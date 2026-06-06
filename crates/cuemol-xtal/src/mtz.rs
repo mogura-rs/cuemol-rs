@@ -1,0 +1,536 @@
+use cuemol_core::{CueMolError, Result};
+use cuemol_qsys::{InOutHandler, ObjReader};
+use std::fs;
+use std::path::Path;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MtzFile {
+    pub header_start_word: usize,
+    pub column_count: usize,
+    pub reflection_count: usize,
+    pub columns: Vec<MtzColumn>,
+    pub cell: Option<[f64; 6]>,
+    pub space_group: Option<i32>,
+    pub resolution: Option<MtzResolution>,
+    pub byte_swapped: bool,
+    pub reflections: Vec<MtzReflection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MtzColumn {
+    pub name: String,
+    pub kind: char,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MtzResolution {
+    pub min: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MtzReflection {
+    pub values: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mtz2MapReader {
+    reader: ObjReader,
+    resolution: f64,
+    min_res: f64,
+    max_res: f64,
+    grid_size: f64,
+    column_f: String,
+    column_phi: String,
+    column_weight: String,
+    selected_f: Option<usize>,
+    selected_phi: Option<usize>,
+    selected_weight: Option<usize>,
+    mtz: Option<MtzFile>,
+}
+
+impl Default for Mtz2MapReader {
+    fn default() -> Self {
+        Self {
+            reader: ObjReader::new("mtzmap", "MTZ Structure Factor (*.mtz)", "*.mtz"),
+            resolution: -1.0,
+            min_res: 0.0,
+            max_res: 0.0,
+            grid_size: 0.33,
+            column_f: String::new(),
+            column_phi: String::new(),
+            column_weight: String::new(),
+            selected_f: None,
+            selected_phi: None,
+            selected_weight: None,
+            mtz: None,
+        }
+    }
+}
+
+impl MtzFile {
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        self.columns
+            .iter()
+            .find(|column| column.name.eq_ignore_ascii_case(name))
+            .map(|column| column.index)
+    }
+
+    pub fn reflection_value(&self, reflection_index: usize, column_name: &str) -> Option<f32> {
+        let column_index = self.column_index(column_name)?;
+        self.reflections
+            .get(reflection_index)?
+            .values
+            .get(column_index)
+            .copied()
+    }
+
+    pub fn reflection_hkl(&self, reflection_index: usize) -> Option<(i32, i32, i32)> {
+        Some((
+            self.reflection_value(reflection_index, "H")?.round() as i32,
+            self.reflection_value(reflection_index, "K")?.round() as i32,
+            self.reflection_value(reflection_index, "L")?.round() as i32,
+        ))
+    }
+
+    pub fn column_values(&self, column_name: &str) -> Option<Vec<f32>> {
+        let column_index = self.column_index(column_name)?;
+        Some(
+            self.reflections
+                .iter()
+                .filter_map(|reflection| reflection.values.get(column_index).copied())
+                .collect(),
+        )
+    }
+}
+
+impl Mtz2MapReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn name(&self) -> &'static str {
+        "mtzmap"
+    }
+
+    pub fn type_descr(&self) -> &'static str {
+        "MTZ Structure Factor (*.mtz)"
+    }
+
+    pub fn file_ext(&self) -> &'static str {
+        "*.mtz"
+    }
+
+    pub fn reader(&self) -> &ObjReader {
+        &self.reader
+    }
+
+    pub fn reader_mut(&mut self) -> &mut ObjReader {
+        &mut self.reader
+    }
+
+    pub fn handler(&self) -> &InOutHandler {
+        self.reader.handler()
+    }
+
+    pub fn resolution(&self) -> f64 {
+        self.resolution
+    }
+
+    pub fn set_resolution(&mut self, value: f64) {
+        self.resolution = value;
+    }
+
+    pub fn min_res(&self) -> f64 {
+        self.min_res
+    }
+
+    pub fn max_res(&self) -> f64 {
+        self.max_res
+    }
+
+    pub fn grid_size(&self) -> f64 {
+        self.grid_size
+    }
+
+    pub fn gridsize(&self) -> f64 {
+        self.grid_size()
+    }
+
+    pub fn set_grid_size(&mut self, value: f64) {
+        self.grid_size = value;
+    }
+
+    pub fn set_gridsize(&mut self, value: f64) {
+        self.set_grid_size(value);
+    }
+
+    pub fn column_f(&self) -> &str {
+        &self.column_f
+    }
+
+    pub fn clmn_f(&self) -> &str {
+        self.column_f()
+    }
+
+    pub fn set_column_f(&mut self, value: impl Into<String>) {
+        self.column_f = value.into();
+    }
+
+    pub fn set_clmn_f(&mut self, value: impl Into<String>) {
+        self.set_column_f(value);
+    }
+
+    pub fn column_phi(&self) -> &str {
+        &self.column_phi
+    }
+
+    pub fn clmn_phi(&self) -> &str {
+        self.column_phi()
+    }
+
+    pub fn set_column_phi(&mut self, value: impl Into<String>) {
+        self.column_phi = value.into();
+    }
+
+    pub fn set_clmn_phi(&mut self, value: impl Into<String>) {
+        self.set_column_phi(value);
+    }
+
+    pub fn column_weight(&self) -> &str {
+        &self.column_weight
+    }
+
+    pub fn clmn_wt(&self) -> &str {
+        self.column_weight()
+    }
+
+    pub fn set_column_weight(&mut self, value: impl Into<String>) {
+        self.column_weight = value.into();
+    }
+
+    pub fn set_clmn_wt(&mut self, value: impl Into<String>) {
+        self.set_column_weight(value);
+    }
+
+    pub fn selected_f(&self) -> Option<usize> {
+        self.selected_f
+    }
+
+    pub fn selected_phi(&self) -> Option<usize> {
+        self.selected_phi
+    }
+
+    pub fn selected_weight(&self) -> Option<usize> {
+        self.selected_weight
+    }
+
+    pub fn mtz(&self) -> Option<&MtzFile> {
+        self.mtz.as_ref()
+    }
+
+    pub fn read_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        let mtz = read_mtz_bytes(bytes)?;
+        if let Some(resolution) = mtz.resolution {
+            self.min_res = resolution.min;
+            self.max_res = resolution.max;
+            if self.resolution < 0.0 {
+                self.resolution = resolution.max;
+            }
+        }
+        self.select_fft_columns_from(&mtz)?;
+        self.mtz = Some(mtz);
+        Ok(())
+    }
+
+    pub fn column_info_json(&self) -> String {
+        self.mtz
+            .as_ref()
+            .map(column_info_json)
+            .unwrap_or_else(|| "[]".to_string())
+    }
+
+    pub fn get_column_info_json(&self) -> String {
+        self.column_info_json()
+    }
+
+    fn select_fft_columns_from(&mut self, mtz: &MtzFile) -> Result<()> {
+        self.selected_f = select_requested_column(mtz, &self.column_f, 'F');
+        self.selected_phi = select_requested_column(mtz, &self.column_phi, 'P');
+        self.selected_weight = select_requested_column(mtz, &self.column_weight, 'W');
+
+        if self.selected_f.is_none() {
+            let (f, phi) = guess_fft_columns(mtz)?;
+            self.selected_f = Some(f);
+            self.selected_phi = phi;
+        }
+        Ok(())
+    }
+}
+
+pub fn read_mtz_file(path: impl AsRef<Path>) -> Result<MtzFile> {
+    let bytes = fs::read(path)?;
+    read_mtz_bytes(&bytes)
+}
+
+pub fn read_mtz_bytes(bytes: &[u8]) -> Result<MtzFile> {
+    if bytes.len() < 12 {
+        return Err(CueMolError::parse("MTZ file is too short"));
+    }
+    if bytes.get(0..4) != Some(b"MTZ ".as_slice()) {
+        return Err(CueMolError::parse("missing MTZ magic"));
+    }
+
+    let (header_start_word, byte_swapped) = detect_mtz_header_start(bytes)?;
+    let header_offset = (header_start_word - 1)
+        .checked_mul(4)
+        .ok_or_else(|| CueMolError::parse("MTZ header offset overflow"))?;
+    if header_offset >= bytes.len() {
+        return Err(CueMolError::parse("MTZ header offset is outside file"));
+    }
+
+    let mut mtz = MtzFile {
+        header_start_word,
+        column_count: 0,
+        reflection_count: 0,
+        columns: Vec::new(),
+        cell: None,
+        space_group: None,
+        resolution: None,
+        byte_swapped,
+        reflections: Vec::new(),
+    };
+
+    let mut offset = header_offset;
+    while offset + 80 <= bytes.len() {
+        let record = std::str::from_utf8(&bytes[offset..offset + 80])
+            .map_err(|_| CueMolError::parse("invalid MTZ header text"))?
+            .trim_matches(['\0', ' ', '\r', '\n']);
+        offset += 80;
+        if record.is_empty() {
+            continue;
+        }
+        if record.starts_with("END") {
+            break;
+        }
+        read_mtz_record(record, &mut mtz)?;
+    }
+
+    if mtz.column_count == 0 && !mtz.columns.is_empty() {
+        mtz.column_count = mtz.columns.len();
+    }
+    mtz.reflections = read_reflection_body(bytes, header_offset, &mtz)?;
+    Ok(mtz)
+}
+
+fn read_reflection_body(
+    bytes: &[u8],
+    header_offset: usize,
+    mtz: &MtzFile,
+) -> Result<Vec<MtzReflection>> {
+    const FIXED_HEADER_BYTES: usize = 80;
+    if header_offset <= FIXED_HEADER_BYTES || mtz.column_count == 0 || mtz.reflection_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let body = &bytes[FIXED_HEADER_BYTES..header_offset];
+    let expected_values = mtz
+        .column_count
+        .checked_mul(mtz.reflection_count)
+        .ok_or_else(|| CueMolError::parse("MTZ reflection table size overflow"))?;
+    let expected_bytes = expected_values
+        .checked_mul(4)
+        .ok_or_else(|| CueMolError::parse("MTZ reflection byte size overflow"))?;
+    if body.len() < expected_bytes {
+        return Err(CueMolError::parse("MTZ reflection table is truncated"));
+    }
+
+    let mut reflections = Vec::with_capacity(mtz.reflection_count);
+    for reflection_index in 0..mtz.reflection_count {
+        let mut values = Vec::with_capacity(mtz.column_count);
+        for column_index in 0..mtz.column_count {
+            let value_index = reflection_index * mtz.column_count + column_index;
+            values.push(read_f32(body, value_index * 4, mtz.byte_swapped));
+        }
+        reflections.push(MtzReflection { values });
+    }
+    Ok(reflections)
+}
+
+fn select_requested_column(mtz: &MtzFile, name: &str, kind: char) -> Option<usize> {
+    if name.is_empty() {
+        return None;
+    }
+    mtz.columns
+        .iter()
+        .find(|column| column.name.eq_ignore_ascii_case(name) && column.kind == kind)
+        .map(|column| column.index)
+}
+
+fn guess_fft_columns(mtz: &MtzFile) -> Result<(usize, Option<usize>)> {
+    for (f_name, phi_name) in [("2FOFCWT", "PH2FOFCWT"), ("FWT", "PHWT"), ("FWT", "PHIC")] {
+        if let Some(f_index) = select_requested_column(mtz, f_name, 'F') {
+            let phi_index = select_requested_column(mtz, phi_name, 'P');
+            if phi_index.is_some() || f_name == "FWT" && phi_name == "PHIC" {
+                return Ok((f_index, phi_index));
+            }
+        }
+    }
+    mtz.columns
+        .iter()
+        .find(|column| column.kind == 'F')
+        .map(|column| (column.index, None))
+        .ok_or_else(|| CueMolError::parse("FFT target column not found"))
+}
+
+fn column_info_json(mtz: &MtzFile) -> String {
+    let entries = mtz
+        .columns
+        .iter()
+        .map(|column| {
+            format!(
+                "{{\"nid\":{}, \"name\": \"{}\", \"type\": \"{}\"}}",
+                column.index,
+                escape_json(&column.name),
+                column.kind
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("[{}]", entries.join(","))
+}
+
+fn escape_json(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn detect_mtz_header_start(bytes: &[u8]) -> Result<(usize, bool)> {
+    let little = read_i32(bytes, 4, false);
+    if let Some(value) = plausible_header_start(bytes, little) {
+        return Ok((value, false));
+    }
+    let big = read_i32(bytes, 4, true);
+    if let Some(value) = plausible_header_start(bytes, big) {
+        return Ok((value, true));
+    }
+    Err(CueMolError::parse("invalid MTZ header start"))
+}
+
+fn plausible_header_start(bytes: &[u8], value: i32) -> Option<usize> {
+    if value <= 0 {
+        return None;
+    }
+    let value = value as usize;
+    let offset = value.checked_sub(1)?.checked_mul(4)?;
+    (offset < bytes.len()).then_some(value)
+}
+
+fn read_mtz_record(record: &str, mtz: &mut MtzFile) -> Result<()> {
+    let tokens = record.split_whitespace().collect::<Vec<_>>();
+    let Some(keyword) = tokens.first().copied() else {
+        return Ok(());
+    };
+    match keyword {
+        "NCOL" => {
+            if tokens.len() < 3 {
+                return Err(CueMolError::parse("invalid MTZ NCOL record"));
+            }
+            mtz.column_count = parse_usize_token(tokens[1], "invalid MTZ NCOL")?;
+            mtz.reflection_count = parse_usize_token(tokens[2], "invalid MTZ NREFL")?;
+        }
+        "COL" | "COLUMN" => {
+            if tokens.len() < 3 {
+                return Err(CueMolError::parse("invalid MTZ COL record"));
+            }
+            let kind = tokens[2]
+                .chars()
+                .next()
+                .ok_or_else(|| CueMolError::parse("invalid MTZ column type"))?;
+            mtz.columns.push(MtzColumn {
+                name: tokens[1].to_string(),
+                kind,
+                index: mtz.columns.len(),
+            });
+        }
+        "CELL" => {
+            if tokens.len() < 7 {
+                return Err(CueMolError::parse("invalid MTZ CELL record"));
+            }
+            mtz.cell = Some(parse_cell_tokens(&tokens[1..7])?);
+        }
+        "DCELL" => {
+            if tokens.len() < 8 {
+                return Err(CueMolError::parse("invalid MTZ DCELL record"));
+            }
+            mtz.cell = Some(parse_cell_tokens(&tokens[2..8])?);
+        }
+        "SYMINF" => {
+            if tokens.len() >= 5 {
+                mtz.space_group = Some(parse_i32_token(tokens[4], "invalid MTZ space group")?);
+            }
+        }
+        "RESO" | "RESOL" | "RESOLUTION" => {
+            if tokens.len() < 3 {
+                return Err(CueMolError::parse("invalid MTZ RESO record"));
+            }
+            let low = parse_f64_token(tokens[1], "invalid MTZ low resolution")?;
+            let high = parse_f64_token(tokens[2], "invalid MTZ high resolution")?;
+            if low <= 0.0 || high <= 0.0 {
+                return Err(CueMolError::parse("invalid MTZ resolution values"));
+            }
+            mtz.resolution = Some(MtzResolution {
+                min: (1.0 / low).sqrt(),
+                max: (1.0 / high).sqrt(),
+            });
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn parse_cell_tokens(tokens: &[&str]) -> Result<[f64; 6]> {
+    Ok([
+        parse_f64_token(tokens[0], "invalid MTZ cell a")?,
+        parse_f64_token(tokens[1], "invalid MTZ cell b")?,
+        parse_f64_token(tokens[2], "invalid MTZ cell c")?,
+        parse_f64_token(tokens[3], "invalid MTZ cell alpha")?,
+        parse_f64_token(tokens[4], "invalid MTZ cell beta")?,
+        parse_f64_token(tokens[5], "invalid MTZ cell gamma")?,
+    ])
+}
+
+fn parse_usize_token(token: &str, message: &'static str) -> Result<usize> {
+    token
+        .parse::<usize>()
+        .map_err(|_| CueMolError::parse(message))
+}
+
+fn parse_i32_token(token: &str, message: &'static str) -> Result<i32> {
+    token
+        .parse::<i32>()
+        .map_err(|_| CueMolError::parse(message))
+}
+
+fn parse_f64_token(token: &str, message: &'static str) -> Result<f64> {
+    token
+        .parse::<f64>()
+        .map_err(|_| CueMolError::parse(message))
+}
+
+fn read_i32(bytes: &[u8], offset: usize, byte_swapped: bool) -> i32 {
+    let field = bytes[offset..offset + 4].try_into().unwrap();
+    if byte_swapped {
+        i32::from_be_bytes(field)
+    } else {
+        i32::from_le_bytes(field)
+    }
+}
+
+fn read_f32(bytes: &[u8], offset: usize, byte_swapped: bool) -> f32 {
+    let field = bytes[offset..offset + 4].try_into().unwrap();
+    if byte_swapped {
+        f32::from_be_bytes(field)
+    } else {
+        f32::from_le_bytes(field)
+    }
+}

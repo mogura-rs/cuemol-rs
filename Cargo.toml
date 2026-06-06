@@ -1,0 +1,46 @@
+[workspace]
+members = [
+  "crates/cuemol-core",
+  "crates/cuemol-gfx",
+  "crates/cuemol-qsys",
+  "crates/cuemol-molstr",
+  "crates/cuemol-importers",
+  "crates/cuemol-molvis",
+  "crates/cuemol-surface",
+  "crates/cuemol-symm",
+  "crates/cuemol-xtal",
+  "crates/cuemol-molanl",
+  "crates/cuemol-anim",
+  "crates/cuemol-mdtools",
+  "crates/cuemol-lwview",
+  "crates/cuemol-molclient",
+  "crates/cuemol-render",
+  "crates/cuemol-desktop",
+  "crates/cuemol-cli",
+  "crates/cuemol-node",
+  "crates/cuemol-py",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/CueMol/cuemol2-rs"
+
+[workspace.dependencies]
+cuemol-core = { path = "crates/cuemol-core" }
+cuemol-gfx = { path = "crates/cuemol-gfx" }
+cuemol-qsys = { path = "crates/cuemol-qsys" }
+cuemol-molstr = { path = "crates/cuemol-molstr" }
+cuemol-importers = { path = "crates/cuemol-importers" }
+cuemol-molvis = { path = "crates/cuemol-molvis" }
+cuemol-surface = { path = "crates/cuemol-surface" }
+cuemol-symm = { path = "crates/cuemol-symm" }
+cuemol-xtal = { path = "crates/cuemol-xtal" }
+cuemol-molanl = { path = "crates/cuemol-molanl" }
+cuemol-anim = { path = "crates/cuemol-anim" }
+cuemol-mdtools = { path = "crates/cuemol-mdtools" }
+cuemol-lwview = { path = "crates/cuemol-lwview" }
+cuemol-molclient = { path = "crates/cuemol-molclient" }
+cuemol-render = { path = "crates/cuemol-render" }
+cuemol-desktop = { path = "crates/cuemol-desktop" }

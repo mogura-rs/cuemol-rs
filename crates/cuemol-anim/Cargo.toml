@@ -1,0 +1,14 @@
+[package]
+name = "cuemol-anim"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cuemol-core.workspace = true
+cuemol-molstr.workspace = true
+cuemol-qsys.workspace = true
+
+[lib]
+name = "cuemol_anim"
+path = "src/lib.rs"

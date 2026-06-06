@@ -1,0 +1,13 @@
+[package]
+name = "cuemol-lwview"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cuemol-core.workspace = true
+cuemol-qsys.workspace = true
+
+[lib]
+name = "cuemol_lwview"
+path = "src/lib.rs"

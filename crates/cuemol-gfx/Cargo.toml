@@ -1,0 +1,12 @@
+[package]
+name = "cuemol-gfx"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cuemol-core.workspace = true
+
+[lib]
+name = "cuemol_gfx"
+path = "src/lib.rs"
