@@ -3447,7 +3447,12 @@ pub fn disorder_lines_snapshot(
 /// pyrimidines), then on to the far ring atom (`N1`/`N3`). Purine vs pyrimidine is
 /// detected by the presence of `N9`. (The base-pair *ladder* rungs and the filled
 /// base block are deferred — they need base-pair partners / per-base polygons.)
-pub fn na_base_sticks_snapshot(molecule: &MolCoord, radius: f64) -> RenderSceneSnapshot {
+pub fn na_base_sticks_snapshot(
+    molecule: &MolCoord,
+    radius: f64,
+    show_basepair: bool,
+) -> RenderSceneSnapshot {
+    use std::collections::{HashMap, HashSet};
     let summaries = molecule.residue_summaries();
     let pos_in = |indices: &[usize], name: &str| -> Option<Vector4> {
         indices
@@ -3456,6 +3461,8 @@ pub fn na_base_sticks_snapshot(molecule: &MolCoord, radius: f64) -> RenderSceneS
             .map(|&ai| molecule.atoms()[ai].position)
     };
     let mut bonds = Vec::new();
+    // Glycosidic-N position per residue id, for the base-pair ladder rungs.
+    let mut glyco_by_resid: HashMap<i32, Vector4> = HashMap::new();
     for s in &summaries {
         let Some(sugar) = pos_in(&s.atom_indices, "C1'").or_else(|| pos_in(&s.atom_indices, "C1*"))
         else {
@@ -3472,7 +3479,33 @@ pub fn na_base_sticks_snapshot(molecule: &MolCoord, radius: f64) -> RenderSceneS
         if let Some(far) = far {
             bonds.push(RenderBond::new(glyco, far, radius as f32, None));
         }
+        glyco_by_resid.insert(s.key.res_id, glyco);
     }
+
+    // Base-pair ladder rungs: connect the glycosidic N of base-paired residues
+    // (the `base_pair` atom int-prop set by MolCoord::calc_base_pair). C++
+    // NARenderer draws these connectors only when show_basepair is on.
+    if show_basepair {
+        let mut drawn: HashSet<(i32, i32)> = HashSet::new();
+        for s in &summaries {
+            let resid = s.key.res_id;
+            let partner = s
+                .atom_indices
+                .iter()
+                .find_map(|&ai| molecule.atoms()[ai].int_prop("base_pair"));
+            if let Some(partner) = partner {
+                let key = (resid.min(partner), resid.max(partner));
+                if drawn.insert(key) {
+                    if let (Some(&a), Some(&b)) =
+                        (glyco_by_resid.get(&resid), glyco_by_resid.get(&partner))
+                    {
+                        bonds.push(RenderBond::new(a, b, radius as f32, None));
+                    }
+                }
+            }
+        }
+    }
+
     RenderSceneSnapshot {
         atoms: Vec::new(),
         bonds,
@@ -3954,7 +3987,7 @@ mod tests {
             na_atom("N1", 2, 1.0, 5.0),
             na_atom("N3", 2, 2.0, 5.0),
         ]);
-        let snap = na_base_sticks_snapshot(&mol, 0.3);
+        let snap = na_base_sticks_snapshot(&mol, 0.3, false);
         // Two sticks per base (sugar->glycosidic, glycosidic->far).
         assert_eq!(snap.bonds.len(), 4);
         let has_stick = |fx: f64, fy: f64, tx: f64, ty: f64| {
@@ -3970,6 +4003,43 @@ mod tests {
         assert!(has_stick(1.0, 0.0, 2.0, 0.0), "purine N9->N1");
         assert!(has_stick(0.0, 5.0, 1.0, 5.0), "pyrimidine C1'->N1");
         assert!(has_stick(1.0, 5.0, 2.0, 5.0), "pyrimidine N1->N3");
+    }
+
+    #[test]
+    fn na_show_basepair_draws_ladder_rungs_between_paired_bases() {
+        fn nt(name: &str, resn: &str, res_id: i32, x: f64, y: f64) -> Atom {
+            let mut a = sample_atom(name, "N", x, y, 0.0);
+            a.res_name = resn.to_string();
+            a.res_id = res_id;
+            a
+        }
+        // Adenine (res 1) and Uracil (res 2) bases ~2 A apart -> base-paired.
+        let mut mol = MolCoord::with_atoms(vec![
+            nt("C1'", "A", 1, 0.0, 0.0),
+            nt("N9", "A", 1, 1.0, 0.0),
+            nt("N1", "A", 1, 2.0, 0.0),
+            nt("C1'", "U", 2, 0.0, 2.0),
+            nt("N1", "U", 2, 1.0, 2.0),
+            nt("N3", "U", 2, 2.0, 2.0),
+        ]);
+        // Before computing base pairs, show_basepair adds no rungs (just the
+        // per-base sticks: 2 per residue).
+        let base_only = na_base_sticks_snapshot(&mol, 0.3, true).bonds.len();
+        assert_eq!(base_only, 4);
+
+        assert_eq!(mol.calc_base_pair(5.0, 30.0), 1);
+        let on = na_base_sticks_snapshot(&mol, 0.3, true);
+        assert_eq!(on.bonds.len(), base_only + 1, "one ladder rung for the pair");
+        // The rung connects the glycosidic N atoms: A.N9 (1,0) <-> U.N1 (1,2).
+        assert!(
+            on.bonds.iter().any(|b| {
+                let (f, t) = ((b.from.x, b.from.y), (b.to.x, b.to.y));
+                (f == (1.0, 0.0) && t == (1.0, 2.0)) || (f == (1.0, 2.0) && t == (1.0, 0.0))
+            }),
+            "rung connects the paired bases' glycosidic N atoms"
+        );
+        // With show_basepair off, the rung is gone.
+        assert_eq!(na_base_sticks_snapshot(&mol, 0.3, false).bonds.len(), base_only);
     }
 
     #[test]
