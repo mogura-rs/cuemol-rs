@@ -5,6 +5,8 @@ use cuemol_molstr::{
 };
 use std::collections::BTreeSet;
 
+mod ssm;
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MolAnlManager;
 
@@ -73,6 +75,13 @@ impl MolAnlManager {
         )
     }
 
+    /// SSM (Secondary Structure Matching) superposition: aligns `moving` onto
+    /// `reference` by matching secondary-structure elements — NO pre-supplied
+    /// atom correspondence needed (unlike LSQ). Native reimplementation of the
+    /// vendored CCP4 ssmlib's functionality (see `ssm`). Falls back to pre-paired
+    /// LSQ when the structures lack enough secondary structure for SSM (e.g.
+    /// tiny / SS-less selections of equal size), preserving the LSQ contract
+    /// there.
     pub fn superpose_ssm1(
         &self,
         reference: &MolCoord,
@@ -81,7 +90,12 @@ impl MolAnlManager {
         moving_selector: &Selector,
         _use_prop: bool,
     ) -> Result<Matrix4> {
-        self.superpose_lsq_matrix(reference, reference_selector, moving, moving_selector)
+        match ssm::superpose_ssm_native(reference, reference_selector, moving, moving_selector) {
+            Ok((matrix, _rmsd, _nfit)) => Ok(matrix),
+            Err(_) => {
+                self.superpose_lsq_matrix(reference, reference_selector, moving, moving_selector)
+            }
+        }
     }
 
     pub fn superpose_ssm_1(
@@ -516,7 +530,7 @@ fn validate_superpose_ids(reference_id: u64, moving_id: u64) -> Result<()> {
     Ok(())
 }
 
-fn rigid_fit_matrix(pairs: &[(Vector4, Vector4)]) -> Result<Matrix4> {
+pub(crate) fn rigid_fit_matrix(pairs: &[(Vector4, Vector4)]) -> Result<Matrix4> {
     if pairs.is_empty() {
         return Err(CueMolError::invalid_argument("no atom pairs"));
     }
@@ -577,11 +591,26 @@ fn dominant_quaternion(s: [[f64; 3]; 3]) -> cuemol_core::Quat {
         ],
     ];
 
+    // Horn's N matrix has trace 0, so it always has both positive and negative
+    // eigenvalues; the optimal rotation is the eigenvector of the LARGEST
+    // (algebraic) eigenvalue, but plain power iteration converges to the largest
+    // *magnitude* one — which may be the negative extreme, giving a wrong
+    // rotation. Shift the diagonal by a Gershgorin bound so every eigenvalue
+    // becomes non-negative; then largest-magnitude == largest-algebraic, and the
+    // eigenvector (hence the quaternion) is unchanged.
+    let shift = (0..4)
+        .map(|i| (0..4).map(|j| n[i][j].abs()).sum::<f64>())
+        .fold(0.0_f64, f64::max);
+    let mut m = n;
+    for (i, row) in m.iter_mut().enumerate() {
+        row[i] += shift;
+    }
+
     let mut q = [1.0, 0.0, 0.0, 0.0];
-    for _ in 0..64 {
+    for _ in 0..512 {
         let mut next = [0.0; 4];
         for i in 0..4 {
-            next[i] = (0..4).map(|j| n[i][j] * q[j]).sum();
+            next[i] = (0..4).map(|j| m[i][j] * q[j]).sum();
         }
         let norm = next.iter().map(|value| value * value).sum::<f64>().sqrt();
         if norm <= 1.0e-15 {
@@ -592,7 +621,11 @@ fn dominant_quaternion(s: [[f64; 3]; 3]) -> cuemol_core::Quat {
         }
         q = next;
     }
-    cuemol_core::Quat::from_scalar_vector(q[0], q[1], q[2], q[3])
+    // Horn's eigenvector quaternion `q` encodes the rotation R with ref ≈ R·mov.
+    // `Quat::to_rot_matrix` builds the TRANSPOSE of the standard rotation matrix
+    // (it is applied as Rᵀ·v by `transform_point`), so feed it the CONJUGATE
+    // (negated vector part) to make `transform_point` apply R·mov, not Rᵀ·mov.
+    cuemol_core::Quat::from_scalar_vector(q[0], -q[1], -q[2], -q[3])
 }
 
 fn center_of_positions(values: impl Iterator<Item = Vector4>) -> Vector4 {
@@ -605,7 +638,7 @@ fn center_of_positions(values: impl Iterator<Item = Vector4>) -> Vector4 {
     sum.scale(1.0 / count as f64)
 }
 
-fn rmsd_for_pairs(pairs: &[(Vector4, Vector4)], matrix: Matrix4) -> f64 {
+pub(crate) fn rmsd_for_pairs(pairs: &[(Vector4, Vector4)], matrix: Matrix4) -> f64 {
     let sum = pairs
         .iter()
         .map(|(reference, moving)| {

@@ -3075,10 +3075,8 @@ perspective\t{}\n",
     }
 }
 
-fn tool_status_text(title: &str) -> &'static str {
-    match title {
-        _ => "No additional action is available.",
-    }
+fn tool_status_text(_title: &str) -> &'static str {
+    "No additional action is available."
 }
 
 struct GpuState {
@@ -4023,8 +4021,10 @@ mod tests {
 
     #[test]
     fn camera_controller_roundtrips_view_data_and_mutates_by_mouse_actions() {
-        let mut camera = CameraController::default();
-        camera.target = Vec3::new(1.0, 2.0, 3.0);
+        let mut camera = CameraController {
+            target: Vec3::new(1.0, 2.0, 3.0),
+            ..Default::default()
+        };
         camera.rotate_by(20.0, -10.0);
         camera.pan_by(5.0, -3.0);
         camera.zoom_by(2.0);

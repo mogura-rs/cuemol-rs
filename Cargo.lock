@@ -1289,6 +1289,8 @@ dependencies = [
  "cuemol-gfx",
  "cuemol-mdtools",
  "cuemol-molstr",
+ "cuemol-molvis",
+ "cuemol-render",
  "cuemol-surface",
  "cuemol-xtal",
 ]

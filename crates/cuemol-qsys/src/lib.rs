@@ -4,6 +4,8 @@ pub mod events;
 pub mod io_handler;
 pub mod io_objects;
 pub mod misc;
+pub mod momentum;
+pub mod mouse;
 pub mod object;
 pub mod qdf_stream;
 pub mod render_base;
@@ -30,6 +32,8 @@ pub use io_objects::{ObjReader, ObjWriter, SceneExporter, SceneXMLReader, SceneX
 pub use misc::{
     MultiGradient, PropEditInfo, RendGroup, Renderer, TestRenderer, ViewInputConfig, INVALID_UID,
 };
+pub use momentum::{momentum_ease, momentum_spin_angle, momentum_translation};
+pub use mouse::{calc_velocity, DragSample, DragState, MouseEventHandler};
 pub use object::SceneObject;
 pub use qdf_stream::{
     qdf_file_type, QdfFieldDef, QdfReader, QdfWriter, QDF_TYPE_BOOL, QDF_TYPE_FIXSTR8,

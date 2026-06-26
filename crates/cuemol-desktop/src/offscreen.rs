@@ -7,10 +7,9 @@
 
 use wgpu::util::DeviceExt;
 
-use cuemol_core::{Matrix4, Vector4};
-use cuemol_gfx::ColorSpec;
+use cuemol_core::Matrix4;
 use cuemol_qsys::Camera;
-use cuemol_render::{MeshVertex, RenderMesh, RenderSceneSnapshot};
+use cuemol_render::{tessellate_snapshot, RenderMesh, RenderSceneSnapshot};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -328,131 +327,6 @@ async fn render_impl(
     Some(out)
 }
 
-/// Resolve a render colour to linear RGBA (default mid-grey).
-fn color_rgba(color: &Option<ColorSpec>) -> [f32; 4] {
-    match color.as_ref().and_then(ColorSpec::rgba8) {
-        Some(c) => [
-            c.r as f32 / 255.0,
-            c.g as f32 / 255.0,
-            c.b as f32 / 255.0,
-            c.a as f32 / 255.0,
-        ],
-        None => [0.7, 0.7, 0.7, 1.0],
-    }
-}
-
-fn normalize3(v: Vector4) -> Vector4 {
-    let len = v.length3d();
-    if len < 1.0e-9 {
-        Vector4::new3(0.0, 0.0, 1.0)
-    } else {
-        v.scale(1.0 / len)
-    }
-}
-
-/// Tessellate a UV sphere (flat-shaded) into `mesh`.
-fn add_sphere(mesh: &mut RenderMesh, center: Vector4, radius: f64, color: [f32; 4]) {
-    const RINGS: usize = 8;
-    const SEGS: usize = 12;
-    let base = mesh.vertices.len() as u32;
-    for i in 0..=RINGS {
-        let phi = std::f64::consts::PI * i as f64 / RINGS as f64;
-        let (sp, cp) = phi.sin_cos();
-        for j in 0..=SEGS {
-            let theta = std::f64::consts::TAU * j as f64 / SEGS as f64;
-            let (st, ct) = theta.sin_cos();
-            let dir = Vector4::new3(sp * ct, cp, sp * st);
-            mesh.vertices.push(MeshVertex {
-                position: Vector4::new3(
-                    center.x + radius * dir.x,
-                    center.y + radius * dir.y,
-                    center.z + radius * dir.z,
-                ),
-                normal: dir,
-                color,
-            });
-        }
-    }
-    let stride = SEGS + 1;
-    for i in 0..RINGS {
-        for j in 0..SEGS {
-            let a = base + (i * stride + j) as u32;
-            let b = base + (i * stride + j + 1) as u32;
-            let c = base + ((i + 1) * stride + j) as u32;
-            let d = base + ((i + 1) * stride + j + 1) as u32;
-            mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
-        }
-    }
-}
-
-/// Tessellate a cylinder between `from` and `to` (flat-shaded) into `mesh`.
-fn add_cylinder(mesh: &mut RenderMesh, from: Vector4, to: Vector4, radius: f64, color: [f32; 4]) {
-    const SEGS: usize = 10;
-    let axis = to - from;
-    let len = axis.length3d();
-    if len < 1.0e-9 {
-        return;
-    }
-    let tangent = axis.scale(1.0 / len);
-    let up = if tangent.x.abs() < 0.9 {
-        Vector4::new3(1.0, 0.0, 0.0)
-    } else {
-        Vector4::new3(0.0, 1.0, 0.0)
-    };
-    let n1 = normalize3(tangent.cross(up));
-    let n2 = normalize3(tangent.cross(n1));
-    let base = mesh.vertices.len() as u32;
-    for end in [from, to] {
-        for j in 0..=SEGS {
-            let theta = std::f64::consts::TAU * j as f64 / SEGS as f64;
-            let (s, c) = theta.sin_cos();
-            let offset = n1.scale(c * radius) + n2.scale(s * radius);
-            mesh.vertices.push(MeshVertex {
-                position: end + offset,
-                normal: normalize3(offset),
-                color,
-            });
-        }
-    }
-    let stride = (SEGS + 1) as u32;
-    for j in 0..SEGS as u32 {
-        let a = base + j;
-        let b = base + j + 1;
-        let c = base + stride + j;
-        let d = base + stride + j + 1;
-        mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
-    }
-}
-
-/// Tessellate a full render snapshot — atoms as spheres, bonds as cylinders,
-/// plus its triangle meshes — into a single flat-shaded [`RenderMesh`].
-pub fn tessellate_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
-    let mut mesh = RenderMesh::new();
-    for atom in &snapshot.atoms {
-        add_sphere(
-            &mut mesh,
-            atom.center,
-            atom.radius as f64,
-            color_rgba(&atom.color),
-        );
-    }
-    for bond in &snapshot.bonds {
-        add_cylinder(
-            &mut mesh,
-            bond.from,
-            bond.to,
-            bond.radius as f64,
-            color_rgba(&bond.color),
-        );
-    }
-    for extra in &snapshot.meshes {
-        let base = mesh.vertices.len() as u32;
-        mesh.vertices.extend(extra.vertices.iter().cloned());
-        mesh.indices.extend(extra.indices.iter().map(|i| i + base));
-    }
-    mesh
-}
-
 /// A row-major translation matrix.
 fn translation(tx: f64, ty: f64, tz: f64) -> Matrix4 {
     let mut m = Matrix4 {
@@ -565,6 +439,7 @@ pub fn render_snapshot_png(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuemol_core::Vector4;
     use cuemol_gfx::{ColorBase, ColorSpec};
     use cuemol_render::{MeshVertex, RenderAtom, RenderBond};
 

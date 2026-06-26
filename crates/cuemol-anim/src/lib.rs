@@ -352,6 +352,79 @@ impl RealPropAnim {
     }
 }
 
+/// Renderer-property animation base (C++ `anim::RendPropAnim`, an abstract
+/// `PropAnim` subclass): a named property animated over a list of target
+/// renderers. The concrete value interpolation lives in the subclasses
+/// ([`RealPropAnim`] scalar, `ShowHideAnim`, `RendXformAnim`); this type holds
+/// the property name + the target-renderer name list and its parsing.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RendPropAnim {
+    base: AnimObj,
+    prop_name: String,
+    rend_names: String,
+    /// Parsed `(object, renderer)` target pairs (object empty = scene-level).
+    rend_name_list: Vec<(String, String)>,
+}
+
+impl RendPropAnim {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn base(&self) -> &AnimObj {
+        &self.base
+    }
+
+    pub fn base_mut(&mut self) -> &mut AnimObj {
+        &mut self.base
+    }
+
+    pub fn prop_name(&self) -> &str {
+        &self.prop_name
+    }
+
+    pub fn set_prop_name(&mut self, value: impl Into<String>) {
+        self.prop_name = value.into();
+    }
+
+    pub fn rend_names(&self) -> &str {
+        &self.rend_names
+    }
+
+    /// Parse a comma-separated target list into `(object, renderer)` pairs (port
+    /// of C++ `RendPropAnim::setRendNames`): each element is `object/renderer`
+    /// (split at the first `/`) or a bare `renderer` (scene-level, empty
+    /// object). The normalized `rend_names` string re-joins only the non-empty
+    /// entries, exactly as C++ does (empty entries stay in the pair list but are
+    /// dropped from the normalized string).
+    pub fn set_rend_names(&mut self, value: &str) {
+        self.rend_name_list.clear();
+        let mut normalized: Vec<String> = Vec::new();
+        for elem in value.split(',') {
+            let (sobj, srend) = match elem.find('/') {
+                Some(pos) => (
+                    elem[..pos].trim().to_string(),
+                    elem[pos + 1..].trim().to_string(),
+                ),
+                None => (String::new(), elem.trim().to_string()),
+            };
+            if sobj.is_empty() {
+                if !srend.is_empty() {
+                    normalized.push(srend.clone());
+                }
+            } else if !srend.is_empty() {
+                normalized.push(format!("{sobj}/{srend}"));
+            }
+            self.rend_name_list.push((sobj, srend));
+        }
+        self.rend_names = normalized.join(",");
+    }
+
+    pub fn rend_name_list(&self) -> &[(String, String)] {
+        &self.rend_name_list
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MolAnim {
     base: AnimObj,
@@ -1182,6 +1255,31 @@ mod tests {
         xform.set_start_tran(Vector4::new3(0.0, 0.0, 0.0));
         xform.set_end_tran(Vector4::new3(10.0, 0.0, 0.0));
         assert_eq!(xform.translation_at_rho(0.4), Vector4::new3(4.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn rend_prop_anim_parses_target_renderer_names() {
+        let mut anim = RendPropAnim::new();
+        anim.set_prop_name("color");
+        // Mixed scene-level (bare) and object-scoped (`obj/rend`) targets, with
+        // surrounding whitespace to exercise trimming.
+        anim.set_rend_names("r1, obj1/r2 , r3");
+        assert_eq!(anim.prop_name(), "color");
+        assert_eq!(
+            anim.rend_name_list(),
+            &[
+                ("".to_string(), "r1".to_string()),
+                ("obj1".to_string(), "r2".to_string()),
+                ("".to_string(), "r3".to_string()),
+            ]
+        );
+        // Normalized string re-joins non-empty entries (object-scoped keep `/`).
+        assert_eq!(anim.rend_names(), "r1,obj1/r2,r3");
+        // Inherited AnimObj timing curve still applies.
+        anim.base_mut().set_abs_start(0);
+        anim.base_mut().set_abs_end(100);
+        assert_eq!(anim.base().rho_at(0), 0.0);
+        assert_eq!(anim.base().rho_at(100), 1.0);
     }
 
     #[test]

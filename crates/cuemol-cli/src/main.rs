@@ -9,6 +9,11 @@ use cuemol_molstr::{
     read_sdf_file, read_xplor_map_with_header_file, write_pdb_string, write_sdf_string,
     HandlerCategory, MolCoord, MolSceneManager, QscLoadStatus, StreamManager,
 };
+use cuemol_molvis::{molecule_render_snapshot, MoleculeRenderOptions};
+use cuemol_render::{
+    tessellate_snapshot, LuxCoreSceneExporter, LuxRendSceneExporter, MqoSceneExporter,
+    PovSceneExporter, RenderMesh, RenderSceneSnapshot, StlSceneExporter, WbpSceneExporter,
+};
 use cuemol_surface::read_msms_surface_files;
 use cuemol_xtal::read_mtz_file;
 use std::env;
@@ -51,6 +56,15 @@ fn run() -> Result<(), String> {
             let mol = read_pdb_file(path).map_err(|err| err.to_string())?;
             print!("{}", write_pdb_string(&mol));
             Ok(())
+        }
+        "export-scene" => {
+            let input = args
+                .next()
+                .ok_or_else(|| "missing input molecule path".to_string())?;
+            let output = args
+                .next()
+                .ok_or_else(|| "missing output path (.stl/.obj/.pov)".to_string())?;
+            export_scene(&input, &output)
         }
         "mmcif-info" => {
             let path = args
@@ -519,6 +533,9 @@ fn print_usage() {
     eprintln!("  cuemol stream-info [all|readers|writers]");
     eprintln!("  cuemol stream-search <objreader|objwriter|scereader|scewriter|0-4> <file> [nicknames_csv]");
     eprintln!("  cuemol select-dump <selection-expression>");
+    eprintln!(
+        "  cuemol export-scene <file.pdb|.cif|.sdf|.mol2> <out.stl|.obj|.pov|.mqo|.lxs|.cfg(LuxCore)|.wbp(Warabi)>"
+    );
 }
 
 fn parse_stream_category(value: &str) -> Result<HandlerCategory, String> {
@@ -549,6 +566,174 @@ fn read_mol_by_format(format: &str, path: &str) -> cuemol_core::Result<MolCoord>
             "unknown format {other}"
         ))),
     }
+}
+
+/// Bounding-box centre and diagonal size of a render snapshot, for framing a
+/// scene exporter's camera. Falls back to origin / size 10 when bounds are absent.
+fn scene_center_size(snapshot: &RenderSceneSnapshot) -> (cuemol_core::Vector4, f64) {
+    match snapshot.bounds {
+        Some((min, max)) => {
+            let center = cuemol_core::Vector4::new3(
+                (min.x + max.x) / 2.0,
+                (min.y + max.y) / 2.0,
+                (min.z + max.z) / 2.0,
+            );
+            let size = ((max.x - min.x).powi(2)
+                + (max.y - min.y).powi(2)
+                + (max.z - min.z).powi(2))
+            .sqrt()
+            .max(1.0);
+            (center, size)
+        }
+        None => (cuemol_core::Vector4::new3(0.0, 0.0, 0.0), 10.0),
+    }
+}
+
+/// Infer a molecule reader format from a path's file extension.
+fn format_from_ext(path: &str) -> Result<&'static str, String> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".pdb") || lower.ends_with(".ent") {
+        Ok("pdb")
+    } else if lower.ends_with(".mmcif") || lower.ends_with(".cif") {
+        Ok("mmcif")
+    } else if lower.ends_with(".sdf") || lower.ends_with(".mol") {
+        Ok("sdf")
+    } else if lower.ends_with(".mol2") {
+        Ok("mol2")
+    } else {
+        Err(format!("cannot infer molecule format from extension: {path}"))
+    }
+}
+
+/// Load a molecule, build its default ball-and-stick render snapshot, tessellate
+/// it to a triangle mesh, and write it as STL / OBJ / POV-Ray geometry. The
+/// headless end-to-end exerciser for the scene-export pipeline.
+fn export_scene(input: &str, output: &str) -> Result<(), String> {
+    let format = format_from_ext(input)?;
+    let mol = read_mol_by_format(format, input).map_err(|err| err.to_string())?;
+    let snapshot = molecule_render_snapshot(&mol, &MoleculeRenderOptions::default());
+    let mesh = tessellate_snapshot(&snapshot);
+    let name = std::path::Path::new(input)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("cuemol");
+    let lower = output.to_ascii_lowercase();
+    // LuxCore (.cfg + .scn + .ply) and Warabi (.wbp + .mqo) are multi-file
+    // scenes, handled separately from the single-file formats below.
+    if lower.ends_with(".cfg") {
+        return export_luxcore(name, output, &mesh, &snapshot);
+    }
+    if lower.ends_with(".wbp") {
+        return export_wbp(name, output, &mesh, &snapshot);
+    }
+    let bytes: Vec<u8> = if lower.ends_with(".stl") {
+        StlSceneExporter::new()
+            .write_ascii_stl_string(name, &mesh.positions(), &mesh.triangles())
+            .into_bytes()
+    } else if lower.ends_with(".obj") {
+        mesh.to_obj_string(name).into_bytes()
+    } else if lower.ends_with(".pov") {
+        let (center, size) = scene_center_size(&snapshot);
+        PovSceneExporter::new()
+            .write_scene_string(&mesh, center, size, false)
+            .into_bytes()
+    } else if lower.ends_with(".mqo") {
+        MqoSceneExporter::new().write_mqo_string(name, &mesh).into_bytes()
+    } else if lower.ends_with(".lxs") {
+        let (center, size) = scene_center_size(&snapshot);
+        LuxRendSceneExporter::new()
+            .write_scene_string(&mesh, center, size, false)
+            .into_bytes()
+    } else {
+        return Err(format!(
+            "unsupported output format (use .stl/.obj/.pov/.mqo/.lxs): {output}"
+        ));
+    };
+    std::fs::write(output, &bytes).map_err(|err| err.to_string())?;
+    eprintln!(
+        "exported {} atoms / {} bonds -> {} vertices / {} triangles to {output}",
+        snapshot.atom_count(),
+        snapshot.bond_count(),
+        mesh.vertices.len(),
+        mesh.triangle_count()
+    );
+    Ok(())
+}
+
+/// LuxCore export — a multi-file scene: `<base>.cfg` (render config) +
+/// `<base>.scn` (scene: camera/lights/material/object) + `<base>.ply`
+/// (geometry), mirroring C++ `LuxCoreDisplayContext`'s split output.
+fn export_luxcore(
+    name: &str,
+    output: &str,
+    mesh: &RenderMesh,
+    snapshot: &RenderSceneSnapshot,
+) -> Result<(), String> {
+    let lux = LuxCoreSceneExporter::new();
+    let base = output
+        .strip_suffix(".cfg")
+        .or_else(|| output.strip_suffix(".CFG"))
+        .unwrap_or(output);
+    let out_stem = std::path::Path::new(base)
+        .file_name()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("scene");
+    let ply_path = format!("{base}.ply");
+    let scn_path = format!("{base}.scn");
+    std::fs::write(&ply_path, lux.write_ply_string(mesh)).map_err(|err| err.to_string())?;
+    std::fs::write(
+        &scn_path,
+        lux.write_scn_string(name, &format!("{out_stem}.ply")),
+    )
+    .map_err(|err| err.to_string())?;
+    std::fs::write(output, lux.write_cfg_string(out_stem, 640, 480))
+        .map_err(|err| err.to_string())?;
+    eprintln!(
+        "exported {} atoms / {} bonds -> {} vertices / {} triangles to {output} (+ {scn_path} + {ply_path})",
+        snapshot.atom_count(),
+        snapshot.bond_count(),
+        mesh.vertices.len(),
+        mesh.triangle_count()
+    );
+    Ok(())
+}
+
+/// Warabi export — a multi-file scene: `<base>.wbp` (project referencing the
+/// geometry) + `<base>.mqo` (the MQO geometry it imports), mirroring C++
+/// `WbpSceneExporter` (which writes the geometry via an MqoDisplayContext).
+fn export_wbp(
+    name: &str,
+    output: &str,
+    mesh: &RenderMesh,
+    snapshot: &RenderSceneSnapshot,
+) -> Result<(), String> {
+    let base = output
+        .strip_suffix(".wbp")
+        .or_else(|| output.strip_suffix(".WBP"))
+        .unwrap_or(output);
+    let out_stem = std::path::Path::new(base)
+        .file_name()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("scene");
+    let mqo_path = format!("{base}.mqo");
+    std::fs::write(
+        &mqo_path,
+        MqoSceneExporter::new().write_mqo_string(name, mesh),
+    )
+    .map_err(|err| err.to_string())?;
+    std::fs::write(
+        output,
+        WbpSceneExporter::new().write_wbp_string(name, mesh, &format!("{out_stem}.mqo")),
+    )
+    .map_err(|err| err.to_string())?;
+    eprintln!(
+        "exported {} atoms / {} bonds -> {} vertices / {} triangles to {output} (+ {mqo_path})",
+        snapshot.atom_count(),
+        snapshot.bond_count(),
+        mesh.vertices.len(),
+        mesh.triangle_count()
+    );
+    Ok(())
 }
 
 fn print_mol_info(mol: &cuemol_molstr::MolCoord) {

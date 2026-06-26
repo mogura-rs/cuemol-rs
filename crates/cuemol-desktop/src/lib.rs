@@ -943,10 +943,7 @@ impl DesktopAppState {
                 "morph frame atom count mismatch: target={target_atom_count}, source={source_atom_count}"
             )));
         }
-        let morph = self
-            .morphs
-            .entry(target_object)
-            .or_insert_with(MorphMol::new);
+        let morph = self.morphs.entry(target_object).or_default();
         morph.append_frame(MorphFrame::new(
             frame_name,
             format!("object:{}", source_object.get()),
@@ -1291,10 +1288,12 @@ fn default_object_name(path: &Path) -> String {
     } else {
         stem
     };
-    (!stem.trim().is_empty())
-        .then_some(stem)
-        .unwrap_or("object")
-        .to_string()
+    if stem.trim().is_empty() {
+        "object"
+    } else {
+        stem
+    }
+    .to_string()
 }
 
 fn default_desktop_config() -> cuemol_qsys::SysConfig {

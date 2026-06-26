@@ -49,6 +49,50 @@ impl RenderMesh {
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
     }
+
+    /// World-space vertex positions, for feeding the geometry exporters
+    /// (`StlSceneExporter`, `PovSceneExporter`) whose writers take plain point
+    /// lists rather than a `RenderMesh`.
+    pub fn positions(&self) -> Vec<Vector4> {
+        self.vertices.iter().map(|v| v.position).collect()
+    }
+
+    /// Triangle vertex-index triples (`indices` grouped in threes; a trailing
+    /// partial group, which a well-formed mesh never has, is dropped).
+    pub fn triangles(&self) -> Vec<[usize; 3]> {
+        self.indices
+            .chunks_exact(3)
+            .map(|c| [c[0] as usize, c[1] as usize, c[2] as usize])
+            .collect()
+    }
+
+    /// Serialize as a Wavefront OBJ string (positions + per-vertex normals +
+    /// triangle faces). The headless `RenderMesh` counterpart of
+    /// `cuemol_surface::SurfaceMesh::to_obj_string`; OBJ indices are 1-based.
+    pub fn to_obj_string(&self, name: &str) -> String {
+        let mut out = String::new();
+        writeln!(&mut out, "# CueMol render mesh: {name}").unwrap();
+        for v in &self.vertices {
+            writeln!(
+                &mut out,
+                "v {:.6} {:.6} {:.6}",
+                v.position.x, v.position.y, v.position.z
+            )
+            .unwrap();
+        }
+        for v in &self.vertices {
+            writeln!(
+                &mut out,
+                "vn {:.6} {:.6} {:.6}",
+                v.normal.x, v.normal.y, v.normal.z
+            )
+            .unwrap();
+        }
+        for [i, j, k] in self.triangles() {
+            writeln!(&mut out, "f {0}//{0} {1}//{1} {2}//{2}", i + 1, j + 1, k + 1).unwrap();
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -396,6 +440,54 @@ impl Default for PngSceneExporter {
     }
 }
 
+/// POV-Ray spec/flash lighting macros + lighting invocation, verbatim from C++
+/// `PovDisplayContext` (the non-radiosity path). Appended after the camera so a
+/// `write_scene_string` document is a complete, renderable scene.
+const POV_LIGHTING: &str = concat!(
+    "#ifndef (_shadow)\n  #declare _shadow = 0;\n#end\n",
+    "#ifndef (_light_spread)\n  #declare _light_spread = 1;\n#end\n",
+    "\n",
+    "// Spec lighting macro\n",
+    "#macro SpecLighting(aLightSpread, aDist, aInten, aShadow)\n",
+    "#local v1=<1,1,1>;\n",
+    "#local v2=<1,-0.5,-0.5>;\n",
+    "#local vecsz=aDist*aLightSpread/10;\n",
+    "light_source {\n",
+    "   vnormalize(v1)*aDist*2\n",
+    "   color rgb aInten\n",
+    "#if (aLightSpread>1)\n",
+    "   area_light vnormalize(v2)*vecsz, vcross(vnormalize(v1),vnormalize(v2))*vecsz, 10, 10\n",
+    "   adaptive 2\n",
+    "#else\n",
+    "   parallel point_at _center\n",
+    "#if (!aShadow)\n",
+    "   shadowless\n",
+    "#end\n",
+    "#end\n",
+    "}\n",
+    "#end\n",
+    "\n",
+    "// Flash lighting macro\n",
+    "#macro FlashLighting(aInten)\n",
+    "light_source {\n",
+    "   _center + <0,0,_distance>\n",
+    "   color rgb aInten\n",
+    "   shadowless\n",
+    "#if (!_perspective)\n",
+    "   parallel point_at _center\n",
+    "#end\n",
+    "}\n",
+    "#end\n",
+    "\n",
+    "#ifndef (_light_inten)\n",
+    "    #declare _light_inten=1.3;\n",
+    "    #declare _flash_frac=0.8/1.3;\n",
+    "    #declare _amb_frac=0;\n",
+    "#end\n",
+    "SpecLighting(_light_spread, _distance, _light_inten*(1-_amb_frac)*(1-_flash_frac), 1)\n",
+    "FlashLighting(_light_inten*(1-_amb_frac)*_flash_frac)\n",
+);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PovSceneExporter {
     state: ExportState,
@@ -572,6 +664,108 @@ impl PovSceneExporter {
         }
         output
     }
+
+    /// Serialize a COMPLETE, renderable POV-Ray scene wrapping the tessellated
+    /// mesh. Emits the C++ `PovDisplayContext` header — background, a camera
+    /// (perspective/ortho, framed on `center`/`size`), `global_settings`, and
+    /// the spec/flash lighting macros plus their invocation — then a coloured
+    /// `mesh2` whose `texture_list` (one entry per distinct face colour)
+    /// preserves element colours. Unlike [`Self::write_mesh2_string`] (a
+    /// geometry fragment) this is a full scene. World-space geometry: the camera
+    /// looks at the molecule `center` (C++ pre-transforms to origin; we keep
+    /// world coords).
+    pub fn write_scene_string(
+        &self,
+        mesh: &RenderMesh,
+        center: Vector4,
+        size: f64,
+        perspective: bool,
+    ) -> String {
+        let distance = (size * 3.0).max(1.0);
+        let zoom = (size * 1.2).max(1.0);
+        let persp = i32::from(perspective);
+        let mut out = String::new();
+        out.push_str("// CueMol POV-Ray scene\n");
+        out.push_str("#declare _bgcolor = <1,1,1>;\n");
+        out.push_str("#ifndef (_transpbg)\nbackground {color rgb _bgcolor}\n");
+        out.push_str("#else\nbackground {color rgbt <1,1,1,0.999>}\n#end\n");
+        writeln!(
+            &mut out,
+            "#declare _center = <{:.6},{:.6},{:.6}>;",
+            center.x, center.y, center.z
+        )
+        .unwrap();
+        writeln!(&mut out, "#declare _distance = {distance:.6};").unwrap();
+        writeln!(
+            &mut out,
+            "#ifndef (_perspective)\n  #declare _perspective = {persp};\n#end"
+        )
+        .unwrap();
+        out.push_str("#ifndef (_stereo)\n  #declare _stereo = 0;\n#end\n");
+        out.push_str("#ifndef (_iod)\n  #declare _iod = 0.03;\n#end\n");
+        writeln!(&mut out, "#declare _zoomy = {zoom:.6};").unwrap();
+        out.push_str("#declare _zoomx = _zoomy * image_width/image_height;\n");
+        out.push_str("#declare _fovx = 2.0*degrees( atan2(_zoomx, 2.0*_distance) );\n");
+        out.push_str("camera {\n");
+        out.push_str(" #if (_perspective)\n perspective\n direction <0,0,-1>\n");
+        out.push_str(" up <0,1,0> * image_height/image_width\n right <1,0,0>\n angle _fovx\n");
+        out.push_str(" location _center + <_stereo*_distance*_iod,0,_distance>\n look_at _center\n");
+        out.push_str(" #else\n orthographic\n direction <0,0,-1>\n");
+        out.push_str(" up <0, _zoomy, 0>\n right <_zoomx, 0, 0>\n");
+        out.push_str(" location _center + <_stereo*_distance*_iod,0,_distance>\n look_at _center\n");
+        out.push_str(" #end\n}\n");
+        out.push_str("global_settings {\n  assumed_gamma 1.0\n}\n");
+        out.push_str(POV_LIGHTING);
+
+        let (mat_keys, face_mat) = face_material_table(mesh);
+        out.push_str("mesh2 {\n");
+        writeln!(&mut out, "  vertex_vectors {{ {}", mesh.vertices.len()).unwrap();
+        for v in &mesh.vertices {
+            writeln!(
+                &mut out,
+                "    <{:.6}, {:.6}, {:.6}>,",
+                v.position.x, v.position.y, v.position.z
+            )
+            .unwrap();
+        }
+        out.push_str("  }\n");
+        writeln!(&mut out, "  texture_list {{ {}", mat_keys.len()).unwrap();
+        for c in &mat_keys {
+            writeln!(
+                &mut out,
+                "    texture {{ pigment {{ color rgb <{:.6}, {:.6}, {:.6}> }} }},",
+                c[0] as f32 / 255.0,
+                c[1] as f32 / 255.0,
+                c[2] as f32 / 255.0,
+            )
+            .unwrap();
+        }
+        out.push_str("  }\n");
+        let tris = mesh.triangles();
+        writeln!(&mut out, "  face_indices {{ {}", tris.len()).unwrap();
+        for (f, [i, j, k]) in tris.iter().enumerate() {
+            writeln!(&mut out, "    <{i}, {j}, {k}>, {},", face_mat[f]).unwrap();
+        }
+        out.push_str("  }\n}\n");
+
+        // NPR silhouette/crease edge lines (C++ show_edge_lines / GraphEdge),
+        // drawn as thin black cylinders. The camera sits at center + distance·z.
+        if self.show_edge_lines {
+            let cam = Vector4::new3(center.x, center.y, center.z + distance);
+            let edges = extract_edge_lines(mesh, cam, self.crease_limit);
+            let ew = (size * 0.004).max(1.0e-4);
+            writeln!(&mut out, "// {} edge lines", edges.len()).unwrap();
+            for e in &edges {
+                writeln!(
+                    &mut out,
+                    "cylinder {{ <{:.6},{:.6},{:.6}>, <{:.6},{:.6},{:.6}>, {ew:.6} pigment {{ color rgb <0,0,0> }} }}",
+                    e.a.x, e.a.y, e.a.z, e.b.x, e.b.y, e.b.z
+                )
+                .unwrap();
+            }
+        }
+        out
+    }
 }
 
 impl Default for PovSceneExporter {
@@ -596,6 +790,70 @@ impl MqoSceneExporter {
             use_clip_z: false,
             grad_steps: 16,
         }
+    }
+
+    /// Serialize a tessellated mesh as a Metasequoia (`.mqo`) text document —
+    /// a faithful port of C++ `MqoDisplayContext` output: the Scene header, a
+    /// Material block (one material per distinct face colour, the face colour
+    /// being the mean of its three vertex colours = C++ `mixColor`), then an
+    /// Object with `vertex`/`face` chunks. Face winding matches C++
+    /// (`3 V(i1 i3 i2) M(im)`); MQO indices are 0-based.
+    pub fn write_mqo_string(&self, name: &str, mesh: &RenderMesh) -> String {
+        let tris = mesh.triangles();
+        let (mat_keys, face_mat) = face_material_table(mesh);
+
+        let mut out = String::new();
+        out.push_str("Metasequoia Document\n");
+        out.push_str("Format Text Ver 1.0\n\n");
+        out.push_str("Scene {\n");
+        out.push_str("    pos 0.0000 0.0000 100.0000\n");
+        out.push_str("    lookat 0.0000 0.0000 0.0000\n");
+        out.push_str("    head 0.0000\n");
+        out.push_str("    pich 0.0000\n");
+        out.push_str("    ortho 0\n");
+        out.push_str("    zoom2 10.0000\n");
+        out.push_str("    amb 0.250 0.250 0.250\n");
+        out.push_str("}\n");
+
+        writeln!(&mut out, "Material {} {{", mat_keys.len()).unwrap();
+        for (i, c) in mat_keys.iter().enumerate() {
+            writeln!(
+                &mut out,
+                "    \"{name}_mat{i}\" col({:.6} {:.6} {:.6} {:.6}) dif(0.7) amb(0.1) emi(0.000) spc(0.3) power(0.00)",
+                c[0] as f32 / 255.0,
+                c[1] as f32 / 255.0,
+                c[2] as f32 / 255.0,
+                c[3] as f32 / 255.0,
+            )
+            .unwrap();
+        }
+        out.push_str("}\n");
+
+        writeln!(&mut out, "Object \"{name}\" {{").unwrap();
+        out.push_str("    visible 15\n");
+        out.push_str("    locking 0\n");
+        out.push_str("    shading 1\n");
+        out.push_str("    facet 59.5\n");
+        out.push_str("    color 1 1 1\n");
+        out.push_str("    color_type 0\n");
+        writeln!(&mut out, "    vertex {} {{", mesh.vertices.len()).unwrap();
+        for v in &mesh.vertices {
+            writeln!(
+                &mut out,
+                "{:.6} {:.6} {:.6}",
+                v.position.x, v.position.y, v.position.z
+            )
+            .unwrap();
+        }
+        out.push_str("    }\n");
+        writeln!(&mut out, "    face {} {{", tris.len()).unwrap();
+        for (f, [i, j, k]) in tris.iter().enumerate() {
+            writeln!(&mut out, "3 V({i} {k} {j}) M({})", face_mat[f]).unwrap();
+        }
+        out.push_str("    }\n");
+        out.push_str("}\n");
+        out.push_str("Eof\n");
+        out
     }
 
     pub fn state(&self) -> &ExportState {
@@ -641,6 +899,135 @@ impl Default for MqoSceneExporter {
     }
 }
 
+/// Default Warabi material body (gradient + highlight), appended after the
+/// per-material `Color`/`Opacity` lines — verbatim from C++ `writeDefaultMaterial`.
+const WBP_DEFAULT_MATERIAL: &str = concat!(
+    "  Gradient : [\n",
+    "    { Position : 0.2, Mode : 0, Value : 0.75, TextureScale : 1, TextureOpacity : 1, TextureBlendMode : \"Multiply\", TextureColorOverride : false, TextureOverrideColor : [ 1, 0, 0 ] }\n",
+    "    { Position : 0.4, Mode : 0, Value : 0.88, TextureScale : 1, TextureOpacity : 1, TextureBlendMode : \"Multiply\", TextureColorOverride : false, TextureOverrideColor : [ 1, 0, 0 ] }\n",
+    "    { Position : 0.6, Mode : 0, Value : 0.88, TextureScale : 1, TextureOpacity : 1, TextureBlendMode : \"Multiply\", TextureColorOverride : false, TextureOverrideColor : [ 1, 0, 0 ] }\n",
+    "    { Position : 0.8, Mode : 0, Value : 1, TextureScale : 1, TextureOpacity : 1, TextureBlendMode : \"Multiply\", TextureColorOverride : false, TextureOverrideColor : [ 1, 0, 0 ] }\n",
+    "  ]\n",
+    "  TextureBlendMode : \"Multiply\"\n",
+    "  TextureOpacity : 1\n",
+    "  Highlight : false\n",
+    "  HighlightSize : 0.3\n",
+    "  HighlightSpread : 0\n",
+    "  HighlightColor : [ 1, 1, 1 ]\n",
+    "  HighlightBlendMode : \"Add\"\n",
+    "  HighlightOpacity : 1\n",
+    "  Group : -1\n",
+);
+
+/// Default Warabi brush block (C++ `writeBrush` no-defs branch).
+const WBP_DEFAULT_BRUSH: &str = concat!(
+    "Brush \"default\" : {\n",
+    "  Width : 1\n",
+    "  Color : [ 0, 0, 0 ]\n",
+    "  Opacity : 0.7\n",
+    "  BlendMode :\"Normal\"\n",
+    "  Roundness : 1\n",
+    "  Angle : 0\n",
+    "  Default : true\n",
+    "}\n",
+);
+
+/// Scene preamble, opening `Scene { ... Children { External {` (C++
+/// `writeScenePreamble`).
+const WBP_SCENE_PREAMBLE: &str = concat!(
+    "Scene : {\n",
+    "  Visible : true\n",
+    "  Position : [ 0, 0, 0 ]\n",
+    "  Scale : [ 1, 1, 1 ]\n",
+    "  Rotation : [ 0, 0, 0 ]\n",
+    "  Layer : 0\n",
+    "  Group : -1\n",
+    "  DropShadow : true\n",
+    "  ReceiveShadow : true\n",
+    "  ShadowOnly : false\n",
+    "  BrushSet : {\n",
+    "    NormalEdgeThreshold : 1.0472\n",
+    "    SilhouettStyle : 1\n",
+    "    ContourStyle : 1\n",
+    "    ObjectBorderStyle : 1\n",
+    "    MaterialBorderStyle : 1\n",
+    "    NormalEdgeStyle : 1\n",
+    "  }\n",
+    "  Children : {\n",
+    "    External : {\n",
+);
+
+/// External-import body following `FileName` (C++ `writeMqoImport`).
+const WBP_IMPORT_OPTIONS: &str = concat!(
+    "      ImportOptions : {\n",
+    "        Scale : 1\n",
+    "        Digits : 0\n",
+    "        Axes : 1056\n",
+    "      }\n",
+    "      Visible : true\n",
+    "      Position : [ 0, 0, 0 ]\n",
+    "      Scale : [ 1, 1, 1 ]\n",
+    "      Rotation : [ 0, 0, 0 ]\n",
+    "      Layer : 0\n",
+    "      Group : -1\n",
+    "      DropShadow : true\n",
+    "      ReceiveShadow : true\n",
+    "      ShadowOnly : false\n",
+    "      BrushSet : {\n",
+    "        NormalEdgeThreshold : 1.0472\n",
+    "        SilhouettStyle : 1\n",
+    "        ContourStyle : 1\n",
+    "        ObjectBorderStyle : 1\n",
+    "        MaterialBorderStyle : 1\n",
+    "        NormalEdgeStyle : 1\n",
+    "      }\n",
+);
+
+/// Per-object body following `Object "name" : {` (C++ `writeMqoObj`).
+const WBP_OBJECT_BODY: &str = concat!(
+    "          Visible : true\n",
+    "          Position : [ 0, 0, 0 ]\n",
+    "          Scale : [ 1, 1, 1 ]\n",
+    "          Rotation : [ 0, 0, 0 ]\n",
+    "          Layer : 0\n",
+    "          Group : -1\n",
+    "          DropShadow : true\n",
+    "          ReceiveShadow : true\n",
+    "          ShadowOnly : false\n",
+    "          BrushSet : {\n",
+    "            NormalEdgeThreshold : 1.0472\n",
+    "            SilhouettStyle : 2\n",
+    "            SilhouettBrush : \"default\"\n",
+    "            ContourStyle : 2\n",
+    "            ContourBrush : \"default\"\n",
+    "            ObjectBorderStyle : 0\n",
+    "            MaterialBorderStyle : 0\n",
+    "            NormalEdgeStyle : 2\n",
+    "            NormalEdgeBrush : \"default\"\n",
+    "          }\n",
+    "          Smoothing : true\n",
+    "          SmoothingAngle : 1.03847\n",
+    "          DrawBackFace : false\n",
+    "        }\n",
+);
+
+/// DirectionalLight + orthographic Camera (C++ `writeWbp` tail).
+const WBP_LIGHT_AND_CAMERA: &str = concat!(
+    "    DirectionalLight \"Light 1\" : {\n",
+    "      Position : [ 500, 500, 500 ]\n",
+    "      Color : [ 1, 1, 1 ]\n",
+    "      Visible : true\n",
+    "      Default : true\n",
+    "    }\n",
+    "    Camera \"camera1\" : {\n",
+    "      Position : [ 0, 0, 1000 ]\n",
+    "      Focus : [ 0, 0, 0 ]\n",
+    "      Up : [ 0, 1, 0 ]\n",
+    "      Fov : 0.100000\n",
+    "      Visible : true\n",
+    "    }\n",
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WbpSceneExporter {
     state: ExportState,
@@ -657,6 +1044,46 @@ impl WbpSceneExporter {
             perspective: false,
             grad_steps: 16,
         }
+    }
+
+    /// Serialize a Warabi project (`.wbp`) referencing an external `.mqo`
+    /// geometry file — a faithful port of C++ `WbpSceneExporter` (which itself
+    /// writes the geometry via `MqoDisplayContext` and wraps it in a `.wbp`):
+    /// the `# Warabi Project 1.1 utf8` header, a Material per distinct face
+    /// colour, a default Brush, then a Scene whose `Children/External` imports
+    /// the `.mqo` and holds the Object, a DirectionalLight, and a Camera.
+    /// `mqo_filename` is the relative `.mqo` reference.
+    pub fn write_wbp_string(&self, name: &str, mesh: &RenderMesh, mqo_filename: &str) -> String {
+        let (mat_keys, _) = face_material_table(mesh);
+        let mut out = String::new();
+        out.push_str("# Warabi Project 1.1 utf8\n");
+        for (i, c) in mat_keys.iter().enumerate() {
+            writeln!(&mut out, "Material \"{name}_mat{i}\" : {{").unwrap();
+            writeln!(
+                &mut out,
+                "  Color : [{:.6}, {:.6}, {:.6}]",
+                c[0] as f32 / 255.0,
+                c[1] as f32 / 255.0,
+                c[2] as f32 / 255.0,
+            )
+            .unwrap();
+            writeln!(&mut out, "  Opacity : {:.6}", c[3] as f32 / 255.0).unwrap();
+            out.push_str(WBP_DEFAULT_MATERIAL);
+            out.push_str("}\n");
+        }
+        out.push_str(WBP_DEFAULT_BRUSH);
+        out.push_str(WBP_SCENE_PREAMBLE);
+        writeln!(&mut out, "      FileName : \"{mqo_filename}\"").unwrap();
+        out.push_str(WBP_IMPORT_OPTIONS);
+        out.push_str("      Children : {\n");
+        writeln!(&mut out, "        Object \"{name}\" : {{").unwrap();
+        out.push_str(WBP_OBJECT_BODY);
+        out.push_str("      }\n"); // close Children
+        out.push_str("    }\n"); // close External
+        out.push_str(WBP_LIGHT_AND_CAMERA);
+        out.push_str("  }\n"); // close scene Children
+        out.push_str("}\n"); // close Scene
+        out
     }
 
     pub fn state(&self) -> &ExportState {
@@ -853,6 +1280,100 @@ impl LuxRendSceneExporter {
         }
     }
 
+    /// Serialize a tessellated mesh as a LuxRender `Shape "mesh"` geometry block
+    /// (triangle indices + point list) — the geometry CORE of C++
+    /// `LuxRendDisplayContext` output, paralleling the POV mesh writer. This is
+    /// a geometry FRAGMENT (no Film/Camera/LightSource/WorldBegin scene chrome —
+    /// those defunct-renderer scene parts are intentionally not ported).
+    pub fn write_mesh_string(&self, vertices: &[Vector4], triangles: &[[usize; 3]]) -> String {
+        let valid: Vec<[usize; 3]> = triangles
+            .iter()
+            .copied()
+            .filter(|t| t.iter().all(|i| *i < vertices.len()))
+            .collect();
+        let mut out = String::new();
+        out.push_str("Shape \"mesh\"\n");
+        out.push_str("  \"integer triindices\" [");
+        for (n, [i, j, k]) in valid.iter().enumerate() {
+            if n > 0 {
+                out.push(' ');
+            }
+            write!(&mut out, "{i} {j} {k}").unwrap();
+        }
+        out.push_str("]\n");
+        out.push_str("  \"point P\" [");
+        for (n, v) in vertices.iter().enumerate() {
+            if n > 0 {
+                out.push(' ');
+            }
+            write!(&mut out, "{:.6} {:.6} {:.6}", v.x, v.y, v.z).unwrap();
+        }
+        out.push_str("]\n");
+        out
+    }
+
+    /// Serialize a COMPLETE, renderable LuxRender scene (`.lxs`) wrapping the
+    /// mesh — a faithful port of C++ `LuxRendDisplayContext`: a `LookAt`/`Camera`
+    /// framed on `center`/`size`, a `Film "fleximage"`, `PixelFilter`/`Sampler`,
+    /// `WorldBegin` … a distant light, a matte `Material`, the `Shape "mesh"`
+    /// geometry, `WorldEnd`. Unlike [`Self::write_mesh_string`] (a geometry
+    /// fragment) this is a full scene. World-space: the camera looks at the
+    /// molecule `center` (C++ pre-transforms to origin; we keep world coords).
+    pub fn write_scene_string(
+        &self,
+        mesh: &RenderMesh,
+        center: Vector4,
+        size: f64,
+        perspective: bool,
+    ) -> String {
+        let dist = (size * 3.0).max(1.0);
+        let zoom = (size * 1.2).max(1.0);
+        let mut out = String::new();
+        out.push_str("# CueMol LuxRender exporter output\n\n");
+        writeln!(
+            &mut out,
+            "LookAt {:.6} {:.6} {:.6}  {:.6} {:.6} {:.6}  0 1 0",
+            center.x,
+            center.y,
+            center.z + dist,
+            center.x,
+            center.y,
+            center.z,
+        )
+        .unwrap();
+        if perspective {
+            out.push_str("Camera \"perspective\" \"float fov\" [45]\n");
+        } else {
+            writeln!(
+                &mut out,
+                "Camera \"orthographic\" \"float screenwindow\" [{:.6} {:.6} {:.6} {:.6}]",
+                -zoom / 2.0,
+                zoom / 2.0,
+                -zoom / 2.0,
+                zoom / 2.0,
+            )
+            .unwrap();
+        }
+        out.push_str("Film \"fleximage\"\n");
+        out.push_str("     \"integer xresolution\" [640]\n");
+        out.push_str("     \"integer yresolution\" [480]\n");
+        out.push_str("     \"bool write_png\" [\"true\"]\n");
+        out.push_str("     \"string write_png_channels\" [\"RGBA\"]\n");
+        writeln!(&mut out, "     \"integer haltspp\" [{}]", self.halt_spp()).unwrap();
+        out.push_str("PixelFilter \"mitchell\" \"float xwidth\" [2] \"float ywidth\" [2]\n");
+        out.push_str("Sampler \"metropolis\"\n");
+        out.push_str("\nWorldBegin\n\n");
+        out.push_str("AttributeBegin # Light\n");
+        out.push_str("LightSource \"distant\"\n  \"color L\" [1 1 1]\n");
+        out.push_str("AttributeEnd\n\n");
+        out.push_str("Material \"matte\" \"color Kd\" [0.7 0.7 0.7]\n");
+        out.push_str("AttributeBegin\n");
+        out.push_str(&self.write_mesh_string(&mesh.positions(), &mesh.triangles()));
+        out.push_str("AttributeEnd\n\n");
+        out.push_str("WorldEnd\n");
+        out
+    }
+
     pub fn state(&self) -> &ExportState {
         &self.state
     }
@@ -958,6 +1479,90 @@ impl LuxCoreSceneExporter {
         }
     }
 
+    /// ASCII PLY geometry for the mesh — the internal geometry format C++
+    /// `LuxCoreDisplayContext` writes alongside the `.scn` (faithful header:
+    /// float x/y/z + nx/ny/nz + uchar red/green/blue per vertex, `3 i j k`
+    /// faces). Kept internal to LuxCore (C++ has no standalone PLY exporter, so
+    /// neither do we — match the reference, don't out-feature it).
+    pub fn write_ply_string(&self, mesh: &RenderMesh) -> String {
+        let tris = mesh.triangles();
+        let mut out = String::new();
+        out.push_str("ply\nformat ascii 1.0\ncomment Created by CueMol\n");
+        writeln!(&mut out, "element vertex {}", mesh.vertices.len()).unwrap();
+        out.push_str("property float x\nproperty float y\nproperty float z\n");
+        out.push_str("property float nx\nproperty float ny\nproperty float nz\n");
+        out.push_str("property uchar red\nproperty uchar green\nproperty uchar blue\n");
+        writeln!(&mut out, "element face {}", tris.len()).unwrap();
+        out.push_str("property list uchar uint vertex_indices\n");
+        out.push_str("end_header\n");
+        for v in &mesh.vertices {
+            let q = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+            writeln!(
+                &mut out,
+                "{:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {} {} {}",
+                v.position.x,
+                v.position.y,
+                v.position.z,
+                v.normal.x,
+                v.normal.y,
+                v.normal.z,
+                q(v.color[0]),
+                q(v.color[1]),
+                q(v.color[2]),
+            )
+            .unwrap();
+        }
+        for [i, j, k] in tris {
+            writeln!(&mut out, "3 {i} {j} {k}").unwrap();
+        }
+        out
+    }
+
+    /// LuxCore `.scn` scene file referencing the mesh `.ply` — faithful to C++
+    /// `LuxCoreDisplayContext`: an orthographic camera, constant + distant
+    /// lights, a matte material, and the shape→ply / object→material+shape
+    /// bindings. `name` is the LuxCore identifier, `ply_filename` the relative
+    /// `.ply` reference.
+    pub fn write_scn_string(&self, name: &str, ply_filename: &str) -> String {
+        let mut out = String::new();
+        out.push_str("scene.camera.up = 0 1 0\n");
+        out.push_str("scene.camera.lookat.target = 0 0 0\n");
+        out.push_str("scene.camera.type = \"orthographic\"\n");
+        out.push_str("scene.camera.lookat.orig = 0 0 100\n");
+        out.push_str("# Lights\n");
+        out.push_str("scene.lights.il.type = constantinfinite\n");
+        out.push_str("scene.lights.il.color = 1 1 1\n");
+        out.push_str("scene.lights.il.gain = 0.15 0.15 0.15\n");
+        out.push_str("scene.lights.distl.type = distant\n");
+        out.push_str("scene.lights.distl.color = 1 1 1\n");
+        out.push_str("scene.lights.distl.gain = 20 20 20\n");
+        out.push_str("scene.lights.distl.direction = 1 1 -1\n");
+        writeln!(&mut out, "scene.materials.{name}.type = matte").unwrap();
+        writeln!(&mut out, "scene.materials.{name}.kd = 0.7 0.7 0.7").unwrap();
+        writeln!(&mut out, "scene.shapes.{name}.type = mesh").unwrap();
+        writeln!(&mut out, "scene.shapes.{name}.ply = {ply_filename}").unwrap();
+        writeln!(&mut out, "scene.objects.{name}.material = {name}").unwrap();
+        writeln!(&mut out, "scene.objects.{name}.shape = {name}").unwrap();
+        out
+    }
+
+    /// LuxCore `.cfg` render config referencing the `.scn` (film size, linear
+    /// tonemap + gamma, RGBA output) — faithful to C++ `LuxCoreDisplayContext`
+    /// header. `scene_base` is the relative basename (no extension).
+    pub fn write_cfg_string(&self, scene_base: &str, width: i32, height: i32) -> String {
+        let mut out = String::new();
+        out.push_str("# CueMol LuxCore exporter output\n");
+        writeln!(&mut out, "scene.file = {scene_base}.scn").unwrap();
+        writeln!(&mut out, "film.width = {width}").unwrap();
+        writeln!(&mut out, "film.height = {height}").unwrap();
+        out.push_str("film.imagepipeline.0.type = TONEMAP_LINEAR\n");
+        out.push_str("film.imagepipeline.1.type = GAMMA_CORRECTION\n");
+        out.push_str("film.imagepipeline.1.value = 2.2\n");
+        out.push_str("film.outputs.1.type = RGBA_TONEMAPPED\n");
+        writeln!(&mut out, "film.outputs.1.filename = {scene_base}.png").unwrap();
+        out
+    }
+
     pub fn state(&self) -> &ExportState {
         &self.state
     }
@@ -1041,6 +1646,43 @@ impl Default for LuxCoreSceneExporter {
     }
 }
 
+/// Build a per-face material table from a mesh: the face colour is the mean of
+/// its three vertex colours (C++ `mixColor`), quantised to 8-bit RGBA and
+/// deduplicated in first-seen order. Returns `(unique_colours, face -> index)`.
+/// Shared by the MQO and WBP exporters. An empty mesh yields one grey default.
+fn face_material_table(mesh: &RenderMesh) -> (Vec<[u8; 4]>, Vec<usize>) {
+    let quant = |c: [f32; 4]| {
+        [
+            (c[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (c[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (c[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (c[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+        ]
+    };
+    let tris = mesh.triangles();
+    let mut keys: Vec<[u8; 4]> = Vec::new();
+    let mut face_mat: Vec<usize> = Vec::with_capacity(tris.len());
+    for [i, j, k] in &tris {
+        let mut mix = [0.0_f32; 4];
+        for idx in [*i, *j, *k] {
+            let c = mesh.vertices[idx].color;
+            for (acc, ch) in mix.iter_mut().zip(c) {
+                *acc += ch / 3.0;
+            }
+        }
+        let key = quant(mix);
+        let mi = keys.iter().position(|k2| *k2 == key).unwrap_or_else(|| {
+            keys.push(key);
+            keys.len() - 1
+        });
+        face_mat.push(mi);
+    }
+    if keys.is_empty() {
+        keys.push([204, 204, 204, 255]);
+    }
+    (keys, face_mat)
+}
+
 fn valid_triangle_vertices(
     vertices: &[Vector4],
     triangles: &[[usize; 3]],
@@ -1112,6 +1754,275 @@ fn pov_rgba(color: Option<&ColorSpec>) -> (f32, f32, f32, f32) {
         f32::from(rgba.b) / 255.0,
         1.0 - f32::from(rgba.a) / 255.0,
     )
+}
+
+/// A ray for hit-testing / picking: points `origin + t * dir`, `dir` unit length.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ray {
+    pub origin: Vector4,
+    pub dir: Vector4,
+}
+
+impl Ray {
+    /// Build a ray, normalizing `dir` (a zero `dir` degenerates to +z).
+    pub fn new(origin: Vector4, dir: Vector4) -> Self {
+        Self {
+            origin,
+            dir: normalize3(dir),
+        }
+    }
+}
+
+/// Nearest-atom ray pick — the headless core of C++ `gfx::Hittest` (ray–sphere
+/// intersection). Returns the index into `snapshot.atoms` of the atom whose vdW
+/// sphere the ray first enters (smallest positive `t`), or `None` if the ray
+/// hits no atom. Pure geometry: a screen click becomes a ray (via the camera),
+/// then this resolves which atom is under it. The analytic ray–sphere test is
+/// its own oracle (no GUI click needed to verify).
+pub fn pick_atom_by_ray(snapshot: &RenderSceneSnapshot, ray: &Ray) -> Option<usize> {
+    let d = ray.dir;
+    let mut best: Option<(f64, usize)> = None;
+    for (i, atom) in snapshot.atoms.iter().enumerate() {
+        let ox = ray.origin.x - atom.center.x;
+        let oy = ray.origin.y - atom.center.y;
+        let oz = ray.origin.z - atom.center.z;
+        let b = ox * d.x + oy * d.y + oz * d.z;
+        let r = atom.radius as f64;
+        let cc = ox * ox + oy * oy + oz * oz - r * r;
+        let disc = b * b - cc;
+        if disc < 0.0 {
+            continue; // ray misses the sphere
+        }
+        let sq = disc.sqrt();
+        let mut t = -b - sq; // near intersection
+        if t < 0.0 {
+            t = -b + sq; // origin inside the sphere: use the far root
+        }
+        if t < 0.0 {
+            continue; // sphere entirely behind the ray
+        }
+        if best.is_none_or(|(bt, _)| t < bt) {
+            best = Some((t, i));
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+/// A silhouette/crease edge line segment (two world-space endpoints).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdgeSegment {
+    pub a: Vector4,
+    pub b: Vector4,
+}
+
+/// Extract silhouette + crease + boundary edge lines from a mesh — a faithful
+/// port of C++ `RendIntData::calcSilEdgeLines` (the NPR edge-line / `GraphEdge`
+/// feature behind POV-Ray's `show_edge_lines`). An edge is emitted when it is:
+/// a BOUNDARY edge (only one adjacent face), a CREASE (`acos(n1·n2) >
+/// crease_limit`, only when `crease_limit > 0`), or a SILHOUETTE (the view
+/// vectors `endpoint - cam` dotted with the two adjacent face normals have
+/// opposite signs at either endpoint — one face front-facing, one back).
+///
+/// Adjacency is keyed by quantised vertex POSITION (not index) so the unwelded
+/// tessellated mesh — whose sphere seams/poles duplicate vertices — still forms
+/// the closed manifold the algorithm needs (the equivalent of C++ welding the
+/// mesh in `buildMeshes`).
+pub fn extract_edge_lines(mesh: &RenderMesh, cam: Vector4, crease_limit: f64) -> Vec<EdgeSegment> {
+    use std::collections::HashMap;
+
+    type Key = (i64, i64, i64);
+    let key = |p: Vector4| -> Key {
+        const Q: f64 = 1.0e4;
+        (
+            (p.x * Q).round() as i64,
+            (p.y * Q).round() as i64,
+            (p.z * Q).round() as i64,
+        )
+    };
+    let dot3 = |a: Vector4, b: Vector4| a.x * b.x + a.y * b.y + a.z * b.z;
+
+    struct EdgeAcc {
+        a: Vector4,
+        b: Vector4,
+        n: [Option<Vector4>; 2],
+    }
+    let mut edges: HashMap<(Key, Key), EdgeAcc> = HashMap::new();
+    for [i, j, k] in mesh.triangles() {
+        let vi = mesh.vertices[i].position;
+        let vj = mesh.vertices[j].position;
+        let vk = mesh.vertices[k].position;
+        let normal = normalize3((vj - vi).cross(vk - vi));
+        for (pa, pb) in [(vi, vj), (vj, vk), (vk, vi)] {
+            let (ka, kb) = (key(pa), key(pb));
+            let (k1, k2, a, b) = if ka <= kb {
+                (ka, kb, pa, pb)
+            } else {
+                (kb, ka, pb, pa)
+            };
+            let acc = edges.entry((k1, k2)).or_insert(EdgeAcc {
+                a,
+                b,
+                n: [None, None],
+            });
+            if acc.n[0].is_none() {
+                acc.n[0] = Some(normal);
+            } else if acc.n[1].is_none() {
+                acc.n[1] = Some(normal);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for acc in edges.values() {
+        let emit = match (acc.n[0], acc.n[1]) {
+            (Some(_), None) => true, // boundary / ridge edge
+            (Some(n1), Some(n2)) => {
+                let crease = crease_limit > 0.0
+                    && dot3(n1, n2).clamp(-1.0, 1.0).acos() > crease_limit;
+                let va = acc.a - cam;
+                let vb = acc.b - cam;
+                let silhouette = dot3(va, n1) * dot3(va, n2) < 0.0
+                    || dot3(vb, n1) * dot3(vb, n2) < 0.0;
+                crease || silhouette
+            }
+            _ => false,
+        };
+        if emit {
+            out.push(EdgeSegment { a: acc.a, b: acc.b });
+        }
+    }
+    out
+}
+
+/// Resolve a render colour to linear RGBA (default mid-grey), matching the
+/// offscreen renderer's atom/bond flat shading.
+fn snapshot_color_rgba(color: &Option<ColorSpec>) -> [f32; 4] {
+    match color.as_ref().and_then(ColorSpec::rgba8) {
+        Some(c) => [
+            c.r as f32 / 255.0,
+            c.g as f32 / 255.0,
+            c.b as f32 / 255.0,
+            c.a as f32 / 255.0,
+        ],
+        None => [0.7, 0.7, 0.7, 1.0],
+    }
+}
+
+fn normalize3(v: Vector4) -> Vector4 {
+    let len = v.length3d();
+    if len < 1.0e-9 {
+        Vector4::new3(0.0, 0.0, 1.0)
+    } else {
+        v.scale(1.0 / len)
+    }
+}
+
+/// Tessellate a UV sphere (flat-shaded, radial normals) into `mesh`. Poles emit
+/// degenerate triangles, kept so the triangle count is a clean `RINGS*SEGS*2`.
+fn add_sphere(mesh: &mut RenderMesh, center: Vector4, radius: f64, color: [f32; 4]) {
+    const RINGS: usize = 8;
+    const SEGS: usize = 12;
+    let base = mesh.vertices.len() as u32;
+    for i in 0..=RINGS {
+        let phi = std::f64::consts::PI * i as f64 / RINGS as f64;
+        let (sp, cp) = phi.sin_cos();
+        for j in 0..=SEGS {
+            let theta = std::f64::consts::TAU * j as f64 / SEGS as f64;
+            let (st, ct) = theta.sin_cos();
+            let dir = Vector4::new3(sp * ct, cp, sp * st);
+            mesh.vertices.push(MeshVertex {
+                position: Vector4::new3(
+                    center.x + radius * dir.x,
+                    center.y + radius * dir.y,
+                    center.z + radius * dir.z,
+                ),
+                normal: dir,
+                color,
+            });
+        }
+    }
+    let stride = SEGS + 1;
+    for i in 0..RINGS {
+        for j in 0..SEGS {
+            let a = base + (i * stride + j) as u32;
+            let b = base + (i * stride + j + 1) as u32;
+            let c = base + ((i + 1) * stride + j) as u32;
+            let d = base + ((i + 1) * stride + j + 1) as u32;
+            mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+}
+
+/// Tessellate a cylinder between `from` and `to` (flat-shaded) into `mesh`. A
+/// zero-length cylinder contributes nothing.
+fn add_cylinder(mesh: &mut RenderMesh, from: Vector4, to: Vector4, radius: f64, color: [f32; 4]) {
+    const SEGS: usize = 10;
+    let axis = to - from;
+    let len = axis.length3d();
+    if len < 1.0e-9 {
+        return;
+    }
+    let tangent = axis.scale(1.0 / len);
+    let up = if tangent.x.abs() < 0.9 {
+        Vector4::new3(1.0, 0.0, 0.0)
+    } else {
+        Vector4::new3(0.0, 1.0, 0.0)
+    };
+    let n1 = normalize3(tangent.cross(up));
+    let n2 = normalize3(tangent.cross(n1));
+    let base = mesh.vertices.len() as u32;
+    for end in [from, to] {
+        for j in 0..=SEGS {
+            let theta = std::f64::consts::TAU * j as f64 / SEGS as f64;
+            let (s, c) = theta.sin_cos();
+            let offset = n1.scale(c * radius) + n2.scale(s * radius);
+            mesh.vertices.push(MeshVertex {
+                position: end + offset,
+                normal: normalize3(offset),
+                color,
+            });
+        }
+    }
+    let stride = (SEGS + 1) as u32;
+    for j in 0..SEGS as u32 {
+        let a = base + j;
+        let b = base + j + 1;
+        let c = base + stride + j;
+        let d = base + stride + j + 1;
+        mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
+    }
+}
+
+/// Tessellate a whole render snapshot — atoms as UV spheres, bonds as cylinders,
+/// plus its pre-built triangle meshes (ribbon/surface) — into a single
+/// flat-shaded [`RenderMesh`] in world coordinates (no camera/model transform,
+/// so exported geometry stays in molecule space). This is the headless backbone
+/// shared by the offscreen GPU renderer and the file-geometry exporters.
+pub fn tessellate_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
+    let mut mesh = RenderMesh::new();
+    for atom in &snapshot.atoms {
+        add_sphere(
+            &mut mesh,
+            atom.center,
+            atom.radius as f64,
+            snapshot_color_rgba(&atom.color),
+        );
+    }
+    for bond in &snapshot.bonds {
+        add_cylinder(
+            &mut mesh,
+            bond.from,
+            bond.to,
+            bond.radius as f64,
+            snapshot_color_rgba(&bond.color),
+        );
+    }
+    for extra in &snapshot.meshes {
+        let base = mesh.vertices.len() as u32;
+        mesh.vertices.extend(extra.vertices.iter().cloned());
+        mesh.indices.extend(extra.indices.iter().map(|i| i + base));
+    }
+    mesh
 }
 
 #[cfg(test)]
@@ -1262,5 +2173,395 @@ mod tests {
         let spheres = pov.write_atoms_string(&atoms);
         assert!(spheres.contains("sphere { <1.000000, 2.000000, 3.000000>, 1.500000"));
         assert!(spheres.contains("rgbf <1.000000, 0.000000, 0.000000"));
+
+        // LuxRender geometry fragment: one valid triangle (the [0 2 9] one is
+        // dropped as out-of-range), points listed, indices present.
+        let lux = LuxRendSceneExporter::new().write_mesh_string(&vertices, &triangles);
+        assert!(lux.contains("Shape \"mesh\""));
+        assert!(lux.contains("\"integer triindices\" [0 1 2]"));
+        assert!(lux.contains("\"point P\" [0.000000 0.000000 0.000000"));
+    }
+
+    #[test]
+    fn luxrender_scene_is_a_complete_renderable_document() {
+        let c = Vector4::new3(2.0, 0.0, 0.0);
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom::new(c, 1.0, None)],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let mesh = tessellate_snapshot(&snapshot);
+        let lxs = LuxRendSceneExporter::new().write_scene_string(&mesh, c, 4.0, false);
+        // Scene chrome a fragment lacks: camera framing, film, world, light.
+        assert!(lxs.contains("LookAt 2.000000 0.000000"));
+        assert!(lxs.contains("Camera \"orthographic\""));
+        assert!(lxs.contains("Film \"fleximage\""));
+        assert!(lxs.contains("WorldBegin"));
+        assert!(lxs.contains("LightSource \"distant\""));
+        assert!(lxs.contains("Material \"matte\""));
+        assert!(lxs.contains("Shape \"mesh\""));
+        assert!(lxs.trim_end().ends_with("WorldEnd"));
+    }
+
+    #[test]
+    fn tessellated_lone_atom_vertices_lie_on_the_sphere() {
+        // Independent geometric oracle (not a writer/reader round-trip): every
+        // tessellated vertex of a single sphere is exactly `radius` from the
+        // centre, with a unit radial normal.
+        let center = Vector4::new3(1.0, 2.0, 3.0);
+        let radius = 1.5_f64;
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom::new(center, radius as f32, None)],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let mesh = tessellate_snapshot(&snapshot);
+        // RINGS(8) * SEGS(12) * 2 triangles per sphere.
+        assert_eq!(mesh.triangle_count(), 8 * 12 * 2);
+        for v in &mesh.vertices {
+            let dx = v.position.x - center.x;
+            let dy = v.position.y - center.y;
+            let dz = v.position.z - center.z;
+            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+            assert!((dist - radius).abs() < 1.0e-6, "vertex off sphere: {dist}");
+            let nlen = v.normal.length3d();
+            assert!((nlen - 1.0).abs() < 1.0e-6, "normal not unit: {nlen}");
+            // Radial: normal points from centre to vertex.
+            assert!((v.normal.x * radius - dx).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn ray_picks_nearest_atom_sphere() {
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![
+                RenderAtom::new(Vector4::new3(0.0, 0.0, 0.0), 1.0, None), // 0
+                RenderAtom::new(Vector4::new3(5.0, 0.0, 0.0), 1.0, None), // 1
+            ],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let down = Vector4::new3(0.0, 0.0, -1.0);
+        // Ray straight down -z through atom 0 / atom 1.
+        let hit0 = pick_atom_by_ray(&snapshot, &Ray::new(Vector4::new3(0.0, 0.0, 10.0), down));
+        assert_eq!(hit0, Some(0));
+        let hit1 = pick_atom_by_ray(&snapshot, &Ray::new(Vector4::new3(5.0, 0.0, 10.0), down));
+        assert_eq!(hit1, Some(1));
+        // Lateral offset (2) > radius (1): miss.
+        let miss = pick_atom_by_ray(&snapshot, &Ray::new(Vector4::new3(2.0, 0.0, 10.0), down));
+        assert_eq!(miss, None);
+        // Tangent: offset exactly == radius (disc == 0) still hits.
+        let tan = pick_atom_by_ray(&snapshot, &Ray::new(Vector4::new3(1.0, 0.0, 10.0), down));
+        assert_eq!(tan, Some(0));
+
+        // Two atoms along the ray: the nearer one (smaller t) wins.
+        let stacked = RenderSceneSnapshot {
+            atoms: vec![
+                RenderAtom::new(Vector4::new3(0.0, 0.0, 0.0), 1.0, None), // far
+                RenderAtom::new(Vector4::new3(0.0, 0.0, 5.0), 1.0, None), // near (origin at z=10)
+            ],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let near = pick_atom_by_ray(&stacked, &Ray::new(Vector4::new3(0.0, 0.0, 10.0), down));
+        assert_eq!(near, Some(1));
+        // Ray pointing away from both: no hit.
+        let away = pick_atom_by_ray(
+            &stacked,
+            &Ray::new(Vector4::new3(0.0, 0.0, 10.0), Vector4::new3(0.0, 0.0, 1.0)),
+        );
+        assert_eq!(away, None);
+    }
+
+    #[test]
+    fn edge_lines_detect_boundary_crease_and_exclude_coplanar_diagonals() {
+        use std::f64::consts::PI;
+        // Flat quad (2 coplanar triangles): the 4 perimeter edges are BOUNDARY,
+        // the shared diagonal is coplanar (no crease) and head-on (no
+        // silhouette) -> excluded. Expect exactly 4 segments.
+        let quad = RenderMesh {
+            vertices: [
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (1.0, 1.0, 0.0),
+                (0.0, 1.0, 0.0),
+            ]
+            .into_iter()
+            .map(|(x, y, z)| MeshVertex {
+                position: Vector4::new3(x, y, z),
+                normal: Vector4::new3(0.0, 0.0, 1.0),
+                color: [1.0; 4],
+            })
+            .collect(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        };
+        let cam = Vector4::new3(0.5, 0.5, 100.0);
+        assert_eq!(extract_edge_lines(&quad, cam, PI / 4.0).len(), 4);
+
+        // Cube: every one of the 12 cube edges is a 90° CREASE; the 6 face
+        // diagonals are coplanar (excluded). Camera at the centre => view
+        // vectors point outward through every outward normal => NO silhouette,
+        // and the cube is closed => no boundary. So crease-only => exactly 12.
+        let corners = [
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+        ];
+        let quads = [
+            [0, 1, 2, 3],
+            [4, 5, 6, 7],
+            [0, 1, 5, 4],
+            [2, 3, 7, 6],
+            [1, 2, 6, 5],
+            [0, 3, 7, 4],
+        ];
+        let mut verts = Vec::new();
+        let mut indices = Vec::new();
+        for q in quads {
+            let base = verts.len() as u32;
+            for &ci in &q {
+                let (x, y, z) = corners[ci];
+                verts.push(MeshVertex {
+                    position: Vector4::new3(x, y, z),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [0.8; 4],
+                });
+            }
+            // Two triangles per quad, consistently wound (shared diagonal stays
+            // coplanar = not a crease).
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        let cube = RenderMesh {
+            vertices: verts,
+            indices,
+        };
+        let center = Vector4::new3(0.0, 0.0, 0.0);
+        let cube_edges = extract_edge_lines(&cube, center, PI / 4.0);
+        assert_eq!(cube_edges.len(), 12, "a cube has 12 crease edges");
+    }
+
+    #[test]
+    fn tessellate_snapshot_emits_sphere_per_atom_and_cylinder_per_bond() {
+        let a = Vector4::new3(0.0, 0.0, 0.0);
+        let b = Vector4::new3(2.0, 0.0, 0.0);
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![
+                RenderAtom::new(a, 0.45, None),
+                RenderAtom::new(b, 0.45, None),
+            ],
+            bonds: vec![RenderBond::new(a, b, 0.08, None)],
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let mesh = tessellate_snapshot(&snapshot);
+        // 2 spheres (8*12*2 each) + 1 cylinder (SEGS(10)*2).
+        assert_eq!(mesh.triangle_count(), 2 * 8 * 12 * 2 + 10 * 2);
+        // A zero-length bond contributes no geometry.
+        let degenerate = RenderSceneSnapshot {
+            atoms: Vec::new(),
+            bonds: vec![RenderBond::new(a, a, 0.08, None)],
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        assert_eq!(tessellate_snapshot(&degenerate).triangle_count(), 0);
+    }
+
+    #[test]
+    fn mqo_export_has_metasequoia_structure_and_correct_counts() {
+        // Two atoms of different colours + one bond -> a mesh with a few
+        // distinct face colours. Verified by STRUCTURE inspection (not a
+        // round-trip through an MQO reader).
+        let red = Some(ColorSpec {
+            base: ColorBase::Html {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            modifiers: Vec::new(),
+        });
+        let blue = Some(ColorSpec {
+            base: ColorBase::Html {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255,
+            },
+            modifiers: Vec::new(),
+        });
+        let a = Vector4::new3(0.0, 0.0, 0.0);
+        let b = Vector4::new3(2.0, 0.0, 0.0);
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![
+                RenderAtom::new(a, 0.45, red),
+                RenderAtom::new(b, 0.45, blue),
+            ],
+            bonds: vec![RenderBond::new(a, b, 0.08, None)],
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let mesh = tessellate_snapshot(&snapshot);
+        let mqo = MqoSceneExporter::new().write_mqo_string("two", &mesh);
+
+        assert!(mqo.starts_with("Metasequoia Document\nFormat Text Ver 1.0"));
+        assert!(mqo.contains("Scene {"));
+        assert!(mqo.trim_end().ends_with("Eof"));
+        // vertex/face chunk counts match the mesh.
+        assert!(mqo.contains(&format!("vertex {} {{", mesh.vertices.len())));
+        assert!(mqo.contains(&format!("face {} {{", mesh.triangle_count())));
+        // One material per distinct face colour: a red sphere, a blue sphere,
+        // and a grey bond -> at least 3 materials, each referenced by an M(idx).
+        let mat_count: usize = mqo
+            .lines()
+            .find_map(|l| l.strip_prefix("Material ").and_then(|r| r.split(' ').next()))
+            .and_then(|n| n.parse().ok())
+            .expect("Material count line");
+        assert!(mat_count >= 3, "expected >=3 face colours, got {mat_count}");
+        assert!(mqo.contains("col(1.000000 0.000000 0.000000"));
+        assert!(mqo.contains("col(0.000000 0.000000 1.000000"));
+        // Face lines are 0-based V(...) M(...).
+        let face_lines = mqo.lines().filter(|l| l.starts_with("3 V(")).count();
+        assert_eq!(face_lines, mesh.triangle_count());
+        assert!(mqo.lines().all(|l| !l.starts_with("3 V(") || l.contains(") M(")));
+    }
+
+    #[test]
+    fn pov_scene_is_a_complete_renderable_document() {
+        let red = Some(ColorSpec {
+            base: ColorBase::Html {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            modifiers: Vec::new(),
+        });
+        let c = Vector4::new3(5.0, 5.0, 5.0);
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom::new(c, 1.0, red)],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let mesh = tessellate_snapshot(&snapshot);
+        let pov = PovSceneExporter::new().write_scene_string(&mesh, c, 4.0, false);
+
+        // A complete scene has the chrome a fragment lacks: camera, lighting,
+        // background, global_settings.
+        assert!(pov.contains("camera {"));
+        assert!(pov.contains("light_source {"));
+        assert!(pov.contains("background {"));
+        assert!(pov.contains("global_settings {"));
+        assert!(pov.contains("look_at _center"));
+        // The camera frames the molecule centre, not the origin.
+        assert!(pov.contains("#declare _center = <5.000000,5.000000,5.000000>;"));
+        // Coloured geometry: a texture_list carrying the red atom colour + mesh2.
+        assert!(pov.contains("mesh2 {"));
+        assert!(pov.contains("texture_list {"));
+        assert!(pov.contains("pigment { color rgb <1.000000, 0.000000, 0.000000> }"));
+        // Balanced braces (the macro/camera/mesh nesting closes cleanly).
+        assert_eq!(pov.matches('{').count(), pov.matches('}').count());
+    }
+
+    #[test]
+    fn wbp_wraps_mqo_with_warabi_project_structure() {
+        let red = Some(ColorSpec {
+            base: ColorBase::Html {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            modifiers: Vec::new(),
+        });
+        let a = Vector4::new3(0.0, 0.0, 0.0);
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom::new(a, 0.45, red)],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let mesh = tessellate_snapshot(&snapshot);
+        let wbp = WbpSceneExporter::new().write_wbp_string("mol", &mesh, "mol.mqo");
+
+        assert!(wbp.starts_with("# Warabi Project 1.1 utf8"));
+        // Material derived from the red sphere, referencing the MQO material id.
+        assert!(wbp.contains("Material \"mol_mat0\" : {"));
+        assert!(wbp.contains("Color : [1.000000, 0.000000, 0.000000]"));
+        // External import points at the .mqo geometry file.
+        assert!(wbp.contains("External : {"));
+        assert!(wbp.contains("FileName : \"mol.mqo\""));
+        assert!(wbp.contains("Object \"mol\" : {"));
+        assert!(wbp.contains("DirectionalLight \"Light 1\" : {"));
+        assert!(wbp.contains("Camera \"camera1\" : {"));
+        // Balanced top-level braces (every '{' has a matching '}').
+        let opens = wbp.matches('{').count();
+        let closes = wbp.matches('}').count();
+        assert_eq!(opens, closes, "unbalanced braces in WBP output");
+    }
+
+    #[test]
+    fn luxcore_writes_ply_geometry_and_scn_cfg_references() {
+        let a = Vector4::new3(0.0, 0.0, 0.0);
+        let b = Vector4::new3(2.0, 0.0, 0.0);
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom::new(a, 0.45, None)],
+            bonds: vec![RenderBond::new(a, b, 0.08, None)],
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let mesh = tessellate_snapshot(&snapshot);
+        let lux = LuxCoreSceneExporter::new();
+
+        let ply = lux.write_ply_string(&mesh);
+        assert!(ply.starts_with("ply\nformat ascii 1.0"));
+        assert!(ply.contains(&format!("element vertex {}", mesh.vertices.len())));
+        assert!(ply.contains(&format!("element face {}", mesh.triangle_count())));
+        assert!(ply.contains("end_header"));
+        // One face line ("3 i j k") per triangle, one vertex data line each.
+        assert_eq!(
+            ply.lines().filter(|l| l.starts_with("3 ")).count(),
+            mesh.triangle_count()
+        );
+
+        let scn = lux.write_scn_string("mol", "mol.ply");
+        assert!(scn.contains("scene.shapes.mol.type = mesh"));
+        assert!(scn.contains("scene.shapes.mol.ply = mol.ply"));
+        assert!(scn.contains("scene.objects.mol.shape = mol"));
+        assert!(scn.contains("scene.camera.type = \"orthographic\""));
+
+        let cfg = lux.write_cfg_string("mol", 640, 480);
+        assert!(cfg.contains("scene.file = mol.scn"));
+        assert!(cfg.contains("film.width = 640"));
+        assert!(cfg.contains("film.outputs.1.filename = mol.png"));
+    }
+
+    #[test]
+    fn render_mesh_obj_string_has_one_v_and_f_line_per_vertex_and_triangle() {
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom::new(Vector4::new3(0.0, 0.0, 0.0), 1.0, None)],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let mesh = tessellate_snapshot(&snapshot);
+        let obj = mesh.to_obj_string("lone");
+        let v_lines = obj.lines().filter(|l| l.starts_with("v ")).count();
+        let vn_lines = obj.lines().filter(|l| l.starts_with("vn ")).count();
+        let f_lines = obj.lines().filter(|l| l.starts_with("f ")).count();
+        assert_eq!(v_lines, mesh.vertices.len());
+        assert_eq!(vn_lines, mesh.vertices.len());
+        assert_eq!(f_lines, mesh.triangle_count());
+        // Faces are 1-based and never reference index 0.
+        assert!(!obj.contains("f 0"));
     }
 }

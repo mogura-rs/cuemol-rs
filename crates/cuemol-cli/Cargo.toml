@@ -9,6 +9,8 @@ cuemol-core.workspace = true
 cuemol-gfx.workspace = true
 cuemol-mdtools.workspace = true
 cuemol-molstr.workspace = true
+cuemol-molvis.workspace = true
+cuemol-render.workspace = true
 cuemol-surface.workspace = true
 cuemol-xtal.workspace = true
 
