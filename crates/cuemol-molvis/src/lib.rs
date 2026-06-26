@@ -3515,6 +3515,48 @@ pub fn ring_meshes_snapshot(molecule: &MolCoord) -> RenderSceneSnapshot {
     }
 }
 
+/// Valence-bond wedge fills (C++ `BallStickRenderer` VBMODE_TYPE1): draw each
+/// stereo-flagged bond as a flat triangle — apex at atom1 (the stereo origin),
+/// widening to `width` at atom2. Reads the MDL/SDF bond `stereo` flag (1 = up
+/// wedge, 6 = down/hash), the FAITHFUL source for which bonds are stereo bonds
+/// (no chirality perception needed). HONEST SCOPE: the solid-vs-hashed fill
+/// distinction (up vs down) is a texture detail not represented here — both
+/// produce the same wedge triangle geometry; only the presence/shape is modeled.
+pub fn valence_wedge_meshes_snapshot(molecule: &MolCoord, width: f64) -> RenderSceneSnapshot {
+    let atoms = molecule.atoms();
+    let mut meshes = Vec::new();
+    for bond in molecule.bonds() {
+        if bond.stereo != 1 && bond.stereo != 6 {
+            continue;
+        }
+        let (Some(a1), Some(a2)) = (atoms.get(bond.atom1), atoms.get(bond.atom2)) else {
+            continue;
+        };
+        let (apex, wide) = (a1.position, a2.position);
+        let axis = wide - apex;
+        let perp = perpendicular(axis);
+        let half = perp.scale(width * 0.5);
+        let normal = normalize_or(axis.cross(perp), Vector4::new3(0.0, 0.0, 1.0));
+        let color = [0.45_f32, 0.45, 0.45, 1.0];
+        let mut mesh = RenderMesh::new();
+        for position in [apex, wide + half, wide - half] {
+            mesh.vertices.push(MeshVertex {
+                position,
+                normal,
+                color,
+            });
+        }
+        mesh.indices.extend_from_slice(&[0, 1, 2]);
+        meshes.push(mesh);
+    }
+    RenderSceneSnapshot {
+        atoms: Vec::new(),
+        bonds: Vec::new(),
+        meshes,
+        bounds: molecule.bounding_box_for(None),
+    }
+}
+
 fn normalize_or(vec: Vector4, fallback: Vector4) -> Vector4 {
     vec.normalize3d().unwrap_or(fallback)
 }
@@ -4264,6 +4306,33 @@ mod tests {
         ala.res_name = "ALA".to_string();
         let ala_mol = MolCoord::with_atoms(vec![ala]);
         assert!(ring_meshes_snapshot(&ala_mol).meshes.is_empty());
+    }
+
+    #[test]
+    fn valence_wedge_meshes_drawn_for_stereo_bonds() {
+        let mut mol = MolCoord::with_atoms(vec![
+            sample_atom("C", "C", 0.0, 0.0, 0.0),
+            sample_atom("C", "C", 1.0, 0.0, 0.0),
+        ]);
+        // An MDL up-wedge bond (stereo = 1).
+        mol.add_bond_stereo(0, 1, cuemol_molstr::BondOrder::Single, 1);
+        let snap = valence_wedge_meshes_snapshot(&mol, 0.4);
+        assert_eq!(snap.meshes.len(), 1);
+        let m = &snap.meshes[0];
+        assert_eq!(m.triangle_count(), 1);
+        assert_eq!(m.vertices.len(), 3);
+        // Apex at atom1 (0,0,0); the base straddles atom2 (1,0,0).
+        assert_eq!(m.vertices[0].position, Vector4::new3(0.0, 0.0, 0.0));
+        let base_mid = (m.vertices[1].position + m.vertices[2].position).scale(0.5);
+        assert!((base_mid - Vector4::new3(1.0, 0.0, 0.0)).length3d() < 1.0e-9);
+
+        // A plain (non-stereo) bond produces no wedge.
+        let mut plain = MolCoord::with_atoms(vec![
+            sample_atom("C", "C", 0.0, 0.0, 0.0),
+            sample_atom("C", "C", 1.0, 0.0, 0.0),
+        ]);
+        plain.add_bond(0, 1, cuemol_molstr::BondOrder::Single);
+        assert!(valence_wedge_meshes_snapshot(&plain, 0.4).meshes.is_empty());
     }
 
     #[test]

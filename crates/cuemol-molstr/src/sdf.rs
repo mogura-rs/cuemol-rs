@@ -151,6 +151,11 @@ pub fn read_sdf_str_with_options(input: &str, options: &SdfReadOptions) -> Resul
             let atom1 = parse_counts_int(line, 0, 3, "bond atom1")? - 1;
             let atom2 = parse_counts_int(line, 3, 6, "bond atom2")? - 1;
             let order = parse_counts_int(line, 6, 9, "bond order")?;
+            // The MDL bond-stereo field (cols 10-12) is optional; default 0.
+            let stereo = line
+                .get(9..12)
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .unwrap_or(0);
             if !skip {
                 let Some(Some(atom1)) = atom_map.get(atom1) else {
                     continue;
@@ -158,7 +163,7 @@ pub fn read_sdf_str_with_options(input: &str, options: &SdfReadOptions) -> Resul
                 let Some(Some(atom2)) = atom_map.get(atom2) else {
                     continue;
                 };
-                mol.add_bond(*atom1, *atom2, BondOrder::from_sdf(order as i32));
+                mol.add_bond_stereo(*atom1, *atom2, BondOrder::from_sdf(order as i32), stereo);
             }
         }
         while index < lines.len() {

@@ -82,6 +82,9 @@ pub struct Bond {
     pub atom1: usize,
     pub atom2: usize,
     pub order: BondOrder,
+    /// MDL/SDF bond stereo flag: 0 = none, 1 = up (wedge, fat end at atom2),
+    /// 6 = down (hashed). Used by BallStick valence-bond display.
+    pub stereo: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -288,6 +291,12 @@ impl MolCoord {
     }
 
     pub fn add_bond(&mut self, atom1: usize, atom2: usize, order: BondOrder) {
+        self.add_bond_stereo(atom1, atom2, order, 0);
+    }
+
+    /// Add a bond carrying an MDL/SDF stereo flag (0 none / 1 up-wedge / 6 down).
+    /// Deduplicates against an existing bond between the same atoms.
+    pub fn add_bond_stereo(&mut self, atom1: usize, atom2: usize, order: BondOrder, stereo: i32) {
         if atom1 != atom2 && atom1 < self.atoms.len() && atom2 < self.atoms.len() {
             if self.bonds.iter().any(|bond| {
                 (bond.atom1 == atom1 && bond.atom2 == atom2)
@@ -299,6 +308,7 @@ impl MolCoord {
                 atom1,
                 atom2,
                 order,
+                stereo,
             });
         }
     }
@@ -660,6 +670,7 @@ impl MolCoord {
                     atom1,
                     atom2,
                     order: bond.order,
+                    stereo: bond.stereo,
                 })
             })
             .collect();
