@@ -124,6 +124,7 @@ pub struct MolCoord {
     bonds: Vec<Bond>,
     residue_props: BTreeMap<ResidueKey, BTreeMap<String, String>>,
     atoms_moved_generation: usize,
+    cell_params: Option<cuemol_core::CellParams>,
 }
 
 impl MolCoord {
@@ -133,6 +134,7 @@ impl MolCoord {
             bonds: Vec::new(),
             residue_props: BTreeMap::new(),
             atoms_moved_generation: 0,
+            cell_params: None,
         }
     }
 
@@ -142,7 +144,18 @@ impl MolCoord {
             bonds: Vec::new(),
             residue_props: BTreeMap::new(),
             atoms_moved_generation: 0,
+            cell_params: None,
         }
+    }
+
+    /// Crystallographic unit-cell parameters (from PDB CRYST1 or mmCIF
+    /// `_cell`/`_symmetry`), if the source file supplied them.
+    pub fn cell_params(&self) -> Option<&cuemol_core::CellParams> {
+        self.cell_params.as_ref()
+    }
+
+    pub fn set_cell_params(&mut self, cell: cuemol_core::CellParams) {
+        self.cell_params = Some(cell);
     }
 
     pub fn atom_by_serial(&self, serial: i32) -> Option<&Atom> {

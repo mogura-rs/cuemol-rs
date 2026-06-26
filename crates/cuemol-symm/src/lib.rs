@@ -859,6 +859,38 @@ fn matrix_is_identity(mat: &Matrix4, eps: f64) -> bool {
 
 /// The vendored full space-group table, parsed once. Mirrors the C++
 /// `SymOpDB` singleton, which loads `symop.dat` lazily and caches it.
+impl CrystalInfo {
+    /// Build crystal info from raw cell parameters (PDB CRYST1 / mmCIF
+    /// `_cell`+`_symmetry`, carried on `MolCoord` as `cuemol_core::CellParams`).
+    /// Resolves the space group from its Int-Tables number when present, else
+    /// from its Hermann–Mauguin name via the built-in symop table. Returns
+    /// `None` if neither yields a known group (so the caller can fall back).
+    pub fn from_cell_params(cell: &cuemol_core::CellParams) -> Option<CrystalInfo> {
+        let nsg = cell
+            .space_group_number
+            .filter(|n| *n > 0)
+            .or_else(|| space_group_number_by_name(&cell.space_group_name))?;
+        Some(CrystalInfo::with_space_group(
+            cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma, nsg,
+        ))
+    }
+}
+
+/// Resolve a Hermann–Mauguin space-group name (full e.g. "P 1 21 1", or short
+/// e.g. "P21") to its International-Tables number via the built-in symop table.
+/// Returns the lowest matching id (the primary setting) or `None` if unknown.
+pub fn space_group_number_by_name(name: &str) -> Option<i32> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    builtin_symop_table()
+        .iter()
+        .filter(|(_, group)| group.canonical_name == name || group.name == name)
+        .map(|(id, _)| *id)
+        .min()
+}
+
 fn builtin_symop_table() -> &'static BTreeMap<i32, SpaceGroup> {
     static TABLE: OnceLock<BTreeMap<i32, SpaceGroup>> = OnceLock::new();
     TABLE.get_or_init(|| parse_symop_dat(include_str!("../data/symop.dat")))
@@ -1395,5 +1427,41 @@ mod tests {
         renderer.mark_display_cache_valid();
         renderer.set_width(2.0);
         assert!(!renderer.display_cache_valid());
+    }
+
+    #[test]
+    fn crystal_info_from_cell_params_resolves_space_group_by_name() {
+        // The bridge from mmCIF/PDB cell parameters to CrystalInfo, resolving the
+        // space group by H-M name when the Int-Tables number is absent (1crn.cif).
+        assert_eq!(space_group_number_by_name("P 1 21 1"), Some(4)); // full H-M
+        assert_eq!(space_group_number_by_name("P21"), Some(4)); // short name
+        assert_eq!(space_group_number_by_name("P 1"), Some(1));
+        assert_eq!(space_group_number_by_name("not a group"), None);
+
+        let cell = cuemol_core::CellParams {
+            a: 40.96,
+            b: 18.65,
+            c: 22.52,
+            alpha: 90.0,
+            beta: 90.77,
+            gamma: 90.0,
+            space_group_name: "P 1 21 1".to_string(),
+            space_group_number: None,
+        };
+        let crystal = CrystalInfo::from_cell_params(&cell).expect("resolves P 1 21 1");
+        assert_eq!(crystal.nsg, 4);
+        assert!((crystal.beta - 90.77).abs() < 1.0e-9);
+        // P21 has 2 symmetry operators (identity + 2-fold screw) — the home-cell
+        // mate generation uses them, proving the resolved group is wired.
+        let manager = SymmOpManager::new();
+        assert_eq!(
+            manager.symmetry_operators(crystal.nsg).map(<[_]>::len),
+            Some(2)
+        );
+
+        // An explicit Int-Tables number takes precedence over the name.
+        let mut cell2 = cell.clone();
+        cell2.space_group_number = Some(19);
+        assert_eq!(CrystalInfo::from_cell_params(&cell2).unwrap().nsg, 19);
     }
 }

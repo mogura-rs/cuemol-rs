@@ -54,6 +54,24 @@ fn mmcif_reader_loads_secondary_structure_from_struct_conf_and_sheet() {
 }
 
 #[test]
+fn mmcif_reader_loads_unit_cell_and_space_group() {
+    let Some(root) = reference_test_data_root() else {
+        return;
+    };
+    let mol = read_mmcif_file(root.join("1crn.cif")).unwrap();
+    let cell = mol.cell_params().expect("1crn.cif carries _cell");
+    assert!((cell.a - 40.960).abs() < 1.0e-6, "a={}", cell.a);
+    assert!((cell.b - 18.650).abs() < 1.0e-6, "b={}", cell.b);
+    assert!((cell.c - 22.520).abs() < 1.0e-6, "c={}", cell.c);
+    assert!((cell.alpha - 90.0).abs() < 1.0e-6);
+    assert!((cell.beta - 90.77).abs() < 1.0e-6, "beta={}", cell.beta);
+    assert!((cell.gamma - 90.0).abs() < 1.0e-6);
+    // 1crn.cif gives the space group by H-M name only (Int_Tables_number = '?').
+    assert_eq!(cell.space_group_name, "P 1 21 1");
+    assert_eq!(cell.space_group_number, None);
+}
+
+#[test]
 fn sdf_reader_writer_matches_reference_fixture_shape() {
     let Some(root) = reference_test_data_root() else {
         return;

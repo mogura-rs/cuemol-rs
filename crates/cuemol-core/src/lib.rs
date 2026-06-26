@@ -1,4 +1,5 @@
 pub mod byte_array;
+pub mod cell;
 pub mod dom;
 pub mod error;
 pub mod event;
@@ -16,6 +17,7 @@ pub mod time;
 pub mod types;
 
 pub use byte_array::{ByteArray, ElementType};
+pub use cell::CellParams;
 pub use dom::{parse_ldom2_xml, write_ldom2_xml, LDom2Node, LDom2Tree};
 pub use error::{CueMolError, Result};
 pub use event::{EventManager, TimeValue, TimerId};

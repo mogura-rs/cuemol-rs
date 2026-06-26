@@ -144,7 +144,60 @@ pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Re
     for (cif_loop, value) in &secstr_loops {
         apply_secstr_range(cif_loop, &mut mol, value);
     }
+    // Crystallographic cell + space group come as single key-value items (not a
+    // loop_), so parse those separately. The symm layer resolves the space group
+    // to operators from these raw values.
+    if let Some(cell) = build_cell_params(&parse_single_items(input)) {
+        mol.set_cell_params(cell);
+    }
     Ok(mol)
+}
+
+/// Collect single (non-loop) `_category.item value` pairs. A loop column header
+/// is a lone `_`-token line (one token); a key-value item has the value on the
+/// same line (>= 2 tokens); data rows do not start with `_`.
+fn parse_single_items(input: &str) -> HashMap<String, String> {
+    let mut items = HashMap::new();
+    for line in input.lines() {
+        let line = line.trim();
+        if !line.starts_with('_') {
+            continue;
+        }
+        if let Ok(tokens) = tokenize_cif_line(line) {
+            if tokens.len() >= 2 {
+                items.insert(tokens[0].clone(), tokens[1].clone());
+            }
+        }
+    }
+    items
+}
+
+/// Build unit-cell parameters from mmCIF `_cell` / `_symmetry` single items.
+/// Requires the three cell lengths; angles default to 90°. The space group is
+/// carried as its H-M name and/or Int-Tables number (resolution is the symm
+/// layer's job).
+fn build_cell_params(items: &HashMap<String, String>) -> Option<cuemol_core::CellParams> {
+    let num = |key: &str| items.get(key).and_then(|v| v.parse::<f64>().ok());
+    let a = num("_cell.length_a")?;
+    let b = num("_cell.length_b")?;
+    let c = num("_cell.length_c")?;
+    let mut cell = cuemol_core::CellParams::new(
+        a,
+        b,
+        c,
+        num("_cell.angle_alpha").unwrap_or(90.0),
+        num("_cell.angle_beta").unwrap_or(90.0),
+        num("_cell.angle_gamma").unwrap_or(90.0),
+    );
+    if let Some(name) = items.get("_symmetry.space_group_name_H-M") {
+        if name != "?" {
+            cell.space_group_name = name.clone();
+        }
+    }
+    cell.space_group_number = items
+        .get("_symmetry.Int_Tables_number")
+        .and_then(|v| v.parse::<i32>().ok());
+    Some(cell)
 }
 
 /// Apply secondary-structure ranges (C++ `MmcifMolReader::apply2ndry`): set the
