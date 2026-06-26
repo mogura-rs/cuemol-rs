@@ -324,6 +324,7 @@ pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result
     let mut current_model = None;
     let mut default_model = None;
     let mut ssbonds = Vec::new();
+    let mut links = Vec::new();
     let mut secondary_ranges = Vec::new();
     for (line_number, line) in input.lines().enumerate() {
         if line.starts_with("ATOM  ") || line.starts_with("HETATM") {
@@ -350,6 +351,10 @@ pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result
             current_model = None;
         } else if line.starts_with("SSBOND") {
             ssbonds.push(parse_ssbond_line(line, line_number + 1)?);
+        } else if line.starts_with("LINK  ") || line.starts_with("LINKR ") {
+            if let Some(record) = parse_link_line(line) {
+                links.push(record);
+            }
         } else if line.starts_with("HELIX ") {
             if let Some(range) = parse_helix_range(line) {
                 secondary_ranges.push(range);
@@ -367,6 +372,7 @@ pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result
         mol.apply_topology();
     }
     apply_ssbond_records(&mut mol, &ssbonds);
+    apply_link_records(&mut mol, &links);
     // C++ PDBFileReader: when build2ndry is set (the default), secondary
     // structure is *computed* by DSSP and the deposited HELIX/SHEET records are
     // ignored; only when it is off are those records applied verbatim.
@@ -650,6 +656,59 @@ fn parse_fixed_ssbond_line(line: &str) -> Option<SsBondRecord> {
     })
 }
 
+/// A LINK record: an explicit covalent bond between two named atoms (C++
+/// `PDBFileReader::readLink`). Used for non-disulfide linkages (metal
+/// coordination, cross-links, modified residues) the topology dictionary misses.
+#[derive(Debug, Clone)]
+struct LinkRecord {
+    name1: String,
+    chain1: String,
+    res_id1: i32,
+    ins_code1: Option<char>,
+    name2: String,
+    chain2: String,
+    res_id2: i32,
+    ins_code2: Option<char>,
+}
+
+/// Parse a fixed-column PDB LINK record. Columns (1-indexed): name1 13-16,
+/// chainID1 22, resSeq1 23-26, iCode1 27; name2 43-46, chainID2 52, resSeq2
+/// 53-56, iCode2 57.
+fn parse_link_line(line: &str) -> Option<LinkRecord> {
+    let name1 = field(line, 12, 16).trim().to_string();
+    let name2 = field(line, 42, 46).trim().to_string();
+    if name1.is_empty() || name2.is_empty() {
+        return None;
+    }
+    Some(LinkRecord {
+        name1,
+        chain1: field(line, 21, 22).trim().to_string(),
+        res_id1: field(line, 22, 26).trim().parse().ok()?,
+        ins_code1: single_char(field(line, 26, 27)),
+        name2,
+        chain2: field(line, 51, 52).trim().to_string(),
+        res_id2: field(line, 52, 56).trim().parse().ok()?,
+        ins_code2: single_char(field(line, 56, 57)),
+    })
+}
+
+fn apply_link_records(mol: &mut MolCoord, records: &[LinkRecord]) {
+    for record in records {
+        let Some(atom1) =
+            find_residue_atom(mol, &record.chain1, record.res_id1, record.ins_code1, &record.name1)
+        else {
+            continue;
+        };
+        let Some(atom2) =
+            find_residue_atom(mol, &record.chain2, record.res_id2, record.ins_code2, &record.name2)
+        else {
+            continue;
+        };
+        // add_bond dedups, so a LINK duplicating a template/SSBOND bond is a no-op.
+        mol.add_bond(atom1, atom2, crate::molecule::BondOrder::Single);
+    }
+}
+
 fn apply_ssbond_records(mol: &mut MolCoord, records: &[SsBondRecord]) {
     for record in records {
         let Some(atom1) =
@@ -866,6 +925,42 @@ mod tests {
         assert_eq!(writer.handler().file_ext(), "*.pdb");
         assert_eq!(writer.handler().category(), InOutHandler::IOH_CAT_OBJWRITER);
         assert_eq!(writer.selection(), &Selector::All);
+    }
+
+    const LINK_LINE: &str = concat!(
+        "LINK  ", "      ", " O1 ", " ", "LIG", " ", "A", "   1", " ",
+        "               ", " C3 ", " ", "LIG", " ", "A", "   2"
+    );
+
+    #[test]
+    fn parse_link_line_extracts_both_atom_endpoints() {
+        let rec = parse_link_line(LINK_LINE).expect("LINK parse");
+        assert_eq!(rec.name1, "O1");
+        assert_eq!(rec.chain1, "A");
+        assert_eq!(rec.res_id1, 1);
+        assert_eq!(rec.name2, "C3");
+        assert_eq!(rec.chain2, "A");
+        assert_eq!(rec.res_id2, 2);
+    }
+
+    #[test]
+    fn link_record_creates_a_covalent_bond_topology_misses() {
+        // Two atoms 5 A apart in different non-polymer LIG residues: the topology
+        // dictionary bonds neither (unknown residue, too far, not a polymer
+        // link). Only the LINK record bonds them.
+        let atoms = "\
+ATOM      1  O1  LIG A   1       0.000   0.000   0.000  1.00  0.00           O
+ATOM      2  C3  LIG A   2       5.000   0.000   0.000  1.00  0.00           C
+";
+        assert_eq!(read_pdb_str(atoms).unwrap().bond_count(), 0);
+
+        let with_link = format!("{atoms}{LINK_LINE}\n");
+        let mol = read_pdb_str(&with_link).unwrap();
+        assert_eq!(
+            mol.bond_count(),
+            1,
+            "LINK record should add exactly one covalent bond"
+        );
     }
 
     #[test]

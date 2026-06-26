@@ -28,6 +28,32 @@ fn mmcif_reader_matches_reference_fixture_counts() {
 }
 
 #[test]
+fn mmcif_reader_loads_secondary_structure_from_struct_conf_and_sheet() {
+    let Some(root) = reference_test_data_root() else {
+        return;
+    };
+    let mol = read_mmcif_file(root.join("1crn.cif")).unwrap();
+    let ss = |resid: i32| {
+        mol.get_residue_prop_str("A", &resid.to_string(), "secondary")
+            .ok()
+            .flatten()
+            .map(str::to_string)
+    };
+    // _struct_conf helices H1 (auth seq 7-19) and H2 (23-30).
+    assert_eq!(ss(7).as_deref(), Some("helix"));
+    assert_eq!(ss(10).as_deref(), Some("helix"));
+    assert_eq!(ss(19).as_deref(), Some("helix"));
+    assert_eq!(ss(25).as_deref(), Some("helix"));
+    // _struct_sheet_range strands (1-4) and (32-35).
+    assert_eq!(ss(1).as_deref(), Some("sheet"));
+    assert_eq!(ss(4).as_deref(), Some("sheet"));
+    assert_eq!(ss(33).as_deref(), Some("sheet"));
+    // Coil residues between the SSEs carry no secondary assignment.
+    assert_eq!(ss(5), None);
+    assert_eq!(ss(22), None);
+}
+
+#[test]
 fn sdf_reader_writer_matches_reference_fixture_shape() {
     let Some(root) = reference_test_data_root() else {
         return;

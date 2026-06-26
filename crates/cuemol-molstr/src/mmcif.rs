@@ -18,7 +18,10 @@ impl Default for MmcifReadOptions {
             load_model: false,
             load_anisou: true,
             load_alt_conf: true,
-            load_secstr: false,
+            // C++ MmcifMolReader's constructor sets m_bLoadSecstr = true,
+            // overriding the qif default — so secondary structure is loaded from
+            // _struct_conf / _struct_sheet_range when present.
+            load_secstr: true,
             auto_topo_gen: true,
         }
     }
@@ -81,6 +84,9 @@ pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Re
     let mut atom_keys = HashMap::new();
     let mut struct_conn_rows = Vec::new();
     let mut anisou_rows = Vec::new();
+    // Secondary-structure ranges: (loop, value). _struct_conf -> "helix"
+    // (HELX_* rows only), _struct_sheet_range -> "sheet".
+    let mut secstr_loops: Vec<(CifLoop, &'static str)> = Vec::new();
     let mut default_model: Option<String> = None;
 
     for cif_loop in loops {
@@ -113,6 +119,10 @@ pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Re
             struct_conn_rows.push(cif_loop);
         } else if cif_loop.category() == "_atom_site_anisotrop" && options.load_anisou {
             anisou_rows.push(cif_loop);
+        } else if cif_loop.category() == "_struct_conf" && options.load_secstr {
+            secstr_loops.push((cif_loop, "helix"));
+        } else if cif_loop.category() == "_struct_sheet_range" && options.load_secstr {
+            secstr_loops.push((cif_loop, "sheet"));
         }
     }
 
@@ -131,7 +141,48 @@ pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Re
     for cif_loop in struct_conn_rows {
         apply_struct_conn(&cif_loop, &atom_keys, &mut mol);
     }
+    for (cif_loop, value) in &secstr_loops {
+        apply_secstr_range(cif_loop, &mut mol, value);
+    }
     Ok(mol)
+}
+
+/// Apply secondary-structure ranges (C++ `MmcifMolReader::apply2ndry`): set the
+/// residue `secondary` property to `value` ("helix"/"sheet") for every residue
+/// in each row's begin..=end auth-sequence range. For `_struct_conf` only HELX_*
+/// conformation types are helices (TURN_P etc. are skipped); `_struct_sheet_range`
+/// rows are all sheets. Auth columns are used (label_ as fallback) to match the
+/// auth ids the `_atom_site` parser stores. Missing residues in a range are
+/// silently skipped.
+fn apply_secstr_range(cif_loop: &CifLoop, mol: &mut MolCoord, value: &str) {
+    let val = |row: &[String], primary: &str, fallback: &str| -> Option<String> {
+        value_for(&cif_loop.columns, row, primary)
+            .or_else(|| value_for(&cif_loop.columns, row, fallback))
+            .map(str::to_string)
+    };
+    for row in &cif_loop.rows {
+        // _struct_conf carries non-helix conformation types too; keep only HELX_*.
+        if value == "helix" {
+            let conf = value_for(&cif_loop.columns, row, "conf_type_id").unwrap_or("");
+            if !conf.starts_with("HELX") {
+                continue;
+            }
+        }
+        let (Some(chain), Some(beg), Some(end)) = (
+            val(row, "beg_auth_asym_id", "beg_label_asym_id"),
+            val(row, "beg_auth_seq_id", "beg_label_seq_id"),
+            val(row, "end_auth_seq_id", "end_label_seq_id"),
+        ) else {
+            continue;
+        };
+        let (Ok(beg), Ok(end)) = (beg.parse::<i32>(), end.parse::<i32>()) else {
+            continue;
+        };
+        for res_id in beg..=end {
+            // Missing residues (gaps) just return NotFound — ignore.
+            let _ = mol.set_residue_prop_str(&chain, &res_id.to_string(), "secondary", value);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
