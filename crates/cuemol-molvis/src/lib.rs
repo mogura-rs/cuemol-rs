@@ -2624,6 +2624,36 @@ pub struct MoleculeRenderOptions {
     /// Explicit backbone-trace tube radius (SplineRenderer `line_width`/2), or
     /// `None` to derive it from `bond_radius`.
     pub mainchain_radius: Option<f32>,
+    /// Per-secondary-structure ribbon cross-section shape (RibbonRenderer
+    /// `helix`/`sheet`/`coil` TubeSection width/thickness).
+    pub ribbon_sections: RibbonSections,
+}
+
+/// Ribbon cross-section width/thickness FACTORS (multiplied by the base coil
+/// radius) per secondary-structure class — the configurable form of C++
+/// `RibbonRenderer`'s helix/sheet/coil `TubeSection`s. Defaults reproduce the
+/// historical flat helix/sheet bands and round coil.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RibbonSections {
+    pub helix_width: f64,
+    pub helix_thick: f64,
+    pub sheet_width: f64,
+    pub sheet_thick: f64,
+    pub coil_width: f64,
+    pub coil_thick: f64,
+}
+
+impl Default for RibbonSections {
+    fn default() -> Self {
+        Self {
+            helix_width: 2.2,
+            helix_thick: 0.7,
+            sheet_width: 2.0,
+            sheet_thick: 0.6,
+            coil_width: 1.0,
+            coil_thick: 1.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2719,6 +2749,7 @@ impl Default for MoleculeRenderOptions {
             selected_indices: Vec::new(),
             putty: PuttyOptions::default(),
             mainchain_radius: None,
+            ribbon_sections: RibbonSections::default(),
         }
     }
 }
@@ -3167,7 +3198,13 @@ pub fn ribbon_mesh_snapshot(
             continue;
         }
         let (samples, sections, width_scales) = sample_backbone(pivots, SUBDIV);
-        let mesh = ribbon_tube_mesh(&samples, &sections, &width_scales, scale);
+        let mesh = ribbon_tube_mesh(
+            &samples,
+            &sections,
+            &width_scales,
+            scale,
+            &options.ribbon_sections,
+        );
         if !mesh.vertices.is_empty() {
             meshes.push(mesh);
         }
@@ -3247,11 +3284,23 @@ fn sheet_arrow_widths(sections: &[Secondary], subdiv: usize) -> Vec<f64> {
 
 /// Cross-section half-width, half-thickness, and color for a secondary-structure
 /// class. `scale` is the base coil radius.
-fn section_params(ss: Secondary, scale: f64) -> (f64, f64, [f32; 4]) {
+fn section_params(ss: Secondary, scale: f64, sec: &RibbonSections) -> (f64, f64, [f32; 4]) {
     match ss {
-        Secondary::Helix => (scale * 2.2, scale * 0.7, [0.95, 0.32, 0.42, 1.0]),
-        Secondary::Sheet => (scale * 2.0, scale * 0.6, [0.95, 0.82, 0.30, 1.0]),
-        Secondary::Coil => (scale, scale, [0.55, 0.85, 0.90, 1.0]),
+        Secondary::Helix => (
+            scale * sec.helix_width,
+            scale * sec.helix_thick,
+            [0.95, 0.32, 0.42, 1.0],
+        ),
+        Secondary::Sheet => (
+            scale * sec.sheet_width,
+            scale * sec.sheet_thick,
+            [0.95, 0.82, 0.30, 1.0],
+        ),
+        Secondary::Coil => (
+            scale * sec.coil_width,
+            scale * sec.coil_thick,
+            [0.55, 0.85, 0.90, 1.0],
+        ),
     }
 }
 
@@ -3269,6 +3318,7 @@ fn ribbon_tube_mesh(
     sections: &[Secondary],
     width_scales: &[f64],
     scale: f64,
+    sec: &RibbonSections,
 ) -> RenderMesh {
     let n = samples.len();
     if n < 2 {
@@ -3305,7 +3355,7 @@ fn ribbon_tube_mesh(
     let mut vertices = Vec::with_capacity(n * TUBE_RADIAL);
     for (i, &center) in samples.iter().enumerate() {
         let (normal, binormal) = frames[i];
-        let (base_width, thick, color) = section_params(sections[i], scale);
+        let (base_width, thick, color) = section_params(sections[i], scale, sec);
         let width = base_width * width_scales[i];
         for j in 0..TUBE_RADIAL {
             let theta = (j as f64) / (TUBE_RADIAL as f64) * std::f64::consts::TAU;
@@ -4338,6 +4388,26 @@ mod tests {
     }
 
     #[test]
+    fn ribbon_sections_are_configurable() {
+        // section_params multiplies the base radius by the configured per-SS
+        // width/thickness factors (RibbonRenderer TubeSection).
+        let custom = RibbonSections {
+            helix_width: 5.0,
+            helix_thick: 0.1,
+            ..RibbonSections::default()
+        };
+        let (w, t, _) = section_params(Secondary::Helix, 1.0, &custom);
+        assert_eq!(w, 5.0);
+        assert_eq!(t, 0.1);
+        // The default keeps the historical flat helix band (2.2 x 0.7).
+        let (dw, dt, _) = section_params(Secondary::Helix, 1.0, &RibbonSections::default());
+        assert_eq!(dw, 2.2);
+        assert_eq!(dt, 0.7);
+        // Sheet/coil factors are independent.
+        assert_eq!(section_params(Secondary::Coil, 2.0, &RibbonSections::default()).0, 2.0);
+    }
+
+    #[test]
     fn ribbon_mesh_snapshot_builds_tube_geometry() {
         let mol = MolCoord::with_atoms(vec![
             ca_atom(1, 0.0, 0.0, 0.0),
@@ -4383,7 +4453,7 @@ mod tests {
         let snap = ribbon_mesh_snapshot(&mol, &MoleculeRenderOptions::default());
         assert_eq!(snap.mesh_count(), 1);
         // Every vertex carries the helix color and a unit normal.
-        let helix_color = section_params(Secondary::Helix, 1.0).2;
+        let helix_color = section_params(Secondary::Helix, 1.0, &RibbonSections::default()).2;
         assert!(snap.meshes[0]
             .vertices
             .iter()
@@ -4393,7 +4463,7 @@ mod tests {
             .iter()
             .all(|vertex| (vertex.normal.length3d() - 1.0).abs() < 1.0e-5));
         // A helix band is wider than it is thick (flat ribbon, not a tube).
-        let (width, thick, _) = section_params(Secondary::Helix, 1.0);
+        let (width, thick, _) = section_params(Secondary::Helix, 1.0, &RibbonSections::default());
         assert!(width > thick * 2.0);
     }
 
