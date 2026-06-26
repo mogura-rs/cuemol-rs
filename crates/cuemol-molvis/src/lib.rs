@@ -1125,6 +1125,49 @@ impl AtomIntrRenderer {
         lines
     }
 
+    /// Arc polylines for Angle measurements (C++ `AtomIntrRenderer` draws an arc
+    /// at the vertex indicating the angle). Each arc sweeps from the first arm to
+    /// the second at `radius_frac` of the shorter arm length, in `segments`+1
+    /// points. Distance/Torsion defs produce no arc. The numeric label is not
+    /// included (GPU/font text, no headless oracle).
+    pub fn measurement_arcs(
+        &self,
+        mol: &MolCoord,
+        radius_frac: f64,
+        segments: usize,
+    ) -> Vec<Vec<Vector4>> {
+        let segments = segments.max(1);
+        let mut arcs = Vec::new();
+        for def in &self.defs {
+            if def.kind != AtomIntrDefKind::Angle {
+                continue;
+            }
+            let Some(p) = self.def_points(def, mol) else {
+                continue;
+            };
+            if p.len() < 3 {
+                continue;
+            }
+            let (arm0, arm2) = (p[0] - p[1], p[2] - p[1]);
+            let len = arm0.length3d().min(arm2.length3d());
+            if len < 1.0e-9 {
+                continue;
+            }
+            let r = len * radius_frac;
+            let d0 = normalize_or(arm0, Vector4::new3(1.0, 0.0, 0.0));
+            let d2 = normalize_or(arm2, Vector4::new3(0.0, 1.0, 0.0));
+            let arc = (0..=segments)
+                .map(|k| {
+                    let t = k as f64 / segments as f64;
+                    let dir = normalize_or(d0.scale(1.0 - t) + d2.scale(t), d0);
+                    p[1] + dir.scale(r)
+                })
+                .collect();
+            arcs.push(arc);
+        }
+        arcs
+    }
+
     /// Measured value of a definition: distance (Å) for a 2-atom Distance, angle
     /// (degrees) for a 3-atom Angle, torsion (degrees) for a 4-atom Torsion.
     /// Port of the value computation in C++ `AtomIntrRenderer::append{,Angle,
@@ -4303,6 +4346,33 @@ mod tests {
         assert!(lines
             .iter()
             .any(|(a, b)| (a.x == 0.0 && b.x == 3.0) || (a.x == 3.0 && b.x == 0.0)));
+    }
+
+    #[test]
+    fn atom_intr_angle_arc_is_a_circular_sweep_at_the_vertex() {
+        let mol = MolCoord::with_atoms(vec![
+            intr_atom(1, 2.0, 0.0, 0.0), // arm 0 along +x
+            intr_atom(2, 0.0, 0.0, 0.0), // vertex
+            intr_atom(3, 0.0, 2.0, 0.0), // arm 2 along +y
+        ]);
+        let mut r = AtomIntrRenderer::new();
+        r.append_angle_by_id(1, 0, 2, 0, 3, 0);
+        let arcs = r.measurement_arcs(&mol, 0.5, 8);
+        assert_eq!(arcs.len(), 1);
+        let arc = &arcs[0];
+        assert_eq!(arc.len(), 9);
+        // radius = 0.5 * min arm length (2) = 1; every arc point is at distance 1
+        // from the vertex (0,0,0), sweeping +x -> +y.
+        for pt in arc {
+            let d = (pt.x * pt.x + pt.y * pt.y + pt.z * pt.z).sqrt();
+            assert!((d - 1.0).abs() < 1.0e-9, "arc point off radius: {d}");
+        }
+        assert!((arc[0].x - 1.0).abs() < 1.0e-9 && arc[0].y.abs() < 1.0e-9);
+        assert!((arc[8].y - 1.0).abs() < 1.0e-9 && arc[8].x.abs() < 1.0e-9);
+        // Distance defs have no arc.
+        let mut r2 = AtomIntrRenderer::new();
+        r2.append_by_id(1, 0, 2, 0, true);
+        assert!(r2.measurement_arcs(&mol, 0.5, 8).is_empty());
     }
 
     #[test]

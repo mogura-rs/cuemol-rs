@@ -65,6 +65,79 @@ pub fn render_meshes_offscreen(
     pollster::block_on(render_impl(meshes, mvp, width.max(1), height.max(1), clear))
 }
 
+/// A persistent wgpu context (device + queue + render pipeline) that an
+/// interactive viewer reuses across frames.
+///
+/// The free `render_*` functions above build a throwaway device and recompile
+/// the shader on every call — fine for a one-shot PNG export, but ruinous when a
+/// mouse drag re-renders dozens of times a second (device creation + runtime
+/// shader compilation dominate). `SceneRenderer` pays that cost once in
+/// [`SceneRenderer::new`]; each [`SceneRenderer::render`] only does the per-frame
+/// work (vertex upload, MVP uniform, textures, readback).
+pub struct SceneRenderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: wgpu::RenderPipeline,
+    bind_layout: wgpu::BindGroupLayout,
+}
+
+impl SceneRenderer {
+    /// Build the GPU device + pipeline once. Returns `None` when no GPU adapter
+    /// is available (headless CI), so callers self-skip exactly like the free
+    /// functions.
+    pub fn new() -> Option<Self> {
+        pollster::block_on(Self::new_async())
+    }
+
+    async fn new_async() -> Option<Self> {
+        let (device, queue) = create_device().await?;
+        let (pipeline, bind_layout) = build_pipeline(&device);
+        Some(Self {
+            device,
+            queue,
+            pipeline,
+            bind_layout,
+        })
+    }
+
+    /// Render `meshes` to a `width`x`height` RGBA8 image (same output as
+    /// [`render_meshes_offscreen`]) reusing the persistent device/pipeline.
+    pub fn render(
+        &self,
+        meshes: &[RenderMesh],
+        mvp: [[f32; 4]; 4],
+        width: u32,
+        height: u32,
+        clear: [f64; 4],
+    ) -> Option<Vec<u8>> {
+        draw_meshes(
+            &self.device,
+            &self.queue,
+            &self.pipeline,
+            &self.bind_layout,
+            meshes,
+            mvp,
+            width,
+            height,
+            clear,
+        )
+    }
+
+    /// Tessellate + render a whole scene snapshot (same output as
+    /// [`render_snapshot_offscreen`]) reusing the persistent device/pipeline.
+    pub fn render_snapshot(
+        &self,
+        snapshot: &RenderSceneSnapshot,
+        mvp: [[f32; 4]; 4],
+        width: u32,
+        height: u32,
+        clear: [f64; 4],
+    ) -> Option<Vec<u8>> {
+        let mesh = tessellate_snapshot(snapshot);
+        self.render(&[mesh], mvp, width, height, clear)
+    }
+}
+
 async fn render_impl(
     meshes: &[RenderMesh],
     mvp: [[f32; 4]; 4],
@@ -72,6 +145,26 @@ async fn render_impl(
     height: u32,
     clear: [f64; 4],
 ) -> Option<Vec<u8>> {
+    // The free-function path builds a throwaway device + pipeline each call
+    // (fine for one-shot exports); `SceneRenderer` reuses them across frames.
+    let (device, queue) = create_device().await?;
+    let (pipeline, bind_layout) = build_pipeline(&device);
+    draw_meshes(
+        &device,
+        &queue,
+        &pipeline,
+        &bind_layout,
+        meshes,
+        mvp,
+        width,
+        height,
+        clear,
+    )
+}
+
+/// Request a wgpu device + queue. Returns `None` when no GPU adapter is present
+/// (e.g. a headless CI box), so callers/tests self-skip.
+async fn create_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -90,51 +183,12 @@ async fn render_impl(
         })
         .await
         .ok()?;
+    Some((device, queue))
+}
 
-    // Flatten the meshes into one vertex/index buffer.
-    let mut vertices: Vec<GpuVertex> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-    for mesh in meshes {
-        let base = vertices.len() as u32;
-        for v in &mesh.vertices {
-            vertices.push(GpuVertex {
-                position: [
-                    v.position.x as f32,
-                    v.position.y as f32,
-                    v.position.z as f32,
-                    1.0,
-                ],
-                normal: [v.normal.x as f32, v.normal.y as f32, v.normal.z as f32, 0.0],
-                color: v.color,
-            });
-        }
-        indices.extend(mesh.indices.iter().map(|i| i + base));
-    }
-    // A degenerate placeholder keeps the buffers non-empty (and draws nothing).
-    if vertices.is_empty() {
-        vertices.push(GpuVertex {
-            position: [0.0, 0.0, 0.0, 1.0],
-            normal: [0.0, 0.0, 1.0, 0.0],
-            color: [0.0, 0.0, 0.0, 0.0],
-        });
-    }
-
-    let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("offscreen-vertices"),
-        contents: bytemuck::cast_slice(&vertices),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("offscreen-indices"),
-        contents: bytemuck::cast_slice(&indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-    let mvp_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("offscreen-mvp"),
-        contents: bytemuck::cast_slice(&mvp),
-        usage: wgpu::BufferUsages::UNIFORM,
-    });
-
+/// Build the mesh render pipeline + its MVP bind-group layout. The pipeline is
+/// format/shader-fixed, so it can be built once and reused across frames.
+fn build_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
     let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("offscreen-mvp-layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -146,14 +200,6 @@ async fn render_impl(
                 min_binding_size: None,
             },
             count: None,
-        }],
-    });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("offscreen-mvp-bind"),
-        layout: &bind_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: mvp_buf.as_entire_binding(),
         }],
     });
 
@@ -204,6 +250,80 @@ async fn render_impl(
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
         cache: None,
+    });
+    (pipeline, bind_layout)
+}
+
+/// Rasterize `meshes` into a `width`x`height` RGBA8 image using a pre-built
+/// `device`/`queue`/`pipeline`. The per-call work (vertex upload, MVP uniform,
+/// color/depth textures, readback) is the only thing an interactive viewer must
+/// repeat per frame — the device + pipeline are reused across calls.
+#[allow(clippy::too_many_arguments)]
+fn draw_meshes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &wgpu::RenderPipeline,
+    bind_layout: &wgpu::BindGroupLayout,
+    meshes: &[RenderMesh],
+    mvp: [[f32; 4]; 4],
+    width: u32,
+    height: u32,
+    clear: [f64; 4],
+) -> Option<Vec<u8>> {
+    let width = width.max(1);
+    let height = height.max(1);
+
+    // Flatten the meshes into one vertex/index buffer.
+    let mut vertices: Vec<GpuVertex> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    for mesh in meshes {
+        let base = vertices.len() as u32;
+        for v in &mesh.vertices {
+            vertices.push(GpuVertex {
+                position: [
+                    v.position.x as f32,
+                    v.position.y as f32,
+                    v.position.z as f32,
+                    1.0,
+                ],
+                normal: [v.normal.x as f32, v.normal.y as f32, v.normal.z as f32, 0.0],
+                color: v.color,
+            });
+        }
+        indices.extend(mesh.indices.iter().map(|i| i + base));
+    }
+    // A degenerate placeholder keeps the buffers non-empty (and draws nothing).
+    if vertices.is_empty() {
+        vertices.push(GpuVertex {
+            position: [0.0, 0.0, 0.0, 1.0],
+            normal: [0.0, 0.0, 1.0, 0.0],
+            color: [0.0, 0.0, 0.0, 0.0],
+        });
+    }
+
+    let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("offscreen-vertices"),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("offscreen-indices"),
+        contents: bytemuck::cast_slice(&indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    let mvp_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("offscreen-mvp"),
+        contents: bytemuck::cast_slice(&mvp),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("offscreen-mvp-bind"),
+        layout: bind_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: mvp_buf.as_entire_binding(),
+        }],
     });
 
     let color = device.create_texture(&wgpu::TextureDescriptor {
@@ -278,7 +398,7 @@ async fn render_impl(
             occlusion_query_set: None,
         });
         if !indices.is_empty() {
-            pass.set_pipeline(&pipeline);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.set_vertex_buffer(0, vbuf.slice(..));
             pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
