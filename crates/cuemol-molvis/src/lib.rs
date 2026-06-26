@@ -2601,12 +2601,88 @@ pub struct MoleculeRenderOptions {
     pub draw_bonds: bool,
     pub color_mode: MoleculeColorMode,
     pub selected_indices: Vec<usize>,
+    /// Backbone-trace "putty" width modulation (TubeRenderer): off by default.
+    pub putty: PuttyOptions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoleculeColorMode {
     Element,
     Uniform,
+}
+
+/// Tube/trace "putty" mode (C++ `TubeRenderer`): modulate the backbone tube
+/// radius by a per-residue scalar (B-factor or occupancy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PuttyMode {
+    Off,
+    /// Linear ramp of width across [min, max] of the target value.
+    Linear,
+    /// Two-sided ramp pivoting at the mean (thin below mean, thick above).
+    Scale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PuttyTarget {
+    BFactor,
+    Occupancy,
+}
+
+/// Putty parameters mirroring `TubeRenderer`'s `putty_mode`/`putty_tgt`/
+/// `putty_loscl`/`putty_hiscl`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PuttyOptions {
+    pub mode: PuttyMode,
+    pub target: PuttyTarget,
+    pub loscl: f64,
+    pub hiscl: f64,
+}
+
+impl Default for PuttyOptions {
+    fn default() -> Self {
+        Self {
+            mode: PuttyMode::Off,
+            target: PuttyTarget::BFactor,
+            loscl: 3.0,
+            hiscl: 3.0,
+        }
+    }
+}
+
+impl PuttyOptions {
+    /// The radius scale at a normalized target value (C++ `TubeRenderer::getEScl`).
+    /// `raw` is the interpolated target value; `lo`/`hi`/`aver` are its min/max/
+    /// mean over the backbone pivots.
+    fn scale(&self, raw: f64, lo: f64, hi: f64, aver: f64) -> f64 {
+        match self.mode {
+            PuttyMode::Off => 1.0,
+            PuttyMode::Linear => {
+                let v = if (hi - lo).abs() < 1.0e-9 {
+                    0.0
+                } else {
+                    (raw - lo) / (hi - lo)
+                };
+                (self.hiscl - 1.0 / self.loscl) * v + 1.0 / self.loscl
+            }
+            PuttyMode::Scale => {
+                if raw < aver {
+                    let v = if (aver - lo).abs() < 1.0e-9 {
+                        0.0
+                    } else {
+                        (raw - lo) / (aver - lo)
+                    };
+                    ((self.loscl - 1.0) * v + 1.0) / self.loscl
+                } else {
+                    let v = if (hi - aver).abs() < 1.0e-9 {
+                        0.0
+                    } else {
+                        (raw - aver) / (hi - aver)
+                    };
+                    (self.hiscl - 1.0) * v + 1.0
+                }
+            }
+        }
+    }
 }
 
 impl Default for MoleculeRenderOptions {
@@ -2620,6 +2696,7 @@ impl Default for MoleculeRenderOptions {
             draw_bonds: true,
             color_mode: MoleculeColorMode::Element,
             selected_indices: Vec::new(),
+            putty: PuttyOptions::default(),
         }
     }
 }
@@ -2713,6 +2790,30 @@ pub fn mainchain_trace_snapshot(
     let tube_radius = (options.bond_radius * 3.0).clamp(0.18, 0.6);
 
     let chains = collect_mainchain_pivots(molecule);
+    let putty = options.putty;
+
+    // Putty statistics (min/max/mean of the target value) over every backbone
+    // pivot — C++ TubeRenderer::beginRend computes these once for the object.
+    let (lo, hi, aver) = if putty.mode == PuttyMode::Off {
+        (0.0, 1.0, 0.5)
+    } else {
+        let vals: Vec<f64> = chains
+            .iter()
+            .flatten()
+            .map(|p| pivot_target(p, putty.target))
+            .collect();
+        if vals.is_empty() {
+            (0.0, 1.0, 0.5)
+        } else {
+            (
+                vals.iter().copied().fold(f64::INFINITY, f64::min),
+                vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                vals.iter().sum::<f64>() / vals.len() as f64,
+            )
+        }
+    };
+    let radius_at = |raw: f64| (tube_radius as f64 * putty.scale(raw, lo, hi, aver)) as f32;
+
     let mut atoms = Vec::new();
     let mut bonds = Vec::new();
 
@@ -2720,20 +2821,34 @@ pub fn mainchain_trace_snapshot(
         let color = mainchain_chain_color(chain_index);
         let positions = pivots.iter().map(|point| point.pos).collect::<Vec<_>>();
         if positions.len() == 1 {
-            atoms.push(RenderAtom::new(positions[0], tube_radius, Some(color.clone())));
+            let r = if putty.mode == PuttyMode::Off {
+                tube_radius
+            } else {
+                radius_at(pivot_target(&pivots[0], putty.target))
+            };
+            atoms.push(RenderAtom::new(positions[0], r, Some(color.clone())));
             continue;
         }
         let samples = cubic_spline_samples(&positions, SUBDIV);
-        for point in &samples {
-            atoms.push(RenderAtom::new(*point, tube_radius, Some(color.clone())));
+        // Per-sample putty radius: the target value interpolated along the same
+        // (segment + sub/SUBDIV) parametrization the spline samples use.
+        let n = positions.len();
+        let radius_of_sample = |i: usize| -> f32 {
+            if putty.mode == PuttyMode::Off {
+                return tube_radius;
+            }
+            let seg = (i / SUBDIV).min(n - 2);
+            let rho = (i - seg * SUBDIV) as f64 / SUBDIV as f64;
+            let raw = pivot_target(&pivots[seg], putty.target) * (1.0 - rho)
+                + pivot_target(&pivots[seg + 1], putty.target) * rho;
+            radius_at(raw)
+        };
+        for (i, point) in samples.iter().enumerate() {
+            atoms.push(RenderAtom::new(*point, radius_of_sample(i), Some(color.clone())));
         }
-        for segment in samples.windows(2) {
-            bonds.push(RenderBond::new(
-                segment[0],
-                segment[1],
-                tube_radius,
-                Some(color.clone()),
-            ));
+        for (i, segment) in samples.windows(2).enumerate() {
+            let r = (radius_of_sample(i) + radius_of_sample(i + 1)) * 0.5;
+            bonds.push(RenderBond::new(segment[0], segment[1], r, Some(color.clone())));
         }
     }
 
@@ -2745,6 +2860,14 @@ pub fn mainchain_trace_snapshot(
     }
 }
 
+/// The putty target value (B-factor or occupancy) of a backbone pivot.
+fn pivot_target(point: &MainchainPoint, target: PuttyTarget) -> f64 {
+    match target {
+        PuttyTarget::Occupancy => point.occupancy,
+        PuttyTarget::BFactor => point.b_factor,
+    }
+}
+
 /// Protein secondary-structure class of a residue, used to shape the ribbon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Secondary {
@@ -2753,11 +2876,14 @@ enum Secondary {
     Sheet,
 }
 
-/// One backbone pivot: its position plus the residue's secondary structure.
+/// One backbone pivot: its position, the residue's secondary structure, and the
+/// pivot atom's B-factor / occupancy (for putty width modulation).
 #[derive(Debug, Clone, Copy)]
 struct MainchainPoint {
     pos: Vector4,
     ss: Secondary,
+    b_factor: f64,
+    occupancy: f64,
 }
 
 /// Read a residue's `secondary` property (set by the PDB reader's HELIX/SHEET
@@ -2807,6 +2933,8 @@ fn mainchain_pivot_point(molecule: &MolCoord, residue: &ResidueView) -> Option<M
             return Some(MainchainPoint {
                 pos: Vector4::new3(atom.position.x, atom.position.y, atom.position.z),
                 ss: residue_secondary(molecule, atom),
+                b_factor: atom.b_factor as f64,
+                occupancy: atom.occupancy as f64,
             });
         }
     }
@@ -3740,6 +3868,49 @@ mod tests {
             large > small + 0.5,
             "larger loopsize should bulge the arc higher: {small} vs {large}"
         );
+    }
+
+    #[test]
+    fn putty_modulates_tube_radius_by_bfactor() {
+        fn ca_b(serial: i32, res_id: i32, x: f64, b: f32) -> Atom {
+            let mut a = sample_atom("CA", "C", x, 0.0, 0.0);
+            a.serial = serial;
+            a.res_id = res_id;
+            a.b_factor = b;
+            a
+        }
+        // A backbone with B-factors rising along the chain (10..90, mean 45).
+        let mol = MolCoord::with_atoms(vec![
+            ca_b(1, 1, 0.0, 10.0),
+            ca_b(2, 2, 3.0, 30.0),
+            ca_b(3, 3, 6.0, 50.0),
+            ca_b(4, 4, 9.0, 90.0),
+        ]);
+
+        // Putty OFF -> a uniform tube radius.
+        let off = mainchain_trace_snapshot(&mol, &MoleculeRenderOptions::default());
+        let r0 = off.atoms.first().unwrap().radius;
+        assert!(
+            off.atoms.iter().all(|a| (a.radius - r0).abs() < 1.0e-6),
+            "putty off should be uniform"
+        );
+
+        // Putty SCALE on B-factor -> radius grows with B (thin low, thick high).
+        let opts = MoleculeRenderOptions {
+            putty: PuttyOptions {
+                mode: PuttyMode::Scale,
+                target: PuttyTarget::BFactor,
+                loscl: 3.0,
+                hiscl: 3.0,
+            },
+            ..MoleculeRenderOptions::default()
+        };
+        let on = mainchain_trace_snapshot(&mol, &opts);
+        let first = on.atoms.first().unwrap().radius;
+        let last = on.atoms.last().unwrap().radius;
+        // Low-B end scaled by 1/loscl (~0.33), high-B end by hiscl (~3.0).
+        assert!(first < r0, "low-B end should be thinner than the off radius");
+        assert!(last > first + 0.1, "high-B end should be thicker: {first} vs {last}");
     }
 
     #[test]
