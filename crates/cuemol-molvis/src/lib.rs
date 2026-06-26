@@ -2627,6 +2627,11 @@ pub struct MoleculeRenderOptions {
     /// Per-secondary-structure ribbon cross-section shape (RibbonRenderer
     /// `helix`/`sheet`/`coil` TubeSection width/thickness).
     pub ribbon_sections: RibbonSections,
+    /// Ribbon2 anchor weight (0..1): how strongly each backbone control point is
+    /// smoothed toward the midpoint of its neighbours before splining (C++
+    /// `Ribbon2Renderer` anchor weight / `SplineCoeffSet` smoothing). 0 = pass
+    /// through the CA atoms; 1 = fully neighbour-averaged.
+    pub anchor_weight: f64,
 }
 
 /// Ribbon cross-section width/thickness FACTORS (multiplied by the base coil
@@ -2750,6 +2755,7 @@ impl Default for MoleculeRenderOptions {
             putty: PuttyOptions::default(),
             mainchain_radius: None,
             ribbon_sections: RibbonSections::default(),
+            anchor_weight: 0.0,
         }
     }
 }
@@ -3197,7 +3203,8 @@ pub fn ribbon_mesh_snapshot(
         if pivots.len() < 2 {
             continue;
         }
-        let (samples, sections, width_scales) = sample_backbone(pivots, SUBDIV);
+        let (samples, sections, width_scales) =
+            sample_backbone(pivots, SUBDIV, options.anchor_weight);
         let mesh = ribbon_tube_mesh(
             &samples,
             &sections,
@@ -3225,8 +3232,19 @@ pub fn ribbon_mesh_snapshot(
 fn sample_backbone(
     points: &[MainchainPoint],
     subdiv: usize,
+    anchor_weight: f64,
 ) -> (Vec<Vector4>, Vec<Secondary>, Vec<f64>) {
-    let positions = points.iter().map(|point| point.pos).collect::<Vec<_>>();
+    let mut positions = points.iter().map(|point| point.pos).collect::<Vec<_>>();
+    // Anchor-weight smoothing (C++ Ribbon2/SplineCoeffSet): blend each interior
+    // control point toward the midpoint of its neighbours before splining.
+    let w = anchor_weight.clamp(0.0, 1.0);
+    if w > 1.0e-9 && positions.len() >= 3 {
+        let orig = positions.clone();
+        for i in 1..orig.len() - 1 {
+            let mid = (orig[i - 1] + orig[i + 1]).scale(0.5);
+            positions[i] = orig[i].scale(1.0 - w) + mid.scale(w);
+        }
+    }
     let samples = cubic_spline_samples(&positions, subdiv);
     let subdiv = subdiv.max(1);
     let n = points.len();
@@ -4385,6 +4403,41 @@ mod tests {
         let trace = mainchain_trace_snapshot(&mol, &MoleculeRenderOptions::default());
         assert_eq!(trace.atom_count(), 1);
         assert_eq!(trace.bond_count(), 0);
+    }
+
+    #[test]
+    fn ribbon_anchor_weight_smooths_the_spline_toward_neighbor_midpoints() {
+        // A backbone with a single sharp peak (pivot 2 at y=3) on an otherwise
+        // flat chain. Anchor smoothing blends the peak toward its neighbours'
+        // midpoint (y=0), so the spline's peak height drops as the weight rises.
+        let pivots: Vec<MainchainPoint> = [
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (2.0, 3.0, 0.0),
+            (3.0, 0.0, 0.0),
+            (4.0, 0.0, 0.0),
+        ]
+        .iter()
+        .map(|&(x, y, z)| MainchainPoint {
+            pos: Vector4::new3(x, y, z),
+            ss: Secondary::Coil,
+            b_factor: 0.0,
+            occupancy: 1.0,
+        })
+        .collect();
+        let max_y = |w: f64| {
+            sample_backbone(&pivots, 8, w)
+                .0
+                .iter()
+                .map(|p| p.y)
+                .fold(0.0_f64, f64::max)
+        };
+        let sharp = max_y(0.0);
+        let smoothed = max_y(1.0);
+        assert!(
+            smoothed < sharp - 0.3,
+            "anchor smoothing should flatten the zigzag: {sharp} vs {smoothed}"
+        );
     }
 
     #[test]
