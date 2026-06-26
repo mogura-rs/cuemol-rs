@@ -2679,6 +2679,18 @@ pub struct MoleculeRenderOptions {
     /// model when set — the ball-and-stick "small uniform ball" mode (C++
     /// `BallStickRenderer` `sphr`). `None` keeps the vdW-scaled radius.
     pub atom_radius_abs: Option<f32>,
+    /// Atom-sphere UV tessellation level (C++ CPK/BallStick `detail`, ≈3 coarse
+    /// .. 10 fine; 4 == the historical default). `None` keeps the default. Fed to
+    /// [`cuemol_render::tessellate_snapshot_with_detail`] at mesh-build time.
+    pub sphere_detail: Option<u32>,
+    /// Ribbon/cartoon spline subdivisions per residue along the backbone (C++
+    /// Ribbon/Spline/Tube `axialdetail`; 8 == the default). Higher = a smoother,
+    /// denser backbone mesh. `None` keeps the default subdivision.
+    pub ribbon_axial_detail: Option<u32>,
+    /// Absolute ribbon cross-section dims per SS class, resolved from a style's
+    /// `<helix>/<sheet>/<coil>` `width`/`tuber` (C++ `TubeSection`). Overrides the
+    /// factor-based [`MoleculeRenderOptions::ribbon_sections`] where present.
+    pub styled_ribbon: StyledRibbonSections,
 }
 
 /// Ribbon cross-section width/thickness FACTORS (multiplied by the base coil
@@ -2704,6 +2716,30 @@ impl Default for RibbonSections {
             sheet_thick: 0.6,
             coil_width: 1.0,
             coil_thick: 1.0,
+        }
+    }
+}
+
+/// ABSOLUTE ribbon cross-section semi-axes per secondary-structure class,
+/// resolved from a C++ `<helix>/<sheet>/<coil>` style sub-element. Each entry is
+/// `(base_width, thick)` in Å — the binormal (flat-face) and normal (thickness)
+/// semi-axes the C++ `TubeSection` builds as `(m_lw·tuber, m_lw)` (so the band's
+/// aspect ratio equals `tuber`). When `Some`, it OVERRIDES the scale×factor
+/// [`RibbonSections`] model for that class (faithful absolute dims vs the
+/// independently-tuned defaults); `None` keeps the factor model.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct StyledRibbonSections {
+    pub helix: Option<(f64, f64)>,
+    pub sheet: Option<(f64, f64)>,
+    pub coil: Option<(f64, f64)>,
+}
+
+impl StyledRibbonSections {
+    fn for_ss(&self, ss: Secondary) -> Option<(f64, f64)> {
+        match ss {
+            Secondary::Helix => self.helix,
+            Secondary::Sheet => self.sheet,
+            Secondary::Coil => self.coil,
         }
     }
 }
@@ -2804,6 +2840,9 @@ impl Default for MoleculeRenderOptions {
             ribbon_sections: RibbonSections::default(),
             anchor_weight: 0.0,
             atom_radius_abs: None,
+            sphere_detail: None,
+            ribbon_axial_detail: None,
+            styled_ribbon: StyledRibbonSections::default(),
         }
     }
 }
@@ -2851,6 +2890,68 @@ pub fn apply_renderer_styles(
         .and_then(|value| value.trim().parse::<f32>().ok())
     {
         options.atom_radius_abs = Some(sphr);
+    }
+    if let Some(detail) = renderer
+        .resolved_attr("detail", styles, scope_id)
+        .and_then(|value| value.trim().parse::<u32>().ok())
+    {
+        options.sphere_detail = Some(detail);
+    }
+    if let Some(axial) = renderer
+        .resolved_attr("axialdetail", styles, scope_id)
+        .and_then(|value| value.trim().parse::<u32>().ok())
+    {
+        options.ribbon_axial_detail = Some(axial);
+    }
+    // Ribbon cross-section sub-elements <helix>/<sheet>/<coil>: each contributes
+    // absolute C++ TubeSection semi-axes (width·tuber, width) for that SS class.
+    if let Some(helix) = resolve_ribbon_section(renderer, styles, scope_id, "helix") {
+        options.styled_ribbon.helix = Some(helix);
+    }
+    if let Some(sheet) = resolve_ribbon_section(renderer, styles, scope_id, "sheet") {
+        options.styled_ribbon.sheet = Some(sheet);
+    }
+    if let Some(coil) = resolve_ribbon_section(renderer, styles, scope_id, "coil") {
+        options.styled_ribbon.coil = Some(coil);
+    }
+}
+
+/// Resolve one ribbon cross-section sub-element (`<helix>`/`<sheet>`/`<coil>`)
+/// into absolute semi-axes `(base_width, thick) = (width·tuber, width)`, the C++
+/// `TubeSection` geometry. `width` is required (the element must declare a size);
+/// a missing `tuber` defaults to 1.0 (a round section).
+fn resolve_ribbon_section(
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    scope_id: u64,
+    tag: &str,
+) -> Option<(f64, f64)> {
+    let width = renderer
+        .resolved_child_attr(tag, "width", styles, scope_id)?
+        .trim()
+        .parse::<f64>()
+        .ok()?;
+    let tuber = renderer
+        .resolved_child_attr(tag, "tuber", styles, scope_id)
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .unwrap_or(1.0);
+    Some((width * tuber, width))
+}
+
+/// Build the atom/bond/mesh snapshot for a molecule and tessellate it into a
+/// single triangle mesh, honouring the resolved `sphere_detail` (C++ CPK/
+/// BallStick `detail`). This is the styled counterpart of
+/// [`cuemol_render::tessellate_snapshot`]: a renderer styled `DefaultCPK`
+/// (detail=10) yields rounder atom spheres than the coarse default. Bonds and
+/// pre-built meshes are unaffected by detail.
+pub fn tessellate_styled_snapshot(
+    molecule: &MolCoord,
+    options: &MoleculeRenderOptions,
+) -> RenderMesh {
+    let snapshot = molecule_render_snapshot(molecule, options);
+    match options.sphere_detail {
+        Some(detail) => cuemol_render::tessellate_snapshot_with_detail(&snapshot, detail),
+        None => cuemol_render::tessellate_snapshot(&snapshot),
     }
 }
 
@@ -3289,7 +3390,8 @@ pub fn ribbon_mesh_snapshot(
     molecule: &MolCoord,
     options: &MoleculeRenderOptions,
 ) -> RenderSceneSnapshot {
-    const SUBDIV: usize = 8;
+    // C++ Ribbon/Spline `axialdetail`: spline subdivisions per residue (default 8).
+    let subdiv = options.ribbon_axial_detail.unwrap_or(8).max(1) as usize;
     let scale = ((options.bond_radius * 4.0).clamp(0.25, 0.8)) as f64;
     let chains = collect_mainchain_pivots(molecule);
     let mut meshes = Vec::new();
@@ -3298,13 +3400,14 @@ pub fn ribbon_mesh_snapshot(
             continue;
         }
         let (samples, sections, width_scales) =
-            sample_backbone(pivots, SUBDIV, options.anchor_weight);
+            sample_backbone(pivots, subdiv, options.anchor_weight);
         let mesh = ribbon_tube_mesh(
             &samples,
             &sections,
             &width_scales,
             scale,
             &options.ribbon_sections,
+            &options.styled_ribbon,
         );
         if !mesh.vertices.is_empty() {
             meshes.push(mesh);
@@ -3396,23 +3499,22 @@ fn sheet_arrow_widths(sections: &[Secondary], subdiv: usize) -> Vec<f64> {
 
 /// Cross-section half-width, half-thickness, and color for a secondary-structure
 /// class. `scale` is the base coil radius.
-fn section_params(ss: Secondary, scale: f64, sec: &RibbonSections) -> (f64, f64, [f32; 4]) {
-    match ss {
-        Secondary::Helix => (
-            scale * sec.helix_width,
-            scale * sec.helix_thick,
-            [0.95, 0.32, 0.42, 1.0],
-        ),
-        Secondary::Sheet => (
-            scale * sec.sheet_width,
-            scale * sec.sheet_thick,
-            [0.95, 0.82, 0.30, 1.0],
-        ),
-        Secondary::Coil => (
-            scale * sec.coil_width,
-            scale * sec.coil_thick,
-            [0.55, 0.85, 0.90, 1.0],
-        ),
+fn section_params(
+    ss: Secondary,
+    scale: f64,
+    sec: &RibbonSections,
+    styled: &StyledRibbonSections,
+) -> (f64, f64, [f32; 4]) {
+    let (factor_width, factor_thick, color) = match ss {
+        Secondary::Helix => (sec.helix_width, sec.helix_thick, [0.95, 0.32, 0.42, 1.0]),
+        Secondary::Sheet => (sec.sheet_width, sec.sheet_thick, [0.95, 0.82, 0.30, 1.0]),
+        Secondary::Coil => (sec.coil_width, sec.coil_thick, [0.55, 0.85, 0.90, 1.0]),
+    };
+    // A style's <helix>/<sheet>/<coil> sub-element gives ABSOLUTE C++ semi-axes
+    // (width·tuber, width) that override the scale×factor model for that class.
+    match styled.for_ss(ss) {
+        Some((base_width, thick)) => (base_width, thick, color),
+        None => (scale * factor_width, scale * factor_thick, color),
     }
 }
 
@@ -3431,6 +3533,7 @@ fn ribbon_tube_mesh(
     width_scales: &[f64],
     scale: f64,
     sec: &RibbonSections,
+    styled: &StyledRibbonSections,
 ) -> RenderMesh {
     let n = samples.len();
     if n < 2 {
@@ -3467,7 +3570,7 @@ fn ribbon_tube_mesh(
     let mut vertices = Vec::with_capacity(n * TUBE_RADIAL);
     for (i, &center) in samples.iter().enumerate() {
         let (normal, binormal) = frames[i];
-        let (base_width, thick, color) = section_params(sections[i], scale, sec);
+        let (base_width, thick, color) = section_params(sections[i], scale, sec, styled);
         let width = base_width * width_scales[i];
         for j in 0..TUBE_RADIAL {
             let theta = (j as f64) / (TUBE_RADIAL as f64) * std::f64::consts::TAU;
@@ -4089,6 +4192,186 @@ mod tests {
         assert!((plain_bond - 0.08).abs() < 1.0e-6, "plain default {plain_bond}");
     }
 
+    /// Tessellate a single-atom CPK scene, either resolving the named `style`
+    /// (when `forced_detail` is None) or forcing `sphere_detail` directly, and
+    /// return the atom-sphere vertex count. The geometry oracle for `detail`:
+    /// reads the EMITTED mesh density, not the parsed XML.
+    fn cpk_vertex_count(style: &str, forced_detail: Option<Option<u32>>) -> usize {
+        let mol = MolCoord::with_atoms(vec![sample_atom("C1", "C", 0.0, 0.0, 0.0)]);
+
+        let mut mgr = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = mgr.new_scene("s");
+        let scene = mgr.scene_mut(scene_uid).unwrap();
+        let obj_uid = scene.add_molecule("m", mol);
+        let obj = scene.object_mut(obj_uid).unwrap();
+        let rend_uid = obj.add_renderer("cpk", "cpk");
+        obj.renderer_mut(rend_uid)
+            .unwrap()
+            .set_qsc_attr("style", style);
+
+        let styles = default_style_manager();
+        let obj = scene.object(obj_uid).unwrap();
+        let renderer = obj.renderer(rend_uid).unwrap();
+        let mut options = MoleculeRenderOptions {
+            draw_bonds: false,
+            ..MoleculeRenderOptions::default()
+        };
+        match forced_detail {
+            Some(detail) => options.sphere_detail = detail,
+            None => apply_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE),
+        }
+        tessellate_styled_snapshot(obj.mol(), &options).vertices.len()
+    }
+
+    #[test]
+    fn cpk_style_detail_drives_sphere_tessellation_density() {
+        // DefaultCPK carries detail=10 (fine); no style keeps the coarse default.
+        let styled = cpk_vertex_count("DefaultCPK", None);
+        let coarse = cpk_vertex_count("", Some(None));
+
+        // The style resolved to detail=10 specifically: the styled mesh matches a
+        // mesh tessellated with detail 10 forced directly, and is denser than the
+        // default (detail 4). Non-circular: distinct detail => distinct vertex count.
+        assert_eq!(styled, cpk_vertex_count("", Some(Some(10))));
+        assert!(
+            styled > coarse,
+            "DefaultCPK (detail=10) should tessellate finer than the default: {styled} vs {coarse}"
+        );
+        assert!(cpk_vertex_count("", Some(Some(10))) > cpk_vertex_count("", Some(Some(4))));
+    }
+
+    /// Resolve a ribbon renderer's style (plus an optional inline `axialdetail`
+    /// override) and return the total backbone-mesh vertex count — the geometry
+    /// oracle for `axialdetail` (more subdivisions => denser mesh).
+    fn ribbon_vertex_count(style: &str, inline_axial: Option<&str>) -> usize {
+        let mol = MolCoord::with_atoms(vec![
+            ca_atom(1, 0.0, 0.0, 0.0),
+            ca_atom(2, 1.0, 0.5, 0.0),
+            ca_atom(3, 2.0, 0.0, 0.5),
+            ca_atom(4, 3.0, 0.5, 0.0),
+            ca_atom(5, 4.0, 0.0, 0.0),
+        ]);
+        let mut mgr = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = mgr.new_scene("s");
+        let scene = mgr.scene_mut(scene_uid).unwrap();
+        let obj_uid = scene.add_molecule("m", mol);
+        let obj = scene.object_mut(obj_uid).unwrap();
+        let rend_uid = obj.add_renderer("ribbon", "rb");
+        let renderer = obj.renderer_mut(rend_uid).unwrap();
+        renderer.set_qsc_attr("style", style);
+        if let Some(axial) = inline_axial {
+            renderer.set_qsc_attr("axialdetail", axial);
+        }
+
+        let styles = default_style_manager();
+        let obj = scene.object(obj_uid).unwrap();
+        let renderer = obj.renderer(rend_uid).unwrap();
+        let mut options = MoleculeRenderOptions::default();
+        apply_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
+        ribbon_mesh_snapshot(obj.mol(), &options)
+            .meshes
+            .iter()
+            .map(|mesh| mesh.vertices.len())
+            .sum()
+    }
+
+    #[test]
+    fn ribbon_style_axialdetail_drives_backbone_mesh_density() {
+        // DefaultRibbon carries axialdetail=8 (== the default subdivision), so a
+        // styled ribbon matches a default-options ribbon.
+        let mol = MolCoord::with_atoms(vec![
+            ca_atom(1, 0.0, 0.0, 0.0),
+            ca_atom(2, 1.0, 0.5, 0.0),
+            ca_atom(3, 2.0, 0.0, 0.5),
+            ca_atom(4, 3.0, 0.5, 0.0),
+            ca_atom(5, 4.0, 0.0, 0.0),
+        ]);
+        let default_count: usize = ribbon_mesh_snapshot(&mol, &MoleculeRenderOptions::default())
+            .meshes
+            .iter()
+            .map(|mesh| mesh.vertices.len())
+            .sum();
+        let styled = ribbon_vertex_count("DefaultRibbon", None);
+        assert_eq!(styled, default_count);
+
+        // An inline axialdetail=20 overrides the style and densifies the mesh —
+        // the value flows from the attribute into the backbone subdivision.
+        let denser = ribbon_vertex_count("DefaultRibbon", Some("20"));
+        assert!(
+            denser > styled,
+            "axialdetail=20 should densify the ribbon mesh: {denser} vs {styled}"
+        );
+    }
+
+    #[test]
+    fn ribbon_style_section_sets_cross_section_aspect_from_tuber() {
+        // A helix run styled by DefaultRibbon (<helix width="0.2" tuber="6.0"/>).
+        let mut mol = MolCoord::with_atoms(vec![
+            ca_atom(1, 0.0, 0.0, 0.0),
+            ca_atom(2, 3.0, 0.0, 0.0),
+            ca_atom(3, 6.0, 0.0, 0.0),
+            ca_atom(4, 9.0, 0.0, 0.0),
+        ]);
+        for res_id in 1..=4 {
+            mol.set_residue_prop_str("A", &res_id.to_string(), "secondary", "helix")
+                .unwrap();
+        }
+
+        let mut mgr = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = mgr.new_scene("s");
+        let scene = mgr.scene_mut(scene_uid).unwrap();
+        let obj_uid = scene.add_molecule("m", mol);
+        let obj = scene.object_mut(obj_uid).unwrap();
+        let rend_uid = obj.add_renderer("ribbon", "rb");
+        obj.renderer_mut(rend_uid)
+            .unwrap()
+            .set_qsc_attr("style", "DefaultRibbon");
+
+        let styles = default_style_manager();
+        let obj = scene.object(obj_uid).unwrap();
+        let renderer = obj.renderer(rend_uid).unwrap();
+        let mut options = MoleculeRenderOptions::default();
+        apply_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
+
+        // The nested <helix> resolves to absolute semi-axes (width*tuber, width).
+        assert_eq!(options.styled_ribbon.helix, Some((0.2 * 6.0, 0.2)));
+        assert_eq!(options.styled_ribbon.sheet, Some((0.2 * 7.0, 0.2)));
+        assert_eq!(options.styled_ribbon.coil, None); // DefaultRibbon has no <coil>
+
+        // The EMITTED helix ring's aspect ratio equals tuber=6.0 — the C++ flat
+        // band — and is distinctly flatter than the unstyled factor model (~3.14).
+        let aspect = |opts: &MoleculeRenderOptions| -> f64 {
+            let snap = ribbon_mesh_snapshot(obj.mol(), opts);
+            let ring = &snap.meshes[0].vertices[0..TUBE_RADIAL];
+            let n = TUBE_RADIAL as f64;
+            let c = (
+                ring.iter().map(|v| v.position.x).sum::<f64>() / n,
+                ring.iter().map(|v| v.position.y).sum::<f64>() / n,
+                ring.iter().map(|v| v.position.z).sum::<f64>() / n,
+            );
+            let dists: Vec<f64> = ring
+                .iter()
+                .map(|v| {
+                    let (dx, dy, dz) =
+                        (v.position.x - c.0, v.position.y - c.1, v.position.z - c.2);
+                    (dx * dx + dy * dy + dz * dz).sqrt()
+                })
+                .collect();
+            dists.iter().cloned().fold(0.0_f64, f64::max)
+                / dists.iter().cloned().fold(f64::INFINITY, f64::min).max(1.0e-9)
+        };
+        let styled_aspect = aspect(&options);
+        let default_aspect = aspect(&MoleculeRenderOptions::default());
+        assert!(
+            (styled_aspect - 6.0).abs() < 0.05,
+            "styled helix aspect should be tuber=6.0, got {styled_aspect}"
+        );
+        assert!(
+            styled_aspect > default_aspect + 1.0,
+            "styled (tuber=6) should be flatter than the default factor band: {styled_aspect} vs {default_aspect}"
+        );
+    }
+
     #[test]
     fn cubic_spline_is_natural_interpolating_and_c2_continuous() {
         // A non-collinear 3D path so the curve genuinely bends.
@@ -4702,15 +4985,26 @@ mod tests {
             helix_thick: 0.1,
             ..RibbonSections::default()
         };
-        let (w, t, _) = section_params(Secondary::Helix, 1.0, &custom);
+        let styled = StyledRibbonSections::default();
+        let (w, t, _) = section_params(Secondary::Helix, 1.0, &custom, &styled);
         assert_eq!(w, 5.0);
         assert_eq!(t, 0.1);
         // The default keeps the historical flat helix band (2.2 x 0.7).
-        let (dw, dt, _) = section_params(Secondary::Helix, 1.0, &RibbonSections::default());
+        let (dw, dt, _) = section_params(Secondary::Helix, 1.0, &RibbonSections::default(), &styled);
         assert_eq!(dw, 2.2);
         assert_eq!(dt, 0.7);
         // Sheet/coil factors are independent.
-        assert_eq!(section_params(Secondary::Coil, 2.0, &RibbonSections::default()).0, 2.0);
+        assert_eq!(
+            section_params(Secondary::Coil, 2.0, &RibbonSections::default(), &styled).0,
+            2.0
+        );
+        // A styled <helix> override replaces the factor model with absolute dims.
+        let abs = StyledRibbonSections {
+            helix: Some((1.2, 0.2)),
+            ..StyledRibbonSections::default()
+        };
+        let (sw, st, _) = section_params(Secondary::Helix, 9.0, &custom, &abs);
+        assert_eq!((sw, st), (1.2, 0.2)); // ignores scale + factors when styled
     }
 
     #[test]
@@ -4759,7 +5053,8 @@ mod tests {
         let snap = ribbon_mesh_snapshot(&mol, &MoleculeRenderOptions::default());
         assert_eq!(snap.mesh_count(), 1);
         // Every vertex carries the helix color and a unit normal.
-        let helix_color = section_params(Secondary::Helix, 1.0, &RibbonSections::default()).2;
+        let helix_color =
+            section_params(Secondary::Helix, 1.0, &RibbonSections::default(), &StyledRibbonSections::default()).2;
         assert!(snap.meshes[0]
             .vertices
             .iter()
@@ -4769,7 +5064,12 @@ mod tests {
             .iter()
             .all(|vertex| (vertex.normal.length3d() - 1.0).abs() < 1.0e-5));
         // A helix band is wider than it is thick (flat ribbon, not a tube).
-        let (width, thick, _) = section_params(Secondary::Helix, 1.0, &RibbonSections::default());
+        let (width, thick, _) = section_params(
+            Secondary::Helix,
+            1.0,
+            &RibbonSections::default(),
+            &StyledRibbonSections::default(),
+        );
         assert!(width > thick * 2.0);
     }
 

@@ -607,6 +607,51 @@ impl StyleManager {
         result
     }
 
+    /// Like [`StyleManager::style_attr`] but for an attribute on a nested child
+    /// element of the preset (e.g. `DefaultRibbon` → `<helix tuber="6.0">`).
+    /// Used for the ribbon cross-section sub-elements `<helix>/<sheet>/<coil>`.
+    pub fn style_child_attr(
+        &self,
+        scope_id: u64,
+        style_id: &str,
+        child_tag: &str,
+        attr: &str,
+    ) -> Option<String> {
+        let lookup = |scope: u64| -> Option<String> {
+            self.scopes.get(&scope)?.iter().find_map(|set| {
+                let value = set
+                    .get_style(style_id)?
+                    .find_child(child_tag)?
+                    .str_attr(attr)
+                    .to_string();
+                (!value.is_empty()).then_some(value)
+            })
+        };
+        lookup(scope_id).or_else(|| (scope_id != 0).then(|| lookup(0)).flatten())
+    }
+
+    /// Resolve a `style="A,B"` list for a nested child-element attribute (later
+    /// style wins), the nested counterpart of [`StyleManager::resolve_style_attr`].
+    pub fn resolve_style_child_attr(
+        &self,
+        scope_id: u64,
+        style_list: &str,
+        child_tag: &str,
+        attr: &str,
+    ) -> Option<String> {
+        let mut result = None;
+        for name in style_list.split(',') {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(value) = self.style_child_attr(scope_id, name, child_tag, attr) {
+                result = Some(value);
+            }
+        }
+        result
+    }
+
     pub fn get_style_value(&self, scope_id: u64, set_name: &str, key: &str) -> String {
         let (style_name, prop_name) = split_style_key(key);
         self.scopes
@@ -930,6 +975,37 @@ mod tests {
             Some("0.2")
         );
         assert!(manager.resolve_style_attr(0, "", "bondw").is_none());
+    }
+
+    #[test]
+    fn style_child_attr_reads_nested_ribbon_section_elements() {
+        let mut manager = StyleManager::new();
+        manager.load_builtin_default_styles(0);
+
+        // DefaultRibbon's nested <helix tuber="6.0" width="0.2"/> and
+        // <sheet tuber="7.0" width="0.2"/> cross-section sub-elements.
+        assert_eq!(
+            manager.style_child_attr(0, "DefaultRibbon", "helix", "tuber").as_deref(),
+            Some("6.0")
+        );
+        assert_eq!(
+            manager.style_child_attr(0, "DefaultRibbon", "helix", "width").as_deref(),
+            Some("0.2")
+        );
+        assert_eq!(
+            manager.style_child_attr(0, "DefaultRibbon", "sheet", "tuber").as_deref(),
+            Some("7.0")
+        );
+        // No <coil> sub-element in DefaultRibbon.
+        assert!(manager.style_child_attr(0, "DefaultRibbon", "coil", "width").is_none());
+        // Resolve across a style list (later style wins): RoundRibbon's helix is
+        // elliptical with the same tuber=6.0.
+        assert_eq!(
+            manager
+                .resolve_style_child_attr(0, "DefaultRibbon,RoundRibbon", "helix", "type")
+                .as_deref(),
+            Some("elliptical")
+        );
     }
 
     #[test]

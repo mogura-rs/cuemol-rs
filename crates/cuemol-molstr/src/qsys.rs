@@ -82,6 +82,21 @@ impl MolRenderer {
         styles.resolve_style_attr(scope_id, style_list, attr)
     }
 
+    /// Resolve an attribute on a nested child element of the renderer's style
+    /// preset (e.g. the ribbon `<helix>`/`<sheet>`/`<coil>` cross-section
+    /// sub-elements). Flat `.qsc` inline attributes cannot express nested
+    /// children, so this resolves through the `style="A,B"` list only.
+    pub fn resolved_child_attr(
+        &self,
+        child_tag: &str,
+        attr: &str,
+        styles: &StyleManager,
+        scope_id: u64,
+    ) -> Option<String> {
+        let style_list = self.style()?;
+        styles.resolve_style_child_attr(scope_id, style_list, child_tag, attr)
+    }
+
     pub fn is_visible(&self) -> bool {
         !matches!(self.qsc_attr("visible"), Some("false" | "0" | "no" | "off"))
     }

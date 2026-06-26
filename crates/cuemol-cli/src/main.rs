@@ -340,7 +340,7 @@ fn run() -> Result<(), String> {
                         println!("style={style}");
                         // Geometry properties the style preset contributes
                         // (resolved through the inline-overrides-style cascade).
-                        for attr in ["bondw", "sphr", "detail", "width"] {
+                        for attr in ["bondw", "sphr", "detail", "axialdetail", "width"] {
                             if let Some(value) = renderer.resolved_attr(attr, &styles, scope) {
                                 println!("resolved.{attr}={value}");
                             }
