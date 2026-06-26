@@ -12,6 +12,10 @@ fn mmcif_reader_matches_reference_fixture_counts() {
         return;
     };
 
+    // Bond counts come from the residue-topology dictionary (the same path the PDB
+    // reader uses); 1crn.cif's 337 matches 1CRN.pdb exactly — a cross-format
+    // consistency check on the same molecule (template bonds + correct orders +
+    // peptide links + the 3 disulfides + the C-terminal OXT distance bond).
     for (file, atoms, bonds) in [
         ("1crn.cif", 327, 337),
         ("3RXN_mod.cif", 9, 7),

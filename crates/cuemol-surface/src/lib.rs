@@ -4,9 +4,14 @@ use cuemol_molstr::{parse_selector, Atom, MolCoord, Selector, SolidColoring};
 use cuemol_qsys::{InOutHandler, MultiGradient, ObjReader, ObjWriter};
 use std::collections::BTreeMap;
 
+pub mod analytic_ses;
+pub mod grid_surface;
 pub mod msms;
+pub mod qdf;
 
+pub use grid_surface::{build_grid_isosurface, ScalarField, SurfSphere};
 pub use msms::{read_msms_surface_files, read_msms_surface_str, sniff_msms_content, MsmsReader};
+pub use qdf::{QdfPotReader, QdfPotWriter, QdfSurfReader, QdfSurfWriter};
 
 pub type MS2TestRenderer = Ms2TestRenderer;
 pub type MSMSFileReader = MsmsFileReader;
@@ -797,7 +802,7 @@ impl MolSurfObj {
         self.mesh.clear();
         if let SurfaceMoleculeSource::Molecule(molecule) = molecule {
             let selector = selection.selector().unwrap_or(Selector::All);
-            build_atom_octa_surface(&mut self.mesh, molecule, &selector, probe_radius);
+            build_mol_surface(&mut self.mesh, molecule, &selector, density, probe_radius);
         }
     }
 
@@ -846,55 +851,65 @@ impl MolSurfObj {
     }
 }
 
-fn build_atom_octa_surface(
+/// Build the molecular (van-der-Waals / solvent-accessible) surface of the
+/// selected atoms via the union-of-spheres marching-tetrahedra isosurface.
+/// `density` controls the grid fineness (grid points per Angstrom); each atom is
+/// a sphere of `vdw_radius + probe_radius`.
+fn build_mol_surface(
     mesh: &mut SurfaceMesh,
     molecule: &MolCoord,
     selector: &Selector,
+    density: f64,
     probe_radius: f64,
 ) {
     let radii = SurfaceVdwRadii::default();
-    for atom in molecule
+    // Each atom is a bare van-der-Waals sphere; the probe is rolled separately by
+    // the solvent-excluded-surface builder (the reentrant patches it carves are
+    // the whole point of an SES vs. the union-of-spheres accessible surface).
+    let spheres: Vec<grid_surface::SurfSphere> = molecule
         .atoms()
         .iter()
         .filter(|atom| selector.matches_in_molecule(atom, molecule))
-    {
-        let radius = (radii.radius_for_element(&atom.element) + probe_radius.max(0.0)).max(0.1);
-        append_octahedron(mesh, atom.position, radius);
-    }
+        .map(|atom| grid_surface::SurfSphere {
+            center: atom.position,
+            radius: radii.radius_for_element(&atom.element).max(0.1),
+        })
+        .collect();
+
+    // density = grid points per Angstrom; spacing is its reciprocal, clamped to
+    // a sane band (default ~0.6 A when unset).
+    let spacing = if density > 0.0 {
+        (1.0 / density).clamp(0.25, 1.5)
+    } else {
+        0.6
+    };
+    grid_surface::build_ses_surface(mesh, &spheres, probe_radius.max(0.0), spacing);
 }
 
-fn append_octahedron(mesh: &mut SurfaceMesh, center: Vector4, radius: f64) {
-    let base = mesh.vertex_count() as u32;
-    let axes = [
-        Vector4::new3(1.0, 0.0, 0.0),
-        Vector4::new3(-1.0, 0.0, 0.0),
-        Vector4::new3(0.0, 1.0, 0.0),
-        Vector4::new3(0.0, -1.0, 0.0),
-        Vector4::new3(0.0, 0.0, 1.0),
-        Vector4::new3(0.0, 0.0, -1.0),
-    ];
-    for normal in axes {
-        mesh.push_vertex(SurfaceVertex {
-            position: Vector4::new3(
-                center.x + normal.x * radius,
-                center.y + normal.y * radius,
-                center.z + normal.z * radius,
-            ),
-            normal,
-        });
-    }
-    for triangle in [
-        [0, 2, 4],
-        [2, 1, 4],
-        [1, 3, 4],
-        [3, 0, 4],
-        [2, 0, 5],
-        [1, 2, 5],
-        [3, 1, 5],
-        [0, 3, 5],
-    ] {
-        mesh.push_triangle([base + triangle[0], base + triangle[1], base + triangle[2]]);
-    }
+/// Build the ANALYTIC (Connolly reduced-surface) SES of `molecule` — convex van
+/// der Waals caps + saddle tori + concave reentrant patches — as a [`SurfaceMesh`].
+/// The analytic counterpart of [`build_mol_surface`]'s grid SES (C++ surface/
+/// `RSCompBuilder` + `Tg*`); `detail` is the per-patch tessellation level. The grid
+/// SES remains the production path; this matches C++'s exact analytic patches.
+pub fn build_analytic_mol_surface(
+    molecule: &MolCoord,
+    selector: &Selector,
+    probe_radius: f64,
+    detail: usize,
+) -> SurfaceMesh {
+    let radii = SurfaceVdwRadii::default();
+    let atoms: Vec<(cuemol_core::Vector4, f64)> = molecule
+        .atoms()
+        .iter()
+        .filter(|atom| selector.matches_in_molecule(atom, molecule))
+        .map(|atom| {
+            (
+                atom.position,
+                radii.radius_for_element(&atom.element).max(0.1),
+            )
+        })
+        .collect();
+    analytic_ses::build_analytic_ses(&atoms, probe_radius.max(0.0), detail)
 }
 
 fn sanitize_obj_name(name: &str) -> String {
@@ -1580,9 +1595,25 @@ impl Ms2TestRenderer {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ElePotMap {
+    counts: [usize; 3],
+    grid_size: [f64; 3],
+    origin: Vector4,
+    values: Vec<f64>,
     fit_view_calls: usize,
+}
+
+impl Default for ElePotMap {
+    fn default() -> Self {
+        Self {
+            counts: [0, 0, 0],
+            grid_size: [0.0, 0.0, 0.0],
+            origin: Vector4::ZERO,
+            values: Vec::new(),
+            fit_view_calls: 0,
+        }
+    }
 }
 
 impl ElePotMap {
@@ -1600,6 +1631,68 @@ impl ElePotMap {
 
     pub fn fit_view_calls(&self) -> usize {
         self.fit_view_calls
+    }
+
+    pub fn col_no(&self) -> usize {
+        self.counts[0]
+    }
+
+    pub fn row_no(&self) -> usize {
+        self.counts[1]
+    }
+
+    pub fn sec_no(&self) -> usize {
+        self.counts[2]
+    }
+
+    pub fn col_grid_size(&self) -> f64 {
+        self.grid_size[0]
+    }
+
+    pub fn row_grid_size(&self) -> f64 {
+        self.grid_size[1]
+    }
+
+    pub fn sec_grid_size(&self) -> f64 {
+        self.grid_size[2]
+    }
+
+    pub fn origin(&self) -> Vector4 {
+        self.origin
+    }
+
+    pub fn values(&self) -> &[f64] {
+        &self.values
+    }
+
+    pub fn value_count(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn set_map_float_array(
+        &mut self,
+        values: &[f64],
+        counts: [usize; 3],
+        grid_size: [f64; 3],
+        origin: Vector4,
+    ) {
+        self.counts = counts;
+        self.grid_size = grid_size;
+        self.origin = origin;
+        let expected = counts[0]
+            .saturating_mul(counts[1])
+            .saturating_mul(counts[2]);
+        self.values = values.to_vec();
+        self.values.resize(expected, 0.0);
+        self.values.truncate(expected);
+    }
+
+    pub fn at_float(&self, col: usize, row: usize, sec: usize) -> f64 {
+        if col >= self.counts[0] || row >= self.counts[1] || sec >= self.counts[2] {
+            return 0.0;
+        }
+        let index = col + self.counts[0] * (row + self.counts[1] * sec);
+        self.values.get(index).copied().unwrap_or(0.0)
     }
 }
 
@@ -1738,6 +1831,41 @@ mod tests {
     }
 
     #[test]
+    fn analytic_mol_surface_lone_atom_is_the_vdw_sphere() {
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(surface_atom(1, "CA", "C", 4.0)); // carbon, vdW 1.7, at x=4
+        let mesh =
+            build_analytic_mol_surface(&molecule, &parse_selector("name CA").unwrap(), 1.4, 6);
+        assert!(mesh.triangle_count() > 50);
+        // A lone atom's SES is its bare vdW sphere (r = 1.7), matching the grid SES.
+        let center = cuemol_core::Vector4::new3(4.0, 0.0, 0.0);
+        for vtx in mesh.vertices() {
+            assert!(
+                ((vtx.position - center).length3d() - 1.7).abs() < 1e-9,
+                "lone-atom analytic SES vertex on the vdW sphere"
+            );
+        }
+    }
+
+    #[test]
+    fn analytic_mol_surface_two_atoms_adds_a_reentrant_saddle() {
+        let mut lone = MolCoord::new();
+        lone.push_atom(surface_atom(1, "C", "C", 0.0));
+        let sel = parse_selector("*").unwrap();
+        let lone_mesh = build_analytic_mol_surface(&lone, &sel, 1.4, 6);
+
+        let mut pair = MolCoord::new();
+        pair.push_atom(surface_atom(1, "C", "C", 0.0));
+        pair.push_atom(surface_atom(2, "C", "C", 2.5));
+        let pair_mesh = build_analytic_mol_surface(&pair, &sel, 1.4, 6);
+
+        // Two nearby atoms produce a real surface; it is not just two lone spheres
+        // (the facing caps are clipped and the saddle torus is added).
+        assert!(pair_mesh.triangle_count() > 0);
+        assert!(pair_mesh.triangle_count() != 2 * lone_mesh.triangle_count());
+    }
+
+    #[test]
     fn molsurf_obj_builds_selected_atom_mesh_from_molecule() {
         let mut molecule = MolCoord::new();
         molecule.push_atom(surface_atom(1, "N", "N", 0.0));
@@ -1749,13 +1877,28 @@ mod tests {
 
         assert_eq!(obj.orig_mol(), "MolCoord");
         assert_eq!(obj.orig_sel(), "name CA");
-        assert_eq!(obj.mesh().vertex_count(), 6);
-        assert_eq!(obj.mesh().triangle_count(), 8);
-        assert!(obj
+        // Only the selected CA atom contributes. This is now the real SES, so a
+        // lone convex atom is its bare vdW sphere (C vdw 1.7, centred at x = 4) —
+        // NOT the vdw+probe (3.1) accessible sphere. Every vertex lies on r = 1.7
+        // and the +x extent is ~5.7.
+        assert!(obj.mesh().triangle_count() > 50);
+        for vertex in obj.mesh().vertices() {
+            let dx = vertex.position.x - 4.0;
+            let r = (dx * dx
+                + vertex.position.y * vertex.position.y
+                + vertex.position.z * vertex.position.z)
+                .sqrt();
+            assert!((r - 1.7).abs() < 0.6, "vertex off CA vdW sphere: r={r}");
+        }
+        let max_x = obj
             .mesh()
             .vertices()
             .iter()
-            .any(|vertex| (vertex.position.x - 7.1).abs() < 1.0e-8));
+            .map(|vertex| vertex.position.x)
+            .fold(f64::NEG_INFINITY, f64::max);
+        // ~5.7 (= 4 + vdw 1.7) within grid tolerance, and far below the 7.1 the
+        // accessible (vdw+probe) sphere would reach.
+        assert!(max_x > 5.0 && max_x < 6.2, "max_x {max_x}");
     }
 
     #[test]
@@ -1765,7 +1908,8 @@ mod tests {
         molecule.push_atom(surface_atom(2, "CA", "C", 4.0));
         let mut obj = MolSurfObj::new();
         obj.create_ses_from_mol(&molecule, "all", 2.0, 1.4);
-        assert_eq!(obj.mesh().triangle_count(), 16);
+        let before = obj.mesh().triangle_count();
+        assert!(before > 0);
 
         obj.cut_by_plane(
             0.5,
@@ -1773,7 +1917,7 @@ mod tests {
             Vector4::new3(0.0, 0.0, 0.0),
             false,
         );
-        assert!(obj.mesh().triangle_count() < 16);
+        assert!(obj.mesh().triangle_count() < before);
         assert_eq!(obj.cut_planes().len(), 1);
 
         let output = obj.mesh().to_obj_string("cut surface");
@@ -1824,6 +1968,81 @@ mod tests {
         assert_eq!(xyzr.handler().type_descr(), "XYZR coordinates(*.xyzr)");
         assert_eq!(xyzr.handler().file_ext(), "*.xyzr");
         assert_eq!(xyzr.selection(), None);
+
+        let qdfsurf = QdfSurfReader::new();
+        assert_eq!(qdfsurf.handler().name(), "qdfsurf");
+        assert_eq!(
+            qdfsurf.handler().type_descr(),
+            "CueMol molsurf file (*.qdf)"
+        );
+        assert_eq!(qdfsurf.handler().file_ext(), "*.qdf");
+        assert_eq!(
+            qdfsurf.handler().category(),
+            InOutHandler::IOH_CAT_OBJREADER
+        );
+
+        let qdfpot = QdfPotWriter::new();
+        assert_eq!(qdfpot.handler().name(), "qdfpot");
+        assert_eq!(qdfpot.handler().type_descr(), "CueMol elepot file (*.qdf)");
+        assert_eq!(qdfpot.handler().file_ext(), "*.qdf");
+        assert_eq!(qdfpot.handler().category(), InOutHandler::IOH_CAT_OBJWRITER);
+    }
+
+    #[test]
+    fn qdf_surface_roundtrip_matches_reference_schema() {
+        let mut obj = MolSurfObj::new();
+        obj.mesh_mut().push_vertex(SurfaceVertex {
+            position: Vector4::new3(1.0, 2.0, 3.0),
+            normal: Vector4::new3(0.0, 0.0, 1.0),
+        });
+        obj.mesh_mut().push_vertex(SurfaceVertex {
+            position: Vector4::new3(2.0, 3.0, 4.0),
+            normal: Vector4::new3(0.0, 1.0, 0.0),
+        });
+        obj.mesh_mut().push_vertex(SurfaceVertex {
+            position: Vector4::new3(3.0, 4.0, 5.0),
+            normal: Vector4::new3(1.0, 0.0, 0.0),
+        });
+        obj.mesh_mut().push_triangle([0, 1, 2]);
+
+        let bytes = QdfSurfWriter::new().write_bytes(&obj);
+        assert_eq!(&bytes[0..4], b"QDF0");
+        assert_eq!(qdf::qdf_file_type(&bytes).as_deref(), Some("SRF1"));
+
+        let parsed = QdfSurfReader::new().read_bytes(&bytes).unwrap();
+        assert_eq!(parsed.mesh().vertex_count(), 3);
+        assert_eq!(parsed.mesh().triangle_count(), 1);
+        assert_eq!(parsed.mesh().triangles()[0], [0, 1, 2]);
+        assert_eq!(
+            parsed.mesh().vertices()[1].position,
+            Vector4::new3(2.0, 3.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn qdf_potential_roundtrip_matches_reference_schema() {
+        let mut map = ElePotMap::new();
+        map.set_map_float_array(
+            &[0.0, 1.0, 2.0, 3.0],
+            [2, 1, 2],
+            [0.5, 0.6, 0.7],
+            Vector4::new3(-1.0, -2.0, -3.0),
+        );
+
+        let bytes = QdfPotWriter::new().write_bytes(&map);
+        assert_eq!(&bytes[0..4], b"QDF0");
+        assert_eq!(qdf::qdf_file_type(&bytes).as_deref(), Some("POT1"));
+
+        let parsed = QdfPotReader::new().read_bytes(&bytes).unwrap();
+        assert_eq!(parsed.col_no(), 2);
+        assert_eq!(parsed.row_no(), 1);
+        assert_eq!(parsed.sec_no(), 2);
+        assert!((parsed.col_grid_size() - 0.5).abs() < 1.0e-6);
+        assert_eq!(parsed.origin(), Vector4::new3(-1.0, -2.0, -3.0));
+        assert_eq!(parsed.at_float(0, 0, 0), 0.0);
+        assert_eq!(parsed.at_float(1, 0, 0), 1.0);
+        assert_eq!(parsed.at_float(0, 0, 1), 2.0);
+        assert_eq!(parsed.at_float(1, 0, 1), 3.0);
     }
 
     #[test]

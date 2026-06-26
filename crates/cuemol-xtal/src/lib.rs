@@ -1,8 +1,12 @@
+pub mod cif_map;
+pub mod fft;
 pub mod map_renderers;
 pub mod mtz;
+pub mod qdf_map;
 
 use cuemol_qsys::{InOutHandler, ObjReader};
 
+pub use cif_map::{density_map_from_cif, parse_cif_map_coeffs, CifMapCoeffs};
 pub use cuemol_molstr::{
     read_brix_map_bytes, read_brix_map_file, read_brix_map_with_header_bytes,
     read_brix_map_with_header_file, read_ccp4_map_bytes, read_ccp4_map_file,
@@ -13,11 +17,16 @@ pub use cuemol_molstr::{
 };
 pub use cuemol_symm::CrystalInfo;
 pub use map_renderers::{
-    DensityMap, GlslMapMeshRenderer, GlslMapMeshRenderer2, GlslMapVolRenderer, MapColorMode,
-    MapMeshRenderer, MapRenderer, MapSurfRenderer, MapSurfaceDrawMode,
+    contour_lines_to_obj, DensityMap, GlslMapMeshRenderer, GlslMapMeshRenderer2,
+    GlslMapVolRenderer, MapColorMode, MapMeshRenderer, MapRenderer, MapSurfRenderer,
+    MapSurfaceDrawMode,
 };
 pub use mtz::{
-    read_mtz_bytes, read_mtz_file, Mtz2MapReader, MtzColumn, MtzFile, MtzReflection, MtzResolution,
+    density_map_from_reflections, density_map_from_reflections_with_cell, read_mtz_bytes,
+    read_mtz_file, Mtz2MapReader, MtzColumn, MtzFile, MtzReflection, MtzResolution,
+};
+pub use qdf_map::{
+    read_qdf_denmap_bytes, write_qdf_denmap_bytes, QdfDenMapReader, QdfDenMapWriter,
 };
 
 pub type CCP4MapReader = Ccp4MapReader;
@@ -219,6 +228,25 @@ impl MmcifMapReader {
     pub fn set_gridsize(&mut self, value: f64) {
         self.set_grid_size(value);
     }
+
+    /// Synthesize the electron-density map from mmCIF map-coefficient text
+    /// (the `_refln` FWT/PHWT loop + cell + space group), using the configured
+    /// (or auto) resolution and grid. Faithful equivalent of C++
+    /// `MmcifMapReader::read`, which consumes the already-decompressed stream.
+    pub fn build_density_map_from_str(&self, input: &str) -> cuemol_core::Result<DensityMap> {
+        density_map_from_cif(input, self.resolution, self.grid_size)
+    }
+
+    /// Convenience file entry point. The CIF is read as plain text; compressed
+    /// inputs are decompressed by the stream/handler layer before reaching here
+    /// (mirrors the C++ InStream contract).
+    pub fn build_density_map_from_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> cuemol_core::Result<DensityMap> {
+        let input = std::fs::read_to_string(path)?;
+        self.build_density_map_from_str(&input)
+    }
 }
 
 impl Default for MmcifMapReader {
@@ -268,5 +296,22 @@ mod tests {
         assert_eq!(mtz.handler().type_descr(), "MTZ Structure Factor (*.mtz)");
         assert_eq!(mtz.resolution(), -1.0);
         assert_eq!(mtz.grid_size(), 0.33);
+    }
+
+    #[test]
+    fn mmcif_map_reader_builds_density_from_coefficients() {
+        // Exercise the public reader entry point end to end (parse -> FFT).
+        let cif = "data_map\n\
+             _cell.length_a 16.0\n_cell.length_b 16.0\n_cell.length_c 16.0\n\
+             _cell.angle_alpha 90.0\n_cell.angle_beta 90.0\n_cell.angle_gamma 90.0\n\
+             _symmetry.Int_Tables_number 1\n\
+             loop_\n_refln.index_h\n_refln.index_k\n_refln.index_l\n\
+             _refln.pdbx_FWT\n_refln.pdbx_PHWT\n\
+             1 0 0 800.0 0.0\n0 1 1 400.0 45.0\n#\n";
+        let reader = MmcifMapReader::new();
+        let map = reader.build_density_map_from_str(cif).unwrap();
+        assert!(map.den_min().is_finite() && map.den_max().is_finite());
+        assert!(map.den_max() > map.den_min());
+        assert!(map.den_sigma() > 0.0);
     }
 }

@@ -47,12 +47,14 @@ fn stream_manager_default_registry_matches_reference_handlers() {
     assert!(info_json.contains("\"name\":\"brix\""));
     assert!(info_json.contains("\"name\":\"mtzmap\""));
     assert!(info_json.contains("\"name\":\"msms\""));
+    assert!(info_json.contains("\"name\":\"qdfsurf\""));
+    assert!(info_json.contains("\"name\":\"qdfpot\""));
     assert!(info_json.contains("\"name\":\"qsc_xml\""));
     assert!(info_json.contains("\"name\":\"psefile\""));
     assert!(info_json.contains("\"category\":3"));
 
     let reader_info = manager.get_reader_info_json();
-    assert!(reader_info.contains("size: 16"));
+    assert!(reader_info.contains("size: 18"));
     assert!(reader_info.contains("\"PDB Coordinates (*.pdb;*.ent;*.pdb.gz)\""));
     assert!(reader_info.contains("\"QDF-PDB (*.qdfpdb)\""));
     assert!(reader_info.contains("\"mmcifmap\""));
@@ -70,10 +72,16 @@ fn stream_manager_default_registry_matches_reference_handlers() {
     assert!(reader_info.contains("\"mtzmap\""));
     assert!(reader_info.contains("\"MTZ Structure Factor (*.mtz)\""));
     assert!(reader_info.contains("\"msms\""));
+    assert!(reader_info.contains("\"CueMol molsurf file (*.qdf)\""));
+    assert!(reader_info.contains("\"CueMol elepot file (*.qdf)\""));
 
     let writer_info = manager.get_writer_info_json();
-    assert!(writer_info.contains("size: 2"));
+    assert!(writer_info.contains("size: 6"));
     assert!(writer_info.contains("\"PDB coordinates (*.pdb)\""));
+    assert!(writer_info.contains("\"XYZR coordinates(*.xyzr)\""));
+    assert!(writer_info.contains("\"PQR coordinates(*.pqr)\""));
+    assert!(writer_info.contains("\"qdfsurf\""));
+    assert!(writer_info.contains("\"qdfpot\""));
 }
 
 #[test]
@@ -438,6 +446,34 @@ fn stream_manager_searches_reference_importer_sniffers() {
         "msms"
     );
     let _ = fs::remove_file(msms);
+
+    let qdfsurf = temp_file("stream-surface.qdf");
+    fs::write(&qdfsurf, qdf_header("SRF1")).unwrap();
+    assert_eq!(
+        manager.search_reader_by_content(&qdfsurf, "", HandlerCategory::ObjReader, false, 0),
+        "qdfsurf"
+    );
+    assert_eq!(
+        manager.sniff_content(&qdfsurf, HandlerSniffer::QdfSurf, 0),
+        cuemol_molstr::ContentVerdict::Yes
+    );
+    assert_eq!(
+        manager.sniff_content(&qdfsurf, HandlerSniffer::QdfPot, 0),
+        cuemol_molstr::ContentVerdict::No
+    );
+    let _ = fs::remove_file(qdfsurf);
+
+    let qdfpot = temp_file("stream-potential.qdf");
+    fs::write(&qdfpot, qdf_header("POT1")).unwrap();
+    assert_eq!(
+        manager.search_reader_by_content(&qdfpot, "", HandlerCategory::ObjReader, false, 0),
+        "qdfpot"
+    );
+    assert_eq!(
+        manager.sniff_content(&qdfpot, HandlerSniffer::QdfPot, 0),
+        cuemol_molstr::ContentVerdict::Yes
+    );
+    let _ = fs::remove_file(qdfpot);
 }
 
 #[test]
@@ -537,5 +573,18 @@ fn namd_header(natoms: i32, x: f64, y: f64, z: f64, swapped: bool) -> Vec<u8> {
         bytes.extend_from_slice(&y.to_le_bytes());
         bytes.extend_from_slice(&z.to_le_bytes());
     }
+    bytes
+}
+
+fn qdf_header(file_type: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"QDF0");
+    bytes.push(0);
+    bytes.extend_from_slice(&12_345_678_i32.to_le_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&1.234_567_8_f32.to_le_bytes());
+    bytes.extend_from_slice(&2_i32.to_le_bytes());
+    bytes.extend_from_slice(&(file_type.len() as i32).to_le_bytes());
+    bytes.extend_from_slice(file_type.as_bytes());
     bytes
 }

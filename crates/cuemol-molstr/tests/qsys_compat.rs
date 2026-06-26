@@ -176,6 +176,28 @@ fn qsc_loader_resolves_atom_interaction_renderer_defs() {
         measure2.get_defs_json(),
         "[{\"a0\":\"9 ALA 27 CA\",\"a1\":\"A CYS 3 CA\"}]"
     );
+
+    // The measured distance is the actual CA(9/27)-CA(A/3) separation. Cross-check
+    // it against the two atoms found by an independent scan of the molecule.
+    let find_ca = |chain: &str, res_id: i32| {
+        mol.mol()
+            .atoms()
+            .iter()
+            .find(|a| a.chain_id == chain && a.res_id == res_id && a.name.trim() == "CA")
+            .map(|a| a.position)
+            .expect("CA atom present")
+    };
+    let p0 = find_ca("9", 27);
+    let p1 = find_ca("A", 3);
+    let expected = ((p0.x - p1.x).powi(2) + (p0.y - p1.y).powi(2) + (p0.z - p1.z).powi(2)).sqrt();
+
+    let distances = mol.atom_intr_distances(measure);
+    assert_eq!(distances.len(), 1);
+    assert!((distances[0].unwrap() - expected).abs() < 1.0e-6);
+    assert!(expected > 0.0);
+    assert!(mol
+        .atom_intr_measurements_json(measure)
+        .contains(&format!("\"distance\":{expected:.3}")));
 }
 
 #[test]

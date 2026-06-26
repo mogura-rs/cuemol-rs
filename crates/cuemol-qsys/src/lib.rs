@@ -5,6 +5,7 @@ pub mod io_handler;
 pub mod io_objects;
 pub mod misc;
 pub mod object;
+pub mod qdf_stream;
 pub mod render_base;
 pub mod renderer_factory;
 pub mod scalar_object;
@@ -30,6 +31,11 @@ pub use misc::{
     MultiGradient, PropEditInfo, RendGroup, Renderer, TestRenderer, ViewInputConfig, INVALID_UID,
 };
 pub use object::SceneObject;
+pub use qdf_stream::{
+    qdf_file_type, QdfFieldDef, QdfReader, QdfWriter, QDF_TYPE_BOOL, QDF_TYPE_FIXSTR8,
+    QDF_TYPE_FLOAT32, QDF_TYPE_INT32, QDF_TYPE_INT8, QDF_TYPE_UID, QDF_TYPE_UINT32, QDF_TYPE_UINT8,
+    QDF_TYPE_UTF8STR,
+};
 pub use render_base::{DispListRenderer, DrawObj, ShaderObjMgr};
 pub use renderer_factory::{RendererFactory, RendererInstance};
 pub use scalar_object::ScalarObject;

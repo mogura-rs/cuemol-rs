@@ -1,3 +1,5 @@
+use crate::fft::{auto_resolution, synthesize_density_map_with_cell, Reflection, SymOp};
+use crate::map_renderers::DensityMap;
 use cuemol_core::{CueMolError, Result};
 use cuemol_qsys::{InOutHandler, ObjReader};
 use std::fs;
@@ -267,6 +269,134 @@ impl Mtz2MapReader {
         }
         Ok(())
     }
+
+    /// Synthesize the electron-density map from the loaded MTZ via inverse FFT,
+    /// using the selected amplitude/phase columns, the MTZ cell and space group,
+    /// and the configured (or auto) resolution. Mirrors C++ `MTZ2MapReader`.
+    pub fn build_density_map(&self) -> Result<DensityMap> {
+        let mtz = self
+            .mtz
+            .as_ref()
+            .ok_or_else(|| CueMolError::invalid_argument("no MTZ data loaded"))?;
+        let f_col = self
+            .selected_f
+            .ok_or_else(|| CueMolError::parse("no amplitude (F) column selected"))?;
+        density_map_from_mtz(
+            mtz,
+            f_col,
+            self.selected_phi,
+            self.resolution,
+            self.grid_size,
+        )
+    }
+}
+
+/// Build an electron-density `DensityMap` from a parsed MTZ and chosen column
+/// indices. Reflections whose amplitude is missing (non-finite) are skipped; an
+/// absent phase column is treated as phase 0. Resolution <= 0.1 triggers the
+/// auto resolution from the maximum Miller indices.
+pub fn density_map_from_mtz(
+    mtz: &MtzFile,
+    f_col: usize,
+    phi_col: Option<usize>,
+    resolution: f64,
+    grid_size: f64,
+) -> Result<DensityMap> {
+    let cell6 = mtz
+        .cell
+        .ok_or_else(|| CueMolError::parse("MTZ has no unit cell"))?;
+
+    let mut reflections = Vec::new();
+    for index in 0..mtz.reflections.len() {
+        let Some((h, k, l)) = mtz.reflection_hkl(index) else {
+            continue;
+        };
+        let values = &mtz.reflections[index].values;
+        let Some(&f) = values.get(f_col) else {
+            continue;
+        };
+        if !f.is_finite() {
+            continue; // missing reflection
+        }
+        let phi_deg = phi_col
+            .and_then(|c| values.get(c).copied())
+            .filter(|p| p.is_finite())
+            .unwrap_or(0.0);
+        reflections.push(Reflection {
+            h,
+            k,
+            l,
+            f,
+            phi_deg,
+        });
+    }
+
+    let sg = mtz.space_group.unwrap_or(1);
+    density_map_from_reflections_with_cell(&reflections, cell6, sg, resolution, grid_size)
+}
+
+/// Shared structure-factors -> electron-density core used by every reflection
+/// source (MTZ, mmCIF map coefficients, ...). Picks the FFT grid resolution
+/// (auto from the max Miller indices when `resolution <= 0.1`), expands the
+/// reflections by the space group's real symmetry operators (full `symop.dat`
+/// table; P1 fallback only if the group is unknown), runs the inverse FFT, and
+/// wraps the grid as a `DensityMap`.
+pub fn density_map_from_reflections(
+    reflections: &[Reflection],
+    cell_abc: [f64; 3],
+    space_group: i32,
+    resolution: f64,
+    grid_size: f64,
+) -> DensityMap {
+    density_map_from_reflections_with_cell(
+        reflections,
+        [cell_abc[0], cell_abc[1], cell_abc[2], 90.0, 90.0, 90.0],
+        space_group,
+        resolution,
+        grid_size,
+    )
+    .expect("orthogonal cell parameters are valid")
+}
+
+pub fn density_map_from_reflections_with_cell(
+    reflections: &[Reflection],
+    cell: [f64; 6],
+    space_group: i32,
+    resolution: f64,
+    grid_size: f64,
+) -> Result<DensityMap> {
+    let cell_abc = [cell[0], cell[1], cell[2]];
+    let max_hkl = reflections.iter().fold([1i32; 3], |mut max, r| {
+        max[0] = max[0].max(r.h.abs());
+        max[1] = max[1].max(r.k.abs());
+        max[2] = max[2].max(r.l.abs());
+        max
+    });
+
+    let grid_spacing = if grid_size > 0.0 {
+        grid_size
+    } else {
+        1.0 / 3.0
+    };
+    let resolution = if resolution > 0.1 {
+        resolution
+    } else {
+        auto_resolution(cell_abc, max_hkl, grid_spacing)
+    };
+
+    let manager = cuemol_symm::SymmOpManager::new();
+    let symops: Vec<SymOp> = manager
+        .symmetry_operators(space_group)
+        .map(|ops| {
+            ops.iter()
+                .map(|op| SymOp::from_matrix(&op.matrix))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![SymOp::identity()]);
+
+    let grid =
+        synthesize_density_map_with_cell(reflections, &symops, cell, resolution, grid_spacing)?;
+    Ok(DensityMap::from_grid_map(grid))
 }
 
 pub fn read_mtz_file(path: impl AsRef<Path>) -> Result<MtzFile> {
@@ -532,5 +662,128 @@ fn read_f32(bytes: &[u8], offset: usize, byte_swapped: bool) -> f32 {
         f32::from_be_bytes(field)
     } else {
         f32::from_le_bytes(field)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn column(name: &str, kind: char, index: usize) -> MtzColumn {
+        MtzColumn {
+            name: name.to_string(),
+            kind,
+            index,
+        }
+    }
+
+    #[test]
+    fn density_map_from_mtz_single_reflection_stats() {
+        // Columns H,K,L,F,PHI with one reflection F(1,0,0)=1000, phase 0.
+        let mtz = MtzFile {
+            header_start_word: 0,
+            column_count: 5,
+            reflection_count: 1,
+            columns: vec![
+                column("H", 'H', 0),
+                column("K", 'H', 1),
+                column("L", 'H', 2),
+                column("F", 'F', 3),
+                column("PHI", 'P', 4),
+            ],
+            cell: Some([10.0, 12.0, 14.0, 90.0, 90.0, 90.0]),
+            space_group: Some(1),
+            resolution: None,
+            byte_swapped: false,
+            reflections: vec![MtzReflection {
+                values: vec![1.0, 0.0, 0.0, 1000.0, 0.0],
+            }],
+        };
+
+        let map = density_map_from_mtz(&mtz, 3, Some(4), -1.0, 0.33).unwrap();
+        // rho = (2A/V) cos(2*pi*a/na): no F000 -> mean 0; max at a=0 is +2A/V.
+        let amp = 2.0 * 1000.0 / (10.0 * 12.0 * 14.0);
+        assert!(map.den_mean().abs() < 1.0e-3, "mean {}", map.den_mean());
+        assert!(
+            (map.den_max() - amp).abs() < 1.0e-3,
+            "max {} vs {amp}",
+            map.den_max()
+        );
+        assert!(map.den_min() < 0.0, "min {}", map.den_min());
+    }
+
+    #[test]
+    fn density_map_from_mtz_skips_missing_amplitude() {
+        // A NaN amplitude reflection must be skipped (no panic; finite map).
+        let mtz = MtzFile {
+            header_start_word: 0,
+            column_count: 4,
+            reflection_count: 2,
+            columns: vec![
+                column("H", 'H', 0),
+                column("K", 'H', 1),
+                column("L", 'H', 2),
+                column("F", 'F', 3),
+            ],
+            cell: Some([10.0, 10.0, 10.0, 90.0, 90.0, 90.0]),
+            space_group: Some(1),
+            resolution: None,
+            byte_swapped: false,
+            reflections: vec![
+                MtzReflection {
+                    values: vec![1.0, 0.0, 0.0, f32::NAN],
+                },
+                MtzReflection {
+                    values: vec![0.0, 1.0, 0.0, 500.0],
+                },
+            ],
+        };
+        let map = density_map_from_mtz(&mtz, 3, None, -1.0, 0.33).unwrap();
+        assert!(map.den_mean().abs() < 1.0e-3);
+        assert!(map.den_max() > 0.0);
+    }
+
+    fn general_reflection_mtz(space_group: i32) -> MtzFile {
+        // One general reflection F(1,2,3); same data, different space group.
+        MtzFile {
+            header_start_word: 0,
+            column_count: 5,
+            reflection_count: 1,
+            columns: vec![
+                column("H", 'H', 0),
+                column("K", 'H', 1),
+                column("L", 'H', 2),
+                column("F", 'F', 3),
+                column("PHI", 'P', 4),
+            ],
+            cell: Some([20.0, 24.0, 28.0, 90.0, 90.0, 90.0]),
+            space_group: Some(space_group),
+            resolution: None,
+            byte_swapped: false,
+            reflections: vec![MtzReflection {
+                values: vec![1.0, 2.0, 3.0, 1000.0, 30.0],
+            }],
+        }
+    }
+
+    #[test]
+    fn density_synthesis_expands_by_real_space_group_symmetry() {
+        // With the full symop table, a non-triclinic group now contributes its
+        // real operators instead of falling back to P1. P212121 (#19) has 4
+        // operators, so its density must differ from the P1 synthesis of the
+        // same single reflection. (Before the table was wired this would have
+        // produced an identical, P1-only map.)
+        let p1 = density_map_from_mtz(&general_reflection_mtz(1), 3, Some(4), 2.0, 0.33).unwrap();
+        let p212121 =
+            density_map_from_mtz(&general_reflection_mtz(19), 3, Some(4), 2.0, 0.33).unwrap();
+
+        // Same grid, but symmetry mates change the density distribution.
+        assert_eq!(p1.byte_values().len(), p212121.byte_values().len());
+        assert!(
+            (p1.den_sigma() - p212121.den_sigma()).abs() > 1.0e-6
+                || (p1.den_max() - p212121.den_max()).abs() > 1.0e-6,
+            "P212121 synthesis did not differ from P1 (symmetry not applied)"
+        );
+        assert!(p212121.den_sigma() > 0.0);
     }
 }

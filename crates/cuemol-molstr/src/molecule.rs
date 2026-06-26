@@ -449,6 +449,36 @@ impl MolCoord {
             .map(String::as_str)
     }
 
+    /// All residue string properties, keyed by residue. Used by the QDF molecule
+    /// serializer to carry per-residue props (e.g. DSSP `secondary`) through a
+    /// save/load round-trip.
+    pub fn residue_props(&self) -> &BTreeMap<ResidueKey, BTreeMap<String, String>> {
+        &self.residue_props
+    }
+
+    /// Replace the entire residue-property table (used to restore a snapshot, e.g.
+    /// for undo of a secondary-structure edit).
+    pub fn set_all_residue_props(
+        &mut self,
+        props: BTreeMap<ResidueKey, BTreeMap<String, String>>,
+    ) {
+        self.residue_props = props;
+    }
+
+    /// Assign protein secondary structure (Kabsch-Sander DSSP) into the
+    /// `secondary`/`secondary2` residue properties. Mirrors C++
+    /// `MolCoord::calcProt2ndry(hb_high, bIgnoreBulge)`.
+    pub fn calc_prot_2ndry(&mut self, hb_high: f64, ignore_bulge: bool) {
+        crate::prot2ndry::calc_prot_2ndry(self, hb_high, ignore_bulge);
+    }
+
+    /// As [`Self::calc_prot_2ndry`], then merge helices across a short
+    /// low-curvature gap. Mirrors C++ `MolCoord::calcProt2ndry2(bIgnoreBulge,
+    /// dhangl1)`.
+    pub fn calc_prot_2ndry2(&mut self, ignore_bulge: bool, dhangl: f64) {
+        crate::prot2ndry::calc_prot_2ndry2(self, ignore_bulge, dhangl);
+    }
+
     pub fn center_pos(&self, selector: Option<&Selector>) -> Option<Vector4> {
         let indices = selected_or_all_indices(self, selector);
         if indices.is_empty() {
@@ -521,29 +551,17 @@ impl MolCoord {
         self.atoms_moved_generation
     }
 
+    /// Generate connectivity from the residue-topology dictionary.
+    ///
+    /// Standard residues get their canonical template bonds (with correct bond
+    /// orders), consecutive polymer residues are joined by the matching poly link
+    /// (peptide / phosphodiester), explicit links (disulfide) are formed between
+    /// distance-matching residue pairs, and unknown residues (ligands, solvent)
+    /// fall back to per-residue distance autogeneration.  Port of
+    /// `TopoBuilder::applyTopology`; see [`crate::toppar`].  Idempotent —
+    /// `add_bond` dedups, so re-running adds nothing new.
     pub fn apply_topology(&mut self) {
-        let mut pairs = Vec::new();
-        for i in 0..self.atoms.len() {
-            for j in (i + 1)..self.atoms.len() {
-                if self.bonds.iter().any(|bond| {
-                    (bond.atom1 == i && bond.atom2 == j) || (bond.atom1 == j && bond.atom2 == i)
-                }) {
-                    continue;
-                }
-                let distance = (self.atoms[i].position - self.atoms[j].position).length3d();
-                if distance >= 0.1
-                    && distance
-                        <= covalent_radius(&self.atoms[i].element)
-                            + covalent_radius(&self.atoms[j].element)
-                            + 0.45
-                {
-                    pairs.push((i, j));
-                }
-            }
-        }
-        for (i, j) in pairs {
-            self.add_bond(i, j, BondOrder::Single);
-        }
+        crate::toppar::build_topology_bonds(self);
     }
 
     pub fn calc_base_pair(&mut self, cutoff: f64, _tilt: f64) -> usize {
@@ -1009,18 +1027,6 @@ fn atom_key(atom: &Atom) -> (String, i32, Option<char>, String, Option<char>) {
     )
 }
 
-fn covalent_radius(element: &str) -> f64 {
-    match element.trim().to_ascii_uppercase().as_str() {
-        "H" => 0.31,
-        "C" => 0.76,
-        "N" => 0.71,
-        "O" => 0.66,
-        "S" => 1.05,
-        "P" => 1.07,
-        _ => 0.77,
-    }
-}
-
 fn is_nucleotide_residue(name: &str) -> bool {
     matches!(
         name.trim().to_ascii_uppercase().as_str(),
@@ -1184,10 +1190,16 @@ mod tests {
 
     #[test]
     fn molcoord_apply_topology_adds_missing_near_bonds() {
+        // A residue with no dictionary template (a ligand) falls back to
+        // per-residue distance autogeneration: C1-C2 (1.4 Å) bonds, C3 (5 Å) does
+        // not.  Atom names C1/C2/C3 are not real ALA atoms, so the topology path
+        // would correctly add nothing — this exercises the autogen fallback.
         let mut mol = MolCoord::new();
-        mol.push_atom(atom(1, "A", 1, "C1", 0.0));
-        mol.push_atom(atom(2, "A", 1, "C2", 1.4));
-        mol.push_atom(atom(3, "A", 1, "C3", 5.0));
+        for (serial, name, x) in [(1, "C1", 0.0), (2, "C2", 1.4), (3, "C3", 5.0)] {
+            let mut a = atom(serial, "A", 1, name, x);
+            a.res_name = "LIG".to_string();
+            mol.push_atom(a);
+        }
 
         mol.apply_topology();
         mol.apply_topology();

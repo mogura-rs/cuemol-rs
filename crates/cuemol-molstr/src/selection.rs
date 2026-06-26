@@ -1,6 +1,6 @@
 use crate::molecule::{Atom, MolCoord};
 use cuemol_core::{CueMolError, IntRange, RangeSet, Result};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selector {
@@ -14,6 +14,12 @@ pub enum Selector {
     ResidueId(String),
     Aid(RangeSet),
     RProp {
+        name: String,
+        value: String,
+    },
+    /// Atom-property selection (`aprop name=value`), matching an atom's integer
+    /// property — the atom-level analogue of `rprop` (C++ `SelPropNode` APROP mode).
+    AProp {
         name: String,
         value: String,
     },
@@ -35,6 +41,9 @@ pub enum Selector {
     Not(Box<Selector>),
     And(Box<Selector>, Box<Selector>),
     Or(Box<Selector>, Box<Selector>),
+    /// A named-selection reference (`sel name`), resolved against a registry of
+    /// saved selections via [`Selector::resolve_named`] (C++ `SelRefNode`).
+    Ref(String),
     Hier(HierSelector),
 }
 
@@ -149,7 +158,68 @@ pub fn parse_selector(input: &str) -> Result<Selector> {
     }
 }
 
+/// Parse a selection, resolving any `sel name` references against `registry`
+/// (named/saved selections). Errors on an unknown or cyclic name.
+pub fn parse_named_selector(
+    input: &str,
+    registry: &HashMap<String, Selector>,
+) -> Result<Selector> {
+    parse_selector(input)?.resolve_named(registry)
+}
+
 impl Selector {
+    /// Replace every `sel name` reference with the registered selector, returning
+    /// a reference-free selector (C++ `SelRefNode::resolveReference`). Errors on an
+    /// unknown name or a reference cycle.
+    pub fn resolve_named(&self, registry: &HashMap<String, Selector>) -> Result<Selector> {
+        self.resolve_named_depth(registry, 0)
+    }
+
+    fn resolve_named_depth(
+        &self,
+        registry: &HashMap<String, Selector>,
+        depth: usize,
+    ) -> Result<Selector> {
+        if depth > 64 {
+            return Err(CueMolError::parse("selection name reference is cyclic"));
+        }
+        Ok(match self {
+            Selector::Ref(name) => {
+                let target = registry.get(name).ok_or_else(|| {
+                    CueMolError::parse(format!("unknown selection name: {name}"))
+                })?;
+                target.resolve_named_depth(registry, depth + 1)?
+            }
+            Selector::Not(inner) => {
+                Selector::Not(Box::new(inner.resolve_named_depth(registry, depth + 1)?))
+            }
+            Selector::And(lhs, rhs) => Selector::And(
+                Box::new(lhs.resolve_named_depth(registry, depth + 1)?),
+                Box::new(rhs.resolve_named_depth(registry, depth + 1)?),
+            ),
+            Selector::Or(lhs, rhs) => Selector::Or(
+                Box::new(lhs.resolve_named_depth(registry, depth + 1)?),
+                Box::new(rhs.resolve_named_depth(registry, depth + 1)?),
+            ),
+            Selector::Unary { op, inner } => Selector::Unary {
+                op: *op,
+                inner: Box::new(inner.resolve_named_depth(registry, depth + 1)?),
+            },
+            Selector::Distance {
+                op,
+                inner,
+                distance,
+                molecule,
+            } => Selector::Distance {
+                op: *op,
+                inner: Box::new(inner.resolve_named_depth(registry, depth + 1)?),
+                distance: *distance,
+                molecule: molecule.clone(),
+            },
+            other => other.clone(),
+        })
+    }
+
     pub fn dump(&self) -> String {
         match self {
             Selector::All => "*".to_string(),
@@ -162,6 +232,7 @@ impl Selector {
             Selector::ResidueId(value) => format!("resi {value}"),
             Selector::Aid(values) => format!("aid {values}"),
             Selector::RProp { name, value } => format!("rprop {name}={value}"),
+            Selector::AProp { name, value } => format!("aprop {name}={value}"),
             Selector::Comparison {
                 property,
                 op,
@@ -183,6 +254,7 @@ impl Selector {
             Selector::Not(inner) => format!("!({})", inner.dump()),
             Selector::And(lhs, rhs) => format!("({}) and ({})", lhs.dump(), rhs.dump()),
             Selector::Or(lhs, rhs) => format!("({}) or ({})", lhs.dump(), rhs.dump()),
+            Selector::Ref(name) => format!("sel {name}"),
             Selector::Hier(value) => value.dump(),
         }
     }
@@ -207,7 +279,7 @@ impl Selector {
                 .any(|value| value.matches_bare(&atom.res_name)),
             Selector::ResidueId(value) => residue_selector_matches(value, atom),
             Selector::Aid(values) => values.contains(atom.serial),
-            Selector::RProp { name, value } => atom
+            Selector::RProp { name, value } | Selector::AProp { name, value } => atom
                 .int_prop(name)
                 .is_some_and(|prop| prop.to_string() == *value),
             Selector::Comparison {
@@ -220,6 +292,9 @@ impl Selector {
             Selector::Not(inner) => !inner.matches(atom),
             Selector::And(lhs, rhs) => lhs.matches(atom) && rhs.matches(atom),
             Selector::Or(lhs, rhs) => lhs.matches(atom) || rhs.matches(atom),
+            // An unresolved named reference matches nothing; resolve it first via
+            // `resolve_named`.
+            Selector::Ref(_) => false,
             Selector::Hier(value) => value.matches(atom),
         }
     }
@@ -692,6 +767,16 @@ impl<'a> Parser<'a> {
         }
         if self.consume_keyword("rprop") {
             return parse_rprop(self.read_leaf_tail());
+        }
+        if self.consume_keyword("aprop") {
+            return parse_aprop(self.read_leaf_tail());
+        }
+        if self.consume_keyword("sel") {
+            let name = self.read_leaf_tail().trim().to_string();
+            if name.is_empty() {
+                return Err(CueMolError::parse("missing selection name after 'sel'"));
+            }
+            return Ok(Selector::Ref(name));
         }
         if self.consume_keyword("resi")
             || self.consume_keyword("resid")
@@ -1273,6 +1358,29 @@ fn parse_comparison(property: NumericProperty, input: &str) -> Result<Selector> 
     })
 }
 
+/// Parse `aprop name=value` — an atom integer-property match.
+fn parse_aprop(input: &str) -> Result<Selector> {
+    let input = input.trim();
+    let Some((name, value)) = input.split_once('=') else {
+        return Err(CueMolError::parse("missing atom property value"));
+    };
+    if value.trim_start().starts_with('=') {
+        return Err(CueMolError::parse("invalid atom property operator"));
+    }
+    let name = name.trim();
+    let value = value.trim();
+    if name.is_empty() {
+        return Err(CueMolError::parse("missing atom property name"));
+    }
+    if value.is_empty() {
+        return Err(CueMolError::parse("missing atom property value"));
+    }
+    Ok(Selector::AProp {
+        name: name.to_string(),
+        value: value.to_string(),
+    })
+}
+
 fn parse_rprop(input: &str) -> Result<Selector> {
     let input = input.trim();
     let Some((name, value)) = input.split_once('=') else {
@@ -1610,5 +1718,65 @@ ATOM      3  C   THR B   2      15.685  12.755   5.133  1.00  9.19           C
         let selector = parse_selector("chain A and elem C").unwrap();
         let selected = mol.select_indices(&selector);
         assert_eq!(selected, vec![1]);
+    }
+
+    #[test]
+    fn evaluates_aprop_atom_property_selection() {
+        // `aprop` selects on an atom's integer property (here the ANISOU U11
+        // component), the atom-level analogue of `rprop`. Atom 0 carries ANISOU;
+        // atom 1 does not.
+        let pdb = "\
+ATOM      1  N   THR A   1      17.047  14.099   3.625  1.00 13.79           N
+ANISOU    1  N   THR A   1     1111   2222   3333    444    555    666       N
+ATOM      2  CA  THR A   1      16.967  12.784   4.338  1.00 10.80           C
+";
+        let mol = read_pdb_str(pdb).unwrap();
+        let sel = parse_selector("aprop anisou_u11=1111").unwrap();
+        assert_eq!(sel.dump(), "aprop anisou_u11=1111");
+        assert_eq!(mol.select_indices(&sel), vec![0]);
+        // A non-matching value (and the atom that lacks the prop) select nothing.
+        assert!(mol
+            .select_indices(&parse_selector("aprop anisou_u11=9999").unwrap())
+            .is_empty());
+        // `aprop` composes with the boolean operators like any other leaf.
+        assert_eq!(
+            mol.select_indices(&parse_selector("aprop anisou_u11=1111 and name N").unwrap()),
+            vec![0]
+        );
+        // A missing value is a parse error.
+        assert!(parse_selector("aprop anisou_u11").is_err());
+    }
+
+    #[test]
+    fn resolves_named_sel_references() {
+        let pdb = "\
+ATOM      1  N   THR A   1      17.047  14.099   3.625  1.00 13.79           N
+ATOM      2  CA  THR A   1      16.967  12.784   4.338  1.00 10.80           C
+ATOM      3  C   THR B   2      15.685  12.755   5.133  1.00  9.19           C
+";
+        let mol = read_pdb_str(pdb).unwrap();
+        let mut registry = HashMap::new();
+        registry.insert("chainA".to_string(), parse_selector("chain A").unwrap());
+        registry.insert("carbons".to_string(), parse_selector("elem C").unwrap());
+
+        // `sel name` references a saved selection.
+        let sel = parse_named_selector("sel chainA", &registry).unwrap();
+        assert_eq!(mol.select_indices(&sel), vec![0, 1]);
+
+        // It composes with operators: chain-A carbons = atom 1 (CA).
+        let sel = parse_named_selector("sel chainA and sel carbons", &registry).unwrap();
+        assert_eq!(mol.select_indices(&sel), vec![1]);
+
+        // The unresolved reference dumps as `sel name`.
+        assert_eq!(parse_selector("sel chainA").unwrap().dump(), "sel chainA");
+
+        // An unknown name is an error.
+        assert!(parse_named_selector("sel nope", &registry).is_err());
+
+        // A reference cycle is detected, not looped forever.
+        let mut cyclic = HashMap::new();
+        cyclic.insert("a".to_string(), parse_selector("sel b").unwrap());
+        cyclic.insert("b".to_string(), parse_selector("sel a").unwrap());
+        assert!(parse_named_selector("sel a", &cyclic).is_err());
     }
 }

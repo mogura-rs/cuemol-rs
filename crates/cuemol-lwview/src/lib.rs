@@ -2,6 +2,9 @@ use cuemol_core::{Uid, Vector4};
 use cuemol_qsys::{Renderer, Scene, SceneObject};
 use std::collections::BTreeMap;
 
+pub mod qdf_lwobj;
+pub use qdf_lwobj::{read_qdf_lwobj_bytes, write_qdf_lwobj_bytes, QdfLWObjReader, QdfLWObjWriter};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LWHitData {
     id: i32,
@@ -157,6 +160,12 @@ impl LWObject {
 
     pub fn hit_data(&self, index: i32) -> Option<&LWHitData> {
         self.hit_data.get(index as usize)
+    }
+
+    /// Mutable access to a hit record (used by the QDF serializer to restore the
+    /// `rendered` flag on load).
+    pub fn hit_data_mut(&mut self, index: i32) -> Option<&mut LWHitData> {
+        self.hit_data.get_mut(index as usize)
     }
 
     pub fn hit_data_len(&self) -> usize {

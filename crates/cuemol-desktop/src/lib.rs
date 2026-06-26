@@ -22,6 +22,14 @@ use std::path::Path;
 #[cfg(feature = "native-gui")]
 pub mod gui;
 
+#[cfg(feature = "gpui-gui")]
+pub mod gpui_app;
+
+// Offscreen wgpu mesh renderer (verifiable headless; the wgpu 3D component the
+// gpui GUI composites). Available whenever the wgpu deps are present.
+#[cfg(any(feature = "native-gui", feature = "gpui-gui"))]
+pub mod offscreen;
+
 #[derive(Debug, Clone)]
 pub struct DesktopAppState {
     command_manager: MolCommandManager,
@@ -634,6 +642,47 @@ impl DesktopAppState {
             .active_scene
             .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
         self.render_snapshot(scene_uid, selection_text)
+    }
+
+    /// Render the active scene to a PNG file via the offscreen wgpu renderer,
+    /// auto-framing the molecule from its bounding box. Headless molecular image
+    /// export (no window). Errors if no GPU adapter is available.
+    #[cfg(any(feature = "native-gui", feature = "gpui-gui"))]
+    pub fn export_active_scene_png(
+        &self,
+        path: impl AsRef<Path>,
+        width: u32,
+        height: u32,
+        selection_text: &str,
+    ) -> Result<()> {
+        let snapshot = self.active_render_snapshot(selection_text)?;
+        let mut camera = cuemol_qsys::Camera::new();
+        if let Some((min, max)) = snapshot.bounds {
+            let dx = max.x - min.x;
+            let dy = max.y - min.y;
+            let dz = max.z - min.z;
+            let size = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
+            camera.set_center(cuemol_core::Vector4::new3(
+                (min.x + max.x) / 2.0,
+                (min.y + max.y) / 2.0,
+                (min.z + max.z) / 2.0,
+            ));
+            camera.set_zoom(size * 1.2);
+            camera.set_cam_dist(size * 3.0);
+            camera.set_slab_depth(size * 2.5);
+        }
+        let aspect = width.max(1) as f64 / height.max(1) as f64;
+        let mvp = crate::offscreen::camera_mvp(&camera, aspect);
+        let png = crate::offscreen::render_snapshot_png(
+            &snapshot,
+            mvp,
+            width,
+            height,
+            [0.1, 0.1, 0.12, 1.0],
+        )
+        .ok_or_else(|| CueMolError::invalid_argument("no GPU adapter for offscreen render"))?;
+        fs::write(path, png)?;
+        Ok(())
     }
 
     pub fn render_snapshot(
@@ -1316,6 +1365,49 @@ fn residue_one_letter(name: &str) -> char {
 mod tests {
     use super::*;
 
+    #[cfg(any(feature = "native-gui", feature = "gpui-gui"))]
+    #[test]
+    fn renders_1crn_molecule_to_a_png_for_visual_check() {
+        // Produce the ACTUAL molecular view the GUI viewport renders, as a PNG, so
+        // it can be eyeballed (self-skips without the reference PDB or a GPU).
+        let pdb = std::path::Path::new("/Users/thmini/works/tools/cuemol2/tests/test_data/1CRN.pdb");
+        if !pdb.exists() {
+            return;
+        }
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        if app.open_path(pdb).is_err() {
+            return;
+        }
+        let out = std::path::Path::new(concat!(
+            "/private/tmp/claude-501/-Users-thmini-works-tools-cuemol2-rs/",
+            "3e9e9ca1-ce59-4a29-94a8-969339aa0fa7/scratchpad/crn_render.png"
+        ));
+        match app.export_active_scene_png(out, 600, 600, "") {
+            Ok(()) => assert!(out.exists(), "png not written"),
+            Err(_) => { /* no GPU adapter; skip */ }
+        }
+    }
+
+    #[cfg(any(feature = "native-gui", feature = "gpui-gui"))]
+    #[test]
+    fn exports_active_scene_to_a_png_file() {
+        // Exercises the offscreen render -> PNG -> file path. Self-skips when no
+        // GPU adapter is available (the method returns an error).
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let path =
+            std::env::temp_dir().join(format!("cuemol2-rs-export-{}.png", std::process::id()));
+        match app.export_active_scene_png(&path, 32, 32, "") {
+            Ok(()) => {
+                let bytes = std::fs::read(&path).expect("read exported png");
+                assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG");
+                let _ = std::fs::remove_file(&path);
+            }
+            Err(_) => { /* no GPU adapter in this environment; skip */ }
+        }
+    }
+
     #[test]
     fn desktop_app_state_exposes_command_and_stream_facades() {
         let mut app = DesktopAppState::new();
@@ -1801,8 +1893,10 @@ attribute \"dep\" string \"positions\"
         let surface = app
             .write_surface_obj(first, "name CA", 1.0, 1.4, &surface_path)
             .unwrap();
-        assert_eq!(surface.vertex_count, 276);
-        assert_eq!(surface.triangle_count, 368);
+        // Grid marching-tetrahedra surface of the 46 CA spheres: a substantial
+        // closed mesh (the former octahedron stub gave a fixed 276 verts/368 tris).
+        assert!(surface.vertex_count > 1000);
+        assert!(surface.triangle_count > 1000);
         assert!(std::fs::read_to_string(&surface_path)
             .unwrap()
             .contains("o cuemol_surface"));

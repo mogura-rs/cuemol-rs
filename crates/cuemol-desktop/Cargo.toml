@@ -21,6 +21,18 @@ egui = { version = "0.33.3", optional = true }
 egui-wgpu = { version = "0.33.3", optional = true }
 egui-winit = { version = "0.33.3", default-features = false, optional = true }
 glam = { version = "0.30.10", optional = true }
+# Same version gpui resolves to, so `image::Frame` matches `gpui::RenderImage::new`.
+image = { version = "0.25", optional = true }
+# `runtime_shaders` makes gpui compile its Metal shaders at RUNTIME (via the
+# Metal framework) instead of at build time via `xcrun metal` — the latter needs
+# the full Xcode toolchain (CLT lacks the offline `metal` compiler). This lets
+# the gpui GUI build with only Command Line Tools.
+gpui = { version = "0.2.2", optional = true, features = ["runtime_shaders"] }
+# wgpu pulls naga 27; without a colour-writer feature naga 27.0.3 falls back to
+# `String: WriteColor`, which codespan-reporting 0.12 doesn't satisfy. Force the
+# `termcolor` path on (egui-wgpu enables it for native-gui; gpui-gui doesn't).
+naga = { version = "27", features = ["termcolor"], optional = true }
+png = { version = "0.17", optional = true }
 pollster = { version = "0.4", optional = true }
 wgpu = { version = "27.0.1", optional = true }
 winit = { version = "0.30.12", optional = true }
@@ -33,9 +45,22 @@ native-gui = [
   "dep:egui-wgpu",
   "dep:egui-winit",
   "dep:glam",
+  "dep:png",
   "dep:pollster",
   "dep:wgpu",
   "dep:winit",
+]
+# Parallel gpui-based GUI (Zed's framework): gpui draws the panels, wgpu renders
+# the 3D molecular view offscreen and is composited as an image.
+gpui-gui = [
+  "dep:bytemuck",
+  "dep:glam",
+  "dep:gpui",
+  "dep:image",
+  "dep:naga",
+  "dep:png",
+  "dep:pollster",
+  "dep:wgpu",
 ]
 
 [lib]
@@ -46,3 +71,8 @@ path = "src/lib.rs"
 name = "cuemol-desktop"
 path = "src/main.rs"
 required-features = ["native-gui"]
+
+[[bin]]
+name = "cuemol-desktop-gpui"
+path = "src/gpui_main.rs"
+required-features = ["gpui-gui"]

@@ -2,7 +2,7 @@ use cuemol_core::Vector4;
 use cuemol_gfx::SolidColor;
 use cuemol_molstr::{GridMap, Selector};
 use cuemol_qsys::{DispListRenderer, MultiGradient, ScalarObject};
-use cuemol_surface::MolSurfObj;
+use cuemol_surface::{build_grid_isosurface, MolSurfObj, ScalarField, SurfaceMesh};
 use cuemol_symm::CrystalInfo;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,14 +83,7 @@ impl DensityMap {
         self.intervals = intervals;
         self.origin = origin;
         self.delta = delta;
-        self.cell = CrystalInfo::new(
-            delta[0].length3d() * intervals[0] as f64,
-            delta[1].length3d() * intervals[1] as f64,
-            delta[2].length3d() * intervals[2] as f64,
-            90.0,
-            90.0,
-            90.0,
-        );
+        self.cell = cell_from_delta(delta, intervals);
 
         self.update_stats(values);
         self.bytes = values
@@ -127,15 +120,24 @@ impl DensityMap {
 
     pub fn set_xtal_params(&mut self, a: f64, b: f64, c: f64, alpha: f64, beta: f64, gamma: f64) {
         self.cell = CrystalInfo::new(a, b, c, alpha, beta, gamma);
-        self.delta = [
-            Vector4::new3(a / self.intervals[0].max(1) as f64, 0.0, 0.0),
-            Vector4::new3(0.0, b / self.intervals[1].max(1) as f64, 0.0),
-            Vector4::new3(0.0, 0.0, c / self.intervals[2].max(1) as f64),
-        ];
+        self.delta = delta_from_cell(a, b, c, alpha, beta, gamma, self.intervals);
     }
 
     pub fn cell(&self) -> CrystalInfo {
         self.cell
+    }
+
+    /// Grid sampling intervals (cell subdivisions) along each axis. Together with
+    /// the cell these define the grid spacing; needed by the QDF map serializer.
+    pub fn intervals(&self) -> [usize; 3] {
+        self.intervals
+    }
+
+    /// Override the crystallographic space-group number (the cell's `nsg`)
+    /// without disturbing the derived grid deltas. Used when reconstructing a
+    /// map from a QDF stream (which stores the space group separately).
+    pub fn set_space_group(&mut self, sg: i32) {
+        self.cell.set_space_group(sg);
     }
 
     pub fn den_min(&self) -> f64 {
@@ -250,6 +252,73 @@ impl DensityMap {
             project_axis(rel, self.delta[2]).floor() as isize + self.start[2],
         ]
     }
+}
+
+fn cell_from_delta(delta: [Vector4; 3], intervals: [usize; 3]) -> CrystalInfo {
+    let axes = [
+        delta[0].scale(intervals[0] as f64),
+        delta[1].scale(intervals[1] as f64),
+        delta[2].scale(intervals[2] as f64),
+    ];
+    CrystalInfo::new(
+        axes[0].length3d(),
+        axes[1].length3d(),
+        axes[2].length3d(),
+        angle_deg_3d(axes[1], axes[2]),
+        angle_deg_3d(axes[0], axes[2]),
+        angle_deg_3d(axes[0], axes[1]),
+    )
+}
+
+fn angle_deg_3d(lhs: Vector4, rhs: Vector4) -> f64 {
+    let denom = lhs.length3d() * rhs.length3d();
+    if denom <= 1.0e-12 {
+        return 90.0;
+    }
+    let dot = lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
+    (dot / denom).clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+fn delta_from_cell(
+    a: f64,
+    b: f64,
+    c: f64,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    intervals: [usize; 3],
+) -> [Vector4; 3] {
+    let fallback = [
+        Vector4::new3(a / intervals[0].max(1) as f64, 0.0, 0.0),
+        Vector4::new3(0.0, b / intervals[1].max(1) as f64, 0.0),
+        Vector4::new3(0.0, 0.0, c / intervals[2].max(1) as f64),
+    ];
+    if a <= 0.0 || b <= 0.0 || c <= 0.0 {
+        return fallback;
+    }
+
+    let alpha = alpha.to_radians();
+    let beta = beta.to_radians();
+    let gamma = gamma.to_radians();
+    let sin_gamma = gamma.sin();
+    if sin_gamma.abs() < 1.0e-12 {
+        return fallback;
+    }
+
+    let bx = b * gamma.cos();
+    let by = b * sin_gamma;
+    let cx = c * beta.cos();
+    let cy = c * (alpha.cos() - beta.cos() * gamma.cos()) / sin_gamma;
+    let cz_sq = c * c - cx * cx - cy * cy;
+    if cz_sq < -1.0e-8 {
+        return fallback;
+    }
+
+    [
+        Vector4::new3(a, 0.0, 0.0).scale(1.0 / intervals[0].max(1) as f64),
+        Vector4::new3(bx, by, 0.0).scale(1.0 / intervals[1].max(1) as f64),
+        Vector4::new3(cx, cy, cz_sq.max(0.0).sqrt()).scale(1.0 / intervals[2].max(1) as f64),
+    ]
 }
 
 impl ScalarObject for DensityMap {
@@ -673,6 +742,157 @@ impl MapMeshRenderer {
             .min(half * scalar.row_grid_size())
             .min(half * scalar.sec_grid_size())
     }
+
+    /// Contour the density into wireframe line segments at the renderer's level
+    /// (the classic "chickenwire" map mesh). Ports C++ `MapMeshRenderer`: the
+    /// isosurface `density == level` is intersected with the three families of
+    /// axis-aligned grid planes, each plane run through 2D marching squares. The
+    /// result is `[start, end]` Cartesian segments (consumed by line drawing /
+    /// OBJ `l` export), the wireframe analogue of `MapSurfRenderer`'s filled mesh.
+    pub fn generate_contour_lines(&self, scalar: &impl ScalarObject) -> Vec<[Vector4; 2]> {
+        let level = self.map.level(scalar);
+        let (nc, nr, ns) = (scalar.col_no(), scalar.row_no(), scalar.sec_no());
+        let (sc, sr, ss) = (scalar.start_col(), scalar.start_row(), scalar.start_sec());
+        if nc < 2 || nr < 2 || ns < 2 {
+            return Vec::new();
+        }
+
+        // Signed field at relative node (i,j,k): negative where density exceeds
+        // the level (so the f=0 isoline is the contour).
+        let node = |i: usize, j: usize, k: usize| -> (f64, Vector4) {
+            let value = level - scalar.at_float(i as isize + sc, j as isize + sr, k as isize + ss);
+            let pos = scalar.conv_to_orth(Vector4::new3(i as f64, j as f64, k as f64));
+            (value, pos)
+        };
+
+        let mut out = Vec::new();
+        // XY planes (constant k).
+        for k in 0..ns {
+            for j in 0..nr - 1 {
+                for i in 0..nc - 1 {
+                    march_squares_cell(
+                        [
+                            node(i, j, k),
+                            node(i + 1, j, k),
+                            node(i + 1, j + 1, k),
+                            node(i, j + 1, k),
+                        ],
+                        &mut out,
+                    );
+                }
+            }
+        }
+        // YZ planes (constant i).
+        for i in 0..nc {
+            for k in 0..ns - 1 {
+                for j in 0..nr - 1 {
+                    march_squares_cell(
+                        [
+                            node(i, j, k),
+                            node(i, j + 1, k),
+                            node(i, j + 1, k + 1),
+                            node(i, j, k + 1),
+                        ],
+                        &mut out,
+                    );
+                }
+            }
+        }
+        // XZ planes (constant j).
+        for j in 0..nr {
+            for k in 0..ns - 1 {
+                for i in 0..nc - 1 {
+                    march_squares_cell(
+                        [
+                            node(i, j, k),
+                            node(i + 1, j, k),
+                            node(i + 1, j, k + 1),
+                            node(i, j, k + 1),
+                        ],
+                        &mut out,
+                    );
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Export contour line segments as a Wavefront OBJ string (`v` vertices + `l`
+/// line elements) — a real, non-GPU consumer of [`MapMeshRenderer::generate_contour_lines`],
+/// the wireframe analogue of the surface mesh's OBJ export.
+pub fn contour_lines_to_obj(segments: &[[Vector4; 2]]) -> String {
+    let mut obj = String::from("# CueMol density contour wireframe\n");
+    for seg in segments {
+        for p in seg {
+            obj.push_str(&format!("v {} {} {}\n", p.x, p.y, p.z));
+        }
+    }
+    for index in 0..segments.len() {
+        let a = index * 2 + 1; // OBJ indices are 1-based
+        obj.push_str(&format!("l {} {}\n", a, a + 1));
+    }
+    obj
+}
+
+/// Emit the marching-squares isoline segments (`f = 0`) for one quad cell.
+/// Corners are in quad order c00, c10, c11, c01; each is `(signed value, pos)`
+/// with `value < 0` inside. Edges: 0 = c00-c10, 1 = c10-c11, 2 = c11-c01,
+/// 3 = c01-c00.
+fn march_squares_cell(corners: [(f64, Vector4); 4], out: &mut Vec<[Vector4; 2]>) {
+    // Segment table: for each of the 16 inside/outside cases, the pairs of edges
+    // the isoline connects (saddle cases 5 and 10 emit two segments).
+    const EDGE_PAIRS: [&[(u8, u8)]; 16] = [
+        &[],
+        &[(3, 0)],
+        &[(0, 1)],
+        &[(3, 1)],
+        &[(1, 2)],
+        &[(3, 0), (1, 2)],
+        &[(0, 2)],
+        &[(2, 3)],
+        &[(2, 3)],
+        &[(0, 2)],
+        &[(0, 1), (2, 3)],
+        &[(1, 2)],
+        &[(1, 3)],
+        &[(0, 1)],
+        &[(0, 3)],
+        &[],
+    ];
+    const EDGE_CORNERS: [(usize, usize); 4] = [(0, 1), (1, 2), (2, 3), (3, 0)];
+
+    let mut case = 0usize;
+    for (c, corner) in corners.iter().enumerate() {
+        if corner.0 < 0.0 {
+            case |= 1 << c;
+        }
+    }
+    let pairs = EDGE_PAIRS[case];
+    if pairs.is_empty() {
+        return;
+    }
+
+    let crossing = |edge: u8| -> Vector4 {
+        let (a, b) = EDGE_CORNERS[edge as usize];
+        let (va, pa) = corners[a];
+        let (vb, pb) = corners[b];
+        let denom = va - vb;
+        let t = if denom.abs() < 1.0e-12 {
+            0.5
+        } else {
+            (va / denom).clamp(0.0, 1.0)
+        };
+        Vector4::new3(
+            pa.x + (pb.x - pa.x) * t,
+            pa.y + (pb.y - pa.y) * t,
+            pa.z + (pb.z - pa.z) * t,
+        )
+    };
+
+    for &(ea, eb) in pairs {
+        out.push([crossing(ea), crossing(eb)]);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -815,14 +1035,18 @@ impl MapSurfRenderer {
         self.max_grids as f64 * scalar.col_grid_size() / 2.0
     }
 
+    /// Contour the density into a triangle isosurface at the renderer's level.
+    ///
+    /// Ports C++ `MapSurfRenderer`: the surface is the iso-level set of the
+    /// electron density, `density(p) == level` where `level = siglevel * sigma`.
+    /// The mesh is extracted by marching the map's own grid (corners are grid
+    /// nodes, crossings are mapped to Cartesian via the map transform), reusing
+    /// the shared marching-tetrahedra core in `cuemol-surface`. This is the
+    /// visual consumer of the MTZ/mmCIF -> density pipeline.
     pub fn generate_surf_obj(&self, scalar: &impl ScalarObject) -> MolSurfObj {
         let mut object = MolSurfObj::new();
-        object.create_ses_from_mol(
-            self.map.color_mapname().to_string(),
-            "",
-            self.map.level(scalar),
-            self.width,
-        );
+        let level = self.map.level(scalar);
+        build_density_isosurface(object.mesh_mut(), scalar, level);
         object
     }
 
@@ -843,6 +1067,145 @@ impl MapSurfRenderer {
         self.omp_thr = value;
         self.map.invalidate_display_cache();
     }
+}
+
+/// Views a scalar map as the signed field `g(p) = level - density(p)` so that
+/// the high-density region (`density > level`) is the interior (`g < 0`) of the
+/// contour. The outward gradient is `-grad(density)` (high density to low),
+/// taken from grid central differences of the trilinearly interpolated density
+/// so vertex normals stay smooth instead of faceted.
+///
+/// Index inversion (Cartesian -> continuous grid index) assumes an orthogonal
+/// cell — the same scope as the MTZ/mmCIF density synthesis that feeds it.
+struct DensityField<'a, S: ScalarObject> {
+    map: &'a S,
+    origin: Vector4,
+    axes: [Vector4; 3],
+    inv_len2: [f64; 3],
+    start: [isize; 3],
+}
+
+impl<'a, S: ScalarObject> DensityField<'a, S> {
+    fn new(map: &'a S) -> Self {
+        let origin = map.conv_to_orth(Vector4::ZERO);
+        let axes = [
+            map.conv_to_orth(Vector4::new3(1.0, 0.0, 0.0)) - origin,
+            map.conv_to_orth(Vector4::new3(0.0, 1.0, 0.0)) - origin,
+            map.conv_to_orth(Vector4::new3(0.0, 0.0, 1.0)) - origin,
+        ];
+        let inv_len2 = [
+            inv_sq_len(axes[0]),
+            inv_sq_len(axes[1]),
+            inv_sq_len(axes[2]),
+        ];
+        Self {
+            map,
+            origin,
+            axes,
+            inv_len2,
+            start: [map.start_col(), map.start_row(), map.start_sec()],
+        }
+    }
+
+    /// Cartesian point -> continuous (relative) grid index, via per-axis
+    /// projection (exact for an orthogonal cell).
+    fn cont_index(&self, p: Vector4) -> [f64; 3] {
+        let rel = p - self.origin;
+        [
+            rel.dot3d(self.axes[0]) * self.inv_len2[0],
+            rel.dot3d(self.axes[1]) * self.inv_len2[1],
+            rel.dot3d(self.axes[2]) * self.inv_len2[2],
+        ]
+    }
+
+    fn node_density(&self, i: isize, j: isize, k: isize) -> f64 {
+        self.map
+            .at_float(i + self.start[0], j + self.start[1], k + self.start[2])
+    }
+
+    /// Trilinear density at a continuous (relative) grid index.
+    fn density_at(&self, idx: [f64; 3]) -> f64 {
+        let x0 = idx[0].floor();
+        let y0 = idx[1].floor();
+        let z0 = idx[2].floor();
+        let fx = idx[0] - x0;
+        let fy = idx[1] - y0;
+        let fz = idx[2] - z0;
+        let (i0, j0, k0) = (x0 as isize, y0 as isize, z0 as isize);
+        let n = |di: isize, dj: isize, dk: isize| self.node_density(i0 + di, j0 + dj, k0 + dk);
+        let c00 = n(0, 0, 0) * (1.0 - fx) + n(1, 0, 0) * fx;
+        let c10 = n(0, 1, 0) * (1.0 - fx) + n(1, 1, 0) * fx;
+        let c01 = n(0, 0, 1) * (1.0 - fx) + n(1, 0, 1) * fx;
+        let c11 = n(0, 1, 1) * (1.0 - fx) + n(1, 1, 1) * fx;
+        let c0 = c00 * (1.0 - fy) + c10 * fy;
+        let c1 = c01 * (1.0 - fy) + c11 * fy;
+        c0 * (1.0 - fz) + c1 * fz
+    }
+}
+
+impl<S: ScalarObject> ScalarField for DensityField<'_, S> {
+    fn gradient(&self, p: Vector4) -> Vector4 {
+        let idx = self.cont_index(p);
+        // Central difference of the density along each grid axis (one node step
+        // either side), mapped to a Cartesian vector by the axis directions.
+        // Outward = toward decreasing density = -grad(density).
+        let mut grad = Vector4::ZERO;
+        for axis in 0..3 {
+            let mut lo = idx;
+            let mut hi = idx;
+            lo[axis] -= 1.0;
+            hi[axis] += 1.0;
+            let d_dens = self.density_at(hi) - self.density_at(lo);
+            grad = grad + self.axes[axis].scale(-0.5 * d_dens * self.inv_len2[axis]);
+        }
+        grad
+    }
+}
+
+fn inv_sq_len(v: Vector4) -> f64 {
+    let d = v.dot3d(v);
+    if d > 1.0e-20 {
+        1.0 / d
+    } else {
+        0.0
+    }
+}
+
+/// Extract the `density == level` isosurface of `map` into `mesh` by marching
+/// the map's grid. Cube corners are grid nodes (values taken exactly from
+/// `at_float`, no resampling), crossings are mapped to Cartesian via
+/// `conv_to_orth`, and the whole grid is contoured (sub-box extent clipping is
+/// deferred). Ports the geometry half of C++ `MapSurfRenderer::marchCube`.
+fn build_density_isosurface<S: ScalarObject>(mesh: &mut SurfaceMesh, map: &S, level: f64) {
+    let dims = [map.col_no(), map.row_no(), map.sec_no()];
+    if dims[0] < 2 || dims[1] < 2 || dims[2] < 2 {
+        return;
+    }
+    let start = [map.start_col(), map.start_row(), map.start_sec()];
+    let field = DensityField::new(map);
+    let spacing = map
+        .col_grid_size()
+        .min(map.row_grid_size())
+        .min(map.sec_grid_size())
+        .max(1.0e-6);
+
+    build_grid_isosurface(
+        mesh,
+        &field,
+        dims,
+        // Signed field at node (i,j,k): negative where density exceeds the level.
+        |i, j, k| {
+            level
+                - map.at_float(
+                    i as isize + start[0],
+                    j as isize + start[1],
+                    k as isize + start[2],
+                )
+        },
+        // Grid node -> Cartesian (relative index; conv_to_orth adds the start).
+        |i, j, k| map.conv_to_orth(Vector4::new3(i as f64, j as f64, k as f64)),
+        spacing,
+    );
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1105,6 +1468,37 @@ mod tests {
     }
 
     #[test]
+    fn density_map_from_grid_preserves_cell_angles_from_delta() {
+        let mut grid = test_grid();
+        grid.delta = [
+            Vector4::new3(1.0, 0.0, 0.0),
+            Vector4::new3(-0.5, 0.8660254037844386, 0.0),
+            Vector4::new3(0.0, 0.0, 1.0),
+        ];
+        let map = DensityMap::from_grid_map(grid);
+        let cell = map.cell();
+        assert!((cell.a - 2.0).abs() < 1.0e-12);
+        assert!((cell.b - 2.0).abs() < 1.0e-12);
+        assert!((cell.c - 2.0).abs() < 1.0e-12);
+        assert!((cell.alpha - 90.0).abs() < 1.0e-12);
+        assert!((cell.beta - 90.0).abs() < 1.0e-12);
+        assert!((cell.gamma - 120.0).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn set_xtal_params_updates_non_orthogonal_delta() {
+        let mut map = DensityMap::from_grid_map(test_grid());
+        map.set_xtal_params(10.0, 12.0, 14.0, 90.0, 90.0, 120.0);
+
+        assert!((map.col_grid_size() - 5.0).abs() < 1.0e-12);
+        assert!((map.row_grid_size() - 6.0).abs() < 1.0e-12);
+        assert!((map.sec_grid_size() - 7.0).abs() < 1.0e-12);
+        let b_axis = map.conv_to_orth(Vector4::new3(0.0, 2.0, 0.0));
+        assert!((b_axis.x + 6.0).abs() < 1.0e-10);
+        assert!((b_axis.y - 10.392304845413264).abs() < 1.0e-10);
+    }
+
+    #[test]
     fn map_renderer_defaults_and_level_math_match_qif() {
         let map = DensityMap::from_grid_map(test_grid());
         let mut renderer = MapRenderer::new();
@@ -1172,8 +1566,231 @@ mod tests {
         assert_eq!(surf.drawmode_code(), MapSurfRenderer::MSRDRAW_LINE);
         surf.map_mut().set_color_mapname("map1");
         let obj = surf.generate_surf_obj(&map);
-        assert_eq!(obj.orig_mol(), "map1");
-        assert_eq!(obj.orig_prad(), 1.2);
+        // The contour now triangulates the density grid itself (the level cuts
+        // through the 0..7 single-cube grid), not a misrouted molecular SES.
+        assert!(obj.mesh().triangle_count() > 0);
+    }
+
+    #[test]
+    fn density_isosurface_contours_radial_peak_to_a_sphere() {
+        // Synthetic map: density(p) = R0 - |p - c|, a radial cone peaking at the
+        // grid centre. Its `density == level` isosurface is a sphere of radius
+        // R0 - level, an analytic oracle for the contour mesh.
+        const N: usize = 24;
+        let r0 = 25.0_f64;
+        let center = Vector4::new3(12.0, 12.0, 12.0);
+        let mut values = vec![0.0_f64; N * N * N];
+        for k in 0..N {
+            for j in 0..N {
+                for i in 0..N {
+                    let dx = i as f64 - center.x;
+                    let dy = j as f64 - center.y;
+                    let dz = k as f64 - center.z;
+                    let r = (dx * dx + dy * dy + dz * dz).sqrt();
+                    values[i + N * (j + N * k)] = r0 - r;
+                }
+            }
+        }
+        let map = DensityMap::from_grid_map(GridMap {
+            counts: [N, N, N],
+            origin: Vector4::ZERO,
+            delta: [
+                Vector4::new3(1.0, 0.0, 0.0),
+                Vector4::new3(0.0, 1.0, 0.0),
+                Vector4::new3(0.0, 0.0, 1.0),
+            ],
+            values,
+        });
+
+        // Contour at density == 19 => sphere of radius R0 - 19 = 6.
+        let mut surf = MapSurfRenderer::new();
+        surf.map_mut().set_level(&map, 19.0);
+        assert!((surf.map().level(&map) - 19.0).abs() < 1.0e-3);
+
+        let obj = surf.generate_surf_obj(&map);
+        let mesh = obj.mesh();
+        assert!(
+            mesh.triangle_count() > 200,
+            "too few triangles: {}",
+            mesh.triangle_count()
+        );
+
+        let radius = 6.0_f64;
+        let len = |v: Vector4| (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+        for v in mesh.vertices() {
+            let radial = v.position - center;
+            let r = len(radial);
+            assert!((r - radius).abs() < 0.6, "vertex off sphere: r={r}");
+            // Outward normal aligns with the radial direction (high to low density).
+            let dot = (v.normal.x * radial.x + v.normal.y * radial.y + v.normal.z * radial.z) / r;
+            assert!(dot > 0.5, "normal not radial-outward: dot={dot}");
+        }
+
+        // Total area approximates 4*pi*r^2 (analytic sphere oracle).
+        let analytic = 4.0 * std::f64::consts::PI * radius * radius;
+        let area: f64 = mesh
+            .triangles()
+            .iter()
+            .map(|t| {
+                let a = mesh.vertices()[t[0] as usize].position;
+                let b = mesh.vertices()[t[1] as usize].position;
+                let c = mesh.vertices()[t[2] as usize].position;
+                let ab = b - a;
+                let ac = c - a;
+                let cx = ab.y * ac.z - ab.z * ac.y;
+                let cy = ab.z * ac.x - ab.x * ac.z;
+                let cz = ab.x * ac.y - ab.y * ac.x;
+                0.5 * (cx * cx + cy * cy + cz * cz).sqrt()
+            })
+            .sum();
+        assert!(
+            (area - analytic).abs() / analytic < 0.15,
+            "area {area} vs analytic {analytic}"
+        );
+    }
+
+    #[test]
+    fn density_isosurface_handles_offset_origin_and_anisotropic_grid() {
+        // Same radial-cone oracle, but on a shifted, anisotropic, non-zero-start
+        // grid: density(p) = R0 - |p - cc| in Cartesian, so the `density == level`
+        // isosurface is still a Cartesian sphere regardless of grid geometry.
+        // Exercises conv_to_orth / start offset / per-axis spacing in DensityField.
+        let counts = [24usize, 18, 14];
+        let start = [3isize, -2, 5];
+        let origin = Vector4::new3(5.0, -3.0, 10.0);
+        let delta = [
+            Vector4::new3(1.0, 0.0, 0.0),
+            Vector4::new3(0.0, 1.5, 0.0),
+            Vector4::new3(0.0, 0.0, 2.0),
+        ];
+        // Cartesian of relative node (i,j,k): origin + sum delta*(idx + start).
+        let cart = |i: usize, j: usize, k: usize| {
+            origin
+                + delta[0].scale(i as f64 + start[0] as f64)
+                + delta[1].scale(j as f64 + start[1] as f64)
+                + delta[2].scale(k as f64 + start[2] as f64)
+        };
+        let cc = cart(counts[0] / 2, counts[1] / 2, counts[2] / 2);
+        let r0 = 25.0_f64;
+        let mut values = vec![0.0_f64; counts[0] * counts[1] * counts[2]];
+        for k in 0..counts[2] {
+            for j in 0..counts[1] {
+                for i in 0..counts[0] {
+                    let p = cart(i, j, k);
+                    let d =
+                        ((p.x - cc.x).powi(2) + (p.y - cc.y).powi(2) + (p.z - cc.z).powi(2)).sqrt();
+                    values[i + counts[0] * (j + counts[1] * k)] = r0 - d;
+                }
+            }
+        }
+        let mut map = DensityMap::new();
+        map.set_map_float_array(&values, counts, start, counts, origin, delta);
+
+        let radius = 6.0_f64;
+        let mut surf = MapSurfRenderer::new();
+        surf.map_mut().set_level(&map, r0 - radius); // density == 19 => |p - cc| == 6
+        let obj = surf.generate_surf_obj(&map);
+        let mesh = obj.mesh();
+        assert!(
+            mesh.triangle_count() > 100,
+            "too few triangles: {}",
+            mesh.triangle_count()
+        );
+
+        let len = |v: Vector4| (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+        for v in mesh.vertices() {
+            let radial = v.position - cc;
+            let r = len(radial);
+            // z spacing is 2.0, so allow a slightly looser radial tolerance.
+            assert!((r - radius).abs() < 1.2, "vertex off sphere: r={r}");
+            let dot = (v.normal.x * radial.x + v.normal.y * radial.y + v.normal.z * radial.z) / r;
+            assert!(dot > 0.5, "normal not radial-outward: dot={dot}");
+        }
+    }
+
+    #[test]
+    fn contour_lines_trace_the_isosurface_sphere_on_a_radial_peak() {
+        // density(p) = R0 - |p - c|: the `density == level` contour is the sphere
+        // of radius R0 - level. The chickenwire intersects that sphere with every
+        // grid plane, so EVERY contour-line vertex must lie on the sphere.
+        const N: usize = 24;
+        let r0 = 25.0_f64;
+        let center = Vector4::new3(12.0, 12.0, 12.0);
+        let mut values = vec![0.0_f64; N * N * N];
+        for k in 0..N {
+            for j in 0..N {
+                for i in 0..N {
+                    let dx = i as f64 - center.x;
+                    let dy = j as f64 - center.y;
+                    let dz = k as f64 - center.z;
+                    values[i + N * (j + N * k)] = r0 - (dx * dx + dy * dy + dz * dz).sqrt();
+                }
+            }
+        }
+        let map = DensityMap::from_grid_map(GridMap {
+            counts: [N, N, N],
+            origin: Vector4::ZERO,
+            delta: [
+                Vector4::new3(1.0, 0.0, 0.0),
+                Vector4::new3(0.0, 1.0, 0.0),
+                Vector4::new3(0.0, 0.0, 1.0),
+            ],
+            values,
+        });
+
+        let radius = 6.0_f64;
+        let mut mesh = MapMeshRenderer::new();
+        mesh.map_mut().set_level(&map, r0 - radius);
+        let segments = mesh.generate_contour_lines(&map);
+
+        assert!(
+            segments.len() > 200,
+            "too few contour segments: {}",
+            segments.len()
+        );
+        // NOTE: this checks crossing-point POSITIONS (all on the sphere), not
+        // segment CONNECTIVITY — both endpoints land on the sphere regardless of
+        // how `EDGE_PAIRS` pairs them (segments are intra-cell). Correct pairing
+        // rests on that hand-verified table, not on this assertion.
+        let len = |v: Vector4| (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+        for seg in &segments {
+            for p in seg {
+                let r = len(*p - center);
+                assert!((r - radius).abs() < 0.7, "contour vertex off sphere: r={r}");
+            }
+        }
+    }
+
+    #[test]
+    fn contour_lines_empty_when_level_exceeds_max() {
+        let map = DensityMap::from_grid_map(test_grid());
+        let mut mesh = MapMeshRenderer::new();
+        mesh.map_mut().set_level(&map, 100.0);
+        assert!(mesh.generate_contour_lines(&map).is_empty());
+    }
+
+    #[test]
+    fn contour_lines_obj_export_pairs_vertices_into_lines() {
+        let segments = vec![
+            [Vector4::new3(0.0, 0.0, 0.0), Vector4::new3(1.0, 0.0, 0.0)],
+            [Vector4::new3(1.0, 0.0, 0.0), Vector4::new3(1.0, 1.0, 0.0)],
+        ];
+        let obj = contour_lines_to_obj(&segments);
+        assert_eq!(obj.lines().filter(|l| l.starts_with("v ")).count(), 4);
+        assert_eq!(obj.lines().filter(|l| l.starts_with("l ")).count(), 2);
+        assert!(obj.contains("l 1 2"));
+        assert!(obj.contains("l 3 4"));
+    }
+
+    #[test]
+    fn density_isosurface_is_empty_when_level_exceeds_max() {
+        // A level above the map maximum has no crossing => empty mesh, never a
+        // spurious surface (guards the inside/outside sign convention).
+        let map = DensityMap::from_grid_map(test_grid());
+        let mut surf = MapSurfRenderer::new();
+        surf.map_mut().set_level(&map, 100.0);
+        let obj = surf.generate_surf_obj(&map);
+        assert_eq!(obj.mesh().triangle_count(), 0);
     }
 
     #[test]

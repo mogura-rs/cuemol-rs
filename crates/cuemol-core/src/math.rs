@@ -1139,4 +1139,22 @@ mod tests {
         assert_eq!(a.add_vec(b), Vector4::new4(1.0, 1.0, 0.0, 0.0));
         assert!((a.angle(b).unwrap() - std::f64::consts::FRAC_PI_2).abs() < 1.0e-12);
     }
+
+    #[test]
+    fn torsion_is_signed_matching_cuemol_convention() {
+        // Sign convention pinned against C++ qlib Vector4D::torsion (VectorHelper.cpp):
+        // about the j-k axis (+x), the i arm along +y and the l arm along +z give +90.
+        let i = Vector4::new3(0.0, 1.0, 0.0);
+        let j = Vector4::new3(0.0, 0.0, 0.0);
+        let k = Vector4::new3(1.0, 0.0, 0.0);
+        let l_pos = Vector4::new3(1.0, 0.0, 1.0);
+        let l_neg = Vector4::new3(1.0, 0.0, -1.0);
+        assert!((Vector4::torsion(i, j, k, l_pos).unwrap().to_degrees() - 90.0).abs() < 1.0e-9);
+        assert!((Vector4::torsion(i, j, k, l_neg).unwrap().to_degrees() + 90.0).abs() < 1.0e-9);
+        // Trans (anti) arrangement is +-180.
+        let l_trans = Vector4::new3(1.0, -1.0, 0.0);
+        assert!((Vector4::torsion(i, j, k, l_trans).unwrap().to_degrees().abs() - 180.0).abs() < 1.0e-9);
+        // Degenerate (collinear i-j-k) is an error, not a silent zero.
+        assert!(Vector4::torsion(j, j, k, l_pos).is_err());
+    }
 }

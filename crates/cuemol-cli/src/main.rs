@@ -170,6 +170,21 @@ fn run() -> Result<(), String> {
             print!("{}", write_sdf_string(&mol));
             Ok(())
         }
+        "cnspar-info" => {
+            let path = args
+                .next()
+                .ok_or_else(|| "missing CNS parameter file path".to_string())?;
+            let db = cuemol_molstr::cns_par::read_cns_par_file(path).map_err(|err| err.to_string())?;
+            println!("bonds={}", db.bond_count());
+            println!("angles={}", db.angle_count());
+            println!("dihedrals={}", db.dihedral_count());
+            println!("impropers={}", db.improper_count());
+            println!("nonbonded={}", db.nonbonded_count());
+            if let Some(b) = db.search_bond("C", "N") {
+                println!("bond C-N: kf={} r0={}", b.kf, b.r0);
+            }
+            Ok(())
+        }
         "opendx-info" => {
             let path = args
                 .next()
@@ -305,6 +320,10 @@ fn run() -> Result<(), String> {
                     println!("renderer={}:{}", renderer.renderer_type(), renderer.name());
                     if renderer.renderer_type() == "atomintr" {
                         println!("defs={}", renderer.get_defs_json());
+                        println!(
+                            "measurements={}",
+                            object.atom_intr_measurements_json(renderer)
+                        );
                     }
                 }
             }

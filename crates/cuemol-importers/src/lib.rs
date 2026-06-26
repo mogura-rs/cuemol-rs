@@ -6,6 +6,11 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+pub mod pickle;
+pub use pickle::{parse_pickle, PickleValue};
+pub mod pse_extract;
+pub use pse_extract::extract_pse_molecules;
+
 pub use cuemol_molstr::{
     read_mmcif_file, read_mmcif_file_with_options, read_mmcif_str, read_mmcif_str_with_options,
     read_mol2_file, read_mol2_file_with_options, read_mol2_str, read_mol2_str_with_options,
@@ -557,6 +562,43 @@ impl PseFileReader {
             pickle_protocol,
         })
     }
+
+    /// Read the file and return the decompressed (or raw) pickle payload.
+    fn decoded_payload(&self) -> Result<Vec<u8>> {
+        if self.path().trim().is_empty() {
+            return Err(CueMolError::invalid_argument("PSE path is empty"));
+        }
+        let bytes = fs::read(self.path())?;
+        if bytes.is_empty() {
+            return Err(CueMolError::parse("PSE file is empty"));
+        }
+        let encoding = detect_pse_encoding(&bytes);
+        if encoding == PseEncoding::Raw {
+            return Ok(bytes);
+        }
+        let decoded =
+            decompress_with_command(pse_encoding_command(encoding), Path::new(self.path()))?;
+        if decoded.is_empty() {
+            return Err(CueMolError::parse(format!(
+                "PSE {} payload is empty",
+                pse_encoding_label(encoding)
+            )));
+        }
+        Ok(decoded)
+    }
+
+    /// Decode the session pickle into a [`PickleValue`] tree (the raw session).
+    pub fn parse_pickle_tree(&self) -> Result<PickleValue> {
+        parse_pickle(&self.decoded_payload()?)
+    }
+
+    /// Read the PyMOL session's molecule objects as [`MolCoord`]s — the pickle VM
+    /// parses the session tree and `extract_pse_molecules` reconstructs the
+    /// ChemPy molecules (atoms, residues, chains, coordinates, bonds).
+    pub fn read_molecules(&self) -> Result<Vec<cuemol_molstr::MolCoord>> {
+        let tree = self.parse_pickle_tree()?;
+        Ok(extract_pse_molecules(&tree))
+    }
 }
 
 fn detect_pse_encoding(bytes: &[u8]) -> PseEncoding {
@@ -799,6 +841,42 @@ mod tests {
         assert!(!pse.error_msg().is_empty());
         assert_eq!(pse.read_count(), 2);
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pse_reader_parses_session_pickle_tree() {
+        // A raw (uncompressed) CPython-pickled session header; the reader runs the
+        // real pickle VM and exposes the value tree.
+        let proto2: &[u8] = &[
+            128, 2, 125, 113, 0, 40, 88, 7, 0, 0, 0, 118, 101, 114, 115, 105, 111, 110, 113, 1, 71,
+            63, 251, 215, 10, 61, 112, 163, 215, 88, 5, 0, 0, 0, 110, 97, 109, 101, 115, 113, 2,
+            93, 113, 3, 40, 88, 4, 0, 0, 0, 109, 111, 108, 49, 113, 4, 88, 4, 0, 0, 0, 109, 111,
+            108, 50, 113, 5, 101, 88, 5, 0, 0, 0, 99, 111, 117, 110, 116, 113, 6, 75, 2, 88, 5, 0,
+            0, 0, 102, 108, 97, 103, 115, 113, 7, 136, 137, 78, 135, 113, 8, 88, 4, 0, 0, 0, 109,
+            101, 116, 97, 113, 9, 125, 113, 10, 40, 88, 5, 0, 0, 0, 116, 105, 116, 108, 101, 113,
+            11, 88, 4, 0, 0, 0, 116, 101, 115, 116, 113, 12, 88, 3, 0, 0, 0, 110, 97, 116, 113, 13,
+            77, 71, 1, 117, 117, 46,
+        ];
+        let path =
+            std::env::temp_dir().join(format!("cuemol2-rs-pse-{}-tree.pse", std::process::id()));
+        std::fs::write(&path, proto2).unwrap();
+
+        let mut pse = PseFileReader::new();
+        pse.set_path(path.to_str().unwrap());
+        let tree = pse.parse_pickle_tree().expect("parse pickle tree");
+        assert_eq!(tree.get("count").unwrap().as_i64(), Some(2));
+        assert_eq!(
+            tree.get("names"),
+            Some(&PickleValue::List(vec![
+                PickleValue::Str("mol1".into()),
+                PickleValue::Str("mol2".into()),
+            ]))
+        );
+        assert_eq!(
+            tree.get("meta").unwrap().get("nat").unwrap().as_i64(),
+            Some(327)
+        );
         let _ = std::fs::remove_file(path);
     }
 

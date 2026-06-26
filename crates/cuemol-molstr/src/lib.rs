@@ -1,16 +1,21 @@
 pub mod chem;
+pub mod cns_par;
 mod fileio;
 pub mod iterators;
 pub mod map;
 pub mod mmcif;
 pub mod mol2;
+pub mod mol_undo;
 pub mod molecule;
 pub mod pdb;
+pub mod prot2ndry;
+pub mod qdf_mol;
 pub mod qsys;
 pub mod renderers;
 pub mod sdf;
 pub mod selection;
 pub mod stream;
+pub mod toppar;
 
 pub use chem::{ElemSym, MolAtom, MolBond, MolChain, MolResidue, ResidIndex, INVALID_UID};
 pub use iterators::{
@@ -38,6 +43,8 @@ pub use pdb::{
     read_qdfpdb_file, read_qdfpdb_str, write_pdb_file, write_pdb_string, PdbReadOptions, PdbReader,
     PdbWriter, QdfPdbReader,
 };
+pub use prot2ndry::{calc_prot_2ndry, calc_prot_2ndry2, Prot2ndrySet};
+pub use qdf_mol::{read_qdf_mol_bytes, write_qdf_mol_bytes, QdfMolFileReader, QdfMolFileWriter};
 pub use qsys::{
     LoadObjectResult, LoadSceneResult, MolCommandManager, MolObject, MolRenderer, MolScene,
     MolSceneManager, MolView, NewRendererResult, NewSceneResult, QscLoadStatus,
@@ -62,4 +69,7 @@ pub type MainChainRenderer = TraceRenderer;
 pub type MolSelection = Selector;
 pub type PDBFileReader = PdbReader;
 pub type PDBFileWriter = PdbWriter;
-pub type QdfMolReader = PdbReader;
+// C++ dual names: the real QDF molecule reader/writer (was a fake alias to
+// PdbReader, which cannot parse the QDF binary format).
+pub type QdfMolReader = QdfMolFileReader;
+pub type QdfMolWriter = QdfMolFileWriter;

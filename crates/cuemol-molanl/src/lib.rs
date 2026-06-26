@@ -1,8 +1,9 @@
 use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
+use cuemol_molstr::mol_undo::{MolUndoManager, ResiduePropsEdit};
 use cuemol_molstr::{
-    parse_selector, Atom, BondOrder, MolCoord, MolSceneManager, ResidueKey, Selector,
+    parse_selector, Atom, BondOrder, MolCoord, MolSceneManager, Prot2ndrySet, Selector,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MolAnlManager;
@@ -384,65 +385,12 @@ impl MolAnlManager {
     }
 
     pub fn calc_prot_2ndry2(&self, molecule: &mut MolCoord, ignore_breaks: bool, angle: f64) {
-        let summaries = molecule.residue_summaries();
-        let mut protein_residues = BTreeSet::new();
-        let mut chain_ca = BTreeMap::<String, Vec<ResidueCa>>::new();
-
-        for summary in &summaries {
-            if !is_amino_acid(&summary.res_name)
-                && !has_backbone_ca(molecule, &summary.atom_indices)
-            {
-                continue;
-            }
-            protein_residues.insert(summary.key.clone());
-            if let Some(position) = ca_position(molecule, &summary.atom_indices) {
-                chain_ca
-                    .entry(summary.key.chain_id.clone())
-                    .or_default()
-                    .push(ResidueCa {
-                        key: summary.key.clone(),
-                        position,
-                    });
-            }
-        }
-
-        for atom in molecule.atoms_mut() {
-            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
-            if protein_residues.contains(&key) {
-                atom.set_int_prop("secondary", 0);
-            }
-        }
-
-        let max_angle = if angle > 0.01 { angle.abs() } else { 60.0 };
-        let mut helix_residues = BTreeSet::new();
-        for residues in chain_ca.values_mut() {
-            residues.sort_by_key(|residue| (residue.key.res_id, residue.key.ins_code));
-            for window in residues.windows(4) {
-                if !ignore_breaks && !is_consecutive_ca_window(window) {
-                    continue;
-                }
-                let Some(torsion) = ca_torsion_degrees(
-                    window[0].position,
-                    window[1].position,
-                    window[2].position,
-                    window[3].position,
-                ) else {
-                    continue;
-                };
-                if torsion.abs() <= max_angle {
-                    for residue in window {
-                        helix_residues.insert(residue.key.clone());
-                    }
-                }
-            }
-        }
-
-        for atom in molecule.atoms_mut() {
-            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
-            if helix_residues.contains(&key) {
-                atom.set_int_prop("secondary", 2);
-            }
-        }
+        // Delegate to the molstr Kabsch-Sander DSSP assignment. Mirrors C++
+        // `MolAnlManager::calcProt2ndry2`, which calls `MolCoord::calcProt2ndry2`:
+        // `ignore_breaks` is the bulge flag, `angle` the helix gap-fill Cα-torsion
+        // criterion. Results land in the `secondary`/`secondary2` residue
+        // properties (the form the renderers consume).
+        molecule.calc_prot_2ndry2(ignore_breaks, angle);
     }
 
     pub fn calc_prot_2_ndry_2(&self, molecule: &mut MolCoord, ignore_breaks: bool, angle: f64) {
@@ -455,11 +403,44 @@ impl MolAnlManager {
         selector: &Selector,
         secondary_type: i32,
     ) {
-        for atom in molecule.atoms_mut() {
-            if selector.matches(atom) {
-                atom.set_int_prop("secondary", secondary_type);
-            }
+        // Mirror C++ MolAnlManager::setProt2ndry: snapshot the current assignment,
+        // override the selected residues to the requested type, and rewrite the
+        // residue string properties the renderers read. Type codes: 1=sheet,
+        // 2=alpha, 3=3-10, 4=pi, other=coil.
+        let selected_atoms: BTreeSet<usize> =
+            molecule.select_indices(selector).into_iter().collect();
+        let selected: Vec<(String, i32)> = molecule
+            .residue_summaries()
+            .iter()
+            .filter(|s| s.atom_indices.iter().any(|i| selected_atoms.contains(i)))
+            .map(|s| (s.key.chain_id.clone(), s.key.res_id))
+            .collect();
+
+        let mut secset = Prot2ndrySet::create(molecule);
+        for (chain, rid) in &selected {
+            secset.set_type(secondary_type, chain, *rid, *rid);
         }
+        secset.apply_to(molecule);
+    }
+
+    /// Like [`Self::set_prot_2ndry`], but records the edit with `undo` so it can be
+    /// reverted. Port of C++ `MolAnlManager::setProt2ndry`, which wraps the edit in
+    /// a `Prot2ndryEditInfo` registered with the UndoManager (saveBefore/saveAfter).
+    pub fn set_prot_2ndry_with_undo(
+        &self,
+        molecule: &mut MolCoord,
+        selector: &Selector,
+        secondary_type: i32,
+        undo: &mut MolUndoManager,
+    ) {
+        let before = molecule.residue_props().clone();
+        self.set_prot_2ndry(molecule, selector, secondary_type);
+        let after = molecule.residue_props().clone();
+        undo.record(Box::new(ResiduePropsEdit::new(
+            before,
+            after,
+            "set secondary structure",
+        )));
     }
 
     pub fn set_prot_2_ndry(
@@ -493,67 +474,6 @@ pub fn selected_centroid(molecule: &MolCoord, selector: &Selector) -> Option<Vec
         acc.add_vec(molecule.atoms()[*index].position)
     });
     Some(sum.scale(1.0 / indices.len() as f64))
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct ResidueCa {
-    key: ResidueKey,
-    position: Vector4,
-}
-
-fn is_amino_acid(name: &str) -> bool {
-    matches!(
-        name.trim().to_ascii_uppercase().as_str(),
-        "ALA"
-            | "ARG"
-            | "ASN"
-            | "ASP"
-            | "CYS"
-            | "GLN"
-            | "GLU"
-            | "GLY"
-            | "HIS"
-            | "ILE"
-            | "LEU"
-            | "LYS"
-            | "MET"
-            | "PHE"
-            | "PRO"
-            | "SER"
-            | "THR"
-            | "TRP"
-            | "TYR"
-            | "VAL"
-            | "MSE"
-    )
-}
-
-fn has_backbone_ca(molecule: &MolCoord, atom_indices: &[usize]) -> bool {
-    ca_position(molecule, atom_indices).is_some()
-}
-
-fn ca_position(molecule: &MolCoord, atom_indices: &[usize]) -> Option<Vector4> {
-    atom_indices.iter().find_map(|index| {
-        let atom = molecule.atoms().get(*index)?;
-        atom.matches_name_case_insensitive("CA")
-            .then_some(atom.position)
-    })
-}
-
-fn is_consecutive_ca_window(window: &[ResidueCa]) -> bool {
-    window.windows(2).all(|pair| {
-        pair[0].key.chain_id == pair[1].key.chain_id && pair[1].key.res_id == pair[0].key.res_id + 1
-    })
-}
-
-fn ca_torsion_degrees(a: Vector4, b: Vector4, c: Vector4, d: Vector4) -> Option<f64> {
-    let b1 = b - a;
-    let b2 = c - b;
-    let b3 = d - c;
-    let n1 = b1.cross(b2).normalize3d().ok()?;
-    let n2 = b2.cross(b3).normalize3d().ok()?;
-    let m1 = n1.cross(b2.normalize3d().ok()?);
-    Some(m1.dot3d(n2).atan2(n1.dot3d(n2)).to_degrees())
 }
 
 fn selected_position_pairs(
@@ -960,36 +880,90 @@ mod tests {
     }
 
     #[test]
-    fn manager_secondary_structure_sets_atom_property() {
+    fn manager_set_secondary_writes_residue_string_prop() {
+        // set_prot_2ndry overrides the selected residues' secondary structure and
+        // writes the residue *string* props the renderers read (not the legacy
+        // per-atom int prop). Type 2 = alpha helix; a lone residue is a 1-run "Hs".
         let manager = MolAnlManager::new();
         let mut molecule = MolCoord::new();
         molecule.push_atom(atom(1, "CA", "A", 1, "C", 0.0));
         manager.set_prot_2ndry(&mut molecule, &Selector::All, 2);
-        assert_eq!(molecule.atoms()[0].int_prop("secondary"), Some(2));
-    }
-
-    #[test]
-    fn manager_calc_secondary_marks_ca_torsion_helix_window() {
-        let manager = MolAnlManager::new();
-        let mut molecule = MolCoord::new();
-        let mut a1 = atom(1, "CA", "A", 1, "C", 0.0);
-        a1.position = Vector4::new3(0.0, 0.0, 0.0);
-        let mut a2 = atom(2, "CA", "A", 2, "C", 0.0);
-        a2.position = Vector4::new3(1.0, 0.0, 0.0);
-        let mut a3 = atom(3, "CA", "A", 3, "C", 0.0);
-        a3.position = Vector4::new3(1.0, 1.0, 0.0);
-        let mut a4 = atom(4, "CA", "A", 4, "C", 0.0);
-        a4.position = Vector4::new3(0.0, 2.0, 0.0);
-        molecule.push_atom(a1);
-        molecule.push_atom(a2);
-        molecule.push_atom(a3);
-        molecule.push_atom(a4);
-
-        manager.calc_prot_2ndry2(&mut molecule, false, 60.0);
-
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "1", "secondary")
+                .unwrap(),
+            Some("helix")
+        );
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "1", "secondary2")
+                .unwrap(),
+            Some("Hs")
+        );
         assert!(molecule
             .atoms()
             .iter()
-            .all(|atom| atom.int_prop("secondary") == Some(2)));
+            .all(|a| a.int_prop("secondary").is_none()));
+    }
+
+    #[test]
+    fn set_prot_2ndry_with_undo_reverts_and_replays() {
+        // The undo-aware variant records the secondary-structure edit so it can be
+        // reverted (C++ Prot2ndryEditInfo) — edit -> undo restores the prior state
+        // -> redo re-applies it.
+        let manager = MolAnlManager::new();
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1, "CA", "A", 1, "C", 0.0));
+        let mut undo = MolUndoManager::new();
+
+        manager.set_prot_2ndry_with_undo(&mut molecule, &Selector::All, 2, &mut undo);
+        assert_eq!(
+            molecule.get_residue_prop_str("A", "1", "secondary").unwrap(),
+            Some("helix")
+        );
+        assert!(undo.is_undoable());
+
+        assert!(undo.undo(&mut molecule));
+        // Before the edit there was no secondary assignment for the residue.
+        assert_eq!(
+            molecule.get_residue_prop_str("A", "1", "secondary").unwrap(),
+            None
+        );
+
+        assert!(undo.redo(&mut molecule));
+        assert_eq!(
+            molecule.get_residue_prop_str("A", "1", "secondary").unwrap(),
+            Some("helix")
+        );
+    }
+
+    #[test]
+    fn manager_calc_secondary_delegates_to_dssp() {
+        // calc_prot_2ndry2 now delegates to the molstr DSSP, which writes the
+        // residue *string* properties (secondary/secondary2) the renderers read,
+        // not the legacy per-atom int property. A single complete backbone
+        // residue is enough to drive the delegation (it resolves to coil).
+        let manager = MolAnlManager::new();
+        let mut molecule = MolCoord::new();
+        for (serial, name) in [(1, "N"), (2, "CA"), (3, "C"), (4, "O")] {
+            let mut a = atom(serial, name, "A", 1, "C", 0.0);
+            a.position = Vector4::new3(serial as f64, 0.0, 0.0);
+            molecule.push_atom(a);
+        }
+
+        manager.calc_prot_2ndry2(&mut molecule, false, 60.0);
+
+        // String-property convention is populated for the backbone residue...
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "1", "secondary2")
+                .unwrap(),
+            Some("")
+        );
+        // ...and the legacy int property is no longer used.
+        assert!(molecule
+            .atoms()
+            .iter()
+            .all(|atom| atom.int_prop("secondary").is_none()));
     }
 }

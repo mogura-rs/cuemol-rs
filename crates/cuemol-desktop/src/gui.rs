@@ -1269,10 +1269,7 @@ impl GuiApplication {
                 self.rebuild_snapshot();
                 camera.fit_snapshot(&self.snapshot);
             }
-            Ok(GuiLoadedPath::Map {
-                scene_uid,
-                map_uid,
-            }) => {
+            Ok(GuiLoadedPath::Map { scene_uid, map_uid }) => {
                 self.push_undo_snapshot(undo);
                 self.selected_object = None;
                 self.selected_renderer = None;
@@ -3046,12 +3043,8 @@ perspective\t{}\n",
                     camera.target = Vec3::new(parse_f32(x)?, parse_f32(y)?, parse_f32(z)?);
                 }
                 ["rotation", x, y, z, w] => {
-                    let quat = Quat::from_xyzw(
-                        parse_f32(x)?,
-                        parse_f32(y)?,
-                        parse_f32(z)?,
-                        parse_f32(w)?,
-                    );
+                    let quat =
+                        Quat::from_xyzw(parse_f32(x)?, parse_f32(y)?, parse_f32(z)?, parse_f32(w)?);
                     camera.orientation = normalized_or_identity(quat);
                 }
                 ["yaw", value] => legacy_yaw = Some(parse_f32(value)?),
@@ -3076,8 +3069,7 @@ perspective\t{}\n",
         if legacy_yaw.is_some() || legacy_pitch.is_some() {
             let yaw = legacy_yaw.unwrap_or(0.0);
             let pitch = legacy_pitch.unwrap_or(0.0);
-            camera.orientation =
-                Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch);
+            camera.orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch);
         }
         Ok(camera)
     }
@@ -3309,10 +3301,8 @@ impl GpuState {
             if self.mesh_index_count > 0 {
                 render_pass.set_pipeline(&self.mesh_pipeline);
                 render_pass.set_vertex_buffer(0, self.mesh_vertex_buffer.slice(..));
-                render_pass.set_index_buffer(
-                    self.mesh_index_buffer.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
+                render_pass
+                    .set_index_buffer(self.mesh_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.mesh_index_count, 0, 0..1);
             }
             if self.bond_vertex_count > 0 {

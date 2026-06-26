@@ -1094,6 +1094,55 @@ impl AtomIntrRenderer {
         &self.defs
     }
 
+    /// Reference points of a definition: its fixed positions if any, else the
+    /// positions of its atoms looked up by id in `mol`.
+    fn def_points(&self, def: &AtomIntrDef, mol: &MolCoord) -> Option<Vec<Vector4>> {
+        if !def.positions.is_empty() {
+            return Some(def.positions.clone());
+        }
+        let mut points = Vec::with_capacity(def.atom_ids.len());
+        for &aid in &def.atom_ids {
+            points.push(mol.get_atom_by_id(aid)?.position);
+        }
+        Some(points)
+    }
+
+    /// Measured value of a definition: distance (Å) for a 2-atom Distance, angle
+    /// (degrees) for a 3-atom Angle, torsion (degrees) for a 4-atom Torsion.
+    /// Port of the value computation in C++ `AtomIntrRenderer::append{,Angle,
+    /// Torsion}ById` (`(pos0-pos1).length()`, `toDegree(angle(pos0-pos1,
+    /// pos2-pos1))`, `toDegree(Vector4D::torsion(pos0..pos3))`). Returns `None`
+    /// when an atom cannot be resolved or the geometry is degenerate (e.g. a
+    /// linear angle triple makes the torsion undefined).
+    pub fn measure_value(&self, def: &AtomIntrDef, mol: &MolCoord) -> Option<f64> {
+        let p = self.def_points(def, mol)?;
+        match def.kind {
+            AtomIntrDefKind::Distance => {
+                if p.len() < 2 {
+                    return None;
+                }
+                Some((p[0] - p[1]).length3d())
+            }
+            AtomIntrDefKind::Angle => {
+                if p.len() < 3 {
+                    return None;
+                }
+                p[0].sub_vec(p[1])
+                    .angle(p[2].sub_vec(p[1]))
+                    .ok()
+                    .map(f64::to_degrees)
+            }
+            AtomIntrDefKind::Torsion => {
+                if p.len() < 4 {
+                    return None;
+                }
+                Vector4::torsion(p[0], p[1], p[2], p[3])
+                    .ok()
+                    .map(f64::to_degrees)
+            }
+        }
+    }
+
     pub fn append(&mut self, selection1: impl Into<String>, selection2: impl Into<String>) -> i32 {
         self.push_def(AtomIntrDef {
             id: 0,
@@ -2674,7 +2723,7 @@ pub fn mainchain_trace_snapshot(
             atoms.push(RenderAtom::new(positions[0], tube_radius, Some(color.clone())));
             continue;
         }
-        let samples = catmull_rom_samples(&positions, SUBDIV);
+        let samples = cubic_spline_samples(&positions, SUBDIV);
         for point in &samples {
             atoms.push(RenderAtom::new(*point, tube_radius, Some(color.clone())));
         }
@@ -2782,40 +2831,172 @@ fn mainchain_chain_color(index: usize) -> ColorSpec {
     rgb_spec(r, g, b)
 }
 
-/// Sample a Catmull-Rom spline through `points`, with `subdiv` samples per segment.
+/// A sampled point on a [`CubicSpline`]: position with the tangent (first
+/// derivative) and curvature (second derivative) vectors at that parameter.
+#[derive(Debug, Clone, Copy)]
+pub struct SplineSample {
+    pub position: Vector4,
+    pub tangent: Vector4,
+    pub curvature: Vector4,
+}
+
+/// Natural cubic-spline interpolator — port of C++ molvis `CubicSpline`.
 ///
-/// Catmull-Rom passes through every control point, so the curve runs exactly
-/// along the backbone atoms while smoothing the path between them.
-fn catmull_rom_samples(points: &[Vector4], subdiv: usize) -> Vec<Vector4> {
+/// Interpolates a sequence of control points with a C2-continuous *natural* cubic
+/// spline (zero second derivative at the two ends), chord-length weighted (each
+/// interval's size is the Euclidean distance between its endpoints). The
+/// evaluation parameter runs over `[0, n-1]`; an integer `i` returns control
+/// point `i` exactly. This is the curve CueMol uses for the main-chain trace and
+/// ribbon backbone (C++ uses Catmull-Rom nowhere — the natural cubic spline is the
+/// faithful path).
+pub struct CubicSpline {
+    coeff0: Vec<Vector4>,
+    coeff1: Vec<Vector4>,
+    coeff2: Vec<Vector4>,
+    coeff3: Vec<Vector4>,
+    n_points: usize,
+}
+
+impl CubicSpline {
+    /// Solve the spline coefficients for `points`. `None` for an empty input.
+    pub fn generate(points: &[Vector4]) -> Option<CubicSpline> {
+        let n = points.len();
+        if n == 0 {
+            return None;
+        }
+        let zero = Vector4::new4(0.0, 0.0, 0.0, 0.0);
+        let mut c0 = vec![zero; n];
+        let mut c1 = vec![zero; n];
+        let mut c2 = vec![zero; n];
+        let mut c3 = vec![zero; n];
+
+        if n == 1 {
+            c0[0] = points[0];
+        } else if n == 2 {
+            // Degenerate (line): a single linear segment.
+            c0[0] = points[0];
+            c1[0] = points[1].sub_vec(points[0]);
+        } else {
+            let int_no = n - 1; // number of intervals
+            let equ_no = int_no - 1; // number of interior equations
+
+            // interval sizes (chord lengths) and their reciprocals
+            let mut h = vec![0.0; int_no];
+            let mut ih = vec![0.0; int_no];
+            for i in 0..int_no {
+                h[i] = points[i].sub_vec(points[i + 1]).length3d();
+                ih[i] = 1.0 / h[i];
+            }
+
+            // diagonal of the tridiagonal matrix
+            let mut a = vec![0.0; equ_no];
+            for i in 0..equ_no {
+                a[i] = 2.0 * (h[i] + h[i + 1]);
+            }
+
+            // LR (tridiagonal) decomposition
+            let mut m = vec![0.0; equ_no];
+            let mut l = vec![0.0; equ_no.saturating_sub(1)];
+            m[0] = a[0];
+            for i in 0..equ_no.saturating_sub(1) {
+                l[i] = h[i + 1] / m[i];
+                m[i + 1] = a[i + 1] - l[i] * h[i + 1];
+            }
+
+            // right-hand side: 6 (ih_i (p_{i+1}-p_i) - ih_{i+1} (p_{i+2}-p_{i+1}))
+            let mut dvec = vec![zero; equ_no];
+            for i in 0..equ_no {
+                let dif1 = points[i + 1].sub_vec(points[i]);
+                let dif2 = points[i + 2].sub_vec(points[i + 1]);
+                dvec[i] = dif1.scale(ih[i]).sub_vec(dif2.scale(ih[i + 1])).scale(6.0);
+            }
+
+            // forward elimination
+            let mut yvec = vec![zero; equ_no];
+            yvec[0] = dvec[0];
+            for i in 1..equ_no {
+                yvec[i] = dvec[i].sub_vec(yvec[i - 1].scale(l[i - 1]));
+            }
+
+            // back substitution -> second derivatives at the interior knots
+            let mut xvec = vec![zero; equ_no];
+            xvec[equ_no - 1] = yvec[equ_no - 1].scale(-1.0 / m[equ_no - 1]);
+            for i in (0..equ_no - 1).rev() {
+                xvec[i] = yvec[i].add_vec(xvec[i + 1].scale(h[i + 1])).scale(-1.0 / m[i]);
+            }
+
+            // assemble the per-interval cubic coefficients (local parameter [0,1])
+            for i in 0..int_no {
+                let d0 = if i == 0 { zero } else { xvec[i - 1] };
+                let d1 = if i == int_no - 1 { zero } else { xvec[i] };
+                let hsq = h[i] * h[i];
+                c3[i] = d1.sub_vec(d0).scale(hsq / 6.0);
+                c2[i] = d0.scale(0.5 * hsq);
+                c1[i] = points[i + 1]
+                    .sub_vec(points[i])
+                    .sub_vec(d1.add_vec(d0.scale(2.0)).scale(hsq / 6.0));
+                c0[i] = points[i];
+            }
+        }
+
+        Some(CubicSpline {
+            coeff0: c0,
+            coeff1: c1,
+            coeff2: c2,
+            coeff3: c3,
+            n_points: n,
+        })
+    }
+
+    pub fn point_count(&self) -> usize {
+        self.n_points
+    }
+
+    /// Evaluate the spline at `par` in `[0, n-1]`, returning position, tangent and
+    /// curvature. The interval is `floor(par)` (clamped) and the polynomial uses
+    /// the fractional part as its local parameter.
+    pub fn interpolate(&self, par: f64) -> SplineSample {
+        let max_interval = self.n_points.saturating_sub(2) as isize;
+        let ncoeff = (par.floor() as isize).clamp(0, max_interval.max(0)) as usize;
+        let c0 = self.coeff0[ncoeff];
+        let c1 = self.coeff1[ncoeff];
+        let c2 = self.coeff2[ncoeff];
+        let c3 = self.coeff3[ncoeff];
+        let f = par - ncoeff as f64;
+
+        let position = c3.scale(f).add_vec(c2).scale(f).add_vec(c1).scale(f).add_vec(c0);
+        let tangent = c3.scale(3.0 * f).add_vec(c2.scale(2.0)).scale(f).add_vec(c1);
+        let curvature = c3.scale(6.0 * f).add_vec(c2.scale(2.0));
+        SplineSample {
+            position,
+            tangent,
+            curvature,
+        }
+    }
+}
+
+/// Sample a natural cubic spline through `points`, with `subdiv` samples per
+/// segment (count `(n-1)*subdiv + 1`, ending exactly on the last control point).
+/// The spline passes through every control point, so the curve runs along the
+/// backbone atoms while smoothing the path between them.
+fn cubic_spline_samples(points: &[Vector4], subdiv: usize) -> Vec<Vector4> {
     if points.len() < 2 {
         return points.to_vec();
     }
     let subdiv = subdiv.max(1);
     let n = points.len();
+    let Some(spline) = CubicSpline::generate(points) else {
+        return points.to_vec();
+    };
     let mut out = Vec::with_capacity((n - 1) * subdiv + 1);
     for i in 0..n - 1 {
-        let p0 = points[i.saturating_sub(1)];
-        let p1 = points[i];
-        let p2 = points[i + 1];
-        let p3 = points[(i + 2).min(n - 1)];
         for step in 0..subdiv {
-            let t = step as f64 / subdiv as f64;
-            out.push(catmull_rom_point(p0, p1, p2, p3, t));
+            let par = i as f64 + step as f64 / subdiv as f64;
+            out.push(spline.interpolate(par).position);
         }
     }
     out.push(points[n - 1]);
     out
-}
-
-fn catmull_rom_point(p0: Vector4, p1: Vector4, p2: Vector4, p3: Vector4, t: f64) -> Vector4 {
-    let t2 = t * t;
-    let t3 = t2 * t;
-    // Uniform Catmull-Rom basis (tension 0.5).
-    let a = p1.scale(2.0);
-    let b = (p2 - p0).scale(t);
-    let c = (p0.scale(2.0) - p1.scale(5.0) + p2.scale(4.0) - p3).scale(t2);
-    let d = (p1.scale(3.0) - p0 + p3 - p2.scale(3.0)).scale(t3);
-    (a + b + c + d).scale(0.5)
 }
 
 /// Build a secondary-structure cartoon snapshot: a ribbon swept along each
@@ -2857,7 +3038,7 @@ fn sample_backbone(
     subdiv: usize,
 ) -> (Vec<Vector4>, Vec<Secondary>, Vec<f64>) {
     let positions = points.iter().map(|point| point.pos).collect::<Vec<_>>();
-    let samples = catmull_rom_samples(&positions, subdiv);
+    let samples = cubic_spline_samples(&positions, subdiv);
     let subdiv = subdiv.max(1);
     let n = points.len();
     let mut sections = Vec::with_capacity(samples.len());
@@ -3011,6 +3192,307 @@ fn normalize_or(vec: Vector4, fallback: Vector4) -> Vector4 {
     vec.normalize3d().unwrap_or(fallback)
 }
 
+fn cubic_bezier_point(p1: Vector4, p2: Vector4, p3: Vector4, p4: Vector4, t: f64) -> Vector4 {
+    let it = 1.0 - t;
+    p1 * (it * it * it) + p2 * (3.0 * t * it * it) + p3 * (3.0 * t * t * it) + p4 * (t * t * t)
+}
+
+/// Dots spaced (by arc length) `dot_sep` apart along the cubic Bézier through
+/// `p1..p4`. Port of C++ `DisoRenderer::renderBezierDots` (accumulate the
+/// differential length, emit a dot each time it crosses a `dot_sep` threshold).
+fn bezier_dots(p1: Vector4, p2: Vector4, p3: Vector4, p4: Vector4, dot_sep: f64) -> Vec<Vector4> {
+    let ndiv = 200usize;
+    let dot_sep = dot_sep.max(0.05);
+    let mut dots = Vec::new();
+    let mut prev = p1;
+    let mut len = 0.0;
+    let mut thres = dot_sep;
+    for i in 1..ndiv {
+        let t = i as f64 / ndiv as f64;
+        let v = cubic_bezier_point(p1, p2, p3, p4, t);
+        len += (v - prev).length3d();
+        prev = v;
+        if len > thres {
+            thres += dot_sep;
+            dots.push(v);
+        }
+    }
+    dots
+}
+
+/// Disorder representation (C++ `DisoRenderer`): a dotted Bézier line bridging
+/// each chain gap — consecutive same-chain residues that are NOT bonded to each
+/// other (a missing/disordered stretch). The curve runs through the residues'
+/// pivot atoms, with the neighbouring pivots giving the Bézier tangents.
+pub fn disorder_lines_snapshot(
+    molecule: &MolCoord,
+    dot_sep: f64,
+    dot_radius: f64,
+) -> RenderSceneSnapshot {
+    use std::collections::{HashMap, HashSet};
+    let summaries = molecule.residue_summaries();
+
+    // atom index -> residue index (position in `summaries`)
+    let mut atom_res: HashMap<usize, usize> = HashMap::new();
+    for (ri, s) in summaries.iter().enumerate() {
+        for &ai in &s.atom_indices {
+            atom_res.insert(ai, ri);
+        }
+    }
+    // residue pairs joined by any inter-residue bond (= "linked", not disordered)
+    let mut linked: HashSet<(usize, usize)> = HashSet::new();
+    for bond in molecule.bonds() {
+        if let (Some(&r1), Some(&r2)) = (atom_res.get(&bond.atom1), atom_res.get(&bond.atom2)) {
+            if r1 != r2 {
+                linked.insert((r1.min(r2), r1.max(r2)));
+            }
+        }
+    }
+    let pivot = |ri: usize| -> Option<Vector4> {
+        let s = &summaries[ri];
+        for name in ["CA", "P", "C1'", "O5'"] {
+            if let Some(&ai) = s
+                .atom_indices
+                .iter()
+                .find(|&&ai| molecule.atoms()[ai].name.trim().eq_ignore_ascii_case(name))
+            {
+                return Some(molecule.atoms()[ai].position);
+            }
+        }
+        None
+    };
+    let same_chain = |a: usize, b: usize| summaries[a].key.chain_id == summaries[b].key.chain_id;
+
+    let mut atoms = Vec::new();
+    for i in 1..summaries.len() {
+        if !same_chain(i - 1, i) || linked.contains(&(i - 1, i)) {
+            continue;
+        }
+        let (Some(p1), Some(p4)) = (pivot(i - 1), pivot(i)) else {
+            continue;
+        };
+        let chord = p4 - p1;
+        let third = chord.length3d() / 3.0;
+        // Bézier tangents from the surrounding pivots (chord fallback at the ends).
+        let tan1 = if i >= 2 && same_chain(i - 2, i - 1) {
+            pivot(i - 2).map(|p0| normalize_or(p1 - p0, chord) * third)
+        } else {
+            None
+        }
+        .unwrap_or(chord * (1.0 / 3.0));
+        let tan4 = if i + 1 < summaries.len() && same_chain(i, i + 1) {
+            pivot(i + 1).map(|p5| normalize_or(p5 - p4, chord) * third)
+        } else {
+            None
+        }
+        .unwrap_or(chord * (1.0 / 3.0));
+        let p2 = p1 + tan1;
+        let p3 = p4 - tan4;
+        for dot in bezier_dots(p1, p2, p3, p4, dot_sep) {
+            atoms.push(RenderAtom::new(dot, dot_radius as f32, None));
+        }
+    }
+    RenderSceneSnapshot {
+        atoms,
+        bonds: Vec::new(),
+        meshes: Vec::new(),
+        bounds: molecule.bounding_box_for(None),
+    }
+}
+
+/// Nucleic-acid base representation (C++ `NARenderer`, the `rendResidSimple1`
+/// core): each nucleotide's base is shown as an oriented stick along its base axis
+/// — from the sugar `C1'` to the glycosidic nitrogen (`N9` for purines, `N1` for
+/// pyrimidines), then on to the far ring atom (`N1`/`N3`). Purine vs pyrimidine is
+/// detected by the presence of `N9`. (The base-pair *ladder* rungs and the filled
+/// base block are deferred — they need base-pair partners / per-base polygons.)
+pub fn na_base_sticks_snapshot(molecule: &MolCoord, radius: f64) -> RenderSceneSnapshot {
+    let summaries = molecule.residue_summaries();
+    let pos_in = |indices: &[usize], name: &str| -> Option<Vector4> {
+        indices
+            .iter()
+            .find(|&&ai| molecule.atoms()[ai].name.trim().eq_ignore_ascii_case(name))
+            .map(|&ai| molecule.atoms()[ai].position)
+    };
+    let mut bonds = Vec::new();
+    for s in &summaries {
+        let Some(sugar) = pos_in(&s.atom_indices, "C1'").or_else(|| pos_in(&s.atom_indices, "C1*"))
+        else {
+            continue;
+        };
+        let (glyco, far) = match pos_in(&s.atom_indices, "N9") {
+            Some(n9) => (n9, pos_in(&s.atom_indices, "N1")), // purine
+            None => match pos_in(&s.atom_indices, "N1") {
+                Some(n1) => (n1, pos_in(&s.atom_indices, "N3")), // pyrimidine
+                None => continue,
+            },
+        };
+        bonds.push(RenderBond::new(sugar, glyco, radius as f32, None));
+        if let Some(far) = far {
+            bonds.push(RenderBond::new(glyco, far, radius as f32, None));
+        }
+    }
+    RenderSceneSnapshot {
+        atoms: Vec::new(),
+        bonds,
+        meshes: Vec::new(),
+        bounds: molecule.bounding_box_for(None),
+    }
+}
+
+/// Read an atom's anisotropic displacement tensor (the PDB ANISOU components,
+/// stored as integer props in U×10^4) as `[U11,U22,U33,U12,U13,U23]` in Å²;
+/// `None` if the atom has no ANISOU record.
+fn atom_anisou(atom: &Atom) -> Option<[f64; 6]> {
+    let scaled = |name: &str| atom.int_prop(name).map(|v| v as f64 * 1.0e-4);
+    Some([
+        scaled("anisou_u11")?,
+        scaled("anisou_u22")?,
+        scaled("anisou_u33")?,
+        scaled("anisou_u12")?,
+        scaled("anisou_u13")?,
+        scaled("anisou_u23")?,
+    ])
+}
+
+/// Cholesky factor `M` (lower-triangular, `M·Mᵀ = U`) of the symmetric 3×3 tensor
+/// `U = [u11,u22,u33,u12,u13,u23]`. `None` when `U` is not positive-definite.
+fn cholesky3(u: [f64; 6]) -> Option<[[f64; 3]; 3]> {
+    let (a, b, c, d, e, f) = (u[0], u[1], u[2], u[3], u[4], u[5]);
+    if a <= 0.0 {
+        return None;
+    }
+    let l00 = a.sqrt();
+    let l10 = d / l00;
+    let l20 = e / l00;
+    let t11 = b - l10 * l10;
+    if t11 <= 0.0 {
+        return None;
+    }
+    let l11 = t11.sqrt();
+    let l21 = (f - l20 * l10) / l11;
+    let t22 = c - l20 * l20 - l21 * l21;
+    if t22 <= 0.0 {
+        return None;
+    }
+    let l22 = t22.sqrt();
+    Some([[l00, 0.0, 0.0], [l10, l11, 0.0], [l20, l21, l22]])
+}
+
+/// Thermal-ellipsoid mesh for one atom: a unit sphere transformed by `scale·M`,
+/// where `M` is the Cholesky factor of the ADP tensor `U` (so the surface is the
+/// probability contour `(x-c)ᵀU⁻¹(x-c) = scale²`). Port of C++ `AnIsoURenderer`'s
+/// sphere-through-the-U-transform. Vertex normals are `M⁻ᵀ·u` (the true ellipsoid
+/// normal). Falls back to an isotropic sphere when `U` is not positive-definite.
+pub fn anisou_ellipsoid_mesh(
+    center: Vector4,
+    u: [f64; 6],
+    scale: f64,
+    color: [f32; 4],
+    stacks: usize,
+    slices: usize,
+) -> RenderMesh {
+    let m = cholesky3(u).unwrap_or_else(|| {
+        let r = (((u[0] + u[1] + u[2]) / 3.0).max(1.0e-6)).sqrt();
+        [[r, 0.0, 0.0], [0.0, r, 0.0], [0.0, 0.0, r]]
+    });
+    let mut mesh = RenderMesh::new();
+    let stacks = stacks.max(2);
+    let slices = slices.max(3);
+    for i in 0..=stacks {
+        let theta = std::f64::consts::PI * i as f64 / stacks as f64;
+        let (st, ct) = (theta.sin(), theta.cos());
+        for j in 0..=slices {
+            let phi = std::f64::consts::TAU * j as f64 / slices as f64;
+            let (sp, cp) = (phi.sin(), phi.cos());
+            let uu = [st * cp, st * sp, ct]; // unit-sphere point (= unit normal)
+            // position = center + scale · M · uu
+            let mu = [
+                m[0][0] * uu[0],
+                m[1][0] * uu[0] + m[1][1] * uu[1],
+                m[2][0] * uu[0] + m[2][1] * uu[1] + m[2][2] * uu[2],
+            ];
+            let position = Vector4::new3(
+                center.x + scale * mu[0],
+                center.y + scale * mu[1],
+                center.z + scale * mu[2],
+            );
+            // normal = normalize(M⁻ᵀ · uu): solve Mᵀ n = uu (upper-tri back-subst).
+            let n2 = uu[2] / m[2][2];
+            let n1 = (uu[1] - m[2][1] * n2) / m[1][1];
+            let n0 = (uu[0] - m[1][0] * n1 - m[2][0] * n2) / m[0][0];
+            let normal = normalize_or(Vector4::new3(n0, n1, n2), Vector4::new3(0.0, 0.0, 1.0));
+            mesh.vertices.push(MeshVertex {
+                position,
+                normal,
+                color,
+            });
+        }
+    }
+    let cols = (slices + 1) as u32;
+    for i in 0..stacks as u32 {
+        for j in 0..slices as u32 {
+            let a = i * cols + j;
+            let b = a + 1;
+            let c = (i + 1) * cols + j;
+            let d = c + 1;
+            mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
+        }
+    }
+    mesh
+}
+
+/// Snapshot rendering atoms as anisotropic thermal ellipsoids (the geometry the
+/// `AnIsoURenderer` draws). Atoms with an ANISOU record become ellipsoid meshes;
+/// atoms without are drawn as sphere primitives so the structure still renders.
+pub fn anisou_mesh_snapshot(
+    molecule: &MolCoord,
+    options: &MoleculeRenderOptions,
+) -> RenderSceneSnapshot {
+    const PROB_SCALE: f64 = 1.5382; // 50%-probability ellipsoid (ORTEP convention)
+    let mut meshes = Vec::new();
+    let mut atoms = Vec::new();
+    for atom in molecule.atoms() {
+        let spec = atom_color(&atom.element, options.color_mode);
+        let col = spec
+            .rgba8()
+            .map(|c| {
+                [
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    c.a as f32 / 255.0,
+                ]
+            })
+            .unwrap_or([0.8, 0.8, 0.8, 1.0]);
+        match atom_anisou(atom) {
+            Some(u) => {
+                meshes.push(anisou_ellipsoid_mesh(
+                    atom.position,
+                    u,
+                    PROB_SCALE,
+                    col,
+                    12,
+                    16,
+                ));
+            }
+            None => {
+                atoms.push(RenderAtom::new(
+                    atom.position,
+                    options.bond_radius.max(0.2),
+                    Some(spec),
+                ));
+            }
+        }
+    }
+    RenderSceneSnapshot {
+        atoms,
+        bonds: Vec::new(),
+        meshes,
+        bounds: molecule.bounding_box_for(None),
+    }
+}
+
 /// A unit vector perpendicular to `tangent`, chosen for numerical stability by
 /// crossing with the world axis least aligned with the tangent.
 fn perpendicular(tangent: Vector4) -> Vector4 {
@@ -3082,6 +3564,238 @@ mod tests {
             formal_charge: None,
             int_props: Default::default(),
         }
+    }
+
+    #[test]
+    fn cubic_spline_is_natural_interpolating_and_c2_continuous() {
+        // A non-collinear 3D path so the curve genuinely bends.
+        let pts = [
+            Vector4::new3(0.0, 0.0, 0.0),
+            Vector4::new3(1.0, 1.0, 0.0),
+            Vector4::new3(2.0, 0.0, 1.0),
+            Vector4::new3(3.0, 1.0, 0.0),
+            Vector4::new3(4.0, 0.0, 0.0),
+        ];
+        let spline = CubicSpline::generate(&pts).unwrap();
+        assert_eq!(spline.point_count(), 5);
+
+        // (1) Interpolation: integer parameters land exactly on control points.
+        for (i, p) in pts.iter().enumerate() {
+            let s = spline.interpolate(i as f64);
+            assert!((s.position - *p).length3d() < 1e-9, "control point {i}");
+        }
+
+        // (2) Natural boundary condition: zero curvature at both ends.
+        assert!(spline.interpolate(0.0).curvature.length3d() < 1e-9);
+        assert!(spline.interpolate(4.0).curvature.length3d() < 1e-9);
+
+        // (3) C1 + (4) C2 continuity across an interior knot (par = 2): tangent
+        // and curvature agree from the left and the right.
+        let eps = 1e-6;
+        let left = spline.interpolate(2.0 - eps);
+        let right = spline.interpolate(2.0 + eps);
+        assert!((left.tangent - right.tangent).length3d() < 1e-3, "C1 at knot");
+        assert!((left.curvature - right.curvature).length3d() < 1e-3, "C2 at knot");
+
+        // (5) The analytic tangent matches a central finite difference of position.
+        let mid = spline.interpolate(1.5);
+        let fd = (spline.interpolate(1.5 + eps).position - spline.interpolate(1.5 - eps).position)
+            .scale(1.0 / (2.0 * eps));
+        assert!((mid.tangent - fd).length3d() < 1e-4, "tangent vs finite diff");
+
+        // (6) The curve actually bends: the mid-segment sample leaves the chord.
+        let chord_mid = (pts[1] + pts[2]).scale(0.5);
+        assert!((mid.position - chord_mid).length3d() > 1e-3, "curve deviates from chord");
+    }
+
+    fn intr_atom(serial: i32, x: f64, y: f64, z: f64) -> Atom {
+        let mut a = sample_atom("X", "C", x, y, z);
+        a.serial = serial;
+        a
+    }
+
+    /// (x-c)ᵀ U⁻¹ (x-c) for a symmetric 3×3 U = [u11,u22,u33,u12,u13,u23].
+    fn quad_form(d: [f64; 3], u: [f64; 6]) -> f64 {
+        let (a, b, c, p, q, r) = (u[0], u[1], u[2], u[3], u[4], u[5]);
+        // cofactors of the symmetric matrix [[a,p,q],[p,b,r],[q,r,c]]
+        let det = a * (b * c - r * r) - p * (p * c - r * q) + q * (p * r - b * q);
+        let i00 = (b * c - r * r) / det;
+        let i11 = (a * c - q * q) / det;
+        let i22 = (a * b - p * p) / det;
+        let i01 = (q * r - p * c) / det;
+        let i02 = (p * r - q * b) / det;
+        let i12 = (p * q - a * r) / det;
+        d[0] * d[0] * i00
+            + d[1] * d[1] * i11
+            + d[2] * d[2] * i22
+            + 2.0 * d[0] * d[1] * i01
+            + 2.0 * d[0] * d[2] * i02
+            + 2.0 * d[1] * d[2] * i12
+    }
+
+    #[test]
+    fn anisou_ellipsoid_is_a_correct_probability_contour() {
+        let center = Vector4::new3(1.0, 2.0, 3.0);
+        let color = [1.0, 1.0, 1.0, 1.0];
+        let scale = 1.5;
+
+        // Isotropic U = 0.01 Å²: the ellipsoid is a sphere of radius scale·0.1.
+        let iso = anisou_ellipsoid_mesh(center, [0.01, 0.01, 0.01, 0.0, 0.0, 0.0], scale, color, 8, 12);
+        let dist = |v: &MeshVertex| (v.position - center).length3d();
+        let max = iso.vertices.iter().map(dist).fold(0.0_f64, f64::max);
+        let min = iso.vertices.iter().map(dist).fold(f64::INFINITY, f64::min);
+        assert!((max - scale * 0.1).abs() < 1e-6 && (min - scale * 0.1).abs() < 1e-6);
+
+        // Anisotropic, off-diagonal U: every vertex lies on the contour
+        // (v-c)ᵀ U⁻¹ (v-c) = scale² — proving it's the correct ellipsoid surface.
+        let u = [0.04, 0.02, 0.01, 0.008, 0.005, -0.003];
+        let ell = anisou_ellipsoid_mesh(center, u, scale, color, 16, 20);
+        assert!(ell.triangle_count() > 100);
+        for v in &ell.vertices {
+            let d = [
+                v.position.x - center.x,
+                v.position.y - center.y,
+                v.position.z - center.z,
+            ];
+            assert!((quad_form(d, u) - scale * scale).abs() < 1e-6, "vertex off contour");
+        }
+
+        // The principal stretch is along x (largest U component) — wider than y.
+        let ext = |f: &dyn Fn(&MeshVertex) -> f64| {
+            ell.vertices.iter().map(f).fold(0.0_f64, f64::max)
+        };
+        let max_x = ext(&|v| (v.position.x - center.x).abs());
+        let max_y = ext(&|v| (v.position.y - center.y).abs());
+        assert!(max_x > max_y, "elongated along the dominant axis");
+
+        // A non-positive-definite tensor falls back to an isotropic sphere (no NaNs).
+        let bad = anisou_ellipsoid_mesh(center, [-1.0, 0.01, 0.01, 0.0, 0.0, 0.0], scale, color, 6, 8);
+        assert!(bad.vertices.iter().all(|v| v.position.x.is_finite()));
+    }
+
+    fn diso_ca(serial: i32, res_id: i32, x: f64) -> Atom {
+        let mut a = sample_atom("CA", "C", x, 0.0, 0.0);
+        a.serial = serial;
+        a.res_id = res_id;
+        a
+    }
+
+    #[test]
+    fn disorder_lines_bridge_unbonded_chain_gaps_only() {
+        // Two same-chain residues 10 Å apart with NO bond between them = a
+        // disordered gap -> a dotted Bézier line bridges them.
+        let mol = MolCoord::with_atoms(vec![diso_ca(1, 1, 0.0), diso_ca(2, 2, 10.0)]);
+        let snap = disorder_lines_snapshot(&mol, 1.0, 0.2);
+        assert!(!snap.atoms.is_empty(), "gap should be dotted");
+        // ~10 dots (10 Å / 1 Å spacing), all between the two pivots.
+        assert!(snap.atoms.len() >= 8 && snap.atoms.len() <= 12, "got {}", snap.atoms.len());
+        assert!(snap
+            .atoms
+            .iter()
+            .all(|a| a.center.x > -0.1 && a.center.x < 10.1));
+
+        // Once the residues are bonded (linked), there is no disorder line.
+        let mut linked = MolCoord::with_atoms(vec![diso_ca(1, 1, 0.0), diso_ca(2, 2, 10.0)]);
+        linked.add_bond(0, 1, cuemol_molstr::BondOrder::Single);
+        let snap2 = disorder_lines_snapshot(&linked, 1.0, 0.2);
+        assert!(snap2.atoms.is_empty(), "linked residues are not disordered");
+    }
+
+    #[test]
+    fn na_base_sticks_pick_glycosidic_n_by_base_type() {
+        fn na_atom(name: &str, res_id: i32, x: f64, y: f64) -> Atom {
+            let mut a = sample_atom(name, "N", x, y, 0.0);
+            a.res_id = res_id;
+            a
+        }
+        let mol = MolCoord::with_atoms(vec![
+            // Purine (res 1): has N9 -> glycosidic N9, far N1.
+            na_atom("C1'", 1, 0.0, 0.0),
+            na_atom("N9", 1, 1.0, 0.0),
+            na_atom("N1", 1, 2.0, 0.0),
+            // Pyrimidine (res 2): no N9 -> glycosidic N1, far N3.
+            na_atom("C1'", 2, 0.0, 5.0),
+            na_atom("N1", 2, 1.0, 5.0),
+            na_atom("N3", 2, 2.0, 5.0),
+        ]);
+        let snap = na_base_sticks_snapshot(&mol, 0.3);
+        // Two sticks per base (sugar->glycosidic, glycosidic->far).
+        assert_eq!(snap.bonds.len(), 4);
+        let has_stick = |fx: f64, fy: f64, tx: f64, ty: f64| {
+            snap.bonds.iter().any(|b| {
+                (b.from.x - fx).abs() < 1e-9
+                    && (b.from.y - fy).abs() < 1e-9
+                    && (b.to.x - tx).abs() < 1e-9
+                    && (b.to.y - ty).abs() < 1e-9
+            })
+        };
+        // Purine glycosidic stick goes to N9 (1,0); pyrimidine to N1 (1,5).
+        assert!(has_stick(0.0, 0.0, 1.0, 0.0), "purine C1'->N9");
+        assert!(has_stick(1.0, 0.0, 2.0, 0.0), "purine N9->N1");
+        assert!(has_stick(0.0, 5.0, 1.0, 5.0), "pyrimidine C1'->N1");
+        assert!(has_stick(1.0, 5.0, 2.0, 5.0), "pyrimidine N1->N3");
+    }
+
+    #[test]
+    fn anisou_snapshot_builds_ellipsoids_for_anisou_atoms() {
+        let mut mol = MolCoord::with_atoms(vec![
+            sample_atom("N", "N", 0.0, 0.0, 0.0),
+            sample_atom("CA", "C", 2.0, 0.0, 0.0),
+        ]);
+        // Atom 0 carries an ANISOU record (the 6 tensor components); atom 1 does not.
+        for (name, value) in [
+            ("anisou_u11", 1111),
+            ("anisou_u22", 2222),
+            ("anisou_u33", 3333),
+            ("anisou_u12", 444),
+            ("anisou_u13", 555),
+            ("anisou_u23", 666),
+        ] {
+            mol.atoms_mut()[0].set_int_prop(name, value);
+        }
+        let snap = anisou_mesh_snapshot(&mol, &MoleculeRenderOptions::default());
+        // Atom 0 (with ANISOU) -> an ellipsoid mesh; atom 1 -> a sphere primitive.
+        assert_eq!(snap.meshes.len(), 1);
+        assert_eq!(snap.atoms.len(), 1);
+        assert!(snap.meshes[0].triangle_count() > 0);
+    }
+
+    #[test]
+    fn atom_intr_measures_distance_angle_and_signed_torsion() {
+        let mol = MolCoord::with_atoms(vec![
+            intr_atom(1, 0.0, 0.0, 0.0),
+            intr_atom(2, 3.0, 4.0, 0.0), // distance 1-2 = 5
+            intr_atom(3, 1.0, 0.0, 0.0),
+            intr_atom(4, 0.0, 0.0, 0.0), // angle 3-4-5 vertex
+            intr_atom(5, 0.0, 1.0, 0.0), // angle = 90 deg
+            intr_atom(6, 0.0, 1.0, 0.0),
+            intr_atom(7, 0.0, 0.0, 0.0),
+            intr_atom(8, 1.0, 0.0, 0.0),
+            intr_atom(9, 1.0, 0.0, 1.0), // torsion 6-7-8-9 = +90 deg
+            intr_atom(10, 1.0, 0.0, -1.0), // torsion 6-7-8-10 = -90 deg
+        ]);
+
+        let mut r = AtomIntrRenderer::new();
+        let dist = r.append_by_id(1, 0, 2, 0, true);
+        let angle = r.append_angle_by_id(3, 0, 4, 0, 5, 0);
+        let tors_pos = r.append_torsion_by_id(6, 0, 7, 0, 8, 0, 9, 0);
+        let tors_neg = r.append_torsion_by_id(6, 0, 7, 0, 8, 0, 10, 0);
+        // An unresolvable atom id yields no measurement.
+        let missing = r.append_by_id(1, 0, 999, 0, true);
+
+        let value = |id: i32| {
+            let def = r.defs().iter().find(|d| d.id() == id).unwrap();
+            r.measure_value(def, &mol)
+        };
+
+        assert!((value(dist).unwrap() - 5.0).abs() < 1e-9);
+        assert!((value(angle).unwrap() - 90.0).abs() < 1e-9);
+        // The torsion is SIGNED — the sign convention matches C++ Vector4D::torsion
+        // (verified against VectorHelper.cpp). Pinning both +90 and -90 guards the
+        // sign, not just the magnitude.
+        assert!((value(tors_pos).unwrap() - 90.0).abs() < 1e-9);
+        assert!((value(tors_neg).unwrap() + 90.0).abs() < 1e-9);
+        assert_eq!(value(missing), None);
     }
 
     #[test]
@@ -3242,6 +3956,53 @@ mod tests {
         // A helix band is wider than it is thick (flat ribbon, not a tube).
         let (width, thick, _) = section_params(Secondary::Helix, 1.0);
         assert!(width > thick * 2.0);
+    }
+
+    #[test]
+    fn ribbon_cross_section_geometry_is_flat_for_helix_round_for_coil() {
+        // The previous test pins the section *params*; this pins that the frame +
+        // ellipse construction actually produces a flattened ring for a helix
+        // (aspect = width/thick ~ 3) and a round ring for a coil (~1) — the
+        // ribbon-vs-tube distinction in the real mesh geometry.
+        fn first_ring_aspect(mol: &MolCoord) -> f64 {
+            let snap = ribbon_mesh_snapshot(mol, &MoleculeRenderOptions::default());
+            let ring = &snap.meshes[0].vertices[0..TUBE_RADIAL];
+            let n = TUBE_RADIAL as f64;
+            let cx = ring.iter().map(|v| v.position.x).sum::<f64>() / n;
+            let cy = ring.iter().map(|v| v.position.y).sum::<f64>() / n;
+            let cz = ring.iter().map(|v| v.position.z).sum::<f64>() / n;
+            let dists: Vec<f64> = ring
+                .iter()
+                .map(|v| {
+                    let (dx, dy, dz) =
+                        (v.position.x - cx, v.position.y - cy, v.position.z - cz);
+                    (dx * dx + dy * dy + dz * dz).sqrt()
+                })
+                .collect();
+            let max = dists.iter().cloned().fold(0.0_f64, f64::max);
+            let min = dists.iter().cloned().fold(f64::INFINITY, f64::min);
+            max / min.max(1.0e-9)
+        }
+
+        let coords = vec![
+            ca_atom(1, 0.0, 0.0, 0.0),
+            ca_atom(2, 3.0, 0.0, 0.0),
+            ca_atom(3, 6.0, 0.0, 0.0),
+            ca_atom(4, 9.0, 0.0, 0.0),
+        ];
+        let mut helix = MolCoord::with_atoms(coords.clone());
+        for res_id in 1..=4 {
+            helix
+                .set_residue_prop_str("A", &res_id.to_string(), "secondary", "helix")
+                .unwrap();
+        }
+        let coil = MolCoord::with_atoms(coords);
+
+        assert!(
+            first_ring_aspect(&helix) > 2.0,
+            "helix ring is not a flat band"
+        );
+        assert!(first_ring_aspect(&coil) < 1.5, "coil ring is not round");
     }
 
     #[test]

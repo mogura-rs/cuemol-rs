@@ -66,6 +66,32 @@ fn mtz2_map_reader_honors_requested_columns() {
     assert_eq!(reader.selected_weight(), Some(5));
 }
 
+#[test]
+fn build_density_map_synthesizes_finite_map_from_synthetic_mtz() {
+    // Exercise the real public pipeline end-to-end: read_bytes -> column
+    // selection (guess_fft_columns) -> build_density_map. The standalone
+    // density_map_from_mtz unit tests feed a hand-built MtzFile and never reach
+    // this entry point, so this is the only coverage of read_bytes + build wired
+    // together. mtz_bytes_with_body() already carries a CELL record (required;
+    // build_density_map errors on a missing cell) and no SYMINF, so the space
+    // group falls back to P1.
+    let mut reader = Mtz2MapReader::new();
+    reader.read_bytes(&mtz_bytes_with_body()).unwrap();
+
+    let map = reader.build_density_map().unwrap();
+
+    // Stats must be finite, and the synthesized map must actually carry signal:
+    // two reflections with non-trivial phases give a non-constant density, so
+    // den_max strictly exceeds den_min and the RMSD is positive. den_sigma == 0
+    // would mean a degenerate/empty grid slipped through.
+    assert!(map.den_min().is_finite());
+    assert!(map.den_max().is_finite());
+    assert!(map.den_mean().is_finite());
+    assert!(map.den_sigma().is_finite());
+    assert!(map.den_max() > map.den_min());
+    assert!(map.den_sigma() > 0.0);
+}
+
 fn mtz_bytes() -> Vec<u8> {
     let mut bytes = vec![0_u8; 80];
     bytes[0..4].copy_from_slice(b"MTZ ");

@@ -11,6 +11,7 @@ cuemol-molstr.workspace = true
 cuemol-qsys.workspace = true
 cuemol-surface.workspace = true
 cuemol-symm.workspace = true
+rustfft = "6"
 
 [lib]
 name = "cuemol_xtal"

@@ -120,7 +120,11 @@ pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Re
         return Err(CueMolError::parse("mmCIF contains no _atom_site rows"));
     }
 
-    infer_covalent_bonds(&mut mol);
+    // Build connectivity from the residue-topology dictionary (correct bonds +
+    // orders, peptide links, distance-gated disulfides), the same path the PDB
+    // reader uses; the explicit `_struct_conn` records below add any remaining
+    // covalent links (and dedup against template disulfides). See `crate::toppar`.
+    mol.apply_topology();
     for cif_loop in anisou_rows {
         apply_anisou(&cif_loop, &mut mol);
     }
@@ -415,49 +419,8 @@ fn apply_struct_conn(cif_loop: &CifLoop, atom_keys: &HashMap<String, usize>, mol
     }
 }
 
-fn infer_covalent_bonds(mol: &mut MolCoord) {
-    let atoms = mol.atoms().to_vec();
-    for i in 0..atoms.len() {
-        for j in i + 1..atoms.len() {
-            if atoms[i].chain_id != atoms[j].chain_id {
-                continue;
-            }
-            if (atoms[i].res_id - atoms[j].res_id).abs() > 1 {
-                continue;
-            }
-            let max_dist =
-                covalent_radius(&atoms[i].element) + covalent_radius(&atoms[j].element) + 0.45;
-            let dist = distance(atoms[i].position, atoms[j].position);
-            if dist > 0.4 && dist <= max_dist.max(1.25) {
-                mol.add_bond(i, j, BondOrder::Single);
-            }
-        }
-    }
-}
-
 fn atom_key(chain: &str, res_id: i32, atom_name: &str) -> String {
     format!("{chain}:{res_id}:{atom_name}")
-}
-
-fn covalent_radius(element: &str) -> f64 {
-    match element.to_ascii_uppercase().as_str() {
-        "H" => 0.31,
-        "C" => 0.76,
-        "N" => 0.71,
-        "O" => 0.66,
-        "P" => 1.07,
-        "S" => 1.05,
-        "F" => 0.57,
-        "CL" => 1.02,
-        _ => 0.77,
-    }
-}
-
-fn distance(a: Vector4, b: Vector4) -> f64 {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    let dz = a.z - b.z;
-    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 #[cfg(test)]

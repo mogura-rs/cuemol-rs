@@ -93,6 +93,8 @@ pub enum HandlerSniffer {
     BrixMap,
     MtzMap,
     MsmsSurface,
+    QdfSurf,
+    QdfPot,
     QscXml,
     Pse,
 }
@@ -670,6 +672,22 @@ fn default_handlers() -> Vec<StreamHandlerInfo> {
             Some(HandlerSniffer::MsmsSurface),
         ),
         StreamHandlerInfo::new(
+            "cuemol_rs::QdfSurfReader",
+            "qdfsurf",
+            "CueMol molsurf file (*.qdf)",
+            "*.qdf",
+            HandlerCategory::ObjReader,
+            Some(HandlerSniffer::QdfSurf),
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::QdfPotReader",
+            "qdfpot",
+            "CueMol elepot file (*.qdf)",
+            "*.qdf",
+            HandlerCategory::ObjReader,
+            Some(HandlerSniffer::QdfPot),
+        ),
+        StreamHandlerInfo::new(
             "cuemol_rs::SceneXMLReader",
             "qsc_xml",
             "CueMol Scene (*.qsc;*.qsl)",
@@ -702,6 +720,38 @@ fn default_handlers() -> Vec<StreamHandlerInfo> {
             None,
         ),
         StreamHandlerInfo::new(
+            "cuemol_rs::XYZRFileWriter",
+            "xyzr",
+            "XYZR coordinates(*.xyzr)",
+            "*.xyzr",
+            HandlerCategory::ObjWriter,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::PQRFileWriter",
+            "pqr",
+            "PQR coordinates(*.pqr)",
+            "*.pqr",
+            HandlerCategory::ObjWriter,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::QdfSurfWriter",
+            "qdfsurf",
+            "CueMol molsurf file (*.qdf)",
+            "*.qdf",
+            HandlerCategory::ObjWriter,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::QdfPotWriter",
+            "qdfpot",
+            "CueMol elepot file (*.qdf)",
+            "*.qdf",
+            HandlerCategory::ObjWriter,
+            None,
+        ),
+        StreamHandlerInfo::new(
             "cuemol_rs::SceneXMLWriter",
             "qsc_xml",
             "CueMol Scene (*.qsc)",
@@ -729,6 +779,8 @@ fn sniff_text(input: &str, sniffer: HandlerSniffer) -> ContentVerdict {
         HandlerSniffer::BrixMap => sniff_brix_map(input),
         HandlerSniffer::MtzMap => sniff_mtz_map(input.as_bytes()),
         HandlerSniffer::MsmsSurface => sniff_msms_surface(input),
+        HandlerSniffer::QdfSurf => sniff_qdf_file_type(input.as_bytes(), b"SRF1"),
+        HandlerSniffer::QdfPot => sniff_qdf_file_type(input.as_bytes(), b"POT1"),
         HandlerSniffer::QscXml => sniff_qsc_xml(input),
         HandlerSniffer::Pse => sniff_pse(input.as_bytes()),
     }
@@ -740,6 +792,8 @@ fn sniff_bytes(bytes: &[u8], sniffer: HandlerSniffer) -> ContentVerdict {
         HandlerSniffer::NamdCoor => sniff_namd_coor(bytes),
         HandlerSniffer::Ccp4Map => sniff_ccp4_map(bytes),
         HandlerSniffer::MtzMap => sniff_mtz_map(bytes),
+        HandlerSniffer::QdfSurf => sniff_qdf_file_type(bytes, b"SRF1"),
+        HandlerSniffer::QdfPot => sniff_qdf_file_type(bytes, b"POT1"),
         HandlerSniffer::Pse => sniff_pse(bytes),
         _ => {
             let input = String::from_utf8_lossy(bytes);
@@ -1006,6 +1060,79 @@ fn sniff_msms_surface(input: &str) -> ContentVerdict {
         return ContentVerdict::Unknown;
     }
     ContentVerdict::Unknown
+}
+
+fn sniff_qdf_file_type(bytes: &[u8], expected_type: &[u8; 4]) -> ContentVerdict {
+    if bytes.len() < 26 {
+        return ContentVerdict::Unknown;
+    }
+    let version = match parse_qdf_version(bytes.get(0..4).unwrap_or_default()) {
+        Some(version) => version,
+        None => return ContentVerdict::Unknown,
+    };
+    let mut offset = if version == 0 {
+        4
+    } else {
+        if bytes.len() < 28 {
+            return ContentVerdict::Unknown;
+        }
+        if bytes.get(4..6) != Some(b"00".as_slice()) {
+            return ContentVerdict::Unknown;
+        }
+        6
+    };
+
+    let Some(&int_bo) = bytes.get(offset) else {
+        return ContentVerdict::Unknown;
+    };
+    offset += 1;
+    let Some(marker) = read_qdf_i32(bytes, offset, int_bo) else {
+        return ContentVerdict::Unknown;
+    };
+    if marker != 12_345_678 {
+        return ContentVerdict::Unknown;
+    }
+    offset += 4;
+    let Some(&float_bo) = bytes.get(offset) else {
+        return ContentVerdict::Unknown;
+    };
+    if float_bo != int_bo {
+        return ContentVerdict::Unknown;
+    }
+    offset += 1;
+    offset += 4; // float byte-order marker
+    offset += 4; // dummy marker
+
+    let Some(type_len) = read_qdf_i32(bytes, offset, int_bo) else {
+        return ContentVerdict::Unknown;
+    };
+    offset += 4;
+    if type_len != 4 {
+        return ContentVerdict::Unknown;
+    }
+    match bytes.get(offset..offset + 4) {
+        Some(found) if found == expected_type => ContentVerdict::Yes,
+        Some(b"SRF1") | Some(b"POT1") => ContentVerdict::No,
+        _ => ContentVerdict::Unknown,
+    }
+}
+
+fn parse_qdf_version(header: &[u8]) -> Option<u16> {
+    let text = std::str::from_utf8(header).ok()?;
+    let digits = text
+        .strip_prefix("QDF")
+        .or_else(|| text.strip_prefix("QD"))
+        .or_else(|| text.strip_prefix('Q'))?;
+    u16::from_str_radix(digits, 16).ok()
+}
+
+fn read_qdf_i32(bytes: &[u8], offset: usize, int_bo: u8) -> Option<i32> {
+    let field: [u8; 4] = bytes.get(offset..offset + 4)?.try_into().ok()?;
+    match int_bo {
+        0 => Some(i32::from_le_bytes(field)),
+        1 => Some(i32::from_be_bytes(field)),
+        _ => None,
+    }
 }
 
 fn sniff_opendx(input: &str) -> ContentVerdict {

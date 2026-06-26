@@ -367,7 +367,12 @@ pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result
         mol.apply_topology();
     }
     apply_ssbond_records(&mut mol, &ssbonds);
+    // C++ PDBFileReader: when build2ndry is set (the default), secondary
+    // structure is *computed* by DSSP and the deposited HELIX/SHEET records are
+    // ignored; only when it is off are those records applied verbatim.
     if options.build_secondary {
+        mol.calc_prot_2ndry(-500.0, false);
+    } else {
         apply_secondary_ranges(&mut mol, &secondary_ranges);
     }
     Ok(mol)
@@ -764,8 +769,12 @@ fn apply_secondary_ranges(mol: &mut MolCoord, ranges: &[SecondaryRange]) {
             continue;
         }
         for res_id in range.start..=range.end {
-            let _ =
-                mol.set_residue_prop_str(&range.chain, &res_id.to_string(), "secondary", range.kind);
+            let _ = mol.set_residue_prop_str(
+                &range.chain,
+                &res_id.to_string(),
+                "secondary",
+                range.kind,
+            );
         }
     }
 }
@@ -860,7 +869,9 @@ mod tests {
     }
 
     #[test]
-    fn reads_helix_and_sheet_records_into_residue_secondary() {
+    fn applies_deposited_helix_sheet_records_when_build_secondary_off() {
+        // With build_secondary OFF, the reader applies the deposited HELIX/SHEET
+        // records verbatim (C++ PDBFileReader::apply2ndry path).
         let pdb = "\
 HELIX    1  H1 ALA A    1  ALA A    3  1
 SHEET    1   A 1 ALA A   5  ALA A   6  0
@@ -869,7 +880,11 @@ ATOM      2  CA  ALA A   3       3.000   0.000   0.000  1.00  0.00           C
 ATOM      3  CA  ALA A   5       6.000   0.000   0.000  1.00  0.00           C
 ATOM      4  CA  ALA A   6       9.000   0.000   0.000  1.00  0.00           C
 ";
-        let mol = read_pdb_str(pdb).unwrap();
+        let options = PdbReadOptions {
+            build_secondary: false,
+            ..PdbReadOptions::default()
+        };
+        let mol = read_pdb_str_with_options(pdb, options).unwrap();
         assert_eq!(
             mol.get_residue_prop_str("A", "1", "secondary").unwrap(),
             Some("helix")
@@ -889,18 +904,25 @@ ATOM      4  CA  ALA A   6       9.000   0.000   0.000  1.00  0.00           C
     }
 
     #[test]
-    fn skips_secondary_when_build_secondary_disabled() {
+    fn ignores_deposited_records_and_computes_dssp_by_default() {
+        // With build_secondary ON (the default, matching C++ build2ndry=true),
+        // deposited HELIX records are IGNORED in favor of computed DSSP. These
+        // CA-only residues have no full backbone, so DSSP assigns nothing — and
+        // crucially the reader does NOT fall back to the deposited HELIX record.
         let pdb = "\
 HELIX    1  H1 ALA A    1  ALA A    3  1
 ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00           C
 ATOM      2  CA  ALA A   3       3.000   0.000   0.000  1.00  0.00           C
 ";
-        let options = PdbReadOptions {
-            build_secondary: false,
-            ..PdbReadOptions::default()
-        };
-        let mol = read_pdb_str_with_options(pdb, options).unwrap();
-        assert_eq!(mol.get_residue_prop_str("A", "1", "secondary").unwrap(), None);
+        let mol = read_pdb_str(pdb).unwrap();
+        assert_eq!(
+            mol.get_residue_prop_str("A", "1", "secondary").unwrap(),
+            None
+        );
+        assert_eq!(
+            mol.get_residue_prop_str("A", "3", "secondary").unwrap(),
+            None
+        );
     }
 
     #[test]

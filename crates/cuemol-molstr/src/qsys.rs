@@ -202,26 +202,72 @@ impl MolObject {
         Ok(uid)
     }
 
-    fn resolve_atom_label(&self, aid: &str) -> Result<String> {
-        let atom = if let Ok(index) = aid.parse::<usize>() {
+    /// Resolve an atom-interaction reference (`aid`) to an atom. The reference is
+    /// either a numeric index into the atom array or a `chain.resid.name` triple.
+    fn resolve_atom(&self, aid: &str) -> Option<&Atom> {
+        if let Ok(index) = aid.parse::<usize>() {
             self.mol.atoms().get(index)
         } else {
             let parts = aid.split('.').collect::<Vec<_>>();
             if parts.len() != 3 {
-                None
-            } else {
-                let chain = parts[0];
-                let resid = parts[1].parse::<i32>().ok();
-                let name = parts[2];
-                self.mol.atoms().iter().find(|atom| {
-                    atom.chain_id == chain
-                        && Some(atom.res_id) == resid
-                        && atom.name.trim().eq_ignore_ascii_case(name)
-                })
+                return None;
             }
+            let chain = parts[0];
+            let resid = parts[1].parse::<i32>().ok();
+            let name = parts[2];
+            self.mol.atoms().iter().find(|atom| {
+                atom.chain_id == chain
+                    && Some(atom.res_id) == resid
+                    && atom.name.trim().eq_ignore_ascii_case(name)
+            })
         }
-        .ok_or_else(|| CueMolError::NotFound(format!("atom id {aid}")))?;
-        Ok(atom_display_name(atom))
+    }
+
+    fn resolve_atom_label(&self, aid: &str) -> Result<String> {
+        self.resolve_atom(aid)
+            .map(atom_display_name)
+            .ok_or_else(|| CueMolError::NotFound(format!("atom id {aid}")))
+    }
+
+    /// Distance (Å) measured by each line of an atom-interaction `renderer`, in
+    /// line order; `None` for a line whose atoms cannot be resolved. The `.qsc`
+    /// scene facade models only 2-atom distance measurements (angle/torsion live in
+    /// the molvis `AtomIntrRenderer`); this is the value C++ `AtomIntrRenderer`
+    /// shows for a distance interaction.
+    pub fn atom_intr_distances(&self, renderer: &MolRenderer) -> Vec<Option<f64>> {
+        renderer
+            .atom_intr_lines
+            .iter()
+            .map(|line| {
+                let p0 = self.resolve_atom(&line.aid1)?.position;
+                let p1 = self.resolve_atom(&line.aid2)?.position;
+                Some((p0 - p1).length3d())
+            })
+            .collect()
+    }
+
+    /// JSON array of `{a0, a1, distance}` for an atom-interaction renderer, where
+    /// `distance` is the measured value (or `null` when unresolved).
+    pub fn atom_intr_measurements_json(&self, renderer: &MolRenderer) -> String {
+        let distances = self.atom_intr_distances(renderer);
+        let entries = renderer
+            .atom_intr_lines
+            .iter()
+            .zip(distances)
+            .map(|(line, dist)| {
+                let dist = match dist {
+                    Some(value) => format!("{value:.3}"),
+                    None => "null".to_string(),
+                };
+                format!(
+                    "{{\"a0\":\"{}\",\"a1\":\"{}\",\"distance\":{}}}",
+                    escape_json(&line.a0),
+                    escape_json(&line.a1),
+                    dist
+                )
+            })
+            .collect::<Vec<_>>();
+        format!("[{}]", entries.join(","))
     }
 }
 
