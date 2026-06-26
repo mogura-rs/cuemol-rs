@@ -3228,7 +3228,14 @@ pub fn disorder_lines_snapshot(
     molecule: &MolCoord,
     dot_sep: f64,
     dot_radius: f64,
+    loopsize: f64,
+    loopsize2: f64,
 ) -> RenderSceneSnapshot {
+    // C++ DisoRenderer: loopsize scales the N-terminal Bézier tangent (gap
+    // bulge amplitude); loopsize2 the C-terminal one, with a negative loopsize2
+    // meaning "reuse loopsize".
+    let loop1 = loopsize;
+    let loop2 = if loopsize2 < 0.0 { loopsize } else { loopsize2 };
     use std::collections::{HashMap, HashSet};
     let summaries = molecule.residue_summaries();
 
@@ -3286,8 +3293,8 @@ pub fn disorder_lines_snapshot(
             None
         }
         .unwrap_or(chord * (1.0 / 3.0));
-        let p2 = p1 + tan1;
-        let p3 = p4 - tan4;
+        let p2 = p1 + tan1 * loop1;
+        let p3 = p4 - tan4 * loop2;
         for dot in bezier_dots(p1, p2, p3, p4, dot_sep) {
             atoms.push(RenderAtom::new(dot, dot_radius as f32, None));
         }
@@ -3685,7 +3692,7 @@ mod tests {
         // Two same-chain residues 10 Å apart with NO bond between them = a
         // disordered gap -> a dotted Bézier line bridges them.
         let mol = MolCoord::with_atoms(vec![diso_ca(1, 1, 0.0), diso_ca(2, 2, 10.0)]);
-        let snap = disorder_lines_snapshot(&mol, 1.0, 0.2);
+        let snap = disorder_lines_snapshot(&mol, 1.0, 0.2, 1.0, -1.0);
         assert!(!snap.atoms.is_empty(), "gap should be dotted");
         // ~10 dots (10 Å / 1 Å spacing), all between the two pivots.
         assert!(snap.atoms.len() >= 8 && snap.atoms.len() <= 12, "got {}", snap.atoms.len());
@@ -3697,8 +3704,42 @@ mod tests {
         // Once the residues are bonded (linked), there is no disorder line.
         let mut linked = MolCoord::with_atoms(vec![diso_ca(1, 1, 0.0), diso_ca(2, 2, 10.0)]);
         linked.add_bond(0, 1, cuemol_molstr::BondOrder::Single);
-        let snap2 = disorder_lines_snapshot(&linked, 1.0, 0.2);
+        let snap2 = disorder_lines_snapshot(&linked, 1.0, 0.2, 1.0, -1.0);
         assert!(snap2.atoms.is_empty(), "linked residues are not disordered");
+    }
+
+    #[test]
+    fn disorder_loopsize_scales_the_gap_arc_amplitude() {
+        // res1-res2 and res3-res4 are bonded; res2-res3 is the unbonded gap. The
+        // neighbours bend the Bézier tangents off the chord (+y), so a larger
+        // loopsize bulges the disorder arc higher in +y.
+        fn bent_ca(serial: i32, res_id: i32, x: f64, y: f64) -> Atom {
+            let mut a = sample_atom("CA", "C", x, y, 0.0);
+            a.serial = serial;
+            a.res_id = res_id;
+            a
+        }
+        let mut mol = MolCoord::with_atoms(vec![
+            bent_ca(1, 1, 0.0, -2.0),
+            bent_ca(2, 2, 0.0, 0.0),
+            bent_ca(3, 3, 10.0, 0.0),
+            bent_ca(4, 4, 10.0, -2.0),
+        ]);
+        mol.add_bond(0, 1, cuemol_molstr::BondOrder::Single);
+        mol.add_bond(2, 3, cuemol_molstr::BondOrder::Single);
+        let max_y = |loopsize: f64| {
+            disorder_lines_snapshot(&mol, 1.0, 0.2, loopsize, -1.0)
+                .atoms
+                .iter()
+                .map(|a| a.center.y)
+                .fold(f64::NEG_INFINITY, f64::max)
+        };
+        let small = max_y(1.0);
+        let large = max_y(3.0);
+        assert!(
+            large > small + 0.5,
+            "larger loopsize should bulge the arc higher: {small} vs {large}"
+        );
     }
 
     #[test]
