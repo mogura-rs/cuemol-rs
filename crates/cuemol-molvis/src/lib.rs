@@ -2603,6 +2603,9 @@ pub struct MoleculeRenderOptions {
     pub selected_indices: Vec<usize>,
     /// Backbone-trace "putty" width modulation (TubeRenderer): off by default.
     pub putty: PuttyOptions,
+    /// Explicit backbone-trace tube radius (SplineRenderer `line_width`/2), or
+    /// `None` to derive it from `bond_radius`.
+    pub mainchain_radius: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2697,6 +2700,7 @@ impl Default for MoleculeRenderOptions {
             color_mode: MoleculeColorMode::Element,
             selected_indices: Vec::new(),
             putty: PuttyOptions::default(),
+            mainchain_radius: None,
         }
     }
 }
@@ -2787,7 +2791,9 @@ pub fn mainchain_trace_snapshot(
     options: &MoleculeRenderOptions,
 ) -> RenderSceneSnapshot {
     const SUBDIV: usize = 8;
-    let tube_radius = (options.bond_radius * 3.0).clamp(0.18, 0.6);
+    let tube_radius = options
+        .mainchain_radius
+        .unwrap_or_else(|| (options.bond_radius * 3.0).clamp(0.18, 0.6));
 
     let chains = collect_mainchain_pivots(molecule);
     let putty = options.putty;
@@ -3911,6 +3917,24 @@ mod tests {
         // Low-B end scaled by 1/loscl (~0.33), high-B end by hiscl (~3.0).
         assert!(first < r0, "low-B end should be thinner than the off radius");
         assert!(last > first + 0.1, "high-B end should be thicker: {first} vs {last}");
+    }
+
+    #[test]
+    fn mainchain_radius_overrides_the_trace_tube_width() {
+        let mol = MolCoord::with_atoms(vec![diso_ca(1, 1, 0.0), diso_ca(2, 2, 3.0), diso_ca(3, 3, 6.0)]);
+        // Default radius is derived from bond_radius (0.08*3 = 0.24).
+        let def = mainchain_trace_snapshot(&mol, &MoleculeRenderOptions::default());
+        assert!((def.atoms[0].radius - 0.24).abs() < 1.0e-6);
+        // The SplineRenderer line_width override (radius = line_width/2) wins.
+        let opts = MoleculeRenderOptions {
+            mainchain_radius: Some(0.5),
+            ..MoleculeRenderOptions::default()
+        };
+        let wide = mainchain_trace_snapshot(&mol, &opts);
+        assert!(
+            wide.atoms.iter().all(|a| (a.radius - 0.5).abs() < 1.0e-6),
+            "explicit mainchain radius should be applied uniformly"
+        );
     }
 
     #[test]
