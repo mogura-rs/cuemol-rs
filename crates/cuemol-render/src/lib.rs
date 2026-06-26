@@ -1917,17 +1917,45 @@ fn normalize3(v: Vector4) -> Vector4 {
     }
 }
 
-/// Tessellate a UV sphere (flat-shaded, radial normals) into `mesh`. Poles emit
-/// degenerate triangles, kept so the triangle count is a clean `RINGS*SEGS*2`.
+/// Default UV-sphere tessellation (rings, segments) — the historical 8×12.
+const DEFAULT_SPHERE_RINGS: usize = 8;
+const DEFAULT_SPHERE_SEGS: usize = 12;
+
+/// Map a C++ CPK/BallStick `detail` level (≈3 coarse .. 10 fine) to UV-sphere
+/// (rings, segments). detail 4 reproduces the historical 8×12 default.
+fn sphere_detail_to_rings_segs(detail: u32) -> (usize, usize) {
+    let detail = detail.max(2) as usize;
+    (detail * 2, detail * 3)
+}
+
+/// Tessellate a UV sphere (flat-shaded, radial normals) at the default detail.
 fn add_sphere(mesh: &mut RenderMesh, center: Vector4, radius: f64, color: [f32; 4]) {
-    const RINGS: usize = 8;
-    const SEGS: usize = 12;
+    add_sphere_detailed(
+        mesh,
+        center,
+        radius,
+        color,
+        DEFAULT_SPHERE_RINGS,
+        DEFAULT_SPHERE_SEGS,
+    );
+}
+
+/// Tessellate a UV sphere at an explicit (rings, segs) resolution. Poles emit
+/// degenerate triangles, kept so the triangle count is a clean `rings*segs*2`.
+fn add_sphere_detailed(
+    mesh: &mut RenderMesh,
+    center: Vector4,
+    radius: f64,
+    color: [f32; 4],
+    rings: usize,
+    segs: usize,
+) {
     let base = mesh.vertices.len() as u32;
-    for i in 0..=RINGS {
-        let phi = std::f64::consts::PI * i as f64 / RINGS as f64;
+    for i in 0..=rings {
+        let phi = std::f64::consts::PI * i as f64 / rings as f64;
         let (sp, cp) = phi.sin_cos();
-        for j in 0..=SEGS {
-            let theta = std::f64::consts::TAU * j as f64 / SEGS as f64;
+        for j in 0..=segs {
+            let theta = std::f64::consts::TAU * j as f64 / segs as f64;
             let (st, ct) = theta.sin_cos();
             let dir = Vector4::new3(sp * ct, cp, sp * st);
             mesh.vertices.push(MeshVertex {
@@ -1941,9 +1969,9 @@ fn add_sphere(mesh: &mut RenderMesh, center: Vector4, radius: f64, color: [f32; 
             });
         }
     }
-    let stride = SEGS + 1;
-    for i in 0..RINGS {
-        for j in 0..SEGS {
+    let stride = segs + 1;
+    for i in 0..rings {
+        for j in 0..segs {
             let a = base + (i * stride + j) as u32;
             let b = base + (i * stride + j + 1) as u32;
             let c = base + ((i + 1) * stride + j) as u32;
@@ -2006,6 +2034,40 @@ pub fn tessellate_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
             atom.center,
             atom.radius as f64,
             snapshot_color_rgba(&atom.color),
+        );
+    }
+    for bond in &snapshot.bonds {
+        add_cylinder(
+            &mut mesh,
+            bond.from,
+            bond.to,
+            bond.radius as f64,
+            snapshot_color_rgba(&bond.color),
+        );
+    }
+    for extra in &snapshot.meshes {
+        let base = mesh.vertices.len() as u32;
+        mesh.vertices.extend(extra.vertices.iter().cloned());
+        mesh.indices.extend(extra.indices.iter().map(|i| i + base));
+    }
+    mesh
+}
+
+/// Tessellate a snapshot with an explicit sphere `detail` level (C++
+/// CPK/BallStick `detail`, ≈3 coarse .. 10 fine; 4 == the default 8×12). Higher
+/// detail yields rounder atom spheres (more triangles); bonds and pre-built
+/// meshes are unaffected.
+pub fn tessellate_snapshot_with_detail(snapshot: &RenderSceneSnapshot, detail: u32) -> RenderMesh {
+    let (rings, segs) = sphere_detail_to_rings_segs(detail);
+    let mut mesh = RenderMesh::new();
+    for atom in &snapshot.atoms {
+        add_sphere_detailed(
+            &mut mesh,
+            atom.center,
+            atom.radius as f64,
+            snapshot_color_rgba(&atom.color),
+            rings,
+            segs,
         );
     }
     for bond in &snapshot.bonds {
@@ -2347,6 +2409,27 @@ mod tests {
         let center = Vector4::new3(0.0, 0.0, 0.0);
         let cube_edges = extract_edge_lines(&cube, center, PI / 4.0);
         assert_eq!(cube_edges.len(), 12, "a cube has 12 crease edges");
+    }
+
+    #[test]
+    fn sphere_detail_controls_tessellation_density() {
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom::new(Vector4::new3(0.0, 0.0, 0.0), 1.0, None)],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        // detail 4 reproduces the default 8x12 = 192 triangles.
+        assert_eq!(
+            tessellate_snapshot_with_detail(&snapshot, 4).triangle_count(),
+            tessellate_snapshot(&snapshot).triangle_count()
+        );
+        // detail d -> rings 2d, segs 3d -> 12*d^2 triangles; finer = more.
+        let coarse = tessellate_snapshot_with_detail(&snapshot, 3).triangle_count();
+        let fine = tessellate_snapshot_with_detail(&snapshot, 8).triangle_count();
+        assert_eq!(coarse, 12 * 3 * 3);
+        assert_eq!(fine, 12 * 8 * 8);
+        assert!(fine > coarse);
     }
 
     #[test]
