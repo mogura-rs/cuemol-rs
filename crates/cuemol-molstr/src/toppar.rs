@@ -92,6 +92,9 @@ pub struct TopoDB {
     links: Vec<LinkDef>,
     /// Alternate residue name (upper-cased) -> canonical template id (upper-cased).
     synonyms: HashMap<String, String>,
+    /// Canonical residue id (upper-cased) -> its aromatic/saturated ring member
+    /// atom-name lists (from `*_props.xml` `<rings><ring value=".."/>`).
+    rings: HashMap<String, Vec<Vec<String>>>,
 }
 
 impl TopoDB {
@@ -104,7 +107,7 @@ impl TopoDB {
                 db.parse_xml(xml);
             }
             for xml in [PROT_PROPS, NUCL_PROPS] {
-                db.parse_synonyms(xml);
+                db.parse_props(xml);
             }
             db
         })
@@ -212,16 +215,26 @@ impl TopoDB {
 }
 
 impl TopoDB {
-    /// Parse a residue-property XML, recording its `<resid id><synonym value>`
-    /// entries as alternate-name -> canonical-id mappings.
-    fn parse_synonyms(&mut self, xml: &str) {
+    /// Parse a residue-property XML, recording per `<resid id=..>`: its
+    /// `<synonym value>` alternate names and its `<rings><ring value=".."/>`
+    /// ring-atom-name lists.
+    fn parse_props(&mut self, xml: &str) {
         let mut cur_id: Option<String> = None;
+        let mut cur_rings: Vec<Vec<String>> = Vec::new();
         for el in TagIter::new(xml) {
             match (el.name.as_str(), el.closing) {
                 ("resid", false) => {
                     cur_id = el.attr("id").map(|s| s.to_ascii_uppercase());
+                    cur_rings = Vec::new();
                 }
-                ("resid", true) => cur_id = None,
+                ("resid", true) => {
+                    if let Some(id) = cur_id.take() {
+                        if !cur_rings.is_empty() {
+                            self.rings.insert(id, std::mem::take(&mut cur_rings));
+                        }
+                    }
+                    cur_rings = Vec::new();
+                }
                 ("synonym", _) => {
                     if let (Some(id), Some(alt)) = (cur_id.as_ref(), el.attr("value")) {
                         let alt = alt.trim().to_ascii_uppercase();
@@ -230,9 +243,33 @@ impl TopoDB {
                         }
                     }
                 }
+                ("ring", _) if cur_id.is_some() => {
+                    if let Some(value) = el.attr("value") {
+                        let members: Vec<String> =
+                            value.split_whitespace().map(str::to_string).collect();
+                        if members.len() >= 3 {
+                            cur_rings.push(members);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
+    }
+
+    /// The ring-atom-name lists for a residue (resolving synonyms), empty if the
+    /// residue has no ring definition.
+    pub fn rings(&self, name: &str) -> &[Vec<String>] {
+        let key = name.trim().to_ascii_uppercase();
+        if let Some(rings) = self.rings.get(&key) {
+            return rings;
+        }
+        if let Some(canonical) = self.synonyms.get(&key) {
+            if let Some(rings) = self.rings.get(canonical) {
+                return rings;
+            }
+        }
+        &[]
     }
 }
 
@@ -713,6 +750,22 @@ mod tests {
         if let Some(hoh) = db.residue("HOH") {
             assert!(!hoh.is_polymer());
         }
+    }
+
+    #[test]
+    fn residue_rings_parsed_from_props_xml() {
+        let db = TopoDB::global();
+        // PHE: a single 6-membered aromatic ring (CG CD1 CE1 CZ CE2 CD2).
+        let phe = db.rings("PHE");
+        assert_eq!(phe.len(), 1);
+        assert_eq!(phe[0].len(), 6);
+        assert_eq!(phe[0][0], "CG");
+        assert_eq!(phe[0][3], "CZ");
+        // HIS: a 5-membered imidazole ring.
+        assert_eq!(db.rings("HIS")[0].len(), 5);
+        // A non-ring residue (or unknown) has none.
+        assert!(db.rings("ALA").is_empty());
+        assert!(db.rings("ZZZ").is_empty());
     }
 
     #[test]

@@ -3322,6 +3322,70 @@ fn ribbon_tube_mesh(
     RenderMesh { vertices, indices }
 }
 
+/// Aromatic/saturated ring fills (C++ `BallStickRenderer::drawRings`): for each
+/// residue with ring definitions in the topology props (`TopoDB::rings`), draw
+/// the ring as a flat filled polygon — a triangle fan from the ring centroid to
+/// its member atoms, with the ring's plane normal. Returned as snapshot meshes.
+pub fn ring_meshes_snapshot(molecule: &MolCoord) -> RenderSceneSnapshot {
+    let db = cuemol_molstr::toppar::TopoDB::global();
+    let summaries = molecule.residue_summaries();
+    let ring_color = [1.0_f32, 1.0, 0.75, 1.0];
+    let mut meshes = Vec::new();
+    for s in &summaries {
+        let rings = db.rings(&s.res_name);
+        if rings.is_empty() {
+            continue;
+        }
+        let pos = |name: &str| -> Option<Vector4> {
+            s.atom_indices
+                .iter()
+                .find(|&&ai| molecule.atoms()[ai].name.trim().eq_ignore_ascii_case(name))
+                .map(|&ai| molecule.atoms()[ai].position)
+        };
+        for ring in rings {
+            let verts: Vec<Vector4> = ring.iter().filter_map(|n| pos(n)).collect();
+            if verts.len() < 3 {
+                continue;
+            }
+            let mut centroid = Vector4::new3(0.0, 0.0, 0.0);
+            for v in &verts {
+                centroid = centroid + *v;
+            }
+            centroid = centroid.scale(1.0 / verts.len() as f64);
+            let normal = normalize_or(
+                (verts[1] - verts[0]).cross(verts[2] - verts[0]),
+                Vector4::new3(0.0, 0.0, 1.0),
+            );
+            let mut mesh = RenderMesh::new();
+            mesh.vertices.push(MeshVertex {
+                position: centroid,
+                normal,
+                color: ring_color,
+            });
+            for v in &verts {
+                mesh.vertices.push(MeshVertex {
+                    position: *v,
+                    normal,
+                    color: ring_color,
+                });
+            }
+            // Triangle fan: centroid (vertex 0) to each consecutive ring edge.
+            let n = verts.len() as u32;
+            for k in 0..n {
+                mesh.indices
+                    .extend_from_slice(&[0, 1 + k, 1 + (k + 1) % n]);
+            }
+            meshes.push(mesh);
+        }
+    }
+    RenderSceneSnapshot {
+        atoms: Vec::new(),
+        bonds: Vec::new(),
+        meshes,
+        bounds: molecule.bounding_box_for(None),
+    }
+}
+
 fn normalize_or(vec: Vector4, fallback: Vector4) -> Vector4 {
     vec.normalize3d().unwrap_or(fallback)
 }
@@ -4040,6 +4104,37 @@ mod tests {
         );
         // With show_basepair off, the rung is gone.
         assert_eq!(na_base_sticks_snapshot(&mol, 0.3, false).bonds.len(), base_only);
+    }
+
+    #[test]
+    fn ring_meshes_drawn_for_aromatic_residues() {
+        // PHE's 6-membered ring (CG CD1 CE1 CZ CE2 CD2) as a hexagon in z=0.
+        let names = ["CG", "CD1", "CE1", "CZ", "CE2", "CD2"];
+        let mol = MolCoord::with_atoms(
+            (0..6)
+                .map(|k| {
+                    let ang = std::f64::consts::TAU * k as f64 / 6.0;
+                    let mut a = sample_atom(names[k], "C", ang.cos(), ang.sin(), 0.0);
+                    a.res_name = "PHE".to_string();
+                    a.res_id = 1;
+                    a
+                })
+                .collect(),
+        );
+        let snap = ring_meshes_snapshot(&mol);
+        assert_eq!(snap.meshes.len(), 1, "one ring mesh for PHE");
+        let m = &snap.meshes[0];
+        assert_eq!(m.triangle_count(), 6, "hexagon fan = 6 triangles");
+        assert_eq!(m.vertices.len(), 7, "centroid + 6 ring atoms");
+        // All vertices in the z=0 plane; the ring normal is ±z.
+        assert!(m.vertices.iter().all(|v| v.position.z.abs() < 1.0e-9));
+        assert!(m.vertices[0].normal.z.abs() > 0.99);
+
+        // A non-aromatic residue yields no ring mesh.
+        let mut ala = sample_atom("CA", "C", 0.0, 0.0, 0.0);
+        ala.res_name = "ALA".to_string();
+        let ala_mol = MolCoord::with_atoms(vec![ala]);
+        assert!(ring_meshes_snapshot(&ala_mol).meshes.is_empty());
     }
 
     #[test]
