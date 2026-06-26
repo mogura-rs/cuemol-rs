@@ -1107,6 +1107,24 @@ impl AtomIntrRenderer {
         Some(points)
     }
 
+    /// The connecting line segments for every measurement definition (C++
+    /// `AtomIntrRenderer` draws these between the measured atoms): one segment
+    /// for a Distance, two for an Angle (the two arms), three for a Torsion.
+    /// The arc indicator and the numeric text label are NOT included here — the
+    /// label is GPU/font text with no headless oracle; the line geometry is the
+    /// verifiable part. Unresolvable definitions are skipped.
+    pub fn measurement_lines(&self, mol: &MolCoord) -> Vec<(Vector4, Vector4)> {
+        let mut lines = Vec::new();
+        for def in &self.defs {
+            if let Some(points) = self.def_points(def, mol) {
+                for seg in points.windows(2) {
+                    lines.push((seg[0], seg[1]));
+                }
+            }
+        }
+        lines
+    }
+
     /// Measured value of a definition: distance (Å) for a 2-atom Distance, angle
     /// (degrees) for a 3-atom Angle, torsion (degrees) for a 4-atom Torsion.
     /// Port of the value computation in C++ `AtomIntrRenderer::append{,Angle,
@@ -4197,6 +4215,26 @@ mod tests {
         assert!((value(tors_pos).unwrap() - 90.0).abs() < 1e-9);
         assert!((value(tors_neg).unwrap() + 90.0).abs() < 1e-9);
         assert_eq!(value(missing), None);
+    }
+
+    #[test]
+    fn atom_intr_measurement_lines_connect_the_measured_atoms() {
+        let mol = MolCoord::with_atoms(vec![
+            intr_atom(1, 0.0, 0.0, 0.0),
+            intr_atom(2, 3.0, 0.0, 0.0),
+            intr_atom(3, 0.0, 0.0, 0.0),
+            intr_atom(4, 1.0, 0.0, 0.0),
+            intr_atom(5, 1.0, 1.0, 0.0),
+        ]);
+        let mut r = AtomIntrRenderer::new();
+        r.append_by_id(1, 0, 2, 0, true); // distance -> 1 segment
+        r.append_angle_by_id(3, 0, 4, 0, 5, 0); // angle -> 2 arm segments
+        let lines = r.measurement_lines(&mol);
+        assert_eq!(lines.len(), 3, "1 distance segment + 2 angle arms");
+        // The distance segment spans atoms 1 (0,0,0) and 2 (3,0,0).
+        assert!(lines
+            .iter()
+            .any(|(a, b)| (a.x == 0.0 && b.x == 3.0) || (a.x == 3.0 && b.x == 0.0)));
     }
 
     #[test]
