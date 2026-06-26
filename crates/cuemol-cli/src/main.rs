@@ -326,12 +326,26 @@ fn run() -> Result<(), String> {
             let scene = manager
                 .scene(scene_uid)
                 .ok_or_else(|| "loaded scene not found".to_string())?;
+            // Resolve renderer `style="..."` references against the bundled
+            // default style presets (C++ StyleMgr's system style sheet).
+            let styles = cuemol_molvis::default_style_manager();
+            let scope = cuemol_molvis::DEFAULT_STYLE_SCOPE;
             println!("objects={}", scene.objects().len());
             for object in scene.objects() {
                 println!("object={}", object.name());
                 println!("atoms={}", object.mol().atom_count());
                 for renderer in object.renderers() {
                     println!("renderer={}:{}", renderer.renderer_type(), renderer.name());
+                    if let Some(style) = renderer.style() {
+                        println!("style={style}");
+                        // Geometry properties the style preset contributes
+                        // (resolved through the inline-overrides-style cascade).
+                        for attr in ["bondw", "sphr", "detail", "width"] {
+                            if let Some(value) = renderer.resolved_attr(attr, &styles, scope) {
+                                println!("resolved.{attr}={value}");
+                            }
+                        }
+                    }
                     if renderer.renderer_type() == "atomintr" {
                         println!("defs={}", renderer.get_defs_json());
                         println!(

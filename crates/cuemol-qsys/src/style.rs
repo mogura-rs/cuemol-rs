@@ -1,7 +1,12 @@
 use crate::misc::INVALID_UID;
-use cuemol_core::LDom2Node;
+use cuemol_core::{parse_ldom2_xml, LDom2Node};
 use cuemol_gfx::{parse_color, SolidColor};
 use std::collections::BTreeMap;
+
+/// Bundled default style sheet (C++ `data/default_style.xml`): named renderer
+/// style presets (`DefaultBallStick`/`DefaultCPK`/…) plus the X11 named-colour
+/// table. Vendored verbatim and parsed once via [`parse_ldom2_xml`].
+const DEFAULT_STYLE_XML: &str = include_str!("../data/default_style.xml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyleSet {
@@ -530,20 +535,76 @@ impl StyleManager {
         path_name: impl AsRef<std::path::Path>,
         read_only: bool,
     ) -> u64 {
-        if std::fs::read_to_string(&path_name).is_err() {
+        let Ok(content) = std::fs::read_to_string(&path_name) else {
             return INVALID_UID;
-        }
+        };
         let name = path_name
             .as_ref()
             .file_stem()
             .and_then(|value| value.to_str())
-            .unwrap_or("style");
+            .unwrap_or("style")
+            .to_string();
         let uid = self.create_style_set(name, scope_id);
         if let Some(set) = self.get_style_set_mut(uid) {
+            populate_style_set_from_xml(set, &content);
             set.set_source(path_name.as_ref().to_string_lossy());
             set.set_read_only(read_only);
+            set.set_modified(false);
         }
         uid
+    }
+
+    /// Register the bundled `default_style.xml` (C++ `StyleMgr` loads it at
+    /// startup into the system scope) as a read-only style set in `scope_id`.
+    /// Returns its style-set UID. The presets it defines become resolvable via
+    /// [`StyleManager::style_attr`]/[`StyleManager::resolve_style_attr`].
+    pub fn load_builtin_default_styles(&mut self, scope_id: u64) -> u64 {
+        let uid = self.create_style_set("system", scope_id);
+        if let Some(set) = self.get_style_set_mut(uid) {
+            populate_style_set_from_xml(set, DEFAULT_STYLE_XML);
+            set.set_source("<builtin>/default_style.xml");
+            set.set_read_only(true);
+            set.set_modified(false);
+        }
+        uid
+    }
+
+    /// Look up a single style preset's attribute (e.g. `DefaultBallStick` /
+    /// `bondw`) by scanning the style sets in `scope_id`, then the global scope
+    /// `0` (C++ `StyleMgr` cascades scene scope → `m_pGlob`). Reads the top-level
+    /// `<style>` XML attribute; returns `None` when the style or attribute is
+    /// absent (or empty). Nested child elements (`<helix>`/`<coloring>`) are not
+    /// flattened here — only the directly-attached presets used for geometry.
+    pub fn style_attr(&self, scope_id: u64, style_id: &str, attr: &str) -> Option<String> {
+        let lookup = |scope: u64| -> Option<String> {
+            self.scopes.get(&scope)?.iter().find_map(|set| {
+                let value = set.get_style(style_id)?.str_attr(attr).to_string();
+                (!value.is_empty()).then_some(value)
+            })
+        };
+        lookup(scope_id).or_else(|| (scope_id != 0).then(|| lookup(0)).flatten())
+    }
+
+    /// Resolve a renderer `style="A,B,C"` list for one attribute, mirroring C++
+    /// `applyStyles`: presets apply left-to-right so a later one overrides an
+    /// earlier one — the LAST style in the list that defines `attr` wins.
+    pub fn resolve_style_attr(
+        &self,
+        scope_id: u64,
+        style_list: &str,
+        attr: &str,
+    ) -> Option<String> {
+        let mut result = None;
+        for name in style_list.split(',') {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(value) = self.style_attr(scope_id, name, attr) {
+                result = Some(value);
+            }
+        }
+        result
     }
 
     pub fn get_style_value(&self, scope_id: u64, set_name: &str, key: &str) -> String {
@@ -645,6 +706,49 @@ fn find_style_value(node: &LDom2Node, prop_name: &str) -> Option<String> {
         current = current.find_child(part)?;
     }
     Some(current.value().to_string())
+}
+
+/// Parse an LDom2 style XML document (`<styles>`) into a [`StyleSet`], mirroring
+/// C++ `StyleSet::readStyleSetFromStream`: each `<style id=...>` preset is stored
+/// by id (keeping its full attribute/child node for later resolution) and each
+/// `<color id=... value=...>` entry populates the named-colour table.
+///
+/// Intentionally NOT parsed (categorical sinks deferred elsewhere): `<material>`
+/// and `<path>` feed ICC colour-management / external-renderer preamble config,
+/// and `<sel>`/`<setting>` are scene preferences — none affect rendered geometry.
+/// Returns the number of styles registered (0 if the document fails to parse).
+fn populate_style_set_from_xml(set: &mut StyleSet, xml: &str) -> usize {
+    let Ok(tree) = parse_ldom2_xml(xml) else {
+        return 0;
+    };
+    let mut style_count = 0;
+    for child in tree.top().children() {
+        if child.is_attr() {
+            continue;
+        }
+        match child.tag_name() {
+            "style" => {
+                let id = child.str_attr("id").to_string();
+                if !id.is_empty() && set.set_style(id, child.clone()) {
+                    style_count += 1;
+                }
+            }
+            "color" => {
+                let id = child.str_attr("id").to_string();
+                // The `value` attribute is reserved by the LDom2 parser and
+                // surfaces as the node value, not a child attribute.
+                let value = child.value().to_string();
+                if id.is_empty() || value.is_empty() {
+                    continue;
+                }
+                if let Some(rgba) = parse_color(&value).ok().and_then(|spec| spec.rgba8()) {
+                    set.set_color(id, SolidColor::from(rgba));
+                }
+            }
+            _ => {}
+        }
+    }
+    style_count
 }
 
 fn set_style_value_node(node: &mut LDom2Node, prop_name: &str, value: String) {
@@ -767,5 +871,89 @@ mod tests {
         assert!(manager.register_style_set(first, -1, 1));
         assert!(!manager.register_style_set(duplicate, -1, 1));
         assert_eq!(manager.has_style_set("Default", 1), 100);
+    }
+
+    #[test]
+    fn builtin_default_styles_parse_presets_and_named_colors() {
+        let mut manager = StyleManager::new();
+        let uid = manager.load_builtin_default_styles(0);
+        assert_ne!(uid, INVALID_UID);
+
+        // The 47 `<style>` presets are registered and read-only.
+        let set = manager.get_style_set(uid).unwrap();
+        assert!(set.read_only());
+        assert!(set.has_style("DefaultBallStick"));
+        assert!(set.has_style("DefaultCPK"));
+
+        // Geometry attributes parse from the `<style>` element attributes.
+        assert_eq!(manager.style_attr(0, "DefaultBallStick", "bondw").as_deref(), Some("0.2"));
+        assert_eq!(manager.style_attr(0, "DefaultBallStick", "sphr").as_deref(), Some("0.3"));
+        assert_eq!(manager.style_attr(0, "ThickBallStick", "bondw").as_deref(), Some("0.3"));
+        assert_eq!(manager.style_attr(0, "ThickBallStick", "sphr").as_deref(), Some("0.5"));
+        assert_eq!(manager.style_attr(0, "DefaultCPK", "detail").as_deref(), Some("10"));
+        // An undefined attribute on a real style is None, not empty string.
+        assert!(manager.style_attr(0, "DefaultCPK", "bondw").is_none());
+        // An unknown style is None.
+        assert!(manager.style_attr(0, "NoSuchStyle", "bondw").is_none());
+
+        // The X11 named-colour table is populated (`<color id=.. value=..>`).
+        assert!(set.has_color("Yellow"));
+        assert!(set.has_color("SlateBlue"));
+    }
+
+    #[test]
+    fn resolve_style_attr_walks_the_comma_list_last_wins() {
+        let mut manager = StyleManager::new();
+        manager.load_builtin_default_styles(0);
+
+        // `DefaultLabel` carries color/font; `DefaultAtomIntr` carries width —
+        // the two contribute disjoint attributes, both resolvable from the list.
+        assert_eq!(
+            manager.resolve_style_attr(0, "DefaultLabel,DefaultAtomIntr", "width").as_deref(),
+            Some("1.0")
+        );
+        assert_eq!(
+            manager.resolve_style_attr(0, "DefaultLabel,DefaultAtomIntr", "color").as_deref(),
+            Some("Yellow")
+        );
+        // Later style overrides earlier when both define an attribute:
+        // DashedStick1AtomIntr.width=0.1 wins over DefaultAtomIntr.width=1.0.
+        assert_eq!(
+            manager
+                .resolve_style_attr(0, "DefaultAtomIntr,DashedStick1AtomIntr", "width")
+                .as_deref(),
+            Some("0.1")
+        );
+        // Whitespace tolerance + unknown names skipped.
+        assert_eq!(
+            manager.resolve_style_attr(0, " DefaultBallStick , ", "bondw").as_deref(),
+            Some("0.2")
+        );
+        assert!(manager.resolve_style_attr(0, "", "bondw").is_none());
+    }
+
+    #[test]
+    fn load_style_set_from_file_parses_a_real_style_document() {
+        // The stubbed loader used to only check the file exists; it now parses.
+        let dir = std::env::temp_dir().join("cuemol_style_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("custom_style.xml");
+        std::fs::write(
+            &path,
+            r##"<?xml version="1.0"?>
+<styles id="custom">
+  <style id="MyBallStick" type="renderer" bondw="0.42" sphr="0.7"/>
+  <color id="Crimson" value="#DC143C"/>
+</styles>"##,
+        )
+        .unwrap();
+
+        let mut manager = StyleManager::new();
+        let uid = manager.load_style_set_from_file(5, &path, true);
+        assert_ne!(uid, INVALID_UID);
+        assert_eq!(manager.style_attr(5, "MyBallStick", "bondw").as_deref(), Some("0.42"));
+        assert!(manager.get_style_set(uid).unwrap().has_color("Crimson"));
+
+        std::fs::remove_file(&path).ok();
     }
 }

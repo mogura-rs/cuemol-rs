@@ -3,7 +3,7 @@ use crate::{
     write_pdb_string, Atom, MolCoord,
 };
 use cuemol_core::{CueMolError, Quat, Result, Uid, Vector4};
-use cuemol_qsys::{Camera, CenterMark, StereoMode, View};
+use cuemol_qsys::{Camera, CenterMark, StereoMode, StyleManager, View};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -56,6 +56,30 @@ impl MolRenderer {
 
     pub fn style(&self) -> Option<&str> {
         self.qsc_attr("style")
+    }
+
+    /// Resolve a renderer property through the C++ value cascade (`applyStyles`):
+    /// an inline `.qsc` attribute on this renderer overrides any preset; failing
+    /// that, the renderer's `style="A,B"` list is resolved against `styles` in
+    /// `scope_id` (a later style in the list wins). Returns `None` when neither
+    /// the renderer nor any referenced style defines `attr`.
+    ///
+    /// This is what wires a scene's `<renderer style="DefaultBallStick">` to the
+    /// preset's `bondw`/`sphr`/… so renderers inherit styled geometry instead of
+    /// hardcoded defaults.
+    pub fn resolved_attr(
+        &self,
+        attr: &str,
+        styles: &StyleManager,
+        scope_id: u64,
+    ) -> Option<String> {
+        if let Some(inline) = self.qsc_attr(attr) {
+            if !inline.is_empty() {
+                return Some(inline.to_string());
+            }
+        }
+        let style_list = self.style()?;
+        styles.resolve_style_attr(scope_id, style_list, attr)
     }
 
     pub fn is_visible(&self) -> bool {

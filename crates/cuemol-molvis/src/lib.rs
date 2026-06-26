@@ -1,7 +1,7 @@
 use cuemol_core::Vector4;
 use cuemol_gfx::{ColorSpec, SolidColor};
-use cuemol_molstr::{Atom, MolCoord, ResidIterator, ResidueView};
-use cuemol_qsys::DrawObj;
+use cuemol_molstr::{Atom, MolCoord, MolRenderer, ResidIterator, ResidueView};
+use cuemol_qsys::{DrawObj, StyleManager};
 use cuemol_render::{MeshVertex, RenderAtom, RenderBond, RenderMesh, RenderSceneSnapshot};
 
 pub type CPK2Renderer = Cpk2Renderer;
@@ -2675,6 +2675,10 @@ pub struct MoleculeRenderOptions {
     /// `Ribbon2Renderer` anchor weight / `SplineCoeffSet` smoothing). 0 = pass
     /// through the CA atoms; 1 = fully neighbour-averaged.
     pub anchor_weight: f64,
+    /// Absolute atom sphere radius (Å), overriding the element-vdW×`vdw_scale`
+    /// model when set — the ball-and-stick "small uniform ball" mode (C++
+    /// `BallStickRenderer` `sphr`). `None` keeps the vdW-scaled radius.
+    pub atom_radius_abs: Option<f32>,
 }
 
 /// Ribbon cross-section width/thickness FACTORS (multiplied by the base coil
@@ -2799,7 +2803,54 @@ impl Default for MoleculeRenderOptions {
             mainchain_radius: None,
             ribbon_sections: RibbonSections::default(),
             anchor_weight: 0.0,
+            atom_radius_abs: None,
         }
+    }
+}
+
+/// Apply a renderer's resolved `<style>` preset onto render options so a scene's
+/// `<renderer style="DefaultBallStick">` inherits the styled geometry instead of
+/// the hardcoded defaults. Mirrors the geometry-bearing half of C++
+/// `BallStickRenderer`/`CPKRenderer` style properties:
+///
+/// - `bondw` → [`MoleculeRenderOptions::bond_radius`] (absolute bond cylinder radius)
+/// - `sphr`  → [`MoleculeRenderOptions::atom_radius_abs`] (absolute atom ball radius)
+///
+/// Inline `.qsc` attributes override the named style (handled by
+/// [`MolRenderer::resolved_attr`]). Only attributes that flow into the snapshot
+/// mesh are mapped; colour/coloring/label/tessellation-detail attributes are
+/// resolved by their own pipelines, not here.
+/// The conventional scope id under which the bundled default styles are loaded
+/// by [`default_style_manager`]. Renderer style resolution should query this id.
+pub const DEFAULT_STYLE_SCOPE: u64 = 0;
+
+/// A [`StyleManager`] pre-loaded with the bundled `default_style.xml` presets in
+/// [`DEFAULT_STYLE_SCOPE`] — the startup state C++ `StyleMgr` reaches after
+/// reading the system style sheet. Use it to resolve a scene renderer's
+/// `style="..."` references when no per-scene style set is present.
+pub fn default_style_manager() -> StyleManager {
+    let mut styles = StyleManager::new();
+    styles.load_builtin_default_styles(DEFAULT_STYLE_SCOPE);
+    styles
+}
+
+pub fn apply_renderer_styles(
+    options: &mut MoleculeRenderOptions,
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    scope_id: u64,
+) {
+    if let Some(bondw) = renderer
+        .resolved_attr("bondw", styles, scope_id)
+        .and_then(|value| value.trim().parse::<f32>().ok())
+    {
+        options.bond_radius = bondw;
+    }
+    if let Some(sphr) = renderer
+        .resolved_attr("sphr", styles, scope_id)
+        .and_then(|value| value.trim().parse::<f32>().ok())
+    {
+        options.atom_radius_abs = Some(sphr);
     }
 }
 
@@ -3919,6 +3970,9 @@ fn perpendicular(tangent: Vector4) -> Vector4 {
 }
 
 fn atom_radius(element: &str, options: &MoleculeRenderOptions) -> f32 {
+    if let Some(radius) = options.atom_radius_abs {
+        return radius;
+    }
     if options.color_mode == MoleculeColorMode::Element {
         (VdwRadii::default().radius_for_element(element) as f32 * options.vdw_scale).max(0.08)
     } else {
@@ -3973,6 +4027,66 @@ mod tests {
             formal_charge: None,
             int_props: Default::default(),
         }
+    }
+
+    /// Build a 2-atom ball-and-stick scene with the given style preset (and an
+    /// optional inline `bondw` override), resolve its styles against the bundled
+    /// default styles, and return the (bond cylinder radius, atom sphere radius)
+    /// the snapshot actually produces — an INDEPENDENT geometry oracle (reads the
+    /// emitted mesh radii, not the parsed XML).
+    fn styled_ballstick_radii(style: &str, inline_bondw: Option<&str>) -> (f32, f32) {
+        let mut mol = MolCoord::with_atoms(vec![
+            sample_atom("C1", "C", 0.0, 0.0, 0.0),
+            sample_atom("C2", "C", 1.5, 0.0, 0.0),
+        ]);
+        mol.add_bond(0, 1, cuemol_molstr::BondOrder::Single);
+
+        let mut mgr = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = mgr.new_scene("s");
+        let scene = mgr.scene_mut(scene_uid).unwrap();
+        let obj_uid = scene.add_molecule("m", mol);
+        let obj = scene.object_mut(obj_uid).unwrap();
+        let rend_uid = obj.add_renderer("ballstick", "bs");
+        let renderer = obj.renderer_mut(rend_uid).unwrap();
+        renderer.set_qsc_attr("style", style);
+        if let Some(bondw) = inline_bondw {
+            renderer.set_qsc_attr("bondw", bondw);
+        }
+
+        let mut styles = StyleManager::new();
+        styles.load_builtin_default_styles(0);
+
+        let obj = scene.object(obj_uid).unwrap();
+        let renderer = obj.renderer(rend_uid).unwrap();
+        let mut options = MoleculeRenderOptions::default();
+        apply_renderer_styles(&mut options, renderer, &styles, 0);
+        let snapshot = molecule_render_snapshot(obj.mol(), &options);
+        (snapshot.bonds[0].radius, snapshot.atoms[0].radius)
+    }
+
+    #[test]
+    fn ballstick_named_style_drives_bond_and_atom_geometry() {
+        // DefaultBallStick: bondw=0.2, sphr=0.3 — both differ from the hardcoded
+        // defaults (bond_radius=0.08, vdW-scaled atom), so a passing assert proves
+        // the style value flowed all the way into the rendered mesh.
+        let (bond, atom) = styled_ballstick_radii("DefaultBallStick", None);
+        assert!((bond - 0.2).abs() < 1.0e-6, "bond radius {bond}");
+        assert!((atom - 0.3).abs() < 1.0e-6, "atom radius {atom}");
+
+        // A DIFFERENT named style yields measurably DIFFERENT (thicker) geometry —
+        // the non-circular oracle: distinct presets => distinct mesh radii.
+        let (thick_bond, thick_atom) = styled_ballstick_radii("ThickBallStick", None);
+        assert!((thick_bond - 0.3).abs() < 1.0e-6, "thick bond {thick_bond}");
+        assert!((thick_atom - 0.5).abs() < 1.0e-6, "thick atom {thick_atom}");
+        assert!(thick_bond > bond && thick_atom > atom);
+
+        // Inline `.qsc` attribute overrides the named style (applyStyles order).
+        let (override_bond, _) = styled_ballstick_radii("DefaultBallStick", Some("0.9"));
+        assert!((override_bond - 0.9).abs() < 1.0e-6, "inline override {override_bond}");
+
+        // No style => the hardcoded default radius is left untouched.
+        let (plain_bond, _) = styled_ballstick_radii("", None);
+        assert!((plain_bond - 0.08).abs() < 1.0e-6, "plain default {plain_bond}");
     }
 
     #[test]
