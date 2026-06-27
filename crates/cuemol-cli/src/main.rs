@@ -718,6 +718,16 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             }
             let mut options = base_render_options(rtype);
             apply_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
+            // Per-renderer `sel="..."` draw restriction (shared behaviour with the GUI).
+            if let Some(sel) = renderer
+                .qsc_attr("sel")
+                .map(str::trim)
+                .filter(|sel| !sel.is_empty() && *sel != "*")
+            {
+                if let Ok(selector) = parse_selector(sel) {
+                    options.draw_indices = Some(object.mol().select_indices(&selector));
+                }
+            }
             let snapshot = if rtype == "atomintr" {
                 // Measurement lines between the renderer's atom pairs, not the
                 // whole molecule (the single source of truth shared with the GUI).

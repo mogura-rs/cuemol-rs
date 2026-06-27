@@ -2691,6 +2691,11 @@ pub struct MoleculeRenderOptions {
     /// `<helix>/<sheet>/<coil>` `width`/`tuber` (C++ `TubeSection`). Overrides the
     /// factor-based [`MoleculeRenderOptions::ribbon_sections`] where present.
     pub styled_ribbon: StyledRibbonSections,
+    /// Atom indices this renderer is restricted to drawing (a renderer's C++
+    /// `sel="..."` selection). `None` draws the whole molecule; `Some` draws only
+    /// these atoms (and bonds whose both ends are included), keeping each atom's
+    /// original index for picking. Honoured by [`molecule_render_snapshot`].
+    pub draw_indices: Option<Vec<usize>>,
 }
 
 /// Ribbon cross-section width/thickness FACTORS (multiplied by the base coil
@@ -2864,6 +2869,7 @@ impl Default for MoleculeRenderOptions {
             sphere_detail: None,
             ribbon_axial_detail: None,
             styled_ribbon: StyledRibbonSections::default(),
+            draw_indices: None,
         }
     }
 }
@@ -3015,11 +3021,20 @@ pub fn molecule_render_snapshot(
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
+    // Per-renderer `sel="..."` draw restriction: when present, only these atoms
+    // (and bonds whose both ends are included) are drawn — each keeps its original
+    // index for picking. `None` draws the whole molecule.
+    let draw = options
+        .draw_indices
+        .as_ref()
+        .map(|indices| indices.iter().copied().collect::<std::collections::BTreeSet<_>>());
+    let drawn = |index: usize| draw.as_ref().is_none_or(|set| set.contains(&index));
     let atoms = if options.draw_atoms {
         molecule
             .atoms()
             .iter()
             .enumerate()
+            .filter(|(index, _)| drawn(*index))
             .map(|(index, atom)| {
                 RenderAtom::new(
                     Vector4::new3(atom.position.x, atom.position.y, atom.position.z),
@@ -3040,6 +3055,7 @@ pub fn molecule_render_snapshot(
         molecule
             .bonds()
             .iter()
+            .filter(|bond| drawn(bond.atom1) && drawn(bond.atom2))
             .filter_map(|bond| {
                 let atom1 = molecule.atoms().get(bond.atom1)?;
                 let atom2 = molecule.atoms().get(bond.atom2)?;
@@ -3071,12 +3087,44 @@ pub fn molecule_render_snapshot(
     } else {
         Vec::new()
     };
+    // Frame the drawn subset: with a sel restriction the bbox comes from the drawn
+    // atoms, else the whole molecule.
+    let bounds = match &draw {
+        None => molecule.bounding_box_for(None),
+        Some(set) => bounds_of_atoms(molecule, set),
+    };
     RenderSceneSnapshot {
         atoms,
         bonds,
         meshes: Vec::new(),
-        bounds: molecule.bounding_box_for(None),
+        bounds,
     }
+}
+
+/// Bounding box of a subset of a molecule's atoms (by index), or `None` if empty.
+fn bounds_of_atoms(
+    molecule: &MolCoord,
+    indices: &std::collections::BTreeSet<usize>,
+) -> Option<(Vector4, Vector4)> {
+    let mut bounds: Option<(Vector4, Vector4)> = None;
+    for &index in indices {
+        let Some(atom) = molecule.atoms().get(index) else {
+            continue;
+        };
+        let p = atom.position;
+        match &mut bounds {
+            None => bounds = Some((p, p)),
+            Some((min, max)) => {
+                min.x = min.x.min(p.x);
+                min.y = min.y.min(p.y);
+                min.z = min.z.min(p.z);
+                max.x = max.x.max(p.x);
+                max.y = max.y.max(p.y);
+                max.z = max.z.max(p.z);
+            }
+        }
+    }
+    bounds
 }
 
 /// Build a smooth main-chain trace ("cartoon"/tube-style) snapshot.

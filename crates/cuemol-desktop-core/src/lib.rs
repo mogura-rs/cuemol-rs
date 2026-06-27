@@ -1049,7 +1049,19 @@ fn append_object_renderer_snapshot(
     styles: &StyleManager,
 ) {
     let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
-    let options = renderer_render_options(object.uid(), renderer, selected_indices, styles);
+    let mut options = renderer_render_options(object.uid(), renderer, selected_indices, styles);
+    // Per-renderer `sel="..."`: restrict the atom/bond geometry to the renderer's
+    // own selection (e.g. a ballstick renderer scoped to a ligand). `*`/empty/all
+    // means no restriction; a parse failure falls back to drawing everything.
+    if let Some(sel) = renderer
+        .and_then(|renderer| renderer.qsc_attr("sel"))
+        .map(str::trim)
+        .filter(|sel| !sel.is_empty() && *sel != "*")
+    {
+        if let Ok(selector) = parse_selector(sel) {
+            options.draw_indices = Some(object.mol().select_indices(&selector));
+        }
+    }
     let snapshot = match (renderer_type, renderer) {
         // An atom-interaction renderer draws measurement lines between its atom
         // pairs, NOT the whole molecule — route it to the measurement geometry so
@@ -1753,6 +1765,53 @@ mod tests {
             "ANISOU atoms render as ellipsoid meshes, not sphere primitives"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn renderer_sel_restricts_drawn_atoms_to_its_selection() {
+        // A renderer's `sel="..."` restricts what it draws (e.g. ballstick scoped
+        // to a ligand). Without it the GUI drew the whole molecule for every
+        // renderer; with it, only the selected atoms.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        let renderer = app
+            .new_renderer_in_active_scene(object, "ballstick", "bs")
+            .unwrap()
+            .result_renderer;
+
+        // No sel: the whole 327-atom molecule.
+        assert_eq!(app.active_render_snapshot("").unwrap().atom_count(), 327);
+
+        // sel="resid 1": only the first residue's atoms — a strict, non-empty subset.
+        app.scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer)
+            .unwrap()
+            .set_qsc_attr("sel", "resid 1");
+        let expected = app
+            .scene_manager()
+            .object(object)
+            .unwrap()
+            .mol()
+            .select_indices(&parse_selector("resid 1").unwrap())
+            .len();
+        assert!(
+            expected > 0 && expected < 327,
+            "resid 1 should be a strict non-empty subset, got {expected}"
+        );
+        assert_eq!(
+            app.active_render_snapshot("").unwrap().atom_count(),
+            expected,
+            "ballstick must draw only its sel'd atoms"
+        );
     }
 
     #[test]
