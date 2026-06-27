@@ -176,8 +176,17 @@ impl PqrFileWriter {
     pub fn write_pqr_string(&self, molecule: &MolCoord) -> String {
         let mut output = String::new();
         for atom in selected_surface_atoms(molecule, self.selection.as_ref(), self.use_h) {
-            let charge = atom.formal_charge.unwrap_or(0) as f64;
-            let radius = SurfaceVdwRadii::default().radius_for_element(&atom.element);
+            // C++ PQRFileWriter writes the force-field PARTIAL charge (getCharge =
+            // the residue template's charge) and the UNITED-ATOM vdW radius
+            // (getVdwRadius bExplH=false), not the formal charge / element radius.
+            // A non-template atom (ligand/ion/water) has no template charge -> 0.0,
+            // matching C++ (getCharge returns false, chg stays 0). DEFERRED (honest):
+            // the united-atom H-charge absorption (a heavy atom += its bonded H
+            // charges when use_h=false) — exact for the common H-free input, and the
+            // use_h=true explicit-H radius would be vdwr; this writes the default
+            // united-atom radius.
+            let charge = cuemol_molstr::toppar::partial_charge_for_atom(atom).unwrap_or(0.0);
+            let radius = cuemol_molstr::toppar::vdw_radius_for_atom(atom);
             output.push_str(&format!(
                 "ATOM  {:5} {:<4} {:>3} {:1}{:4}    {:8.3}{:8.3}{:8.3} {:7.4} {:6.3}\n",
                 atom.serial,
@@ -2078,6 +2087,24 @@ mod tests {
         let xyzr = xyzr.write_xyzr_string(&molecule);
         assert_eq!(xyzr.lines().count(), 1);
         assert!(xyzr.contains("1.5500"));
+    }
+
+    #[test]
+    fn pqr_writes_template_partial_charge_and_united_atom_radius() {
+        // C++ PQRFileWriter writes the force-field partial charge + united-atom
+        // radius. A backbone CA in ALA -> charge 0.058 (prot_top.xml) and radius
+        // 1.95 (CH1 vdwhr, default_params.xml), NOT formal charge 0 / element 1.70.
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(surface_atom(1, "CA", "C", 0.0));
+        let out = PqrFileWriter::new().write_pqr_string(&molecule);
+        assert!(
+            out.contains("0.0580"),
+            "PQR must write the partial charge 0.058, got: {out}"
+        );
+        assert!(
+            out.contains("1.950"),
+            "PQR must write the united-atom radius 1.95, got: {out}"
+        );
     }
 
     #[test]
