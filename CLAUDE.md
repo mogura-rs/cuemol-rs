@@ -26,8 +26,11 @@ cargo fmt                                    # no custom rustfmt/clippy config �
 cargo run -p cuemol-cli -- pdb-info ../cuemol2/tests/test_data/1CRN.pdb
 cargo run -p cuemol-cli                      # prints full subcommand list
 
-# Desktop GUI is behind a feature flag (wgpu/egui/winit are optional deps)
-cargo run -p cuemol-desktop --features native-gui
+# Desktop GUI — three selectable front ends over the shared cuemol-desktop-core:
+cargo run -p cuemol-desktop --features native-gui   # egui
+cargo run -p cuemol-desktop-gpui --features gpui-gui # gpui (Zed's framework)
+# Dioxus front end is OUTSIDE the workspace (own lockfile — see GUI feature flag):
+cargo run --manifest-path crates/cuemol-desktop-dioxus/Cargo.toml -- file.pdb
 ```
 
 To run compat tests against a reference tree in a non-default location, set
@@ -103,9 +106,21 @@ or selection logic, confirm the relevant `*_compat.rs` actually executed (run wi
 `../cuemol2` present). Git LFS pointer fixtures (payload not pulled) are detected and
 reported as metadata rather than parsed — see `QscLoadStatus::GitLfsPointer`.
 
-### GUI feature flag
+### GUI: shared core + three front ends
 
-`cuemol-desktop` keeps all heavy GPU/windowing deps (`wgpu`, `egui`, `winit`, `glam`,
-`bytemuck`, `pollster`) behind the `native-gui` feature. The default build is headless
-(scene-state facade only); the `cuemol-desktop` binary has `required-features = ["native-gui"]`.
-Keep new GUI code gated so the default workspace build stays light and headless-friendly.
+GUI-agnostic logic lives in **`cuemol-desktop-core`** (no windowing toolkit): the headless
+`DesktopAppState` facade, the `Gui*Summary` view-models, and the `offscreen` wgpu mesh
+renderer (behind core's `offscreen` feature). Three front ends layer on top:
+
+- **`cuemol-desktop`** (`native-gui` = egui, `gpui-gui` = gpui) — both heavy GPU/windowing
+  deps stay optional behind those features; it re-exports `cuemol_desktop_core::*` so the
+  `gui`/`gpui_app` modules keep using `crate::DesktopAppState`, `crate::offscreen::…`.
+- **`cuemol-desktop-dioxus`** (Dioxus 0.7 webview) — **intentionally NOT a workspace member**
+  (`[workspace] exclude`). gpui 0.2.2 (only published version) hard-pins `cocoa =0.26.0`
+  while every Dioxus needs `>=0.26.1`; a workspace shares one `Cargo.lock` in which even
+  non-activated optional deps must co-resolve, so the two can't coexist. The Dioxus crate
+  keeps its own lockfile, depends only on the gpui-free core, and is built via
+  `--manifest-path` (not `cargo build --workspace`). It mirrors the gpui shell: panels +
+  a wgpu-offscreen 3D view composited as a PNG `data:` URI `<img>`.
+
+The default workspace build stays headless (no GPU stack); keep new GUI code gated.

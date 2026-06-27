@@ -1306,6 +1306,7 @@ dependencies = [
  "bytemuck",
  "cuemol-anim",
  "cuemol-core",
+ "cuemol-desktop-core",
  "cuemol-gfx",
  "cuemol-mdtools",
  "cuemol-molanl",
@@ -1321,11 +1322,32 @@ dependencies = [
  "glam",
  "gpui",
  "image",
+ "pollster 0.4.0",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "cuemol-desktop-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "cuemol-anim",
+ "cuemol-core",
+ "cuemol-gfx",
+ "cuemol-mdtools",
+ "cuemol-molanl",
+ "cuemol-molstr",
+ "cuemol-molvis",
+ "cuemol-qsys",
+ "cuemol-render",
+ "cuemol-surface",
+ "cuemol-xtal",
+ "glam",
  "naga 27.0.3",
  "png 0.17.16",
  "pollster 0.4.0",
  "wgpu",
- "winit",
 ]
 
 [[package]]

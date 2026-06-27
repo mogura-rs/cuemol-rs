@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+# GUI-agnostic shared logic (DesktopAppState facade, Gui* view-models, offscreen
+# wgpu renderer). Re-exported at this crate's root for the egui/gpui modules.
+cuemol-desktop-core.workspace = true
 cuemol-core.workspace = true
 cuemol-gfx.workspace = true
 cuemol-qsys.workspace = true
@@ -28,11 +31,8 @@ image = { version = "0.25", optional = true }
 # the full Xcode toolchain (CLT lacks the offline `metal` compiler). This lets
 # the gpui GUI build with only Command Line Tools.
 gpui = { version = "0.2.2", optional = true, features = ["runtime_shaders"] }
-# wgpu pulls naga 27; without a colour-writer feature naga 27.0.3 falls back to
-# `String: WriteColor`, which codespan-reporting 0.12 doesn't satisfy. Force the
-# `termcolor` path on (egui-wgpu enables it for native-gui; gpui-gui doesn't).
-naga = { version = "27", features = ["termcolor"], optional = true }
-png = { version = "0.17", optional = true }
+# naga (with `termcolor`) and png are pulled in via `cuemol-desktop-core/offscreen`
+# (enabled by both GUI features below), so they no longer need a direct dep here.
 pollster = { version = "0.4", optional = true }
 wgpu = { version = "27.0.1", optional = true }
 winit = { version = "0.30.12", optional = true }
@@ -40,12 +40,12 @@ winit = { version = "0.30.12", optional = true }
 [features]
 default = []
 native-gui = [
+  "cuemol-desktop-core/offscreen",
   "dep:bytemuck",
   "dep:egui",
   "dep:egui-wgpu",
   "dep:egui-winit",
   "dep:glam",
-  "dep:png",
   "dep:pollster",
   "dep:wgpu",
   "dep:winit",
@@ -53,12 +53,11 @@ native-gui = [
 # Parallel gpui-based GUI (Zed's framework): gpui draws the panels, wgpu renders
 # the 3D molecular view offscreen and is composited as an image.
 gpui-gui = [
+  "cuemol-desktop-core/offscreen",
   "dep:bytemuck",
   "dep:glam",
   "dep:gpui",
   "dep:image",
-  "dep:naga",
-  "dep:png",
   "dep:pollster",
   "dep:wgpu",
 ]

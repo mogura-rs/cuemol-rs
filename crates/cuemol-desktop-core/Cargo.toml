@@ -1,0 +1,51 @@
+[package]
+name = "cuemol-desktop-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# GUI-agnostic desktop logic shared by every front end (egui/gpui/Dioxus): the
+# headless `DesktopAppState` facade, the `Gui*Summary` view-models, and the
+# offscreen wgpu renderer. Deliberately depends on NO windowing/GUI toolkit so it
+# can be a dependency of GUI crates with mutually incompatible native deps — most
+# importantly the Dioxus front end (which lives outside this workspace because
+# gpui 0.2.2 hard-pins `cocoa =0.26.0` while Dioxus needs `>=0.26.1`).
+
+[dependencies]
+cuemol-core.workspace = true
+cuemol-gfx.workspace = true
+cuemol-qsys.workspace = true
+cuemol-molstr.workspace = true
+cuemol-mdtools.workspace = true
+cuemol-molanl.workspace = true
+cuemol-molvis.workspace = true
+cuemol-surface.workspace = true
+cuemol-anim.workspace = true
+cuemol-render.workspace = true
+cuemol-xtal.workspace = true
+# Offscreen wgpu renderer deps — optional, behind the `offscreen` feature, so the
+# default workspace build stays light and headless (no GPU stack compiled).
+bytemuck = { version = "1.25", features = ["derive"], optional = true }
+glam = { version = "0.30.10", optional = true }
+naga = { version = "27", features = ["termcolor"], optional = true }
+png = { version = "0.17", optional = true }
+pollster = { version = "0.4", optional = true }
+wgpu = { version = "27.0.1", optional = true }
+
+[features]
+default = []
+# Compile the wgpu offscreen mesh renderer (`offscreen` module) and the
+# `DesktopAppState::export_active_scene_png` path. Front ends that show a 3D view
+# enable this; a pure scene-state build does not.
+offscreen = [
+  "dep:bytemuck",
+  "dep:glam",
+  "dep:naga",
+  "dep:png",
+  "dep:pollster",
+  "dep:wgpu",
+]
+
+[lib]
+name = "cuemol_desktop_core"
+path = "src/lib.rs"

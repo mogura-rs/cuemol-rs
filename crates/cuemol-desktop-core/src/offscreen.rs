@@ -905,4 +905,79 @@ mod tests {
             "depth ordering wrong: nearer={nearer:?} farther={farther:?}"
         );
     }
+
+    #[test]
+    fn scene_renderer_matches_the_free_function() {
+        // The persistent SceneRenderer must produce byte-identical output to the
+        // one-shot free function — proving the refactor is behaviour-preserving
+        // (the device/pipeline reuse is the only difference).
+        let green = [0.0, 1.0, 0.0, 1.0];
+        let mesh = RenderMesh {
+            vertices: vec![
+                vert(-0.9, -0.9, green),
+                vert(0.9, -0.9, green),
+                vert(0.0, 0.9, green),
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let Some(renderer) = SceneRenderer::new() else {
+            eprintln!("no GPU adapter; skipping SceneRenderer test");
+            return;
+        };
+        let reused = renderer
+            .render(std::slice::from_ref(&mesh), IDENTITY, 64, 64, [0.0, 0.0, 0.0, 1.0])
+            .expect("SceneRenderer produced no image");
+        let oneshot =
+            render_meshes_offscreen(std::slice::from_ref(&mesh), IDENTITY, 64, 64, [0.0, 0.0, 0.0, 1.0])
+                .expect("free function produced no image");
+        assert_eq!(
+            reused, oneshot,
+            "SceneRenderer output differs from the free function"
+        );
+    }
+
+    #[test]
+    fn scene_renderer_reuses_one_device_across_frames() {
+        // The interactive path: build the renderer ONCE, then render two frames
+        // with different MVPs from the same device/pipeline. Both must succeed and
+        // the differing camera must yield a different image (proving the reused
+        // pipeline still honours per-frame MVP uniforms).
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![
+                RenderAtom::new(Vector4::new3(-3.0, 0.0, 0.0), 1.0, solid(1.0, 0.2, 0.2)),
+                RenderAtom::new(Vector4::new3(3.0, 0.0, 0.0), 1.0, solid(0.2, 1.0, 0.2)),
+                RenderAtom::new(Vector4::new3(0.0, 2.0, 4.0), 1.0, solid(0.2, 0.2, 1.0)),
+            ],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let mut camera = Camera::new();
+        camera.set_zoom(14.0);
+        camera.set_cam_dist(30.0);
+        camera.set_slab_depth(30.0);
+
+        let Some(renderer) = SceneRenderer::new() else {
+            return;
+        };
+        let mvp_a = camera_mvp(&camera, 1.0);
+        let img_a = renderer
+            .render_snapshot(&snapshot, mvp_a, 80, 80, [0.0, 0.0, 0.0, 1.0])
+            .expect("frame A");
+        camera.set_rotation(camera.rotation().rotate_y(50.0).unwrap());
+        let mvp_b = camera_mvp(&camera, 1.0);
+        let img_b = renderer
+            .render_snapshot(&snapshot, mvp_b, 80, 80, [0.0, 0.0, 0.0, 1.0])
+            .expect("frame B");
+
+        let changed = img_a
+            .iter()
+            .zip(&img_b)
+            .filter(|(a, b)| (**a as i32 - **b as i32).abs() > 24)
+            .count();
+        assert!(
+            changed > 300,
+            "reused renderer ignored the per-frame MVP: {changed} pixels changed"
+        );
+    }
 }
