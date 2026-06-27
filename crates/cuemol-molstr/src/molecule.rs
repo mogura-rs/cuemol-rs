@@ -85,6 +85,11 @@ pub struct Bond {
     /// MDL/SDF bond stereo flag: 0 = none, 1 = up (wedge, fat end at atom2),
     /// 6 = down (hashed). Used by BallStick valence-bond display.
     pub stereo: i32,
+    /// Whether this bond was explicitly DEPOSITED (a PDB LINK / SSBOND record),
+    /// as opposed to inferred by the topology/distance builder (C++
+    /// `MolBond::isPersist`). The PDB writer emits LINK records only for
+    /// persistent, non-disulfide bonds, so topology bonds are not echoed back.
+    pub persist: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -309,8 +314,25 @@ impl MolCoord {
                 atom2,
                 order,
                 stereo,
+                persist: false,
             });
         }
+    }
+
+    /// Mark the bond between `atom1` and `atom2` (either direction) as a
+    /// deposited/persistent bond (C++ `MolBond::setPersist`). Used by the PDB
+    /// LINK-record reader so the writer can echo those links back. Returns
+    /// whether a matching bond was found.
+    pub fn mark_bond_persistent(&mut self, atom1: usize, atom2: usize) -> bool {
+        for bond in &mut self.bonds {
+            if (bond.atom1 == atom1 && bond.atom2 == atom2)
+                || (bond.atom1 == atom2 && bond.atom2 == atom1)
+            {
+                bond.persist = true;
+                return true;
+            }
+        }
+        false
     }
 
     pub fn bonds(&self) -> &[Bond] {
@@ -738,6 +760,7 @@ impl MolCoord {
                     atom2,
                     order: bond.order,
                     stereo: bond.stereo,
+                    persist: bond.persist,
                 })
             })
             .collect();
