@@ -274,7 +274,9 @@ impl XyzrFileWriter {
     pub fn write_xyzr_string(&self, molecule: &MolCoord) -> String {
         let mut output = String::new();
         for atom in selected_surface_atoms(molecule, self.selection.as_ref(), true) {
-            let radius = SurfaceVdwRadii::default().radius_for_element(&atom.element);
+            // C++ XYZRFileWriter uses getVdwRadius(atom, false) = the united-atom
+            // vdwhr (XYZRFileWriter.cpp:104), not the bare element radius.
+            let radius = cuemol_molstr::toppar::vdw_radius_for_atom(atom);
             output.push_str(&format!(
                 "{:12.6} {:12.6} {:12.6} {:8.4}\n",
                 atom.position.x, atom.position.y, atom.position.z, radius
@@ -2100,7 +2102,8 @@ mod tests {
         xyzr.set_selection(Some(parse_selector("name N").unwrap()));
         let xyzr = xyzr.write_xyzr_string(&molecule);
         assert_eq!(xyzr.lines().count(), 1);
-        assert!(xyzr.contains("1.5500"));
+        // N in ALA -> NH1 united-atom radius 1.60 (vdwhr), not element 1.55.
+        assert!(xyzr.contains("1.6000"), "got: {xyzr}");
     }
 
     #[test]

@@ -259,10 +259,11 @@ impl MolAnlManager {
         for atom in molecule.atoms() {
             if selector.matches(atom) == shift_selected {
                 let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
-                if !mapping.contains_key(&key) {
-                    mapping.insert(key, next);
+                mapping.entry(key).or_insert_with(|| {
+                    let assigned = next;
                     next += 1;
-                }
+                    assigned
+                });
             }
         }
         molecule.relabel_residue_keys(|atom| {
