@@ -1,6 +1,8 @@
 use cuemol_core::Vector4;
 use cuemol_gfx::{ColorSpec, SolidColor};
-use cuemol_molstr::{parse_selector, Atom, MolCoord, MolRenderer, ResidIterator, ResidueView};
+use cuemol_molstr::{
+    parse_selector, Atom, BfacColoring, MolCoord, MolRenderer, ResidIterator, ResidueView,
+};
 use cuemol_qsys::{DrawObj, StyleManager};
 use cuemol_render::{MeshVertex, RenderAtom, RenderBond, RenderMesh, RenderSceneSnapshot};
 
@@ -2727,6 +2729,10 @@ pub struct MoleculeRenderOptions {
     /// gradient over the chain residues (C++ RainbowColoring). Takes precedence
     /// over `object_paint` (it is the object's coloring scheme). `None` = no rainbow.
     pub rainbow: Option<RainbowColoring>,
+    /// Object `<coloring type="BfacColoring">`: colours the backbone by B-factor/
+    /// occupancy lerped low_color→high_color (C++ BfacColoring, auto-scaled to the
+    /// molecule range by default). Another object coloring scheme. `None` = off.
+    pub bfac: Option<BfacColoring>,
 }
 
 /// Ribbon cross-section width/thickness FACTORS (multiplied by the base coil
@@ -2903,6 +2909,7 @@ impl Default for MoleculeRenderOptions {
             draw_indices: None,
             object_paint: Vec::new(),
             rainbow: None,
+            bfac: None,
         }
     }
 }
@@ -2958,6 +2965,26 @@ pub fn rainbow_coloring_from_attrs<'a>(
         rainbow.set_bri(value);
     }
     Some(rainbow)
+}
+
+/// Build a [`BfacColoring`] from an object's `<coloring type="BfacColoring">`
+/// scheme name + attribute accessor (lowpar/highpar). Colours + mode keep the
+/// C++ defaults (blue→red, auto-scaled to the molecule). `None` for other types.
+pub fn bfac_coloring_from_attrs<'a>(
+    coloring_type: Option<&str>,
+    attr: impl Fn(&str) -> Option<&'a str>,
+) -> Option<BfacColoring> {
+    if coloring_type != Some("BfacColoring") {
+        return None;
+    }
+    let mut bfac = BfacColoring::new();
+    if let Some(value) = attr("lowpar").and_then(|s| s.trim().parse().ok()) {
+        bfac.set_low_param(value);
+    }
+    if let Some(value) = attr("highpar").and_then(|s| s.trim().parse().ok()) {
+        bfac.set_high_param(value);
+    }
+    Some(bfac)
 }
 
 pub fn apply_renderer_styles(
@@ -3434,6 +3461,38 @@ fn ribbon_rainbow_colors(
         .collect()
 }
 
+/// Per-spline-sample B-factor colours for a ribbon chain: each sample takes its
+/// segment residue's `BfacColoring::color_for_atom` (auto params already computed).
+fn ribbon_bfac_colors(
+    sample_count: usize,
+    pivots: &[MainchainPoint],
+    subdiv: usize,
+    bfac: &BfacColoring,
+    molecule: &MolCoord,
+) -> Vec<Option<[f32; 4]>> {
+    let subdiv = subdiv.max(1);
+    let pivot_colors: Vec<Option<[f32; 4]>> = pivots
+        .iter()
+        .map(|pivot| {
+            molecule.atoms().get(pivot.atom_index).map(|atom| {
+                let c = bfac.color_for_atom(atom).rgba8();
+                [
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
+                    c.a as f32 / 255.0,
+                ]
+            })
+        })
+        .collect();
+    (0..sample_count)
+        .map(|i| {
+            let seg = (i / subdiv).min(pivots.len().saturating_sub(1));
+            pivot_colors.get(seg).copied().flatten()
+        })
+        .collect()
+}
+
 /// The putty target value (B-factor or occupancy) of a backbone pivot.
 fn pivot_target(point: &MainchainPoint, target: PuttyTarget) -> f64 {
     match target {
@@ -3739,6 +3798,11 @@ pub fn ribbon_mesh_snapshot(
     // Object paint coloring (resolved against the X11 table) colours the backbone
     // where the renderer defers to $molcol; built once when the scene paints.
     let paint_styles = (!options.object_paint.is_empty()).then(default_style_manager);
+    // BfacColoring: auto-scale to the molecule's B-factor range once up front.
+    let bfac_coloring = options.bfac.clone().map(|mut bfac| {
+        bfac.start_molecule(molecule);
+        bfac
+    });
     // RainbowColoring (when set) is the object's colour scheme and spans the whole
     // molecule's residues (RBC_MOL default), so index pivots globally across chains.
     let total_residues: usize = chains.iter().map(|chain| chain.len()).sum();
@@ -3763,7 +3827,7 @@ pub fn ribbon_mesh_snapshot(
                 putty_aver,
             );
         }
-        // Rainbow (object colour scheme) takes precedence over $molcol→paint.
+        // Object colour scheme precedence: Rainbow, then Bfac, then $molcol→paint.
         let paint = if let Some(rainbow) = &options.rainbow {
             Some(ribbon_rainbow_colors(
                 samples.len(),
@@ -3772,6 +3836,14 @@ pub fn ribbon_mesh_snapshot(
                 pivots.len(),
                 subdiv,
                 rainbow,
+            ))
+        } else if let Some(bfac) = &bfac_coloring {
+            Some(ribbon_bfac_colors(
+                samples.len(),
+                pivots,
+                subdiv,
+                bfac,
+                molecule,
             ))
         } else {
             paint_styles.as_ref().map(|styles| {

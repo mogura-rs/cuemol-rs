@@ -738,6 +738,10 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 object.coloring_type(),
                 |name| object.coloring_attr(name),
             );
+            // Object B-factor coloring (`<coloring type="BfacColoring">`).
+            options.bfac = cuemol_molvis::bfac_coloring_from_attrs(object.coloring_type(), |name| {
+                object.coloring_attr(name)
+            });
             let snapshot = if rtype == "atomintr" {
                 // Measurement lines between the renderer's atom pairs, not the
                 // whole molecule (the single source of truth shared with the GUI).
