@@ -1063,6 +1063,11 @@ fn append_object_renderer_snapshot(
             options.draw_indices = Some(object.mol().select_indices(&selector));
         }
     }
+    // Object-level paint coloring (the scene's `<coloring type="PaintColoring">`):
+    // colours the backbone where the renderer defers to $molcol.
+    if !object.paint_coloring().is_empty() {
+        options.object_paint = object.paint_coloring().to_vec();
+    }
     let snapshot = match (renderer_type, renderer) {
         // An atom-interaction renderer draws measurement lines between its atom
         // pairs, NOT the whole molecule — route it to the measurement geometry so
@@ -2040,6 +2045,65 @@ mod tests {
             nucl.bond_count()
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn paint_coloring_colors_the_ribbon_by_object_paint() {
+        // The scene's object-level `<coloring type="PaintColoring">` colours the
+        // backbone ribbon (the trace's CPK carbon CA defers to $molcol = the object
+        // paint). FloralWhite (#FFFAF0) is the paint "*" fallback — a colour the
+        // default element/secondary-structure colouring never produces, so its
+        // appearance proves paint is wired; clearing the paint removes it.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let fixture = root.join("number_chain_atomintr1.qsc");
+        if !fixture.exists() {
+            return;
+        }
+        let mut app = DesktopAppState::new();
+        let Ok(Some(scene_uid)) = app.load_qsc_file(&fixture) else {
+            return;
+        };
+        let object_uid = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .objects()
+            .first()
+            .expect("scene has a molecule object")
+            .uid();
+        // Sanity: the PaintColoring actually parsed (else the test verifies nothing).
+        assert!(
+            !app.scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .paint_coloring()
+                .is_empty(),
+            "the object's PaintColoring must have parsed"
+        );
+
+        let has_floral = |snapshot: &RenderSceneSnapshot| {
+            snapshot.meshes.iter().flat_map(|mesh| mesh.vertices.iter()).any(|vertex| {
+                (vertex.color[0] - 1.0).abs() < 0.005
+                    && (vertex.color[1] - 250.0 / 255.0).abs() < 0.005
+                    && (vertex.color[2] - 240.0 / 255.0).abs() < 0.005
+            })
+        };
+        assert!(
+            has_floral(&app.render_snapshot(scene_uid, "").unwrap()),
+            "the ribbon should show the FloralWhite paint fallback colour"
+        );
+
+        // Clear the paint coloring: the ribbon falls back to section colours.
+        app.scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .set_paint_coloring(Vec::new());
+        assert!(
+            !has_floral(&app.render_snapshot(scene_uid, "").unwrap()),
+            "without paint coloring the FloralWhite must disappear"
+        );
     }
 
     #[test]

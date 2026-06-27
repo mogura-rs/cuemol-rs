@@ -1,6 +1,6 @@
 use cuemol_core::Vector4;
 use cuemol_gfx::{ColorSpec, SolidColor};
-use cuemol_molstr::{Atom, MolCoord, MolRenderer, ResidIterator, ResidueView};
+use cuemol_molstr::{parse_selector, Atom, MolCoord, MolRenderer, ResidIterator, ResidueView};
 use cuemol_qsys::{DrawObj, StyleManager};
 use cuemol_render::{MeshVertex, RenderAtom, RenderBond, RenderMesh, RenderSceneSnapshot};
 
@@ -2697,6 +2697,11 @@ pub struct MoleculeRenderOptions {
     /// these atoms (and bonds whose both ends are included), keeping each atom's
     /// original index for picking. Honoured by [`molecule_render_snapshot`].
     pub draw_indices: Option<Vec<usize>>,
+    /// Object-level `<coloring type="PaintColoring">` entries `(selection, color)`,
+    /// first-match-wins. When non-empty, the ribbon backbone is coloured by paint
+    /// (the C++ `$molcol`→object-coloring cascade — the backbone CA is carbon, so
+    /// CPKColoring defers it to the object's paint). Empty = the default colours.
+    pub object_paint: Vec<(String, String)>,
 }
 
 /// Ribbon cross-section width/thickness FACTORS (multiplied by the base coil
@@ -2871,6 +2876,7 @@ impl Default for MoleculeRenderOptions {
             ribbon_axial_detail: None,
             styled_ribbon: StyledRibbonSections::default(),
             draw_indices: None,
+            object_paint: Vec::new(),
         }
     }
 }
@@ -3284,6 +3290,77 @@ fn putty_value_stats(
     )
 }
 
+/// Resolve an atom's object paint colour: the first entry whose selection matches
+/// the atom, its colour name resolved to RGBA (C++ first-match PaintColoring).
+/// `None` when no entry matches.
+fn resolve_paint_color(
+    entries: &[(String, String)],
+    atom: &Atom,
+    molecule: &MolCoord,
+    styles: &StyleManager,
+) -> Option<[f32; 4]> {
+    for (sel, color_name) in entries {
+        let Ok(selector) = parse_selector(sel) else {
+            continue;
+        };
+        if selector.matches_in_molecule(atom, molecule) {
+            return resolve_color_name(color_name, styles);
+        }
+    }
+    None
+}
+
+/// Resolve a colour name/value ("SteelBlue", "#FFFAF0", …) to RGBA, preferring
+/// the bundled X11 table (the same source C++ uses) then the generic parser.
+fn resolve_color_name(name: &str, styles: &StyleManager) -> Option<[f32; 4]> {
+    let to_rgba = |c: cuemol_gfx::Rgba8| {
+        [
+            c.r as f32 / 255.0,
+            c.g as f32 / 255.0,
+            c.b as f32 / 255.0,
+            c.a as f32 / 255.0,
+        ]
+    };
+    if let Some(color) = styles.get_color(name, DEFAULT_STYLE_SCOPE) {
+        return Some(to_rgba(color.rgba8()));
+    }
+    cuemol_gfx::parse_color(name)
+        .ok()
+        .and_then(|spec| spec.rgba8())
+        .map(to_rgba)
+}
+
+/// Per-spline-sample paint colours for a ribbon chain: each sample takes its
+/// segment's start residue's paint colour (resolved once per pivot). `None` for a
+/// sample whose residue matches no paint entry (the ribbon keeps its section
+/// colour there).
+fn ribbon_paint_colors(
+    sample_count: usize,
+    pivots: &[MainchainPoint],
+    subdiv: usize,
+    entries: &[(String, String)],
+    molecule: &MolCoord,
+    styles: &StyleManager,
+) -> Vec<Option<[f32; 4]>> {
+    let n = pivots.len();
+    let subdiv = subdiv.max(1);
+    let pivot_colors: Vec<Option<[f32; 4]>> = pivots
+        .iter()
+        .map(|pivot| {
+            molecule
+                .atoms()
+                .get(pivot.atom_index)
+                .and_then(|atom| resolve_paint_color(entries, atom, molecule, styles))
+        })
+        .collect();
+    (0..sample_count)
+        .map(|i| {
+            let seg = (i / subdiv).min(n.saturating_sub(1));
+            pivot_colors.get(seg).copied().flatten()
+        })
+        .collect()
+}
+
 /// The putty target value (B-factor or occupancy) of a backbone pivot.
 fn pivot_target(point: &MainchainPoint, target: PuttyTarget) -> f64 {
     match target {
@@ -3308,6 +3385,9 @@ struct MainchainPoint {
     ss: Secondary,
     b_factor: f64,
     occupancy: f64,
+    /// Molecule atom index of this residue's backbone pivot (CA/P/C1'/O5'), used
+    /// to evaluate per-residue paint coloring against the pivot atom.
+    atom_index: usize,
 }
 
 /// Read a residue's `secondary` property (set by the PDB reader's HELIX/SHEET
@@ -3358,18 +3438,21 @@ fn collect_mainchain_pivots(
 
 /// Pick the residue's backbone pivot atom: CA (protein) then nucleic-acid fallbacks.
 fn mainchain_pivot_point(molecule: &MolCoord, residue: &ResidueView) -> Option<MainchainPoint> {
-    let atoms = residue.atoms();
+    let indices = residue.atom_indices();
     for name in ["CA", "P", "C1'", "O5'"] {
-        if let Some(atom) = atoms
-            .iter()
-            .find(|atom| atom.name.trim().eq_ignore_ascii_case(name))
-        {
-            return Some(MainchainPoint {
-                pos: Vector4::new3(atom.position.x, atom.position.y, atom.position.z),
-                ss: residue_secondary(molecule, atom),
-                b_factor: atom.b_factor as f64,
-                occupancy: atom.occupancy as f64,
-            });
+        for &index in indices {
+            let Some(atom) = molecule.atoms().get(index) else {
+                continue;
+            };
+            if atom.name.trim().eq_ignore_ascii_case(name) {
+                return Some(MainchainPoint {
+                    pos: Vector4::new3(atom.position.x, atom.position.y, atom.position.z),
+                    ss: residue_secondary(molecule, atom),
+                    b_factor: atom.b_factor as f64,
+                    occupancy: atom.occupancy as f64,
+                    atom_index: index,
+                });
+            }
         }
     }
     None
@@ -3580,6 +3663,9 @@ pub fn ribbon_mesh_snapshot(
     // occupancy, on top of the section width scales. Stats are over all pivots.
     let putty = options.putty;
     let (putty_lo, putty_hi, putty_aver) = putty_value_stats(&chains, &putty);
+    // Object paint coloring (resolved against the X11 table) colours the backbone
+    // where the renderer defers to $molcol; built once when the scene paints.
+    let paint_styles = (!options.object_paint.is_empty()).then(default_style_manager);
     let mut meshes = Vec::new();
     for pivots in &chains {
         if pivots.len() < 2 {
@@ -3598,6 +3684,16 @@ pub fn ribbon_mesh_snapshot(
                 putty_aver,
             );
         }
+        let paint = paint_styles.as_ref().map(|styles| {
+            ribbon_paint_colors(
+                samples.len(),
+                pivots,
+                subdiv,
+                &options.object_paint,
+                molecule,
+                styles,
+            )
+        });
         let mesh = ribbon_tube_mesh(
             &samples,
             &sections,
@@ -3605,6 +3701,7 @@ pub fn ribbon_mesh_snapshot(
             scale,
             &options.ribbon_sections,
             &options.styled_ribbon,
+            paint.as_deref(),
         );
         if !mesh.vertices.is_empty() {
             meshes.push(mesh);
@@ -3765,6 +3862,7 @@ fn ribbon_tube_mesh(
     scale: f64,
     sec: &RibbonSections,
     styled: &StyledRibbonSections,
+    paint: Option<&[Option<[f32; 4]>]>,
 ) -> RenderMesh {
     let n = samples.len();
     if n < 2 {
@@ -3802,7 +3900,12 @@ fn ribbon_tube_mesh(
     let mut vertices = Vec::with_capacity(n * TUBE_RADIAL);
     for (i, &center) in samples.iter().enumerate() {
         let (normal, binormal) = frames[i];
-        let (base_width, thick, color) = section_params(sections[i], scale, sec, styled);
+        let (base_width, thick, section_color) = section_params(sections[i], scale, sec, styled);
+        // Object paint coloring (when resolved for this sample) overrides the
+        // secondary-structure section colour — the $molcol→object cascade.
+        let color = paint
+            .and_then(|colors| colors.get(i).copied().flatten())
+            .unwrap_or(section_color);
         let width = base_width * width_scales[i];
         let shape = styled.shape_for(sections[i]);
         for j in 0..TUBE_RADIAL {
@@ -5265,6 +5368,7 @@ mod tests {
             ss: Secondary::Coil,
             b_factor: 0.0,
             occupancy: 1.0,
+            atom_index: 0,
         })
         .collect();
         let max_y = |w: f64| {

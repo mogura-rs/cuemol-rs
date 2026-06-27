@@ -137,6 +137,12 @@ pub struct MolObject {
     mol: MolCoord,
     renderers: Vec<MolRenderer>,
     next_renderer_uid: u64,
+    /// Object-level `<coloring type="PaintColoring">` entries `(selection, color)`
+    /// in declaration order (first matching selection wins). Empty when the scene
+    /// declares no paint coloring. Renderers whose colour resolves to `$molcol`
+    /// (e.g. CPKColoring carbon) defer to this — the C++ object→renderer colour
+    /// cascade (`ColSchmHolder::getColor`/`evalMolColor`).
+    paint_coloring: Vec<(String, String)>,
 }
 
 impl MolObject {
@@ -158,6 +164,15 @@ impl MolObject {
 
     pub fn renderers(&self) -> &[MolRenderer] {
         &self.renderers
+    }
+
+    /// Object-level paint-coloring entries `(selection, color)`, first-match-wins.
+    pub fn paint_coloring(&self) -> &[(String, String)] {
+        &self.paint_coloring
+    }
+
+    pub fn set_paint_coloring(&mut self, entries: Vec<(String, String)>) {
+        self.paint_coloring = entries;
     }
 
     pub fn renderer_by_name(&self, name: &str) -> Option<&MolRenderer> {
@@ -413,6 +428,7 @@ impl MolScene {
             mol,
             renderers: Vec::new(),
             next_renderer_uid: 1,
+            paint_coloring: Vec::new(),
         });
         uid
     }
@@ -461,8 +477,23 @@ impl MolScene {
 
         let mut current_atomintr: Option<(String, Vec<(String, String)>)> = None;
         let mut current_atomintr_attrs = BTreeMap::new();
+        // Object-level `<coloring type="PaintColoring">` with `<paint sel color>`
+        // children — collected here and applied to the object after the block walk.
+        let mut paint_entries: Vec<(String, String)> = Vec::new();
+        let mut in_paint_coloring = false;
         for line in block.iter().map(|line| line.trim()) {
-            if line.starts_with("<renderer ") {
+            if line.starts_with("<coloring ") {
+                in_paint_coloring =
+                    attr_value(line, "type").as_deref() == Some("PaintColoring");
+            } else if line.starts_with("</coloring>") {
+                in_paint_coloring = false;
+            } else if in_paint_coloring && line.starts_with("<paint ") {
+                if let (Some(sel), Some(color)) =
+                    (attr_value(line, "sel"), attr_value(line, "color"))
+                {
+                    paint_entries.push((sel, color));
+                }
+            } else if line.starts_with("<renderer ") {
                 let attrs = attr_map(line);
                 let renderer_type = attr_value(line, "type").unwrap_or_default();
                 let renderer_name =
@@ -496,6 +527,9 @@ impl MolScene {
 
         if let Some((name, lines)) = current_atomintr.take() {
             object.add_atom_intr_renderer_with_attrs(name, &lines, current_atomintr_attrs)?;
+        }
+        if !paint_entries.is_empty() {
+            object.set_paint_coloring(paint_entries);
         }
         Ok(())
     }

@@ -729,6 +729,10 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                     options.draw_indices = Some(object.mol().select_indices(&selector));
                 }
             }
+            // Object paint coloring (scene `<coloring type="PaintColoring">`).
+            if !object.paint_coloring().is_empty() {
+                options.object_paint = object.paint_coloring().to_vec();
+            }
             let snapshot = if rtype == "atomintr" {
                 // Measurement lines between the renderer's atom pairs, not the
                 // whole molecule (the single source of truth shared with the GUI).
