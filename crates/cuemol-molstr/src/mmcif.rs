@@ -495,30 +495,45 @@ fn parse_f64(value: Option<&str>, name: &str) -> Result<f64> {
 }
 
 fn apply_struct_conn(cif_loop: &CifLoop, atom_keys: &HashMap<String, usize>, mol: &mut MolCoord) {
-    let p1_chain = cif_loop.column_index("ptnr1_label_asym_id");
-    let p1_seq = cif_loop.column_index("ptnr1_label_seq_id");
-    let p1_atom = cif_loop.column_index("ptnr1_label_atom_id");
-    let p2_chain = cif_loop.column_index("ptnr2_label_asym_id");
-    let p2_seq = cif_loop.column_index("ptnr2_label_seq_id");
-    let p2_atom = cif_loop.column_index("ptnr2_label_atom_id");
-    let (Some(p1_chain), Some(p1_seq), Some(p1_atom), Some(p2_chain), Some(p2_seq), Some(p2_atom)) =
-        (p1_chain, p1_seq, p1_atom, p2_chain, p2_seq, p2_atom)
-    else {
-        return;
+    // Resolve a `_struct_conn` partner's (chain, seq, atom) with the SAME
+    // auth-preferred-then-label scheme the atoms were stored under (`get_atom`:
+    // auth_* `||` label_*), mirroring C++ `applyLink`'s `getAsymID`/`getResidIndex`/
+    // `getAtomID` (MmcifMolReader.cpp:636-645). A label-only lookup misses every
+    // atom whose `auth_seq_id != label_seq_id` (ligands/metals/glycans, where
+    // `label_seq_id` is `.`), silently dropping the covalent bond.
+    let pick = |row: &[String], auth: &str, label: &str| -> Option<String> {
+        let read = |name: &str| -> Option<String> {
+            cif_loop
+                .column_index(name)
+                .and_then(|i| row.get(i))
+                .filter(|v| !matches!(v.as_str(), "." | "?" | ""))
+                .cloned()
+        };
+        read(auth).or_else(|| read(label))
+    };
+    let partner_key = |row: &[String], n: u8| -> Option<String> {
+        let chain = pick(
+            row,
+            &format!("ptnr{n}_auth_asym_id"),
+            &format!("ptnr{n}_label_asym_id"),
+        )?;
+        let seq = pick(
+            row,
+            &format!("ptnr{n}_auth_seq_id"),
+            &format!("ptnr{n}_label_seq_id"),
+        )?;
+        let atom = pick(
+            row,
+            &format!("ptnr{n}_auth_atom_id"),
+            &format!("ptnr{n}_label_atom_id"),
+        )?;
+        Some(atom_key(&chain, seq.parse().unwrap_or(0), &atom))
     };
     for row in &cif_loop.rows {
-        let key1 = atom_key(
-            &row[p1_chain],
-            row[p1_seq].parse().unwrap_or(0),
-            &row[p1_atom],
-        );
-        let key2 = atom_key(
-            &row[p2_chain],
-            row[p2_seq].parse().unwrap_or(0),
-            &row[p2_atom],
-        );
-        if let (Some(&atom1), Some(&atom2)) = (atom_keys.get(&key1), atom_keys.get(&key2)) {
-            mol.add_bond(atom1, atom2, BondOrder::Single);
+        if let (Some(key1), Some(key2)) = (partner_key(row, 1), partner_key(row, 2)) {
+            if let (Some(&atom1), Some(&atom2)) = (atom_keys.get(&key1), atom_keys.get(&key2)) {
+                mol.add_bond(atom1, atom2, BondOrder::Single);
+            }
         }
     }
 }
@@ -590,5 +605,60 @@ _atom_site_anisotrop.U[2][3]
         options.load_anisou = false;
         let mol = read_mmcif_str_with_options(cif, options).unwrap();
         assert_eq!(mol.atoms()[0].int_prop("anisou_u11"), None);
+    }
+
+    #[test]
+    fn struct_conn_resolves_partners_by_auth_ids_like_the_atoms() {
+        // A `_struct_conn` covale to a metal whose auth_seq_id (100) differs from
+        // its label_seq_id (`.`). Atoms are stored under auth ids, so a label-only
+        // lookup would search "B:0:FE" and miss — dropping the bond. The fix
+        // resolves partners auth-first (C++ applyLink, MmcifMolReader.cpp:636), so
+        // the covale bond is created. FE is placed 50 A away so no distance/topology
+        // bond can mask the result: the ONLY path to a CA-FE bond is the covale.
+        let cif = "\
+data_test
+loop_
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_seq_id
+_atom_site.auth_atom_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_seq_id
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+1 C CA ALA A 1 CA ALA A 1 0.0 0.0 0.0
+2 FE FE FE2 B . FE FE2 A 100 50.0 0.0 0.0
+#
+loop_
+_struct_conn.conn_type_id
+_struct_conn.ptnr1_label_asym_id
+_struct_conn.ptnr1_label_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.ptnr1_auth_asym_id
+_struct_conn.ptnr1_auth_seq_id
+_struct_conn.ptnr1_auth_atom_id
+_struct_conn.ptnr2_label_asym_id
+_struct_conn.ptnr2_label_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.ptnr2_auth_asym_id
+_struct_conn.ptnr2_auth_seq_id
+_struct_conn.ptnr2_auth_atom_id
+covale A 1 CA A 1 CA B . FE A 100 FE
+#
+";
+        let mol = read_mmcif_str(cif).unwrap();
+        assert_eq!(mol.atom_count(), 2);
+        // The FE atom is stored under its AUTH seq id (100), not label (`.`->0).
+        assert_eq!(mol.atoms()[1].res_id, 100, "FE stored under auth_seq_id");
+        // The covale bond exists — only resolvable via auth-preferred partner keys.
+        assert_eq!(mol.bonds().len(), 1, "the covale bond must be created");
+        let bond = &mol.bonds()[0];
+        let pair = (bond.atom1.min(bond.atom2), bond.atom1.max(bond.atom2));
+        assert_eq!(pair, (0, 1), "the bond connects CA (atom0) and FE (atom1)");
     }
 }
