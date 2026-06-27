@@ -472,6 +472,73 @@ impl MolCoord {
             .map(String::as_str)
     }
 
+    /// Relabel residues by a per-atom destination-key function: `dest` returns
+    /// `Some(new_key)` for an atom that moves to a new (chain, resid, ins) residue,
+    /// or `None` to keep its current residue. Returns `false` WITHOUT mutating if
+    /// the relabel would MERGE two distinct residues — two atoms with different
+    /// ORIGINAL residue keys mapping to the same destination key — mirroring C++
+    /// `MolAnlManager::changeChainName`/`shiftResIndex`, which abort (throw) rather
+    /// than silently collapse two residues into one (the flat `MolCoord` groups by
+    /// `(chain,resid,ins)`, so an unchecked collision silently merges them).
+    ///
+    /// On success it rewrites each moved atom's chain/resid/ins and moves the
+    /// residue properties of any residue FULLY vacated to a single new key (a split
+    /// residue, whose old key still holds atoms, keeps its props) — the C++
+    /// "the same `MolResidue` object moves, carrying its props" behaviour.
+    pub fn relabel_residue_keys(&mut self, dest: impl Fn(&Atom) -> Option<ResidueKey>) -> bool {
+        // Destination key per atom (its current key when the atom does not move).
+        let dests: Vec<ResidueKey> = self
+            .atoms
+            .iter()
+            .map(|atom| dest(atom).unwrap_or_else(|| residue_key(atom)))
+            .collect();
+        // Collision guard: a destination key must not receive atoms from two
+        // different original residues.
+        let mut origin: BTreeMap<&ResidueKey, ResidueKey> = BTreeMap::new();
+        for (atom, new_key) in self.atoms.iter().zip(&dests) {
+            let old_key = residue_key(atom);
+            match origin.get(new_key) {
+                Some(existing) if *existing != old_key => return false,
+                _ => {
+                    origin.insert(new_key, old_key);
+                }
+            }
+        }
+        // Residues fully vacated to a single new key -> move their props.
+        let mut orig_dests: BTreeMap<ResidueKey, BTreeSet<ResidueKey>> = BTreeMap::new();
+        for (atom, new_key) in self.atoms.iter().zip(&dests) {
+            orig_dests
+                .entry(residue_key(atom))
+                .or_default()
+                .insert(new_key.clone());
+        }
+        let prop_moves: Vec<(ResidueKey, ResidueKey)> = orig_dests
+            .iter()
+            .filter_map(|(old, news)| match news.iter().next() {
+                Some(new) if news.len() == 1 && new != old => Some((old.clone(), new.clone())),
+                _ => None,
+            })
+            .collect();
+        // Apply atom mutations.
+        for (atom, new_key) in self.atoms.iter_mut().zip(&dests) {
+            atom.chain_id = new_key.chain_id.clone();
+            atom.res_id = new_key.res_id;
+            atom.ins_code = new_key.ins_code;
+        }
+        // Re-key props: pull from every old key first, then insert at the new keys,
+        // so a lockstep shift (1->2, 2->3) does not clobber a not-yet-moved entry.
+        let mut moved = Vec::new();
+        for (old, new) in &prop_moves {
+            if let Some(props) = self.residue_props.remove(old) {
+                moved.push((new.clone(), props));
+            }
+        }
+        for (new, props) in moved {
+            self.residue_props.insert(new, props);
+        }
+        true
+    }
+
     /// All residue string properties, keyed by residue. Used by the QDF molecule
     /// serializer to carry per-residue props (e.g. DSSP `secondary`) through a
     /// save/load round-trip.

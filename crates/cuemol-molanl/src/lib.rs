@@ -1,9 +1,9 @@
 use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
 use cuemol_molstr::mol_undo::{MolUndoManager, ResiduePropsEdit};
 use cuemol_molstr::{
-    parse_selector, Atom, BondOrder, MolCoord, MolSceneManager, Prot2ndrySet, Selector,
+    parse_selector, Atom, BondOrder, MolCoord, MolSceneManager, Prot2ndrySet, ResidueKey, Selector,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod ssm;
 
@@ -223,14 +223,13 @@ impl MolAnlManager {
         selector: &Selector,
         name: &str,
     ) -> bool {
-        let mut changed = false;
-        for atom in molecule.atoms_mut() {
-            if selector.matches(atom) {
-                atom.chain_id = name.to_string();
-                changed = true;
-            }
-        }
-        changed
+        // Move every selected atom's residue to chain `name`; the collision guard
+        // in `relabel_residue_keys` rejects a merge into an existing residue.
+        molecule.relabel_residue_keys(|atom| {
+            selector
+                .matches(atom)
+                .then(|| ResidueKey::new(name, atom.res_id, atom.ins_code))
+        })
     }
 
     pub fn shift_res_index(
@@ -240,14 +239,10 @@ impl MolAnlManager {
         shift_selected: bool,
         value: i32,
     ) -> bool {
-        let mut changed = false;
-        for atom in molecule.atoms_mut() {
-            if selector.matches(atom) == shift_selected {
-                atom.res_id += value;
-                changed = true;
-            }
-        }
-        changed
+        molecule.relabel_residue_keys(|atom| {
+            (selector.matches(atom) == shift_selected)
+                .then(|| ResidueKey::new(atom.chain_id.clone(), atom.res_id + value, atom.ins_code))
+        })
     }
 
     pub fn renum_res_index(
@@ -257,22 +252,25 @@ impl MolAnlManager {
         shift_selected: bool,
         start: i32,
     ) -> bool {
-        let mut changed = false;
-        let mut current_key: Option<(String, i32, Option<char>)> = None;
-        let mut next_resid = start;
-        for atom in molecule.atoms_mut() {
-            if selector.matches(atom) != shift_selected {
-                continue;
+        // Sequential renumber depends on residue ORDER, so precompute each affected
+        // residue's new resid (in atom order) before delegating the relabel.
+        let mut mapping: BTreeMap<ResidueKey, i32> = BTreeMap::new();
+        let mut next = start;
+        for atom in molecule.atoms() {
+            if selector.matches(atom) == shift_selected {
+                let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
+                if !mapping.contains_key(&key) {
+                    mapping.insert(key, next);
+                    next += 1;
+                }
             }
-            let key = (atom.chain_id.clone(), atom.res_id, atom.ins_code);
-            if current_key.as_ref() != Some(&key) {
-                current_key = Some(key);
-                next_resid += 1;
-            }
-            atom.res_id = next_resid - 1;
-            changed = true;
         }
-        changed
+        molecule.relabel_residue_keys(|atom| {
+            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
+            mapping
+                .get(&key)
+                .map(|&resid| ResidueKey::new(atom.chain_id.clone(), resid, atom.ins_code))
+        })
     }
 
     pub fn make_bond(&self, molecule: &mut MolCoord, aid1: i32, aid2: i32) -> bool {
@@ -883,6 +881,50 @@ mod tests {
         assert_eq!(target.atoms()[0].res_id, 1);
         assert!(manager.delete_atoms(&mut target, &Selector::All));
         assert_eq!(target.atom_count(), 0);
+    }
+
+    #[test]
+    fn change_chain_name_aborts_on_residue_collision_instead_of_merging() {
+        // C++ MolAnlManager::changeChainName (MolAnlManager.cpp:785) throws if a
+        // renamed residue would collide with an existing one; the Rust path used to
+        // mutate unconditionally, so the flat (chain,resid)-keyed model SILENTLY
+        // merged the two residues. Oracle: residue_count.
+        let manager = MolAnlManager::new();
+        let mut mol = MolCoord::new();
+        mol.push_atom(atom(1, "CA", "A", 1, "C", 0.0)); // chain A resid 1 (unselected)
+        mol.push_atom(atom(2, "CA", "B", 1, "C", 1.0)); // chain B resid 1 (selected)
+        assert_eq!(mol.residue_count(), 2);
+        let sel = parse_selector("chain B").unwrap();
+        // Renaming chain B resid 1 -> chain A collides with the existing A resid 1.
+        assert!(
+            !manager.change_chain_name(&mut mol, &sel, "A"),
+            "a collision must abort the rename"
+        );
+        assert_eq!(mol.residue_count(), 2, "no silent residue merge");
+        assert_eq!(mol.atoms()[1].chain_id, "B", "the molecule is left untouched");
+    }
+
+    #[test]
+    fn change_chain_name_migrates_residue_props_to_the_new_key() {
+        // C++ moves the same MolResidue object, so its property map follows the
+        // rename (MolCoord.cpp:661). The flat model must re-key residue_props from
+        // (A,1) to (Z,1); the old code stranded them under the old key.
+        let manager = MolAnlManager::new();
+        let mut mol = MolCoord::new();
+        mol.push_atom(atom(1, "CA", "A", 1, "C", 0.0));
+        mol.set_residue_prop_str("A", "1", "secondary", "Hs").unwrap();
+        let sel = parse_selector("chain A").unwrap();
+        assert!(manager.change_chain_name(&mut mol, &sel, "Z"));
+        assert_eq!(
+            mol.get_residue_prop_str("Z", "1", "secondary").unwrap(),
+            Some("Hs"),
+            "props must follow the residue to its new chain"
+        );
+        assert_eq!(
+            mol.get_residue_prop_str("A", "1", "secondary").unwrap(),
+            None,
+            "no props stranded under the old key"
+        );
     }
 
     #[test]
