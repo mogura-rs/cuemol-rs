@@ -311,7 +311,11 @@ impl CueMolGpuiApp {
         // Auto-frame the camera and tessellate the scene ONCE; both are reused for
         // every interactive re-render (only the MVP changes as the camera moves).
         let snapshot = state.active_render_snapshot("").ok();
-        let camera = snapshot.as_ref().map(frame_camera).unwrap_or_default();
+        // Restore a loaded .qsc's saved view; auto-frame a plain molecule.
+        let camera = state
+            .active_scene_saved_camera()
+            .or_else(|| snapshot.as_ref().map(frame_camera))
+            .unwrap_or_default();
         let mesh = snapshot.as_ref().map(cuemol_render::tessellate_snapshot);
         let mut app = Self {
             state,

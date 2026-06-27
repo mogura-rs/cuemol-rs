@@ -643,8 +643,21 @@ impl DesktopAppState {
         self.render_snapshot(scene_uid, selection_text)
     }
 
-    /// Render the active scene to a PNG file via the offscreen wgpu renderer,
-    /// auto-framing the molecule from its bounding box. Headless molecular image
+    /// The active scene's saved view camera — the `__current` camera restored from
+    /// a loaded `.qsc` (else the first defined camera), or `None` when the scene
+    /// has none (e.g. a plain molecule loaded from a PDB). Front ends and the PNG
+    /// export restore this saved view instead of auto-framing.
+    pub fn active_scene_saved_camera(&self) -> Option<cuemol_qsys::Camera> {
+        let scene = self.scene_manager().scene(self.active_scene?)?;
+        scene
+            .camera_by_name("__current")
+            .or_else(|| scene.cameras().first())
+            .cloned()
+    }
+
+    /// Render the active scene to a PNG file via the offscreen wgpu renderer.
+    /// Restores the scene's saved camera (a loaded `.qsc` view) when present, else
+    /// auto-frames the molecule from its bounding box. Headless molecular image
     /// export (no window). Errors if no GPU adapter is available.
     #[cfg(feature = "offscreen")]
     pub fn export_active_scene_png(
@@ -655,21 +668,27 @@ impl DesktopAppState {
         selection_text: &str,
     ) -> Result<()> {
         let snapshot = self.active_render_snapshot(selection_text)?;
-        let mut camera = cuemol_qsys::Camera::new();
-        if let Some((min, max)) = snapshot.bounds {
-            let dx = max.x - min.x;
-            let dy = max.y - min.y;
-            let dz = max.z - min.z;
-            let size = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
-            camera.set_center(cuemol_core::Vector4::new3(
-                (min.x + max.x) / 2.0,
-                (min.y + max.y) / 2.0,
-                (min.z + max.z) / 2.0,
-            ));
-            camera.set_zoom(size * 1.2);
-            camera.set_cam_dist(size * 3.0);
-            camera.set_slab_depth(size * 2.5);
-        }
+        let camera = match self.active_scene_saved_camera() {
+            Some(saved) => saved,
+            None => {
+                let mut camera = cuemol_qsys::Camera::new();
+                if let Some((min, max)) = snapshot.bounds {
+                    let dx = max.x - min.x;
+                    let dy = max.y - min.y;
+                    let dz = max.z - min.z;
+                    let size = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
+                    camera.set_center(cuemol_core::Vector4::new3(
+                        (min.x + max.x) / 2.0,
+                        (min.y + max.y) / 2.0,
+                        (min.z + max.z) / 2.0,
+                    ));
+                    camera.set_zoom(size * 1.2);
+                    camera.set_cam_dist(size * 3.0);
+                    camera.set_slab_depth(size * 2.5);
+                }
+                camera
+            }
+        };
         let aspect = width.max(1) as f64 / height.max(1) as f64;
         let mvp = crate::offscreen::camera_mvp(&camera, aspect);
         let png = crate::offscreen::render_snapshot_png(
@@ -2103,6 +2122,46 @@ mod tests {
         assert!(
             !has_floral(&app.render_snapshot(scene_uid, "").unwrap()),
             "without paint coloring the FloralWhite must disappear"
+        );
+    }
+
+    #[test]
+    fn loading_a_qsc_restores_its_saved_view_camera() {
+        // A loaded .qsc carries a saved `__current` camera; the viewer/export must
+        // restore it (the scene's view) instead of auto-framing. A plain PDB has
+        // no saved camera, so those still auto-frame.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let fixture = root.join("number_chain_atomintr1.qsc");
+        if !fixture.exists() {
+            return;
+        }
+        let mut app = DesktopAppState::new();
+        if app.load_qsc_file(&fixture).ok().flatten().is_none() {
+            return;
+        }
+        let camera = app
+            .active_scene_saved_camera()
+            .expect("the .qsc's saved camera must be restored");
+        // Exact values from the fixture's <camera center=(7.2782,10.1857,6.8747)
+        // zoom=50 perspec=false>.
+        let center = camera.center();
+        assert!((center.x - 7.2782).abs() < 1e-3, "center.x = {}", center.x);
+        assert!((center.y - 10.1857).abs() < 1e-3, "center.y = {}", center.y);
+        assert!((center.z - 6.8747).abs() < 1e-3, "center.z = {}", center.z);
+        assert!((camera.zoom() - 50.0).abs() < 1e-6, "zoom = {}", camera.zoom());
+        assert!(!camera.is_perspective(), "fixture camera is orthographic");
+
+        // A plain PDB load has no saved camera (export auto-frames it).
+        let mut pdb_app = DesktopAppState::new();
+        pdb_app.new_scene("work", false);
+        pdb_app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap();
+        assert!(
+            pdb_app.active_scene_saved_camera().is_none(),
+            "a PDB load defines no saved camera"
         );
     }
 

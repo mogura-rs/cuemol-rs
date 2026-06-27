@@ -99,7 +99,11 @@ impl Model {
             status = format!("Loaded {loaded} file(s)");
         }
         let snapshot = state.active_render_snapshot("").ok();
-        let camera = snapshot.as_ref().map(frame_camera).unwrap_or_default();
+        // Restore a loaded .qsc's saved view; auto-frame a plain molecule.
+        let camera = state
+            .active_scene_saved_camera()
+            .or_else(|| snapshot.as_ref().map(frame_camera))
+            .unwrap_or_default();
         let mesh = snapshot.as_ref().map(cuemol_render::tessellate_snapshot);
         let mut model = Self {
             state,
