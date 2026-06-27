@@ -2450,6 +2450,27 @@ impl RainbowColoring {
     pub fn set_incr_mode(&mut self, value: i32) {
         self.incr_mode = value;
     }
+
+    /// RGBA for the `index`-th of `total` coloured units (residues), the C++
+    /// `RainbowColoring::makeChainMap` gradient: `hue = start + index·(end−start)/
+    /// total`, then `createHSB(hue/360, sat, bri)`. Spans start_hue (default 240 =
+    /// blue) → end_hue (default 0 = red) across the chain.
+    pub fn color_for_index(&self, index: usize, total: usize) -> [f32; 4] {
+        let del_hue = if total == 0 {
+            0.0
+        } else {
+            (self.end_hue - self.start_hue) / total as f64
+        };
+        let hue = self.start_hue + index as f64 * del_hue;
+        let color = SolidColor::create_hsb((hue / 360.0).rem_euclid(1.0), self.sat, self.bri, 1.0)
+            .rgba8();
+        [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a as f32 / 255.0,
+        ]
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -2702,6 +2723,10 @@ pub struct MoleculeRenderOptions {
     /// (the C++ `$molcol`→object-coloring cascade — the backbone CA is carbon, so
     /// CPKColoring defers it to the object's paint). Empty = the default colours.
     pub object_paint: Vec<(String, String)>,
+    /// Object `<coloring type="RainbowColoring">`: colours the backbone by a hue
+    /// gradient over the chain residues (C++ RainbowColoring). Takes precedence
+    /// over `object_paint` (it is the object's coloring scheme). `None` = no rainbow.
+    pub rainbow: Option<RainbowColoring>,
 }
 
 /// Ribbon cross-section width/thickness FACTORS (multiplied by the base coil
@@ -2877,6 +2902,7 @@ impl Default for MoleculeRenderOptions {
             styled_ribbon: StyledRibbonSections::default(),
             draw_indices: None,
             object_paint: Vec::new(),
+            rainbow: None,
         }
     }
 }
@@ -2905,6 +2931,33 @@ pub fn default_style_manager() -> StyleManager {
     let mut styles = StyleManager::new();
     styles.load_builtin_default_styles(DEFAULT_STYLE_SCOPE);
     styles
+}
+
+/// Build a [`RainbowColoring`] from an object's `<coloring type="RainbowColoring">`
+/// scheme name + attribute accessor (start_hue/end_hue/sat/bri). Returns `None`
+/// for any other (or absent) coloring type. Shared by the desktop GUIs and CLI so
+/// both resolve rainbow coloring identically.
+pub fn rainbow_coloring_from_attrs<'a>(
+    coloring_type: Option<&str>,
+    attr: impl Fn(&str) -> Option<&'a str>,
+) -> Option<RainbowColoring> {
+    if coloring_type != Some("RainbowColoring") {
+        return None;
+    }
+    let mut rainbow = RainbowColoring::new();
+    if let Some(value) = attr("start_hue").and_then(|s| s.trim().parse().ok()) {
+        rainbow.set_start_hue(value);
+    }
+    if let Some(value) = attr("end_hue").and_then(|s| s.trim().parse().ok()) {
+        rainbow.set_end_hue(value);
+    }
+    if let Some(value) = attr("sat").and_then(|s| s.trim().parse().ok()) {
+        rainbow.set_sat(value);
+    }
+    if let Some(value) = attr("bri").and_then(|s| s.trim().parse().ok()) {
+        rainbow.set_bri(value);
+    }
+    Some(rainbow)
 }
 
 pub fn apply_renderer_styles(
@@ -3361,6 +3414,26 @@ fn ribbon_paint_colors(
         .collect()
 }
 
+/// Per-spline-sample rainbow colours for a ribbon chain: each sample takes its
+/// segment residue's hue along the molecule-wide gradient (`chain_offset` is this
+/// chain's global residue start, `total_residues` the molecule total).
+fn ribbon_rainbow_colors(
+    sample_count: usize,
+    chain_offset: usize,
+    total_residues: usize,
+    pivot_count: usize,
+    subdiv: usize,
+    rainbow: &RainbowColoring,
+) -> Vec<Option<[f32; 4]>> {
+    let subdiv = subdiv.max(1);
+    (0..sample_count)
+        .map(|i| {
+            let seg = (i / subdiv).min(pivot_count.saturating_sub(1));
+            Some(rainbow.color_for_index(chain_offset + seg, total_residues))
+        })
+        .collect()
+}
+
 /// The putty target value (B-factor or occupancy) of a backbone pivot.
 fn pivot_target(point: &MainchainPoint, target: PuttyTarget) -> f64 {
     match target {
@@ -3666,8 +3739,14 @@ pub fn ribbon_mesh_snapshot(
     // Object paint coloring (resolved against the X11 table) colours the backbone
     // where the renderer defers to $molcol; built once when the scene paints.
     let paint_styles = (!options.object_paint.is_empty()).then(default_style_manager);
+    // RainbowColoring (when set) is the object's colour scheme and spans the whole
+    // molecule's residues (RBC_MOL default), so index pivots globally across chains.
+    let total_residues: usize = chains.iter().map(|chain| chain.len()).sum();
+    let mut residue_offset = 0usize;
     let mut meshes = Vec::new();
     for pivots in &chains {
+        let chain_offset = residue_offset;
+        residue_offset += pivots.len();
         if pivots.len() < 2 {
             continue;
         }
@@ -3684,16 +3763,28 @@ pub fn ribbon_mesh_snapshot(
                 putty_aver,
             );
         }
-        let paint = paint_styles.as_ref().map(|styles| {
-            ribbon_paint_colors(
+        // Rainbow (object colour scheme) takes precedence over $molcol→paint.
+        let paint = if let Some(rainbow) = &options.rainbow {
+            Some(ribbon_rainbow_colors(
                 samples.len(),
-                pivots,
+                chain_offset,
+                total_residues,
+                pivots.len(),
                 subdiv,
-                &options.object_paint,
-                molecule,
-                styles,
-            )
-        });
+                rainbow,
+            ))
+        } else {
+            paint_styles.as_ref().map(|styles| {
+                ribbon_paint_colors(
+                    samples.len(),
+                    pivots,
+                    subdiv,
+                    &options.object_paint,
+                    molecule,
+                    styles,
+                )
+            })
+        };
         let mesh = ribbon_tube_mesh(
             &samples,
             &sections,

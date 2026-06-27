@@ -143,6 +143,11 @@ pub struct MolObject {
     /// (e.g. CPKColoring carbon) defer to this — the C++ object→renderer colour
     /// cascade (`ColSchmHolder::getColor`/`evalMolColor`).
     paint_coloring: Vec<(String, String)>,
+    /// The object's `<coloring type="...">` scheme name (e.g. `PaintColoring`,
+    /// `RainbowColoring`), and that tag's attributes (e.g. rainbow `start_hue`/
+    /// `end_hue`/`sat`/`bri`). `None` when no object coloring is declared.
+    coloring_type: Option<String>,
+    coloring_attrs: BTreeMap<String, String>,
 }
 
 impl MolObject {
@@ -173,6 +178,21 @@ impl MolObject {
 
     pub fn set_paint_coloring(&mut self, entries: Vec<(String, String)>) {
         self.paint_coloring = entries;
+    }
+
+    /// The object's `<coloring type="...">` scheme name, if any.
+    pub fn coloring_type(&self) -> Option<&str> {
+        self.coloring_type.as_deref()
+    }
+
+    /// An attribute of the object's `<coloring>` tag (e.g. rainbow `start_hue`).
+    pub fn coloring_attr(&self, name: &str) -> Option<&str> {
+        self.coloring_attrs.get(name).map(String::as_str)
+    }
+
+    pub fn set_coloring(&mut self, coloring_type: Option<String>, attrs: BTreeMap<String, String>) {
+        self.coloring_type = coloring_type;
+        self.coloring_attrs = attrs;
     }
 
     pub fn renderer_by_name(&self, name: &str) -> Option<&MolRenderer> {
@@ -429,6 +449,8 @@ impl MolScene {
             renderers: Vec::new(),
             next_renderer_uid: 1,
             paint_coloring: Vec::new(),
+            coloring_type: None,
+            coloring_attrs: BTreeMap::new(),
         });
         uid
     }
@@ -477,14 +499,18 @@ impl MolScene {
 
         let mut current_atomintr: Option<(String, Vec<(String, String)>)> = None;
         let mut current_atomintr_attrs = BTreeMap::new();
-        // Object-level `<coloring type="PaintColoring">` with `<paint sel color>`
-        // children — collected here and applied to the object after the block walk.
+        // Object-level `<coloring type="...">` — its scheme name + tag attributes
+        // (rainbow start_hue/…), plus any `<paint sel color>` children. Collected
+        // here and applied to the object after the block walk.
         let mut paint_entries: Vec<(String, String)> = Vec::new();
+        let mut coloring_type: Option<String> = None;
+        let mut coloring_attrs: BTreeMap<String, String> = BTreeMap::new();
         let mut in_paint_coloring = false;
         for line in block.iter().map(|line| line.trim()) {
             if line.starts_with("<coloring ") {
-                in_paint_coloring =
-                    attr_value(line, "type").as_deref() == Some("PaintColoring");
+                coloring_type = attr_value(line, "type");
+                coloring_attrs = attr_map(line);
+                in_paint_coloring = coloring_type.as_deref() == Some("PaintColoring");
             } else if line.starts_with("</coloring>") {
                 in_paint_coloring = false;
             } else if in_paint_coloring && line.starts_with("<paint ") {
@@ -530,6 +556,9 @@ impl MolScene {
         }
         if !paint_entries.is_empty() {
             object.set_paint_coloring(paint_entries);
+        }
+        if coloring_type.is_some() {
+            object.set_coloring(coloring_type, coloring_attrs);
         }
         Ok(())
     }

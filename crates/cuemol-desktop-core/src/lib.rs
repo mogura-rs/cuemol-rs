@@ -1087,6 +1087,10 @@ fn append_object_renderer_snapshot(
     if !object.paint_coloring().is_empty() {
         options.object_paint = object.paint_coloring().to_vec();
     }
+    // Object-level rainbow coloring (`<coloring type="RainbowColoring">`).
+    options.rainbow = cuemol_molvis::rainbow_coloring_from_attrs(object.coloring_type(), |name| {
+        object.coloring_attr(name)
+    });
     let snapshot = match (renderer_type, renderer) {
         // An atom-interaction renderer draws measurement lines between its atom
         // pairs, NOT the whole molecule — route it to the measurement geometry so
@@ -2162,6 +2166,83 @@ mod tests {
         assert!(
             pdb_app.active_scene_saved_camera().is_none(),
             "a PDB load defines no saved camera"
+        );
+    }
+
+    #[test]
+    fn rainbow_object_coloring_gradient_colors_the_ribbon() {
+        // A synthetic .qsc whose object declares <coloring type="RainbowColoring"
+        // start_hue=240 end_hue=0> colours the backbone ribbon by a blue->red hue
+        // gradient (C++ RainbowColoring). Hand-built fixture (no human .qsc needed),
+        // same technique as the ANISOU/NA synthetic fixtures.
+        fn pdb_ca(serial: i32, resid: i32, x: f64) -> String {
+            let mut line = vec![b' '; 80];
+            let put = |line: &mut [u8], text: &str, start: usize| {
+                for (i, byte) in text.bytes().enumerate() {
+                    line[start + i] = byte;
+                }
+            };
+            put(&mut line, "ATOM", 0);
+            put(&mut line, &format!("{serial:>5}"), 6);
+            put(&mut line, "CA", 12);
+            put(&mut line, "ALA", 17);
+            put(&mut line, "A", 21);
+            put(&mut line, &format!("{resid:>4}"), 22);
+            put(&mut line, &format!("{x:>8.3}"), 30);
+            put(&mut line, &format!("{:>8.3}", 0.0), 38);
+            put(&mut line, &format!("{:>8.3}", 0.0), 46);
+            String::from_utf8(line).unwrap()
+        }
+        let mut pdb = String::new();
+        for resid in 1..=6 {
+            pdb.push_str(&pdb_ca(resid, resid, (resid - 1) as f64 * 3.8));
+            pdb.push('\n');
+        }
+        let qsc = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<scene>\n\
+             \t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n\
+             \t<object type=\"MolCoord\" name=\"rb\" src=\"datachunk:00000\" srctype=\"qdfpdb\">\n\
+             \t\t<coloring type=\"RainbowColoring\" start_hue=\"240\" end_hue=\"0\" sat=\"1\" bri=\"1\"/>\n\
+             \t\t<renderer type=\"trace\" name=\"trace1\"/>\n\
+             \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
+             ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
+        );
+        let path = std::env::temp_dir().join(format!("cuemol2-rs-rainbow-{}.qsc", std::process::id()));
+        std::fs::write(&path, &qsc).unwrap();
+
+        let mut app = DesktopAppState::new();
+        let loaded = app.load_qsc_file(&path).ok().flatten();
+        let _ = std::fs::remove_file(&path);
+        let Some(scene_uid) = loaded else {
+            panic!("synthetic rainbow .qsc failed to load");
+        };
+        // Sanity: the object's RainbowColoring parsed.
+        assert_eq!(
+            app.scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .objects()
+                .first()
+                .unwrap()
+                .coloring_type(),
+            Some("RainbowColoring"),
+            "the object RainbowColoring must have parsed"
+        );
+
+        let snapshot = app.render_snapshot(scene_uid, "").unwrap();
+        let colors: Vec<[f32; 4]> = snapshot
+            .meshes
+            .iter()
+            .flat_map(|mesh| mesh.vertices.iter().map(|vertex| vertex.color))
+            .collect();
+        assert!(!colors.is_empty(), "the trace ribbon should produce mesh");
+        // The gradient spans start_hue=240 (blue: B high, R low) to end_hue=0 (red:
+        // R high, B low) — neither is producible by the default section colouring.
+        let has_blue = colors.iter().any(|c| c[2] > 0.8 && c[0] < 0.2);
+        let has_red = colors.iter().any(|c| c[0] > 0.8 && c[2] < 0.2);
+        assert!(
+            has_blue && has_red,
+            "rainbow ribbon must span blue->red (has_blue={has_blue} has_red={has_red})"
         );
     }
 
