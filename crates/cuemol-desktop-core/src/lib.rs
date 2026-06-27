@@ -2399,6 +2399,61 @@ mod tests {
     }
 
     #[test]
+    fn rainbow_object_coloring_colors_atom_renderer_carbons() {
+        // RainbowColoring on an atom renderer: carbon atoms (CPK $molcol) span the
+        // blue->red gradient across residues, like the ribbon. Self-built .qsc.
+        fn pdb_ca(serial: i32, resid: i32) -> String {
+            let mut line = vec![b' '; 80];
+            let put = |line: &mut [u8], text: &str, start: usize| {
+                for (i, byte) in text.bytes().enumerate() {
+                    line[start + i] = byte;
+                }
+            };
+            put(&mut line, "ATOM", 0);
+            put(&mut line, &format!("{serial:>5}"), 6);
+            put(&mut line, "CA", 12);
+            put(&mut line, "ALA", 17);
+            put(&mut line, "A", 21);
+            put(&mut line, &format!("{resid:>4}"), 22);
+            put(&mut line, &format!("{:>8.3}", resid as f64 * 3.8), 30);
+            put(&mut line, &format!("{:>8.3}", 0.0), 38);
+            put(&mut line, &format!("{:>8.3}", 0.0), 46);
+            String::from_utf8(line).unwrap()
+        }
+        let mut pdb = String::new();
+        for resid in 1..=6 {
+            pdb.push_str(&pdb_ca(resid, resid));
+            pdb.push('\n');
+        }
+        let qsc = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<scene>\n\
+             \t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n\
+             \t<object type=\"MolCoord\" name=\"r\" src=\"datachunk:00000\" srctype=\"qdfpdb\">\n\
+             \t\t<coloring type=\"RainbowColoring\" start_hue=\"240\" end_hue=\"0\" sat=\"1\" bri=\"1\"/>\n\
+             \t\t<renderer type=\"ballstick\" name=\"bs1\"/>\n\
+             \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
+             ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
+        );
+        let path = std::env::temp_dir().join(format!("cuemol2-rs-rbatom-{}.qsc", std::process::id()));
+        std::fs::write(&path, &qsc).unwrap();
+        let mut app = DesktopAppState::new();
+        let loaded = app.load_qsc_file(&path).ok().flatten();
+        let _ = std::fs::remove_file(&path);
+        let Some(scene_uid) = loaded else {
+            panic!("synthetic rainbow-atom .qsc failed to load");
+        };
+        let snapshot = app.render_snapshot(scene_uid, "").unwrap();
+        let colors: Vec<[f32; 4]> = snapshot.atoms.iter().map(|a| a.color.as_ref().unwrap().rgba8().map(|c| [c.r as f32/255.0, c.g as f32/255.0, c.b as f32/255.0, 1.0]).unwrap()).collect();
+        assert!(!colors.is_empty(), "ballstick should draw atom spheres");
+        let has_blue = colors.iter().any(|c| c[2] > 0.8 && c[0] < 0.2);
+        let has_red = colors.iter().any(|c| c[0] > 0.8 && c[2] < 0.2);
+        assert!(
+            has_blue && has_red,
+            "rainbow atom carbons must span blue->red (has_blue={has_blue} has_red={has_red})"
+        );
+    }
+
+    #[test]
     fn desktop_app_state_opens_path_and_builds_render_snapshot() {
         let Some(root) = reference_test_data_root() else {
             return;

@@ -2952,6 +2952,12 @@ pub fn rainbow_coloring_from_attrs<'a>(
         return None;
     }
     let mut rainbow = RainbowColoring::new();
+    if let Some(mode) = attr("mode") {
+        rainbow.set_mode(match mode.trim() {
+            "chain" => RainbowColoring::RBC_CHAIN,
+            _ => RainbowColoring::RBC_MOL,
+        });
+    }
     if let Some(value) = attr("start_hue").and_then(|s| s.trim().parse().ok()) {
         rainbow.set_start_hue(value);
     }
@@ -3152,9 +3158,27 @@ pub fn molecule_render_snapshot(
         bfac.start_molecule(molecule);
         bfac
     });
-    let object_carbon_color = |atom: &Atom| -> Option<ColorSpec> {
+    // Rainbow on atoms needs each atom's residue ordinal (RBC_MOL: across the whole
+    // molecule). Map atom index -> residue ordinal once.
+    let rainbow_atoms = options.rainbow.as_ref().map(|rainbow| {
+        let summaries = molecule.residue_summaries();
+        let total = summaries.len();
+        let mut ordinal = std::collections::HashMap::new();
+        for (ord, summary) in summaries.iter().enumerate() {
+            for &atom_index in &summary.atom_indices {
+                ordinal.insert(atom_index, ord);
+            }
+        }
+        (rainbow.clone(), ordinal, total)
+    });
+    let object_carbon_color = |index: usize, atom: &Atom| -> Option<ColorSpec> {
         if !atom.element.eq_ignore_ascii_case("C") {
             return None;
+        }
+        // Object colour scheme precedence (same as the ribbon): Rainbow > Bfac > paint.
+        if let Some((rainbow, ordinal, total)) = &rainbow_atoms {
+            let ord = ordinal.get(&index).copied().unwrap_or(0);
+            return Some(rgba_to_spec(rainbow.color_for_index(ord, *total)));
         }
         if let Some(bfac) = &bfac_atoms {
             return Some(solid_color_to_spec(&bfac.color_for_atom(atom)));
@@ -3172,7 +3196,7 @@ pub fn molecule_render_snapshot(
             .enumerate()
             .filter(|(index, _)| drawn(*index))
             .map(|(index, atom)| {
-                let color = object_carbon_color(atom)
+                let color = object_carbon_color(index, atom)
                     .unwrap_or_else(|| atom_color(atom.element.as_str(), options.color_mode));
                 RenderAtom::new(
                     Vector4::new3(atom.position.x, atom.position.y, atom.position.z),
@@ -3500,10 +3524,17 @@ fn ribbon_rainbow_colors(
     rainbow: &RainbowColoring,
 ) -> Vec<Option<[f32; 4]>> {
     let subdiv = subdiv.max(1);
+    // RBC_CHAIN: each chain gets its own full gradient (local index / chain length);
+    // RBC_MOL (default): one gradient across the whole molecule (global index).
+    let (offset, total) = if rainbow.mode() == RainbowColoring::RBC_CHAIN {
+        (0, pivot_count)
+    } else {
+        (chain_offset, total_residues)
+    };
     (0..sample_count)
         .map(|i| {
             let seg = (i / subdiv).min(pivot_count.saturating_sub(1));
-            Some(rainbow.color_for_index(chain_offset + seg, total_residues))
+            Some(rainbow.color_for_index(offset + seg, total))
         })
         .collect()
 }
@@ -4664,6 +4695,29 @@ mod tests {
 
     fn assert_f64_eq(lhs: f64, rhs: f64) {
         assert!((lhs - rhs).abs() < 1.0e-12, "{lhs} != {rhs}");
+    }
+
+    #[test]
+    fn rainbow_rbc_chain_restarts_the_gradient_per_chain() {
+        // Default 240(blue)->0(red). For the SECOND chain (global offset 5 of 10):
+        // RBC_CHAIN restarts at local index 0 -> blue; RBC_MOL continues at global
+        // index 5 -> mid-gradient (not blue).
+        let is_blue = |c: [f32; 4]| c[2] > 0.8 && c[0] < 0.2;
+        let mut rb = RainbowColoring::new();
+        rb.set_mode(RainbowColoring::RBC_CHAIN);
+        let chain = ribbon_rainbow_colors(5, 5, 10, 5, 1, &rb);
+        assert!(
+            is_blue(chain[0].unwrap()),
+            "RBC_CHAIN: 2nd chain restarts blue, got {:?}",
+            chain[0]
+        );
+        rb.set_mode(RainbowColoring::RBC_MOL);
+        let mol = ribbon_rainbow_colors(5, 5, 10, 5, 1, &rb);
+        assert!(
+            !is_blue(mol[0].unwrap()),
+            "RBC_MOL: 2nd chain continues the global gradient (not blue), got {:?}",
+            mol[0]
+        );
     }
 
     fn sample_atom(name: &str, element: &str, x: f64, y: f64, z: f64) -> Atom {
