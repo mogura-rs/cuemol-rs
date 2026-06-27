@@ -1019,10 +1019,15 @@ fn append_object_snapshot(
     let selected_indices = selector
         .map(|selector| object.mol().select_indices(selector))
         .unwrap_or_default();
+    // Skip internal/overlay renderers (e.g. `*selection`): like the CLI
+    // render-qsc path and C++, these system renderers carry no standalone scene
+    // geometry — the selection overlay is drawn via `selected_indices`
+    // highlighting on the real renderers, so rendering `*selection` itself would
+    // spuriously dump every atom.
     let visible_renderers = object
         .renderers()
         .iter()
-        .filter(|renderer| renderer.is_visible())
+        .filter(|renderer| renderer.is_visible() && !renderer.renderer_type().starts_with('*'))
         .collect::<Vec<_>>();
     if visible_renderers.is_empty() && !object.renderers().is_empty() {
         return;
@@ -1045,10 +1050,18 @@ fn append_object_renderer_snapshot(
 ) {
     let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
     let options = renderer_render_options(object.uid(), renderer, selected_indices, styles);
-    let snapshot = if is_mainchain_trace_renderer(renderer_type) {
-        ribbon_mesh_snapshot(object.mol(), &options)
-    } else {
-        molecule_render_snapshot(object.mol(), &options)
+    let snapshot = match (renderer_type, renderer) {
+        // An atom-interaction renderer draws measurement lines between its atom
+        // pairs, NOT the whole molecule — route it to the measurement geometry so
+        // it stops dumping every atom (the gap this closes).
+        ("atomintr", Some(renderer)) => cuemol_render::atom_intr_snapshot(
+            &object.atom_intr_segments(renderer),
+            Some(object.uid().get()),
+        ),
+        (rtype, _) if is_mainchain_trace_renderer(rtype) => {
+            ribbon_mesh_snapshot(object.mol(), &options)
+        }
+        _ => molecule_render_snapshot(object.mol(), &options),
     };
     merge_bounds(&mut target.bounds, snapshot.bounds);
     target.atoms.extend(snapshot.atoms);
@@ -1570,6 +1583,61 @@ mod tests {
             after.atoms.iter().all(|atom| (atom.radius - 0.3).abs() < 1e-6),
             "styled atoms should all be the absolute sphr=0.3, first was {}",
             after.atoms[0].radius
+        );
+    }
+
+    #[test]
+    fn atomintr_renderer_draws_measurement_lines_not_the_whole_molecule() {
+        // An atom-interaction ("measure") renderer must draw a thin line between
+        // each of its atom pairs, NOT a sphere per atom of the whole molecule.
+        // Regression for the bug where "atomintr" (and the `*selection` overlay)
+        // fell through to molecule_render_snapshot and dumped every atom (286
+        // spheres for this fixture's two measure renderers).
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let fixture = root.join("number_chain_atomintr1.qsc");
+        if !fixture.exists() {
+            return;
+        }
+        let mut app = DesktopAppState::new();
+        let Ok(Some(scene_uid)) = app.load_qsc_file(&fixture) else {
+            return;
+        };
+
+        let snapshot = app.render_snapshot(scene_uid, "").unwrap();
+        // Scene = a trace ribbon (mesh) + `*selection` (skipped) + two atomintr
+        // renderers (one <line> each). After the fix: zero atom spheres, exactly
+        // two measurement-line bonds, plus the trace ribbon mesh.
+        assert_eq!(
+            snapshot.atom_count(),
+            0,
+            "atomintr/`*selection` must not dump atom spheres"
+        );
+        assert_eq!(
+            snapshot.bond_count(),
+            2,
+            "one measurement line per atomintr renderer"
+        );
+        assert!(
+            snapshot.mesh_count() >= 1,
+            "the trace renderer still contributes a ribbon mesh"
+        );
+
+        // Endpoint oracle: `measure2` is <line aid1="43" aid2="88"/>, so one
+        // measurement bond must connect the resolved positions of atoms 43 and 88.
+        let scene = app.scene_manager().scene(scene_uid).unwrap();
+        let object = scene.objects().first().expect("scene has a molecule object");
+        let atoms = object.mol().atoms();
+        let p43 = atoms[43].position;
+        let p88 = atoms[88].position;
+        let close = |u: cuemol_core::Vector4, v: cuemol_core::Vector4| (u - v).length3d() < 1e-6;
+        assert!(
+            snapshot.bonds.iter().any(|bond| {
+                (close(bond.from, p43) && close(bond.to, p88))
+                    || (close(bond.from, p88) && close(bond.to, p43))
+            }),
+            "a measurement line must connect the resolved atoms 43 and 88"
         );
     }
 

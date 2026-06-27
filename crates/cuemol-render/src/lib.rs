@@ -2026,6 +2026,62 @@ fn add_cylinder(mesh: &mut RenderMesh, from: Vector4, to: Vector4, radius: f64, 
 /// flat-shaded [`RenderMesh`] in world coordinates (no camera/model transform,
 /// so exported geometry stays in molecule space). This is the headless backbone
 /// shared by the offscreen GPU renderer and the file-geometry exporters.
+/// Build a snapshot of an `atomintr` renderer's measurement geometry: one thin
+/// cylinder per resolved atom-pair segment (from [`MolObject::atom_intr_segments`]).
+///
+/// This is the geometric core of C++ `AtomIntrRenderer`, which draws a line —
+/// plus a numeric distance/angle label, deferred here as GPU text — between each
+/// measured atom pair, NOT the whole molecule. Routing the `atomintr` renderer
+/// type here keeps it from spuriously dumping every atom (the gap this closes).
+/// `bounds` is taken from the segment endpoints so a measurement-only scene still
+/// frames correctly. The line width comes from a fixed thin world radius: the
+/// C++ `width` style attr is a screen-space PIXEL width with no faithful Å
+/// mapping (see the trace/simple-width note), so it is not used here.
+pub fn atom_intr_snapshot(
+    segments: &[(Vector4, Vector4)],
+    object_uid: Option<u64>,
+) -> RenderSceneSnapshot {
+    const MEASURE_RADIUS: f32 = 0.06;
+    let color = ColorSpec {
+        base: cuemol_gfx::ColorBase::Rgb {
+            r: 1.0,
+            g: 1.0,
+            b: 0.4,
+            a: 1.0,
+        },
+        modifiers: Vec::new(),
+    };
+    let mut bounds: Option<(Vector4, Vector4)> = None;
+    let mut extend = |p: Vector4| match &mut bounds {
+        None => bounds = Some((p, p)),
+        Some((min, max)) => {
+            min.x = min.x.min(p.x);
+            min.y = min.y.min(p.y);
+            min.z = min.z.min(p.z);
+            max.x = max.x.max(p.x);
+            max.y = max.y.max(p.y);
+            max.z = max.z.max(p.z);
+        }
+    };
+    let bonds = segments
+        .iter()
+        .map(|&(from, to)| {
+            extend(from);
+            extend(to);
+            // Not a chemical bond: no atom_indices, so it never participates in
+            // bond-based picking.
+            RenderBond::new(from, to, MEASURE_RADIUS, Some(color.clone()))
+                .with_picking(object_uid, None, false)
+        })
+        .collect();
+    RenderSceneSnapshot {
+        atoms: Vec::new(),
+        bonds,
+        meshes: Vec::new(),
+        bounds,
+    }
+}
+
 pub fn tessellate_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
     let mut mesh = RenderMesh::new();
     for atom in &snapshot.atoms {

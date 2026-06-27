@@ -34,8 +34,11 @@ fn render_qsc_renders_a_styled_scene_to_obj() {
     assert!(status.success(), "render-qsc exited with failure");
 
     let obj = std::fs::read_to_string(&out).expect("read rendered OBJ");
-    // The scene's trace renderer (a main-chain ribbon mesh) + atomintr atom
-    // spheres produce substantial real geometry: many vertices and faces.
+    // The scene's trace renderer (a main-chain ribbon mesh) plus the two atomintr
+    // renderers' thin measurement-line cylinders produce substantial real
+    // geometry. (The atomintr renderers draw one line each between their atom
+    // pairs — NOT a sphere per atom in the whole molecule; the sharp correctness
+    // oracle for that lives in cuemol-desktop-core's snapshot test.)
     let verts = obj.lines().filter(|line| line.starts_with("v ")).count();
     let faces = obj.lines().filter(|line| line.starts_with("f ")).count();
     assert!(verts > 1000, "expected a substantial mesh, got {verts} vertices");

@@ -718,7 +718,11 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             }
             let mut options = base_render_options(rtype);
             apply_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
-            let snapshot = if is_mainchain_trace_type(rtype) {
+            let snapshot = if rtype == "atomintr" {
+                // Measurement lines between the renderer's atom pairs, not the
+                // whole molecule (the single source of truth shared with the GUI).
+                cuemol_render::atom_intr_snapshot(&object.atom_intr_segments(renderer), None)
+            } else if is_mainchain_trace_type(rtype) {
                 ribbon_mesh_snapshot(object.mol(), &options)
             } else {
                 molecule_render_snapshot(object.mol(), &options)

@@ -285,6 +285,25 @@ impl MolObject {
             .collect()
     }
 
+    /// Resolved 3D endpoints of each atom-interaction line (in line order),
+    /// skipping any line whose atoms cannot be resolved. The geometric
+    /// counterpart of [`MolObject::atom_intr_distances`]: the measurement-line
+    /// segments a C++ `AtomIntrRenderer` draws between its atom pairs (the
+    /// numeric label is GPU text, not modelled here). This is the single source
+    /// of truth both the desktop GUIs and the CLI use to render measurements, so
+    /// an `atomintr` renderer draws its lines — not the whole molecule.
+    pub fn atom_intr_segments(&self, renderer: &MolRenderer) -> Vec<(Vector4, Vector4)> {
+        renderer
+            .atom_intr_lines
+            .iter()
+            .filter_map(|line| {
+                let p0 = self.resolve_atom(&line.aid1)?.position;
+                let p1 = self.resolve_atom(&line.aid2)?.position;
+                Some((p0, p1))
+            })
+            .collect()
+    }
+
     /// JSON array of `{a0, a1, distance}` for an atom-interaction renderer, where
     /// `distance` is the measured value (or `null` when unresolved).
     pub fn atom_intr_measurements_json(&self, renderer: &MolRenderer) -> String {
