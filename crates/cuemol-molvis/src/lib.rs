@@ -2914,6 +2914,15 @@ pub fn apply_renderer_styles(
     if let Some(coil) = resolve_ribbon_section(renderer, styles, scope_id, "coil") {
         options.styled_ribbon.coil = Some(coil);
     }
+    // When a ribbon style sets helix/sheet (absolute dims) but omits <coil>, the
+    // C++ coil section keeps the TubeSection default (width 0.35, tuber 1.0 =>
+    // a round 0.35 tube). Apply it so all three SS classes share one unit system
+    // instead of mixing absolute helix/sheet with the scale×factor coil.
+    if options.styled_ribbon.coil.is_none()
+        && (options.styled_ribbon.helix.is_some() || options.styled_ribbon.sheet.is_some())
+    {
+        options.styled_ribbon.coil = Some((0.35, 0.35));
+    }
 }
 
 /// Resolve one ribbon cross-section sub-element (`<helix>`/`<sheet>`/`<coil>`)
@@ -4336,7 +4345,9 @@ mod tests {
         // The nested <helix> resolves to absolute semi-axes (width*tuber, width).
         assert_eq!(options.styled_ribbon.helix, Some((0.2 * 6.0, 0.2)));
         assert_eq!(options.styled_ribbon.sheet, Some((0.2 * 7.0, 0.2)));
-        assert_eq!(options.styled_ribbon.coil, None); // DefaultRibbon has no <coil>
+        // DefaultRibbon omits <coil>, so the coil falls back to the C++
+        // TubeSection default (0.35 round) — keeping one unit system.
+        assert_eq!(options.styled_ribbon.coil, Some((0.35, 0.35)));
 
         // The EMITTED helix ring's aspect ratio equals tuber=6.0 — the C++ flat
         // band — and is distinctly flatter than the unstyled factor model (~3.14).

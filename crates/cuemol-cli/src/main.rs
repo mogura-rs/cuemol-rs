@@ -9,10 +9,14 @@ use cuemol_molstr::{
     read_sdf_file, read_xplor_map_with_header_file, write_pdb_string, write_sdf_string,
     HandlerCategory, MolCoord, MolSceneManager, QscLoadStatus, StreamManager,
 };
-use cuemol_molvis::{molecule_render_snapshot, MoleculeRenderOptions};
+use cuemol_molvis::{
+    apply_renderer_styles, default_style_manager, molecule_render_snapshot, ribbon_mesh_snapshot,
+    MoleculeRenderOptions, DEFAULT_STYLE_SCOPE,
+};
 use cuemol_render::{
-    tessellate_snapshot, LuxCoreSceneExporter, LuxRendSceneExporter, MqoSceneExporter,
-    PovSceneExporter, RenderMesh, RenderSceneSnapshot, StlSceneExporter, WbpSceneExporter,
+    tessellate_snapshot, tessellate_snapshot_with_detail, LuxCoreSceneExporter,
+    LuxRendSceneExporter, MqoSceneExporter, PovSceneExporter, RenderMesh, RenderSceneSnapshot,
+    StlSceneExporter, WbpSceneExporter,
 };
 use cuemol_surface::read_msms_surface_files;
 use cuemol_xtal::read_mtz_file;
@@ -65,6 +69,15 @@ fn run() -> Result<(), String> {
                 .next()
                 .ok_or_else(|| "missing output path (.stl/.obj/.pov)".to_string())?;
             export_scene(&input, &output)
+        }
+        "render-qsc" => {
+            let input = args
+                .next()
+                .ok_or_else(|| "missing input .qsc path".to_string())?;
+            let output = args
+                .next()
+                .ok_or_else(|| "missing output path (.stl/.obj)".to_string())?;
+            render_qsc_scene(&input, &output)
         }
         "mmcif-info" => {
             let path = args
@@ -550,6 +563,7 @@ fn print_usage() {
     eprintln!(
         "  cuemol export-scene <file.pdb|.cif|.sdf|.mol2> <out.stl|.obj|.pov|.mqo|.lxs|.cfg(LuxCore)|.wbp(Warabi)>"
     );
+    eprintln!("  cuemol render-qsc <file.qsc> <out.stl|.obj>   (renders the scene with resolved styles)");
 }
 
 fn parse_stream_category(value: &str) -> Result<HandlerCategory, String> {
@@ -672,6 +686,121 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
         mesh.triangle_count()
     );
     Ok(())
+}
+
+/// Render a loaded `.qsc` SCENE (objects + renderers, each with its `style="..."`
+/// presets resolved against the bundled default styles) into a single mesh and
+/// write it as STL/OBJ. Unlike `export-scene` (one molecule, default look), this
+/// honours every renderer's type AND its resolved style geometry (bondw/sphr/
+/// detail/axialdetail/ribbon cross-sections), so the exported mesh reflects the
+/// scene's actual styling — the production consumer of the style-resolution chain.
+fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
+    let mut manager = MolSceneManager::new();
+    let scene_uid = manager.load_qsc_file(input).map_err(|err| err.to_string())?;
+    let scene = manager
+        .scene(scene_uid)
+        .ok_or_else(|| "loaded scene not found".to_string())?;
+
+    let styles = default_style_manager();
+    let mut combined = RenderMesh::new();
+    let (mut total_atoms, mut total_bonds, mut renderer_count) = (0usize, 0usize, 0usize);
+
+    for object in scene.objects() {
+        for renderer in object.renderers() {
+            if !renderer.is_visible() {
+                continue;
+            }
+            let rtype = renderer.renderer_type();
+            // Skip internal/overlay renderers (e.g. "*selection") which carry no
+            // standalone geometry — drawing them would spuriously dump all atoms.
+            if rtype.starts_with('*') {
+                continue;
+            }
+            let mut options = base_render_options(rtype);
+            apply_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
+            let snapshot = if is_mainchain_trace_type(rtype) {
+                ribbon_mesh_snapshot(object.mol(), &options)
+            } else {
+                molecule_render_snapshot(object.mol(), &options)
+            };
+            total_atoms += snapshot.atom_count();
+            total_bonds += snapshot.bond_count();
+            let mesh = match options.sphere_detail {
+                Some(detail) => tessellate_snapshot_with_detail(&snapshot, detail),
+                None => tessellate_snapshot(&snapshot),
+            };
+            merge_mesh(&mut combined, &mesh);
+            renderer_count += 1;
+        }
+    }
+
+    if renderer_count == 0 {
+        return Err("scene has no visible renderers to render".to_string());
+    }
+
+    let name = std::path::Path::new(input)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("cuemol");
+    let lower = output.to_ascii_lowercase();
+    let bytes: Vec<u8> = if lower.ends_with(".stl") {
+        StlSceneExporter::new()
+            .write_ascii_stl_string(name, &combined.positions(), &combined.triangles())
+            .into_bytes()
+    } else if lower.ends_with(".obj") {
+        combined.to_obj_string(name).into_bytes()
+    } else {
+        return Err(format!("unsupported output format (use .stl/.obj): {output}"));
+    };
+    std::fs::write(output, &bytes).map_err(|err| err.to_string())?;
+    eprintln!(
+        "rendered {renderer_count} renderers ({total_atoms} atoms / {total_bonds} bonds) -> {} vertices / {} triangles to {output}",
+        combined.vertices.len(),
+        combined.triangle_count()
+    );
+    Ok(())
+}
+
+/// Renderer-type base render options (the hardcoded per-type look, mirroring the
+/// desktop's `renderer_render_options`) onto which style resolution then layers.
+fn base_render_options(renderer_type: &str) -> MoleculeRenderOptions {
+    let mut options = MoleculeRenderOptions::default();
+    match renderer_type {
+        "cpk" => {
+            options.vdw_scale = 0.55;
+            options.bond_radius = 0.0;
+            options.draw_bonds = false;
+        }
+        "ballstick" => {
+            options.vdw_scale = 0.16;
+            options.bond_radius = 0.08;
+        }
+        "trace" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl" => {
+            options.vdw_scale = 0.12;
+            options.bond_radius = 0.12;
+        }
+        "molsurf" | "directsurf" => {
+            options.vdw_scale = 0.32;
+            options.bond_radius = 0.04;
+        }
+        _ => {}
+    }
+    options
+}
+
+fn is_mainchain_trace_type(renderer_type: &str) -> bool {
+    matches!(
+        renderer_type,
+        "trace" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl"
+    )
+}
+
+/// Append `src` into `dst`, offsetting indices (the merge `tessellate_snapshot`
+/// uses for pre-built meshes).
+fn merge_mesh(dst: &mut RenderMesh, src: &RenderMesh) {
+    let base = dst.vertices.len() as u32;
+    dst.vertices.extend(src.vertices.iter().cloned());
+    dst.indices.extend(src.indices.iter().map(|index| index + base));
 }
 
 /// LuxCore export — a multi-file scene: `<base>.cfg` (render config) +
