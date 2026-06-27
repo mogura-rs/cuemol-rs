@@ -1425,7 +1425,35 @@ fn project_axis(value: Vector4, axis: Vector4) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cuemol_molstr::parse_selector;
+    use cuemol_molstr::{parse_selector, read_opendx_str};
+
+    #[test]
+    fn opendx_loads_into_density_map_without_x_z_swap() {
+        // End-to-end through the real consumer (read_opendx_str -> from_grid_map ->
+        // at_float): an OpenDX 2x2x2 with z-fastest file values 0..7. The voxel
+        // (col=1,row=0,sec=0) must read ~4.0 (the file's (1,0,0) value), not ~1.0
+        // (which is what a no-transpose load leaves there — the silent x<->z swap).
+        // at_float is byte-quantized (level_step 7/256), so ~4.0 vs ~1.0 is the
+        // discriminator with ample margin.
+        let dx = "\
+object 1 class gridpositions counts 2 2 2
+origin 0.0 0.0 0.0
+delta 1 0 0
+delta 0 1 0
+delta 0 0 1
+object 2 class gridconnections counts 2 2 2
+object 3 class array type \"double\" rank 0 items 8 data follows
+0 1 2 3 4 5 6 7
+attribute \"dep\" string \"positions\"
+";
+        let map = DensityMap::from_grid_map(read_opendx_str(dx).unwrap());
+        assert!(
+            (map.at_float(1, 0, 0) - 4.0).abs() < 0.1,
+            "OpenDX voxel (1,0,0) should be ~4.0, got {} (a ~1.0 here = the x<->z swap)",
+            map.at_float(1, 0, 0)
+        );
+        assert!((map.at_float(0, 0, 0) - 0.0).abs() < 0.1);
+    }
 
     fn test_grid() -> GridMap {
         GridMap {

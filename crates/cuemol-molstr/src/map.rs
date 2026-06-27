@@ -435,11 +435,27 @@ pub fn read_opendx_str(input: &str) -> Result<GridMap> {
     if values.len() != expected_items {
         return Err(CueMolError::parse("OpenDX data count mismatch"));
     }
+    // OpenDX stores values Z-fastest (the last grid axis varies fastest), but the
+    // GridMap/DensityMap convention is COL(X)-fastest (`flat = col + (row +
+    // sec*ny)*nx`), which every other reader produces (CCP4 `rotate_values`, Brix,
+    // XPLOR). Transpose into col-fastest so an OpenDX map is not loaded with X and
+    // Z swapped — the same reorder C++ `OpenDXPotReader` does on read (reads
+    // Z-innermost, stores `ix + (iy + iz*ny)*nx`, OpenDXPotReader.cpp:245-254).
+    let [nx, ny, nz] = counts;
+    let mut ordered = vec![0.0; nx * ny * nz];
+    let mut src = values.into_iter();
+    for ix in 0..nx {
+        for iy in 0..ny {
+            for iz in 0..nz {
+                ordered[ix + (iy + iz * ny) * nx] = src.next().expect("count checked above");
+            }
+        }
+    }
     Ok(GridMap {
         counts,
         origin,
         delta: [deltas[0], deltas[1], deltas[2]],
-        values,
+        values: ordered,
     })
 }
 
@@ -1119,5 +1135,33 @@ attribute \"dep\" string \"positions\"
         assert_eq!(map.counts, [1, 1, 2]);
         assert_eq!(map.value_count(), 2);
         assert_eq!(map.values, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn opendx_transposes_z_fastest_file_into_col_fastest_grid() {
+        // OpenDX is Z-fastest; the GridMap is COL(X)-fastest. A 2x2x2 with file
+        // values 0..7 (z-fastest) must be stored transposed so `values[flat]`
+        // reads the right voxel. flat(col=1,row=0,sec=0) = 1; the voxel (1,0,0)'s
+        // value in the z-fastest file is index iz+nz*(iy+ny*ix)=0+2*(0+2*1)=4, so
+        // it must be 4.0 (a no-transpose load leaves the file value 1.0 there =
+        // the silent x<->z swap bug).
+        let dx = "\
+object 1 class gridpositions counts 2 2 2
+origin 0.0 0.0 0.0
+delta 1 0 0
+delta 0 1 0
+delta 0 0 1
+object 2 class gridconnections counts 2 2 2
+object 3 class array type \"double\" rank 0 items 8 data follows
+0 1 2 3 4 5 6 7
+attribute \"dep\" string \"positions\"
+";
+        let map = read_opendx_str(dx).unwrap();
+        assert_eq!(map.counts, [2, 2, 2]);
+        // col-fastest flat index of (col=1,row=0,sec=0) = col + (row + sec*ny)*nx = 1.
+        let flat = 1usize;
+        assert_eq!(map.values[flat], 4.0, "OpenDX must be transposed to col-fastest");
+        // The full transposed array (z-fastest 0..7 -> col-fastest).
+        assert_eq!(map.values, vec![0.0, 4.0, 2.0, 6.0, 1.0, 5.0, 3.0, 7.0]);
     }
 }
