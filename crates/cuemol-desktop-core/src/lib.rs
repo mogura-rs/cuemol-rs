@@ -1087,14 +1087,19 @@ fn append_object_renderer_snapshot(
     if !object.paint_coloring().is_empty() {
         options.object_paint = object.paint_coloring().to_vec();
     }
-    // Object-level rainbow coloring (`<coloring type="RainbowColoring">`).
-    options.rainbow = cuemol_molvis::rainbow_coloring_from_attrs(object.coloring_type(), |name| {
-        object.coloring_attr(name)
-    });
-    // Object-level B-factor coloring (`<coloring type="BfacColoring">`).
-    options.bfac = cuemol_molvis::bfac_coloring_from_attrs(object.coloring_type(), |name| {
-        object.coloring_attr(name)
-    });
+    // Object-level rainbow/bfac coloring — applied only when the renderer set no own
+    // coloring scheme (renderer concrete coloring, set in apply_renderer_styles,
+    // takes precedence over the object's, per the C++ cascade).
+    if options.rainbow.is_none() {
+        options.rainbow = cuemol_molvis::rainbow_coloring_from_attrs(object.coloring_type(), |name| {
+            object.coloring_attr(name)
+        });
+    }
+    if options.bfac.is_none() {
+        options.bfac = cuemol_molvis::bfac_coloring_from_attrs(object.coloring_type(), |name| {
+            object.coloring_attr(name)
+        });
+    }
     let snapshot = match (renderer_type, renderer) {
         // An atom-interaction renderer draws measurement lines between its atom
         // pairs, NOT the whole molecule — route it to the measurement geometry so

@@ -3075,6 +3075,31 @@ pub fn apply_renderer_styles(
     {
         options.putty.loscl = lo;
     }
+
+    // Renderer-level `<coloring type="...">` from the renderer's own style — a
+    // concrete scheme (its own Rainbow/Bfac) overrides the object coloring. The
+    // `type` is read via the dedicated reserved-attr resolver; other coloring attrs
+    // (start_hue/…) are normal. CPKColoring is left alone (carbon $molcol defers to
+    // the object, handled in the snapshot).
+    if let Some(coloring_type) = renderer.resolved_child_type("coloring", styles, scope_id) {
+        let attrs: std::collections::BTreeMap<String, String> = [
+            "start_hue", "end_hue", "sat", "bri", "mode", "lowpar", "highpar",
+        ]
+        .iter()
+        .filter_map(|key| {
+            renderer
+                .resolved_child_attr("coloring", key, styles, scope_id)
+                .map(|value| (key.to_string(), value))
+        })
+        .collect();
+        let get = |name: &str| attrs.get(name).map(String::as_str);
+        if let Some(rainbow) = rainbow_coloring_from_attrs(Some(coloring_type.as_str()), get) {
+            options.rainbow = Some(rainbow);
+        }
+        if let Some(bfac) = bfac_coloring_from_attrs(Some(coloring_type.as_str()), get) {
+            options.bfac = Some(bfac);
+        }
+    }
 }
 
 /// Resolve a ribbon sub-element's `type` into a cross-section profile (C++
@@ -4695,6 +4720,55 @@ mod tests {
 
     fn assert_f64_eq(lhs: f64, rhs: f64) {
         assert!((lhs - rhs).abs() < 1.0e-12, "{lhs} != {rhs}");
+    }
+
+    #[test]
+    fn renderer_own_rainbow_coloring_sets_options_rainbow() {
+        // A renderer whose OWN style declares <coloring type="RainbowColoring"> sets
+        // options.rainbow (overriding the object coloring) — the renderer-level
+        // coloring path, resolving the reserved `type` via style_child_type.
+        let mut mol = MolCoord::with_atoms(vec![
+            sample_atom("CA", "C", 0.0, 0.0, 0.0),
+            sample_atom("CA", "C", 3.8, 0.0, 0.0),
+        ]);
+        mol.atoms_mut()[1].res_id = 2;
+
+        let mut mgr = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = mgr.new_scene("s");
+        let scene = mgr.scene_mut(scene_uid).unwrap();
+        let obj_uid = scene.add_molecule("m", mol);
+        let obj = scene.object_mut(obj_uid).unwrap();
+        let rend_uid = obj.add_renderer("trace", "tr");
+        obj.renderer_mut(rend_uid)
+            .unwrap()
+            .set_qsc_attr("style", "MyRainbow");
+
+        let dir = std::env::temp_dir().join("cuemol_rend_rainbow_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rainbow.xml");
+        std::fs::write(
+            &path,
+            r##"<?xml version="1.0"?>
+<styles id="custom">
+  <style id="MyRainbow" type="renderer">
+    <coloring type="RainbowColoring" start_hue="240" end_hue="0"/>
+  </style>
+</styles>"##,
+        )
+        .unwrap();
+        let mut styles = StyleManager::new();
+        styles.load_builtin_default_styles(0);
+        styles.load_style_set_from_file(0, &path, true);
+
+        let renderer = scene.object(obj_uid).unwrap().renderer(rend_uid).unwrap();
+        let mut options = MoleculeRenderOptions::default();
+        apply_renderer_styles(&mut options, renderer, &styles, 0);
+        let rainbow = options
+            .rainbow
+            .expect("the renderer's own RainbowColoring should set options.rainbow");
+        assert!((rainbow.start_hue() - 240.0).abs() < 1e-9);
+        assert!((rainbow.end_hue() - 0.0).abs() < 1e-9);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

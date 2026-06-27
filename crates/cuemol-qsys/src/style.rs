@@ -652,6 +652,50 @@ impl StyleManager {
         result
     }
 
+    /// The `type` of a preset's nested child element (e.g. `DefaultCPKColoring` →
+    /// `<coloring type="CPKColoring">` → `"CPKColoring"`). `type` is an LDom2
+    /// RESERVED attribute surfaced via `type_name()`, NOT `str_attr("type")`, so it
+    /// needs its own resolver (the trap that `style_child_attr` cannot read).
+    pub fn style_child_type(
+        &self,
+        scope_id: u64,
+        style_id: &str,
+        child_tag: &str,
+    ) -> Option<String> {
+        let lookup = |scope: u64| -> Option<String> {
+            self.scopes.get(&scope)?.iter().find_map(|set| {
+                let type_name = set
+                    .get_style(style_id)?
+                    .find_child(child_tag)?
+                    .type_name()
+                    .to_string();
+                (!type_name.is_empty()).then_some(type_name)
+            })
+        };
+        lookup(scope_id).or_else(|| (scope_id != 0).then(|| lookup(0)).flatten())
+    }
+
+    /// Resolve a `style="A,B"` list for a nested child element's `type` (later
+    /// style wins) — e.g. the renderer's own `<coloring type="...">` scheme.
+    pub fn resolve_style_child_type(
+        &self,
+        scope_id: u64,
+        style_list: &str,
+        child_tag: &str,
+    ) -> Option<String> {
+        let mut result = None;
+        for name in style_list.split(',') {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(type_name) = self.style_child_type(scope_id, name, child_tag) {
+                result = Some(type_name);
+            }
+        }
+        result
+    }
+
     pub fn get_style_value(&self, scope_id: u64, set_name: &str, key: &str) -> String {
         let (style_name, prop_name) = split_style_key(key);
         self.scopes
@@ -1030,6 +1074,50 @@ mod tests {
         assert_eq!(manager.style_attr(5, "MyBallStick", "bondw").as_deref(), Some("0.42"));
         assert!(manager.get_style_set(uid).unwrap().has_color("Crimson"));
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn style_child_type_reads_the_reserved_type_attr() {
+        let mut manager = StyleManager::new();
+        manager.load_builtin_default_styles(0);
+        // DefaultCPKColoring has <coloring type="CPKColoring" col_C="$molcol"/>.
+        // This LDom2 parser stores `type` as a normal attr child, so style_child_type
+        // resolves it (via type_name) to "CPKColoring".
+        assert_eq!(
+            manager
+                .style_child_type(0, "DefaultCPKColoring", "coloring")
+                .as_deref(),
+            Some("CPKColoring"),
+            "style_child_type reads the coloring scheme name"
+        );
+
+        // A custom style with a RainbowColoring scheme resolves through a style list.
+        let dir = std::env::temp_dir().join("cuemol_style_child_type_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rainbow_style.xml");
+        std::fs::write(
+            &path,
+            r##"<?xml version="1.0"?>
+<styles id="custom">
+  <style id="MyRainbow" type="renderer">
+    <coloring type="RainbowColoring" start_hue="240" end_hue="0"/>
+  </style>
+</styles>"##,
+        )
+        .unwrap();
+        manager.load_style_set_from_file(0, &path, true);
+        assert_eq!(
+            manager.style_child_type(0, "MyRainbow", "coloring").as_deref(),
+            Some("RainbowColoring")
+        );
+        assert_eq!(
+            manager
+                .resolve_style_child_type(0, "DefaultCPKColoring,MyRainbow", "coloring")
+                .as_deref(),
+            Some("RainbowColoring"),
+            "later style in the list wins"
+        );
         std::fs::remove_file(&path).ok();
     }
 }

@@ -97,6 +97,19 @@ impl MolRenderer {
         styles.resolve_style_child_attr(scope_id, style_list, child_tag, attr)
     }
 
+    /// Resolve the `type` of a nested child element of this renderer's style preset
+    /// (e.g. the renderer's own `<coloring type="...">` scheme). `type` is an LDom2
+    /// reserved attribute, so it has a dedicated resolver.
+    pub fn resolved_child_type(
+        &self,
+        child_tag: &str,
+        styles: &StyleManager,
+        scope_id: u64,
+    ) -> Option<String> {
+        let style_list = self.style()?;
+        styles.resolve_style_child_type(scope_id, style_list, child_tag)
+    }
+
     pub fn is_visible(&self) -> bool {
         !matches!(self.qsc_attr("visible"), Some("false" | "0" | "no" | "off"))
     }
