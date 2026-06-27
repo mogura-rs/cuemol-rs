@@ -837,6 +837,9 @@ fn base_render_options(renderer_type: &str) -> MoleculeRenderOptions {
         }
         _ => {}
     }
+    // `trace` is the angular Cα line strip (C++ TraceRenderer): straight between
+    // pivots, no spline. tube/spline/ribbon/cartoon/nucl keep the smooth spline.
+    options.linear_backbone = renderer_type == "trace";
     options
 }
 

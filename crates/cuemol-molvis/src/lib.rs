@@ -2733,6 +2733,12 @@ pub struct MoleculeRenderOptions {
     /// occupancy lerped low_color→high_color (C++ BfacColoring, auto-scaled to the
     /// molecule range by default). Another object coloring scheme. `None` = off.
     pub bfac: Option<BfacColoring>,
+    /// Backbone sampled as a PIECEWISE-LINEAR path through the raw Cα pivots
+    /// (straight between residues) instead of a smoothed cubic spline — the C++
+    /// `TraceRenderer` (a Cα line strip, `TraceRenderer.cpp:102`), as distinct from
+    /// the splined `tube`/`spline`/`ribbon`/`cartoon`. Set only for the `trace`
+    /// renderer; keeps the tube-mesh machinery (cross-section, coloring, sel, putty).
+    pub linear_backbone: bool,
 }
 
 /// Ribbon cross-section width/thickness FACTORS (multiplied by the base coil
@@ -2910,6 +2916,7 @@ impl Default for MoleculeRenderOptions {
             object_paint: Vec::new(),
             rainbow: None,
             bfac: None,
+            linear_backbone: false,
         }
     }
 }
@@ -3879,6 +3886,28 @@ fn cubic_spline_samples(points: &[Vector4], subdiv: usize) -> Vec<Vector4> {
     out
 }
 
+/// Sample a PIECEWISE-LINEAR path through `points` (straight segments between
+/// consecutive control points), with `subdiv` samples per segment — the same
+/// count and parametrization as [`cubic_spline_samples`], so it is a drop-in
+/// replacement, but every intermediate sample lies exactly on the chord. This is
+/// the C++ `TraceRenderer` Cα line strip (the angular trace) vs the splined tube.
+fn linear_samples(points: &[Vector4], subdiv: usize) -> Vec<Vector4> {
+    if points.len() < 2 {
+        return points.to_vec();
+    }
+    let subdiv = subdiv.max(1);
+    let n = points.len();
+    let mut out = Vec::with_capacity((n - 1) * subdiv + 1);
+    for i in 0..n - 1 {
+        for step in 0..subdiv {
+            let t = step as f64 / subdiv as f64;
+            out.push(points[i].scale(1.0 - t) + points[i + 1].scale(t));
+        }
+    }
+    out.push(points[n - 1]);
+    out
+}
+
 /// Build a secondary-structure cartoon snapshot: a ribbon swept along each
 /// chain's splined backbone, shaped per residue (helix/sheet = wide flat band,
 /// coil = thin tube) and colored by secondary structure.
@@ -3918,7 +3947,7 @@ pub fn ribbon_mesh_snapshot(
             continue;
         }
         let (samples, sections, mut width_scales) =
-            sample_backbone(pivots, subdiv, options.anchor_weight);
+            sample_backbone(pivots, subdiv, options.anchor_weight, options.linear_backbone);
         if putty.mode != PuttyMode::Off {
             apply_putty_to_width_scales(
                 &mut width_scales,
@@ -3994,19 +4023,27 @@ fn sample_backbone(
     points: &[MainchainPoint],
     subdiv: usize,
     anchor_weight: f64,
+    linear: bool,
 ) -> (Vec<Vector4>, Vec<Secondary>, Vec<f64>) {
     let mut positions = points.iter().map(|point| point.pos).collect::<Vec<_>>();
     // Anchor-weight smoothing (C++ Ribbon2/SplineCoeffSet): blend each interior
-    // control point toward the midpoint of its neighbours before splining.
+    // control point toward the midpoint of its neighbours before splining. The
+    // angular `trace` (linear path) keeps the raw pivots — no pre-smoothing.
     let w = anchor_weight.clamp(0.0, 1.0);
-    if w > 1.0e-9 && positions.len() >= 3 {
+    if !linear && w > 1.0e-9 && positions.len() >= 3 {
         let orig = positions.clone();
         for i in 1..orig.len() - 1 {
             let mid = (orig[i - 1] + orig[i + 1]).scale(0.5);
             positions[i] = orig[i].scale(1.0 - w) + mid.scale(w);
         }
     }
-    let samples = cubic_spline_samples(&positions, subdiv);
+    // `trace` runs straight between Cα pivots (C++ TraceRenderer line strip); every
+    // other main-chain type smooths the path with a natural cubic spline.
+    let samples = if linear {
+        linear_samples(&positions, subdiv)
+    } else {
+        cubic_spline_samples(&positions, subdiv)
+    };
     let subdiv = subdiv.max(1);
     let n = points.len();
     let mut sections = Vec::with_capacity(samples.len());
@@ -5689,6 +5726,68 @@ mod tests {
     }
 
     #[test]
+    fn trace_runs_straight_through_pivots_unlike_the_smooth_spline() {
+        // C++ TraceRenderer draws a Cα line strip — straight segments between
+        // pivots, NOT a smoothed spline (which `tube`/`spline`/`ribbon` use). On a
+        // turning backbone the spline bulges off the chords; the linear trace does
+        // not. Discriminating oracle (advisor-steered): straightness, not face count
+        // (the tube representation has triangles either way).
+        let coords = [
+            (0.0, 0.0, 0.0),
+            (4.0, 0.0, 0.0),
+            (8.0, 4.0, 0.0),
+            (12.0, 4.0, 0.0),
+        ];
+        let pivots: Vec<MainchainPoint> = coords
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, y, z))| MainchainPoint {
+                pos: Vector4::new3(x, y, z),
+                ss: Secondary::Coil,
+                b_factor: 0.0,
+                occupancy: 1.0,
+                atom_index: i,
+            })
+            .collect();
+        let positions: Vec<Vector4> = pivots.iter().map(|p| p.pos).collect();
+        let subdiv = 8usize;
+        let dist = |a: &Vector4, b: &Vector4| {
+            ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
+        };
+        let max_chord_dev = |samples: &[Vector4]| {
+            let mut max = 0.0_f64;
+            for i in 0..positions.len() - 1 {
+                for step in 0..subdiv {
+                    let t = step as f64 / subdiv as f64;
+                    let chord = positions[i].scale(1.0 - t) + positions[i + 1].scale(t);
+                    max = max.max(dist(&samples[i * subdiv + step], &chord));
+                }
+            }
+            max
+        };
+
+        let (linear, _, _) = sample_backbone(&pivots, subdiv, 0.0, true);
+        let (spline, _, _) = sample_backbone(&pivots, subdiv, 0.0, false);
+        // Same sample count -> a drop-in path swap, the tube machinery is unchanged.
+        assert_eq!(linear.len(), spline.len());
+        // Linear trace samples lie exactly on the pivot chords.
+        assert!(
+            max_chord_dev(&linear) < 1.0e-9,
+            "linear trace must stay on the pivot chords (dev {})",
+            max_chord_dev(&linear)
+        );
+        // The smooth spline bulges measurably off the chords (the distinction).
+        assert!(
+            max_chord_dev(&spline) > 0.1,
+            "the spline must deviate from the straight chords (dev {})",
+            max_chord_dev(&spline)
+        );
+        // Both still pass through the real Cα pivots (endpoints coincide).
+        assert!(dist(&linear[0], &positions[0]) < 1.0e-9);
+        assert!(dist(&linear[subdiv], &positions[1]) < 1.0e-9);
+    }
+
+    #[test]
     fn ribbon_anchor_weight_smooths_the_spline_toward_neighbor_midpoints() {
         // A backbone with a single sharp peak (pivot 2 at y=3) on an otherwise
         // flat chain. Anchor smoothing blends the peak toward its neighbours'
@@ -5710,7 +5809,7 @@ mod tests {
         })
         .collect();
         let max_y = |w: f64| {
-            sample_backbone(&pivots, 8, w)
+            sample_backbone(&pivots, 8, w, false)
                 .0
                 .iter()
                 .map(|p| p.y)

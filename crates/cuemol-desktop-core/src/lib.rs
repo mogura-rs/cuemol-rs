@@ -1170,7 +1170,8 @@ fn renderer_render_options(
         selected_indices: selected_indices.to_vec(),
         ..MoleculeRenderOptions::default()
     };
-    match renderer.map(MolRenderer::renderer_type).unwrap_or("simple") {
+    let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
+    match renderer_type {
         "cpk" => {
             options.vdw_scale = 0.55;
             options.bond_radius = 0.0;
@@ -1190,6 +1191,9 @@ fn renderer_render_options(
         }
         _ => {}
     }
+    // `trace` is the angular Cα line strip (C++ TraceRenderer): straight between
+    // pivots, no spline. tube/spline/ribbon/cartoon/nucl keep the smooth spline.
+    options.linear_backbone = renderer_type == "trace";
     // Layer the scene renderer's resolved `style="..."` geometry (bond/atom radii,
     // ribbon cross-section dims/shape, axial detail) on top of the per-type
     // defaults — the same cascade the CLI `render-qsc` applies. A renderer with no
