@@ -2648,6 +2648,7 @@ pub fn simple_atom_primitives(
             object_uid: None,
             atom_index: None,
             selected: false,
+            detail: None,
         })
         .collect()
 }
@@ -3074,6 +3075,7 @@ pub fn molecule_render_snapshot(
                     Some(index),
                     selected.contains(&index),
                 )
+                .with_detail(options.sphere_detail)
             })
             .collect::<Vec<_>>()
     } else {

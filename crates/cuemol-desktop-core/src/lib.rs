@@ -1910,6 +1910,46 @@ mod tests {
     }
 
     #[test]
+    fn styled_sphere_detail_refines_the_gui_tessellation() {
+        // A renderer style's sphere `detail` now reaches the GUI tessellation: the
+        // snapshot's atoms carry the detail and `tessellate_snapshot` honours it,
+        // so DefaultBallStick (detail=10) produces finer spheres (more vertices)
+        // than the unstyled default.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        let renderer = app
+            .new_renderer_in_active_scene(object, "ballstick", "bs")
+            .unwrap()
+            .result_renderer;
+
+        let tessellated_verts = |app: &DesktopAppState| {
+            cuemol_render::tessellate_snapshot(&app.active_render_snapshot("").unwrap())
+                .vertices
+                .len()
+        };
+        let base = tessellated_verts(&app);
+
+        app.scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer)
+            .unwrap()
+            .set_qsc_attr("style", "DefaultBallStick");
+        let detailed = tessellated_verts(&app);
+        assert!(
+            detailed > base,
+            "styled detail=10 should refine the spheres: base={base} detailed={detailed}"
+        );
+    }
+
+    #[test]
     fn desktop_app_state_opens_path_and_builds_render_snapshot() {
         let Some(root) = reference_test_data_root() else {
             return;

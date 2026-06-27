@@ -3846,6 +3846,7 @@ mod tests {
             object_uid: Some(obj),
             atom_index: Some(idx),
             selected: false,
+            detail: None,
         }
     }
 

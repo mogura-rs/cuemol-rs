@@ -4106,6 +4106,7 @@ mod tests {
             object_uid: Some(7),
             atom_index: Some(3),
             selected: false,
+            detail: None,
         });
         assert_eq!(
             app.pick_hit(&camera, egui::pos2(400.0, 300.0)),

@@ -11,6 +11,10 @@ pub struct RenderAtom {
     pub object_uid: Option<u64>,
     pub atom_index: Option<usize>,
     pub selected: bool,
+    /// Per-atom sphere UV tessellation level (C++ CPK/BallStick `detail`), or
+    /// `None` for the default. `tessellate_snapshot` honours it so a styled
+    /// renderer's `detail` shows in the GUI without a separate detailed pass.
+    pub detail: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,6 +152,7 @@ impl RenderAtom {
             object_uid: None,
             atom_index: None,
             selected: false,
+            detail: None,
         }
     }
 
@@ -160,6 +165,12 @@ impl RenderAtom {
         self.object_uid = object_uid;
         self.atom_index = atom_index;
         self.selected = selected;
+        self
+    }
+
+    /// Set the per-atom sphere tessellation detail (C++ `detail`).
+    pub fn with_detail(mut self, detail: Option<u32>) -> Self {
+        self.detail = detail;
         self
     }
 }
@@ -2085,12 +2096,27 @@ pub fn atom_intr_snapshot(
 pub fn tessellate_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
     let mut mesh = RenderMesh::new();
     for atom in &snapshot.atoms {
-        add_sphere(
-            &mut mesh,
-            atom.center,
-            atom.radius as f64,
-            snapshot_color_rgba(&atom.color),
-        );
+        // Honour a per-atom `detail` (a styled renderer's sphere tessellation
+        // level) so the GUI shows it; atoms without it use the default sphere.
+        match atom.detail {
+            Some(detail) => {
+                let (rings, segs) = sphere_detail_to_rings_segs(detail);
+                add_sphere_detailed(
+                    &mut mesh,
+                    atom.center,
+                    atom.radius as f64,
+                    snapshot_color_rgba(&atom.color),
+                    rings,
+                    segs,
+                );
+            }
+            None => add_sphere(
+                &mut mesh,
+                atom.center,
+                atom.radius as f64,
+                snapshot_color_rgba(&atom.color),
+            ),
+        }
     }
     for bond in &snapshot.bonds {
         add_cylinder(
@@ -2161,6 +2187,7 @@ mod tests {
                 object_uid: None,
                 atom_index: None,
                 selected: false,
+                detail: None,
             }],
         );
         backend.end_frame(frame);
