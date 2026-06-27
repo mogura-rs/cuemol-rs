@@ -2954,6 +2954,34 @@ pub fn apply_renderer_styles(
     options.styled_ribbon.helix_shape = resolve_section_shape(renderer, styles, scope_id, "helix");
     options.styled_ribbon.sheet_shape = resolve_section_shape(renderer, styles, scope_id, "sheet");
     options.styled_ribbon.coil_shape = resolve_section_shape(renderer, styles, scope_id, "coil");
+
+    // Putty (C++ TubeRenderer width modulation by B-factor/occupancy): exact qsc
+    // attr names + enum values from TubeRenderer.qif.
+    if let Some(mode) = renderer.resolved_attr("putty_mode", styles, scope_id).as_deref() {
+        options.putty.mode = match mode {
+            "linear1" => PuttyMode::Linear,
+            "scale1" => PuttyMode::Scale,
+            _ => PuttyMode::Off,
+        };
+    }
+    if let Some(target) = renderer.resolved_attr("putty_tgt", styles, scope_id).as_deref() {
+        options.putty.target = match target {
+            "occ" => PuttyTarget::Occupancy,
+            _ => PuttyTarget::BFactor,
+        };
+    }
+    if let Some(hi) = renderer
+        .resolved_attr("putty_hiscl", styles, scope_id)
+        .and_then(|value| value.trim().parse::<f64>().ok())
+    {
+        options.putty.hiscl = hi;
+    }
+    if let Some(lo) = renderer
+        .resolved_attr("putty_loscl", styles, scope_id)
+        .and_then(|value| value.trim().parse::<f64>().ok())
+    {
+        options.putty.loscl = lo;
+    }
 }
 
 /// Resolve a ribbon sub-element's `type` into a cross-section profile (C++
@@ -3153,24 +3181,7 @@ pub fn mainchain_trace_snapshot(
 
     // Putty statistics (min/max/mean of the target value) over every backbone
     // pivot — C++ TubeRenderer::beginRend computes these once for the object.
-    let (lo, hi, aver) = if putty.mode == PuttyMode::Off {
-        (0.0, 1.0, 0.5)
-    } else {
-        let vals: Vec<f64> = chains
-            .iter()
-            .flatten()
-            .map(|p| pivot_target(p, putty.target))
-            .collect();
-        if vals.is_empty() {
-            (0.0, 1.0, 0.5)
-        } else {
-            (
-                vals.iter().copied().fold(f64::INFINITY, f64::min),
-                vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                vals.iter().sum::<f64>() / vals.len() as f64,
-            )
-        }
-    };
+    let (lo, hi, aver) = putty_value_stats(&chains, &putty);
     let radius_at = |raw: f64| (tube_radius as f64 * putty.scale(raw, lo, hi, aver)) as f32;
 
     let mut atoms = Vec::new();
@@ -3217,6 +3228,58 @@ pub fn mainchain_trace_snapshot(
         meshes: Vec::new(),
         bounds: molecule.bounding_box_for(None),
     }
+}
+
+/// Multiply each per-sample ribbon width scale by the putty factor at that
+/// sample (the target value interpolated along the same segment/subdiv
+/// parametrization the spline uses). Mirrors `mainchain_trace_snapshot`'s
+/// per-sample putty radius so the ribbon and trace agree.
+fn apply_putty_to_width_scales(
+    width_scales: &mut [f64],
+    pivots: &[MainchainPoint],
+    subdiv: usize,
+    putty: &PuttyOptions,
+    lo: f64,
+    hi: f64,
+    aver: f64,
+) {
+    let n = pivots.len();
+    if n < 2 {
+        return;
+    }
+    let subdiv = subdiv.max(1);
+    for (i, scale) in width_scales.iter_mut().enumerate() {
+        let seg = (i / subdiv).min(n - 2);
+        let rho = (i - seg * subdiv) as f64 / subdiv as f64;
+        let raw = pivot_target(&pivots[seg], putty.target) * (1.0 - rho)
+            + pivot_target(&pivots[seg + 1], putty.target) * rho;
+        *scale *= putty.scale(raw, lo, hi, aver);
+    }
+}
+
+/// Min/max/mean of the putty target value over every backbone pivot (C++
+/// `TubeRenderer::beginRend` precompute). Returns the identity `(0,1,0.5)` when
+/// putty is off or there are no pivots.
+fn putty_value_stats(
+    chains: &[Vec<MainchainPoint>],
+    putty: &PuttyOptions,
+) -> (f64, f64, f64) {
+    if putty.mode == PuttyMode::Off {
+        return (0.0, 1.0, 0.5);
+    }
+    let vals: Vec<f64> = chains
+        .iter()
+        .flatten()
+        .map(|point| pivot_target(point, putty.target))
+        .collect();
+    if vals.is_empty() {
+        return (0.0, 1.0, 0.5);
+    }
+    (
+        vals.iter().copied().fold(f64::INFINITY, f64::min),
+        vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        vals.iter().sum::<f64>() / vals.len() as f64,
+    )
 }
 
 /// The putty target value (B-factor or occupancy) of a backbone pivot.
@@ -3511,13 +3574,28 @@ pub fn ribbon_mesh_snapshot(
         .as_ref()
         .map(|indices| indices.iter().copied().collect::<std::collections::BTreeSet<_>>());
     let chains = collect_mainchain_pivots(molecule, draw.as_ref());
+    // Putty (TubeRenderer): modulate the ribbon width per residue by the B-factor/
+    // occupancy, on top of the section width scales. Stats are over all pivots.
+    let putty = options.putty;
+    let (putty_lo, putty_hi, putty_aver) = putty_value_stats(&chains, &putty);
     let mut meshes = Vec::new();
     for pivots in &chains {
         if pivots.len() < 2 {
             continue;
         }
-        let (samples, sections, width_scales) =
+        let (samples, sections, mut width_scales) =
             sample_backbone(pivots, subdiv, options.anchor_weight);
+        if putty.mode != PuttyMode::Off {
+            apply_putty_to_width_scales(
+                &mut width_scales,
+                pivots,
+                subdiv,
+                &putty,
+                putty_lo,
+                putty_hi,
+                putty_aver,
+            );
+        }
         let mesh = ribbon_tube_mesh(
             &samples,
             &sections,

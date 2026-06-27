@@ -1861,6 +1861,55 @@ mod tests {
     }
 
     #[test]
+    fn putty_modulates_ribbon_width_by_bfactor() {
+        // A trace renderer with putty_mode="scale1" modulates the backbone tube
+        // width per residue by the B-factor (TubeRenderer putty). 1CRN has varying
+        // B-factors, so the puttied ribbon mesh differs from the unmodulated one
+        // (same topology, moved cross-section vertices).
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        let renderer = app
+            .new_renderer_in_active_scene(object, "trace", "tr")
+            .unwrap()
+            .result_renderer;
+
+        let vertices = |app: &DesktopAppState| -> Vec<cuemol_core::Vector4> {
+            app.active_render_snapshot("")
+                .unwrap()
+                .meshes
+                .iter()
+                .flat_map(|mesh| mesh.vertices.iter().map(|vertex| vertex.position))
+                .collect()
+        };
+        let base = vertices(&app);
+        assert!(!base.is_empty(), "the trace should produce a ribbon mesh");
+
+        app.scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer)
+            .unwrap()
+            .set_qsc_attr("putty_mode", "scale1");
+        let puttied = vertices(&app);
+        assert_eq!(
+            base.len(),
+            puttied.len(),
+            "putty changes widths, not topology"
+        );
+        assert_ne!(
+            base, puttied,
+            "putty must modulate the ribbon width (B-factor varies in 1CRN)"
+        );
+    }
+
+    #[test]
     fn desktop_app_state_opens_path_and_builds_render_snapshot() {
         let Some(root) = reference_test_data_root() else {
             return;
