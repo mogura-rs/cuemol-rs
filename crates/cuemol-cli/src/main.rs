@@ -1,3 +1,4 @@
+use cuemol_core::Matrix4;
 use cuemol_mdtools::{
     read_amber_mdcrd_file, read_amber_prmtop_file, read_amber_prmtop_with_restart_files,
     read_amber_restart_file, read_gro_file, read_namd_coor_file, read_namd_coor_with_psf_files,
@@ -746,7 +747,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                     |name| object.coloring_attr(name),
                 );
             }
-            let snapshot = if rtype == "atomintr" {
+            let mut snapshot = if rtype == "atomintr" {
                 // Measurement lines between the renderer's atom pairs, not the
                 // whole molecule (the single source of truth shared with the GUI).
                 cuemol_render::atom_intr_snapshot(&object.atom_intr_segments(renderer), None)
@@ -767,6 +768,13 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             } else {
                 molecule_render_snapshot(object.mol(), &options)
             };
+            // Bake the object + renderer `xformMat` (C++ display-time transform)
+            // into this renderer's geometry — effective transform `renderer · object`
+            // — so render-qsc matches the GUI and the scene's saved placement.
+            let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
+            if xform != Matrix4::IDENTITY {
+                snapshot.apply_xform(&xform);
+            }
             total_atoms += snapshot.atom_count();
             total_bonds += snapshot.bond_count();
             let mesh = match options.sphere_detail {

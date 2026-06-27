@@ -1,4 +1,4 @@
-use cuemol_core::Vector4;
+use cuemol_core::{Matrix4, Vector4};
 use cuemol_gfx::ColorSpec;
 use cuemol_qsys::{InOutHandler, SceneExporter as QsysSceneExporter};
 use std::fmt::Write as _;
@@ -225,6 +225,79 @@ impl RenderSceneSnapshot {
 
     pub fn mesh_triangle_count(&self) -> usize {
         self.meshes.iter().map(RenderMesh::triangle_count).sum()
+    }
+
+    /// Apply an affine transform `m` to all geometry in place.
+    ///
+    /// The headless equivalent of C++ `DisplayContext::multMatrix(xform)` applied
+    /// to an object/renderer `xformMat` before `display()` (`Scene::displayRendImpl`,
+    /// and the object xform propagated to atom positions via `MolAtom::getPos`).
+    /// Positions transform as points (w=1); mesh normals transform by the rotation
+    /// part only (w=0) and are renormalized — correct for the rigid superposition
+    /// transforms that set `xformMat`. Bounds are recomputed from the transformed
+    /// geometry so a moved object still auto-frames correctly.
+    pub fn apply_xform(&mut self, m: &Matrix4) {
+        for atom in &mut self.atoms {
+            m.xform3d(&mut atom.center);
+        }
+        for bond in &mut self.bonds {
+            m.xform3d(&mut bond.from);
+            m.xform3d(&mut bond.to);
+        }
+        for mesh in &mut self.meshes {
+            for vertex in &mut mesh.vertices {
+                m.xform3d(&mut vertex.position);
+                // Rotation-only (w=0 drops the translation column).
+                let rotated =
+                    m.transform_point(Vector4::new4(vertex.normal.x, vertex.normal.y, vertex.normal.z, 0.0));
+                let len = (rotated.x * rotated.x + rotated.y * rotated.y + rotated.z * rotated.z).sqrt();
+                if len > 1.0e-12 {
+                    vertex.normal = Vector4::new3(rotated.x / len, rotated.y / len, rotated.z / len);
+                }
+            }
+        }
+        self.recompute_bounds();
+    }
+
+    /// Recompute the axis-aligned bounds from the current geometry (atom spheres,
+    /// bond endpoints, mesh vertices). `None` when the snapshot holds no geometry.
+    pub fn recompute_bounds(&mut self) {
+        let mut min: Option<Vector4> = None;
+        let mut max: Option<Vector4> = None;
+        let mut include = |p: Vector4| {
+            match (&mut min, &mut max) {
+                (Some(lo), Some(hi)) => {
+                    lo.x = lo.x.min(p.x);
+                    lo.y = lo.y.min(p.y);
+                    lo.z = lo.z.min(p.z);
+                    hi.x = hi.x.max(p.x);
+                    hi.y = hi.y.max(p.y);
+                    hi.z = hi.z.max(p.z);
+                }
+                _ => {
+                    min = Some(p);
+                    max = Some(p);
+                }
+            }
+        };
+        for atom in &self.atoms {
+            let r = atom.radius as f64;
+            include(Vector4::new3(atom.center.x - r, atom.center.y - r, atom.center.z - r));
+            include(Vector4::new3(atom.center.x + r, atom.center.y + r, atom.center.z + r));
+        }
+        for bond in &self.bonds {
+            include(bond.from);
+            include(bond.to);
+        }
+        for mesh in &self.meshes {
+            for vertex in &mesh.vertices {
+                include(vertex.position);
+            }
+        }
+        self.bounds = match (min, max) {
+            (Some(lo), Some(hi)) => Some((lo, hi)),
+            _ => None,
+        };
     }
 }
 
@@ -2209,6 +2282,75 @@ mod tests {
         );
         backend.end_frame(frame);
         assert_eq!(backend.bond_draw_calls, 1);
+    }
+
+    #[test]
+    fn apply_xform_rotates_and_translates_geometry() {
+        // Discriminating oracle (advisor-steered): a ROTATION + translation, not a
+        // pure translation. A pure-translation xform would pass even with a
+        // column-major<->row-major transpose bug; a 90deg-about-Z rotation does not.
+        // Column-major (m1..m16) for R_z(+90) [ (x,y,z)->(-y,x,z) ] with translate
+        // (0,0,5): cols [0,1,0,0][-1,0,0,0][0,0,1,0][0,0,5,1]. set_ai uses the C++
+        // linear (column-major) index, so this is the exact LScrMatrix4D layout.
+        let cm = [0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 5.0, 1.0];
+        let mut m = Matrix4::IDENTITY;
+        for (i, value) in cm.iter().enumerate() {
+            m.set_ai(i + 1, *value).unwrap();
+        }
+        let mut mesh = RenderMesh::new();
+        mesh.vertices.push(MeshVertex {
+            position: Vector4::new3(1.0, 0.0, 0.0),
+            normal: Vector4::new3(1.0, 0.0, 0.0),
+            color: [1.0, 1.0, 1.0, 1.0],
+        });
+        let mut snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom {
+                center: Vector4::new3(1.0, 0.0, 0.0),
+                radius: 0.5,
+                color: None,
+                object_uid: None,
+                atom_index: None,
+                selected: false,
+                detail: None,
+            }],
+            bonds: vec![RenderBond::new(
+                Vector4::new3(1.0, 0.0, 0.0),
+                Vector4::new3(0.0, 0.0, 0.0),
+                0.1,
+                None,
+            )],
+            meshes: vec![mesh],
+            bounds: None,
+        };
+        snapshot.apply_xform(&m);
+
+        let eps = 1.0e-9;
+        // atom (1,0,0) -> R_z(90)=(0,1,0) then +translate(0,0,5) = (0,1,5).
+        let c = snapshot.atoms[0].center;
+        assert!(
+            (c.x - 0.0).abs() < eps && (c.y - 1.0).abs() < eps && (c.z - 5.0).abs() < eps,
+            "atom center should be (0,1,5), got ({},{},{})",
+            c.x,
+            c.y,
+            c.z
+        );
+        // bond endpoint (1,0,0) likewise; the bond origin (0,0,0)-> (0,0,5).
+        let from = snapshot.bonds[0].from;
+        let to = snapshot.bonds[0].to;
+        assert!((from.x).abs() < eps && (from.y - 1.0).abs() < eps && (from.z - 5.0).abs() < eps);
+        assert!((to.x).abs() < eps && (to.y).abs() < eps && (to.z - 5.0).abs() < eps);
+        // normal (1,0,0) -> rotation only (NO translation) = (0,1,0), still unit.
+        let n = snapshot.meshes[0].vertices[0].normal;
+        assert!(
+            (n.x).abs() < eps && (n.y - 1.0).abs() < eps && (n.z).abs() < eps,
+            "normal should rotate to (0,1,0) with no translation, got ({},{},{})",
+            n.x,
+            n.y,
+            n.z
+        );
+        // bounds were recomputed around the transformed geometry.
+        let (lo, hi) = snapshot.bounds.expect("bounds recomputed");
+        assert!(lo.z <= 5.0 && hi.z >= 5.0, "bounds should track the +5 z shift");
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::{
     read_mmcif_file, read_mol2_file, read_pdb_file, read_pdb_str, read_qdfpdb_file, read_sdf_file,
     write_pdb_string, Atom, MolCoord,
 };
-use cuemol_core::{CueMolError, Quat, Result, Uid, Vector4};
+use cuemol_core::{CueMolError, Matrix4, Quat, Result, Uid, Vector4};
 use cuemol_qsys::{Camera, CenterMark, StereoMode, StyleManager, View};
 use std::collections::BTreeMap;
 use std::fs;
@@ -110,6 +110,15 @@ impl MolRenderer {
         styles.resolve_style_child_type(scope_id, style_list, child_tag)
     }
 
+    /// The renderer's `xformMat` display transform (C++ `Renderer::getXformMatrix`,
+    /// applied to its geometry via `multMatrix` at display). Identity when unset or
+    /// malformed. Captured from the `<renderer xformMat="(...)">` attribute.
+    pub fn xform_matrix(&self) -> Matrix4 {
+        self.qsc_attr("xformMat")
+            .and_then(parse_xform_mat)
+            .unwrap_or(Matrix4::IDENTITY)
+    }
+
     pub fn is_visible(&self) -> bool {
         !matches!(self.qsc_attr("visible"), Some("false" | "0" | "no" | "off"))
     }
@@ -161,6 +170,14 @@ pub struct MolObject {
     /// `end_hue`/`sat`/`bri`). `None` when no object coloring is declared.
     coloring_type: Option<String>,
     coloring_attrs: BTreeMap<String, String>,
+    /// The object's `xformMat` transform (C++ `Object::getXformMatrix`). In C++
+    /// it is propagated onto every atom (`MolAtom::getPos` applies it), so the
+    /// rendered structure sits at its transformed position — e.g. a structure
+    /// superposed by `superposeSSM1`'s by-property mode persists its fit here.
+    /// `None` (identity) for a freshly loaded molecule. The render path bakes it
+    /// into the snapshot geometry instead of mutating `MolCoord`, so CLI atom
+    /// queries / exports of the same object stay in raw coordinates.
+    xform: Option<Matrix4>,
 }
 
 impl MolObject {
@@ -206,6 +223,20 @@ impl MolObject {
     pub fn set_coloring(&mut self, coloring_type: Option<String>, attrs: BTreeMap<String, String>) {
         self.coloring_type = coloring_type;
         self.coloring_attrs = attrs;
+    }
+
+    /// The object's `xformMat` transform, identity when unset. Applied to the
+    /// rendered geometry (C++ propagates it onto atom positions).
+    pub fn xform_matrix(&self) -> Matrix4 {
+        self.xform.unwrap_or(Matrix4::IDENTITY)
+    }
+
+    pub fn set_xform_matrix(&mut self, matrix: Matrix4) {
+        self.xform = if matrix == Matrix4::IDENTITY {
+            None
+        } else {
+            Some(matrix)
+        };
     }
 
     pub fn renderer_by_name(&self, name: &str) -> Option<&MolRenderer> {
@@ -464,6 +495,7 @@ impl MolScene {
             paint_coloring: Vec::new(),
             coloring_type: None,
             coloring_attrs: BTreeMap::new(),
+            xform: None,
         });
         uid
     }
@@ -509,6 +541,16 @@ impl MolScene {
         let object = self
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound("loaded QSC object".to_string()))?;
+
+        // Object-level `xformMat` (C++ `Object::xformMat`): the structure's saved
+        // transform (e.g. a persisted superposition fit). Applied to the rendered
+        // geometry by the render path.
+        if let Some(matrix) = attr_value(object_line, "xformMat")
+            .as_deref()
+            .and_then(parse_xform_mat)
+        {
+            object.set_xform_matrix(matrix);
+        }
 
         let mut current_atomintr: Option<(String, Vec<(String, String)>)> = None;
         let mut current_atomintr_attrs = BTreeMap::new();
@@ -583,10 +625,18 @@ impl MolScene {
         output.push_str("\t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n");
         for (index, object) in self.objects.iter().enumerate() {
             let chunk_id = format!("{index:05}");
+            // Emit `xformMat` only for a transformed object (C++ omits the identity
+            // default), in the column-major `(...)` format the reader parses.
+            let xform_attr = if object.xform.is_some() {
+                format!(" xformMat=\"{}\"", format_xform_mat(object.xform_matrix()))
+            } else {
+                String::new()
+            };
             output.push_str(&format!(
-                "\t<object type=\"MolCoord\" name=\"{}\" src=\"datachunk:{}\" srctype=\"qdfpdb\">\n",
+                "\t<object type=\"MolCoord\" name=\"{}\" src=\"datachunk:{}\" srctype=\"qdfpdb\"{}>\n",
                 escape_xml(object.name()),
-                chunk_id
+                chunk_id,
+                xform_attr
             ));
             for renderer in object.renderers() {
                 if renderer.renderer_type() == "atomintr" {
@@ -1065,6 +1115,39 @@ fn parse_quat(input: &str) -> Result<Quat> {
     Ok(Quat::new(values[0], values[1], values[2], values[3]))
 }
 
+/// Parse a C++ `LScrMatrix4D` serialization into a [`Matrix4`]. The value is
+/// either `(identity)` or a `(m1,...,m16)` tuple in COLUMN-MAJOR order (C++
+/// `Matrix4D::ai` linear index). `Matrix4::set_ai` uses the same column-major
+/// linear index, so the elements map across directly (no transpose). Returns
+/// `None` on a malformed value, which callers treat as identity.
+fn parse_xform_mat(input: &str) -> Option<Matrix4> {
+    let trimmed = input.trim();
+    if trimmed.eq_ignore_ascii_case("(identity)") {
+        return Some(Matrix4::IDENTITY);
+    }
+    let values = parse_tuple(trimmed).ok()?;
+    if values.len() != 16 {
+        return None;
+    }
+    let mut matrix = Matrix4::IDENTITY;
+    for (index, value) in values.iter().enumerate() {
+        matrix.set_ai(index + 1, *value).ok()?;
+    }
+    Some(matrix)
+}
+
+/// Serialize a [`Matrix4`] in the C++ `LScrMatrix4D::toString` format: `(identity)`
+/// for the identity matrix, otherwise `(m1,...,m16)` in column-major order.
+fn format_xform_mat(matrix: Matrix4) -> String {
+    if matrix == Matrix4::IDENTITY {
+        return "(identity)".to_string();
+    }
+    let parts: Vec<String> = (1..=16)
+        .map(|index| format_float(matrix.ai(index).unwrap_or(0.0)))
+        .collect();
+    format!("({})", parts.join(","))
+}
+
 fn parse_tuple(input: &str) -> Result<Vec<f64>> {
     let trimmed = input.trim().trim_start_matches('(').trim_end_matches(')');
     trimmed
@@ -1169,4 +1252,39 @@ fn escape_xml(input: &str) -> String {
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_xform_mat_reads_column_major_rotation() {
+        assert_eq!(parse_xform_mat("(identity)"), Some(Matrix4::IDENTITY));
+        assert_eq!(parse_xform_mat("(IDENTITY)"), Some(Matrix4::IDENTITY));
+
+        // R_z(+90) [ (x,y,z)->(-y,x,z) ] + translate(0,0,5), column-major:
+        // cols [0,1,0,0][-1,0,0,0][0,0,1,0][0,0,5,1].
+        let matrix = parse_xform_mat("(0,1,0,0,-1,0,0,0,0,0,1,0,0,0,5,1)")
+            .expect("well-formed 16-tuple parses");
+        // The row-major result; the -1 in row0/col1 and +1 in row1/col0 catch a
+        // column-major<->row-major transpose; tz=5 sits in row2/col3.
+        assert_eq!(matrix.get_at(1, 2).unwrap(), -1.0, "row0,col1 = -sin");
+        assert_eq!(matrix.get_at(2, 1).unwrap(), 1.0, "row1,col0 = +sin");
+        assert_eq!(matrix.get_at(3, 4).unwrap(), 5.0, "row2,col3 = tz");
+        assert_eq!(matrix.get_at(4, 4).unwrap(), 1.0, "homogeneous w");
+
+        // Apply to a point to confirm the orientation end to end.
+        let mut p = Vector4::new3(1.0, 0.0, 0.0);
+        matrix.xform3d(&mut p);
+        assert!((p.x).abs() < 1e-9 && (p.y - 1.0).abs() < 1e-9 && (p.z - 5.0).abs() < 1e-9);
+
+        // Round-trips through the column-major writer.
+        assert_eq!(parse_xform_mat(&format_xform_mat(matrix)), Some(matrix));
+        assert_eq!(format_xform_mat(Matrix4::IDENTITY), "(identity)");
+
+        // Malformed -> None (callers fall back to identity).
+        assert_eq!(parse_xform_mat("(1,2,3)"), None);
+        assert_eq!(parse_xform_mat("garbage"), None);
+    }
 }

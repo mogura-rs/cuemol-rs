@@ -1,5 +1,5 @@
 use cuemol_anim::{MorphFrame, MorphMol};
-use cuemol_core::{CueMolError, Result, Uid};
+use cuemol_core::{CueMolError, Matrix4, Result, Uid};
 use cuemol_mdtools::{read_amber_prmtop_file, read_gro_file, read_psf_file};
 use cuemol_molanl::MolAnlManager;
 use cuemol_molstr::{
@@ -1100,7 +1100,7 @@ fn append_object_renderer_snapshot(
             object.coloring_attr(name)
         });
     }
-    let snapshot = match (renderer_type, renderer) {
+    let mut snapshot = match (renderer_type, renderer) {
         // An atom-interaction renderer draws measurement lines between its atom
         // pairs, NOT the whole molecule — route it to the measurement geometry so
         // it stops dumping every atom (the gap this closes).
@@ -1132,6 +1132,17 @@ fn append_object_renderer_snapshot(
         }
         _ => molecule_render_snapshot(object.mol(), &options),
     };
+    // Apply the object + renderer `xformMat` (C++ `Object`/`Renderer` xformMat,
+    // multiplied onto the modelview at display; the object xform is propagated onto
+    // atom positions). The effective transform is `renderer · object`, baked into
+    // this renderer's geometry so a superposed/positioned object renders where the
+    // scene saved it. Skipped when both are identity (the common case).
+    let object_xform = object.xform_matrix();
+    let renderer_xform = renderer.map(MolRenderer::xform_matrix).unwrap_or(Matrix4::IDENTITY);
+    let xform = renderer_xform.mul_mat(object_xform);
+    if xform != Matrix4::IDENTITY {
+        snapshot.apply_xform(&xform);
+    }
     merge_bounds(&mut target.bounds, snapshot.bounds);
     target.atoms.extend(snapshot.atoms);
     target.bonds.extend(snapshot.bonds);
@@ -2252,6 +2263,78 @@ mod tests {
         assert!(
             has_blue && has_red,
             "rainbow ribbon must span blue->red (has_blue={has_blue} has_red={has_red})"
+        );
+    }
+
+    #[test]
+    fn object_xform_mat_transforms_rendered_geometry() {
+        // C++ `Object::xformMat` (e.g. a superposition fit persisted by
+        // `superposeSSM1`'s by-property mode) places the rendered structure at its
+        // transformed position (`MolAtom::getPos` applies it). Discriminating oracle
+        // (advisor-steered): a 90deg-about-Z rotation + translation in the column-
+        // major LScrMatrix4D layout — a pure translation would pass even with a
+        // column-major<->row-major transpose bug.
+        fn pdb_atom(x: f64, y: f64, z: f64) -> String {
+            let mut line = vec![b' '; 80];
+            let put = |line: &mut [u8], text: &str, start: usize| {
+                for (i, byte) in text.bytes().enumerate() {
+                    line[start + i] = byte;
+                }
+            };
+            put(&mut line, "ATOM", 0);
+            put(&mut line, "    1", 6);
+            put(&mut line, "CA", 12);
+            put(&mut line, "ALA", 17);
+            put(&mut line, "A", 21);
+            put(&mut line, "   1", 22);
+            put(&mut line, &format!("{x:>8.3}"), 30);
+            put(&mut line, &format!("{y:>8.3}"), 38);
+            put(&mut line, &format!("{z:>8.3}"), 46);
+            String::from_utf8(line).unwrap()
+        }
+        let pdb = pdb_atom(1.0, 0.0, 0.0);
+        // A `cpk` renderer draws the lone atom as a single sphere (no bonds), so the
+        // atom centre is the geometry to read back.
+        let render_atom_center = |xform_attr: &str, tag: &str| -> cuemol_core::Vector4 {
+            let qsc = format!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<scene>\n\
+                 \t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n\
+                 \t<object type=\"MolCoord\" name=\"xf\" src=\"datachunk:00000\" srctype=\"qdfpdb\"{xform_attr}>\n\
+                 \t\t<renderer type=\"cpk\" name=\"cpk1\"/>\n\
+                 \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
+                 ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
+            );
+            let path = std::env::temp_dir()
+                .join(format!("cuemol2-rs-xform-{tag}-{}.qsc", std::process::id()));
+            std::fs::write(&path, &qsc).unwrap();
+            let mut app = DesktopAppState::new();
+            let loaded = app.load_qsc_file(&path).ok().flatten();
+            let _ = std::fs::remove_file(&path);
+            let scene_uid = loaded.expect("synthetic xform .qsc failed to load");
+            let snapshot = app.render_snapshot(scene_uid, "").unwrap();
+            assert_eq!(snapshot.atoms.len(), 1, "cpk lone atom -> exactly one sphere");
+            snapshot.atoms[0].center
+        };
+
+        // Before: no xformMat -> the atom sits at its raw (1,0,0) (non-vacuous).
+        let before = render_atom_center("", "id");
+        assert!(
+            (before.x - 1.0).abs() < 1e-6 && before.y.abs() < 1e-6 && before.z.abs() < 1e-6,
+            "without xform the atom is at its raw position, got ({},{},{})",
+            before.x,
+            before.y,
+            before.z
+        );
+
+        // After: R_z(+90) [ (x,y,z)->(-y,x,z) ] + translate(0,0,5) -> (0,1,5).
+        let after =
+            render_atom_center(" xformMat=\"(0,1,0,0,-1,0,0,0,0,0,1,0,0,0,5,1)\"", "rot");
+        assert!(
+            after.x.abs() < 1e-6 && (after.y - 1.0).abs() < 1e-6 && (after.z - 5.0).abs() < 1e-6,
+            "object xformMat should rotate+translate the atom to (0,1,5), got ({},{},{})",
+            after.x,
+            after.y,
+            after.z
         );
     }
 
