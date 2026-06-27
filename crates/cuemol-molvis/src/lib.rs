@@ -2732,6 +2732,9 @@ pub struct StyledRibbonSections {
     pub helix: Option<(f64, f64)>,
     pub sheet: Option<(f64, f64)>,
     pub coil: Option<(f64, f64)>,
+    pub helix_shape: SectionShape,
+    pub sheet_shape: SectionShape,
+    pub coil_shape: SectionShape,
 }
 
 impl StyledRibbonSections {
@@ -2742,6 +2745,24 @@ impl StyledRibbonSections {
             Secondary::Coil => self.coil,
         }
     }
+
+    fn shape_for(&self, ss: Secondary) -> SectionShape {
+        match ss {
+            Secondary::Helix => self.helix_shape,
+            Secondary::Sheet => self.sheet_shape,
+            Secondary::Coil => self.coil_shape,
+        }
+    }
+}
+
+/// Ribbon cross-section profile (C++ `TubeSection` `TS_*`): a smooth ellipse vs a
+/// flat-faced rectangle. A rectangle gives the sharp-edged "fancy" ribbon (each
+/// side carries an axis-aligned face normal); an ellipse the rounded default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SectionShape {
+    #[default]
+    Elliptical,
+    Rectangular,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2922,6 +2943,27 @@ pub fn apply_renderer_styles(
         && (options.styled_ribbon.helix.is_some() || options.styled_ribbon.sheet.is_some())
     {
         options.styled_ribbon.coil = Some((0.35, 0.35));
+    }
+    // Cross-section PROFILE per class (C++ TubeSection `type`): rectangle vs ellipse.
+    options.styled_ribbon.helix_shape = resolve_section_shape(renderer, styles, scope_id, "helix");
+    options.styled_ribbon.sheet_shape = resolve_section_shape(renderer, styles, scope_id, "sheet");
+    options.styled_ribbon.coil_shape = resolve_section_shape(renderer, styles, scope_id, "coil");
+}
+
+/// Resolve a ribbon sub-element's `type` into a cross-section profile (C++
+/// `TubeSection` "rectangle"/"rect" → `TS_RECT`, anything else → elliptical).
+fn resolve_section_shape(
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    scope_id: u64,
+    tag: &str,
+) -> SectionShape {
+    match renderer
+        .resolved_child_attr(tag, "type", styles, scope_id)
+        .as_deref()
+    {
+        Some("rectangle") | Some("rect") => SectionShape::Rectangular,
+        _ => SectionShape::Elliptical,
     }
 }
 
@@ -3527,6 +3569,36 @@ fn section_params(
     }
 }
 
+/// A point on a RECTANGULAR cross-section perimeter at fraction `t` in [0,1),
+/// returning `(offset from centre, outward normal)` in the (binormal=width,
+/// normal=thick) frame. Faithful to C++ `TubeSection::setupRectSection`: four
+/// flat sides, each carrying an axis-aligned FACE normal (so the band has sharp
+/// edges, unlike the elliptical profile's smooth radial normals).
+fn rect_ring_point(
+    t: f64,
+    width: f64,
+    thick: f64,
+    binormal: Vector4,
+    normal: Vector4,
+) -> (Vector4, Vector4) {
+    let (w, h) = (width, thick);
+    let perim = 4.0 * (w + h);
+    let d = (t * perim).rem_euclid(perim);
+    // (u along binormal, v along normal, face-normal in the same frame).
+    let (u, v, nb, nn) = if d < 2.0 * w {
+        (w - d, h, 0.0, 1.0) // top:    (w,h) -> (-w,h),  normal +normal
+    } else if d < 2.0 * w + 2.0 * h {
+        (-w, h - (d - 2.0 * w), -1.0, 0.0) // left:  (-w,h) -> (-w,-h), normal -binormal
+    } else if d < 4.0 * w + 2.0 * h {
+        (-w + (d - 2.0 * w - 2.0 * h), -h, 0.0, -1.0) // bottom: normal -normal
+    } else {
+        (w, -h + (d - 4.0 * w - 2.0 * h), 1.0, 0.0) // right:  normal +binormal
+    };
+    let offset = binormal.scale(u) + normal.scale(v);
+    let nrm = normalize_or(binormal.scale(nb) + normal.scale(nn), normal);
+    (offset, nrm)
+}
+
 /// Number of radial samples around the ribbon cross-section.
 const TUBE_RADIAL: usize = 12;
 
@@ -3574,22 +3646,30 @@ fn ribbon_tube_mesh(
         frames.push((normal, binormal));
     }
 
-    // Ring vertices: an ellipse of TUBE_RADIAL points at each sample, with width
-    // along the binormal and thickness along the normal.
+    // Ring vertices: TUBE_RADIAL points of the cross-section at each sample, with
+    // width along the binormal and thickness along the normal. The profile is an
+    // ellipse (smooth) or a rectangle (flat-faced) per the resolved style.
     let mut vertices = Vec::with_capacity(n * TUBE_RADIAL);
     for (i, &center) in samples.iter().enumerate() {
         let (normal, binormal) = frames[i];
         let (base_width, thick, color) = section_params(sections[i], scale, sec, styled);
         let width = base_width * width_scales[i];
+        let shape = styled.shape_for(sections[i]);
         for j in 0..TUBE_RADIAL {
-            let theta = (j as f64) / (TUBE_RADIAL as f64) * std::f64::consts::TAU;
-            let (sin, cos) = theta.sin_cos();
-            let offset = binormal.scale(cos * width) + normal.scale(sin * thick);
-            // Outward ellipse normal: gradient of (u/width)^2 + (v/thick)^2.
-            let nrm = normalize_or(
-                binormal.scale(cos * thick) + normal.scale(sin * width),
-                normal,
-            );
+            let t = (j as f64) / (TUBE_RADIAL as f64);
+            let (offset, nrm) = match shape {
+                SectionShape::Rectangular => rect_ring_point(t, width, thick, binormal, normal),
+                SectionShape::Elliptical => {
+                    let (sin, cos) = (t * std::f64::consts::TAU).sin_cos();
+                    let offset = binormal.scale(cos * width) + normal.scale(sin * thick);
+                    // Outward ellipse normal: gradient of (u/width)^2 + (v/thick)^2.
+                    let nrm = normalize_or(
+                        binormal.scale(cos * thick) + normal.scale(sin * width),
+                        normal,
+                    );
+                    (offset, nrm)
+                }
+            };
             vertices.push(MeshVertex {
                 position: center + offset,
                 normal: nrm,
@@ -4313,6 +4393,67 @@ mod tests {
     }
 
     #[test]
+    fn ribbon_style_section_shape_is_rectangular_or_elliptical_per_type() {
+        // Build a helix run and render it under two styles that share the same
+        // dims but differ in section `type`: DefaultRibbon (rectangle) vs
+        // RoundRibbon (elliptical).
+        fn first_ring_distinct_normals(style: &str) -> (SectionShape, usize) {
+            let mut mol = MolCoord::with_atoms(vec![
+                ca_atom(1, 0.0, 0.0, 0.0),
+                ca_atom(2, 3.0, 0.0, 0.0),
+                ca_atom(3, 6.0, 0.0, 0.0),
+                ca_atom(4, 9.0, 0.0, 0.0),
+            ]);
+            for res_id in 1..=4 {
+                mol.set_residue_prop_str("A", &res_id.to_string(), "secondary", "helix")
+                    .unwrap();
+            }
+            let mut mgr = cuemol_molstr::MolSceneManager::new();
+            let scene_uid = mgr.new_scene("s");
+            let scene = mgr.scene_mut(scene_uid).unwrap();
+            let obj_uid = scene.add_molecule("m", mol);
+            let obj = scene.object_mut(obj_uid).unwrap();
+            let rend_uid = obj.add_renderer("ribbon", "rb");
+            obj.renderer_mut(rend_uid)
+                .unwrap()
+                .set_qsc_attr("style", style);
+
+            let styles = default_style_manager();
+            let obj = scene.object(obj_uid).unwrap();
+            let renderer = obj.renderer(rend_uid).unwrap();
+            let mut options = MoleculeRenderOptions::default();
+            apply_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
+
+            let snap = ribbon_mesh_snapshot(obj.mol(), &options);
+            let ring = &snap.meshes[0].vertices[0..TUBE_RADIAL];
+            // Cluster normals by direction (dot > 0.99 => same flat face).
+            let mut reps: Vec<Vector4> = Vec::new();
+            for vertex in ring {
+                if !reps.iter().any(|r| r.dot3d(vertex.normal) > 0.99) {
+                    reps.push(vertex.normal);
+                }
+            }
+            (options.styled_ribbon.helix_shape, reps.len())
+        }
+
+        let (rect_shape, rect_normals) = first_ring_distinct_normals("DefaultRibbon");
+        let (ell_shape, ell_normals) = first_ring_distinct_normals("RoundRibbon");
+
+        assert_eq!(rect_shape, SectionShape::Rectangular);
+        assert_eq!(ell_shape, SectionShape::Elliptical);
+        // A rectangle's flat sides collapse to a few axis-aligned face normals;
+        // the ellipse's smooth profile gives a distinct normal per ring vertex.
+        assert!(
+            rect_normals <= 4,
+            "rectangular section should have <=4 face normals, got {rect_normals}"
+        );
+        assert!(
+            ell_normals >= 10,
+            "elliptical section should have many distinct normals, got {ell_normals}"
+        );
+    }
+
+    #[test]
     fn ribbon_style_section_sets_cross_section_aspect_from_tuber() {
         // A helix run styled by DefaultRibbon (<helix width="0.2" tuber="6.0"/>).
         let mut mol = MolCoord::with_atoms(vec![
@@ -4332,9 +4473,12 @@ mod tests {
         let obj_uid = scene.add_molecule("m", mol);
         let obj = scene.object_mut(obj_uid).unwrap();
         let rend_uid = obj.add_renderer("ribbon", "rb");
+        // RoundRibbon: same helix/sheet dims as DefaultRibbon but an ELLIPTICAL
+        // profile, so the ring aspect equals tuber exactly (a rectangle's corners
+        // would push the max distance past base_width — covered by the shape test).
         obj.renderer_mut(rend_uid)
             .unwrap()
-            .set_qsc_attr("style", "DefaultRibbon");
+            .set_qsc_attr("style", "RoundRibbon");
 
         let styles = default_style_manager();
         let obj = scene.object(obj_uid).unwrap();
@@ -4345,7 +4489,8 @@ mod tests {
         // The nested <helix> resolves to absolute semi-axes (width*tuber, width).
         assert_eq!(options.styled_ribbon.helix, Some((0.2 * 6.0, 0.2)));
         assert_eq!(options.styled_ribbon.sheet, Some((0.2 * 7.0, 0.2)));
-        // DefaultRibbon omits <coil>, so the coil falls back to the C++
+        assert_eq!(options.styled_ribbon.helix_shape, SectionShape::Elliptical);
+        // RoundRibbon omits <coil>, so the coil falls back to the C++
         // TubeSection default (0.35 round) — keeping one unit system.
         assert_eq!(options.styled_ribbon.coil, Some((0.35, 0.35)));
 
