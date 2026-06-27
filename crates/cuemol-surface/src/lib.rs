@@ -864,17 +864,20 @@ fn build_mol_surface(
     density: f64,
     probe_radius: f64,
 ) {
-    let radii = SurfaceVdwRadii::default();
     // Each atom is a bare van-der-Waals sphere; the probe is rolled separately by
     // the solvent-excluded-surface builder (the reentrant patches it carves are
-    // the whole point of an SES vs. the union-of-spheres accessible surface).
+    // the whole point of an SES vs. the union-of-spheres accessible surface). The
+    // radius is the C++ production surface's UNITED-ATOM vdW (`getVdwRadius`,
+    // bExplH=false): a backbone CH1 carbon is 1.95, not the bare element 1.70;
+    // atoms with no residue template (ligands/ions/waters) fall back to the
+    // element radius.
     let spheres: Vec<grid_surface::SurfSphere> = molecule
         .atoms()
         .iter()
         .filter(|atom| selector.matches_in_molecule(atom, molecule))
         .map(|atom| grid_surface::SurfSphere {
             center: atom.position,
-            radius: radii.radius_for_element(&atom.element).max(0.1),
+            radius: cuemol_molstr::toppar::vdw_radius_for_atom(atom).max(0.1),
         })
         .collect();
 
@@ -899,7 +902,6 @@ pub fn build_analytic_mol_surface(
     probe_radius: f64,
     detail: usize,
 ) -> SurfaceMesh {
-    let radii = SurfaceVdwRadii::default();
     let atoms: Vec<(cuemol_core::Vector4, f64)> = molecule
         .atoms()
         .iter()
@@ -907,7 +909,7 @@ pub fn build_analytic_mol_surface(
         .map(|atom| {
             (
                 atom.position,
-                radii.radius_for_element(&atom.element).max(0.1),
+                cuemol_molstr::toppar::vdw_radius_for_atom(atom).max(0.1),
             )
         })
         .collect();
@@ -1835,16 +1837,19 @@ mod tests {
     #[test]
     fn analytic_mol_surface_lone_atom_is_the_vdw_sphere() {
         let mut molecule = MolCoord::new();
-        molecule.push_atom(surface_atom(1, "CA", "C", 4.0)); // carbon, vdW 1.7, at x=4
+        // A backbone CA in ALA: the C++ production surface uses the UNITED-ATOM
+        // radius (getVdwRadius bExplH=false), so this CA's vdW is the CH1 type's
+        // vdwhr = 1.95 (from default_params.xml), NOT the bare element 1.70. This
+        // exercises the full build path's topology->ParamDB radius resolution.
+        molecule.push_atom(surface_atom(1, "CA", "C", 4.0));
         let mesh =
             build_analytic_mol_surface(&molecule, &parse_selector("name CA").unwrap(), 1.4, 6);
         assert!(mesh.triangle_count() > 50);
-        // A lone atom's SES is its bare vdW sphere (r = 1.7), matching the grid SES.
         let center = cuemol_core::Vector4::new3(4.0, 0.0, 0.0);
         for vtx in mesh.vertices() {
             assert!(
-                ((vtx.position - center).length3d() - 1.7).abs() < 1e-9,
-                "lone-atom analytic SES vertex on the vdW sphere"
+                ((vtx.position - center).length3d() - 1.95).abs() < 1e-9,
+                "lone-atom analytic SES vertex on the united-atom (CH1, 1.95) vdW sphere"
             );
         }
     }

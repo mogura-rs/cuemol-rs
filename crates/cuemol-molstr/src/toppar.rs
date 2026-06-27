@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::molecule::{BondOrder, MolCoord};
+use crate::molecule::{Atom, BondOrder, MolCoord};
 
 const PROT_TOP: &str = include_str!("../data/prot_top.xml");
 const NUCL_TOP: &str = include_str!("../data/nucl_top.xml");
@@ -29,12 +29,19 @@ const MONO_TOP: &str = include_str!("../data/mono_top.xml");
 // the canonical template id, so those residues still resolve to a topology.
 const PROT_PROPS: &str = include_str!("../data/prot_props.xml");
 const NUCL_PROPS: &str = include_str!("../data/nucl_props.xml");
+/// Force-field parameters (per-atom-type vdW radii) — C++ `ParamDB`/default_params.xml.
+const DEFAULT_PARAMS: &str = include_str!("../data/default_params.xml");
 
-/// One atom entry of a residue template (`<atom id=".." elem=".." .../>`).
-#[derive(Debug, Clone)]
+/// One atom entry of a residue template (`<atom id=".." elem=".." type=".."
+/// charge=".." .../>`). `vtype` is the force-field atom TYPE (e.g. "CH1", "NH1"),
+/// the key into the parameter DB for the united-atom vdW radius; `charge` is the
+/// force-field partial charge.
+#[derive(Debug, Clone, Default)]
 pub struct TopAtom {
     pub name: String,
     pub elem: String,
+    pub vtype: String,
+    pub charge: f64,
 }
 
 /// A template bond between two named atoms (intra-residue or within a link).
@@ -65,6 +72,117 @@ impl ResiToppar {
         !self.group.is_empty()
             && !matches!(self.group.as_str(), "water" | "ion" | "non-polymer")
     }
+
+    /// Look up a template atom by its `id` (atom name), case-insensitive on the
+    /// trimmed name (C++ `ResiToppar::getAtom`).
+    pub fn get_atom(&self, name: &str) -> Option<&TopAtom> {
+        let key = name.trim();
+        self.atoms
+            .iter()
+            .find(|atom| atom.name.trim().eq_ignore_ascii_case(key))
+    }
+}
+
+/// One atom-type's force-field vdW radii (C++ `param::AtomVal`). `vdwhr` is the
+/// united-atom (H-absorbed) radius; `vdwr` the explicit-hydrogen radius.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AtomParam {
+    pub vdwr: f64,
+    pub vdwhr: f64,
+}
+
+/// Force-field parameter dictionary keyed by atom TYPE (C++ `ParamDB`, loaded
+/// from `default_params.xml`).
+#[derive(Debug, Default)]
+pub struct ParamDB {
+    atoms: HashMap<String, AtomParam>,
+}
+
+impl ParamDB {
+    /// The process-wide parameter DB parsed once from the bundled
+    /// `default_params.xml`.
+    pub fn global() -> &'static ParamDB {
+        static DB: OnceLock<ParamDB> = OnceLock::new();
+        DB.get_or_init(|| ParamDB::from_xml(DEFAULT_PARAMS))
+    }
+
+    pub fn from_xml(xml: &str) -> Self {
+        let mut atoms = HashMap::new();
+        for el in TagIter::new(xml) {
+            if el.name == "atom" && !el.closing {
+                if let Some(id) = el.attr("id") {
+                    let num = |name: &str| el.attr(name).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                    atoms.insert(
+                        id,
+                        AtomParam {
+                            vdwr: num("vdwr"),
+                            vdwhr: num("vdwhr"),
+                        },
+                    );
+                }
+            }
+        }
+        ParamDB { atoms }
+    }
+
+    pub fn get(&self, vtype: &str) -> Option<&AtomParam> {
+        self.atoms.get(vtype)
+    }
+
+    pub fn atom_count(&self) -> usize {
+        self.atoms.len()
+    }
+}
+
+/// Element-based vdW radius fallback (C++ `elemBasedVdw`): the 6 common elements
+/// + a 1.7 Å default. Used when an atom has no residue template / type / param.
+pub fn elem_based_vdw(element: &str) -> f64 {
+    match element.trim().to_ascii_uppercase().as_str() {
+        "H" => 1.2,
+        "C" => 1.7,
+        "N" => 1.55,
+        "O" => 1.52,
+        "S" => 1.8,
+        "P" => 1.8,
+        _ => 1.7,
+    }
+}
+
+/// The atom's vdW radius for surface building (C++ `TopparManager::getVdwRadius`
+/// with `bExplH=false`): resolve the residue template -> atom type -> the param
+/// DB's united-atom `vdwhr` (or `vdwr` when `vdwhr<=0`); fall back to the
+/// element-based radius when any lookup misses (e.g. ligands/ions/waters with no
+/// template). This is the larger H-absorbed radius the production C++ surface uses
+/// (e.g. a backbone CH1 carbon is 1.95, not the element 1.70).
+pub fn vdw_radius_for_atom(atom: &Atom) -> f64 {
+    let fallback = elem_based_vdw(&atom.element);
+    let Some(resi) = TopoDB::global().residue(&atom.res_name) else {
+        return fallback;
+    };
+    let Some(top_atom) = resi.get_atom(&atom.name) else {
+        return fallback;
+    };
+    let Some(param) = ParamDB::global().get(&top_atom.vtype) else {
+        return fallback;
+    };
+    if param.vdwhr > 0.0 {
+        param.vdwhr
+    } else if param.vdwr > 0.0 {
+        param.vdwr
+    } else {
+        fallback
+    }
+}
+
+/// The atom's force-field partial charge from its residue template (C++
+/// `TopparManager::getCharge`, the `pTA->charge` value); `None` for an atom with
+/// no template (ligand/ion/water), where C++ `getCharge` returns false and the
+/// PQR writer falls back to 0. NOTE: this is the explicit-H template charge; the
+/// united-atom H-absorption (heavy atom += bonded H charges) is not applied here.
+pub fn partial_charge_for_atom(atom: &Atom) -> Option<f64> {
+    let resi = TopoDB::global().residue(&atom.res_name)?;
+    let top_atom = resi.get_atom(&atom.name)?;
+    Some(top_atom.charge)
 }
 
 /// One target selector of a link (`<target group1=".." resid1=".." .../>`).
@@ -167,6 +285,11 @@ impl TopoDB {
                         resid.atoms.push(TopAtom {
                             name: el.attr("id").unwrap_or_default(),
                             elem: el.attr("elem").unwrap_or_default(),
+                            vtype: el.attr("type").unwrap_or_default(),
+                            charge: el
+                                .attr("charge")
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(0.0),
                         });
                     }
                 }
@@ -742,6 +865,34 @@ mod tests {
         // CYS template bonds N-CA, CA-CB, CB-SG, CA-C, C-O are all present despite
         // the residue being named CYX.
         assert!(mol.bond_count() >= 5, "got {} bonds", mol.bond_count());
+    }
+
+    #[test]
+    fn vdw_radius_and_charge_resolve_through_topology_and_param_db() {
+        // C++ TopparManager::getVdwRadius(false)/getCharge: resn+aname -> type ->
+        // default_params.xml vdwhr / prot_top.xml charge. The expected values are
+        // transcribed from the C++ data files (the oracle, NOT Rust's output).
+        let mk = |name: &str, resn: &str, elem: &str| -> Atom {
+            let mut a = sg_atom(1, 1, 0.0);
+            a.name = name.to_string();
+            a.res_name = resn.to_string();
+            a.element = elem.to_string();
+            a
+        };
+        // United-atom (H-absorbed) radii: a backbone CH1 carbon is 1.95, NOT the
+        // element radius 1.70; ALA C->1.75, O->1.52, N(NH1)->1.60.
+        assert!((vdw_radius_for_atom(&mk("CA", "ALA", "C")) - 1.95).abs() < 1e-9);
+        assert!((vdw_radius_for_atom(&mk("C", "ALA", "C")) - 1.75).abs() < 1e-9);
+        assert!((vdw_radius_for_atom(&mk("O", "ALA", "O")) - 1.52).abs() < 1e-9);
+        assert!((vdw_radius_for_atom(&mk("N", "ALA", "N")) - 1.60).abs() < 1e-9);
+        // A non-template residue (ligand) falls back to the element-based radius.
+        assert!((vdw_radius_for_atom(&mk("C1", "LIG", "C")) - 1.70).abs() < 1e-9);
+        // Partial charges from the prot_top.xml ALA template.
+        assert!((partial_charge_for_atom(&mk("CA", "ALA", "C")).unwrap() - 0.058).abs() < 1e-9);
+        assert!((partial_charge_for_atom(&mk("N", "ALA", "N")).unwrap() + 0.204).abs() < 1e-9);
+        assert_eq!(partial_charge_for_atom(&mk("C1", "LIG", "C")), None);
+        // default_params.xml lists 195 <atom> entries; one id repeats, so 194 unique.
+        assert_eq!(ParamDB::global().atom_count(), 194);
     }
 
     #[test]
