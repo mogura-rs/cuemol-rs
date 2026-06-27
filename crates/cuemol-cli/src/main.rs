@@ -11,7 +11,8 @@ use cuemol_molstr::{
 };
 use cuemol_molvis::{
     anisou_mesh_snapshot, apply_renderer_styles, default_style_manager, disorder_lines_snapshot,
-    molecule_render_snapshot, ribbon_mesh_snapshot, MoleculeRenderOptions, DEFAULT_STYLE_SCOPE,
+    molecule_render_snapshot, na_base_sticks_snapshot, ribbon_mesh_snapshot, MoleculeRenderOptions,
+    DEFAULT_STYLE_SCOPE,
 };
 use cuemol_render::{
     tessellate_snapshot, tessellate_snapshot_with_detail, LuxCoreSceneExporter,
@@ -736,6 +737,14 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 anisou_mesh_snapshot(object.mol(), &options)
             } else if rtype == "disorder" {
                 disorder_lines_snapshot(object.mol(), 1.0, 0.15, 2.0, -1.0)
+            } else if rtype == "nucl" {
+                // Backbone ribbon + nucleotide base sticks (C++ NARenderer).
+                let mut snapshot = ribbon_mesh_snapshot(object.mol(), &options);
+                let bases = na_base_sticks_snapshot(object.mol(), 0.25, true);
+                snapshot.atoms.extend(bases.atoms);
+                snapshot.bonds.extend(bases.bonds);
+                snapshot.meshes.extend(bases.meshes);
+                snapshot
             } else if is_mainchain_trace_type(rtype) {
                 ribbon_mesh_snapshot(object.mol(), &options)
             } else {

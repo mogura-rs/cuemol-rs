@@ -9,7 +9,8 @@ use cuemol_molstr::{
 };
 use cuemol_molvis::{
     anisou_mesh_snapshot, apply_renderer_styles, default_style_manager, disorder_lines_snapshot,
-    molecule_render_snapshot, ribbon_mesh_snapshot, MoleculeRenderOptions, DEFAULT_STYLE_SCOPE,
+    molecule_render_snapshot, na_base_sticks_snapshot, ribbon_mesh_snapshot, MoleculeRenderOptions,
+    DEFAULT_STYLE_SCOPE,
 };
 use cuemol_qsys::{ScalarObject, StyleManager};
 use cuemol_render::PovSceneExporter;
@@ -1077,6 +1078,18 @@ fn append_object_renderer_snapshot(
         // DisoRenderer defaults (dotsep 1.0 / loopsize 2.0 / loopsize2 -1.0; a thin
         // dot radius). On a fully-bonded molecule this correctly draws nothing.
         ("disorder", _) => disorder_lines_snapshot(object.mol(), 1.0, 0.15, 2.0, -1.0),
+        // Nucleic-acid renderer = the backbone ribbon PLUS each nucleotide's base
+        // stick (and base-pair rungs), matching C++ NARenderer (which the plain
+        // mainchain ribbon alone omits).
+        ("nucl", _) => {
+            let mut snapshot = ribbon_mesh_snapshot(object.mol(), &options);
+            let bases = na_base_sticks_snapshot(object.mol(), 0.25, true);
+            merge_bounds(&mut snapshot.bounds, bases.bounds);
+            snapshot.atoms.extend(bases.atoms);
+            snapshot.bonds.extend(bases.bonds);
+            snapshot.meshes.extend(bases.meshes);
+            snapshot
+        }
         (rtype, _) if is_mainchain_trace_renderer(rtype) => {
             ribbon_mesh_snapshot(object.mol(), &options)
         }
@@ -1947,6 +1960,86 @@ mod tests {
             detailed > base,
             "styled detail=10 should refine the spheres: base={base} detailed={detailed}"
         );
+    }
+
+    #[test]
+    fn nucl_renderer_adds_base_sticks_to_the_backbone_ribbon() {
+        // A nucleic-acid renderer draws the backbone ribbon PLUS each nucleotide's
+        // base stick (C++ NARenderer), which the plain mainchain ribbon omits.
+        // Build two purine nucleotides (C1'/N9/N1) by exact PDB columns.
+        fn pdb_atom(serial: i32, name: &str, res: &str, resid: i32, x: f64, y: f64, z: f64) -> String {
+            let mut line = vec![b' '; 80];
+            let put = |line: &mut [u8], text: &str, start: usize| {
+                for (i, byte) in text.bytes().enumerate() {
+                    line[start + i] = byte;
+                }
+            };
+            put(&mut line, "ATOM", 0);
+            put(&mut line, &format!("{serial:>5}"), 6);
+            put(&mut line, &format!("{name:<4}"), 12);
+            put(&mut line, &format!("{res:>3}"), 17);
+            put(&mut line, "A", 21);
+            put(&mut line, &format!("{resid:>4}"), 22);
+            put(&mut line, &format!("{x:>8.3}"), 30);
+            put(&mut line, &format!("{y:>8.3}"), 38);
+            put(&mut line, &format!("{z:>8.3}"), 46);
+            String::from_utf8(line).unwrap()
+        }
+        let mut pdb = String::new();
+        for (resid, base_x) in [(1, 0.0), (2, 5.0)] {
+            let serial = (resid - 1) * 3;
+            pdb.push_str(&pdb_atom(serial + 1, "C1'", "G", resid, base_x, 0.0, 0.0));
+            pdb.push('\n');
+            pdb.push_str(&pdb_atom(serial + 2, "N9", "G", resid, base_x + 1.0, 0.0, 0.0));
+            pdb.push('\n');
+            pdb.push_str(&pdb_atom(serial + 3, "N1", "G", resid, base_x + 2.0, 0.0, 0.0));
+            pdb.push('\n');
+        }
+        pdb.push_str("END\n");
+        let path = std::env::temp_dir().join(format!("cuemol2-rs-nucl-{}.pdb", std::process::id()));
+        std::fs::write(&path, &pdb).unwrap();
+
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        let object = app
+            .load_object_into_active_scene(&path, "na", "pdb")
+            .unwrap()
+            .result_object;
+        // Sanity: the nucleotide atoms parsed (C1' present).
+        assert!(
+            app.scene_manager()
+                .object(object)
+                .unwrap()
+                .mol()
+                .atoms()
+                .iter()
+                .any(|atom| atom.name.trim() == "C1'"),
+            "the C1' atoms must have parsed (else the test verifies nothing)"
+        );
+
+        // A plain trace draws the ribbon backbone only (no base-stick bonds).
+        app.new_renderer_in_active_scene(object, "trace", "tr").unwrap();
+        let trace = app.active_render_snapshot("").unwrap();
+        assert_eq!(trace.bond_count(), 0, "a plain trace has no base sticks");
+
+        // Replace it with a nucl renderer: ribbon mesh + base-stick bonds.
+        app.new_scene("work2", false);
+        let object = app
+            .load_object_into_active_scene(&path, "na", "pdb")
+            .unwrap()
+            .result_object;
+        app.new_renderer_in_active_scene(object, "nucl", "na").unwrap();
+        let nucl = app.active_render_snapshot("").unwrap();
+        assert!(
+            nucl.mesh_count() >= 1,
+            "nucl still draws the backbone ribbon mesh"
+        );
+        assert!(
+            nucl.bond_count() >= 4,
+            "nucl adds two base sticks per nucleotide, got {}",
+            nucl.bond_count()
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
