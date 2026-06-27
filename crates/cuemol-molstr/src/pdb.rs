@@ -363,6 +363,10 @@ pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result
             if let Some(range) = parse_sheet_range(line) {
                 secondary_ranges.push(range);
             }
+        } else if line.starts_with("CRYST1") {
+            if let Some(cell) = parse_cryst1_line(line) {
+                mol.set_cell_params(cell);
+            }
         }
     }
     if mol.atom_count() == 0 {
@@ -819,6 +823,40 @@ fn parse_sheet_range(line: &str) -> Option<SecondaryRange> {
     })
 }
 
+/// Parse a PDB `CRYST1` record into unit-cell parameters (C++ `PDBCryst1Handler`).
+/// Columns (1-indexed): a 7-15, b 16-24, c 25-33, alpha 34-40, beta 41-47,
+/// gamma 48-54, space-group H-M name 56-66. The H-M name is carried verbatim; the
+/// symm layer resolves it to operators, exactly as the mmCIF `_cell`/`_symmetry`
+/// path does (so a PDB and its mmCIF twin yield the same cell + space group).
+fn parse_cryst1_line(line: &str) -> Option<cuemol_core::CellParams> {
+    // Clamp the end to the line length so a CRYST1 that is not space-padded to
+    // column 66 still yields its trailing space-group field.
+    let col = |start: usize, end: usize| -> &str {
+        let end = end.min(line.len());
+        if start >= end {
+            return "";
+        }
+        line.get(start..end).unwrap_or("").trim()
+    };
+    let num = |start, end| col(start, end).parse::<f64>().ok();
+    let a = num(6, 15)?;
+    let b = num(15, 24)?;
+    let c = num(24, 33)?;
+    let mut cell = cuemol_core::CellParams::new(
+        a,
+        b,
+        c,
+        num(33, 40).unwrap_or(90.0),
+        num(40, 47).unwrap_or(90.0),
+        num(47, 54).unwrap_or(90.0),
+    );
+    let sgroup = col(55, 66);
+    if !sgroup.is_empty() {
+        cell.space_group_name = sgroup.to_string();
+    }
+    Some(cell)
+}
+
 /// Apply parsed HELIX/SHEET spans as the residue `secondary` property
 /// ("helix"/"sheet"). Mirrors the original `PDBFileReader::apply2ndry`. Residues
 /// that are absent (gaps, insertion codes) are skipped silently.
@@ -894,6 +932,38 @@ fn infer_element(atom_name: &str) -> String {
 mod tests {
     use super::*;
     use cuemol_qsys::InOutHandler;
+
+    #[test]
+    fn parse_cryst1_reads_cell_and_space_group() {
+        // The real 1CRN.pdb CRYST1 record (C++ PDBCryst1Handler parses it; the Rust
+        // reader used to drop CRYST1 entirely while the mmCIF reader kept _cell).
+        let line =
+            "CRYST1   40.960   18.650   22.520  90.00  90.77  90.00 P 1 21 1      2          ";
+        let cell = parse_cryst1_line(line).expect("CRYST1 parses");
+        assert!((cell.a - 40.960).abs() < 1e-6);
+        assert!((cell.b - 18.650).abs() < 1e-6);
+        assert!((cell.c - 22.520).abs() < 1e-6);
+        assert!((cell.alpha - 90.0).abs() < 1e-6);
+        assert!((cell.beta - 90.77).abs() < 1e-6);
+        assert!((cell.gamma - 90.0).abs() < 1e-6);
+        assert_eq!(cell.space_group_name, "P 1 21 1");
+        // And it flows through the reader onto the molecule's cell params.
+        let pdb = format!(
+            "{line}\nATOM      1  N   THR A   1      17.047  14.099   3.625  1.00 13.79           N\n"
+        );
+        let mol = read_pdb_str(&pdb).unwrap();
+        let parsed = mol.cell_params().expect("PDB CRYST1 -> cell params on the molecule");
+        assert_eq!(parsed.space_group_name, "P 1 21 1");
+        assert!((parsed.a - 40.960).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_cryst1_handles_short_unpadded_record() {
+        // A CRYST1 not space-padded to column 80 must still yield its space group.
+        let line = "CRYST1   40.960   18.650   22.520  90.00  90.77  90.00 P 1 21 1";
+        let cell = parse_cryst1_line(line).expect("short CRYST1 parses");
+        assert_eq!(cell.space_group_name, "P 1 21 1");
+    }
 
     #[test]
     fn pdb_reader_writer_state_matches_qif_defaults() {
