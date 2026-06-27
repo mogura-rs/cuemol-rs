@@ -198,9 +198,9 @@ impl PqrFileWriter {
                 cuemol_molstr::toppar::united_atom_partial_charge(molecule, index)
             }
             .unwrap_or(0.0);
-            // Radius is the united-atom vdwhr; the use_h=true explicit-H radius
-            // (vdwr) is a minor remaining deferral.
-            let radius = cuemol_molstr::toppar::vdw_radius_for_atom(atom);
+            // Radius matches the charge mode: vdwhr (united-atom) or vdwr
+            // (explicit-H), C++ getVdwRadius(atom, m_bUseH).
+            let radius = cuemol_molstr::toppar::vdw_radius_for_atom_mode(atom, self.use_h);
             output.push_str(&format!(
                 "ATOM  {:5} {:<4} {:>3} {:1}{:4}    {:8.3}{:8.3}{:8.3} {:7.4} {:6.3}\n",
                 atom.serial,

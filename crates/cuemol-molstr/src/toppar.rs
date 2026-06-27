@@ -155,6 +155,14 @@ pub fn elem_based_vdw(element: &str) -> f64 {
 /// template). This is the larger H-absorbed radius the production C++ surface uses
 /// (e.g. a backbone CH1 carbon is 1.95, not the element 1.70).
 pub fn vdw_radius_for_atom(atom: &Atom) -> f64 {
+    vdw_radius_for_atom_mode(atom, false)
+}
+
+/// The atom's vdW radius (C++ `TopparManager::getVdwRadius(atom, bExplH)`): with
+/// `explicit_h=false` (united-atom, the surface/default-PQR mode) the larger
+/// H-absorbed `vdwhr`; with `explicit_h=true` (explicit-hydrogen mode) the bare
+/// `vdwr`. Element-table fallback when the residue/type/param lookup misses.
+pub fn vdw_radius_for_atom_mode(atom: &Atom, explicit_h: bool) -> f64 {
     let fallback = elem_based_vdw(&atom.element);
     let Some(resi) = TopoDB::global().residue(&atom.res_name) else {
         return fallback;
@@ -165,7 +173,14 @@ pub fn vdw_radius_for_atom(atom: &Atom) -> f64 {
     let Some(param) = ParamDB::global().get(&top_atom.vtype) else {
         return fallback;
     };
-    if param.vdwhr > 0.0 {
+    if explicit_h {
+        // Explicit-hydrogen mode uses the bare vdwr.
+        if param.vdwr > 0.0 {
+            param.vdwr
+        } else {
+            fallback
+        }
+    } else if param.vdwhr > 0.0 {
         param.vdwhr
     } else if param.vdwr > 0.0 {
         param.vdwr
@@ -913,6 +928,9 @@ mod tests {
         assert!((vdw_radius_for_atom(&mk("C", "ALA", "C")) - 1.75).abs() < 1e-9);
         assert!((vdw_radius_for_atom(&mk("O", "ALA", "O")) - 1.52).abs() < 1e-9);
         assert!((vdw_radius_for_atom(&mk("N", "ALA", "N")) - 1.60).abs() < 1e-9);
+        // Explicit-hydrogen mode uses the bare vdwr (CH1 = 1.70), not vdwhr (1.95).
+        assert!((vdw_radius_for_atom_mode(&mk("CA", "ALA", "C"), true) - 1.70).abs() < 1e-9);
+        assert!((vdw_radius_for_atom_mode(&mk("CA", "ALA", "C"), false) - 1.95).abs() < 1e-9);
         // A non-template residue (ligand) falls back to the element-based radius.
         assert!((vdw_radius_for_atom(&mk("C1", "LIG", "C")) - 1.70).abs() < 1e-9);
         // Partial charges from the prot_top.xml ALA template.
