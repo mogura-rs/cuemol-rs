@@ -159,6 +159,12 @@ impl<'a> ResidueView<'a> {
             .collect()
     }
 
+    /// The molecule atom indices that make up this residue (used to test a
+    /// per-renderer `sel="..."` draw restriction at residue granularity).
+    pub fn atom_indices(&self) -> &[usize] {
+        &self.summary.atom_indices
+    }
+
     pub fn atoms_json(&self) -> String {
         let body = self
             .atoms()

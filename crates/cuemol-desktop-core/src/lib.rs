@@ -1815,6 +1815,52 @@ mod tests {
     }
 
     #[test]
+    fn renderer_sel_restricts_the_ribbon_trace_to_its_residues() {
+        // The mainchain/ribbon path also honours a renderer's `sel`: a sel'd trace
+        // splines only its residues' backbone, not the whole chain.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        let renderer = app
+            .new_renderer_in_active_scene(object, "trace", "tr")
+            .unwrap()
+            .result_renderer;
+
+        let full: usize = app
+            .active_render_snapshot("")
+            .unwrap()
+            .meshes
+            .iter()
+            .map(|mesh| mesh.vertices.len())
+            .sum();
+        assert!(full > 0, "the full backbone trace should produce a ribbon mesh");
+
+        app.scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer)
+            .unwrap()
+            .set_qsc_attr("sel", "resid 1:10");
+        let restricted: usize = app
+            .active_render_snapshot("")
+            .unwrap()
+            .meshes
+            .iter()
+            .map(|mesh| mesh.vertices.len())
+            .sum();
+        assert!(
+            restricted > 0 && restricted < full,
+            "a sel'd trace should cover fewer residues: full={full} restricted={restricted}"
+        );
+    }
+
+    #[test]
     fn desktop_app_state_opens_path_and_builds_render_snapshot() {
         let Some(root) = reference_test_data_root() else {
             return;

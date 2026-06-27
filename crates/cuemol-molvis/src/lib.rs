@@ -3144,7 +3144,11 @@ pub fn mainchain_trace_snapshot(
         .mainchain_radius
         .unwrap_or_else(|| (options.bond_radius * 3.0).clamp(0.18, 0.6));
 
-    let chains = collect_mainchain_pivots(molecule);
+    let draw = options
+        .draw_indices
+        .as_ref()
+        .map(|indices| indices.iter().copied().collect::<std::collections::BTreeSet<_>>());
+    let chains = collect_mainchain_pivots(molecule, draw.as_ref());
     let putty = options.putty;
 
     // Putty statistics (min/max/mean of the target value) over every backbone
@@ -3256,19 +3260,29 @@ fn residue_secondary(molecule: &MolCoord, atom: &Atom) -> Secondary {
 ///
 /// Chains are split whenever the residue iterator crosses a chain-name boundary,
 /// so each returned point list is one contiguous backbone to be splined.
-fn collect_mainchain_pivots(molecule: &MolCoord) -> Vec<Vec<MainchainPoint>> {
+fn collect_mainchain_pivots(
+    molecule: &MolCoord,
+    draw: Option<&std::collections::BTreeSet<usize>>,
+) -> Vec<Vec<MainchainPoint>> {
     let mut chains: Vec<(String, Vec<MainchainPoint>)> = Vec::new();
     let mut iter = ResidIterator::all(molecule);
     iter.first();
     while iter.has_more() {
         if let Some(residue) = iter.get() {
-            if let Some(point) = mainchain_pivot_point(molecule, residue) {
-                let chain = residue.chain_name().to_string();
-                if chains.last().map(|(name, _)| name != &chain).unwrap_or(true) {
-                    chains.push((chain, Vec::new()));
-                }
-                if let Some((_, points)) = chains.last_mut() {
-                    points.push(point);
+            // Per-renderer `sel="..."`: skip residues with no selected atom so a
+            // sel'd ribbon traces only its selection, not the whole backbone.
+            let included = draw.is_none_or(|set| {
+                residue.atom_indices().iter().any(|index| set.contains(index))
+            });
+            if included {
+                if let Some(point) = mainchain_pivot_point(molecule, residue) {
+                    let chain = residue.chain_name().to_string();
+                    if chains.last().map(|(name, _)| name != &chain).unwrap_or(true) {
+                        chains.push((chain, Vec::new()));
+                    }
+                    if let Some((_, points)) = chains.last_mut() {
+                        points.push(point);
+                    }
                 }
             }
         }
@@ -3492,7 +3506,11 @@ pub fn ribbon_mesh_snapshot(
     // C++ Ribbon/Spline `axialdetail`: spline subdivisions per residue (default 8).
     let subdiv = options.ribbon_axial_detail.unwrap_or(8).max(1) as usize;
     let scale = ((options.bond_radius * 4.0).clamp(0.25, 0.8)) as f64;
-    let chains = collect_mainchain_pivots(molecule);
+    let draw = options
+        .draw_indices
+        .as_ref()
+        .map(|indices| indices.iter().copied().collect::<std::collections::BTreeSet<_>>());
+    let chains = collect_mainchain_pivots(molecule, draw.as_ref());
     let mut meshes = Vec::new();
     for pivots in &chains {
         if pivots.len() < 2 {
@@ -3512,11 +3530,15 @@ pub fn ribbon_mesh_snapshot(
             meshes.push(mesh);
         }
     }
+    let bounds = match &draw {
+        None => molecule.bounding_box_for(None),
+        Some(set) => bounds_of_atoms(molecule, set),
+    };
     RenderSceneSnapshot {
         atoms: Vec::new(),
         bonds: Vec::new(),
         meshes,
-        bounds: molecule.bounding_box_for(None),
+        bounds,
     }
 }
 
