@@ -185,6 +185,34 @@ pub fn partial_charge_for_atom(atom: &Atom) -> Option<f64> {
     Some(top_atom.charge)
 }
 
+/// The atom's UNITED-ATOM partial charge (C++ `TopparManager::getCharge`,
+/// `bExplH=false`): the atom's own template charge PLUS the template charges of
+/// its bonded hydrogens (which are absorbed into the heavy atom because explicit
+/// H are dropped in united-atom mode, so their charge must be conserved here).
+/// `None` for an atom with no residue template. For a hydrogen-free structure this
+/// equals [`partial_charge_for_atom`] (nothing to absorb).
+pub fn united_atom_partial_charge(molecule: &MolCoord, atom_index: usize) -> Option<f64> {
+    let atom = molecule.atoms().get(atom_index)?;
+    let mut total = partial_charge_for_atom(atom)?;
+    for bond in molecule.bonds() {
+        let other = if bond.atom1 == atom_index {
+            bond.atom2
+        } else if bond.atom2 == atom_index {
+            bond.atom1
+        } else {
+            continue;
+        };
+        if let Some(neighbour) = molecule.atoms().get(other) {
+            if neighbour.element.trim().eq_ignore_ascii_case("H") {
+                if let Some(h_charge) = partial_charge_for_atom(neighbour) {
+                    total += h_charge;
+                }
+            }
+        }
+    }
+    Some(total)
+}
+
 /// One target selector of a link (`<target group1=".." resid1=".." .../>`).
 #[derive(Debug, Clone, Default)]
 pub struct LinkTarget {
@@ -893,6 +921,40 @@ mod tests {
         assert_eq!(partial_charge_for_atom(&mk("C1", "LIG", "C")), None);
         // default_params.xml lists 195 <atom> entries; one id repeats, so 194 unique.
         assert_eq!(ParamDB::global().atom_count(), 194);
+    }
+
+    #[test]
+    fn united_atom_charge_absorbs_bonded_hydrogens() {
+        // C++ getCharge(bExplH=false): a heavy atom absorbs its bonded H charges
+        // (the H are dropped in united-atom mode). ALA CB is CH3 (-0.120) bonded to
+        // HB1/HB2/HB3 (HCH3, 0.040 each), so its united-atom charge is exactly 0.0,
+        // while its explicit-H charge stays -0.120. Values from prot_top.xml.
+        let mk = |serial: i32, name: &str, elem: &str| -> Atom {
+            let mut a = sg_atom(serial, 1, 0.0);
+            a.name = name.to_string();
+            a.res_name = "ALA".to_string();
+            a.element = elem.to_string();
+            a
+        };
+        let mut mol = MolCoord::new();
+        mol.push_atom(mk(1, "CB", "C")); // index 0
+        mol.push_atom(mk(2, "HB1", "H"));
+        mol.push_atom(mk(3, "HB2", "H"));
+        mol.push_atom(mk(4, "HB3", "H"));
+        for h in 1..=3 {
+            mol.add_bond(0, h, BondOrder::Single);
+        }
+        assert!((partial_charge_for_atom(&mol.atoms()[0]).unwrap() + 0.120).abs() < 1e-9);
+        assert!(
+            united_atom_partial_charge(&mol, 0).unwrap().abs() < 1e-9,
+            "CB (-0.120) + 3x HB (0.040) absorbed = 0.0, got {}",
+            united_atom_partial_charge(&mol, 0).unwrap()
+        );
+        // A hydrogen-free atom is unchanged (nothing to absorb).
+        let lone = mk(5, "CA", "C");
+        let mut mol2 = MolCoord::new();
+        mol2.push_atom(lone);
+        assert!((united_atom_partial_charge(&mol2, 0).unwrap() - 0.058).abs() < 1e-9);
     }
 
     #[test]

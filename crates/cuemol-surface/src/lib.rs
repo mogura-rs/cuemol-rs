@@ -175,17 +175,31 @@ impl PqrFileWriter {
 
     pub fn write_pqr_string(&self, molecule: &MolCoord) -> String {
         let mut output = String::new();
-        for atom in selected_surface_atoms(molecule, self.selection.as_ref(), self.use_h) {
-            // C++ PQRFileWriter writes the force-field PARTIAL charge (getCharge =
-            // the residue template's charge) and the UNITED-ATOM vdW radius
-            // (getVdwRadius bExplH=false), not the formal charge / element radius.
-            // A non-template atom (ligand/ion/water) has no template charge -> 0.0,
-            // matching C++ (getCharge returns false, chg stays 0). DEFERRED (honest):
-            // the united-atom H-charge absorption (a heavy atom += its bonded H
-            // charges when use_h=false) — exact for the common H-free input, and the
-            // use_h=true explicit-H radius would be vdwr; this writes the default
-            // united-atom radius.
-            let charge = cuemol_molstr::toppar::partial_charge_for_atom(atom).unwrap_or(0.0);
+        for (index, atom) in molecule.atoms().iter().enumerate() {
+            // Drop hydrogens in the default united-atom mode + honour the selection
+            // (C++ PQRFileWriter:104 / selected_surface_atoms).
+            if !self.use_h && atom.element.trim().eq_ignore_ascii_case("H") {
+                continue;
+            }
+            if let Some(selector) = self.selection.as_ref() {
+                if !selector.matches_in_molecule(atom, molecule) {
+                    continue;
+                }
+            }
+            // C++ PQRFileWriter writes the force-field PARTIAL charge (getCharge) +
+            // UNITED-ATOM vdW radius (getVdwRadius), not formal charge / element
+            // radius. In the default united-atom mode the heavy atom ABSORBS its
+            // bonded hydrogens' charges (the H are dropped); the explicit-H mode
+            // writes each atom's own charge. A non-template atom (ligand/ion/water)
+            // has no template charge -> 0.0, matching C++ (getCharge false -> 0).
+            let charge = if self.use_h {
+                cuemol_molstr::toppar::partial_charge_for_atom(atom)
+            } else {
+                cuemol_molstr::toppar::united_atom_partial_charge(molecule, index)
+            }
+            .unwrap_or(0.0);
+            // Radius is the united-atom vdwhr; the use_h=true explicit-H radius
+            // (vdwr) is a minor remaining deferral.
             let radius = cuemol_molstr::toppar::vdw_radius_for_atom(atom);
             output.push_str(&format!(
                 "ATOM  {:5} {:<4} {:>3} {:1}{:4}    {:8.3}{:8.3}{:8.3} {:7.4} {:6.3}\n",
