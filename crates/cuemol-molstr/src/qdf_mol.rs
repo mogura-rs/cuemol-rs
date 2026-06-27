@@ -36,6 +36,21 @@ use crate::molecule::{Atom, BondOrder, MolCoord, ResidueKey};
 /// `secondary` residue prop is stored as `$secondary` (C++ `PROP_PFX`).
 const PROP_PFX: char = '$';
 
+/// QdfMol anisotropic-U columns (C++ `QdfMolWriter`/`QdfMolReader`, in matrix
+/// `getU(i,j)` order) paired with the Rust ANISOU int-prop names the PDB reader
+/// fills (PDB U-naming, stored x10^4): `u00`=U(0,0)=U11, `u01`=U(0,1)=U12,
+/// `u02`=U(0,2)=U13, `u11`=U(1,1)=U22, `u12`=U(1,2)=U23, `u22`=U(2,2)=U33. The
+/// mapping is anchored to the C++ source, not to the round-trip, so a swapped
+/// component cannot pass self-consistently.
+const ANISO_COLUMNS: [(&str, &str); 6] = [
+    ("u00", "anisou_u11"),
+    ("u01", "anisou_u12"),
+    ("u02", "anisou_u13"),
+    ("u11", "anisou_u22"),
+    ("u12", "anisou_u23"),
+    ("u22", "anisou_u33"),
+];
+
 /// Build the residue-index string (`"100"` or `"100A"`) used by
 /// `MolCoord::set_residue_prop_str`.
 fn residue_sindex(res_id: i32, ins_code: Option<char>) -> String {
@@ -226,9 +241,13 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
         }
     }
 
-    // atom block (flat order -> uid == index)
-    w.data_def("atom", mol.atom_count());
-    w.record_def_ext(&[
+    // atom block (flat order -> uid == index). ANISOU columns are written only
+    // when at least one atom carries them (C++ `QdfMolWriter`'s `bHasAnisou`).
+    let has_anisou = mol
+        .atoms()
+        .iter()
+        .any(|atom| atom.int_prop("anisou_u11").is_some());
+    let mut atom_schema: Vec<(&str, i8, usize)> = vec![
         ("id", QDF_TYPE_UID, 0),
         ("pid", QDF_TYPE_UID, 0),
         ("name", QDF_TYPE_FIXSTR8, aname_len),
@@ -240,7 +259,14 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
         ("posz", QDF_TYPE_FLOAT32, 0),
         ("bfac", QDF_TYPE_FLOAT32, 0),
         ("occ", QDF_TYPE_FLOAT32, 0),
-    ]);
+    ];
+    if has_anisou {
+        for (col, _) in ANISO_COLUMNS {
+            atom_schema.push((col, QDF_TYPE_FLOAT32, 0));
+        }
+    }
+    w.data_def("atom", mol.atom_count());
+    w.record_def_ext(&atom_schema);
     for (i, atom) in mol.atoms().iter().enumerate() {
         w.u32(i as u32);
         w.u32(atom_resid[i]);
@@ -253,6 +279,14 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
         w.f32(atom.position.z as f32);
         w.f32(atom.b_factor);
         w.f32(atom.occupancy);
+        // ANISOU: the PDB reader stores U components x10^4 as int props; C++
+        // QdfMol stores the raw f32 in Angstrom^2 (getU). Write the f32, 0.0 for
+        // an atom that lacks aniso (matching C++'s per-atom 0.0 fallback).
+        if has_anisou {
+            for (_, prop) in ANISO_COLUMNS {
+                w.f32(atom.int_prop(prop).map(|v| v as f32 / 1.0e4).unwrap_or(0.0));
+            }
+        }
     }
 
     // bond block (schema written only when there are bonds, matching C++)
@@ -357,6 +391,9 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
     let aname_len = QdfFieldDef::fixed_len_of(&atom_defs, "name")
         .ok_or_else(|| CueMolError::parse("QDF mol: atom block missing 'name'"))?;
     let cnam_len = QdfFieldDef::fixed_len_of(&atom_defs, "cnam").unwrap_or(aname_len);
+    // ANISOU columns are present only when the writer block had any (C++
+    // `QdfMolReader` `in.isDefined("u00")`).
+    let has_anisou = QdfFieldDef::is_defined(&atom_defs, "u00");
 
     let mut mol = MolCoord::new();
     // Atom UID -> flat index, so bonds stay correct even if ids are not the
@@ -374,6 +411,20 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
         let posz = r.read_f32()? as f64;
         let bfac = r.read_f32()?;
         let occ = r.read_f32()?;
+        // ANISOU: read the 6 f32 U components, restore the PDB int props (x10^4).
+        // C++ `QdfMolReader` drops an all-zero set (the no-aniso fallback), so a
+        // bare atom does not gain spurious props.
+        let aniso = if has_anisou {
+            let mut vals = [0.0f32; 6];
+            for value in &mut vals {
+                *value = r.read_f32()?;
+            }
+            vals.iter()
+                .any(|v| v.abs() > 1.0e-6)
+                .then(|| vals.map(|v| (v * 1.0e4).round() as i32))
+        } else {
+            None
+        };
 
         let res = residues.get(&pid);
         let (chain, res_name, res_id, ins_code) = match res {
@@ -381,7 +432,7 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
             None => (String::new(), String::new(), 0, None),
         };
 
-        let atom = Atom {
+        let mut atom = Atom {
             serial: 0,
             name,
             alt_loc: conf_to_alt_loc(conf),
@@ -396,6 +447,11 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
             formal_charge: None,
             int_props: BTreeMap::new(),
         };
+        if let Some(vals) = aniso {
+            for ((_, prop), value) in ANISO_COLUMNS.iter().zip(vals) {
+                atom.set_int_prop(*prop, value);
+            }
+        }
         mol.append_atom1(atom, chain, res_id, res_name);
         atom_index.insert(id, mol.atom_count() - 1);
     }
@@ -638,6 +694,58 @@ mod tests {
         }
         // The 2-letter element survived as iron (Z=26).
         assert_eq!(dst.atoms()[6].element, "Fe");
+    }
+
+    #[test]
+    fn qdf_mol_roundtrip_preserves_anisou() {
+        // C++ QdfMolWriter stores 6 ANISOU f32 columns (u00..u22) when any atom
+        // has aniso (bHasAnisou); the Rust port had deferred them. The PDB reader
+        // stores the U components as int props (x10^4) named `anisou_u11..u23`;
+        // the QdfMol writer maps them to u00..u22 / 1e4 (f32) and the reader maps
+        // back. ASYMMETRIC values catch a scaling or component-order bug; the C++
+        // component correspondence itself is anchored in ANISO_COLUMNS, not here.
+        let mut src = MolCoord::new();
+        let mut a = atom("CA", "A", 1, "ALA", "C", [0.0, 0.0, 0.0]);
+        // Distinct values so a swapped/mis-scaled component cannot pass.
+        a.set_int_prop("anisou_u11", 1100);
+        a.set_int_prop("anisou_u22", 2200);
+        a.set_int_prop("anisou_u33", 3300);
+        a.set_int_prop("anisou_u12", 1200);
+        a.set_int_prop("anisou_u13", 1300);
+        a.set_int_prop("anisou_u23", 2300);
+        src.append_atom1(a, "A", 1, "ALA");
+        // A second atom WITHOUT aniso: it must not gain spurious props (C++ skips
+        // an all-zero set on read).
+        src.append_atom1(atom("CB", "A", 1, "ALA", "C", [1.5, 0.0, 0.0]), "A", 1, "ALA");
+
+        let bytes = write_qdf_mol_bytes(&src);
+        let dst = read_qdf_mol_bytes(&bytes).expect("read back QDF molecule");
+
+        let restored = &dst.atoms()[0];
+        for (_, prop) in ANISO_COLUMNS {
+            assert_eq!(
+                restored.int_prop(prop),
+                src.atoms()[0].int_prop(prop),
+                "ANISOU {prop} must survive the round-trip"
+            );
+        }
+        // The bare atom carries no aniso props.
+        for (_, prop) in ANISO_COLUMNS {
+            assert_eq!(dst.atoms()[1].int_prop(prop), None, "{prop} must stay unset");
+        }
+    }
+
+    #[test]
+    fn qdf_mol_omits_anisou_columns_without_aniso() {
+        // No atom has aniso -> the writer must NOT add the u00..u22 columns, and
+        // a round-trip stays clean (the schema matches the pre-aniso format).
+        let src = sample_mol();
+        let bytes = write_qdf_mol_bytes(&src);
+        let dst = read_qdf_mol_bytes(&bytes).expect("read back QDF molecule");
+        assert_eq!(dst.atom_count(), src.atom_count());
+        for atom in dst.atoms() {
+            assert_eq!(atom.int_prop("anisou_u11"), None);
+        }
     }
 
     #[test]
