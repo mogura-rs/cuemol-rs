@@ -3144,6 +3144,27 @@ pub fn molecule_render_snapshot(
         .as_ref()
         .map(|indices| indices.iter().copied().collect::<std::collections::BTreeSet<_>>());
     let drawn = |index: usize| draw.as_ref().is_none_or(|set| set.contains(&index));
+    // Object coloring ($molcol cascade) for an atom renderer: CPKColoring carbon is
+    // $molcol, so carbons defer to the object's paint/bfac scheme; other elements
+    // keep their CPK colour. Built once when the object declares a scheme.
+    let paint_styles = (!options.object_paint.is_empty()).then(default_style_manager);
+    let bfac_atoms = options.bfac.clone().map(|mut bfac| {
+        bfac.start_molecule(molecule);
+        bfac
+    });
+    let object_carbon_color = |atom: &Atom| -> Option<ColorSpec> {
+        if !atom.element.eq_ignore_ascii_case("C") {
+            return None;
+        }
+        if let Some(bfac) = &bfac_atoms {
+            return Some(solid_color_to_spec(&bfac.color_for_atom(atom)));
+        }
+        if let Some(styles) = &paint_styles {
+            return resolve_paint_color(&options.object_paint, atom, molecule, styles)
+                .map(rgba_to_spec);
+        }
+        None
+    };
     let atoms = if options.draw_atoms {
         molecule
             .atoms()
@@ -3151,10 +3172,12 @@ pub fn molecule_render_snapshot(
             .enumerate()
             .filter(|(index, _)| drawn(*index))
             .map(|(index, atom)| {
+                let color = object_carbon_color(atom)
+                    .unwrap_or_else(|| atom_color(atom.element.as_str(), options.color_mode));
                 RenderAtom::new(
                     Vector4::new3(atom.position.x, atom.position.y, atom.position.z),
                     atom_radius(atom.element.as_str(), options),
-                    Some(atom_color(atom.element.as_str(), options.color_mode)),
+                    Some(color),
                 )
                 .with_picking(
                     options.object_uid,
@@ -3388,6 +3411,30 @@ fn resolve_paint_color(
         }
     }
     None
+}
+
+/// Wrap an RGBA `[f32;4]` in a flat `ColorSpec`.
+fn rgba_to_spec(rgba: [f32; 4]) -> ColorSpec {
+    ColorSpec {
+        base: cuemol_gfx::ColorBase::Rgb {
+            r: rgba[0],
+            g: rgba[1],
+            b: rgba[2],
+            a: rgba[3],
+        },
+        modifiers: Vec::new(),
+    }
+}
+
+/// Convert a `SolidColor` to a flat `ColorSpec`.
+fn solid_color_to_spec(color: &SolidColor) -> ColorSpec {
+    let c = color.rgba8();
+    rgba_to_spec([
+        c.r as f32 / 255.0,
+        c.g as f32 / 255.0,
+        c.b as f32 / 255.0,
+        c.a as f32 / 255.0,
+    ])
 }
 
 /// Resolve a colour name/value ("SteelBlue", "#FFFAF0", …) to RGBA, preferring

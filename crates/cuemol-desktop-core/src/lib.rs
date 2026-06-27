@@ -2331,6 +2331,74 @@ mod tests {
     }
 
     #[test]
+    fn atom_renderer_carbons_defer_to_object_coloring() {
+        // For an atom renderer (cpk), CPKColoring carbon is $molcol, so carbon atoms
+        // defer to the object's PaintColoring (here `*`=FloralWhite) while N/O keep
+        // their CPK element colours. Self-built .qsc with C/N/O atoms.
+        fn pdb_atom(serial: i32, name: &str) -> String {
+            let mut line = vec![b' '; 80];
+            let put = |line: &mut [u8], text: &str, start: usize| {
+                for (i, byte) in text.bytes().enumerate() {
+                    line[start + i] = byte;
+                }
+            };
+            put(&mut line, "ATOM", 0);
+            put(&mut line, &format!("{serial:>5}"), 6);
+            put(&mut line, &format!("{name:<4}"), 12);
+            put(&mut line, "ALA", 17);
+            put(&mut line, "A", 21);
+            put(&mut line, "   1", 22);
+            put(&mut line, &format!("{:>8.3}", serial as f64), 30);
+            put(&mut line, &format!("{:>8.3}", 0.0), 38);
+            put(&mut line, &format!("{:>8.3}", 0.0), 46);
+            String::from_utf8(line).unwrap()
+        }
+        let pdb = format!(
+            "{}\n{}\n{}\n",
+            pdb_atom(1, "C"),
+            pdb_atom(2, "N"),
+            pdb_atom(3, "O")
+        );
+        let qsc = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<scene>\n\
+             \t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n\
+             \t<object type=\"MolCoord\" name=\"a\" src=\"datachunk:00000\" srctype=\"qdfpdb\">\n\
+             \t\t<coloring type=\"PaintColoring\">\n\t\t\t<paint sel=\"*\" color=\"FloralWhite\"/>\n\t\t</coloring>\n\
+             \t\t<renderer type=\"cpk\" name=\"cpk1\"/>\n\
+             \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
+             ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
+        );
+        let path = std::env::temp_dir().join(format!("cuemol2-rs-atompaint-{}.qsc", std::process::id()));
+        std::fs::write(&path, &qsc).unwrap();
+        let mut app = DesktopAppState::new();
+        let loaded = app.load_qsc_file(&path).ok().flatten();
+        let _ = std::fs::remove_file(&path);
+        let Some(scene_uid) = loaded else {
+            panic!("synthetic atom-paint .qsc failed to load");
+        };
+
+        let snapshot = app.render_snapshot(scene_uid, "").unwrap();
+        let mol = app.scene_manager().scene(scene_uid).unwrap().objects()[0].mol();
+        let color_of = |element: &str| -> [u8; 3] {
+            let atom = snapshot
+                .atoms
+                .iter()
+                .find(|a| {
+                    a.atom_index
+                        .and_then(|i| mol.atoms().get(i))
+                        .is_some_and(|at| at.element.eq_ignore_ascii_case(element))
+                })
+                .unwrap_or_else(|| panic!("no {element} atom in snapshot"));
+            let c = atom.color.as_ref().unwrap().rgba8().unwrap();
+            [c.r, c.g, c.b]
+        };
+        // Carbon defers to the paint `*` fallback FloralWhite (#FFFAF0).
+        assert_eq!(color_of("C"), [255, 250, 240], "carbon should be paint FloralWhite");
+        // Nitrogen keeps its CPK element colour (not FloralWhite).
+        assert_ne!(color_of("N"), [255, 250, 240], "nitrogen keeps its CPK colour");
+    }
+
+    #[test]
     fn desktop_app_state_opens_path_and_builds_render_snapshot() {
         let Some(root) = reference_test_data_root() else {
             return;
