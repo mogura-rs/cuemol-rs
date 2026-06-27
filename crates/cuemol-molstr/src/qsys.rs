@@ -178,6 +178,13 @@ pub struct MolObject {
     /// into the snapshot geometry instead of mutating `MolCoord`, so CLI atom
     /// queries / exports of the same object stay in raw coordinates.
     xform: Option<Matrix4>,
+    /// Object-level visibility (C++ `Object::visible`, `Object.qif:33`, default
+    /// `true`). An invisible object hides ALL its renderers at display — the
+    /// C++ display loop skips it before the per-renderer check (`Scene.cpp:635`
+    /// `if (pObj.isnull() || !pObj->isVisible()) continue;`). Persisted as a
+    /// `visible="false"` attribute on the `<object>` element only when hidden
+    /// (the default-true property is omitted otherwise, like `xformMat`).
+    visible: bool,
 }
 
 impl MolObject {
@@ -237,6 +244,17 @@ impl MolObject {
         } else {
             Some(matrix)
         };
+    }
+
+    /// Whether this object is visible (drawn) — C++ `Object::isVisible`. An
+    /// invisible object contributes no geometry regardless of its renderers'
+    /// own visibility (the higher-level gate of `Scene.cpp:635`).
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    pub fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
     }
 
     pub fn renderer_by_name(&self, name: &str) -> Option<&MolRenderer> {
@@ -496,6 +514,7 @@ impl MolScene {
             coloring_type: None,
             coloring_attrs: BTreeMap::new(),
             xform: None,
+            visible: true,
         });
         uid
     }
@@ -550,6 +569,16 @@ impl MolScene {
             .and_then(parse_xform_mat)
         {
             object.set_xform_matrix(matrix);
+        }
+
+        // Object-level `visible` (C++ `Object::visible`, default true): only a
+        // hidden object carries the attribute. Mirror `MolRenderer::is_visible`'s
+        // tolerance of `false`/`0`/`no`/`off` so the same false-spellings parse.
+        if let Some(value) = attr_value(object_line, "visible") {
+            object.set_visible(!matches!(
+                value.as_str(),
+                "false" | "0" | "no" | "off"
+            ));
         }
 
         let mut current_atomintr: Option<(String, Vec<(String, String)>)> = None;
@@ -632,11 +661,21 @@ impl MolScene {
             } else {
                 String::new()
             };
+            // C++ omits the default-true `visible` property; emit it only when the
+            // object is hidden (`visible="false"`), as a `<object>` attribute —
+            // qlib serializes string-convertible scalars as attributes
+            // (`LDOM2Tree.cpp:172-174` `setValue`+`setAttrFlag(true)`).
+            let visible_attr = if object.is_visible() {
+                String::new()
+            } else {
+                " visible=\"false\"".to_string()
+            };
             output.push_str(&format!(
-                "\t<object type=\"MolCoord\" name=\"{}\" src=\"datachunk:{}\" srctype=\"qdfpdb\"{}>\n",
+                "\t<object type=\"MolCoord\" name=\"{}\" src=\"datachunk:{}\" srctype=\"qdfpdb\"{}{}>\n",
                 escape_xml(object.name()),
                 chunk_id,
-                xform_attr
+                xform_attr,
+                visible_attr
             ));
             for renderer in object.renderers() {
                 if renderer.renderer_type() == "atomintr" {
@@ -1286,5 +1325,47 @@ mod tests {
         // Malformed -> None (callers fall back to identity).
         assert_eq!(parse_xform_mat("(1,2,3)"), None);
         assert_eq!(parse_xform_mat("garbage"), None);
+    }
+
+    #[test]
+    fn object_visible_round_trips_through_qsc() {
+        // C++ serializes the default-true `visible` property only when hidden,
+        // as a `<object>` attribute (qlib `LDOM2Tree.cpp:172` writes string-
+        // convertible scalars with `setAttrFlag(true)`). Mirror that: a hidden
+        // object writes `visible="false"`; a visible one omits the attribute.
+        let mut manager = MolSceneManager::new();
+        let scene = manager.new_scene("s");
+        let mol = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n",
+        )
+        .unwrap();
+        let scene_ref = manager.scene_mut(scene).unwrap();
+        let _visible_uid = scene_ref.add_molecule("shown", mol.clone());
+        let hidden_uid = scene_ref.add_molecule("hidden", mol);
+        scene_ref.object_mut(hidden_uid).unwrap().set_visible(false);
+
+        let xml = manager.scene(scene).unwrap().write_qsc_string();
+        // The hidden object carries the attribute; the visible one does not.
+        assert!(
+            xml.contains("name=\"hidden\" src=\"datachunk:00001\" srctype=\"qdfpdb\" visible=\"false\""),
+            "hidden object must serialize visible=\"false\":\n{xml}"
+        );
+        assert!(
+            xml.contains("name=\"shown\" src=\"datachunk:00000\" srctype=\"qdfpdb\">"),
+            "visible object must omit the visible attribute (default true):\n{xml}"
+        );
+
+        // Round-trip: re-loading preserves both visibilities.
+        let mut reloaded = MolSceneManager::new();
+        let scene2 = reloaded.new_scene("reloaded");
+        reloaded.scene_mut(scene2).unwrap().load_qsc_str(&xml).unwrap();
+        let objects: Vec<bool> = reloaded
+            .scene(scene2)
+            .unwrap()
+            .objects()
+            .iter()
+            .map(|object| object.is_visible())
+            .collect();
+        assert_eq!(objects, vec![true, false], "visibility survives the round-trip");
     }
 }

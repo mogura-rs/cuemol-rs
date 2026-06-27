@@ -708,6 +708,11 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
     let (mut total_atoms, mut total_bonds, mut renderer_count) = (0usize, 0usize, 0usize);
 
     for object in scene.objects() {
+        // Object-level visibility gate (C++ `Scene.cpp:635`): a hidden object
+        // contributes no geometry, regardless of its renderers' own visibility.
+        if !object.is_visible() {
+            continue;
+        }
         for renderer in object.renderers() {
             if !renderer.is_visible() {
                 continue;

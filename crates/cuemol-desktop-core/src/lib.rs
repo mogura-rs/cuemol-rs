@@ -720,6 +720,12 @@ impl DesktopAppState {
         let styles = default_style_manager();
         let mut snapshot = RenderSceneSnapshot::empty();
         for object in scene.objects() {
+            // C++ `Scene::displayRendImpl` skips an invisible object before its
+            // renderers (`Scene.cpp:635`): an object-level `visible="false"`
+            // hides the whole object regardless of per-renderer visibility.
+            if !object.is_visible() {
+                continue;
+            }
             append_object_snapshot(&mut snapshot, object, selector.as_ref(), &styles);
         }
         Ok(snapshot)
@@ -2191,6 +2197,74 @@ mod tests {
             pdb_app.active_scene_saved_camera().is_none(),
             "a PDB load defines no saved camera"
         );
+    }
+
+    #[test]
+    fn object_visible_false_hides_the_whole_object() {
+        // C++ `Object::visible` (Object.qif:33, default true) is a higher-level
+        // gate above per-renderer visibility: `Scene::displayRendImpl` skips an
+        // invisible object entirely (Scene.cpp:635). The render snapshot must
+        // honour the .qsc `<object visible="false">` attribute (the gap this
+        // closes — the path was renderer-visible-only). Oracle is INDEPENDENT of
+        // the fixture's attribute form: the discriminator is the atom COUNT
+        // (6 -> 0), not the parsed flag.
+        fn pdb_ca(serial: i32, resid: i32, x: f64) -> String {
+            let mut line = vec![b' '; 80];
+            let put = |line: &mut [u8], text: &str, start: usize| {
+                for (i, byte) in text.bytes().enumerate() {
+                    line[start + i] = byte;
+                }
+            };
+            put(&mut line, "ATOM", 0);
+            put(&mut line, &format!("{serial:>5}"), 6);
+            put(&mut line, "CA", 12);
+            put(&mut line, "ALA", 17);
+            put(&mut line, "A", 21);
+            put(&mut line, &format!("{resid:>4}"), 22);
+            put(&mut line, &format!("{x:>8.3}"), 30);
+            put(&mut line, &format!("{:>8.3}", 0.0), 38);
+            put(&mut line, &format!("{:>8.3}", 0.0), 46);
+            String::from_utf8(line).unwrap()
+        }
+        let mut pdb = String::new();
+        for resid in 1..=6 {
+            pdb.push_str(&pdb_ca(resid, resid, (resid - 1) as f64 * 3.8));
+            pdb.push('\n');
+        }
+        // `visible_attr` toggles only the one attribute the gap is about.
+        let build = |visible_attr: &str| {
+            format!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<scene>\n\
+                 \t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n\
+                 \t<object type=\"MolCoord\" name=\"mol\" src=\"datachunk:00000\" srctype=\"qdfpdb\"{visible_attr}>\n\
+                 \t\t<renderer type=\"cpk\" name=\"cpk1\"/>\n\
+                 \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
+                 ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
+            )
+        };
+        let render_atom_count = |visible_attr: &str| {
+            let qsc = build(visible_attr);
+            let path = std::env::temp_dir()
+                .join(format!("cuemol2-rs-objvis-{}-{visible_attr:?}.qsc", std::process::id()));
+            std::fs::write(&path, &qsc).unwrap();
+            let mut app = DesktopAppState::new();
+            let scene_uid = app.load_qsc_file(&path).ok().flatten().expect("synthetic .qsc loads");
+            let _ = std::fs::remove_file(&path);
+            let object = app.scene_manager().scene(scene_uid).unwrap().objects().first().unwrap();
+            let parsed_visible = object.is_visible();
+            let atoms = app.render_snapshot(scene_uid, "").unwrap().atom_count();
+            (parsed_visible, atoms)
+        };
+
+        // Control: a visible object (no attribute = C++ default true) draws its atoms.
+        let (vis_flag, vis_atoms) = render_atom_count("");
+        assert!(vis_flag, "default (no attr) object is visible");
+        assert_eq!(vis_atoms, 6, "a visible object renders all 6 CA atoms");
+
+        // The gap: `visible="false"` hides the whole object -> no geometry.
+        let (hidden_flag, hidden_atoms) = render_atom_count(" visible=\"false\"");
+        assert!(!hidden_flag, "visible=\"false\" parses as not visible");
+        assert_eq!(hidden_atoms, 0, "a hidden object contributes no atoms (Scene.cpp:635)");
     }
 
     #[test]
