@@ -7,8 +7,11 @@ use cuemol_molstr::{
     MolCommandManager, MolCoord, MolObject, MolRenderer, MolSceneManager, NewRendererResult,
     NewSceneResult, QscLoadStatus, Selector, StreamManager,
 };
-use cuemol_molvis::{molecule_render_snapshot, ribbon_mesh_snapshot, MoleculeRenderOptions};
-use cuemol_qsys::ScalarObject;
+use cuemol_molvis::{
+    apply_renderer_styles, default_style_manager, molecule_render_snapshot, ribbon_mesh_snapshot,
+    MoleculeRenderOptions, DEFAULT_STYLE_SCOPE,
+};
+use cuemol_qsys::{ScalarObject, StyleManager};
 use cuemol_render::PovSceneExporter;
 use cuemol_render::RenderSceneSnapshot;
 use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter};
@@ -690,9 +693,14 @@ impl DesktopAppState {
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
         let selector = parse_gui_selector(selection_text)?;
+        // Resolve renderer `style="..."` presets against the bundled system style
+        // sheet (the same source the CLI `render-qsc`/`qsc-info` consume), built
+        // once per snapshot. Without this the GUI viewer ignored every scene
+        // style and drew the hardcoded per-type look — the gap this closes.
+        let styles = default_style_manager();
         let mut snapshot = RenderSceneSnapshot::empty();
         for object in scene.objects() {
-            append_object_snapshot(&mut snapshot, object, selector.as_ref());
+            append_object_snapshot(&mut snapshot, object, selector.as_ref(), &styles);
         }
         Ok(snapshot)
     }
@@ -1006,6 +1014,7 @@ fn append_object_snapshot(
     target: &mut RenderSceneSnapshot,
     object: &MolObject,
     selector: Option<&cuemol_molstr::Selector>,
+    styles: &StyleManager,
 ) {
     let selected_indices = selector
         .map(|selector| object.mol().select_indices(selector))
@@ -1019,11 +1028,11 @@ fn append_object_snapshot(
         return;
     }
     if visible_renderers.is_empty() {
-        append_object_renderer_snapshot(target, object, None, &selected_indices);
+        append_object_renderer_snapshot(target, object, None, &selected_indices, styles);
         return;
     }
     for renderer in visible_renderers {
-        append_object_renderer_snapshot(target, object, Some(renderer), &selected_indices);
+        append_object_renderer_snapshot(target, object, Some(renderer), &selected_indices, styles);
     }
 }
 
@@ -1032,9 +1041,10 @@ fn append_object_renderer_snapshot(
     object: &MolObject,
     renderer: Option<&MolRenderer>,
     selected_indices: &[usize],
+    styles: &StyleManager,
 ) {
     let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
-    let options = renderer_render_options(object.uid(), renderer, selected_indices);
+    let options = renderer_render_options(object.uid(), renderer, selected_indices, styles);
     let snapshot = if is_mainchain_trace_renderer(renderer_type) {
         ribbon_mesh_snapshot(object.mol(), &options)
     } else {
@@ -1060,6 +1070,7 @@ fn renderer_render_options(
     object_uid: Uid,
     renderer: Option<&MolRenderer>,
     selected_indices: &[usize],
+    styles: &StyleManager,
 ) -> MoleculeRenderOptions {
     let mut options = MoleculeRenderOptions {
         object_uid: Some(object_uid.get()),
@@ -1085,6 +1096,15 @@ fn renderer_render_options(
             options.bond_radius = 0.04;
         }
         _ => {}
+    }
+    // Layer the scene renderer's resolved `style="..."` geometry (bond/atom radii,
+    // ribbon cross-section dims/shape, axial detail) on top of the per-type
+    // defaults — the same cascade the CLI `render-qsc` applies. A renderer with no
+    // style attr resolves every attr to None and keeps the defaults above, so only
+    // styled scenes change. `sphere_detail` is resolved here too but the GUI's
+    // `tessellate_snapshot` step does not yet honour it (cosmetic smoothness only).
+    if let Some(renderer) = renderer {
+        apply_renderer_styles(&mut options, renderer, styles, DEFAULT_STYLE_SCOPE);
     }
     options
 }
@@ -1498,6 +1518,59 @@ mod tests {
         assert_eq!(atom.atom_index, 0);
         assert_eq!(atom.serial, 1);
         assert_eq!(atom.selection_text, "aid 1");
+    }
+
+    #[test]
+    fn render_snapshot_applies_a_renderers_resolved_style_geometry() {
+        // The GUI render snapshot must honour a renderer's `style="..."` preset,
+        // not just its per-type defaults (the gap this closes — egui/gpui/dioxus all
+        // route geometry through `active_render_snapshot`). Discriminator: a
+        // ballstick renderer draws bonds at the 0.08 type default until tagged with
+        // `DefaultBallStick`, whose bundled preset is bondw=0.2 / sphr=0.3.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        let renderer = app
+            .new_renderer_in_active_scene(object, "ballstick", "bs")
+            .unwrap()
+            .result_renderer;
+
+        // Before styling: the hardcoded per-type ballstick look (bond radius 0.08).
+        let before = app.active_render_snapshot("").unwrap();
+        assert!(before.bond_count() > 0, "ballstick should draw bonds");
+        assert!(
+            (before.bonds[0].radius - 0.08).abs() < 1e-6,
+            "unstyled ballstick bond radius should be the 0.08 default, got {}",
+            before.bonds[0].radius
+        );
+
+        // Tag the renderer with the bundled DefaultBallStick preset.
+        app.scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer)
+            .unwrap()
+            .set_qsc_attr("style", "DefaultBallStick");
+
+        // After styling: every bond at the preset bondw=0.2 and every atom forced
+        // to the absolute sphr=0.3 (atom_radius_abs overrides the vdW-scaled radius).
+        let after = app.active_render_snapshot("").unwrap();
+        assert!(
+            after.bonds.iter().all(|bond| (bond.radius - 0.2).abs() < 1e-6),
+            "styled bonds should all be bondw=0.2, first was {}",
+            after.bonds[0].radius
+        );
+        assert!(
+            after.atoms.iter().all(|atom| (atom.radius - 0.3).abs() < 1e-6),
+            "styled atoms should all be the absolute sphr=0.3, first was {}",
+            after.atoms[0].radius
+        );
     }
 
     #[test]
