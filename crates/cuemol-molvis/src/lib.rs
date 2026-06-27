@@ -3643,15 +3643,21 @@ fn residue_secondary(molecule: &MolCoord, atom: &Atom) -> Secondary {
 }
 
 /// Collect each chain's backbone pivots (position + secondary structure) in
-/// residue order.
+/// residue order, split into contiguous runs to be splined/traced.
 ///
-/// Chains are split whenever the residue iterator crosses a chain-name boundary,
-/// so each returned point list is one contiguous backbone to be splined.
+/// A run breaks on a chain-name boundary OR a backbone GAP — consecutive pivots
+/// farther apart than the link cutoff (a missing/unmodelled stretch, an
+/// alternate fragment, or a residue with no pivot). This mirrors C++
+/// `MainChainRenderer::isNewSegment` (chain change + `!isLinkedTo` + absent
+/// pivot, MainChainRenderer.cpp:37/88), so a chain with an internal break draws
+/// disjoint strips instead of one spline bridging the gap with a spurious bar.
 fn collect_mainchain_pivots(
     molecule: &MolCoord,
     draw: Option<&std::collections::BTreeSet<usize>>,
 ) -> Vec<Vec<MainchainPoint>> {
-    let mut chains: Vec<(String, Vec<MainchainPoint>)> = Vec::new();
+    let mut runs: Vec<Vec<MainchainPoint>> = Vec::new();
+    // Previous accepted pivot: (chain name, position, link cutoff).
+    let mut prev: Option<(String, Vector4, f64)> = None;
     let mut iter = ResidIterator::all(molecule);
     iter.first();
     while iter.has_more() {
@@ -3662,24 +3668,50 @@ fn collect_mainchain_pivots(
                 residue.atom_indices().iter().any(|index| set.contains(index))
             });
             if included {
-                if let Some(point) = mainchain_pivot_point(molecule, residue) {
+                if let Some((point, cutoff)) = mainchain_pivot_point(molecule, residue) {
                     let chain = residue.chain_name().to_string();
-                    if chains.last().map(|(name, _)| name != &chain).unwrap_or(true) {
-                        chains.push((chain, Vec::new()));
+                    let pos = point.pos;
+                    let new_run = match &prev {
+                        None => true,
+                        Some((prev_chain, prev_pos, prev_cutoff)) => {
+                            *prev_chain != chain
+                                || pivot_distance(*prev_pos, pos) > prev_cutoff.max(cutoff)
+                        }
+                    };
+                    if new_run {
+                        runs.push(Vec::new());
                     }
-                    if let Some((_, points)) = chains.last_mut() {
-                        points.push(point);
-                    }
+                    runs.last_mut().expect("a run was just pushed").push(point);
+                    prev = Some((chain, pos, cutoff));
                 }
             }
         }
         iter.next();
     }
-    chains.into_iter().map(|(_, points)| points).collect()
+    runs
 }
 
-/// Pick the residue's backbone pivot atom: CA (protein) then nucleic-acid fallbacks.
-fn mainchain_pivot_point(molecule: &MolCoord, residue: &ResidueView) -> Option<MainchainPoint> {
+/// Euclidean distance between two backbone pivot positions.
+fn pivot_distance(a: Vector4, b: Vector4) -> f64 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
+}
+
+/// Max distance between consecutive pivots for them to count as one backbone run.
+/// Protein Cα–Cα is ~3.8 Å (so 5.0 keeps a contiguous chain joined but splits a
+/// missing-residue gap, where the virtual Cα–Cα blows past ~7 Å); nucleic P–P is
+/// ~6–7 Å (so 8.0). This is the distance analogue of C++'s link test
+/// (`TopoBuilder.cpp:365` measures the polymer bond), the only signal available
+/// for a Cα-only backbone where no peptide bond exists.
+const PROTEIN_PIVOT_LINK_DIST: f64 = 5.0;
+const NUCLEIC_PIVOT_LINK_DIST: f64 = 8.0;
+
+/// Pick the residue's backbone pivot atom: CA (protein) then nucleic-acid
+/// fallbacks. Returns the pivot point and its link-distance cutoff (protein vs
+/// nucleic), used to break the backbone run at chain gaps.
+fn mainchain_pivot_point(
+    molecule: &MolCoord,
+    residue: &ResidueView,
+) -> Option<(MainchainPoint, f64)> {
     let indices = residue.atom_indices();
     for name in ["CA", "P", "C1'", "O5'"] {
         for &index in indices {
@@ -3687,13 +3719,19 @@ fn mainchain_pivot_point(molecule: &MolCoord, residue: &ResidueView) -> Option<M
                 continue;
             };
             if atom.name.trim().eq_ignore_ascii_case(name) {
-                return Some(MainchainPoint {
+                let cutoff = if name == "CA" {
+                    PROTEIN_PIVOT_LINK_DIST
+                } else {
+                    NUCLEIC_PIVOT_LINK_DIST
+                };
+                let point = MainchainPoint {
                     pos: Vector4::new3(atom.position.x, atom.position.y, atom.position.z),
                     ss: residue_secondary(molecule, atom),
                     b_factor: atom.b_factor as f64,
                     occupancy: atom.occupancy as f64,
                     atom_index: index,
-                });
+                };
+                return Some((point, cutoff));
             }
         }
     }
@@ -5785,6 +5823,52 @@ mod tests {
         // Both still pass through the real Cα pivots (endpoints coincide).
         assert!(dist(&linear[0], &positions[0]) < 1.0e-9);
         assert!(dist(&linear[subdiv], &positions[1]) < 1.0e-9);
+    }
+
+    #[test]
+    fn backbone_runs_break_at_chain_gaps_but_not_contiguous_ca() {
+        // C++ MainChainRenderer::isNewSegment breaks a backbone segment at chain
+        // boundaries AND chemical-link gaps. The Rust path used to break ONLY on
+        // chain name, so a chain with an internal break got one spline bridging the
+        // gap. Oracle: count runs from collect_mainchain_pivots.
+        // (1) Contiguous Ca-only chain stays ONE run (anti-regression: a bond-based
+        // break would vanish this, since Ca-only structures form no peptide bonds).
+        let contiguous: Vec<Atom> = (1..=5)
+            .map(|i| ca_atom(i, (i - 1) as f64 * 3.8, 0.0, 0.0))
+            .collect();
+        let mol = MolCoord::with_atoms(contiguous);
+        let runs = collect_mainchain_pivots(&mol, None);
+        assert_eq!(runs.len(), 1, "a contiguous Ca-only chain is one run");
+        assert_eq!(runs[0].len(), 5);
+
+        // (2) A single chain with an internal coordinate GAP breaks into two runs;
+        // no run bridges residues 3 and 50 (42 A apart >> the 5 A Ca cutoff).
+        let mut gapped: Vec<Atom> = vec![
+            ca_atom(1, 0.0, 0.0, 0.0),
+            ca_atom(2, 3.8, 0.0, 0.0),
+            ca_atom(3, 7.6, 0.0, 0.0),
+            ca_atom(50, 50.0, 0.0, 0.0),
+            ca_atom(51, 53.8, 0.0, 0.0),
+        ];
+        // keep them all chain A so only the gap (not a chain change) splits them.
+        for atom in &mut gapped {
+            atom.chain_id = "A".to_string();
+        }
+        let runs = collect_mainchain_pivots(&MolCoord::with_atoms(gapped), None);
+        assert_eq!(runs.len(), 2, "an internal backbone gap splits the run");
+        assert_eq!(runs[0].len(), 3);
+        assert_eq!(runs[1].len(), 2);
+
+        // (3) Distinct chains always break, even when spatially close.
+        let mut two_chain = vec![ca_atom(1, 0.0, 0.0, 0.0), ca_atom(2, 3.8, 0.0, 0.0)];
+        let mut b1 = ca_atom(1, 7.6, 0.0, 0.0);
+        let mut b2 = ca_atom(2, 11.4, 0.0, 0.0);
+        b1.chain_id = "B".to_string();
+        b2.chain_id = "B".to_string();
+        two_chain.push(b1);
+        two_chain.push(b2);
+        let runs = collect_mainchain_pivots(&MolCoord::with_atoms(two_chain), None);
+        assert_eq!(runs.len(), 2, "two chains are two runs");
     }
 
     #[test]
