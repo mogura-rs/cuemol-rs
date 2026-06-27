@@ -8,8 +8,8 @@ use cuemol_molstr::{
     NewSceneResult, QscLoadStatus, Selector, StreamManager,
 };
 use cuemol_molvis::{
-    apply_renderer_styles, default_style_manager, molecule_render_snapshot, ribbon_mesh_snapshot,
-    MoleculeRenderOptions, DEFAULT_STYLE_SCOPE,
+    anisou_mesh_snapshot, apply_renderer_styles, default_style_manager, disorder_lines_snapshot,
+    molecule_render_snapshot, ribbon_mesh_snapshot, MoleculeRenderOptions, DEFAULT_STYLE_SCOPE,
 };
 use cuemol_qsys::{ScalarObject, StyleManager};
 use cuemol_render::PovSceneExporter;
@@ -1058,6 +1058,13 @@ fn append_object_renderer_snapshot(
             &object.atom_intr_segments(renderer),
             Some(object.uid().get()),
         ),
+        // Anisotropic thermal ellipsoids (ANISOU atoms), not generic spheres.
+        ("anisou", _) => anisou_mesh_snapshot(object.mol(), &options),
+        // Disorder = dotted Bézier lines bridging unbonded chain gaps, drawn only
+        // where the backbone breaks — NOT a sphere per atom. Params are the C++
+        // DisoRenderer defaults (dotsep 1.0 / loopsize 2.0 / loopsize2 -1.0; a thin
+        // dot radius). On a fully-bonded molecule this correctly draws nothing.
+        ("disorder", _) => disorder_lines_snapshot(object.mol(), 1.0, 0.15, 2.0, -1.0),
         (rtype, _) if is_mainchain_trace_renderer(rtype) => {
             ribbon_mesh_snapshot(object.mol(), &options)
         }
@@ -1639,6 +1646,113 @@ mod tests {
             }),
             "a measurement line must connect the resolved atoms 43 and 88"
         );
+    }
+
+    #[test]
+    fn disorder_renderer_draws_gap_lines_not_the_whole_molecule() {
+        // A "disorder" renderer draws dotted Bézier lines bridging unbonded chain
+        // gaps, NOT a sphere per atom. On 1CRN (a single fully-bonded chain) it
+        // should therefore draw (almost) nothing — far fewer than the 327 spheres
+        // a generic atom dump produced before the dispatch fix.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        app.new_renderer_in_active_scene(object, "disorder", "diso")
+            .unwrap();
+
+        let snapshot = app.active_render_snapshot("").unwrap();
+        // Routes to the disorder geometry (matches the molvis function), which is
+        // far below the 327-atom generic dump.
+        let direct = disorder_lines_snapshot(
+            app.scene_manager()
+                .object(object)
+                .unwrap()
+                .mol(),
+            1.0,
+            0.15,
+            2.0,
+            -1.0,
+        );
+        assert_eq!(
+            snapshot.atom_count(),
+            direct.atom_count(),
+            "disorder renderer must route to the disorder geometry"
+        );
+        assert!(
+            snapshot.atom_count() < 100,
+            "disorder on a fully-bonded chain must not dump all 327 atoms, got {}",
+            snapshot.atom_count()
+        );
+    }
+
+    #[test]
+    fn anisou_renderer_draws_thermal_ellipsoids() {
+        // An "anisou" renderer draws an anisotropic displacement ellipsoid mesh per
+        // ANISOU atom, not a plain sphere primitive. Build a tiny two-atom molecule
+        // with ANISOU records (U values placed at the exact PDB columns the reader
+        // reads: serial in 7-11, U11.. from column 29) and confirm the snapshot is
+        // two ellipsoid meshes, zero atom spheres.
+        let mut pdb = String::new();
+        pdb.push_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\n",
+        );
+        pdb.push_str(
+            "ATOM      2  CB  ALA A   1       1.500   0.000   0.000  1.00 10.00           C\n",
+        );
+        for serial in [1, 2] {
+            let mut line = format!("ANISOU{serial:>5}  CA  ALA A   1");
+            while line.len() < 28 {
+                line.push(' ');
+            }
+            for u in [1000, 1000, 1000, 0, 0, 0] {
+                line.push_str(&format!("{u:>7}"));
+            }
+            pdb.push_str(&line);
+            pdb.push('\n');
+        }
+        pdb.push_str("END\n");
+        let path =
+            std::env::temp_dir().join(format!("cuemol2-rs-anisou-{}.pdb", std::process::id()));
+        std::fs::write(&path, &pdb).unwrap();
+
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        let object = app
+            .load_object_into_active_scene(&path, "adp", "pdb")
+            .unwrap()
+            .result_object;
+        // Sanity: the ANISOU records actually parsed onto the atoms.
+        assert!(
+            app.scene_manager()
+                .object(object)
+                .unwrap()
+                .mol()
+                .atoms()[0]
+                .int_prop("anisou_u11")
+                .is_some(),
+            "ANISOU U values must have parsed (else the test verifies nothing)"
+        );
+        app.new_renderer_in_active_scene(object, "anisou", "adp")
+            .unwrap();
+
+        let snapshot = app.active_render_snapshot("").unwrap();
+        assert_eq!(
+            snapshot.mesh_count(),
+            2,
+            "one thermal-ellipsoid mesh per ANISOU atom"
+        );
+        assert_eq!(
+            snapshot.atom_count(),
+            0,
+            "ANISOU atoms render as ellipsoid meshes, not sphere primitives"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -10,8 +10,8 @@ use cuemol_molstr::{
     HandlerCategory, MolCoord, MolSceneManager, QscLoadStatus, StreamManager,
 };
 use cuemol_molvis::{
-    apply_renderer_styles, default_style_manager, molecule_render_snapshot, ribbon_mesh_snapshot,
-    MoleculeRenderOptions, DEFAULT_STYLE_SCOPE,
+    anisou_mesh_snapshot, apply_renderer_styles, default_style_manager, disorder_lines_snapshot,
+    molecule_render_snapshot, ribbon_mesh_snapshot, MoleculeRenderOptions, DEFAULT_STYLE_SCOPE,
 };
 use cuemol_render::{
     tessellate_snapshot, tessellate_snapshot_with_detail, LuxCoreSceneExporter,
@@ -722,6 +722,10 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 // Measurement lines between the renderer's atom pairs, not the
                 // whole molecule (the single source of truth shared with the GUI).
                 cuemol_render::atom_intr_snapshot(&object.atom_intr_segments(renderer), None)
+            } else if rtype == "anisou" {
+                anisou_mesh_snapshot(object.mol(), &options)
+            } else if rtype == "disorder" {
+                disorder_lines_snapshot(object.mol(), 1.0, 0.15, 2.0, -1.0)
             } else if is_mainchain_trace_type(rtype) {
                 ribbon_mesh_snapshot(object.mol(), &options)
             } else {
