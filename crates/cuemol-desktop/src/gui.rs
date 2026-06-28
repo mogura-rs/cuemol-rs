@@ -1250,7 +1250,12 @@ impl GuiApplication {
                 self.add_recent_path(self.last_loaded_path.clone().unwrap());
                 self.set_status(format!("Opened scene {}", scene_uid.get()));
                 self.rebuild_snapshot();
-                camera.fit_snapshot(&self.snapshot);
+                // Restore the scene's saved view (a `.qsc` `<camera>`); only a
+                // camera-less scene falls back to auto-framing the bounding box.
+                match self.state.active_scene_saved_camera() {
+                    Some(saved) => *camera = CameraController::from_qsys_camera(&saved),
+                    None => camera.fit_snapshot(&self.snapshot),
+                }
             }
             Ok(GuiLoadedPath::Object {
                 scene_uid,
@@ -3025,6 +3030,32 @@ perspective\t{}\n",
         camera
     }
 
+    /// Build a controller from a saved `cuemol_qsys::Camera` (a `.qsc` view) —
+    /// the exact inverse of [`to_qsys_camera`], so a save → load round-trips. The
+    /// drag/transient fields reset to defaults. (`ortho_scale` inverts the
+    /// `zoom = 1000 / ortho_scale` mapping; the orientation quaternion maps
+    /// component-wise — `q` and `-q` denote the same rotation.)
+    fn from_qsys_camera(camera: &cuemol_qsys::Camera) -> Self {
+        let q = camera.rotation();
+        let zoom = camera.zoom();
+        let defaults = Self::default();
+        let ortho_scale = if zoom.abs() > 1.0e-9 {
+            (1000.0 / zoom) as f32
+        } else {
+            defaults.ortho_scale
+        };
+        let center = camera.center();
+        Self {
+            target: Vec3::new(center.x as f32, center.y as f32, center.z as f32),
+            orientation: Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32)
+                .normalize(),
+            distance: camera.cam_dist() as f32,
+            ortho_scale,
+            perspective: camera.is_perspective(),
+            ..defaults
+        }
+    }
+
     fn from_view_data(data: &str) -> Result<Self> {
         let mut camera = Self::default();
         let mut saw_header = false;
@@ -4048,6 +4079,43 @@ mod tests {
             CameraDragMode::from_button(MouseButton::Right),
             Some(CameraDragMode::Pan)
         );
+    }
+
+    #[test]
+    fn camera_round_trips_through_a_qsys_camera() {
+        // from_qsys_camera must invert to_qsys_camera so that a `.qsc` save then
+        // reload restores the exact same view. Headless guarantee for the Phase-4
+        // camera restore; the on-screen orientation/zoom is user-verified.
+        let mut cc = CameraController {
+            target: Vec3::new(7.2782, 10.1857, 6.8747),
+            orientation: Quat::from_axis_angle(Vec3::new(0.3, 0.5, 0.8).normalize(), 1.1)
+                .normalize(),
+            distance: 84.0,
+            ortho_scale: 22.5,
+            perspective: false,
+            ..Default::default()
+        };
+        // Sanity: a non-identity orientation, so the quaternion path is exercised.
+        assert!(!cc.orientation.abs_diff_eq(Quat::IDENTITY, 1.0e-3));
+
+        let qsys = cc.to_qsys_camera("__current");
+        let back = CameraController::from_qsys_camera(&qsys);
+        assert!((back.target - cc.target).length() < 1.0e-3, "target");
+        assert!((back.distance - cc.distance).abs() < 1.0e-2, "distance");
+        assert!(
+            (back.ortho_scale - cc.ortho_scale).abs() < 1.0e-2,
+            "ortho_scale"
+        );
+        assert_eq!(back.perspective, cc.perspective, "perspective");
+        // q and -q are the same rotation; accept either sign.
+        let diff = (back.orientation - cc.orientation)
+            .length()
+            .min((back.orientation + cc.orientation).length());
+        assert!(diff < 1.0e-3, "orientation mismatch: {diff}");
+
+        // The perspective flag round-trips both ways.
+        cc.perspective = true;
+        assert!(CameraController::from_qsys_camera(&cc.to_qsys_camera("x")).perspective);
     }
 
     #[test]

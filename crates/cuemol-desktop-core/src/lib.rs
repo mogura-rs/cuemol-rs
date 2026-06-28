@@ -1478,9 +1478,133 @@ fn residue_one_letter(name: &str) -> char {
     }
 }
 
+/// Find the atom whose projected screen position is nearest `cursor_px` (within
+/// `radius_px`), or `None`. The shared screen-space atom pick used by the GUI
+/// front ends: each atom centre is projected with the same column-major `mvp` the
+/// offscreen renderer uses, so the projection matches what is drawn. The readback
+/// does not flip vertically (image row 0 = NDC y = +1 = top), hence the `1 - y`.
+/// Returns the atom's `(object_uid, atom_index)` for `atom_summary` lookup.
+///
+/// `cursor_px` and `vp_px` must share one pixel basis (both CSS px, or both
+/// physical px) — see the front ends' DPI handling. Pure geometry (no GPU): its
+/// own oracle is "project an atom, hand its pixel back, get that atom".
+pub fn pick_atom_screen(
+    atoms: &[cuemol_render::RenderAtom],
+    mvp: [[f32; 4]; 4],
+    cursor_px: (f64, f64),
+    vp_px: (f64, f64),
+    radius_px: f64,
+) -> Option<(u64, usize)> {
+    let mut best: Option<(f64, u64, usize)> = None;
+    for atom in atoms {
+        let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) else {
+            continue;
+        };
+        let c = &atom.center;
+        let v = [c.x as f32, c.y as f32, c.z as f32, 1.0];
+        // column-major mvp * column vector
+        let mut clip = [0.0f32; 4];
+        for i in 0..4 {
+            for col in 0..4 {
+                clip[i] += mvp[col][i] * v[col];
+            }
+        }
+        if clip[3].abs() < 1.0e-6 {
+            continue;
+        }
+        let ndc_x = (clip[0] / clip[3]) as f64;
+        let ndc_y = (clip[1] / clip[3]) as f64;
+        let ndc_z = (clip[2] / clip[3]) as f64;
+        if !(-1.0..=1.0).contains(&ndc_z) {
+            continue; // outside the depth slab (behind camera / clipped)
+        }
+        let sx = (ndc_x + 1.0) / 2.0 * vp_px.0;
+        let sy = (1.0 - ndc_y) / 2.0 * vp_px.1;
+        let dx = sx - cursor_px.0;
+        let dy = sy - cursor_px.1;
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist <= radius_px && best.is_none_or(|(b, _, _)| dist < b) {
+            best = Some((dist, object_uid, atom_index));
+        }
+    }
+    best.map(|(_, object_uid, atom_index)| (object_uid, atom_index))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a pickable atom at a world position (object_uid/atom_index set).
+    fn pick_atom_fixture(
+        uid: u64,
+        index: usize,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> cuemol_render::RenderAtom {
+        cuemol_render::RenderAtom {
+            center: cuemol_core::Vector4::new3(x, y, z),
+            radius: 1.0,
+            color: None,
+            object_uid: Some(uid),
+            atom_index: Some(index),
+            selected: false,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn pick_atom_screen_returns_the_nearest_projected_atom() {
+        // Identity column-major mvp -> clip == [x, y, z, 1], so projection is
+        // trivial and self-evidently the oracle: ndc == world xyz, screen pixel
+        // = ((x+1)/2*w, (1-y)/2*h). No camera_mvp (offscreen feature) needed, so
+        // this runs in the default `cargo test --workspace`.
+        let mvp = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let vp = (100.0, 100.0);
+        let atoms = vec![
+            pick_atom_fixture(7, 0, 0.0, 0.0, 0.0), // -> pixel (50, 50)
+            pick_atom_fixture(7, 1, 0.4, 0.0, 0.0), // -> pixel (70, 50)
+            pick_atom_fixture(9, 9, 0.0, 0.0, 2.0), // ndc_z=2 -> outside slab, skipped
+        ];
+        // Click near the centre atom.
+        assert_eq!(
+            pick_atom_screen(&atoms, mvp, (52.0, 50.0), vp, 10.0),
+            Some((7, 0))
+        );
+        // Click near the +x atom.
+        assert_eq!(
+            pick_atom_screen(&atoms, mvp, (69.0, 50.0), vp, 10.0),
+            Some((7, 1))
+        );
+        // Click far from any projected atom -> nothing.
+        assert_eq!(pick_atom_screen(&atoms, mvp, (50.0, 95.0), vp, 10.0), None);
+        // The depth-clipped atom is never returned even with a click on its pixel.
+        assert_eq!(
+            pick_atom_screen(&atoms[2..], mvp, (50.0, 50.0), vp, 10.0),
+            None
+        );
+    }
+
+    #[test]
+    fn pick_atom_screen_skips_atoms_without_object_identity() {
+        let mvp = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let mut atom = pick_atom_fixture(0, 0, 0.0, 0.0, 0.0);
+        atom.object_uid = None; // overlay/decoration geometry, not a real atom
+        assert_eq!(
+            pick_atom_screen(&[atom], mvp, (50.0, 50.0), (100.0, 100.0), 10.0),
+            None
+        );
+    }
 
     #[cfg(feature = "offscreen")]
     #[test]
