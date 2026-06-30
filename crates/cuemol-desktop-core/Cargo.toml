@@ -23,6 +23,7 @@ cuemol-surface.workspace = true
 cuemol-anim.workspace = true
 cuemol-render.workspace = true
 cuemol-xtal.workspace = true
+cuemol-symm.workspace = true
 # Offscreen wgpu renderer deps — optional, behind the `offscreen` feature, so the
 # default workspace build stays light and headless (no GPU stack compiled).
 bytemuck = { version = "1.25", features = ["derive"], optional = true }

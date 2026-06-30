@@ -366,6 +366,8 @@ struct GuiApplication {
     molstruct_expand_all: bool,
     /// Active tab of the Selection side panel (Command vs Editor).
     selection_tab: SelectionTab,
+    /// Whether the crystallographic unit-cell box is drawn (Symmetry panel "Unit cell").
+    show_unit_cell: bool,
     /// Rainbow coloring hue endpoints (degrees) edited in the Coloring panel; the
     /// classic N→C blue→red gradient by default (start 240° = blue, end 0° = red).
     coloring_start_hue: f32,
@@ -604,6 +606,7 @@ impl GuiApplication {
             molstruct_object: None,
             molstruct_expand_all: false,
             selection_tab: SelectionTab::Command,
+            show_unit_cell: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
             selected_renderer: None,
@@ -1857,6 +1860,14 @@ impl GuiApplication {
                     ui.end_row();
                 });
         }
+        ui.separator();
+        // CueMol2 Symmetry panel "Unit cell" toggle: draw the crystallographic cell box.
+        if ui
+            .checkbox(&mut self.show_unit_cell, "Unit cell")
+            .changed()
+        {
+            self.rebuild_snapshot();
+        }
     }
 
     /// Density-map section (deepened in M2 with contour sliders).
@@ -2670,6 +2681,48 @@ impl GuiApplication {
             Ok(snapshot) => self.snapshot = snapshot,
             Err(error) => self.set_error(error),
         }
+        if self.show_unit_cell {
+            self.append_unit_cell_edges();
+        }
+    }
+
+    /// Append the crystallographic unit-cell box (CueMol2 Symmetry "Unit cell") to the
+    /// live snapshot as thin yellow line-bonds, growing the scene bounds to fit it so a
+    /// Fit/auto-frame still shows the whole box.
+    fn append_unit_cell_edges(&mut self) {
+        let edges = self.state.active_unit_cell_edges();
+        if edges.is_empty() {
+            return;
+        }
+        let cell_color = cuemol_gfx::ColorSpec {
+            base: cuemol_gfx::ColorBase::Html {
+                r: 210,
+                g: 210,
+                b: 110,
+                a: 255,
+            },
+            modifiers: Vec::new(),
+        };
+        let (mut min, mut max) = self
+            .snapshot
+            .bounds
+            .unwrap_or((edges[0].0, edges[0].0));
+        for (from, to) in edges {
+            for point in [from, to] {
+                min = Vector4::new3(min.x.min(point.x), min.y.min(point.y), min.z.min(point.z));
+                max = Vector4::new3(max.x.max(point.x), max.y.max(point.y), max.z.max(point.z));
+            }
+            self.snapshot.bonds.push(cuemol_render::RenderBond {
+                from,
+                to,
+                radius: 0.12,
+                color: Some(cell_color.clone()),
+                object_uid: None,
+                atom_indices: None,
+                selected: false,
+            });
+        }
+        self.snapshot.bounds = Some((min, max));
     }
 
     fn draw_center_mark(&self, ui: &egui::Ui, rect: egui::Rect) {
@@ -5305,6 +5358,37 @@ mod tests {
     }
 
     #[test]
+    fn unit_cell_toggle_adds_the_twelve_cell_box_edges() {
+        // 1CRN's CRYST1 (P 1 21 1) gives a crystallographic cell, so toggling the
+        // Symmetry "Unit cell" must add exactly the 12 box edges as bonds, and toggling
+        // it off must remove them.
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        let base_bonds = app.snapshot.bonds.len();
+
+        app.show_unit_cell = true;
+        app.rebuild_snapshot();
+        assert_eq!(
+            app.snapshot.bonds.len() - base_bonds,
+            12,
+            "the unit cell box has 12 edges"
+        );
+
+        app.show_unit_cell = false;
+        app.rebuild_snapshot();
+        assert_eq!(
+            app.snapshot.bonds.len(),
+            base_bonds,
+            "toggling the unit cell off removes its edges"
+        );
+    }
+
+    #[test]
     fn selection_editor_expressions_parse_as_valid_grammar() {
         // Every expression the Selection Editor tab can emit must be valid selection
         // grammar, so clicking a quick-select never produces an unparseable selection.
@@ -5450,6 +5534,34 @@ mod tests {
                 ) {
                     let path = out_dir.join("rainbow_3d.png");
                     std::fs::write(&path, png).expect("write rainbow_3d.png");
+                    eprintln!("snapshot written to {}", path.display());
+                }
+            }
+        }
+
+        // (4) 3D render of the molecule wrapped in its crystallographic unit-cell box
+        // (Symmetry "Unit cell"), verifying the cell-edge geometry visually.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            app.show_unit_cell = true;
+            app.rebuild_snapshot();
+            if app.snapshot.bounds.is_some() {
+                camera.fit_snapshot(&app.snapshot);
+                let (w, h) = (900u32, 700u32);
+                let mvp = camera
+                    .view_projection(w as f32 / h as f32)
+                    .to_cols_array_2d();
+                if let Some(png) = crate::offscreen::render_snapshot_png(
+                    &app.snapshot,
+                    mvp,
+                    w,
+                    h,
+                    [0.02, 0.02, 0.05, 1.0],
+                ) {
+                    let path = out_dir.join("unit_cell_3d.png");
+                    std::fs::write(&path, png).expect("write unit_cell_3d.png");
                     eprintln!("snapshot written to {}", path.display());
                 }
             }

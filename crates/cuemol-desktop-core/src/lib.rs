@@ -442,6 +442,27 @@ impl DesktopAppState {
             .collect()
     }
 
+    /// The Cartesian unit-cell box edges for every crystallographic object in the
+    /// active scene (CueMol2 Symmetry panel "Unit cell"). A front end draws these as
+    /// line segments around the molecule; empty for non-crystallographic scenes.
+    pub fn active_unit_cell_edges(&self) -> Vec<(cuemol_core::Vector4, cuemol_core::Vector4)> {
+        let Some(scene_uid) = self.active_scene else {
+            return Vec::new();
+        };
+        let Some(scene) = self.scene_manager().scene(scene_uid) else {
+            return Vec::new();
+        };
+        let mut edges = Vec::new();
+        for object in scene.objects() {
+            if let Some(cell) = object.mol().cell_params() {
+                if let Some(crystal) = cuemol_symm::CrystalInfo::from_cell_params(cell) {
+                    edges.extend(cuemol_symm::unit_cell_edges(&crystal));
+                }
+            }
+        }
+        edges
+    }
+
     pub fn new_scene(&mut self, name: impl Into<String>, create_view: bool) -> NewSceneResult {
         let result = self
             .command_manager

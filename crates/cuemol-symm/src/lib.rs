@@ -594,34 +594,7 @@ impl UnitCellRenderer {
     }
 
     pub fn unit_cell_edges(&self, crystal: &CrystalInfo) -> Vec<(Vector4, Vector4)> {
-        let vertices = [
-            Vector4::new3(0.0, 0.0, 0.0),
-            Vector4::new3(1.0, 0.0, 0.0),
-            Vector4::new3(1.0, 1.0, 0.0),
-            Vector4::new3(0.0, 1.0, 0.0),
-            Vector4::new3(0.0, 0.0, 1.0),
-            Vector4::new3(1.0, 0.0, 1.0),
-            Vector4::new3(1.0, 1.0, 1.0),
-            Vector4::new3(0.0, 1.0, 1.0),
-        ]
-        .map(|vertex| crystal.frac_to_orth(vertex));
-        [
-            (0, 1),
-            (1, 2),
-            (2, 3),
-            (3, 0),
-            (4, 5),
-            (5, 6),
-            (6, 7),
-            (7, 4),
-            (0, 4),
-            (1, 5),
-            (2, 6),
-            (3, 7),
-        ]
-        .into_iter()
-        .map(|(lhs, rhs)| (vertices[lhs], vertices[rhs]))
-        .collect()
+        unit_cell_edges(crystal)
     }
 
     pub fn display_cache_valid(&self) -> bool {
@@ -631,6 +604,41 @@ impl UnitCellRenderer {
     pub fn mark_display_cache_valid(&mut self) {
         self.disp_list.mark_display_cache_valid();
     }
+}
+
+/// The 12 Cartesian edge segments of the crystallographic unit cell box (CueMol2
+/// `SymmRenderer` unit-cell display): the 8 fractional corners mapped through
+/// `frac_to_orth`, joined along the a/b/c axes. Free function so callers without a
+/// `SymmRenderer` instance (e.g. the desktop Symmetry panel) can draw the box.
+pub fn unit_cell_edges(crystal: &CrystalInfo) -> Vec<(Vector4, Vector4)> {
+    let vertices = [
+        Vector4::new3(0.0, 0.0, 0.0),
+        Vector4::new3(1.0, 0.0, 0.0),
+        Vector4::new3(1.0, 1.0, 0.0),
+        Vector4::new3(0.0, 1.0, 0.0),
+        Vector4::new3(0.0, 0.0, 1.0),
+        Vector4::new3(1.0, 0.0, 1.0),
+        Vector4::new3(1.0, 1.0, 1.0),
+        Vector4::new3(0.0, 1.0, 1.0),
+    ]
+    .map(|vertex| crystal.frac_to_orth(vertex));
+    [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    ]
+    .into_iter()
+    .map(|(lhs, rhs)| (vertices[lhs], vertices[rhs]))
+    .collect()
 }
 
 /// Build the per-unit-cell symmetry-mate transforms (in Cartesian space) for a
