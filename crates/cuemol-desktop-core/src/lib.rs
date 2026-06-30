@@ -517,6 +517,35 @@ impl DesktopAppState {
         Ok(())
     }
 
+    /// The object's current object-level coloring scheme class name (e.g.
+    /// `"RainbowColoring"`), or `None` when it uses the default element/CPK coloring.
+    /// Lets the Coloring panel reflect the live state instead of guessing.
+    pub fn object_coloring_type(&self, object_uid: Uid) -> Option<String> {
+        self.scene_manager()
+            .object(object_uid)?
+            .coloring_type()
+            .map(str::to_string)
+    }
+
+    /// Set an object's coloring scheme (CueMol2 Coloring panel). `coloring_type` is a
+    /// C++ scheme class name (e.g. `"RainbowColoring"`, `"BfacColoring"`); `None`
+    /// clears it so the renderers fall back to their default (element/CPK) coloring.
+    /// `attrs` are the scheme parameters (`start_hue`, `low_color`, …) read back by
+    /// the snapshot's `*_coloring_from_attrs` builders.
+    pub fn set_object_coloring(
+        &mut self,
+        object_uid: Uid,
+        coloring_type: Option<String>,
+        attrs: std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        object.set_coloring(coloring_type, attrs);
+        Ok(())
+    }
+
     pub fn destroy_renderer_in_object(
         &mut self,
         object_uid: Uid,

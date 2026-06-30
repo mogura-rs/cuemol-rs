@@ -366,6 +366,10 @@ struct GuiApplication {
     molstruct_expand_all: bool,
     /// Active tab of the Selection side panel (Command vs Editor).
     selection_tab: SelectionTab,
+    /// Rainbow coloring hue endpoints (degrees) edited in the Coloring panel; the
+    /// classic N→C blue→red gradient by default (start 240° = blue, end 0° = red).
+    coloring_start_hue: f32,
+    coloring_end_hue: f32,
     snapshot: RenderSceneSnapshot,
     background: SceneBackground,
     center_mark: CenterMark,
@@ -498,6 +502,16 @@ enum SelectionTab {
     Editor,
 }
 
+/// Object-level coloring scheme chosen in the Coloring panel (CueMol2
+/// `coloring-panel.xul` type dropdown). The subset wired into the snapshot's
+/// object-coloring cascade (Element/CPK default, Rainbow, B-factor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColoringMode {
+    Element,
+    Rainbow,
+    Bfac,
+}
+
 /// Ribbon toolbar tabs mirroring CueMol2's `topbar/cuemol2-ribbon.xul`
 /// (`tool-ribbon.js`): Home (navigate), Measure, Animation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,6 +604,8 @@ impl GuiApplication {
             molstruct_object: None,
             molstruct_expand_all: false,
             selection_tab: SelectionTab::Command,
+            coloring_start_hue: 240.0,
+            coloring_end_hue: 0.0,
             selected_renderer: None,
             snapshot: RenderSceneSnapshot::empty(),
             background: SceneBackground::Black,
@@ -1718,22 +1734,102 @@ impl GuiApplication {
 
     /// Coloring section (deepened in M2 with per-type decks).
     fn coloring_section(&mut self, ui: &mut egui::Ui) {
-        if let Some(renderer_uid) = self.selected_renderer {
-            for object in self.state.active_object_summaries() {
-                if let Some(renderer) = self
-                    .state
-                    .renderer_summaries(object.uid)
-                    .into_iter()
-                    .find(|renderer| renderer.uid == renderer_uid)
-                {
-                    ui.label(format!("Renderer: {}", renderer.name));
-                    break;
-                }
-            }
-        } else {
-            ui.weak("Select a renderer in Workspace.");
+        let objects = self.state.active_object_summaries();
+        if objects.is_empty() {
+            ui.weak("No molecule loaded.");
+            return;
         }
-        ui.weak("Coloring-type decks need a core setter (later pass).");
+
+        // Molecule selector (the Coloring panel applies object-level coloring).
+        let mut selected = self
+            .molstruct_object
+            .filter(|uid| objects.iter().any(|object| object.uid == *uid))
+            .or_else(|| objects.first().map(|object| object.uid));
+        let name = objects
+            .iter()
+            .find(|object| Some(object.uid) == selected)
+            .map(|object| object.name.clone())
+            .unwrap_or_default();
+        egui::ComboBox::from_id_salt("coloring-molecule")
+            .selected_text(name)
+            .show_ui(ui, |ui| {
+                for object in &objects {
+                    ui.selectable_value(&mut selected, Some(object.uid), &object.name);
+                }
+            });
+        self.molstruct_object = selected;
+        let Some(object_uid) = selected else {
+            return;
+        };
+
+        // Reflect the molecule's live object-coloring scheme in the dropdown.
+        let mut mode = match self.state.object_coloring_type(object_uid).as_deref() {
+            Some("RainbowColoring") => ColoringMode::Rainbow,
+            Some("BfacColoring") => ColoringMode::Bfac,
+            _ => ColoringMode::Element,
+        };
+        let before = mode;
+        egui::ComboBox::from_id_salt("coloring-type")
+            .selected_text(match mode {
+                ColoringMode::Element => "Element (CPK)",
+                ColoringMode::Rainbow => "Rainbow",
+                ColoringMode::Bfac => "B-factor",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut mode, ColoringMode::Element, "Element (CPK)");
+                ui.selectable_value(&mut mode, ColoringMode::Rainbow, "Rainbow");
+                ui.selectable_value(&mut mode, ColoringMode::Bfac, "B-factor");
+            });
+
+        // Rainbow exposes its hue endpoints (the XUL Rainbow deck's Start H / End H).
+        let mut params_changed = false;
+        if mode == ColoringMode::Rainbow {
+            ui.horizontal(|ui| {
+                ui.label("Start H");
+                params_changed |= ui
+                    .add(egui::Slider::new(&mut self.coloring_start_hue, 0.0..=360.0).suffix("°"))
+                    .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("End H");
+                params_changed |= ui
+                    .add(egui::Slider::new(&mut self.coloring_end_hue, 0.0..=360.0).suffix("°"))
+                    .changed();
+            });
+        } else if mode == ColoringMode::Bfac {
+            ui.weak("Blue (low) → red (high), auto-scaled to the molecule.");
+        } else {
+            ui.weak("Per-element CPK colours (carbon = molecule colour).");
+        }
+
+        if mode != before || params_changed {
+            self.apply_object_coloring(object_uid, mode);
+        }
+    }
+
+    /// Push the chosen object-coloring scheme into the model and re-render. The
+    /// snapshot's object-coloring cascade (`molecule_render_snapshot`) recolours each
+    /// carbon atom (and the ribbon backbone) by the scheme — the C++ `$molcol` path.
+    fn apply_object_coloring(&mut self, object_uid: cuemol_core::Uid, mode: ColoringMode) {
+        let (coloring_type, attrs) = match mode {
+            ColoringMode::Element => (None, std::collections::BTreeMap::new()),
+            ColoringMode::Rainbow => {
+                let mut attrs = std::collections::BTreeMap::new();
+                attrs.insert("mode".to_string(), "mol".to_string());
+                attrs.insert("start_hue".to_string(), format!("{:.0}", self.coloring_start_hue));
+                attrs.insert("end_hue".to_string(), format!("{:.0}", self.coloring_end_hue));
+                attrs.insert("sat".to_string(), "1".to_string());
+                attrs.insert("bri".to_string(), "1".to_string());
+                (Some("RainbowColoring".to_string()), attrs)
+            }
+            ColoringMode::Bfac => (Some("BfacColoring".to_string()), std::collections::BTreeMap::new()),
+        };
+        if let Err(error) = self.state.set_object_coloring(object_uid, coloring_type, attrs) {
+            self.set_status(format!("Coloring failed: {error}"));
+            return;
+        }
+        self.rebuild_snapshot();
+        self.set_status("Applied coloring");
     }
 
     /// Symmetry section — crystal cell / space group table (CueMol2 `symmetry-panel.xul`).
@@ -5168,6 +5264,47 @@ mod tests {
     }
 
     #[test]
+    fn rainbow_object_coloring_spreads_atom_colors_into_a_gradient() {
+        // Probe that the Coloring panel actually recolours atoms: applying Rainbow must
+        // spread the carbon atoms across a hue gradient (one distinct colour per
+        // residue), where Element mode gives a single carbon colour. Verifies the
+        // object-coloring cascade reaches the ball-and-stick atom path, not just ribbon.
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        let object_uid = app
+            .state
+            .active_object_summaries()
+            .first()
+            .map(|object| object.uid)
+            .expect("1CRN loads as one object");
+
+        let distinct_colors = |app: &GuiApplication| -> usize {
+            app.snapshot
+                .atoms
+                .iter()
+                .filter_map(|atom| atom.color.as_ref().and_then(|color| color.rgba8()))
+                .map(|color| format!("{color:?}"))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        };
+
+        app.apply_object_coloring(object_uid, ColoringMode::Element);
+        let element_colors = distinct_colors(&app);
+        app.apply_object_coloring(object_uid, ColoringMode::Rainbow);
+        let rainbow_colors = distinct_colors(&app);
+        assert!(
+            rainbow_colors > element_colors + 10,
+            "rainbow must spread carbon colours into a gradient: \
+             element={element_colors} rainbow={rainbow_colors}"
+        );
+    }
+
+    #[test]
     fn selection_editor_expressions_parse_as_valid_grammar() {
         // Every expression the Selection Editor tab can emit must be valid selection
         // grammar, so clicking a quick-select never produces an unparseable selection.
@@ -5250,6 +5387,10 @@ mod tests {
             app.molstruct_expand_all = true;
             // Show the Selection Editor tab (the new build-by-click controls).
             app.selection_tab = SelectionTab::Editor;
+            // Put the Coloring panel into Rainbow mode so its hue controls render.
+            if let Some(uid) = app.state.active_object_summaries().first().map(|o| o.uid) {
+                app.apply_object_coloring(uid, ColoringMode::Rainbow);
+            }
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(420.0, 1500.0))
                 .build(|ctx| {
@@ -5283,6 +5424,35 @@ mod tests {
                 });
             harness.run();
             save_harness(&mut harness, &out_dir.join("panels.png"));
+        }
+
+        // (3) A real 3D render of the rainbow-coloured molecule (offscreen wgpu), so the
+        // object-coloring cascade is verified visually — not only by the colour-count
+        // oracle. egui's own central viewport stays blank under kittest, so this uses
+        // the headless mesh renderer directly.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            if let Some(uid) = app.state.active_object_summaries().first().map(|o| o.uid) {
+                app.apply_object_coloring(uid, ColoringMode::Rainbow);
+                camera.fit_snapshot(&app.snapshot);
+                let (w, h) = (900u32, 700u32);
+                let mvp = camera
+                    .view_projection(w as f32 / h as f32)
+                    .to_cols_array_2d();
+                if let Some(png) = crate::offscreen::render_snapshot_png(
+                    &app.snapshot,
+                    mvp,
+                    w,
+                    h,
+                    [0.02, 0.02, 0.05, 1.0],
+                ) {
+                    let path = out_dir.join("rainbow_3d.png");
+                    std::fs::write(&path, png).expect("write rainbow_3d.png");
+                    eprintln!("snapshot written to {}", path.display());
+                }
+            }
         }
     }
 
