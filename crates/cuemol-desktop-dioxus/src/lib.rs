@@ -116,6 +116,10 @@ struct Model {
     view_size: (u32, u32),
     /// The applied selection expression (drives atom highlighting); set by picking.
     selection_text: String,
+    /// Symmetry panel toggles (CueMol2 "Unit cell" / "Symm mol"): draw the cell box
+    /// and the home-cell symmetry-mate copies.
+    show_unit_cell: bool,
+    show_symm_mates: bool,
 }
 
 impl Model {
@@ -146,16 +150,34 @@ impl Model {
             drag: None,
             view_size: (INIT_VIEW_W, INIT_VIEW_H),
             selection_text: String::new(),
+            show_unit_cell: false,
+            show_symm_mates: false,
         };
         model.rebuild_after_load();
         model
+    }
+
+    /// The render snapshot for the current selection, with the Symmetry panel's crystal
+    /// geometry (unit-cell box / symmetry mates) appended via the shared core. Used by
+    /// the render paths — NOT by picking, which must hit-test the bare molecule.
+    fn current_render_snapshot(&self) -> Option<cuemol_render::RenderSceneSnapshot> {
+        let mut snapshot = self
+            .state
+            .active_render_snapshot(&self.selection_text)
+            .ok()?;
+        self.state.append_crystal_geometry(
+            &mut snapshot,
+            self.show_unit_cell,
+            self.show_symm_mates,
+        );
+        Some(snapshot)
     }
 
     /// Recompute snapshot → camera → mesh → image after the scene's molecule set
     /// changes. Restores a loaded `.qsc`'s saved view; auto-frames a plain
     /// molecule from its bounding box.
     fn rebuild_after_load(&mut self) {
-        let snapshot = self.state.active_render_snapshot(&self.selection_text).ok();
+        let snapshot = self.current_render_snapshot();
         self.camera = self
             .state
             .active_scene_saved_camera()
@@ -169,9 +191,7 @@ impl Model {
     /// reflects `selection_text`) and re-render. Used after a pick.
     fn rebuild_selection(&mut self) {
         self.mesh = self
-            .state
-            .active_render_snapshot(&self.selection_text)
-            .ok()
+            .current_render_snapshot()
             .as_ref()
             .map(cuemol_render::tessellate_snapshot);
         self.rerender();
@@ -223,6 +243,18 @@ impl Model {
 
     fn color_bfactor(&mut self) {
         self.apply_coloring(Some("BfacColoring"), BTreeMap::new());
+    }
+
+    /// Symmetry panel toggles (CueMol2 "Unit cell" / "Symm mol"). Re-tessellate so the
+    /// shared crystal geometry appears/disappears in the 3D view.
+    fn toggle_unit_cell(&mut self) {
+        self.show_unit_cell = !self.show_unit_cell;
+        self.rebuild_selection();
+    }
+
+    fn toggle_symm_mates(&mut self) {
+        self.show_symm_mates = !self.show_symm_mates;
+        self.rebuild_selection();
     }
 
     fn render_uri(&self) -> Option<String> {
@@ -662,6 +694,20 @@ fn app() -> Element {
                                 "B-factor"
                             }
                         }
+                        // Symmetry actions (CueMol2 symmetry-panel.xul): cell box + mates.
+                        div { style: "{section_header_style}", "Symmetry" }
+                        div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().toggle_unit_cell(),
+                                "Unit cell"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().toggle_symm_mates(),
+                                "Symm mol"
+                            }
+                        }
                     }
                 }
                 // 3D viewport: scroll to zoom, left-drag to orbit, right-drag to
@@ -951,6 +997,32 @@ mod tests {
         assert!(
             rainbow > element + 10,
             "rainbow must spread carbon colours: element={element} rainbow={rainbow}"
+        );
+    }
+
+    #[test]
+    fn symmetry_toggles_add_crystal_geometry_to_the_dioxus_snapshot() {
+        // Unit cell adds the 12 box edges; Symm mol adds whole-molecule copies — the
+        // shared append_crystal_geometry path, exercised through the dioxus Model.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        let base = model.current_render_snapshot().expect("base snapshot");
+        let (base_atoms, base_bonds) = (base.atoms.len(), base.bonds.len());
+
+        model.show_unit_cell = true;
+        let with_cell = model.current_render_snapshot().expect("cell snapshot");
+        assert_eq!(
+            with_cell.bonds.len() - base_bonds,
+            12,
+            "the unit cell box has 12 edges"
+        );
+        model.show_unit_cell = false;
+
+        model.show_symm_mates = true;
+        let with_mates = model.current_render_snapshot().expect("mates snapshot");
+        assert!(
+            with_mates.atoms.len() > base_atoms,
+            "symmetry mates add whole-molecule copies"
         );
     }
 
