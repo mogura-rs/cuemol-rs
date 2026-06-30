@@ -18,7 +18,7 @@ use cuemol_render::RenderSceneSnapshot;
 use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter};
 use cuemol_xtal::{
     read_brix_map_file, read_ccp4_map_file, read_opendx_file, read_xplor_map_file, DensityMap,
-    MapMeshRenderer,
+    MapMeshRenderer, MapSurfRenderer,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -566,6 +566,44 @@ impl DesktopAppState {
                 });
             }
         }
+    }
+
+    /// Build the FILLED density isosurface mesh for every map in the active scene at the
+    /// given sigma level (CueMol2 `MapSurfRenderer` — the solid-surface density display,
+    /// the second mode alongside the chickenwire contour). Wires the orphaned
+    /// `generate_surf_obj` into the GUI: marching the map's own grid → a `RenderMesh`
+    /// (the same MolSurfObj→mesh conversion as the molecular surface). `None` when no
+    /// map yields geometry.
+    pub fn build_density_surface_mesh(&self, siglevel: f64) -> Option<cuemol_render::RenderMesh> {
+        let scene_uid = self.active_scene?;
+        let color = [0.45, 0.65, 0.95, 1.0];
+        let mut vertices: Vec<cuemol_render::MeshVertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        for map_object in self
+            .density_maps
+            .values()
+            .filter(|object| object.scene_uid == scene_uid)
+        {
+            let mut renderer = MapSurfRenderer::new();
+            renderer.map_mut().set_siglevel(siglevel);
+            let surface = renderer.generate_surf_obj(&map_object.map);
+            let mesh = surface.mesh();
+            let base = vertices.len() as u32;
+            vertices.extend(mesh.vertices().iter().map(|vertex| cuemol_render::MeshVertex {
+                position: vertex.position,
+                normal: vertex.normal,
+                color,
+            }));
+            indices.extend(
+                mesh.triangles()
+                    .iter()
+                    .flat_map(|triangle| triangle.iter().map(|index| base + index)),
+            );
+        }
+        if indices.is_empty() {
+            return None;
+        }
+        Some(cuemol_render::RenderMesh { vertices, indices })
     }
 
     /// Insert a pre-built density map (a computed/synthetic `DensityMap`, not read from

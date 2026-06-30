@@ -374,6 +374,10 @@ struct GuiApplication {
     /// (CueMol2 Density map panel level slider).
     show_density_contour: bool,
     density_level: f64,
+    /// Filled density isosurface (the solid-surface density mode alongside the
+    /// chickenwire contour) + a cached mesh (marching cubes is expensive).
+    show_density_solid: bool,
+    density_solid_mesh: Option<cuemol_render::RenderMesh>,
     /// Molecular-surface (SES) display: the toggle + a cached mesh (the SES is
     /// expensive, so it is computed once on enable, not every rebuild).
     show_surface: bool,
@@ -623,6 +627,8 @@ impl GuiApplication {
             show_symm_mates: false,
             show_density_contour: false,
             density_level: 1.5,
+            show_density_solid: false,
+            density_solid_mesh: None,
             show_surface: false,
             surface_mesh: None,
             force_open_all_panels: false,
@@ -1963,15 +1969,31 @@ impl GuiApplication {
             ));
         }
         ui.separator();
-        // CueMol2 Density map panel: "chickenwire" contour toggle + sigma level slider.
+        // CueMol2 Density map panel: chickenwire contour + filled-surface modes + σ level.
         let mut changed = ui
             .checkbox(&mut self.show_density_contour, "Show contour")
             .changed();
+        let solid_label = if self.show_density_solid {
+            "Solid surface ✓"
+        } else {
+            "Solid surface"
+        };
+        if ui.button(solid_label).clicked() {
+            // Toggling solid (re)builds + caches the marching-cubes mesh.
+            self.toggle_density_solid();
+        }
         ui.horizontal(|ui| {
             ui.label("Level (σ)");
-            changed |= ui
+            if ui
                 .add(egui::Slider::new(&mut self.density_level, 0.5..=5.0).step_by(0.1))
-                .changed();
+                .changed()
+            {
+                changed = true;
+                // A level change invalidates the cached solid mesh; rebuild it if shown.
+                if self.show_density_solid {
+                    self.density_solid_mesh = self.state.build_density_surface_mesh(self.density_level);
+                }
+            }
         });
         if changed {
             self.rebuild_snapshot();
@@ -2823,22 +2845,49 @@ impl GuiApplication {
             self.density_level,
             self.show_density_contour,
         );
-        // Cached molecular surface (SES) mesh, when shown.
-        if self.show_surface {
-            if let Some(mesh) = self.surface_mesh.clone() {
-                for vertex in &mesh.vertices {
-                    let p = vertex.position;
-                    self.snapshot.bounds = Some(match self.snapshot.bounds {
-                        Some((min, max)) => (
-                            Vector4::new3(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z)),
-                            Vector4::new3(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z)),
-                        ),
-                        None => (p, p),
-                    });
-                }
+        // Cached filled density isosurface, when shown.
+        if self.show_density_solid {
+            if let Some(mesh) = self.density_solid_mesh.clone() {
+                self.grow_bounds_to_mesh(&mesh);
                 self.snapshot.meshes.push(mesh);
             }
         }
+        // Cached molecular surface (SES) mesh, when shown.
+        if self.show_surface {
+            if let Some(mesh) = self.surface_mesh.clone() {
+                self.grow_bounds_to_mesh(&mesh);
+                self.snapshot.meshes.push(mesh);
+            }
+        }
+    }
+
+    /// Grow the live snapshot bounds to enclose every vertex of a mesh (so Fit frames
+    /// an appended surface / isosurface).
+    fn grow_bounds_to_mesh(&mut self, mesh: &cuemol_render::RenderMesh) {
+        for vertex in &mesh.vertices {
+            let p = vertex.position;
+            self.snapshot.bounds = Some(match self.snapshot.bounds {
+                Some((min, max)) => (
+                    Vector4::new3(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z)),
+                    Vector4::new3(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z)),
+                ),
+                None => (p, p),
+            });
+        }
+    }
+
+    /// Toggle the filled density isosurface (the solid density-surface mode). On enable,
+    /// compute the marching-cubes mesh once at the current σ level and cache it.
+    fn toggle_density_solid(&mut self) {
+        self.show_density_solid = !self.show_density_solid;
+        if self.show_density_solid && self.density_solid_mesh.is_none() {
+            self.density_solid_mesh = self.state.build_density_surface_mesh(self.density_level);
+            if self.density_solid_mesh.is_none() {
+                self.show_density_solid = false;
+                self.set_status("No density map for a solid surface");
+            }
+        }
+        self.rebuild_snapshot();
     }
 
     /// Toggle the molecular-surface (SES) display. On enable, compute the SES mesh once
@@ -5705,6 +5754,37 @@ mod tests {
     }
 
     #[test]
+    fn density_solid_surface_adds_a_filled_isosurface_mesh() {
+        // The filled density isosurface (2nd density mode) wires the orphaned
+        // generate_surf_obj: build a marching-cubes mesh + toggle it into the snapshot.
+        let mut app = GuiApplication::new();
+        let scene = app.state.active_scene().expect("default scene");
+        app.state
+            .add_density_map(scene, "gauss", synthetic_gaussian_map());
+        app.density_level = 1.0;
+
+        let mesh = app
+            .state
+            .build_density_surface_mesh(1.0)
+            .expect("a filled isosurface builds");
+        assert!(
+            mesh.indices.len() >= 30,
+            "the filled isosurface is a real triangle mesh ({} indices)",
+            mesh.indices.len()
+        );
+
+        let base = app.snapshot.meshes.len();
+        app.toggle_density_solid();
+        assert!(app.show_density_solid);
+        assert!(
+            app.snapshot.meshes.len() > base,
+            "the solid isosurface mesh is added"
+        );
+        app.toggle_density_solid();
+        assert_eq!(app.snapshot.meshes.len(), base, "removed on toggle off");
+    }
+
+    #[test]
     fn unit_cell_toggle_adds_the_twelve_cell_box_edges() {
         // 1CRN's CRYST1 (P 1 21 1) gives a crystallographic cell, so toggling the
         // Symmetry "Unit cell" must add exactly the 12 box edges as bonds, and toggling
@@ -6052,6 +6132,37 @@ mod tests {
                     let path = out_dir.join("surface_3d.png");
                     std::fs::write(&path, png).expect("write surface_3d.png");
                     eprintln!("snapshot written to {}", path.display());
+                }
+            }
+        }
+
+        // (8) 3D render of the FILLED density isosurface (solid mode) over the same
+        // synthetic Gaussian — the solid-surface counterpart of the chickenwire.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            if let Some(scene) = app.state.active_scene() {
+                app.state
+                    .add_density_map(scene, "gauss", synthetic_gaussian_map());
+                app.density_level = 1.0;
+                app.toggle_density_solid();
+                if !app.snapshot.meshes.is_empty() {
+                    camera.fit_snapshot(&app.snapshot);
+                    let (w, h) = (900u32, 700u32);
+                    let mvp = camera
+                        .view_projection(w as f32 / h as f32)
+                        .to_cols_array_2d();
+                    if let Some(png) = crate::offscreen::render_snapshot_png(
+                        &app.snapshot,
+                        mvp,
+                        w,
+                        h,
+                        [0.02, 0.02, 0.05, 1.0],
+                    ) {
+                        let path = out_dir.join("density_solid_3d.png");
+                        std::fs::write(&path, png).expect("write density_solid_3d.png");
+                        eprintln!("snapshot written to {}", path.display());
+                    }
                 }
             }
         }
