@@ -72,6 +72,7 @@ const COL_DANGER: u32 = 0xc2554f;
 const INSPECTOR_W: f32 = 320.0;
 const BOTTOM_H: f32 = 180.0;
 const TOOLBAR_H: f32 = 36.0;
+const SCENE_TAB_H: f32 = 26.0;
 
 /// Renderer types offered in the "Add renderer" dialog (id, human label).
 /// Mirrors the egui front end's `RENDERER_TYPES` so both GUIs expose the same set.
@@ -1060,6 +1061,60 @@ impl CueMolGpuiApp {
         self.refresh_scene(true);
     }
 
+    /// Create a new (empty) scene tab and switch to it (CueMol2 `tabmolview` "+").
+    fn new_scene_tab(&mut self) {
+        let _ = self.state.new_scene("Scene", true);
+        self.selected_object = None;
+        self.selected_renderer = None;
+        self.surface_mesh = None;
+        self.density_solid_mesh = None;
+        self.refresh_scene(true);
+    }
+
+    /// The scene-tab strip above the 3D view (CueMol2 multi-scene `tabmolview`): one
+    /// tab per scene + a "+" to add one. Mirrors the egui front end's scene tabs.
+    fn scene_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.state.active_scene();
+        let mut strip = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .h(px(SCENE_TAB_H))
+            .px_2()
+            .bg(rgb(COL_HEADER))
+            .border_b_1()
+            .border_color(rgb(COL_BORDER));
+        for scene in self.state.scene_summaries() {
+            let uid = scene.uid;
+            let is_active = Some(uid) == active;
+            let mut tab = div()
+                .id(eid(format!("scene-tab-{}", uid.get())))
+                .px_2()
+                .py_1()
+                .cursor_pointer()
+                .text_xs()
+                .rounded_sm()
+                .child(scene.name)
+                .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                    this.select_scene(uid);
+                    cx.notify();
+                }));
+            if is_active {
+                tab = tab.bg(rgb(COL_BTN)).text_color(rgb(COL_ACCENT));
+            } else {
+                tab = tab.text_color(rgb(COL_TEXT_DIM));
+            }
+            strip = strip.child(tab);
+        }
+        strip.child(color_btn("scene-new", "+").on_click(cx.listener(
+            |this, _: &gpui::ClickEvent, _, cx| {
+                this.new_scene_tab();
+                cx.notify();
+            },
+        )))
+    }
+
     fn select_object(&mut self, object_uid: cuemol_core::Uid) {
         self.selected_object = Some(object_uid);
         self.selected_renderer = None;
@@ -1241,8 +1296,11 @@ impl CueMolGpuiApp {
         // panel-visibility flags means the offscreen render matches the visible
         // region exactly instead of stretching.
         let chrome_w = SIDEBAR_W + if self.show_inspector { INSPECTOR_W } else { 0.0 };
-        let chrome_h =
-            HEADER_H + TOOLBAR_H + STATUS_H + if self.show_bottom { BOTTOM_H } else { 0.0 };
+        let chrome_h = HEADER_H
+            + TOOLBAR_H
+            + SCENE_TAB_H
+            + STATUS_H
+            + if self.show_bottom { BOTTOM_H } else { 0.0 };
         self.scale_factor = window.scale_factor();
         let size = viewport_pixels(window, chrome_w, chrome_h);
         if size != self.view_size {
@@ -1326,6 +1384,7 @@ impl Render for CueMolGpuiApp {
         // `self.panel(cx)` call borrows independently and finishes before the next.
         let header = self.header(cx).into_any_element();
         let toolbar = self.toolbar(cx).into_any_element();
+        let scene_tabs = self.scene_tabs(cx).into_any_element();
         let sidebar = self.sidebar(cx).into_any_element();
         let viewport = self.viewport(cx).into_any_element();
         let bottom = self
@@ -1365,6 +1424,7 @@ impl Render for CueMolGpuiApp {
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
+                            .child(scene_tabs)
                             .child(viewport)
                             .children(bottom),
                     )
