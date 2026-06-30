@@ -281,6 +281,8 @@ pub struct CueMolGpuiApp {
     /// Molecular-surface (SES) display + a cached mesh (the SES is expensive).
     show_surface: bool,
     surface_mesh: Option<cuemol_render::RenderMesh>,
+    /// Hydrogen-bond dashed lines.
+    show_hbonds: bool,
     /// Console / status log (newest last), capped to avoid unbounded growth.
     log_lines: Vec<String>,
     /// Most-recently-opened file paths (newest first, capped at 10).
@@ -359,6 +361,7 @@ impl CueMolGpuiApp {
             density_solid_mesh: None,
             show_surface: false,
             surface_mesh: None,
+            show_hbonds: false,
             log_lines: Vec::new(),
             recent_paths: Vec::new(),
             undo_stack: Vec::new(),
@@ -417,6 +420,8 @@ impl CueMolGpuiApp {
             self.density_level,
             self.show_density_contour,
         );
+        self.state
+            .append_hbond_geometry(&mut snapshot, self.show_hbonds);
         if self.show_density_solid {
             if let Some(mesh) = &self.density_solid_mesh {
                 snapshot.meshes.push(mesh.clone());
@@ -494,6 +499,12 @@ impl CueMolGpuiApp {
     /// Density map "chickenwire" contour toggle (CueMol2 Density map panel).
     fn toggle_density_contour(&mut self) {
         self.show_density_contour = !self.show_density_contour;
+        self.refresh_scene(false);
+    }
+
+    /// Hydrogen-bond dashed-line display toggle.
+    fn toggle_hbonds(&mut self) {
+        self.show_hbonds = !self.show_hbonds;
         self.refresh_scene(false);
     }
 
@@ -2050,6 +2061,12 @@ impl CueMolGpuiApp {
                 .child(color_btn("surf-show", "Surface").on_click(cx.listener(
                     |this, _: &gpui::ClickEvent, _, cx| {
                         this.toggle_surface();
+                        cx.notify();
+                    },
+                )))
+                .child(color_btn("hbonds", "H-bonds").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.toggle_hbonds();
                         cx.notify();
                     },
                 )))

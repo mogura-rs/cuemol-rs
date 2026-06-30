@@ -129,6 +129,8 @@ struct Model {
     /// Molecular-surface (SES) display + a cached mesh (the SES is expensive).
     show_surface: bool,
     surface_mesh: Option<cuemol_render::RenderMesh>,
+    /// Hydrogen-bond dashed lines.
+    show_hbonds: bool,
 }
 
 impl Model {
@@ -167,6 +169,7 @@ impl Model {
             density_solid_mesh: None,
             show_surface: false,
             surface_mesh: None,
+            show_hbonds: false,
         };
         model.rebuild_after_load();
         model
@@ -190,6 +193,8 @@ impl Model {
             self.density_level,
             self.show_density_contour,
         );
+        self.state
+            .append_hbond_geometry(&mut snapshot, self.show_hbonds);
         if self.show_density_solid {
             if let Some(mesh) = &self.density_solid_mesh {
                 snapshot.meshes.push(mesh.clone());
@@ -298,6 +303,12 @@ impl Model {
     /// Density map "chickenwire" contour toggle (CueMol2 Density map panel).
     fn toggle_density_contour(&mut self) {
         self.show_density_contour = !self.show_density_contour;
+        self.rebuild_selection();
+    }
+
+    /// Hydrogen-bond dashed-line display toggle.
+    fn toggle_hbonds(&mut self) {
+        self.show_hbonds = !self.show_hbonds;
         self.rebuild_selection();
     }
 
@@ -836,6 +847,11 @@ fn app() -> Element {
                                 style: "{color_btn_style}",
                                 onclick: move |_| model.write().toggle_surface(),
                                 "Show surface"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().toggle_hbonds(),
+                                "H-bonds"
                             }
                         }
                     }
