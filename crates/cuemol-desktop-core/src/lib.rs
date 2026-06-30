@@ -40,6 +40,9 @@ pub struct DesktopAppState {
     morphs: BTreeMap<Uid, MorphMol>,
     density_maps: BTreeMap<Uid, GuiDensityMapObject>,
     next_density_map_uid: u64,
+    /// Per-object MD trajectory frames (each frame = atom positions in molecule order),
+    /// for the MolAnim animation type. Empty until a trajectory is loaded.
+    trajectories: BTreeMap<Uid, Vec<Vec<cuemol_core::Vector4>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +143,7 @@ pub enum AnimKind {
     SlideOut,
     ShowAnim,
     HideAnim,
+    MolAnim,
 }
 
 impl AnimKind {
@@ -152,6 +156,7 @@ impl AnimKind {
             Self::SlideOut => "SlideOut",
             Self::ShowAnim => "Show",
             Self::HideAnim => "Hide",
+            Self::MolAnim => "MolAnim",
         }
     }
 }
@@ -177,6 +182,9 @@ pub struct AnimFrame {
     /// front end applies it only when the current visibility differs (so it re-renders
     /// once on entry, not every frame).
     pub set_visible: Option<bool>,
+    /// Trajectory playback progress 0..1 for a MolAnim object (`None` otherwise). The
+    /// front end maps it to a trajectory frame via `apply_trajectory_fraction`.
+    pub frame_fraction: Option<f64>,
 }
 
 /// Advance an animation timeline by `dt` seconds (looping at the total duration) and
@@ -188,6 +196,7 @@ pub fn anim_step(objects: &[AnimObject], elapsed: f64, dt: f64) -> AnimFrame {
             rotate_dir: 1.0,
             slide_dir: 0.0,
             set_visible: None,
+            frame_fraction: None,
         };
     }
     let total: f64 = objects.iter().map(|object| object.duration.max(0.01)).sum();
@@ -199,20 +208,23 @@ pub fn anim_step(objects: &[AnimObject], elapsed: f64, dt: f64) -> AnimFrame {
     for object in objects {
         let d = object.duration.max(0.01);
         if next < acc + d {
-            let (rotate_dir, slide_dir, set_visible) = match object.kind {
-                AnimKind::Spin => (1.0, 0.0, None),
-                AnimKind::Rock => (if (next - acc) / d < 0.5 { 1.0 } else { -1.0 }, 0.0, None),
-                AnimKind::Pause => (0.0, 0.0, None),
-                AnimKind::SlideIn => (0.0, -1.0, None),
-                AnimKind::SlideOut => (0.0, 1.0, None),
-                AnimKind::ShowAnim => (0.0, 0.0, Some(true)),
-                AnimKind::HideAnim => (0.0, 0.0, Some(false)),
+            let progress = (next - acc) / d; // 0..1 within this segment
+            let (rotate_dir, slide_dir, set_visible, frame_fraction) = match object.kind {
+                AnimKind::Spin => (1.0, 0.0, None, None),
+                AnimKind::Rock => (if progress < 0.5 { 1.0 } else { -1.0 }, 0.0, None, None),
+                AnimKind::Pause => (0.0, 0.0, None, None),
+                AnimKind::SlideIn => (0.0, -1.0, None, None),
+                AnimKind::SlideOut => (0.0, 1.0, None, None),
+                AnimKind::ShowAnim => (0.0, 0.0, Some(true), None),
+                AnimKind::HideAnim => (0.0, 0.0, Some(false), None),
+                AnimKind::MolAnim => (0.0, 0.0, None, Some(progress)),
             };
             return AnimFrame {
                 elapsed: next,
                 rotate_dir,
                 slide_dir,
                 set_visible,
+                frame_fraction,
             };
         }
         acc += d;
@@ -222,6 +234,7 @@ pub fn anim_step(objects: &[AnimObject], elapsed: f64, dt: f64) -> AnimFrame {
         rotate_dir: 0.0,
         slide_dir: 0.0,
         set_visible: None,
+        frame_fraction: None,
     }
 }
 
@@ -345,6 +358,7 @@ impl Default for DesktopAppState {
             morphs: BTreeMap::new(),
             density_maps: BTreeMap::new(),
             next_density_map_uid: 1,
+            trajectories: BTreeMap::new(),
         }
     }
 }
@@ -755,6 +769,73 @@ impl DesktopAppState {
             },
         );
         uid
+    }
+
+    /// Store an MD trajectory (frames of atom positions, in molecule order) for an
+    /// object, enabling the MolAnim animation type. Frames whose length doesn't match
+    /// the molecule's atom count are kept but applied position-by-position up to the
+    /// shorter length.
+    pub fn set_object_trajectory(
+        &mut self,
+        object_uid: Uid,
+        frames: Vec<Vec<cuemol_core::Vector4>>,
+    ) {
+        self.trajectories.insert(object_uid, frames);
+    }
+
+    /// Load an AMBER mdcrd trajectory file and attach it to an object (MolAnim source).
+    /// The atom count is taken from the object's molecule (mdcrd is headerless).
+    pub fn load_amber_trajectory(&mut self, object_uid: Uid, path: &Path) -> Result<usize> {
+        let natom = self
+            .scene_manager()
+            .object(object_uid)
+            .map(|object| object.mol().atoms().len())
+            .unwrap_or(0);
+        let trajectory = cuemol_mdtools::read_amber_mdcrd_file(path, natom, false)?;
+        let frames: Vec<Vec<cuemol_core::Vector4>> = trajectory
+            .frames
+            .into_iter()
+            .map(|frame| frame.positions)
+            .collect();
+        let count = frames.len();
+        self.trajectories.insert(object_uid, frames);
+        Ok(count)
+    }
+
+    /// Whether an object has a loaded trajectory (so the front end can offer MolAnim).
+    pub fn object_has_trajectory(&self, object_uid: Uid) -> bool {
+        self.trajectories
+            .get(&object_uid)
+            .is_some_and(|frames| !frames.is_empty())
+    }
+
+    /// The frame count of an object's trajectory (0 if none).
+    pub fn trajectory_len(&self, object_uid: Uid) -> usize {
+        self.trajectories
+            .get(&object_uid)
+            .map_or(0, |frames| frames.len())
+    }
+
+    /// Apply the trajectory frame at `fraction` (0..1) to an object's atoms — overwrites
+    /// the molecule's positions in order (MolAnim playback). No-op without a trajectory.
+    /// The caller re-tessellates afterwards.
+    pub fn apply_trajectory_fraction(&mut self, object_uid: Uid, fraction: f64) {
+        let Some(frames) = self.trajectories.get(&object_uid) else {
+            return;
+        };
+        if frames.is_empty() {
+            return;
+        }
+        let last = frames.len() - 1;
+        let index = ((fraction.clamp(0.0, 1.0)) * last as f64).round() as usize;
+        let frame = frames[index.min(last)].clone();
+        let Some(object) = self.scene_manager_mut().object_mut(object_uid) else {
+            return;
+        };
+        let atoms = object.mol_mut().atoms_mut();
+        for (atom, position) in atoms.iter_mut().zip(frame.iter()) {
+            atom.position = *position;
+        }
     }
 
     /// Home-unit-cell symmetry-mate transforms (CueMol2 Symmetry panel "Symm mol" →
@@ -2477,6 +2558,43 @@ mod tests {
         // SlideIn → slide_dir -1 (zoom in); SlideOut → +1.
         let slide = vec![AnimObject { kind: AnimKind::SlideIn, duration: 1.0 }];
         assert_eq!(anim_step(&slide, 0.0, 0.1).slide_dir, -1.0);
+    }
+
+    #[test]
+    fn trajectory_playback_overwrites_atom_positions() {
+        // MolAnim source: a stored trajectory's frame coordinates overwrite the
+        // molecule's atom positions when applied by fraction.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        if app.open_path(root.join("1CRN.pdb")).is_err() {
+            return;
+        }
+        let object_uid = app.active_object_summaries().first().map(|o| o.uid).unwrap();
+        let natom = app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .mol()
+            .atoms()
+            .len();
+        let frame0 = vec![cuemol_core::Vector4::new3(0.0, 0.0, 0.0); natom];
+        let frame1 = vec![cuemol_core::Vector4::new3(5.0, 0.0, 0.0); natom];
+        app.set_object_trajectory(object_uid, vec![frame0, frame1]);
+        assert!(app.object_has_trajectory(object_uid));
+        assert_eq!(app.trajectory_len(object_uid), 2);
+
+        app.apply_trajectory_fraction(object_uid, 1.0); // last frame
+        let pos = app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .mol()
+            .atoms()[0]
+            .position;
+        assert!((pos.x - 5.0).abs() < 1.0e-6, "frame 1 moved atoms to x=5, got {}", pos.x);
     }
 
     #[test]

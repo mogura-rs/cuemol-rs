@@ -350,6 +350,8 @@ struct GuiApplication {
     open_path: String,
     save_path: String,
     object_save_path: String,
+    /// AMBER mdcrd trajectory path for the MolAnim animation type.
+    trajectory_path: String,
     view_save_path: String,
     export_path: String,
     log_save_path: String,
@@ -624,6 +626,7 @@ impl GuiApplication {
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
             save_path: "scene.qsc".to_string(),
             object_save_path: "object.pdb".to_string(),
+            trajectory_path: String::new(),
             view_save_path: "current_view.cam".to_string(),
             export_path: "scene.pov".to_string(),
             log_save_path: "cuemol.log".to_string(),
@@ -2110,6 +2113,19 @@ impl GuiApplication {
         if let Some(target) = frame.set_visible {
             self.apply_anim_visibility(target);
         }
+        if let Some(fraction) = frame.frame_fraction {
+            if let Some(object_uid) = self
+                .state
+                .active_object_summaries()
+                .first()
+                .map(|object| object.uid)
+            {
+                if self.state.object_has_trajectory(object_uid) {
+                    self.state.apply_trajectory_fraction(object_uid, fraction);
+                    self.rebuild_snapshot();
+                }
+            }
+        }
     }
 
     /// Set every renderer's visibility for a Show/Hide animation object, re-tessellating
@@ -2150,6 +2166,7 @@ impl GuiApplication {
                     AnimKind::SlideOut,
                     AnimKind::ShowAnim,
                     AnimKind::HideAnim,
+                    AnimKind::MolAnim,
                 ] {
                     if ui.button(kind.label()).clicked() {
                         self.animation_objects.push(AnimObject {
@@ -2167,6 +2184,32 @@ impl GuiApplication {
             if ui.button("⏹ Stop").clicked() {
                 self.animation_playing = false;
                 self.animation_elapsed = 0.0;
+            }
+        });
+        // MolAnim source: load an AMBER mdcrd trajectory onto the active object.
+        ui.horizontal(|ui| {
+            ui.label("Traj:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.trajectory_path)
+                    .hint_text("trajectory.mdcrd")
+                    .desired_width(120.0),
+            );
+            if ui.button("Load").clicked() {
+                let path = self.trajectory_path.trim().to_string();
+                if let Some(object_uid) = self
+                    .state
+                    .active_object_summaries()
+                    .first()
+                    .map(|object| object.uid)
+                {
+                    match self
+                        .state
+                        .load_amber_trajectory(object_uid, std::path::Path::new(&path))
+                    {
+                        Ok(frames) => self.set_status(format!("Trajectory: {frames} frames")),
+                        Err(error) => self.set_status(format!("Trajectory load failed: {error}")),
+                    }
+                }
             }
         });
         ui.separator();

@@ -42,6 +42,8 @@ struct Inputs {
     save_obj: Entity<TextInput>,
     /// Destination path for "Export POV-Ray" (`.pov`).
     export_pov: Entity<TextInput>,
+    /// AMBER mdcrd trajectory path for the MolAnim animation type.
+    trajectory: Entity<TextInput>,
 }
 
 // Chrome sizes (logical px). Shared by BOTH the on-screen layout and the
@@ -466,6 +468,7 @@ impl CueMolGpuiApp {
                 save_qsc: cx.new(|cx| TextInput::new(cx, "scene.qsc", "scene.qsc")),
                 save_obj: cx.new(|cx| TextInput::new(cx, "object.pdb", "object.pdb")),
                 export_pov: cx.new(|cx| TextInput::new(cx, "scene.pov", "scene.pov")),
+                trajectory: cx.new(|cx| TextInput::new(cx, "trajectory.mdcrd", "")),
             };
             self.inputs = Some(inputs);
         }
@@ -611,6 +614,19 @@ impl CueMolGpuiApp {
         }
     }
 
+    /// Load an AMBER mdcrd trajectory onto the active object (MolAnim source).
+    fn load_trajectory(&mut self, path: &str) {
+        if let Some(uid) = self.state.active_object_summaries().first().map(|o| o.uid) {
+            match self
+                .state
+                .load_amber_trajectory(uid, std::path::Path::new(path))
+            {
+                Ok(frames) => self.set_status(format!("Trajectory: {frames} frames")),
+                Err(error) => self.set_status(format!("Trajectory load failed: {error}")),
+            }
+        }
+    }
+
     /// Append an animation object to the timeline (CueMol2 anim-panel Add).
     fn add_anim(&mut self, kind: AnimKind) {
         self.animation_objects.push(AnimObject {
@@ -646,6 +662,16 @@ impl CueMolGpuiApp {
                             }
                             if let Some(target) = frame.set_visible {
                                 this.apply_anim_visibility(target);
+                            }
+                            if let Some(fraction) = frame.frame_fraction {
+                                if let Some(uid) =
+                                    this.state.active_object_summaries().first().map(|o| o.uid)
+                                {
+                                    if this.state.object_has_trajectory(uid) {
+                                        this.state.apply_trajectory_fraction(uid, fraction);
+                                        this.refresh_scene(false);
+                                    }
+                                }
                             }
                             cx.notify();
                             true
@@ -2951,6 +2977,12 @@ impl CueMolGpuiApp {
                         cx.notify();
                     },
                 )))
+                .child(button("anim-mol", "+ MolAnim").text_xs().on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.add_anim(AnimKind::MolAnim);
+                        cx.notify();
+                    },
+                )))
                 .child(
                     button("anim-play", if playing { "Stop" } else { "Play" }).on_click(
                         cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
@@ -2960,6 +2992,29 @@ impl CueMolGpuiApp {
                     ),
                 ),
         );
+        // MolAnim source: load an AMBER mdcrd trajectory onto the active object.
+        if let Some(inputs) = &self.inputs {
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().text_color(rgb(col_text_dim())).child("Traj:"))
+                    .child(div().w(px(180.0)).child(inputs.trajectory.clone()))
+                    .child(button("anim-loadtraj", "Load traj").text_xs().on_click(cx.listener(
+                        |this, _: &gpui::ClickEvent, _, cx| {
+                            let path = this
+                                .inputs
+                                .as_ref()
+                                .map(|i| i.trajectory.read(cx).text())
+                                .unwrap_or_default();
+                            this.load_trajectory(&path);
+                            cx.notify();
+                        },
+                    ))),
+            );
+        }
         if self.animation_objects.is_empty() {
             col = col.child(
                 div()

@@ -381,6 +381,24 @@ impl Model {
         }
     }
 
+    /// Load an AMBER mdcrd trajectory onto the active object (MolAnim source).
+    fn load_trajectory(&mut self, path: &str) {
+        if let Some(uid) = self
+            .state
+            .active_object_summaries()
+            .first()
+            .map(|object| object.uid)
+        {
+            match self
+                .state
+                .load_amber_trajectory(uid, std::path::Path::new(path))
+            {
+                Ok(frames) => self.status = format!("Trajectory: {frames} frames"),
+                Err(error) => self.status = format!("Trajectory load failed: {error}"),
+            }
+        }
+    }
+
     /// Append an animation object to the timeline (CueMol2 anim-panel Add).
     fn add_anim(&mut self, kind: cuemol_desktop_core::AnimKind) {
         self.animation_objects.push(cuemol_desktop_core::AnimObject {
@@ -831,6 +849,7 @@ fn app() -> Element {
     // The Open field's text, held separately from the model so per-keystroke edits
     // don't churn the wgpu-owning model signal.
     let mut open_text = use_signal(String::new);
+    let mut traj_text = use_signal(String::new);
 
     // Animation playback loop (CueMol2 SimpleSpin): an executor-agnostic timer ticks
     // ~60 fps; while `anim_playing` is set, each tick spins the camera + re-renders.
@@ -852,6 +871,14 @@ fn app() -> Element {
                 }
                 if let Some(target) = frame.set_visible {
                     m.apply_anim_visibility(target);
+                }
+                if let Some(fraction) = frame.frame_fraction {
+                    if let Some(uid) = m.state.active_object_summaries().first().map(|o| o.uid) {
+                        if m.state.object_has_trajectory(uid) {
+                            m.state.apply_trajectory_fraction(uid, fraction);
+                            m.rebuild_selection();
+                        }
+                    }
                 }
             }
             futures_timer::Delay::new(std::time::Duration::from_millis(16)).await;
@@ -1250,8 +1277,32 @@ fn app() -> Element {
                             }
                             button {
                                 style: "{color_btn_style}",
+                                onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::MolAnim),
+                                "+ MolAnim"
+                            }
+                            button {
+                                style: "{color_btn_style}",
                                 onclick: move |_| model.write().toggle_animation(),
                                 if anim_playing { "⏸ Stop" } else { "▶ Play" }
+                            }
+                        }
+                        // MolAnim source: load an AMBER mdcrd trajectory onto the active object.
+                        div { style: "display:flex;gap:4px;padding:4px 12px;align-items:center;",
+                            input {
+                                style: "flex:1;min-width:0;background:{COL_BG};color:{COL_TEXT};border:1px solid {COL_BORDER};border-radius:4px;padding:2px 6px;font-size:11px;",
+                                placeholder: "trajectory.mdcrd",
+                                value: "{traj_text}",
+                                oninput: move |e| traj_text.set(e.value()),
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| {
+                                    let path = traj_text.peek().trim().to_string();
+                                    if !path.is_empty() {
+                                        model.write().load_trajectory(&path);
+                                    }
+                                },
+                                "Load traj"
                             }
                         }
                         for (ai , (label , duration)) in anim_objects.iter().enumerate() {
