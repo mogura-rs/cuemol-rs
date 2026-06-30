@@ -773,6 +773,28 @@ impl Model {
         }
     }
 
+    /// Write APBS electrostatics input files (PQR + APBS input + DX target) for the
+    /// first molecule to the temp dir (CueMol2 Tools → APBS). No dialog — paths are
+    /// derived and reported in the status bar (mirrors the gpui front end).
+    fn write_apbs(&mut self) {
+        let Some(uid) = self.first_object_uid() else {
+            return;
+        };
+        let dir = std::env::temp_dir();
+        let pqr = dir.join("cuemol_apbs.pqr");
+        let input = dir.join("cuemol_apbs.in");
+        let dx = dir.join("cuemol_apbs.dx");
+        match self
+            .state
+            .write_apbs_files(uid, &self.selection_text, &pqr, &input, &dx)
+        {
+            Ok(summary) => {
+                self.status = format!("APBS files written ({} atoms)", summary.atom_count)
+            }
+            Err(error) => self.status = format!("APBS failed: {error}"),
+        }
+    }
+
     /// Superpose the second molecule onto the first by all-atom SSM fit (CueMol2
     /// Tools → Superposition). Needs ≥2 objects; repositions the moving molecule.
     fn superpose(&mut self) {
@@ -859,6 +881,7 @@ impl Model {
             "clear_undo" => self.clear_undo_data(),
             "contacts" => self.find_contacts(),
             "superpose" => self.superpose(),
+            "apbs" => self.write_apbs(),
             "sel_none" => self.set_selection("none"),
             "sel_all" => self.set_selection("*"),
             "col_element" => self.color_element(),
@@ -1302,6 +1325,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("Reassign secondary structure", "reassign_ss"),
             ("Find contacts", "contacts"),
             ("Superpose molecules", "superpose"),
+            ("APBS electrostatics", "apbs"),
         ], // Tools
         7 => &[("About", "about")],              // Help
         _ => &[],
@@ -1827,6 +1851,12 @@ fn app() -> Element {
                                 title: "Add molecule 2 as a morph end-state of molecule 1",
                                 onclick: move |_| model.write().add_morph_frame(),
                                 "Morph frame"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                title: "Write APBS electrostatics files to the temp dir",
+                                onclick: move |_| model.write().write_apbs(),
+                                "APBS"
                             }
                         }
                         div { style: "display:flex;gap:6px;align-items:center;padding:2px 12px;",
@@ -2635,6 +2665,18 @@ mod tests {
             model.status.starts_with("Morph @"),
             "morph applied ({})",
             model.status
+        );
+
+        // APBS writes electrostatics input files for molecule 1.
+        model.write_apbs();
+        assert!(
+            model.status.starts_with("APBS files written"),
+            "APBS wrote files ({})",
+            model.status
+        );
+        assert!(
+            std::env::temp_dir().join("cuemol_apbs.pqr").exists(),
+            "the PQR file was written"
         );
     }
 

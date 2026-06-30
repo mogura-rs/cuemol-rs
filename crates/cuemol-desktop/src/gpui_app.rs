@@ -1200,6 +1200,26 @@ impl CueMolGpuiApp {
         }
     }
 
+    /// Write APBS electrostatics input files (PQR + APBS input + DX target) for `target`
+    /// to the temp dir (CueMol2 Tools → APBS). No dialog — paths are derived, reported
+    /// in the status bar.
+    fn run_apbs(&mut self, target: cuemol_core::Uid) {
+        let dir = std::env::temp_dir();
+        let pqr = dir.join("cuemol_apbs.pqr");
+        let input = dir.join("cuemol_apbs.in");
+        let dx = dir.join("cuemol_apbs.dx");
+        match self
+            .state
+            .write_apbs_files(target, &self.applied_selection, &pqr, &input, &dx)
+        {
+            Ok(summary) => self.set_status(format!(
+                "APBS files written ({} atoms): {}",
+                summary.atom_count, summary.pqr_path
+            )),
+            Err(error) => self.set_status(format!("APBS error: {error}")),
+        }
+    }
+
     fn run_surface(
         &mut self,
         target: cuemol_core::Uid,
@@ -2046,6 +2066,15 @@ impl CueMolGpuiApp {
                             this.with_selected_object(cx, |this, obj, cx| {
                                 this.open_morph_dialog(obj, cx)
                             });
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    menu_item("mi-apbs", "APBS electrostatics")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.with_selected_object(cx, |this, obj, _cx| this.run_apbs(obj));
                             this.open_menu = None;
                             cx.notify();
                         }))
@@ -4667,6 +4696,23 @@ mod tests {
         app.delete_renderer(object, renderer);
         assert_eq!(app.renderers(object).len(), before, "delete undoes the add");
         assert_eq!(app.selected_renderer, None);
+    }
+
+    #[test]
+    fn run_apbs_writes_electrostatics_files_in_gpui() {
+        let Some((mut app, object)) = app_with_molecule() else {
+            return;
+        };
+        app.run_apbs(object);
+        assert!(
+            app.status.starts_with("APBS files written"),
+            "status: {}",
+            app.status
+        );
+        assert!(
+            std::env::temp_dir().join("cuemol_apbs.pqr").exists(),
+            "the PQR file was written"
+        );
     }
 
     #[test]
