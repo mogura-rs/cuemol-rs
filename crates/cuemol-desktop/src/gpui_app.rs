@@ -335,7 +335,8 @@ impl CueMolGpuiApp {
             background: Background::Slate,
             center_mark: CenterMarkKind::Cross,
             bottom_tab: BottomTab::Output,
-            show_inspector: true,
+            // CueMol2 has no right dock; properties open on demand via the toolbar toggle.
+            show_inspector: false,
             show_bottom: true,
             log_lines: Vec::new(),
             recent_paths: Vec::new(),
@@ -1774,6 +1775,8 @@ impl CueMolGpuiApp {
                     .into_any_element(),
             );
         }
+        // CueMol2's left dock stacks several panels below the Workspace tree.
+        rows.extend(self.cuemol_extra_panels());
 
         div()
             .flex()
@@ -1783,7 +1786,7 @@ impl CueMolGpuiApp {
             .bg(rgb(COL_PANEL))
             .border_r_1()
             .border_color(rgb(COL_BORDER))
-            .child(panel_title("Scene tree"))
+            .child(panel_title("Workspace"))
             .child(
                 // A scrollable region must be stateful (an `id`'d element), since
                 // `overflow_y_scroll` lives on `StatefulInteractiveElement`.
@@ -1796,6 +1799,80 @@ impl CueMolGpuiApp {
                     .overflow_y_scroll()
                     .children(rows),
             )
+    }
+
+    /// CueMol2 left-dock panels beyond the Workspace tree — MolStruct (per-chain
+    /// structure), Symmetry (crystal cell), Density map — as read-only sections.
+    fn cuemol_extra_panels(&self) -> Vec<gpui::AnyElement> {
+        let mut out: Vec<gpui::AnyElement> = Vec::new();
+
+        // --- MolStruct ---
+        out.push(section_label("MolStruct").into_any_element());
+        let seqs = self.state.active_sequence_summaries();
+        if seqs.is_empty() {
+            out.push(info_row("No molecule loaded.".into()).into_any_element());
+        } else {
+            for seq in seqs {
+                let chain = if seq.chain_id.is_empty() {
+                    "_".to_string()
+                } else {
+                    seq.chain_id.clone()
+                };
+                out.push(
+                    info_row(format!("chain {chain} — {} residues", seq.residue_count))
+                        .into_any_element(),
+                );
+            }
+        }
+
+        // --- Symmetry ---
+        out.push(section_label("Symmetry").into_any_element());
+        let crystals = self.state.active_crystal_summaries();
+        if crystals.is_empty() {
+            out.push(info_row("No crystal cell.".into()).into_any_element());
+        } else {
+            for cell in crystals {
+                let sg = cell.space_group_name.trim();
+                out.push(
+                    info_row(format!("SG {}", if sg.is_empty() { "(none)" } else { sg }))
+                        .into_any_element(),
+                );
+                out.push(
+                    info_row(format!("a/b/c {:.2} {:.2} {:.2}", cell.a, cell.b, cell.c))
+                        .into_any_element(),
+                );
+                out.push(
+                    info_row(format!(
+                        "α/β/γ {:.1} {:.1} {:.1}",
+                        cell.alpha, cell.beta, cell.gamma
+                    ))
+                    .into_any_element(),
+                );
+            }
+        }
+
+        // --- Density map ---
+        out.push(section_label("Density map").into_any_element());
+        let maps = self
+            .state
+            .active_scene()
+            .map(|scene| self.state.density_map_summaries(scene))
+            .unwrap_or_default();
+        if maps.is_empty() {
+            out.push(info_row("No density map.".into()).into_any_element());
+        } else {
+            for map in maps {
+                out.push(
+                    info_row(format!(
+                        "{} {}×{}×{}",
+                        map.name, map.counts[0], map.counts[1], map.counts[2]
+                    ))
+                    .into_any_element(),
+                );
+            }
+        }
+
+        out
     }
 
     /// The right inspector: selection editor, scene/object/renderer details, and
@@ -3442,6 +3519,16 @@ fn section_label(text: &str) -> gpui::Div {
         .text_color(rgb(COL_ACCENT))
         .text_xs()
         .child(text.to_string())
+}
+
+/// A plain read-only text row inside a left-dock panel section.
+fn info_row(text: String) -> gpui::Div {
+    div()
+        .px_3()
+        .py_1()
+        .text_xs()
+        .text_color(rgb(COL_TEXT))
+        .child(text)
 }
 
 /// The dialog "Cancel" button (closes the modal).

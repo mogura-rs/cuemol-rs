@@ -582,7 +582,8 @@ impl GuiApplication {
             measure_mode: MeasureMode::Distance,
             show_toolbar: true,
             show_workspace: true,
-            show_inspector: true,
+            // CueMol2 opens properties on demand (no docked inspector); start closed.
+            show_inspector: false,
             show_bottom_panel: true,
             show_about: false,
             show_options: false,
