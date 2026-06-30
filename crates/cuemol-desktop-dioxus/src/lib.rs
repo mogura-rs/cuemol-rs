@@ -798,6 +798,38 @@ impl Model {
         self.rebuild_selection();
     }
 
+    /// Write a cross-section (cut) molecular-surface OBJ for the current selection to
+    /// the temp dir (CueMol2 Tools → Surface cutter). The cut plane passes through the
+    /// selection's bounding-box centre with a +Z normal (a sensible default for a
+    /// no-dialog action); same file-export shape as APBS.
+    fn write_cut_surface(&mut self) {
+        let Some(uid) = self.first_object_uid() else {
+            return;
+        };
+        let center = self
+            .current_render_snapshot()
+            .and_then(|snapshot| snapshot.bounds)
+            .map(|(min, max)| {
+                cuemol_core::Vector4::new3(
+                    (min.x + max.x) / 2.0,
+                    (min.y + max.y) / 2.0,
+                    (min.z + max.z) / 2.0,
+                )
+            })
+            .unwrap_or_else(|| cuemol_core::Vector4::new3(0.0, 0.0, 0.0));
+        let normal = cuemol_core::Vector4::new3(0.0, 0.0, 1.0);
+        let path = std::env::temp_dir().join("cuemol_cut_surface.obj");
+        match self
+            .state
+            .write_cut_surface_obj(uid, &self.selection_text, 1.0, 1.4, normal, center, &path)
+        {
+            Ok(summary) => {
+                self.status = format!("Cut surface: {} triangles", summary.triangle_count)
+            }
+            Err(error) => self.status = format!("Cut surface failed: {error}"),
+        }
+    }
+
     /// Write APBS electrostatics input files (PQR + APBS input + DX target) for the
     /// first molecule to the temp dir (CueMol2 Tools → APBS). No dialog — paths are
     /// derived and reported in the status bar (mirrors the gpui front end).
@@ -907,6 +939,7 @@ impl Model {
             "contacts" => self.find_contacts(),
             "superpose" => self.superpose(),
             "apbs" => self.write_apbs(),
+            "cut_surface" => self.write_cut_surface(),
             "sel_none" => self.set_selection("none"),
             "sel_all" => self.set_selection("*"),
             "col_element" => self.color_element(),
@@ -1351,6 +1384,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("Find contacts", "contacts"),
             ("Superpose molecules", "superpose"),
             ("APBS electrostatics", "apbs"),
+            ("Surface cutter (OBJ)", "cut_surface"),
         ], // Tools
         7 => &[("About", "about")],              // Help
         _ => &[],
@@ -1885,6 +1919,12 @@ fn app() -> Element {
                                 title: "Write APBS electrostatics files to the temp dir",
                                 onclick: move |_| model.write().write_apbs(),
                                 "APBS"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                title: "Write a cross-section (cut) surface OBJ to the temp dir",
+                                onclick: move |_| model.write().write_cut_surface(),
+                                "Cut surf"
                             }
                         }
                         // Bond editor: make/remove a bond between two atom serial ids.
@@ -2691,6 +2731,25 @@ mod tests {
             model.animation_objects[1].kind.label(),
             first,
             "it landed in slot 2"
+        );
+    }
+
+    #[test]
+    fn surface_cutter_writes_an_obj_in_dioxus() {
+        // Parity for Tools → Surface cutter: write a cross-section surface OBJ. A small
+        // selection keeps the SES build cheap.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        model.selection_text = "resid 1:3".to_string();
+        model.write_cut_surface();
+        assert!(
+            model.status.starts_with("Cut surface:"),
+            "cut surface ({})",
+            model.status
+        );
+        assert!(
+            std::env::temp_dir().join("cuemol_cut_surface.obj").exists(),
+            "the cut-surface OBJ was written"
         );
     }
 

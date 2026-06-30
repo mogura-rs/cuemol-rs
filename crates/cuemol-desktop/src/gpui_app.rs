@@ -1234,6 +1234,42 @@ impl CueMolGpuiApp {
         }
     }
 
+    /// Write a cross-section (cut) molecular-surface OBJ for `target` to the temp dir
+    /// (CueMol2 Tools → Surface cutter). The cut plane passes through the selection's
+    /// bounding-box centre with a +Z normal — same file-export shape as APBS.
+    fn run_cut_surface(&mut self, target: cuemol_core::Uid) {
+        let center = self
+            .state
+            .active_render_snapshot(&self.applied_selection)
+            .ok()
+            .and_then(|snapshot| snapshot.bounds)
+            .map(|(min, max)| {
+                cuemol_core::Vector4::new3(
+                    (min.x + max.x) / 2.0,
+                    (min.y + max.y) / 2.0,
+                    (min.z + max.z) / 2.0,
+                )
+            })
+            .unwrap_or_else(|| cuemol_core::Vector4::new3(0.0, 0.0, 0.0));
+        let normal = cuemol_core::Vector4::new3(0.0, 0.0, 1.0);
+        let path = std::env::temp_dir().join("cuemol_cut_surface.obj");
+        match self.state.write_cut_surface_obj(
+            target,
+            &self.applied_selection,
+            1.0,
+            1.4,
+            normal,
+            center,
+            &path,
+        ) {
+            Ok(summary) => self.set_status(format!(
+                "Cut surface: {} triangles",
+                summary.triangle_count
+            )),
+            Err(error) => self.set_status(format!("Cut surface error: {error}")),
+        }
+    }
+
     /// Write APBS electrostatics input files (PQR + APBS input + DX target) for `target`
     /// to the temp dir (CueMol2 Tools → APBS). No dialog — paths are derived, reported
     /// in the status bar.
@@ -2125,6 +2161,17 @@ impl CueMolGpuiApp {
                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                             this.with_selected_object(cx, |this, obj, cx| {
                                 this.open_bond_dialog(obj, cx)
+                            });
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    menu_item("mi-cut-surface", "Surface cutter (OBJ)")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.with_selected_object(cx, |this, obj, _cx| {
+                                this.run_cut_surface(obj)
                             });
                             this.open_menu = None;
                             cx.notify();
@@ -4822,6 +4869,24 @@ mod tests {
             app.status.starts_with("Removed bond"),
             "remove ({})",
             app.status
+        );
+    }
+
+    #[test]
+    fn surface_cutter_writes_an_obj_in_gpui() {
+        let Some((mut app, object)) = app_with_molecule() else {
+            return;
+        };
+        app.applied_selection = "resid 1:3".to_string(); // keep the SES build cheap
+        app.run_cut_surface(object);
+        assert!(
+            app.status.starts_with("Cut surface:"),
+            "status: {}",
+            app.status
+        );
+        assert!(
+            std::env::temp_dir().join("cuemol_cut_surface.obj").exists(),
+            "the cut-surface OBJ was written"
         );
     }
 
