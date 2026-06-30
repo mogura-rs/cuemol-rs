@@ -93,6 +93,41 @@ pub struct GuiSequenceSummary {
     pub sequence: String,
 }
 
+/// One atom leaf in the MolStruct hierarchy tree (CueMol2 `molStructTree`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiStructAtom {
+    pub atom_index: usize,
+    pub serial: i32,
+    pub name: String,
+    pub element: String,
+}
+
+/// One residue node (holds its atoms) in the MolStruct hierarchy tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiStructResidue {
+    pub res_name: String,
+    pub res_id: i32,
+    pub ins_code: Option<char>,
+    pub atoms: Vec<GuiStructAtom>,
+}
+
+/// One chain node (holds its residues) in the MolStruct hierarchy tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiStructChain {
+    pub chain_id: String,
+    pub residues: Vec<GuiStructResidue>,
+}
+
+/// A molecule's full chain → residue → atom hierarchy for the MolStruct side panel
+/// (CueMol2 `molstruct-panel.xul` `molStructTree`). Built from the molecule's own
+/// `chain_summaries()` + `residue_summaries()`; shared by all three front ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiStructObject {
+    pub object_uid: Uid,
+    pub object_name: String,
+    pub chains: Vec<GuiStructChain>,
+}
+
 /// Crystal cell / space-group readout for the Symmetry side panel
 /// (CueMol2 `symmetry-panel.xul`).
 #[derive(Debug, Clone, PartialEq)]
@@ -677,6 +712,61 @@ impl DesktopAppState {
             }
         }
         rows
+    }
+
+    /// The active scene's molecules as a chain → residue → atom hierarchy for the
+    /// MolStruct side panel (CueMol2 `molStructTree`). Mirrors the per-chain grouping
+    /// of [`active_sequence_summaries`](Self::active_sequence_summaries) but descends
+    /// to individual atoms, so a front end can render the full collapsible tree.
+    pub fn active_structure_tree(&self) -> Vec<GuiStructObject> {
+        let Some(scene_uid) = self.active_scene else {
+            return Vec::new();
+        };
+        let Some(scene) = self.scene_manager().scene(scene_uid) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for object in scene.objects() {
+            let mol = object.mol();
+            let atoms = mol.atoms();
+            let residues = mol.residue_summaries();
+            let mut chains = Vec::new();
+            for chain in mol.chain_summaries() {
+                let mut chain_residues = Vec::new();
+                for key in &chain.residue_keys {
+                    let Some(residue) = residues.iter().find(|residue| &residue.key == key) else {
+                        continue;
+                    };
+                    let mut res_atoms = Vec::new();
+                    for &index in &residue.atom_indices {
+                        if let Some(atom) = atoms.get(index) {
+                            res_atoms.push(GuiStructAtom {
+                                atom_index: index,
+                                serial: atom.serial,
+                                name: atom.name.trim().to_string(),
+                                element: atom.element.clone(),
+                            });
+                        }
+                    }
+                    chain_residues.push(GuiStructResidue {
+                        res_name: residue.res_name.clone(),
+                        res_id: key.res_id,
+                        ins_code: key.ins_code,
+                        atoms: res_atoms,
+                    });
+                }
+                chains.push(GuiStructChain {
+                    chain_id: chain.chain_id,
+                    residues: chain_residues,
+                });
+            }
+            out.push(GuiStructObject {
+                object_uid: object.uid(),
+                object_name: object.name().to_string(),
+                chains,
+            });
+        }
+        out
     }
 
     pub fn active_render_snapshot(&self, selection_text: &str) -> Result<RenderSceneSnapshot> {

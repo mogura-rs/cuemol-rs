@@ -22,7 +22,10 @@ cuemol-xtal.workspace = true
 bytemuck = { version = "1.25", features = ["derive"], optional = true }
 egui = { version = "0.33.3", optional = true }
 egui-wgpu = { version = "0.33.3", optional = true }
-egui-winit = { version = "0.33.3", default-features = false, optional = true }
+# `accesskit` keeps egui-winit's `PlatformOutput` destructuring in sync with egui's
+# struct when the egui_kittest dev-dep (AccessKit-based) unifies egui's accesskit
+# feature into the test build; without it the two disagree on `accesskit_update`.
+egui-winit = { version = "0.33.3", default-features = false, features = ["accesskit"], optional = true }
 glam = { version = "0.30.10", optional = true }
 # Same version gpui resolves to, so `image::Frame` matches `gpui::RenderImage::new`.
 image = { version = "0.25", optional = true }
@@ -61,6 +64,14 @@ gpui-gui = [
   "dep:pollster",
   "dep:wgpu",
 ]
+
+# Visual self-verification: render the egui shell to a PNG offscreen (wgpu/Metal),
+# so the CueMol2 layout can be compared against the XUL spec without a window.
+# Pinned to egui's exact minor (0.33.x) — a mismatch would drag a second egui copy
+# into the tree and break `egui::Context` type identity. Only used by native-gui tests.
+[dev-dependencies]
+egui_kittest = { version = "0.33.3", features = ["wgpu"] }
+image = "0.25"
 
 [lib]
 name = "cuemol_desktop"

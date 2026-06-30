@@ -357,6 +357,13 @@ struct GuiApplication {
     selection_text: String,
     selected_object: Option<cuemol_core::Uid>,
     selected_renderer: Option<cuemol_core::Uid>,
+    /// Molecule chosen in the MolStruct panel's molecule selector (CueMol2
+    /// `molstruct-panel.xul`); independent of the Workspace tree selection.
+    molstruct_object: Option<cuemol_core::Uid>,
+    /// MolStruct tree expand-all / collapse-all state. Folded into each node's
+    /// persistent id so toggling recreates every chain/residue node with this as the
+    /// default-open state (egui only honours `default_open` on first creation).
+    molstruct_expand_all: bool,
     snapshot: RenderSceneSnapshot,
     background: SceneBackground,
     center_mark: CenterMark,
@@ -570,6 +577,8 @@ impl GuiApplication {
             console_input: String::new(),
             selection_text: String::new(),
             selected_object: None,
+            molstruct_object: None,
+            molstruct_expand_all: false,
             selected_renderer: None,
             snapshot: RenderSceneSnapshot::empty(),
             background: SceneBackground::Black,
@@ -1249,7 +1258,7 @@ impl GuiApplication {
     ) {
         match panel {
             LeftPanel::Workspace => self.workspace_section(ui, camera),
-            LeftPanel::MolStruct => self.molstruct_section(ui),
+            LeftPanel::MolStruct => self.molstruct_section(ui, camera),
             LeftPanel::Selection => self.selection_section(ui),
             LeftPanel::Coloring => self.coloring_section(ui),
             LeftPanel::Symmetry => self.symmetry_section(ui),
@@ -1342,39 +1351,176 @@ impl GuiApplication {
         });
     }
 
-    /// MolStruct section — per-chain structure with sequence (CueMol2 `molStructTree`).
-    /// Clicking a chain selects it in the 3D view.
-    fn molstruct_section(&mut self, ui: &mut egui::Ui) {
-        let sequences = self.state.active_sequence_summaries();
-        if sequences.is_empty() {
+    /// MolStruct section — the molecule's chain → residue → atom hierarchy
+    /// (CueMol2 `molstruct-panel.xul` `molStructTree`): a molecule selector menulist,
+    /// a Select/Center/Zoom/Property toolbar, and a collapsible tree where each row is
+    /// click-to-select (the triangle toggles, the label selects, like the XUL tree).
+    fn molstruct_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        let tree = self.state.active_structure_tree();
+        if tree.is_empty() {
             ui.weak("No molecule loaded.");
             return;
         }
+
+        // Molecule selector menulist — default to the first molecule, kept valid if the
+        // previously-chosen object was removed.
+        let mut selected = self
+            .molstruct_object
+            .filter(|uid| tree.iter().any(|object| object.object_uid == *uid))
+            .or_else(|| tree.first().map(|object| object.object_uid));
+        let selected_name = tree
+            .iter()
+            .find(|object| Some(object.object_uid) == selected)
+            .map(|object| object.object_name.clone())
+            .unwrap_or_default();
+        egui::ComboBox::from_id_salt("molstruct-molecule")
+            .selected_text(selected_name)
+            .show_ui(ui, |ui| {
+                for object in &tree {
+                    ui.selectable_value(
+                        &mut selected,
+                        Some(object.object_uid),
+                        &object.object_name,
+                    );
+                }
+            });
+        self.molstruct_object = selected;
+        let Some(object) = tree.iter().find(|object| Some(object.object_uid) == selected) else {
+            return;
+        };
+
+        // Toolbar (CueMol2 molStruct toolbar: Select atoms / Center at / Zoom at /
+        // Properties). "Select atoms" selects the whole molecule; finer selection comes
+        // from clicking a chain / residue / atom row below.
         let mut apply: Option<String> = None;
-        let mut current_object: Option<String> = None;
-        for seq in &sequences {
-            if current_object.as_deref() != Some(seq.object_name.as_str()) {
-                current_object = Some(seq.object_name.clone());
-                ui.label(egui::RichText::new(&seq.object_name).strong());
+        let mut center = false;
+        let mut zoom = false;
+        ui.horizontal(|ui| {
+            if ui.button("Select").on_hover_text("Select all atoms").clicked() {
+                apply = Some("*".to_string());
             }
-            ui.indent(
-                ("molstruct", seq.object_name.clone(), seq.chain_id.clone()),
-                |ui| {
-                    let chain = if seq.chain_id.is_empty() { "_" } else { &seq.chain_id };
-                    let label = format!("Chain {chain} — {} residues", seq.residue_count);
-                    if ui.selectable_label(false, label).clicked() {
-                        apply = Some(format!("chain {}", seq.chain_id));
-                    }
-                    if !seq.sequence.is_empty() {
-                        ui.monospace(&seq.sequence);
-                    }
-                },
-            );
-        }
+            if ui.button("Center").on_hover_text("Center view on selection").clicked() {
+                center = true;
+            }
+            if ui.button("Zoom").on_hover_text("Zoom to fit molecule").clicked() {
+                zoom = true;
+            }
+            if ui.button("Property").clicked() {
+                self.show_inspector = true;
+            }
+            let toggle = if self.molstruct_expand_all {
+                "Collapse"
+            } else {
+                "Expand"
+            };
+            if ui.button(toggle).on_hover_text("Expand / collapse all").clicked() {
+                self.molstruct_expand_all = !self.molstruct_expand_all;
+            }
+        });
+
+        egui::ScrollArea::vertical()
+            .max_height(360.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for chain in &object.chains {
+                    let chain_disp = if chain.chain_id.is_empty() {
+                        "_"
+                    } else {
+                        chain.chain_id.as_str()
+                    };
+                    let chain_id = ui.make_persistent_id((
+                        "molstruct-chain",
+                        object.object_uid.get(),
+                        chain_disp,
+                        self.molstruct_expand_all,
+                    ));
+                    egui::collapsing_header::CollapsingState::load_with_default_open(
+                        ui.ctx(),
+                        chain_id,
+                        self.molstruct_expand_all,
+                    )
+                    .show_header(ui, |ui| {
+                        let label =
+                            format!("Chain {chain_disp}  ({} res)", chain.residues.len());
+                        if ui.selectable_label(false, label).clicked() {
+                            apply = Some(format!("chain {}", chain.chain_id));
+                        }
+                    })
+                    .body(|ui| {
+                        for residue in &chain.residues {
+                            let ins = residue.ins_code.map(String::from).unwrap_or_default();
+                            let res_label =
+                                format!("{} {}{}", residue.res_name.trim(), residue.res_id, ins);
+                            let res_id = ui.make_persistent_id((
+                                "molstruct-res",
+                                object.object_uid.get(),
+                                chain_disp,
+                                residue.res_id,
+                                residue.ins_code,
+                                self.molstruct_expand_all,
+                            ));
+                            let res_sel = if chain.chain_id.is_empty() {
+                                format!("resid {}", residue.res_id)
+                            } else {
+                                format!("chain {} and resid {}", chain.chain_id, residue.res_id)
+                            };
+                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                ui.ctx(),
+                                res_id,
+                                self.molstruct_expand_all,
+                            )
+                            .show_header(ui, |ui| {
+                                if ui.selectable_label(false, &res_label).clicked() {
+                                    apply = Some(res_sel.clone());
+                                }
+                            })
+                            .body(|ui| {
+                                for atom in &residue.atoms {
+                                    let atom_label =
+                                        format!("{}  ({})", atom.name, atom.element);
+                                    if ui.selectable_label(false, atom_label).clicked() {
+                                        apply = Some(format!("aid {}", atom.serial));
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+            });
+
         if let Some(sel) = apply {
             self.selection_text = sel;
+            self.push_selection_history();
             self.rebuild_snapshot();
         }
+        if center {
+            if let Some(target) = self.selection_centroid() {
+                camera.target = target;
+                self.set_status("Centered on selection");
+            }
+        }
+        if zoom {
+            camera.fit_snapshot(&self.snapshot);
+            self.set_status("Zoomed to molecule");
+        }
+    }
+
+    /// Centroid of the currently selected atoms in the live snapshot (used by the
+    /// MolStruct "Center" toolbar button). Falls back to the whole-scene bounds
+    /// centre when nothing is selected.
+    fn selection_centroid(&self) -> Option<Vec3> {
+        let mut sum = Vec3::ZERO;
+        let mut count = 0u32;
+        for atom in self.snapshot.atoms.iter().filter(|atom| atom.selected) {
+            sum += vec3_from_vector(atom.center);
+            count += 1;
+        }
+        if count > 0 {
+            return Some(sum / count as f32);
+        }
+        self.snapshot.bounds.map(|(min, max)| {
+            (vec3_from_vector(min) + vec3_from_vector(max)) * 0.5
+        })
     }
 
     /// Selection section — the command-style selection editor + history
@@ -4846,7 +4992,7 @@ mod tests {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     app.workspace_section(ui, &mut camera);
-                    app.molstruct_section(ui);
+                    app.molstruct_section(ui, &mut camera);
                     app.selection_section(ui);
                     app.coloring_section(ui);
                     app.symmetry_section(ui);
@@ -4889,5 +5035,101 @@ mod tests {
         // Dragging up in zoom mode reduces ortho_scale (zoom in).
         camera.zoom_by(-(-20.0) * 0.1);
         assert!(camera.ortho_scale < start, "shift+left drag-up should zoom in");
+    }
+
+    /// Opt-in visual self-verification: render the whole CueMol2 shell to a PNG via
+    /// egui_kittest's offscreen wgpu (Metal) renderer, so the layout can be compared
+    /// against the authoritative XUL inventory (`docs/migration/uxp-inventory/`)
+    /// without an on-screen window. No-op unless `CUEMOL_SNAPSHOT_OUT` names an output
+    /// path; self-skips (does not fail) when no GPU adapter is available — the same
+    /// graceful-degradation contract as `offscreen.rs`. The 3D viewport renders blank
+    /// here (egui_wgpu paint callbacks don't run under kittest's own renderer); the
+    /// chrome (menu / ribbon / 8-panel left dock / scene tabs / status bar) is the
+    /// subject of the snapshot.
+    #[test]
+    fn render_cuemol2_shell_to_png_for_visual_review() {
+        let Ok(out_dir) = std::env::var("CUEMOL_SNAPSHOT_OUT") else {
+            return;
+        };
+        let out_dir = std::path::PathBuf::from(out_dir);
+        let _ = std::fs::create_dir_all(&out_dir);
+
+        let load = |app: &mut GuiApplication, camera: &mut CameraController| {
+            if let Some(pdb) = reference_pdb_path() {
+                app.open_path = pdb.to_string_lossy().to_string();
+                app.open_current_path(camera);
+            }
+        };
+
+        // (1) Whole shell — menu / ribbon / left dock / scene tabs / bottom dock /
+        // status bar. The accordion is mostly collapsed here (egui default state),
+        // so this verifies the SKELETON only.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1366.0, 850.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("shell.png"));
+        }
+
+        // (2) Every left-dock panel body expanded at once, so each panel's CONTROLS
+        // can be diffed against the XUL inventory (`docs/migration/uxp-inventory/
+        // panels.md`). Drives the section bodies directly — the same entry points the
+        // headless smoke test exercises — inside one tall scrollable column.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            // Expand the MolStruct tree so the chain → residue nesting is visible.
+            app.molstruct_expand_all = true;
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(420.0, 1500.0))
+                .build(|ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ui.heading("Workspace");
+                            app.workspace_section(ui, &mut camera);
+                            ui.separator();
+                            ui.heading("MolStruct");
+                            app.molstruct_section(ui, &mut camera);
+                            ui.separator();
+                            ui.heading("Selection");
+                            app.selection_section(ui);
+                            ui.separator();
+                            ui.heading("Coloring");
+                            app.coloring_section(ui);
+                            ui.separator();
+                            ui.heading("Symmetry");
+                            app.symmetry_section(ui);
+                            ui.separator();
+                            ui.heading("Density map");
+                            app.densitymap_section(ui);
+                            ui.separator();
+                            ui.heading("View");
+                            app.view_section(ui, &mut camera);
+                            ui.separator();
+                            ui.heading("Animation");
+                            app.animation_section(ui);
+                        });
+                    });
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("panels.png"));
+        }
+    }
+
+    fn save_harness(harness: &mut egui_kittest::Harness<'_>, path: &std::path::Path) {
+        match harness.render() {
+            Ok(image) => {
+                image.save(path).expect("save snapshot PNG");
+                eprintln!("snapshot written to {}", path.display());
+            }
+            Err(err) => eprintln!("no GPU adapter for kittest, skipping {}: {err}", path.display()),
+        }
     }
 }
