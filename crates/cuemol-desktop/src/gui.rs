@@ -382,6 +382,8 @@ struct GuiApplication {
     /// expensive, so it is computed once on enable, not every rebuild).
     show_surface: bool,
     surface_mesh: Option<cuemol_render::RenderMesh>,
+    /// Atom/residue labels overlaid on the selected atoms in the 3D view.
+    show_labels: bool,
     /// Force every left-dock accordion section open (an "expand all panels" aid, also
     /// used to snapshot the bodies inside the REAL narrow dock for layout review).
     force_open_all_panels: bool,
@@ -631,6 +633,7 @@ impl GuiApplication {
             density_solid_mesh: None,
             show_surface: false,
             surface_mesh: None,
+            show_labels: false,
             force_open_all_panels: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
@@ -748,6 +751,7 @@ impl GuiApplication {
                 let rect = ui.max_rect();
                 self.viewport_rect = Some(rect);
                 self.draw_center_mark(ui, rect);
+                self.draw_atom_labels(ui, camera, rect);
                 ui.allocate_ui(rect.size(), |ui| {
                     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                         ui.label(
@@ -1516,6 +1520,14 @@ impl GuiApplication {
                 .clicked()
             {
                 self.toggle_surface();
+            }
+            let labels_label = if self.show_labels { "Labels ✓" } else { "Labels" };
+            if ui
+                .button(labels_label)
+                .on_hover_text("Label the selected atoms in the 3D view")
+                .clicked()
+            {
+                self.show_labels = !self.show_labels;
             }
         });
 
@@ -2918,6 +2930,55 @@ impl GuiApplication {
             }
         }
         self.rebuild_snapshot();
+    }
+
+    /// Overlay residue/atom labels on the selected atoms (CueMol2 atom labels). Each
+    /// selected atom's 3D position is projected to the viewport and its
+    /// `RES id : ATOM` drawn as 2D text. Capped so a huge selection doesn't clutter.
+    fn draw_atom_labels(&self, ui: &egui::Ui, camera: &CameraController, rect: egui::Rect) {
+        if !self.show_labels {
+            return;
+        }
+        const MAX_LABELS: usize = 80;
+        let selected: Vec<&RenderAtom> = self
+            .snapshot
+            .atoms
+            .iter()
+            .filter(|atom| atom.selected)
+            .take(MAX_LABELS)
+            .collect();
+        if selected.is_empty() {
+            return;
+        }
+        let painter = ui.painter();
+        let color = match self.background {
+            SceneBackground::White => egui::Color32::from_rgb(20, 24, 30),
+            SceneBackground::Black => egui::Color32::from_rgb(235, 240, 248),
+        };
+        for atom in selected {
+            let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) else {
+                continue;
+            };
+            let Some((screen, _depth)) =
+                camera.project_to_viewport(vec3_from_vector(atom.center), rect)
+            else {
+                continue;
+            };
+            let label = match self
+                .state
+                .atom_summary(cuemol_core::Uid::new(object_uid), atom_index)
+            {
+                Ok(info) => format!("{}{}:{}", info.residue_name.trim(), info.residue_id, info.name),
+                Err(_) => continue,
+            };
+            painter.text(
+                screen,
+                egui::Align2::LEFT_BOTTOM,
+                label,
+                egui::FontId::proportional(11.0),
+                color,
+            );
+        }
     }
 
     fn draw_center_mark(&self, ui: &egui::Ui, rect: egui::Rect) {
@@ -5936,6 +5997,27 @@ mod tests {
                 });
             harness.run();
             save_harness(&mut harness, &out_dir.join("dock.png"));
+        }
+
+        // (1c) Atom labels overlaid on a small selection. The egui painter text DOES
+        // render under kittest (unlike the wgpu 3D callback), so the projected
+        // "RESid:ATOM" labels appear over the (blank) viewport — verifying the projection
+        // + label text end to end.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            app.selection_text = "resid 1:2".to_string();
+            app.rebuild_snapshot();
+            app.show_labels = true;
+            camera.fit_snapshot(&app.snapshot);
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1100.0, 850.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("labels.png"));
         }
 
         // (2) Every left-dock panel body expanded at once, so each panel's CONTROLS
