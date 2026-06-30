@@ -2689,87 +2689,13 @@ impl GuiApplication {
             Ok(snapshot) => self.snapshot = snapshot,
             Err(error) => self.set_error(error),
         }
-        // Symmetry copies first (they clone the bare molecule), then the cell box.
-        if self.show_symm_mates {
-            self.append_symmetry_mates();
-        }
-        if self.show_unit_cell {
-            self.append_unit_cell_edges();
-        }
-    }
-
-    /// Append the home-cell symmetry-mate molecule copies (CueMol2 Symmetry "Symm mol")
-    /// to the live snapshot: each transform from the core is baked into a clone of the
-    /// rendered molecule and merged, growing the scene bounds to fit them.
-    fn append_symmetry_mates(&mut self) {
-        let transforms = self.state.active_symmetry_mate_transforms();
-        if transforms.is_empty() {
-            return;
-        }
-        let base = self.snapshot.clone();
-        for matrix in transforms {
-            let mut mate = base.clone();
-            mate.apply_xform(&matrix);
-            if let Some((min, max)) = mate.bounds {
-                self.snapshot.bounds = Some(match self.snapshot.bounds {
-                    Some((cur_min, cur_max)) => (
-                        Vector4::new3(
-                            cur_min.x.min(min.x),
-                            cur_min.y.min(min.y),
-                            cur_min.z.min(min.z),
-                        ),
-                        Vector4::new3(
-                            cur_max.x.max(max.x),
-                            cur_max.y.max(max.y),
-                            cur_max.z.max(max.z),
-                        ),
-                    ),
-                    None => (min, max),
-                });
-            }
-            self.snapshot.atoms.extend(mate.atoms);
-            self.snapshot.bonds.extend(mate.bonds);
-            self.snapshot.meshes.extend(mate.meshes);
-        }
-    }
-
-    /// Append the crystallographic unit-cell box (CueMol2 Symmetry "Unit cell") to the
-    /// live snapshot as thin yellow line-bonds, growing the scene bounds to fit it so a
-    /// Fit/auto-frame still shows the whole box.
-    fn append_unit_cell_edges(&mut self) {
-        let edges = self.state.active_unit_cell_edges();
-        if edges.is_empty() {
-            return;
-        }
-        let cell_color = cuemol_gfx::ColorSpec {
-            base: cuemol_gfx::ColorBase::Html {
-                r: 210,
-                g: 210,
-                b: 110,
-                a: 255,
-            },
-            modifiers: Vec::new(),
-        };
-        let (mut min, mut max) = self
-            .snapshot
-            .bounds
-            .unwrap_or((edges[0].0, edges[0].0));
-        for (from, to) in edges {
-            for point in [from, to] {
-                min = Vector4::new3(min.x.min(point.x), min.y.min(point.y), min.z.min(point.z));
-                max = Vector4::new3(max.x.max(point.x), max.y.max(point.y), max.z.max(point.z));
-            }
-            self.snapshot.bonds.push(cuemol_render::RenderBond {
-                from,
-                to,
-                radius: 0.12,
-                color: Some(cell_color.clone()),
-                object_uid: None,
-                atom_indices: None,
-                selected: false,
-            });
-        }
-        self.snapshot.bounds = Some((min, max));
+        // Crystal packing (Symmetry "Unit cell" / "Symm mol") via the shared core path,
+        // so egui/gpui/dioxus render it identically.
+        self.state.append_crystal_geometry(
+            &mut self.snapshot,
+            self.show_unit_cell,
+            self.show_symm_mates,
+        );
     }
 
     fn draw_center_mark(&self, ui: &egui::Ui, rect: egui::Rect) {

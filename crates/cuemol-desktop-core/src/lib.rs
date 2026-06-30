@@ -463,6 +463,61 @@ impl DesktopAppState {
         edges
     }
 
+    /// Append the crystallographic unit-cell box and/or home-cell symmetry-mate copies
+    /// to an already-built render snapshot (CueMol2 Symmetry "Unit cell" / "Symm mol").
+    /// Shared by all three front ends so crystal packing renders identically. Symmetry
+    /// mates are added first (they clone the bare molecule); then the yellow cell box.
+    pub fn append_crystal_geometry(
+        &self,
+        snapshot: &mut RenderSceneSnapshot,
+        show_unit_cell: bool,
+        show_symm_mates: bool,
+    ) {
+        if show_symm_mates {
+            let transforms = self.active_symmetry_mate_transforms();
+            if !transforms.is_empty() {
+                let base = snapshot.clone();
+                for matrix in transforms {
+                    let mut mate = base.clone();
+                    mate.apply_xform(&matrix);
+                    merge_bounds(&mut snapshot.bounds, mate.bounds);
+                    snapshot.atoms.extend(mate.atoms);
+                    snapshot.bonds.extend(mate.bonds);
+                    snapshot.meshes.extend(mate.meshes);
+                }
+            }
+        }
+        if show_unit_cell {
+            let edges = self.active_unit_cell_edges();
+            if !edges.is_empty() {
+                let cell_color = cuemol_gfx::ColorSpec {
+                    base: cuemol_gfx::ColorBase::Html {
+                        r: 210,
+                        g: 210,
+                        b: 110,
+                        a: 255,
+                    },
+                    modifiers: Vec::new(),
+                };
+                for (from, to) in edges {
+                    // Each endpoint as a degenerate point-box so min/max grow correctly
+                    // regardless of the edge's component ordering.
+                    merge_bounds(&mut snapshot.bounds, Some((from, from)));
+                    merge_bounds(&mut snapshot.bounds, Some((to, to)));
+                    snapshot.bonds.push(cuemol_render::RenderBond {
+                        from,
+                        to,
+                        radius: 0.12,
+                        color: Some(cell_color.clone()),
+                        object_uid: None,
+                        atom_indices: None,
+                        selected: false,
+                    });
+                }
+            }
+        }
+    }
+
     /// Home-unit-cell symmetry-mate transforms (CueMol2 Symmetry panel "Symm mol" →
     /// Unit cell): the Cartesian matrices that map each crystallographic object onto
     /// its symmetry copies within the home cell, EXCLUDING the identity (the molecule
