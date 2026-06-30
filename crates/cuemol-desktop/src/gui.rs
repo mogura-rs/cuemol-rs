@@ -426,6 +426,7 @@ struct GuiApplication {
     redo_stack: Vec<GuiUndoSnapshot>,
     status: String,
     log_lines: Vec<String>,
+    selection_history: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -630,6 +631,7 @@ impl GuiApplication {
             redo_stack: Vec::new(),
             status: "Ready".to_string(),
             log_lines: Vec::new(),
+            selection_history: Vec::new(),
         };
         app.rebuild_snapshot();
         app
@@ -1203,23 +1205,43 @@ impl GuiApplication {
         });
     }
 
-    /// MolStruct section — chain/residue/atom structure (deepened in M2).
+    /// MolStruct section — per-chain structure with sequence (CueMol2 `molStructTree`).
+    /// Clicking a chain selects it in the 3D view.
     fn molstruct_section(&mut self, ui: &mut egui::Ui) {
-        let objects = self.state.active_object_summaries();
-        if objects.is_empty() {
+        let sequences = self.state.active_sequence_summaries();
+        if sequences.is_empty() {
             ui.weak("No molecule loaded.");
             return;
         }
-        for object in objects {
-            ui.label(format!(
-                "{} — {} atoms, {} residues",
-                object.name, object.atom_count, object.residue_count
-            ));
+        let mut apply: Option<String> = None;
+        let mut current_object: Option<String> = None;
+        for seq in &sequences {
+            if current_object.as_deref() != Some(seq.object_name.as_str()) {
+                current_object = Some(seq.object_name.clone());
+                ui.label(egui::RichText::new(&seq.object_name).strong());
+            }
+            ui.indent(
+                ("molstruct", seq.object_name.clone(), seq.chain_id.clone()),
+                |ui| {
+                    let chain = if seq.chain_id.is_empty() { "_" } else { &seq.chain_id };
+                    let label = format!("Chain {chain} — {} residues", seq.residue_count);
+                    if ui.selectable_label(false, label).clicked() {
+                        apply = Some(format!("chain {}", seq.chain_id));
+                    }
+                    if !seq.sequence.is_empty() {
+                        ui.monospace(&seq.sequence);
+                    }
+                },
+            );
         }
-        ui.weak("Chain/residue/atom tree wired in M2.");
+        if let Some(sel) = apply {
+            self.selection_text = sel;
+            self.rebuild_snapshot();
+        }
     }
 
-    /// Selection section — the command-style selection editor (CueMol2 Command tab).
+    /// Selection section — the command-style selection editor + history
+    /// (CueMol2 `selection-panel.xul` Command tab).
     fn selection_section(&mut self, ui: &mut egui::Ui) {
         ui.label("Selection command");
         let response = ui.add_sized(
@@ -1234,11 +1256,42 @@ impl GuiApplication {
         let selected_count = self.snapshot.atoms.iter().filter(|atom| atom.selected).count();
         ui.horizontal(|ui| {
             ui.label(format!("Selected: {selected_count}"));
+            if ui.button("Select").clicked() {
+                self.push_selection_history();
+                self.rebuild_snapshot();
+            }
             if ui.button("Clear").clicked() {
                 self.selection_text.clear();
                 self.rebuild_snapshot();
             }
         });
+        if !self.selection_history.is_empty() {
+            let mut history_pick: Option<String> = None;
+            ui.collapsing("History", |ui| {
+                for past in self.selection_history.iter().rev() {
+                    if ui.selectable_label(false, past).clicked() {
+                        history_pick = Some(past.clone());
+                    }
+                }
+            });
+            if let Some(sel) = history_pick {
+                self.selection_text = sel;
+                self.rebuild_snapshot();
+            }
+        }
+    }
+
+    /// Push the current selection text onto the most-recently-used history list.
+    fn push_selection_history(&mut self) {
+        let sel = self.selection_text.trim().to_string();
+        if sel.is_empty() {
+            return;
+        }
+        self.selection_history.retain(|entry| entry != &sel);
+        self.selection_history.push(sel);
+        if self.selection_history.len() > 20 {
+            self.selection_history.remove(0);
+        }
     }
 
     /// Coloring section (deepened in M2 with per-type decks).
@@ -1258,12 +1311,34 @@ impl GuiApplication {
         } else {
             ui.weak("Select a renderer in Workspace.");
         }
-        ui.weak("Coloring type decks wired in M2.");
+        ui.weak("Coloring-type decks need a core setter (later pass).");
     }
 
-    /// Symmetry section (deepened in M2 with the crystal cell table).
+    /// Symmetry section — crystal cell / space group table (CueMol2 `symmetry-panel.xul`).
     fn symmetry_section(&mut self, ui: &mut egui::Ui) {
-        ui.weak("Crystal cell / space group wired in M2.");
+        let crystals = self.state.active_crystal_summaries();
+        if crystals.is_empty() {
+            ui.weak("No crystal cell (non-crystallographic).");
+            return;
+        }
+        for cell in crystals {
+            ui.label(egui::RichText::new(&cell.object_name).strong());
+            egui::Grid::new(("symm-grid", cell.object_uid.get()))
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label("Space group");
+                    let sg = cell.space_group_name.trim();
+                    ui.label(if sg.is_empty() { "(none)" } else { sg });
+                    ui.end_row();
+                    ui.label("a, b, c (Å)");
+                    ui.label(format!("{:.3}, {:.3}, {:.3}", cell.a, cell.b, cell.c));
+                    ui.end_row();
+                    ui.label("α, β, γ (°)");
+                    ui.label(format!("{:.2}, {:.2}, {:.2}", cell.alpha, cell.beta, cell.gamma));
+                    ui.end_row();
+                });
+        }
     }
 
     /// Density-map section (deepened in M2 with contour sliders).
@@ -1275,30 +1350,70 @@ impl GuiApplication {
             .unwrap_or_default();
         if maps.is_empty() {
             ui.weak("No density map loaded.");
-        } else {
-            for map in maps {
-                ui.label(map.name);
-            }
+            return;
         }
-        ui.weak("Contour sliders wired in M2.");
+        for map in maps {
+            ui.label(egui::RichText::new(&map.name).strong());
+            ui.label(format!(
+                "{} grid {}×{}×{}",
+                map.format, map.counts[0], map.counts[1], map.counts[2]
+            ));
+            ui.label(format!(
+                "ρ {:.3} … {:.3}  (mean {:.3}, rmsd {:.3})",
+                map.min_density, map.max_density, map.mean_density, map.rmsd_density
+            ));
+        }
     }
 
-    /// View section — projection + Fit (rotary dials wired in M2).
+    /// View section — fake-dial style camera controls (CueMol2 `fakedial-panel.xul`).
+    /// Rotation is relative-delta (ADR-0025); translation / zoom / slab are absolute.
     fn view_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         ui.horizontal(|ui| {
             ui.radio_value(&mut camera.perspective, false, "Ortho");
             ui.radio_value(&mut camera.perspective, true, "Persp");
         });
+        ui.separator();
+        ui.label("Rotation");
+        for (axis, label) in [(Vec3::X, "Rot X"), (Vec3::Y, "Rot Y"), (Vec3::Z, "Rot Z")] {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                if ui.small_button("−15°").clicked() {
+                    camera.orientation =
+                        Quat::from_axis_angle(axis, -15.0_f32.to_radians()) * camera.orientation;
+                }
+                if ui.small_button("+15°").clicked() {
+                    camera.orientation =
+                        Quat::from_axis_angle(axis, 15.0_f32.to_radians()) * camera.orientation;
+                }
+            });
+        }
+        ui.separator();
+        ui.label("Translation (Å)");
+        ui.add(egui::DragValue::new(&mut camera.target.x).prefix("X ").speed(0.2));
+        ui.add(egui::DragValue::new(&mut camera.target.y).prefix("Y ").speed(0.2));
+        ui.add(egui::DragValue::new(&mut camera.target.z).prefix("Z ").speed(0.2));
+        ui.separator();
+        ui.label("Zoom / Slab");
+        ui.add(egui::DragValue::new(&mut camera.ortho_scale).prefix("Zoom ").speed(1.0));
+        camera.ortho_scale = camera.ortho_scale.max(1.0);
+        ui.add(egui::DragValue::new(&mut camera.distance).prefix("Dist ").speed(1.0));
         if ui.button("Fit").clicked() {
             camera.fit_snapshot(&self.snapshot);
         }
-        ui.weak("Rotation / Translation / Zoom dials wired in M2.");
     }
 
-    /// Animation section (deepened in M2 with the anim list).
+    /// Animation section — frame state (full anim-element list in a later pass).
     fn animation_section(&mut self, ui: &mut egui::Ui) {
-        ui.label(format!("Frames: {}", self.animation_frames));
-        ui.weak("Animation element list wired in M2.");
+        ui.label(format!("Morph frames: {}", self.animation_frames));
+        ui.horizontal(|ui| {
+            let play = if self.animation_playing { "⏸ Pause" } else { "▶ Play" };
+            if ui.button(play).clicked() {
+                self.animation_playing = !self.animation_playing;
+            }
+            if ui.button("⏹ Stop").clicked() {
+                self.animation_playing = false;
+            }
+        });
     }
 
     /// Properties — CueMol2 opens object/renderer properties as a modal dialog
@@ -4510,5 +4625,52 @@ mod tests {
                 atom_index: 3,
             })
         );
+    }
+
+    fn reference_pdb_path() -> Option<std::path::PathBuf> {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2")
+            });
+        let pdb = root.join("tests/test_data/1CRN.pdb");
+        pdb.exists().then_some(pdb)
+    }
+
+    /// Exercise the whole shell + every left-panel section headlessly so a runtime
+    /// panic / borrow problem in the new CueMol2 layout is caught without a window.
+    #[test]
+    fn cuemol2_shell_and_left_panels_render_headless() {
+        let ctx = egui::Context::default();
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+
+        // Whole window (menu / ribbon / left dock / scene tabs / bottom dock /
+        // status bar / properties window) on the empty default scene.
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.ui(ctx, &mut camera);
+        });
+
+        // With a real molecule (when the reference tree is present), drive every
+        // section body directly so the non-empty branches run too.
+        if let Some(pdb) = reference_pdb_path() {
+            app.open_path = pdb.to_string_lossy().to_string();
+            app.open_current_path(&mut camera);
+            assert!(app.snapshot.atom_count() > 0);
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.workspace_section(ui, &mut camera);
+                    app.molstruct_section(ui);
+                    app.selection_section(ui);
+                    app.coloring_section(ui);
+                    app.symmetry_section(ui);
+                    app.densitymap_section(ui);
+                    app.view_section(ui, &mut camera);
+                    app.animation_section(ui);
+                });
+            });
+            // MolStruct chain-select wrote a selection; Symmetry found 1CRN's cell.
+            assert!(!app.state.active_crystal_summaries().is_empty());
+        }
     }
 }

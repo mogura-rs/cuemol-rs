@@ -93,6 +93,22 @@ pub struct GuiSequenceSummary {
     pub sequence: String,
 }
 
+/// Crystal cell / space-group readout for the Symmetry side panel
+/// (CueMol2 `symmetry-panel.xul`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuiCrystalSummary {
+    pub object_uid: Uid,
+    pub object_name: String,
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub alpha: f64,
+    pub beta: f64,
+    pub gamma: f64,
+    pub space_group_name: String,
+    pub space_group_number: Option<i32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiSurfaceSummary {
     pub object_uid: Uid,
@@ -362,6 +378,33 @@ impl DesktopAppState {
             residue_id: atom.res_id,
             selection_text: format!("aid {}", atom.serial),
         })
+    }
+
+    /// Crystal cell / space group for a molecule object, if the file carried one
+    /// (CueMol2 Symmetry panel). Returns `None` for non-crystallographic molecules.
+    pub fn crystal_summary(&self, object_uid: Uid) -> Option<GuiCrystalSummary> {
+        let object = self.scene_manager().object(object_uid)?;
+        let cell = object.mol().cell_params()?;
+        Some(GuiCrystalSummary {
+            object_uid,
+            object_name: object.name().to_string(),
+            a: cell.a,
+            b: cell.b,
+            c: cell.c,
+            alpha: cell.alpha,
+            beta: cell.beta,
+            gamma: cell.gamma,
+            space_group_name: cell.space_group_name.clone(),
+            space_group_number: cell.space_group_number,
+        })
+    }
+
+    /// Crystal summaries for every molecule object in the active scene that has a cell.
+    pub fn active_crystal_summaries(&self) -> Vec<GuiCrystalSummary> {
+        self.active_object_summaries()
+            .into_iter()
+            .filter_map(|object| self.crystal_summary(object.uid))
+            .collect()
     }
 
     pub fn new_scene(&mut self, name: impl Into<String>, create_view: bool) -> NewSceneResult {
@@ -2763,6 +2806,32 @@ mod tests {
             46
         );
         assert!(snapshot.bounds.is_some());
+    }
+
+    #[test]
+    fn crystal_summary_reports_the_pdb_unit_cell() {
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        let GuiLoadedPath::Object { object_uid, .. } =
+            app.open_path(root.join("1CRN.pdb")).unwrap()
+        else {
+            panic!("expected object load");
+        };
+        let cell = app
+            .crystal_summary(object_uid)
+            .expect("1CRN carries a CRYST1 cell");
+        // Independent oracle: 1CRN's deposited CRYST1 record.
+        assert!((cell.a - 40.96).abs() < 1e-2, "a = {}", cell.a);
+        assert!((cell.b - 18.65).abs() < 1e-2, "b = {}", cell.b);
+        assert!((cell.c - 22.52).abs() < 1e-2, "c = {}", cell.c);
+        assert!((cell.alpha - 90.0).abs() < 1e-2);
+        assert!((cell.beta - 90.77).abs() < 1e-2, "beta = {}", cell.beta);
+        assert!((cell.gamma - 90.0).abs() < 1e-2);
+        assert_eq!(cell.space_group_name.trim(), "P 1 21 1");
+        // The active-scene aggregate finds the same crystal.
+        assert_eq!(app.active_crystal_summaries().len(), 1);
     }
 
     #[test]
