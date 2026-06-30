@@ -492,6 +492,57 @@ impl Model {
         self.rebuild_selection();
     }
 
+    /// Save the active scene to a `.qsc` file (CueMol2 File → Save scene). Read-only
+    /// on the model; the shared-core writer serializes the scene + its qdfpdb data.
+    fn save_scene(&mut self, path: &str) {
+        let path = path.trim();
+        if path.is_empty() {
+            self.status = "Save scene: enter a path".into();
+            return;
+        }
+        match self.state.save_active_scene_qsc(path) {
+            Ok(()) => self.status = format!("Saved scene: {path}"),
+            Err(error) => self.status = format!("Save scene failed: {error}"),
+        }
+    }
+
+    /// Save the first molecule to a `.pdb`/`.sdf` file (CueMol2 File → Save object).
+    /// The extension selects the writer; no extension defaults to PDB.
+    fn save_object(&mut self, path: &str) {
+        let path = path.trim();
+        if path.is_empty() {
+            self.status = "Save object: enter a path".into();
+            return;
+        }
+        let Some(uid) = self
+            .state
+            .active_object_summaries()
+            .first()
+            .map(|object| object.uid)
+        else {
+            self.status = "Save object: no molecule loaded".into();
+            return;
+        };
+        match self.state.save_object_as(uid, path) {
+            Ok(()) => self.status = format!("Saved object: {path}"),
+            Err(error) => self.status = format!("Save object failed: {error}"),
+        }
+    }
+
+    /// Export the active scene's atoms to a POV-Ray `.pov` file (CueMol2 File →
+    /// Export scene). Exports the current selection (empty = whole scene).
+    fn export_scene(&mut self, path: &str) {
+        let path = path.trim();
+        if path.is_empty() {
+            self.status = "Export scene: enter a path".into();
+            return;
+        }
+        match self.state.export_active_scene_pov(path, &self.selection_text) {
+            Ok(atoms) => self.status = format!("Exported {atoms} atoms → {path}"),
+            Err(error) => self.status = format!("Export scene failed: {error}"),
+        }
+    }
+
     /// Run a menu-bar dropdown action and close the menu.
     fn run_menu_action(&mut self, action: &str) {
         match action {
@@ -902,6 +953,8 @@ fn app() -> Element {
     // don't churn the wgpu-owning model signal.
     let mut open_text = use_signal(String::new);
     let mut traj_text = use_signal(String::new);
+    // Save/export path field, held separately from the model like `open_text`.
+    let mut save_text = use_signal(String::new);
 
     // Animation playback loop (CueMol2 SimpleSpin): an executor-agnostic timer ticks
     // ~60 fps; while `anim_playing` is set, each tick spins the camera + re-renders.
@@ -1091,6 +1144,38 @@ fn app() -> Element {
                         }
                     },
                     "Open"
+                }
+                input {
+                    style: "{open_input_style}",
+                    placeholder: "save path: .qsc / .pdb / .sdf / .pov …",
+                    oninput: move |e| save_text.set(e.value()),
+                }
+                button {
+                    style: "{open_btn_style}",
+                    title: "Save the active scene as .qsc",
+                    onclick: move |_| {
+                        let path = save_text.peek().trim().to_string();
+                        model.write().save_scene(&path);
+                    },
+                    "Save scene"
+                }
+                button {
+                    style: "{open_btn_style}",
+                    title: "Save the first molecule as .pdb / .sdf",
+                    onclick: move |_| {
+                        let path = save_text.peek().trim().to_string();
+                        model.write().save_object(&path);
+                    },
+                    "Save obj"
+                }
+                button {
+                    style: "{open_btn_style}",
+                    title: "Export the scene (current selection) to POV-Ray .pov",
+                    onclick: move |_| {
+                        let path = save_text.peek().trim().to_string();
+                        model.write().export_scene(&path);
+                    },
+                    "Export"
                 }
                 span { style: "color:{COL_TEXT_DIM};margin-left:12px;", "Dioxus" }
             }
@@ -1769,6 +1854,48 @@ mod tests {
         model.delete_renderer(object, renderer.uid);
         assert_eq!(count(&model), before, "delete_renderer removes it");
         assert_eq!(cartoons(&model), 0, "the cartoon renderer is gone");
+    }
+
+    #[test]
+    fn save_scene_object_and_export_write_files_in_dioxus() {
+        // File-persistence parity with egui/gpui: save scene (.qsc), save molecule
+        // (.pdb), and export POV (.pov) each write a real file through the shared core.
+        // Verified by INDEPENDENT file-content invariants (not a self-round-trip): the
+        // .pdb must carry 1CRN's 327 ATOM records, the .qsc a <scene> element, the .pov
+        // a non-empty body.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        let dir = std::env::temp_dir().join(format!("cuemol_dioxus_save_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let qsc = dir.join("scene.qsc");
+        model.save_scene(qsc.to_str().unwrap());
+        assert!(qsc.exists(), "save_scene wrote a file ({})", model.status);
+        let qsc_body = std::fs::read_to_string(&qsc).unwrap();
+        assert!(
+            qsc_body.contains("<scene"),
+            "the .qsc carries a scene element"
+        );
+
+        let out_pdb = dir.join("out.pdb");
+        model.save_object(out_pdb.to_str().unwrap());
+        assert!(out_pdb.exists(), "save_object wrote a file ({})", model.status);
+        let atom_lines = std::fs::read_to_string(&out_pdb)
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("ATOM  ") || line.starts_with("HETATM"))
+            .count();
+        assert_eq!(atom_lines, 327, "1CRN round-trips its 327 atom records");
+
+        let pov = dir.join("scene.pov");
+        model.export_scene(pov.to_str().unwrap());
+        assert!(pov.exists(), "export_scene wrote a file ({})", model.status);
+        assert!(
+            std::fs::metadata(&pov).unwrap().len() > 0,
+            "the .pov export is non-empty"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
