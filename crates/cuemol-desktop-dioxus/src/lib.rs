@@ -686,6 +686,8 @@ impl Model {
             "new_scene" => self.new_scene_tab(),
             "undo" => self.undo(),
             "redo" => self.redo(),
+            "fit_view" => self.fit_view(),
+            "toggle_projection" => self.toggle_projection(),
             "sel_none" => self.set_selection("none"),
             "sel_all" => self.set_selection("*"),
             "col_element" => self.color_element(),
@@ -866,6 +868,27 @@ impl Model {
     fn pan_camera(&mut self, dx_pix: f64, dy_pix: f64) {
         self.camera
             .set_center(pan_center(&self.camera, dx_pix, dy_pix, self.view_size.1));
+        self.rerender();
+    }
+
+    /// Re-frame the camera on the current scene's bounding box (CueMol2 View → Fit).
+    fn fit_view(&mut self) {
+        if let Some(snapshot) = self.current_render_snapshot() {
+            self.camera = frame_camera(&snapshot);
+            self.status = "View fitted".into();
+            self.rerender();
+        }
+    }
+
+    /// Toggle perspective vs orthographic projection (CueMol2 View → Projection).
+    fn toggle_projection(&mut self) {
+        let perspective = !self.camera.is_perspective();
+        self.camera.set_perspective(perspective);
+        self.status = if perspective {
+            "Projection: perspective".into()
+        } else {
+            "Projection: orthographic".into()
+        };
         self.rerender();
     }
 
@@ -1077,6 +1100,8 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
         ], // Render
         3 => &[("New tab", "new_scene")], // Scene
         4 => &[
+            ("Fit view", "fit_view"),
+            ("Toggle projection", "toggle_projection"),
             ("Toggle light/dark theme", "toggle_theme"),
             ("Surface", "surface"),
             ("Density contour", "den_contour"),
@@ -1102,6 +1127,8 @@ fn app() -> Element {
     // Molecule-editing input fields (chain name, residue start), held outside the model.
     let mut edit_chain_text = use_signal(String::new);
     let mut edit_renum_text = use_signal(String::new);
+    // Free-text selection expression (the full selection grammar, beyond quick-selects).
+    let mut sel_input_text = use_signal(String::new);
 
     // Animation playback loop (CueMol2 SimpleSpin): an executor-agnostic timer ticks
     // ~60 fps; while `anim_playing` is set, each tick spins the camera + re-renders.
@@ -1445,8 +1472,35 @@ fn app() -> Element {
                                 "Symm mol"
                             }
                         }
-                        // Selection quick-selects (CueMol2 selection-panel.xul Editor tab).
+                        // Selection: a free-text expression (full grammar — the Command
+                        // tab) + the quick-selects (the Editor tab) (CueMol2 selection-panel.xul).
                         div { style: "{section_header_style}", "Selection" }
+                        div { style: "display:flex;gap:4px;align-items:center;padding:4px 12px;flex-wrap:wrap;",
+                            input {
+                                style: "flex:1;min-width:120px;{edit_input_style}",
+                                placeholder: "e.g. resid 1:10 and bymainch *",
+                                value: "{sel_input_text}",
+                                oninput: move |e| sel_input_text.set(e.value()),
+                                onkeydown: move |e| {
+                                    if e.key() == Key::Enter {
+                                        let expr = sel_input_text.peek().trim().to_string();
+                                        if !expr.is_empty() {
+                                            model.write().set_selection(&expr);
+                                        }
+                                    }
+                                },
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| {
+                                    let expr = sel_input_text.peek().trim().to_string();
+                                    if !expr.is_empty() {
+                                        model.write().set_selection(&expr);
+                                    }
+                                },
+                                "Apply"
+                            }
+                        }
                         div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
                             button {
                                 style: "{color_btn_style}",
@@ -2192,6 +2246,38 @@ mod tests {
         assert_eq!(total(&model), before, "second undo restored again");
         model.undo();
         assert_eq!(model.status, "Nothing to undo", "undo stack is now empty");
+    }
+
+    #[test]
+    fn view_and_selection_controls_in_dioxus() {
+        // Parity for the free-text selection box (full grammar, not just quick-selects),
+        // perspective/ortho toggle, and View-fit.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+
+        // A free-text expression drives the full selection grammar.
+        model.set_selection("resid 1:10");
+        assert_eq!(model.selection_text, "resid 1:10");
+        let selected = model
+            .state
+            .active_render_snapshot("resid 1:10")
+            .map(|snapshot| snapshot.atoms.iter().filter(|atom| atom.selected).count())
+            .unwrap_or(0);
+        assert!(selected > 0, "free-text selection matches atoms");
+
+        // Projection toggle flips perspective/orthographic.
+        let before = model.camera.is_perspective();
+        model.toggle_projection();
+        assert_eq!(
+            model.camera.is_perspective(),
+            !before,
+            "projection toggled"
+        );
+
+        // Fit re-frames the camera without panicking, yielding a valid (positive) zoom.
+        model.fit_view();
+        assert!(model.camera.zoom() > 0.0, "fit produced a valid camera");
+        assert_eq!(model.status, "View fitted");
     }
 
     #[test]
