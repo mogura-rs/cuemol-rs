@@ -85,6 +85,14 @@ struct TreeRow {
     accent: bool,
 }
 
+/// One stacked left-dock panel below the Workspace tree (CueMol2 side panels),
+/// rendered as a titled list of read-only lines.
+#[derive(Clone, PartialEq)]
+struct PanelSection {
+    title: String,
+    lines: Vec<String>,
+}
+
 /// Mutable application model, held behind a `Signal`. Not `Clone` (it owns the
 /// wgpu device); the reactive runtime stores it by value and re-renders on write.
 struct Model {
@@ -312,6 +320,69 @@ impl Model {
             .map(|s| s.name)
             .unwrap_or_else(|| "(no scene)".to_string())
     }
+
+    /// CueMol2 left-dock panels below the Workspace tree (MolStruct / Symmetry /
+    /// Density map), as read-only titled line lists.
+    fn panel_sections(&self) -> Vec<PanelSection> {
+        let mut sections = Vec::new();
+
+        let mut lines = Vec::new();
+        for seq in self.state.active_sequence_summaries() {
+            let chain = if seq.chain_id.is_empty() {
+                "_".to_string()
+            } else {
+                seq.chain_id.clone()
+            };
+            lines.push(format!("chain {chain} — {} residues", seq.residue_count));
+        }
+        if lines.is_empty() {
+            lines.push("No molecule loaded.".into());
+        }
+        sections.push(PanelSection {
+            title: "MolStruct".into(),
+            lines,
+        });
+
+        let mut lines = Vec::new();
+        for cell in self.state.active_crystal_summaries() {
+            let sg = cell.space_group_name.trim();
+            lines.push(format!("SG {}", if sg.is_empty() { "(none)" } else { sg }));
+            lines.push(format!("a/b/c {:.2} {:.2} {:.2}", cell.a, cell.b, cell.c));
+            lines.push(format!(
+                "α/β/γ {:.1} {:.1} {:.1}",
+                cell.alpha, cell.beta, cell.gamma
+            ));
+        }
+        if lines.is_empty() {
+            lines.push("No crystal cell.".into());
+        }
+        sections.push(PanelSection {
+            title: "Symmetry".into(),
+            lines,
+        });
+
+        let mut lines = Vec::new();
+        let maps = self
+            .state
+            .active_scene()
+            .map(|scene| self.state.density_map_summaries(scene))
+            .unwrap_or_default();
+        for map in maps {
+            lines.push(format!(
+                "{} {}×{}×{}",
+                map.name, map.counts[0], map.counts[1], map.counts[2]
+            ));
+        }
+        if lines.is_empty() {
+            lines.push("No density map.".into());
+        }
+        sections.push(PanelSection {
+            title: "Density map".into(),
+            lines,
+        });
+
+        sections
+    }
 }
 
 /// Build an auto-framed camera for a scene from its bounding box. (Local copy of
@@ -394,13 +465,14 @@ fn app() -> Element {
 
     // Derive view data under a short read borrow, then release it before RSX so
     // the event handlers (which write the signal) never alias the read guard.
-    let (status, scene_name, image_uri, rows) = {
+    let (status, scene_name, image_uri, rows, sections) = {
         let m = model.read();
         (
             m.status.clone(),
             m.active_scene_name(),
             m.image_uri.clone(),
             m.tree_rows(),
+            m.panel_sections(),
         )
     };
 
@@ -438,6 +510,17 @@ fn app() -> Element {
         "display:flex;align-items:center;height:26px;padding:0 16px;background:{COL_HEADER};\
          border-top:1px solid {COL_BORDER};font-size:11px;color:{COL_TEXT_DIM};flex:0 0 auto;"
     );
+    let menubar_style = format!(
+        "display:flex;align-items:center;gap:4px;height:28px;padding:0 12px;background:{COL_PANEL};\
+         border-bottom:1px solid {COL_BORDER};flex:0 0 auto;font-size:12px;"
+    );
+    let menu_item_style =
+        format!("padding:2px 8px;border-radius:4px;color:{COL_TEXT};cursor:default;");
+    let section_header_style = format!(
+        "padding:6px 12px 2px;color:{COL_ACCENT};font-size:11px;\
+         border-bottom:1px solid {COL_BORDER};margin-top:6px;"
+    );
+    let section_line_style = format!("padding:2px 12px;color:{COL_TEXT};font-size:11px;");
 
     rsx! {
         div { style: "{root_style}",
@@ -471,10 +554,17 @@ fn app() -> Element {
                 }
                 span { style: "color:{COL_TEXT_DIM};margin-left:12px;", "Dioxus" }
             }
+            // Menu bar (CueMol2 cuemol2-menus.xul). Visual structure; functional
+            // dropdowns are a later pass — file open works via the header field.
+            div { style: "{menubar_style}",
+                for menu in ["File", "Edit", "Render", "Scene", "View", "Tools", "Window", "Help"] {
+                    span { key: "{menu}", style: "{menu_item_style}", "{menu}" }
+                }
+            }
             // Body: sidebar + viewport.
             div { style: "display:flex;flex:1;min-height:0;",
                 div { style: "{sidebar_style}",
-                    div { style: "{panel_title_style}", "Scene tree" }
+                    div { style: "{panel_title_style}", "Workspace" }
                     div { style: "flex:1;min-height:0;overflow-y:auto;",
                         if rows.is_empty() {
                             div { style: "padding:12px;color:{COL_TEXT_DIM};",
@@ -483,6 +573,13 @@ fn app() -> Element {
                         }
                         for (i, row) in rows.iter().enumerate() {
                             TreeRowView { key: "{i}", row: row.clone() }
+                        }
+                        // CueMol2 left-dock panels below the Workspace tree.
+                        for (si, sec) in sections.iter().enumerate() {
+                            div { key: "sec-{si}", style: "{section_header_style}", "{sec.title}" }
+                            for (li, line) in sec.lines.iter().enumerate() {
+                                div { key: "sec-{si}-l{li}", style: "{section_line_style}", "{line}" }
+                            }
                         }
                     }
                 }
