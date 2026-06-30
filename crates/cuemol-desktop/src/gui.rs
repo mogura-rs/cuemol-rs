@@ -370,6 +370,10 @@ struct GuiApplication {
     show_unit_cell: bool,
     /// Whether the home-cell symmetry-mate copies are drawn (Symmetry panel "Symm mol").
     show_symm_mates: bool,
+    /// Density-map "chickenwire" contour display + its sigma contour level
+    /// (CueMol2 Density map panel level slider).
+    show_density_contour: bool,
+    density_level: f64,
     /// Force every left-dock accordion section open (an "expand all panels" aid, also
     /// used to snapshot the bodies inside the REAL narrow dock for layout review).
     force_open_all_panels: bool,
@@ -613,6 +617,8 @@ impl GuiApplication {
             selection_tab: SelectionTab::Command,
             show_unit_cell: false,
             show_symm_mates: false,
+            show_density_contour: false,
+            density_level: 1.5,
             force_open_all_panels: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
@@ -1942,6 +1948,20 @@ impl GuiApplication {
                 map.min_density, map.max_density, map.mean_density, map.rmsd_density
             ));
         }
+        ui.separator();
+        // CueMol2 Density map panel: "chickenwire" contour toggle + sigma level slider.
+        let mut changed = ui
+            .checkbox(&mut self.show_density_contour, "Show contour")
+            .changed();
+        ui.horizontal(|ui| {
+            ui.label("Level (σ)");
+            changed |= ui
+                .add(egui::Slider::new(&mut self.density_level, 0.5..=5.0).step_by(0.1))
+                .changed();
+        });
+        if changed {
+            self.rebuild_snapshot();
+        }
     }
 
     /// View section — fake-dial style camera controls (CueMol2 `fakedial-panel.xul`).
@@ -2782,6 +2802,12 @@ impl GuiApplication {
             &mut self.snapshot,
             self.show_unit_cell,
             self.show_symm_mates,
+        );
+        // Density-map chickenwire contour (Density panel), shared too.
+        self.state.append_density_geometry(
+            &mut self.snapshot,
+            self.density_level,
+            self.show_density_contour,
         );
     }
 
@@ -5509,6 +5535,67 @@ mod tests {
         );
     }
 
+    /// A synthetic isotropic-Gaussian density map (no deposited fixture needed — the
+    /// only bundled `.dx` is all-zeros and contours to nothing). Col(X)-fastest values.
+    fn synthetic_gaussian_map() -> cuemol_xtal::DensityMap {
+        let n = 20usize;
+        let center = (n as f64 - 1.0) / 2.0;
+        let sigma2 = 9.0;
+        let mut values = Vec::with_capacity(n * n * n);
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let dx = i as f64 - center;
+                    let dy = j as f64 - center;
+                    let dz = k as f64 - center;
+                    values.push((-(dx * dx + dy * dy + dz * dz) / (2.0 * sigma2)).exp());
+                }
+            }
+        }
+        let grid = cuemol_molstr::GridMap {
+            counts: [n, n, n],
+            origin: Vector4::new3(0.0, 0.0, 0.0),
+            delta: [
+                Vector4::new3(1.0, 0.0, 0.0),
+                Vector4::new3(0.0, 1.0, 0.0),
+                Vector4::new3(0.0, 0.0, 1.0),
+            ],
+            values,
+        };
+        cuemol_xtal::DensityMap::from_grid_map(grid)
+    }
+
+    #[test]
+    fn density_contour_appears_when_toggled() {
+        // Wire the orphaned MapMeshRenderer contour into the GUI: toggling "Show contour"
+        // on a (synthetic) density map adds chickenwire line segments to the snapshot.
+        let mut app = GuiApplication::new();
+        let scene = app
+            .state
+            .active_scene()
+            .expect("a default scene exists after construction");
+        app.state
+            .add_density_map(scene, "gauss", synthetic_gaussian_map());
+        let base_bonds = app.snapshot.bonds.len();
+
+        app.show_density_contour = true;
+        app.density_level = 1.0;
+        app.rebuild_snapshot();
+        let added = app.snapshot.bonds.len() - base_bonds;
+        assert!(
+            added > 50,
+            "the contour adds chickenwire segments, got {added}"
+        );
+
+        app.show_density_contour = false;
+        app.rebuild_snapshot();
+        assert_eq!(
+            app.snapshot.bonds.len(),
+            base_bonds,
+            "toggling the contour off removes it"
+        );
+    }
+
     #[test]
     fn unit_cell_toggle_adds_the_twelve_cell_box_edges() {
         // 1CRN's CRYST1 (P 1 21 1) gives a crystallographic cell, so toggling the
@@ -5796,6 +5883,38 @@ mod tests {
                     let path = out_dir.join("symm_pack_3d.png");
                     std::fs::write(&path, png).expect("write symm_pack_3d.png");
                     eprintln!("snapshot written to {}", path.display());
+                }
+            }
+        }
+
+        // (6) 3D render of the electron-density chickenwire contour over a synthetic
+        // Gaussian map — the formerly-orphaned MapMeshRenderer wired into the GUI.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            if let Some(scene) = app.state.active_scene() {
+                app.state
+                    .add_density_map(scene, "gauss", synthetic_gaussian_map());
+                app.show_density_contour = true;
+                app.density_level = 1.0;
+                app.rebuild_snapshot();
+                if app.snapshot.bounds.is_some() {
+                    camera.fit_snapshot(&app.snapshot);
+                    let (w, h) = (900u32, 700u32);
+                    let mvp = camera
+                        .view_projection(w as f32 / h as f32)
+                        .to_cols_array_2d();
+                    if let Some(png) = crate::offscreen::render_snapshot_png(
+                        &app.snapshot,
+                        mvp,
+                        w,
+                        h,
+                        [0.02, 0.02, 0.05, 1.0],
+                    ) {
+                        let path = out_dir.join("density_3d.png");
+                        std::fs::write(&path, png).expect("write density_3d.png");
+                        eprintln!("snapshot written to {}", path.display());
+                    }
                 }
             }
         }

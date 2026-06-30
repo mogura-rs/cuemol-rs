@@ -18,6 +18,7 @@ use cuemol_render::RenderSceneSnapshot;
 use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter};
 use cuemol_xtal::{
     read_brix_map_file, read_ccp4_map_file, read_opendx_file, read_xplor_map_file, DensityMap,
+    MapMeshRenderer,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -516,6 +517,79 @@ impl DesktopAppState {
                 }
             }
         }
+    }
+
+    /// Append electron-density "chickenwire" contour lines to a render snapshot
+    /// (CueMol2 `MapMeshRenderer`): for every density map in the active scene, contour
+    /// `density == siglevel·σ` into wireframe segments and push them as thin cyan
+    /// line-bonds. Wires the otherwise-orphaned `generate_contour_lines` into the GUI
+    /// render path (the unit-cell-edge pattern). No-op unless `show`.
+    pub fn append_density_geometry(
+        &self,
+        snapshot: &mut RenderSceneSnapshot,
+        siglevel: f64,
+        show: bool,
+    ) {
+        if !show {
+            return;
+        }
+        let Some(scene_uid) = self.active_scene else {
+            return;
+        };
+        let contour_color = cuemol_gfx::ColorSpec {
+            base: cuemol_gfx::ColorBase::Html {
+                r: 90,
+                g: 200,
+                b: 255,
+                a: 255,
+            },
+            modifiers: Vec::new(),
+        };
+        for map_object in self
+            .density_maps
+            .values()
+            .filter(|object| object.scene_uid == scene_uid)
+        {
+            let mut renderer = MapMeshRenderer::new();
+            renderer.map_mut().set_siglevel(siglevel);
+            for segment in renderer.generate_contour_lines(&map_object.map) {
+                merge_bounds(&mut snapshot.bounds, Some((segment[0], segment[0])));
+                merge_bounds(&mut snapshot.bounds, Some((segment[1], segment[1])));
+                snapshot.bonds.push(cuemol_render::RenderBond {
+                    from: segment[0],
+                    to: segment[1],
+                    radius: 0.04,
+                    color: Some(contour_color.clone()),
+                    object_uid: None,
+                    atom_indices: None,
+                    selected: false,
+                });
+            }
+        }
+    }
+
+    /// Insert a pre-built density map (a computed/synthetic `DensityMap`, not read from
+    /// a file) into the active scene's map set, returning its uid. Companion to the
+    /// file-based [`load_density_map`](Self::load_density_map).
+    pub fn add_density_map(
+        &mut self,
+        scene_uid: Uid,
+        name: impl Into<String>,
+        map: DensityMap,
+    ) -> Uid {
+        let uid = Uid::new(self.next_density_map_uid);
+        self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
+        self.density_maps.insert(
+            uid,
+            GuiDensityMapObject {
+                uid,
+                scene_uid,
+                name: name.into(),
+                format: "synthetic".to_string(),
+                map,
+            },
+        );
+        uid
     }
 
     /// Home-unit-cell symmetry-mate transforms (CueMol2 Symmetry panel "Symm mol" →
