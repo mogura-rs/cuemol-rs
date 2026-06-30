@@ -171,6 +171,17 @@ struct Model {
     animation_elapsed: f64,
     /// Light vs dark UI theme (CueMol2's native look is light; dark is the default).
     theme_light: bool,
+    /// Undo / redo stacks (CueMol2 Edit → Undo/Redo). Each entry is a full clone of the
+    /// scene state taken before a mutating edit, mirroring the egui/gpui front ends.
+    undo_stack: Vec<DioxusUndo>,
+    redo_stack: Vec<DioxusUndo>,
+}
+
+/// A point-in-time scene snapshot for undo/redo: the cloned app state plus the
+/// selection expression (the only model field that participates in an edit).
+struct DioxusUndo {
+    state: DesktopAppState,
+    selection_text: String,
 }
 
 impl Model {
@@ -216,6 +227,8 @@ impl Model {
             animation_objects: Vec::new(),
             animation_elapsed: 0.0,
             theme_light: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         };
         model.rebuild_after_load();
         model
@@ -289,6 +302,7 @@ impl Model {
     /// `set_object_coloring`, so the snapshot's object-coloring cascade recolours each
     /// carbon (and the ribbon) — identical to the egui front end.
     fn apply_coloring(&mut self, coloring_type: Option<&str>, attrs: BTreeMap<String, String>) {
+        self.push_undo();
         let uids: Vec<_> = self
             .state
             .active_object_summaries()
@@ -436,6 +450,7 @@ impl Model {
         key: &str,
         delta: f64,
     ) {
+        self.push_undo();
         let (default, min, max) = match key {
             "sphr" => (0.30, 0.05, 3.0),
             _ => (0.18, 0.02, 2.0),
@@ -457,6 +472,7 @@ impl Model {
     /// mirroring egui's `open_renderer_dialog` naming. Re-tessellates so the new
     /// representation appears in the 3D view immediately.
     fn add_renderer(&mut self, object_uid: cuemol_core::Uid, ty: &str) {
+        self.push_undo();
         let index = self.state.renderer_summaries(object_uid).len();
         let name = format!("{ty}{index}");
         match self.state.new_renderer_in_active_scene(object_uid, ty, name) {
@@ -468,6 +484,7 @@ impl Model {
 
     /// Remove a renderer from its object (CueMol2 workspace-tree → Delete).
     fn delete_renderer(&mut self, object_uid: cuemol_core::Uid, renderer_uid: cuemol_core::Uid) {
+        self.push_undo();
         match self
             .state
             .destroy_renderer_in_object(object_uid, renderer_uid)
@@ -486,10 +503,63 @@ impl Model {
         renderer_uid: cuemol_core::Uid,
         visible: bool,
     ) {
+        self.push_undo();
         let _ = self
             .state
             .set_renderer_visible(object_uid, renderer_uid, !visible);
         self.rebuild_selection();
+    }
+
+    /// Push the current scene state onto the undo stack before a mutating edit
+    /// (capped at 50, clears the redo stack). Call at the START of each edit op.
+    fn push_undo(&mut self) {
+        self.undo_stack.push(DioxusUndo {
+            state: self.state.clone(),
+            selection_text: self.selection_text.clone(),
+        });
+        if self.undo_stack.len() > 50 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    /// Replace the live scene with a saved snapshot, invalidating cached meshes and
+    /// re-tessellating (shared by undo and redo).
+    fn restore_undo(&mut self, snapshot: DioxusUndo) {
+        self.state = snapshot.state;
+        self.selection_text = snapshot.selection_text;
+        self.surface_mesh = None;
+        self.density_solid_mesh = None;
+        self.rebuild_selection();
+    }
+
+    /// Undo the last edit (CueMol2 Edit → Undo). Saves the current state to the redo
+    /// stack first so redo can replay it.
+    fn undo(&mut self) {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            self.status = "Nothing to undo".into();
+            return;
+        };
+        self.redo_stack.push(DioxusUndo {
+            state: self.state.clone(),
+            selection_text: self.selection_text.clone(),
+        });
+        self.restore_undo(snapshot);
+        self.status = "Undo".into();
+    }
+
+    /// Redo the last undone edit (CueMol2 Edit → Redo).
+    fn redo(&mut self) {
+        let Some(snapshot) = self.redo_stack.pop() else {
+            self.status = "Nothing to redo".into();
+            return;
+        };
+        self.undo_stack.push(DioxusUndo {
+            state: self.state.clone(),
+            selection_text: self.selection_text.clone(),
+        });
+        self.restore_undo(snapshot);
+        self.status = "Redo".into();
     }
 
     /// Save the active scene to a `.qsc` file (CueMol2 File → Save scene). Read-only
@@ -567,6 +637,7 @@ impl Model {
             return;
         };
         let selection = self.selection_text.clone();
+        self.push_undo();
         match self.state.delete_atoms_in_object(uid, &selection) {
             Ok(count) => self.status = format!("Deleted {count} atoms"),
             Err(error) => self.status = format!("Delete atoms failed: {error}"),
@@ -586,6 +657,7 @@ impl Model {
             return;
         };
         let selection = self.selection_text.clone();
+        self.push_undo();
         match self.state.change_chain_in_object(uid, &selection, &chain) {
             Ok(count) => self.status = format!("Chain → {chain} on {count} atoms"),
             Err(error) => self.status = format!("Change chain failed: {error}"),
@@ -600,6 +672,7 @@ impl Model {
             return;
         };
         let selection = self.selection_text.clone();
+        self.push_undo();
         match self.state.renumber_residues_in_object(uid, &selection, start) {
             Ok(count) => self.status = format!("Renumbered {count} atoms from {start}"),
             Err(error) => self.status = format!("Renumber failed: {error}"),
@@ -611,6 +684,8 @@ impl Model {
     fn run_menu_action(&mut self, action: &str) {
         match action {
             "new_scene" => self.new_scene_tab(),
+            "undo" => self.undo(),
+            "redo" => self.redo(),
             "sel_none" => self.set_selection("none"),
             "sel_all" => self.set_selection("*"),
             "col_element" => self.color_element(),
@@ -989,7 +1064,12 @@ fn base64_encode(data: &[u8]) -> String {
 fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
     match index {
         0 => &[("New scene tab", "new_scene")], // File
-        1 => &[("Select all", "sel_all"), ("Clear selection", "sel_none")], // Edit
+        1 => &[
+            ("Undo", "undo"),
+            ("Redo", "redo"),
+            ("Select all", "sel_all"),
+            ("Clear selection", "sel_none"),
+        ], // Edit
         2 => &[
             ("Element coloring", "col_element"),
             ("Rainbow coloring", "col_rainbow"),
@@ -1392,6 +1472,18 @@ fn app() -> Element {
                         // Molecule editing (CueMol2 Edit menu): acts on the current selection
                         // of the first molecule (change chain / renumber / delete atoms).
                         div { style: "{section_header_style}", "Edit" }
+                        div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().undo(),
+                                "Undo"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().redo(),
+                                "Redo"
+                            }
+                        }
                         div { style: "display:flex;gap:4px;align-items:center;padding:4px 12px;flex-wrap:wrap;",
                             input {
                                 style: "width:52px;{edit_input_style}",
@@ -2065,6 +2157,41 @@ mod tests {
             "deletion removed exactly the selected residue's atoms"
         );
         assert_eq!(sel_count(&model, "resid 100"), 0, "the deleted residue is gone");
+    }
+
+    #[test]
+    fn undo_redo_restores_and_replays_an_edit_in_dioxus() {
+        // Undo/redo parity with egui/gpui: each mutating edit snapshots the scene, so
+        // Undo restores the prior state and Redo replays the edit. Verified on a delete.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        let total = |model: &Model| -> usize {
+            model
+                .state
+                .active_render_snapshot("")
+                .map(|snapshot| snapshot.atoms.len())
+                .unwrap_or(0)
+        };
+        let before = total(&model);
+        assert!(before > 300, "1CRN loads its atoms (got {before})");
+
+        // Delete the first residue.
+        model.set_selection("resid 1");
+        model.delete_selected_atoms();
+        let after_delete = total(&model);
+        assert!(after_delete < before, "delete shrank the molecule");
+
+        // Undo restores the deleted atoms; redo replays the delete.
+        model.undo();
+        assert_eq!(total(&model), before, "undo restored the deleted atoms");
+        model.redo();
+        assert_eq!(total(&model), after_delete, "redo replayed the delete");
+
+        // Undo once more empties the stack; a further undo is a no-op with a message.
+        model.undo();
+        assert_eq!(total(&model), before, "second undo restored again");
+        model.undo();
+        assert_eq!(model.status, "Nothing to undo", "undo stack is now empty");
     }
 
     #[test]
