@@ -607,13 +607,18 @@ impl CueMolGpuiApp {
                             if !this.animation_playing {
                                 return false;
                             }
-                            let (elapsed, direction) = cuemol_desktop_core::anim_spin_direction(
+                            let frame = cuemol_desktop_core::anim_step(
                                 &this.animation_objects,
                                 this.animation_elapsed,
                                 0.016,
                             );
-                            this.animation_elapsed = elapsed;
-                            this.rotate_camera(direction * 2.0, 0.0);
+                            this.animation_elapsed = frame.elapsed;
+                            if frame.rotate_dir != 0.0 {
+                                this.rotate_camera(frame.rotate_dir * 2.0, 0.0);
+                            }
+                            if frame.slide_dir != 0.0 {
+                                this.zoom_camera(1.0 + frame.slide_dir * 0.02);
+                            }
                             cx.notify();
                             true
                         })
@@ -2891,6 +2896,18 @@ impl CueMolGpuiApp {
                 .child(button("anim-pause", "+ Pause").text_xs().on_click(cx.listener(
                     |this, _: &gpui::ClickEvent, _, cx| {
                         this.add_anim(AnimKind::Pause);
+                        cx.notify();
+                    },
+                )))
+                .child(button("anim-slidein", "+ SlideIn").text_xs().on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.add_anim(AnimKind::SlideIn);
+                        cx.notify();
+                    },
+                )))
+                .child(button("anim-slideout", "+ SlideOut").text_xs().on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.add_anim(AnimKind::SlideOut);
                         cx.notify();
                     },
                 )))

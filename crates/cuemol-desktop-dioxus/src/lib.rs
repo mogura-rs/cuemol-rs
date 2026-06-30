@@ -813,13 +813,18 @@ fn app() -> Element {
         loop {
             if model.read().anim_playing {
                 let mut m = model.write();
-                let (elapsed, direction) = cuemol_desktop_core::anim_spin_direction(
+                let frame = cuemol_desktop_core::anim_step(
                     &m.animation_objects,
                     m.animation_elapsed,
                     0.016,
                 );
-                m.animation_elapsed = elapsed;
-                m.rotate_camera(direction * 2.0, 0.0);
+                m.animation_elapsed = frame.elapsed;
+                if frame.rotate_dir != 0.0 {
+                    m.rotate_camera(frame.rotate_dir * 2.0, 0.0);
+                }
+                if frame.slide_dir != 0.0 {
+                    m.zoom_camera(1.0 + frame.slide_dir * 0.02);
+                }
             }
             futures_timer::Delay::new(std::time::Duration::from_millis(16)).await;
         }
@@ -1194,6 +1199,16 @@ fn app() -> Element {
                                 style: "{color_btn_style}",
                                 onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Pause),
                                 "+ Pause"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::SlideIn),
+                                "+ SlideIn"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::SlideOut),
+                                "+ SlideOut"
                             }
                             button {
                                 style: "{color_btn_style}",

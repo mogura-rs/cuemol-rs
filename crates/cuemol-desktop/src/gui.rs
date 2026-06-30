@@ -1,6 +1,6 @@
 // AnimKind/AnimObject + the `anim_spin_direction` timeline stepper are shared via core
 // so egui/gpui/dioxus drive the animation timeline identically.
-use crate::{anim_spin_direction, AnimKind, AnimObject, DesktopAppState, GuiLoadedPath, GuiSequenceSummary};
+use crate::{anim_step, AnimKind, AnimObject, DesktopAppState, GuiLoadedPath, GuiSequenceSummary};
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::Rgba8;
 use cuemol_render::{MeshVertex, RenderAtom, RenderBond, RenderSceneSnapshot};
@@ -2098,10 +2098,15 @@ impl GuiApplication {
     /// active object via the shared-core `anim_spin_direction` (CueMol2 anim playback;
     /// empty list → a simple continuous spin).
     fn advance_animation(&mut self, dt: f32, camera: &mut CameraController) {
-        let (elapsed, direction) =
-            anim_spin_direction(&self.animation_objects, self.animation_elapsed as f64, dt as f64);
-        self.animation_elapsed = elapsed as f32;
-        camera.rotate_by(direction as f32 * 120.0 * dt, 0.0);
+        let frame = anim_step(&self.animation_objects, self.animation_elapsed as f64, dt as f64);
+        self.animation_elapsed = frame.elapsed as f32;
+        if frame.rotate_dir != 0.0 {
+            camera.rotate_by(frame.rotate_dir as f32 * 120.0 * dt, 0.0);
+        }
+        if frame.slide_dir != 0.0 {
+            // zoom_by: +step zooms in, so SlideIn (slide_dir -1) → +step.
+            camera.zoom_by(-frame.slide_dir as f32 * 20.0 * dt);
+        }
     }
 
     /// Animation panel — the timeline object list (CueMol2 `anim-panel`): Add (Spin /
@@ -2109,7 +2114,13 @@ impl GuiApplication {
     fn animation_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.menu_button("Add", |ui| {
-                for kind in [AnimKind::Spin, AnimKind::Rock, AnimKind::Pause] {
+                for kind in [
+                    AnimKind::Spin,
+                    AnimKind::Rock,
+                    AnimKind::Pause,
+                    AnimKind::SlideIn,
+                    AnimKind::SlideOut,
+                ] {
                     if ui.button(kind.label()).clicked() {
                         self.animation_objects.push(AnimObject {
                             kind,
