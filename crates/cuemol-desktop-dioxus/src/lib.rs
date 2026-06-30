@@ -773,6 +773,31 @@ impl Model {
         }
     }
 
+    /// Add (`make`=true) or remove (`make`=false) a bond between two atoms by serial id
+    /// on the first molecule (CueMol2 Tools → Mol bond editor). Undoable + re-tessellates.
+    fn edit_bond(&mut self, aid1: i32, aid2: i32, make: bool) {
+        let Some(uid) = self.first_object_uid() else {
+            return;
+        };
+        self.push_undo();
+        let result = if make {
+            self.state.make_bond_in_object(uid, aid1, aid2)
+        } else {
+            self.state.remove_bond_in_object(uid, aid1, aid2)
+        };
+        match result {
+            Ok(true) => {
+                self.status = format!(
+                    "{} bond {aid1}-{aid2}",
+                    if make { "Made" } else { "Removed" }
+                )
+            }
+            Ok(false) => self.status = format!("No change for bond {aid1}-{aid2}"),
+            Err(error) => self.status = format!("Bond edit failed: {error}"),
+        }
+        self.rebuild_selection();
+    }
+
     /// Write APBS electrostatics input files (PQR + APBS input + DX target) for the
     /// first molecule to the temp dir (CueMol2 Tools → APBS). No dialog — paths are
     /// derived and reported in the status bar (mirrors the gpui front end).
@@ -1350,6 +1375,9 @@ fn app() -> Element {
     let mut pdb_id_text = use_signal(String::new);
     // Morph interpolation fraction (Tools → Morphing slider).
     let mut morph_frac = use_signal(|| 0.0_f64);
+    // Bond-editor atom serial fields (Tools → Mol bond editor).
+    let mut bond_aid1 = use_signal(String::new);
+    let mut bond_aid2 = use_signal(String::new);
 
     // Animation playback loop (CueMol2 SimpleSpin): an executor-agnostic timer ticks
     // ~60 fps; while `anim_playing` is set, each tick spins the camera + re-renders.
@@ -1857,6 +1885,47 @@ fn app() -> Element {
                                 title: "Write APBS electrostatics files to the temp dir",
                                 onclick: move |_| model.write().write_apbs(),
                                 "APBS"
+                            }
+                        }
+                        // Bond editor: make/remove a bond between two atom serial ids.
+                        div { style: "display:flex;gap:4px;align-items:center;padding:2px 12px;flex-wrap:wrap;",
+                            input {
+                                style: "width:44px;{edit_input_style}",
+                                placeholder: "aid1",
+                                oninput: move |e| bond_aid1.set(e.value()),
+                            }
+                            input {
+                                style: "width:44px;{edit_input_style}",
+                                placeholder: "aid2",
+                                oninput: move |e| bond_aid2.set(e.value()),
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| {
+                                    if let (Ok(a), Ok(b)) = (
+                                        bond_aid1.peek().trim().parse::<i32>(),
+                                        bond_aid2.peek().trim().parse::<i32>(),
+                                    ) {
+                                        model.write().edit_bond(a, b, true);
+                                    } else {
+                                        model.write().status = "Bond: enter two atom ids".into();
+                                    }
+                                },
+                                "Make bond"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| {
+                                    if let (Ok(a), Ok(b)) = (
+                                        bond_aid1.peek().trim().parse::<i32>(),
+                                        bond_aid2.peek().trim().parse::<i32>(),
+                                    ) {
+                                        model.write().edit_bond(a, b, false);
+                                    } else {
+                                        model.write().status = "Bond: enter two atom ids".into();
+                                    }
+                                },
+                                "Remove"
                             }
                         }
                         div { style: "display:flex;gap:6px;align-items:center;padding:2px 12px;",
@@ -2623,6 +2692,36 @@ mod tests {
             first,
             "it landed in slot 2"
         );
+    }
+
+    #[test]
+    fn bond_editor_makes_and_removes_a_bond_in_dioxus() {
+        // Parity for Tools → Mol bond editor: make/remove a bond by atom serial id.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        let bonds = |model: &Model| -> usize {
+            model
+                .state
+                .active_render_snapshot("")
+                .map(|snapshot| snapshot.bonds.len())
+                .unwrap_or(0)
+        };
+        let before = bonds(&model);
+        // Serials 1 and 100 aren't bonded (far apart) — making a bond adds a drawn one.
+        model.edit_bond(1, 100, true);
+        assert!(
+            model.status.starts_with("Made bond"),
+            "make bond ({})",
+            model.status
+        );
+        assert_eq!(bonds(&model), before + 1, "make added a drawn bond");
+        model.edit_bond(1, 100, false);
+        assert!(
+            model.status.starts_with("Removed bond"),
+            "remove bond ({})",
+            model.status
+        );
+        assert_eq!(bonds(&model), before, "remove undid it");
     }
 
     #[test]

@@ -251,6 +251,10 @@ enum Dialog {
     },
     /// Configuration key/value editor.
     Config,
+    /// Make / remove a bond between two atom serial ids on `target`.
+    BondEditor {
+        target: cuemol_core::Uid,
+    },
 }
 
 /// A point-in-time copy of everything Undo/Redo restores. `DesktopAppState` is
@@ -283,6 +287,8 @@ struct DialogInputs {
     surf_probe: Option<Entity<TextInput>>,
     surf_path: Option<Entity<TextInput>>,
     morph_name: Option<Entity<TextInput>>,
+    bond_aid1: Option<Entity<TextInput>>,
+    bond_aid2: Option<Entity<TextInput>>,
     config_key: Option<Entity<TextInput>>,
     config_value: Option<Entity<TextInput>>,
     config_path: Option<Entity<TextInput>>,
@@ -1200,6 +1206,34 @@ impl CueMolGpuiApp {
         }
     }
 
+    /// Make (`make`=true) or remove a bond between two atom serial ids on `target`
+    /// (CueMol2 Tools → Mol bond editor). Undoable + refreshes the scene.
+    fn run_bond(&mut self, target: cuemol_core::Uid, aid1: i32, aid2: i32, make: bool) {
+        self.snapshot_undo();
+        let result = if make {
+            self.state.make_bond_in_object(target, aid1, aid2)
+        } else {
+            self.state.remove_bond_in_object(target, aid1, aid2)
+        };
+        match result {
+            Ok(true) => {
+                self.refresh_scene(false);
+                self.set_status(format!(
+                    "{} bond {aid1}-{aid2}",
+                    if make { "Made" } else { "Removed" }
+                ));
+            }
+            Ok(false) => {
+                self.undo_stack.pop();
+                self.set_status(format!("No change for bond {aid1}-{aid2}"));
+            }
+            Err(error) => {
+                self.undo_stack.pop();
+                self.set_status(format!("Bond edit error: {error}"));
+            }
+        }
+    }
+
     /// Write APBS electrostatics input files (PQR + APBS input + DX target) for `target`
     /// to the temp dir (CueMol2 Tools → APBS). No dialog — paths are derived, reported
     /// in the status bar.
@@ -1399,6 +1433,12 @@ impl CueMolGpuiApp {
             ty: "simple".to_string(),
         };
         self.dialog_inputs.renderer_name = Some(cx.new(|cx| TextInput::new(cx, "name", "simple")));
+    }
+
+    fn open_bond_dialog(&mut self, target: cuemol_core::Uid, cx: &mut Context<Self>) {
+        self.dialog = Dialog::BondEditor { target };
+        self.dialog_inputs.bond_aid1 = Some(cx.new(|cx| TextInput::new(cx, "", "aid1")));
+        self.dialog_inputs.bond_aid2 = Some(cx.new(|cx| TextInput::new(cx, "", "aid2")));
     }
 
     fn open_chain_dialog(&mut self, target: cuemol_core::Uid, cx: &mut Context<Self>) {
@@ -2075,6 +2115,17 @@ impl CueMolGpuiApp {
                     menu_item("mi-apbs", "APBS electrostatics")
                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                             this.with_selected_object(cx, |this, obj, _cx| this.run_apbs(obj));
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    menu_item("mi-bond", "Mol bond editor…")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.with_selected_object(cx, |this, obj, cx| {
+                                this.open_bond_dialog(obj, cx)
+                            });
                             this.open_menu = None;
                             cx.notify();
                         }))
@@ -3307,6 +3358,7 @@ impl CueMolGpuiApp {
                 self.morph_dialog(cx, *target, *source, *frame).into_any_element()
             }
             Dialog::Config => self.config_dialog(cx).into_any_element(),
+            Dialog::BondEditor { target } => self.bond_dialog(cx, *target).into_any_element(),
         };
         div()
             .absolute()
@@ -3468,6 +3520,61 @@ impl CueMolGpuiApp {
                     )))
                     .child(dialog_cancel(cx)),
             )
+    }
+
+    fn bond_dialog(&self, cx: &mut Context<Self>, target: cuemol_core::Uid) -> impl IntoElement {
+        let aid1 = self.dialog_inputs.bond_aid1.clone();
+        let aid2 = self.dialog_inputs.bond_aid2.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_color(rgb(col_accent())).child("Mol bond editor"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Two atom serial ids to bond / unbond"),
+            )
+            .children(aid1.map(|i| i.into_any_element()))
+            .children(aid2.map(|i| i.into_any_element()))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .justify_end()
+                    .child(button("bond-make", "Make").on_click(cx.listener(
+                        move |this, _: &gpui::ClickEvent, _, cx| {
+                            this.apply_bond_dialog(target, true, cx);
+                        },
+                    )))
+                    .child(button("bond-remove", "Remove").on_click(cx.listener(
+                        move |this, _: &gpui::ClickEvent, _, cx| {
+                            this.apply_bond_dialog(target, false, cx);
+                        },
+                    )))
+                    .child(dialog_cancel(cx)),
+            )
+    }
+
+    /// Read the two bond-editor serial inputs and run the make/remove (shared by the
+    /// Make and Remove buttons).
+    fn apply_bond_dialog(&mut self, target: cuemol_core::Uid, make: bool, cx: &mut Context<Self>) {
+        let parse = |field: &Option<Entity<TextInput>>| -> Option<i32> {
+            field.as_ref().and_then(|i| i.read(cx).text().trim().parse::<i32>().ok())
+        };
+        match (
+            parse(&self.dialog_inputs.bond_aid1),
+            parse(&self.dialog_inputs.bond_aid2),
+        ) {
+            (Some(aid1), Some(aid2)) => {
+                self.run_bond(target, aid1, aid2, make);
+                self.close_dialog();
+            }
+            _ => self.set_status("Bond editor: enter two atom ids"),
+        }
+        cx.notify();
     }
 
     fn residue_dialog(&self, cx: &mut Context<Self>, target: cuemol_core::Uid) -> impl IntoElement {
@@ -4696,6 +4803,26 @@ mod tests {
         app.delete_renderer(object, renderer);
         assert_eq!(app.renderers(object).len(), before, "delete undoes the add");
         assert_eq!(app.selected_renderer, None);
+    }
+
+    #[test]
+    fn bond_editor_makes_and_removes_a_bond_in_gpui() {
+        let Some((mut app, object)) = app_with_molecule() else {
+            return;
+        };
+        // Serials 1 and 100 aren't bonded — make then remove.
+        app.run_bond(object, 1, 100, true);
+        assert!(
+            app.status.starts_with("Made bond"),
+            "make ({})",
+            app.status
+        );
+        app.run_bond(object, 1, 100, false);
+        assert!(
+            app.status.starts_with("Removed bond"),
+            "remove ({})",
+            app.status
+        );
     }
 
     #[test]
