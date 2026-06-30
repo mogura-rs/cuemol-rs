@@ -274,6 +274,7 @@ impl NativeRunner {
                     &paint_jobs,
                     &full_output.textures_delta,
                     full_output.pixels_per_point,
+                    self.app.viewport_rect,
                 ) {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -3878,9 +3879,31 @@ impl GpuState {
         paint_jobs: &[egui::ClippedPrimitive],
         textures_delta: &egui::TexturesDelta,
         pixels_per_point: f32,
+        viewport: Option<egui::Rect>,
     ) -> std::result::Result<(), wgpu::SurfaceError> {
         self.prepare_snapshot(snapshot);
-        let camera_uniform = self.camera.uniform(self.size);
+        // Confine the 3D scene to the central viewport region (everything but the
+        // docked panels), in physical pixels, so the molecule is centred in the
+        // visible area and its on-screen position matches the picking projection
+        // (which also uses `viewport_rect`). Without this the scene is centred on
+        // the whole window and appears shifted once the left dock takes space.
+        let (vx, vy, vw, vh) = match viewport {
+            Some(rect) => {
+                let x = (rect.left() * pixels_per_point).max(0.0);
+                let y = (rect.top() * pixels_per_point).max(0.0);
+                let w = (rect.width() * pixels_per_point)
+                    .min(self.config.width as f32 - x)
+                    .max(1.0);
+                let h = (rect.height() * pixels_per_point)
+                    .min(self.config.height as f32 - y)
+                    .max(1.0);
+                (x, y, w, h)
+            }
+            None => (0.0, 0.0, self.config.width as f32, self.config.height as f32),
+        };
+        let camera_uniform = self
+            .camera
+            .uniform(PhysicalSize::new(vw as u32, vh as u32));
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
         for (id, image_delta) in &textures_delta.set {
@@ -3930,6 +3953,7 @@ impl GpuState {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            render_pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             if self.mesh_index_count > 0 {
                 render_pass.set_pipeline(&self.mesh_pipeline);
