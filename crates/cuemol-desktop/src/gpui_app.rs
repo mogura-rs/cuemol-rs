@@ -57,18 +57,79 @@ const DEFAULT_VIEW_W: u32 = 960;
 const DEFAULT_VIEW_H: u32 = 720;
 
 // A small dark palette (hex RGB) so the panels read as a cohesive theme.
-const COL_BG: u32 = 0x1e1e28;
-const COL_PANEL: u32 = 0x252530;
-const COL_HEADER: u32 = 0x2d2d3a;
-const COL_VIEWPORT: u32 = 0x14141c;
-const COL_BORDER: u32 = 0x3a3a48;
-const COL_TEXT: u32 = 0xd6d6e0;
-const COL_TEXT_DIM: u32 = 0x8a8a9a;
-const COL_ACCENT: u32 = 0x6db3f2;
-const COL_BTN: u32 = 0x39394a;
-const COL_BTN_HOVER: u32 = 0x474760;
-const COL_SEL: u32 = 0x34506e; // selected tree-row background
-const COL_DANGER: u32 = 0xc2554f;
+// Palette: dark (default) + light values. gpui has no CSS variables, so the `col_*()`
+// accessors below pick by a per-thread theme flag (set once at the top of `render`); a
+// light/dark toggle flips it and re-renders, and every `rgb(col_*())` follows.
+const COL_BG_DARK: u32 = 0x1e1e28;
+const COL_BG_LIGHT: u32 = 0xf4f4f6;
+const COL_PANEL_DARK: u32 = 0x252530;
+const COL_PANEL_LIGHT: u32 = 0xeaeaef;
+const COL_HEADER_DARK: u32 = 0x2d2d3a;
+const COL_HEADER_LIGHT: u32 = 0xdedee4;
+const COL_VIEWPORT_DARK: u32 = 0x14141c;
+const COL_VIEWPORT_LIGHT: u32 = 0xfafafc;
+const COL_BORDER_DARK: u32 = 0x3a3a48;
+const COL_BORDER_LIGHT: u32 = 0xc4c4cc;
+const COL_TEXT_DARK: u32 = 0xd6d6e0;
+const COL_TEXT_LIGHT: u32 = 0x1e1e28;
+const COL_TEXT_DIM_DARK: u32 = 0x8a8a9a;
+const COL_TEXT_DIM_LIGHT: u32 = 0x6a6a78;
+const COL_ACCENT_DARK: u32 = 0x6db3f2;
+const COL_ACCENT_LIGHT: u32 = 0x1f6fd0;
+const COL_BTN_DARK: u32 = 0x39394a;
+const COL_BTN_LIGHT: u32 = 0xd8d8e0;
+const COL_BTN_HOVER_DARK: u32 = 0x474760;
+const COL_BTN_HOVER_LIGHT: u32 = 0xc8c8d4;
+const COL_SEL_DARK: u32 = 0x34506e; // selected tree-row background
+const COL_SEL_LIGHT: u32 = 0xa9cdf0;
+const COL_DANGER_DARK: u32 = 0xc2554f;
+const COL_DANGER_LIGHT: u32 = 0xc2554f;
+
+thread_local! {
+    static THEME_LIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn set_theme_light(light: bool) {
+    THEME_LIGHT.with(|flag| flag.set(light));
+}
+fn theme_light_on() -> bool {
+    THEME_LIGHT.with(|flag| flag.get())
+}
+fn col_bg() -> u32 {
+    if theme_light_on() { COL_BG_LIGHT } else { COL_BG_DARK }
+}
+fn col_panel() -> u32 {
+    if theme_light_on() { COL_PANEL_LIGHT } else { COL_PANEL_DARK }
+}
+fn col_header() -> u32 {
+    if theme_light_on() { COL_HEADER_LIGHT } else { COL_HEADER_DARK }
+}
+fn col_viewport() -> u32 {
+    if theme_light_on() { COL_VIEWPORT_LIGHT } else { COL_VIEWPORT_DARK }
+}
+fn col_border() -> u32 {
+    if theme_light_on() { COL_BORDER_LIGHT } else { COL_BORDER_DARK }
+}
+fn col_text() -> u32 {
+    if theme_light_on() { COL_TEXT_LIGHT } else { COL_TEXT_DARK }
+}
+fn col_text_dim() -> u32 {
+    if theme_light_on() { COL_TEXT_DIM_LIGHT } else { COL_TEXT_DIM_DARK }
+}
+fn col_accent() -> u32 {
+    if theme_light_on() { COL_ACCENT_LIGHT } else { COL_ACCENT_DARK }
+}
+fn col_btn() -> u32 {
+    if theme_light_on() { COL_BTN_LIGHT } else { COL_BTN_DARK }
+}
+fn col_btn_hover() -> u32 {
+    if theme_light_on() { COL_BTN_HOVER_LIGHT } else { COL_BTN_HOVER_DARK }
+}
+fn col_sel() -> u32 {
+    if theme_light_on() { COL_SEL_LIGHT } else { COL_SEL_DARK }
+}
+fn col_danger() -> u32 {
+    if theme_light_on() { COL_DANGER_LIGHT } else { COL_DANGER_DARK }
+}
 
 const INSPECTOR_W: f32 = 320.0;
 const BOTTOM_H: f32 = 180.0;
@@ -287,6 +348,8 @@ pub struct CueMolGpuiApp {
     show_hbonds: bool,
     /// Atom/residue labels overlaid on the selected atoms.
     show_labels: bool,
+    /// Light vs dark UI theme (CueMol2's native look is light; dark is the default).
+    theme_light: bool,
     /// Console / status log (newest last), capped to avoid unbounded growth.
     log_lines: Vec<String>,
     /// Most-recently-opened file paths (newest first, capped at 10).
@@ -370,6 +433,7 @@ impl CueMolGpuiApp {
             surface_mesh: None,
             show_hbonds: false,
             show_labels: false,
+            theme_light: false,
             log_lines: Vec::new(),
             recent_paths: Vec::new(),
             undo_stack: Vec::new(),
@@ -1162,9 +1226,9 @@ impl CueMolGpuiApp {
             .gap_1()
             .h(px(SCENE_TAB_H))
             .px_2()
-            .bg(rgb(COL_HEADER))
+            .bg(rgb(col_header()))
             .border_b_1()
-            .border_color(rgb(COL_BORDER));
+            .border_color(rgb(col_border()));
         for scene in self.state.scene_summaries() {
             let uid = scene.uid;
             let is_active = Some(uid) == active;
@@ -1181,9 +1245,9 @@ impl CueMolGpuiApp {
                     cx.notify();
                 }));
             if is_active {
-                tab = tab.bg(rgb(COL_BTN)).text_color(rgb(COL_ACCENT));
+                tab = tab.bg(rgb(col_btn())).text_color(rgb(col_accent()));
             } else {
-                tab = tab.text_color(rgb(COL_TEXT_DIM));
+                tab = tab.text_color(rgb(col_text_dim()));
             }
             strip = strip.child(tab);
         }
@@ -1453,6 +1517,9 @@ impl CueMolGpuiApp {
 impl Render for CueMolGpuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_inputs(cx);
+        // Make the palette accessors (col_*()) resolve to the current theme for this
+        // render pass (gpui has no CSS variables; the flag is per-thread).
+        set_theme_light(self.theme_light);
         // Adopt any edited selection text and re-tessellate before laying out.
         self.sync_selection(cx);
         // Keep the offscreen 3D resolution matched to the live window size so a
@@ -1485,8 +1552,8 @@ impl Render for CueMolGpuiApp {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(COL_BG))
-            .text_color(rgb(COL_TEXT))
+            .bg(rgb(col_bg()))
+            .text_color(rgb(col_text()))
             .text_sm()
             .child(header)
             .child(toolbar)
@@ -1529,14 +1596,14 @@ impl CueMolGpuiApp {
             .items_center()
             .w_full()
             .h(px(HEADER_H))
-            .bg(rgb(COL_HEADER))
+            .bg(rgb(col_header()))
             .border_b_1()
-            .border_color(rgb(COL_BORDER))
+            .border_color(rgb(col_border()))
             .child(
                 div()
                     .w(px(92.0))
                     .px_3()
-                    .text_color(rgb(COL_ACCENT))
+                    .text_color(rgb(col_accent()))
                     .child("CueMol2-rs"),
             );
         // Top-level menu titles; clicking toggles that menu's dropdown overlay.
@@ -1552,8 +1619,8 @@ impl CueMolGpuiApp {
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
-                    .bg(rgb(if open { COL_BTN } else { COL_HEADER }))
-                    .hover(|s| s.bg(rgb(COL_BTN)))
+                    .bg(rgb(if open { col_btn() } else { col_header() }))
+                    .hover(|s| s.bg(rgb(col_btn())))
                     .child(name)
                     .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
                         this.open_menu = if this.open_menu == Some(name) {
@@ -1565,7 +1632,7 @@ impl CueMolGpuiApp {
                     })),
             );
         }
-        bar.child(div().flex_1().px_3().text_color(rgb(COL_TEXT_DIM)).child(format!("scene: {active}")))
+        bar.child(div().flex_1().px_3().text_color(rgb(col_text_dim())).child(format!("scene: {active}")))
             // Right-aligned panel toggles (mirrors egui's Options/Window menu).
             .child(
                 toggle_button("tgl-inspector", "Inspector", self.show_inspector).on_click(
@@ -1624,9 +1691,9 @@ impl CueMolGpuiApp {
                     .py_1()
                     .min_w(px(200.0))
                     .rounded_md()
-                    .bg(rgb(COL_PANEL))
+                    .bg(rgb(col_panel()))
                     .border_1()
-                    .border_color(rgb(COL_BORDER))
+                    .border_color(rgb(col_border()))
                     .children(items),
             )
     }
@@ -1708,7 +1775,7 @@ impl CueMolGpuiApp {
                             .px_3()
                             .py_1()
                             .text_xs()
-                            .text_color(rgb(COL_TEXT_DIM))
+                            .text_color(rgb(col_text_dim()))
                             .child("(no recent files)")
                             .into_any_element(),
                     );
@@ -1787,6 +1854,15 @@ impl CueMolGpuiApp {
                 );
             }
             "View" => {
+                items.push(
+                    menu_item("mi-theme", "Toggle light/dark theme")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.theme_light = !this.theme_light;
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
                 items.push(
                     menu_item("mi-fit", "Fit")
                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
@@ -1938,9 +2014,9 @@ impl CueMolGpuiApp {
             .w_full()
             .h(px(TOOLBAR_H))
             .px_3()
-            .bg(rgb(COL_HEADER))
+            .bg(rgb(col_header()))
             .border_b_1()
-            .border_color(rgb(COL_BORDER))
+            .border_color(rgb(col_border()))
             .child(button("tb-open", "Open").on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                 let path = this
                     .inputs
@@ -2111,7 +2187,7 @@ impl CueMolGpuiApp {
             rows.push(
                 div()
                     .p_3()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child("No objects loaded. Use Open (toolbar) or pass a file path.")
                     .into_any_element(),
             );
@@ -2269,9 +2345,9 @@ impl CueMolGpuiApp {
             .flex_col()
             .w(px(SIDEBAR_W))
             .h_full()
-            .bg(rgb(COL_PANEL))
+            .bg(rgb(col_panel()))
             .border_r_1()
-            .border_color(rgb(COL_BORDER))
+            .border_color(rgb(col_border()))
             .child(panel_title("Workspace"))
             .child(
                 // A scrollable region must be stateful (an `id`'d element), since
@@ -2400,7 +2476,7 @@ impl CueMolGpuiApp {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(COL_TEXT_DIM))
+                        .text_color(rgb(col_text_dim()))
                         .child(format!("Selected atoms: {}", self.rendered_atom_count)),
                 )
                 .child(button("ins-clearsel", "Clear").text_xs().on_click(cx.listener(
@@ -2611,9 +2687,9 @@ impl CueMolGpuiApp {
             .flex_col()
             .w(px(INSPECTOR_W))
             .h_full()
-            .bg(rgb(COL_PANEL))
+            .bg(rgb(col_panel()))
             .border_l_1()
-            .border_color(rgb(COL_BORDER))
+            .border_color(rgb(col_border()))
             .child(panel_title("Inspector"))
             .child(
                 div()
@@ -2639,9 +2715,9 @@ impl CueMolGpuiApp {
             .w_full()
             .px_2()
             .py_1()
-            .bg(rgb(COL_HEADER))
+            .bg(rgb(col_header()))
             .border_b_1()
-            .border_color(rgb(COL_BORDER))
+            .border_color(rgb(col_border()))
             .child(self.tab_button(cx, "Output", BottomTab::Output))
             .child(self.tab_button(cx, "Sequence", BottomTab::Sequence))
             .child(self.tab_button(cx, "Animation", BottomTab::Animation))
@@ -2659,9 +2735,9 @@ impl CueMolGpuiApp {
             .flex_col()
             .w_full()
             .h(px(BOTTOM_H))
-            .bg(rgb(COL_PANEL))
+            .bg(rgb(col_panel()))
             .border_t_1()
-            .border_color(rgb(COL_BORDER))
+            .border_color(rgb(col_border()))
             .child(tabs)
             .child(content)
     }
@@ -2674,9 +2750,9 @@ impl CueMolGpuiApp {
             .py_1()
             .rounded_sm()
             .cursor_pointer()
-            .text_color(rgb(if active { COL_TEXT } else { COL_TEXT_DIM }))
-            .bg(rgb(if active { COL_SEL } else { COL_PANEL }))
-            .hover(|s| s.bg(rgb(COL_BTN)))
+            .text_color(rgb(if active { col_text() } else { col_text_dim() }))
+            .bg(rgb(if active { col_sel() } else { col_panel() }))
+            .hover(|s| s.bg(rgb(col_btn())))
             .child(label.to_string())
             .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
                 this.bottom_tab = tab;
@@ -2719,7 +2795,7 @@ impl CueMolGpuiApp {
                     .children(
                         lines
                             .into_iter()
-                            .map(|line| div().text_color(rgb(COL_TEXT_DIM)).child(line)),
+                            .map(|line| div().text_color(rgb(col_text_dim())).child(line)),
                     ),
             )
     }
@@ -2733,7 +2809,7 @@ impl CueMolGpuiApp {
             rows.push(
                 div()
                     .text_xs()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child(format!(
                         "{} : chain {} ({} res)",
                         chain.object_name,
@@ -2757,7 +2833,7 @@ impl CueMolGpuiApp {
                         cx.notify();
                     }));
                 if residue.selected {
-                    cell = cell.bg(rgb(COL_ACCENT)).text_color(rgb(0xffffff));
+                    cell = cell.bg(rgb(col_accent())).text_color(rgb(0xffffff));
                 }
                 cells.push(cell.into_any_element());
             }
@@ -2775,7 +2851,7 @@ impl CueMolGpuiApp {
             rows.push(
                 div()
                     .p_2()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child("No sequence (load a molecule).")
                     .into_any_element(),
             );
@@ -2831,7 +2907,7 @@ impl CueMolGpuiApp {
             col = col.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child("No objects — Add Spin / Rock / Pause (or Play for a spin)."),
             );
         }
@@ -2871,7 +2947,7 @@ impl CueMolGpuiApp {
             .items_center()
             .gap_3()
             .p_3()
-            .child(div().text_color(rgb(COL_TEXT_DIM)).child("Backend: POV-Ray"))
+            .child(div().text_color(rgb(col_text_dim())).child("Backend: POV-Ray"))
             .child(button("render-go", "Render").on_click(cx.listener(
                 |this, _: &gpui::ClickEvent, _, cx| {
                     let path = this
@@ -2896,7 +2972,7 @@ impl CueMolGpuiApp {
             .min_h_0()
             .items_center()
             .justify_center()
-            .bg(rgb(COL_VIEWPORT))
+            .bg(rgb(col_viewport()))
             // Scroll to zoom, left-drag to orbit, right-drag to pan — each mutates
             // the camera and re-renders the offscreen wgpu image.
             .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
@@ -2978,7 +3054,7 @@ impl CueMolGpuiApp {
                 )
                 .children(center_mark_overlay(self.center_mark))
                 .children(self.label_overlay()),
-            None => base.gap_2().child(div().text_color(rgb(COL_TEXT_DIM)).child(
+            None => base.gap_2().child(div().text_color(rgb(col_text_dim())).child(
                 "3D viewport (wgpu) — load a molecule (or no GPU adapter available)",
             )),
         }
@@ -3004,11 +3080,11 @@ impl CueMolGpuiApp {
             .w_full()
             .h(px(STATUS_H))
             .px_4()
-            .bg(rgb(COL_HEADER))
+            .bg(rgb(col_header()))
             .border_t_1()
-            .border_color(rgb(COL_BORDER))
+            .border_color(rgb(col_border()))
             .text_xs()
-            .text_color(rgb(COL_TEXT_DIM))
+            .text_color(rgb(col_text_dim()))
             .child(div().flex_1().child(self.status.clone()))
             .child(div().child(format!(
                 "{} atoms / {} bonds",
@@ -3062,9 +3138,9 @@ impl CueMolGpuiApp {
                     .max_w(px(520.0))
                     .p_4()
                     .rounded_lg()
-                    .bg(rgb(COL_PANEL))
+                    .bg(rgb(col_panel()))
                     .border_1()
-                    .border_color(rgb(COL_BORDER))
+                    .border_color(rgb(col_border()))
                     .child(body),
             )
     }
@@ -3074,15 +3150,15 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_ACCENT)).child("CueMol2-rs"))
+            .child(div().text_color(rgb(col_accent())).child("CueMol2-rs"))
             .child(
                 div()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child("gpui desktop front end (Zed's GPU UI framework)"),
             )
             .child(
                 div()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .text_xs()
                     .child("Panels in gpui · 3D view rendered offscreen with wgpu"),
             )
@@ -3106,8 +3182,8 @@ impl CueMolGpuiApp {
                     .py_1()
                     .rounded_sm()
                     .cursor_pointer()
-                    .bg(rgb(if chosen { COL_SEL } else { COL_PANEL }))
-                    .hover(|s| s.bg(rgb(COL_BTN)))
+                    .bg(rgb(if chosen { col_sel() } else { col_panel() }))
+                    .hover(|s| s.bg(rgb(col_btn())))
                     .child(label.to_string())
                     .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
                         if let Dialog::NewRenderer { ty, .. } = &mut this.dialog {
@@ -3123,11 +3199,11 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_ACCENT)).child("Add renderer"))
+            .child(div().text_color(rgb(col_accent())).child("Add renderer"))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child(format!("on object uid {}", target.get())),
             )
             .child(
@@ -3140,7 +3216,7 @@ impl CueMolGpuiApp {
                     .overflow_y_scroll()
                     .children(type_rows),
             )
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child("Name"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Name"))
             .children(name_input.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -3176,11 +3252,11 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_ACCENT)).child("Change chain ID"))
+            .child(div().text_color(rgb(col_accent())).child("Change chain ID"))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child("New chain ID for the current selection"),
             )
             .children(input.map(|i| i.into_any_element()))
@@ -3214,11 +3290,11 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_ACCENT)).child("Renumber residues"))
+            .child(div().text_color(rgb(col_accent())).child("Renumber residues"))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child("Start number for the current selection"),
             )
             .children(input.map(|i| i.into_any_element()))
@@ -3259,11 +3335,11 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_DANGER)).child("Delete atoms"))
+            .child(div().text_color(rgb(col_danger())).child("Delete atoms"))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child("Selection of atoms to delete"),
             )
             .children(input.map(|i| i.into_any_element()))
@@ -3296,11 +3372,11 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_ACCENT)).child("Get PDB"))
+            .child(div().text_color(rgb(col_accent())).child("Get PDB"))
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child("Set the Open path to a local PDB file by ID"),
             )
             .children(input.map(|i| i.into_any_element()))
@@ -3352,8 +3428,8 @@ impl CueMolGpuiApp {
                     .py_1()
                     .rounded_sm()
                     .cursor_pointer()
-                    .bg(rgb(if chosen { COL_SEL } else { COL_PANEL }))
-                    .hover(|s| s.bg(rgb(COL_BTN)))
+                    .bg(rgb(if chosen { col_sel() } else { col_panel() }))
+                    .hover(|s| s.bg(rgb(col_btn())))
                     .child(object.name)
                     .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
                         if let Dialog::Superpose { moving, .. } = &mut this.dialog {
@@ -3368,7 +3444,7 @@ impl CueMolGpuiApp {
             obj_rows.push(
                 div()
                     .text_xs()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child("(no other object to move)")
                     .into_any_element(),
             );
@@ -3379,8 +3455,8 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_ACCENT)).child("Molecular superposition"))
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child(format!(
+            .child(div().text_color(rgb(col_accent())).child("Molecular superposition"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!(
                 "Reference: object {}  ·  pick a moving object:",
                 reference.get()
             )))
@@ -3394,9 +3470,9 @@ impl CueMolGpuiApp {
                     .overflow_y_scroll()
                     .children(obj_rows),
             )
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child("Reference selection"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Reference selection"))
             .children(ref_sel.map(|i| i.into_any_element()))
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child("Moving selection"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Moving selection"))
             .children(mov_sel.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -3453,12 +3529,12 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_ACCENT)).child("Interaction / contacts"))
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child(format!(
+            .child(div().text_color(rgb(col_accent())).child("Interaction / contacts"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!(
                 "Object {}  ·  selection: {sel_label}",
                 target.get()
             )))
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child("Distance min / max (Å)"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Distance min / max (Å)"))
             .children(cmin.map(|i| i.into_any_element()))
             .children(cmax.map(|i| i.into_any_element()))
             .child(checkbox("ct-hbond", hbond, "H-bond candidates only").on_click(cx.listener(
@@ -3502,8 +3578,8 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_ACCENT)).child("Reassign secondary structure"))
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child(format!("Object {}", target.get())))
+            .child(div().text_color(rgb(col_accent())).child("Reassign secondary structure"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!("Object {}", target.get())))
             .child(checkbox("ss-breaks", ignore_breaks, "Ignore chain breaks").on_click(cx.listener(
                 |this, _: &gpui::ClickEvent, _, cx| {
                     if let Dialog::Secondary { ignore_breaks, .. } = &mut this.dialog {
@@ -3512,7 +3588,7 @@ impl CueMolGpuiApp {
                     cx.notify();
                 },
             )))
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child("Helix angle threshold (deg)"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Helix angle threshold (deg)"))
             .children(angle.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -3546,15 +3622,15 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_ACCENT)).child("Molecular surface (OBJ)"))
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child(format!(
+            .child(div().text_color(rgb(col_accent())).child("Molecular surface (OBJ)"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!(
                 "Object {}  ·  selection: {sel_label}",
                 target.get()
             )))
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child("Density / probe radius"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Density / probe radius"))
             .children(density.map(|i| i.into_any_element()))
             .children(probe.map(|i| i.into_any_element()))
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child("Output OBJ path"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Output OBJ path"))
             .children(path.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -3603,8 +3679,8 @@ impl CueMolGpuiApp {
                     .py_1()
                     .rounded_sm()
                     .cursor_pointer()
-                    .bg(rgb(if chosen { COL_SEL } else { COL_PANEL }))
-                    .hover(|s| s.bg(rgb(COL_BTN)))
+                    .bg(rgb(if chosen { col_sel() } else { col_panel() }))
+                    .hover(|s| s.bg(rgb(col_btn())))
                     .child(object.name)
                     .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
                         if let Dialog::Morph { source, .. } = &mut this.dialog {
@@ -3619,7 +3695,7 @@ impl CueMolGpuiApp {
             obj_rows.push(
                 div()
                     .text_xs()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .text_color(rgb(col_text_dim()))
                     .child("(no source object)")
                     .into_any_element(),
             );
@@ -3629,8 +3705,8 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_ACCENT)).child("Morphing animation"))
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child(format!(
+            .child(div().text_color(rgb(col_accent())).child("Morphing animation"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!(
                 "Target object {}  ·  source frame object:",
                 target.get()
             )))
@@ -3644,7 +3720,7 @@ impl CueMolGpuiApp {
                     .overflow_y_scroll()
                     .children(obj_rows),
             )
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child("Frame name"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Frame name"))
             .children(name.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -3673,7 +3749,7 @@ impl CueMolGpuiApp {
                             cx.notify();
                         },
                     )))
-                    .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child(format!("frame {frame:.2}")))
+                    .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!("frame {frame:.2}")))
                     .child(button("mo-dec", "-").on_click(cx.listener(
                         |this, _: &gpui::ClickEvent, _, cx| {
                             if let Dialog::Morph { frame, .. } = &mut this.dialog {
@@ -3723,8 +3799,8 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(COL_ACCENT)).child("Configuration"))
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child("Key / value"))
+            .child(div().text_color(rgb(col_accent())).child("Configuration"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Key / value"))
             .children(key.map(|i| i.into_any_element()))
             .children(value.map(|i| i.into_any_element()))
             .child(
@@ -3768,7 +3844,7 @@ impl CueMolGpuiApp {
                         },
                     ))),
             )
-            .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child("Config file path"))
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Config file path"))
             .children(path.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -3810,7 +3886,7 @@ impl CueMolGpuiApp {
                     .mt_1()
                     .p_1()
                     .rounded_sm()
-                    .bg(rgb(COL_VIEWPORT))
+                    .bg(rgb(col_viewport()))
                     .overflow_y_scroll()
                     .children(entry_rows),
             )
@@ -3962,10 +4038,10 @@ fn panel_title(text: &str) -> impl IntoElement {
         .w_full()
         .px_3()
         .py_2()
-        .bg(rgb(COL_HEADER))
+        .bg(rgb(col_header()))
         .border_b_1()
-        .border_color(rgb(COL_BORDER))
-        .text_color(rgb(COL_TEXT_DIM))
+        .border_color(rgb(col_border()))
+        .text_color(rgb(col_text_dim()))
         .text_xs()
         .child(text.to_string())
 }
@@ -3986,10 +4062,10 @@ fn button(id: impl Into<gpui::ElementId>, label: impl Into<String>) -> gpui::Sta
         .px_2()
         .py_1()
         .rounded_md()
-        .bg(rgb(COL_BTN))
-        .text_color(rgb(COL_TEXT))
+        .bg(rgb(col_btn()))
+        .text_color(rgb(col_text()))
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(COL_BTN_HOVER)))
+        .hover(|s| s.bg(rgb(col_btn_hover())))
         .child(label.into())
 }
 
@@ -3998,7 +4074,7 @@ fn danger_button(
     id: impl Into<gpui::ElementId>,
     label: impl Into<String>,
 ) -> gpui::Stateful<gpui::Div> {
-    button(id, label).bg(rgb(COL_DANGER)).hover(|s| s.bg(rgb(0xd6695f)))
+    button(id, label).bg(rgb(col_danger())).hover(|s| s.bg(rgb(0xd6695f)))
 }
 
 /// A header pill that reads as on/off (panel-visibility toggles).
@@ -4014,9 +4090,9 @@ fn toggle_button(
         .rounded_md()
         .cursor_pointer()
         .text_xs()
-        .bg(rgb(if active { COL_SEL } else { COL_BTN }))
-        .text_color(rgb(if active { COL_TEXT } else { COL_TEXT_DIM }))
-        .hover(|s| s.bg(rgb(COL_BTN_HOVER)))
+        .bg(rgb(if active { col_sel() } else { col_btn() }))
+        .text_color(rgb(if active { col_text() } else { col_text_dim() }))
+        .hover(|s| s.bg(rgb(col_btn_hover())))
         .child(label.into())
 }
 
@@ -4036,16 +4112,16 @@ fn checkbox(
         .py_1()
         .rounded_sm()
         .cursor_pointer()
-        .bg(rgb(COL_BTN))
-        .hover(|s| s.bg(rgb(COL_BTN_HOVER)))
+        .bg(rgb(col_btn()))
+        .hover(|s| s.bg(rgb(col_btn_hover())))
         .child(
             div()
                 .w(px(12.0))
                 .h(px(12.0))
                 .rounded_sm()
                 .border_1()
-                .border_color(rgb(COL_TEXT_DIM))
-                .bg(rgb(if checked { COL_ACCENT } else { COL_PANEL })),
+                .border_color(rgb(col_text_dim()))
+                .bg(rgb(if checked { col_accent() } else { col_panel() })),
         )
         .child(label.into())
 }
@@ -4061,7 +4137,7 @@ fn tree_row_el(
     selected: bool,
     accent: bool,
 ) -> gpui::Stateful<gpui::Div> {
-    let name_color = if accent { COL_ACCENT } else { COL_TEXT };
+    let name_color = if accent { col_accent() } else { col_text() };
     div()
         .id(id)
         .flex()
@@ -4072,14 +4148,14 @@ fn tree_row_el(
         .px_3()
         .py_1()
         .pl(px(12.0 + depth as f32 * 16.0))
-        .bg(rgb(if selected { COL_SEL } else { COL_PANEL }))
+        .bg(rgb(if selected { col_sel() } else { col_panel() }))
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(if selected { COL_SEL } else { COL_BTN })))
-        .child(div().text_color(rgb(COL_TEXT_DIM)).child(mark.to_string()))
+        .hover(|s| s.bg(rgb(if selected { col_sel() } else { col_btn() })))
+        .child(div().text_color(rgb(col_text_dim())).child(mark.to_string()))
         .child(div().flex_1().text_color(rgb(name_color)).child(name.to_string()))
         .child(
             div()
-                .text_color(rgb(COL_TEXT_DIM))
+                .text_color(rgb(col_text_dim()))
                 .text_xs()
                 .child(detail.to_string()),
         )
@@ -4092,7 +4168,7 @@ fn kv(key: &str, value: impl Into<String>) -> gpui::Div {
         .flex_row()
         .justify_between()
         .gap_2()
-        .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child(key.to_string()))
+        .child(div().text_xs().text_color(rgb(col_text_dim())).child(key.to_string()))
         .child(div().text_xs().child(value.into()))
 }
 
@@ -4105,8 +4181,8 @@ fn menu_item(id: impl Into<gpui::ElementId>, label: impl Into<String>) -> gpui::
         .py_1()
         .cursor_pointer()
         .text_sm()
-        .text_color(rgb(COL_TEXT))
-        .hover(|s| s.bg(rgb(COL_BTN)))
+        .text_color(rgb(col_text()))
+        .hover(|s| s.bg(rgb(col_btn())))
         .child(label.into())
 }
 
@@ -4118,17 +4194,17 @@ fn color_btn(id: impl Into<gpui::ElementId>, label: impl Into<String>) -> gpui::
         .py_1()
         .cursor_pointer()
         .text_xs()
-        .text_color(rgb(COL_TEXT))
+        .text_color(rgb(col_text()))
         .border_1()
-        .border_color(rgb(COL_BORDER))
+        .border_color(rgb(col_border()))
         .rounded_sm()
-        .hover(|s| s.bg(rgb(COL_BTN)))
+        .hover(|s| s.bg(rgb(col_btn())))
         .child(label.into())
 }
 
 /// A thin separator line for dropdown menus.
 fn menu_separator() -> gpui::Div {
-    div().w_full().my_1().h(px(1.0)).bg(rgb(COL_BORDER))
+    div().w_full().my_1().h(px(1.0)).bg(rgb(col_border()))
 }
 
 /// An inspector section header (accent text + underline).
@@ -4138,8 +4214,8 @@ fn section_label(text: &str) -> gpui::Div {
         .mt_2()
         .pb_1()
         .border_b_1()
-        .border_color(rgb(COL_BORDER))
-        .text_color(rgb(COL_ACCENT))
+        .border_color(rgb(col_border()))
+        .text_color(rgb(col_accent()))
         .text_xs()
         .child(text.to_string())
 }
@@ -4150,7 +4226,7 @@ fn info_row(text: String) -> gpui::Div {
         .px_3()
         .py_1()
         .text_xs()
-        .text_color(rgb(COL_TEXT))
+        .text_color(rgb(col_text()))
         .child(text)
 }
 
@@ -4179,7 +4255,7 @@ fn dialog_buttons_close(cx: &mut Context<CueMolGpuiApp>, label: &str) -> impl In
 fn center_mark_overlay(kind: CenterMarkKind) -> Option<gpui::AnyElement> {
     let (h_color, v_color) = match kind {
         CenterMarkKind::None => return None,
-        CenterMarkKind::Cross => (COL_TEXT_DIM, COL_TEXT_DIM),
+        CenterMarkKind::Cross => (col_text_dim(), col_text_dim()),
         CenterMarkKind::Axis => (0xdc4444u32, 0x50b460u32),
     };
     Some(
