@@ -1,4 +1,4 @@
-use crate::{DesktopAppState, GuiLoadedPath};
+use crate::{DesktopAppState, GuiLoadedPath, GuiSequenceSummary};
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::Rgba8;
 use cuemol_render::{MeshVertex, RenderAtom, RenderBond, RenderSceneSnapshot};
@@ -364,6 +364,8 @@ struct GuiApplication {
     /// persistent id so toggling recreates every chain/residue node with this as the
     /// default-open state (egui only honours `default_open` on first creation).
     molstruct_expand_all: bool,
+    /// Active tab of the Selection side panel (Command vs Editor).
+    selection_tab: SelectionTab,
     snapshot: RenderSceneSnapshot,
     background: SceneBackground,
     center_mark: CenterMark,
@@ -488,6 +490,14 @@ enum BottomTab {
     Render,
 }
 
+/// Selection-panel tab (CueMol2 `selection-panel.xul`): the free-text Command tab
+/// vs the click-to-build Editor tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionTab {
+    Command,
+    Editor,
+}
+
 /// Ribbon toolbar tabs mirroring CueMol2's `topbar/cuemol2-ribbon.xul`
 /// (`tool-ribbon.js`): Home (navigate), Measure, Animation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -579,6 +589,7 @@ impl GuiApplication {
             selected_object: None,
             molstruct_object: None,
             molstruct_expand_all: false,
+            selection_tab: SelectionTab::Command,
             selected_renderer: None,
             snapshot: RenderSceneSnapshot::empty(),
             background: SceneBackground::Black,
@@ -1523,9 +1534,58 @@ impl GuiApplication {
         })
     }
 
-    /// Selection section — the command-style selection editor + history
-    /// (CueMol2 `selection-panel.xul` Command tab).
+    /// Selection section (CueMol2 `selection-panel.xul`): a molecule selector and two
+    /// tabs — a free-text Command tab and a click-to-build Editor tab — over the shared
+    /// selection grammar.
     fn selection_section(&mut self, ui: &mut egui::Ui) {
+        // Molecule selector menulist (parity with the XUL panel; the chosen molecule
+        // scopes the Editor tab's per-chain quick-selects).
+        let sequences = self.state.active_sequence_summaries();
+        if !sequences.is_empty() {
+            let mut selected = self
+                .molstruct_object
+                .filter(|uid| sequences.iter().any(|seq| seq.object_uid == *uid))
+                .or_else(|| sequences.first().map(|seq| seq.object_uid));
+            let name = sequences
+                .iter()
+                .find(|seq| Some(seq.object_uid) == selected)
+                .map(|seq| seq.object_name.clone())
+                .unwrap_or_default();
+            egui::ComboBox::from_id_salt("selection-molecule")
+                .selected_text(name)
+                .show_ui(ui, |ui| {
+                    let mut seen = std::collections::BTreeSet::new();
+                    for seq in &sequences {
+                        if seen.insert(seq.object_uid) {
+                            ui.selectable_value(
+                                &mut selected,
+                                Some(seq.object_uid),
+                                &seq.object_name,
+                            );
+                        }
+                    }
+                });
+            self.molstruct_object = selected;
+        }
+
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.selection_tab, SelectionTab::Command, "Command");
+            ui.selectable_value(&mut self.selection_tab, SelectionTab::Editor, "Editor");
+        });
+        ui.separator();
+
+        match self.selection_tab {
+            SelectionTab::Command => self.selection_command_tab(ui),
+            SelectionTab::Editor => self.selection_editor_tab(ui, &sequences),
+        }
+
+        let selected_count = self.snapshot.atoms.iter().filter(|atom| atom.selected).count();
+        ui.separator();
+        ui.label(format!("Selected: {selected_count} atoms"));
+    }
+
+    /// Command tab: the free-text selection expression + history (CueMol2 Command tab).
+    fn selection_command_tab(&mut self, ui: &mut egui::Ui) {
         ui.label("Selection command");
         let response = ui.add_sized(
             [ui.available_width(), 56.0],
@@ -1536,9 +1596,7 @@ impl GuiApplication {
         if response.changed() {
             self.rebuild_snapshot();
         }
-        let selected_count = self.snapshot.atoms.iter().filter(|atom| atom.selected).count();
         ui.horizontal(|ui| {
-            ui.label(format!("Selected: {selected_count}"));
             if ui.button("Select").clicked() {
                 self.push_selection_history();
                 self.rebuild_snapshot();
@@ -1550,15 +1608,96 @@ impl GuiApplication {
         });
         if !self.selection_history.is_empty() {
             let mut history_pick: Option<String> = None;
-            ui.collapsing("History", |ui| {
+            ui.menu_button("History", |ui| {
                 for past in self.selection_history.iter().rev() {
                     if ui.selectable_label(false, past).clicked() {
                         history_pick = Some(past.clone());
+                        ui.close();
                     }
                 }
             });
             if let Some(sel) = history_pick {
                 self.selection_text = sel;
+                self.push_selection_history();
+                self.rebuild_snapshot();
+            }
+        }
+    }
+
+    /// Editor tab: click-to-build selection terms over the shared grammar — the egui
+    /// analogue of the XUL Editor tab's Hierarchical / Terminal / Around–Expand adds.
+    fn selection_editor_tab(&mut self, ui: &mut egui::Ui, sequences: &[GuiSequenceSummary]) {
+        // `set` replaces the whole expression; `wrap` rewrites the current one.
+        let mut set: Option<String> = None;
+        let mut wrap: Option<String> = None;
+
+        ui.label("Whole molecule");
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("All").clicked() {
+                set = Some("*".to_string());
+            }
+            if ui.button("None").clicked() {
+                set = Some("none".to_string());
+            }
+            if ui.button("Backbone").clicked() {
+                set = Some("bymainch *".to_string());
+            }
+            if ui.button("Sidechain").clicked() {
+                set = Some("bysidech *".to_string());
+            }
+            if ui.button("Hydrogen").clicked() {
+                set = Some("elem H".to_string());
+            }
+        });
+
+        // Per-chain Hierarchical adds for the selected molecule.
+        let active = self
+            .molstruct_object
+            .or_else(|| sequences.first().map(|seq| seq.object_uid));
+        let chains: Vec<String> = sequences
+            .iter()
+            .filter(|seq| Some(seq.object_uid) == active)
+            .map(|seq| seq.chain_id.clone())
+            .collect();
+        if !chains.is_empty() {
+            ui.label("Chain");
+            ui.horizontal_wrapped(|ui| {
+                for chain in &chains {
+                    let label = if chain.is_empty() { "_" } else { chain.as_str() };
+                    if ui.button(label).clicked() {
+                        set = Some(format!("chain {chain}"));
+                    }
+                }
+            });
+        }
+
+        ui.label("Modify current");
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("By residue").clicked() {
+                wrap = Some("byres".to_string());
+            }
+            if ui.button("Around 5Å").clicked() {
+                wrap = Some("around".to_string());
+            }
+            if ui.button("Invert").clicked() {
+                wrap = Some("invert".to_string());
+            }
+        });
+
+        if let Some(expr) = set {
+            self.selection_text = expr;
+            self.push_selection_history();
+            self.rebuild_snapshot();
+        } else if let Some(kind) = wrap {
+            let current = self.selection_text.trim();
+            if !current.is_empty() {
+                self.selection_text = match kind.as_str() {
+                    "byres" => format!("byres ({current})"),
+                    "around" => format!("({current}) around 5"),
+                    "invert" => format!("!({current})"),
+                    _ => current.to_string(),
+                };
+                self.push_selection_history();
                 self.rebuild_snapshot();
             }
         }
@@ -5029,6 +5168,28 @@ mod tests {
     }
 
     #[test]
+    fn selection_editor_expressions_parse_as_valid_grammar() {
+        // Every expression the Selection Editor tab can emit must be valid selection
+        // grammar, so clicking a quick-select never produces an unparseable selection.
+        for expr in [
+            "*",
+            "none",
+            "bymainch *",
+            "bysidech *",
+            "elem H",
+            "chain A",
+            "byres (chain A)",
+            "(chain A) around 5",
+            "!(chain A)",
+        ] {
+            assert!(
+                cuemol_molstr::parse_selector(expr).is_ok(),
+                "editor expression must parse: {expr}"
+            );
+        }
+    }
+
+    #[test]
     fn shift_left_drag_zooms_the_camera() {
         let mut camera = CameraController::default();
         let start = camera.ortho_scale;
@@ -5087,6 +5248,8 @@ mod tests {
             load(&mut app, &mut camera);
             // Expand the MolStruct tree so the chain → residue nesting is visible.
             app.molstruct_expand_all = true;
+            // Show the Selection Editor tab (the new build-by-click controls).
+            app.selection_tab = SelectionTab::Editor;
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(420.0, 1500.0))
                 .build(|ctx| {
