@@ -320,6 +320,22 @@ impl Model {
         self.show_labels = !self.show_labels;
     }
 
+    /// Switch to another scene tab (CueMol2 multi-scene `tabmolview`).
+    fn switch_scene(&mut self, uid: cuemol_core::Uid) {
+        self.state.set_active_scene(Some(uid));
+        self.surface_mesh = None;
+        self.density_solid_mesh = None;
+        self.rebuild_after_load();
+    }
+
+    /// Create a new (empty) scene tab and switch to it.
+    fn new_scene_tab(&mut self) {
+        let _ = self.state.new_scene("Scene", true);
+        self.surface_mesh = None;
+        self.density_solid_mesh = None;
+        self.rebuild_after_load();
+    }
+
     /// Projected atom labels for the selected atoms at the current camera, in image
     /// pixels (== this viewport's CSS px, so they overlay 1:1). Empty unless shown.
     fn atom_labels(&self) -> Vec<cuemol_desktop_core::GuiAtomLabel> {
@@ -669,7 +685,7 @@ fn app() -> Element {
 
     // Derive view data under a short read borrow, then release it before RSX so
     // the event handlers (which write the signal) never alias the read guard.
-    let (status, scene_name, image_uri, rows, sections, seq_chains, atom_labels) = {
+    let (status, scene_name, image_uri, rows, sections, seq_chains, atom_labels, scenes, active_scene) = {
         let m = model.read();
         (
             m.status.clone(),
@@ -679,6 +695,8 @@ fn app() -> Element {
             m.panel_sections(),
             m.state.active_sequence_view(&m.selection_text),
             m.atom_labels(),
+            m.state.scene_summaries(),
+            m.state.active_scene(),
         )
     };
 
@@ -777,6 +795,31 @@ fn app() -> Element {
             div { style: "{menubar_style}",
                 for menu in ["File", "Edit", "Render", "Scene", "View", "Tools", "Window", "Help"] {
                     span { key: "{menu}", style: "{menu_item_style}", "{menu}" }
+                }
+            }
+            // Scene tabs (CueMol2 multi-scene tabmolview): one tab per scene + "+".
+            div {
+                style: "display:flex;align-items:center;gap:4px;height:26px;padding:0 12px;\
+                        background:{COL_HEADER};border-bottom:1px solid {COL_BORDER};flex:0 0 auto;",
+                for scene in scenes.iter() {
+                    span {
+                        key: "scenetab-{scene.uid.get()}",
+                        style: if Some(scene.uid) == active_scene {
+                            format!("padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px;background:{COL_PANEL};color:{COL_ACCENT};")
+                        } else {
+                            format!("padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px;color:{COL_TEXT_DIM};")
+                        },
+                        onclick: {
+                            let uid = scene.uid;
+                            move |_| model.write().switch_scene(uid)
+                        },
+                        "{scene.name}"
+                    }
+                }
+                span {
+                    style: "padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px;color:{COL_TEXT};",
+                    onclick: move |_| model.write().new_scene_tab(),
+                    "+"
                 }
             }
             // Body: sidebar + viewport.
