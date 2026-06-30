@@ -368,6 +368,8 @@ struct GuiApplication {
     selection_tab: SelectionTab,
     /// Whether the crystallographic unit-cell box is drawn (Symmetry panel "Unit cell").
     show_unit_cell: bool,
+    /// Whether the home-cell symmetry-mate copies are drawn (Symmetry panel "Symm mol").
+    show_symm_mates: bool,
     /// Rainbow coloring hue endpoints (degrees) edited in the Coloring panel; the
     /// classic N→C blue→red gradient by default (start 240° = blue, end 0° = red).
     coloring_start_hue: f32,
@@ -607,6 +609,7 @@ impl GuiApplication {
             molstruct_expand_all: false,
             selection_tab: SelectionTab::Command,
             show_unit_cell: false,
+            show_symm_mates: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
             selected_renderer: None,
@@ -1861,11 +1864,16 @@ impl GuiApplication {
                 });
         }
         ui.separator();
-        // CueMol2 Symmetry panel "Unit cell" toggle: draw the crystallographic cell box.
-        if ui
+        // CueMol2 Symmetry panel "Unit cell" / "Symm mol" toggles: draw the cell box
+        // and the home-cell symmetry-mate copies.
+        let mut changed = ui
             .checkbox(&mut self.show_unit_cell, "Unit cell")
-            .changed()
-        {
+            .changed();
+        changed |= ui
+            .checkbox(&mut self.show_symm_mates, "Symm mol")
+            .on_hover_text("Show symmetry-related molecules in the unit cell")
+            .changed();
+        if changed {
             self.rebuild_snapshot();
         }
     }
@@ -2681,8 +2689,47 @@ impl GuiApplication {
             Ok(snapshot) => self.snapshot = snapshot,
             Err(error) => self.set_error(error),
         }
+        // Symmetry copies first (they clone the bare molecule), then the cell box.
+        if self.show_symm_mates {
+            self.append_symmetry_mates();
+        }
         if self.show_unit_cell {
             self.append_unit_cell_edges();
+        }
+    }
+
+    /// Append the home-cell symmetry-mate molecule copies (CueMol2 Symmetry "Symm mol")
+    /// to the live snapshot: each transform from the core is baked into a clone of the
+    /// rendered molecule and merged, growing the scene bounds to fit them.
+    fn append_symmetry_mates(&mut self) {
+        let transforms = self.state.active_symmetry_mate_transforms();
+        if transforms.is_empty() {
+            return;
+        }
+        let base = self.snapshot.clone();
+        for matrix in transforms {
+            let mut mate = base.clone();
+            mate.apply_xform(&matrix);
+            if let Some((min, max)) = mate.bounds {
+                self.snapshot.bounds = Some(match self.snapshot.bounds {
+                    Some((cur_min, cur_max)) => (
+                        Vector4::new3(
+                            cur_min.x.min(min.x),
+                            cur_min.y.min(min.y),
+                            cur_min.z.min(min.z),
+                        ),
+                        Vector4::new3(
+                            cur_max.x.max(max.x),
+                            cur_max.y.max(max.y),
+                            cur_max.z.max(max.z),
+                        ),
+                    ),
+                    None => (min, max),
+                });
+            }
+            self.snapshot.atoms.extend(mate.atoms);
+            self.snapshot.bonds.extend(mate.bonds);
+            self.snapshot.meshes.extend(mate.meshes);
         }
     }
 
@@ -5389,6 +5436,37 @@ mod tests {
     }
 
     #[test]
+    fn symm_mol_toggle_adds_symmetry_mate_copies() {
+        // 1CRN is P 1 21 1 (one 2₁ screw beyond the identity), so "Symm mol" adds
+        // exactly one whole-molecule copy; the atom count scales by (mates + 1).
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        let base_atoms = app.snapshot.atoms.len();
+        let mate_count = app.state.active_symmetry_mate_transforms().len();
+        assert!(
+            mate_count >= 1,
+            "P 1 21 1 has at least one non-identity symmetry mate"
+        );
+
+        app.show_symm_mates = true;
+        app.rebuild_snapshot();
+        assert_eq!(
+            app.snapshot.atoms.len(),
+            base_atoms * (mate_count + 1),
+            "each mate copies the whole molecule"
+        );
+
+        app.show_symm_mates = false;
+        app.rebuild_snapshot();
+        assert_eq!(app.snapshot.atoms.len(), base_atoms, "toggling off removes copies");
+    }
+
+    #[test]
     fn selection_editor_expressions_parse_as_valid_grammar() {
         // Every expression the Selection Editor tab can emit must be valid selection
         // grammar, so clicking a quick-select never produces an unparseable selection.
@@ -5562,6 +5640,35 @@ mod tests {
                 ) {
                     let path = out_dir.join("unit_cell_3d.png");
                     std::fs::write(&path, png).expect("write unit_cell_3d.png");
+                    eprintln!("snapshot written to {}", path.display());
+                }
+            }
+        }
+
+        // (5) 3D render of the home-cell crystal packing: the molecule, its symmetry
+        // mates ("Symm mol"), and the unit-cell box together.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            app.show_symm_mates = true;
+            app.show_unit_cell = true;
+            app.rebuild_snapshot();
+            if app.snapshot.bounds.is_some() {
+                camera.fit_snapshot(&app.snapshot);
+                let (w, h) = (900u32, 700u32);
+                let mvp = camera
+                    .view_projection(w as f32 / h as f32)
+                    .to_cols_array_2d();
+                if let Some(png) = crate::offscreen::render_snapshot_png(
+                    &app.snapshot,
+                    mvp,
+                    w,
+                    h,
+                    [0.02, 0.02, 0.05, 1.0],
+                ) {
+                    let path = out_dir.join("symm_pack_3d.png");
+                    std::fs::write(&path, png).expect("write symm_pack_3d.png");
                     eprintln!("snapshot written to {}", path.display());
                 }
             }

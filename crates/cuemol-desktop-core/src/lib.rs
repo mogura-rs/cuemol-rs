@@ -463,6 +463,60 @@ impl DesktopAppState {
         edges
     }
 
+    /// Home-unit-cell symmetry-mate transforms (CueMol2 Symmetry panel "Symm mol" →
+    /// Unit cell): the Cartesian matrices that map each crystallographic object onto
+    /// its symmetry copies within the home cell, EXCLUDING the identity (the molecule
+    /// itself). A front end bakes each into a copy of the rendered molecule. Empty for
+    /// non-crystallographic scenes. Port of C++ `SymmRenderer::genByCell`.
+    pub fn active_symmetry_mate_transforms(&self) -> Vec<cuemol_core::Matrix4> {
+        let Some(scene_uid) = self.active_scene else {
+            return Vec::new();
+        };
+        let Some(scene) = self.scene_manager().scene(scene_uid) else {
+            return Vec::new();
+        };
+        let manager = cuemol_symm::SymmOpManager::new();
+        let mut out = Vec::new();
+        for object in scene.objects() {
+            let mol = object.mol();
+            let Some(cell) = mol.cell_params() else {
+                continue;
+            };
+            let Some(crystal) = cuemol_symm::CrystalInfo::from_cell_params(cell) else {
+                continue;
+            };
+            let Some(operators) = manager.symmetry_operators(crystal.space_group()) else {
+                continue;
+            };
+            let atoms = mol.atoms();
+            if atoms.is_empty() {
+                continue;
+            }
+            // Molecule centroid (Cartesian) — drives the home-cell shift of each mate.
+            let (mut sx, mut sy, mut sz) = (0.0, 0.0, 0.0);
+            for atom in atoms {
+                sx += atom.position.x;
+                sy += atom.position.y;
+                sz += atom.position.z;
+            }
+            let n = atoms.len() as f64;
+            let center = cuemol_core::Vector4::new3(sx / n, sy / n, sz / n);
+            for mate in cuemol_symm::symm_mates_by_cell(center, &crystal, operators) {
+                // Skip the identity mate (the molecule at its home position): it leaves
+                // the centroid fixed, while a genuine symmetry copy moves it.
+                let mut moved = center;
+                mate.matrix.xform3d(&mut moved);
+                let dx = moved.x - center.x;
+                let dy = moved.y - center.y;
+                let dz = moved.z - center.z;
+                if dx * dx + dy * dy + dz * dz > 1.0e-6 {
+                    out.push(mate.matrix);
+                }
+            }
+        }
+        out
+    }
+
     pub fn new_scene(&mut self, name: impl Into<String>, create_view: bool) -> NewSceneResult {
         let result = self
             .command_manager
