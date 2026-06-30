@@ -2161,6 +2161,17 @@ impl CueMolGpuiApp {
                 .into_any_element(),
         );
 
+        // Measure (CueMol2 AtomIntr): distance/angle/torsion of the selected atoms.
+        rows.push(section_label("Measure").into_any_element());
+        rows.push(
+            info_row(
+                self.state
+                    .active_measure(&self.applied_selection)
+                    .unwrap_or_else(|| "Select 2 / 3 / 4 atoms".to_string()),
+            )
+            .into_any_element(),
+        );
+
         // Density map chickenwire contour (CueMol2 densitymap-panel.xul).
         rows.push(section_label("Density map").into_any_element());
         rows.push(

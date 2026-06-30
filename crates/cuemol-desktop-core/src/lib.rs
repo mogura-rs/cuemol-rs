@@ -1204,6 +1204,54 @@ impl DesktopAppState {
         out
     }
 
+    /// Distance / angle / torsion of the selected atoms (CueMol2 AtomIntr): 2 selected
+    /// atoms → distance, 3 → angle, 4 → torsion, in atom-index order. Shared by all
+    /// three front ends. `None` for any other count.
+    pub fn active_measure(&self, selection_text: &str) -> Option<String> {
+        let scene_uid = self.active_scene?;
+        let scene = self.scene_manager().scene(scene_uid)?;
+        let selector = parse_gui_selector(selection_text).ok().flatten()?;
+        let mut points: Vec<cuemol_core::Vector4> = Vec::new();
+        for object in scene.objects() {
+            let mol = object.mol();
+            let atoms = mol.atoms();
+            for index in mol.select_indices(&selector) {
+                if let Some(atom) = atoms.get(index) {
+                    points.push(atom.position);
+                }
+            }
+        }
+        match points.as_slice() {
+            [a, b] => Some(format!("Distance: {:.3} Å", b.sub(*a).length3d())),
+            [a, b, c] => {
+                let u = a.sub(*b);
+                let v = c.sub(*b);
+                let denom = u.length3d() * v.length3d();
+                if denom < 1.0e-9 {
+                    return None;
+                }
+                let angle = (u.dot3d(v) / denom).clamp(-1.0, 1.0).acos().to_degrees();
+                Some(format!("Angle: {angle:.2}°"))
+            }
+            [a, b, c, d] => {
+                let b1 = b.sub(*a);
+                let b2 = c.sub(*b);
+                let b3 = d.sub(*c);
+                let len = b2.length3d();
+                if len < 1.0e-9 {
+                    return None;
+                }
+                let b2n = cuemol_core::Vector4::new3(b2.x / len, b2.y / len, b2.z / len);
+                let n1 = b1.cross(b2);
+                let n2 = b2.cross(b3);
+                let m = n1.cross(b2n);
+                let torsion = m.dot3d(n2).atan2(n1.dot3d(n2)).to_degrees();
+                Some(format!("Torsion: {torsion:.2}°"))
+            }
+            _ => None,
+        }
+    }
+
     pub fn active_render_snapshot(&self, selection_text: &str) -> Result<RenderSceneSnapshot> {
         let scene_uid = self
             .active_scene
@@ -2315,6 +2363,28 @@ mod tests {
         assert!((x - 600.0).abs() < 0.1 && (y - 450.0).abs() < 0.1, "got ({x}, {y})");
         // Off-screen → None.
         assert!(project_to_image(id, [5.0, 0.0, 0.0], 800.0, 600.0).is_none());
+    }
+
+    #[test]
+    fn active_measure_reports_distance_angle_torsion_by_count() {
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        if app.open_path(root.join("1CRN.pdb")).is_err() {
+            return;
+        }
+        assert!(app.active_measure("aid 1 or aid 5").unwrap().starts_with("Distance:"));
+        assert!(app
+            .active_measure("aid 1 or aid 5 or aid 9")
+            .unwrap()
+            .starts_with("Angle:"));
+        assert!(app
+            .active_measure("aid 1 or aid 5 or aid 9 or aid 13")
+            .unwrap()
+            .starts_with("Torsion:"));
+        assert!(app.active_measure("aid 1").is_none(), "one atom → no measure");
     }
 
     #[test]

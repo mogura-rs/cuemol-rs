@@ -768,6 +768,10 @@ fn app() -> Element {
     };
     let menu_open = model.read().menu_open;
     let anim_playing = model.read().anim_playing;
+    let measure = {
+        let m = model.read();
+        m.state.active_measure(&m.selection_text)
+    };
 
     let root_style = format!(
         "display:flex;flex-direction:column;height:100vh;width:100vw;margin:0;\
@@ -995,6 +999,11 @@ fn app() -> Element {
                                 onclick: move |_| model.write().set_selection("bysidech *"),
                                 "Sidechain"
                             }
+                        }
+                        // Measure (CueMol2 AtomIntr): distance/angle/torsion of selection.
+                        div { style: "{section_header_style}", "Measure" }
+                        div { style: "{section_line_style}",
+                            {measure.clone().unwrap_or_else(|| "Select 2 / 3 / 4 atoms".to_string())}
                         }
                         // Density map chickenwire contour (CueMol2 densitymap-panel.xul).
                         div { style: "{section_header_style}", "Density map" }
