@@ -133,6 +133,27 @@ enum RibbonTab {
     Animation,
 }
 
+/// An open right-click viewport context menu (CueMol2 `navi-ctxtmenu-atom`).
+#[derive(Clone)]
+struct ContextMenu {
+    /// Screen position (CSS px within the viewport) to anchor the menu.
+    x: f64,
+    y: f64,
+    /// The atom under the cursor, or `None` (empty-space right-click).
+    atom: Option<ContextAtom>,
+}
+
+/// The resolved atom for a context menu: its label + the selection expressions its
+/// items apply, plus the 3D centre for "Center at this atom".
+#[derive(Clone)]
+struct ContextAtom {
+    label: String,
+    atom_sel: String,
+    resid_sel: String,
+    chain_sel: String,
+    center: Option<[f64; 3]>,
+}
+
 struct Model {
     state: DesktopAppState,
     status: String,
@@ -194,6 +215,8 @@ struct Model {
     /// Surface-cutter plane offset along +Z from the bbox centre (Å) — the interactive
     /// plane control for the cut-surface export.
     cut_offset: f64,
+    /// Open right-click viewport context menu, or `None`.
+    context_menu: Option<ContextMenu>,
     /// Undo / redo stacks (CueMol2 Edit → Undo/Redo). Each entry is a full clone of the
     /// scene state taken before a mutating edit, mirroring the egui/gpui front ends.
     undo_stack: Vec<DioxusUndo>,
@@ -256,6 +279,7 @@ impl Model {
             show_properties: false,
             ribbon_tab: RibbonTab::Home,
             cut_offset: 0.0,
+            context_menu: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         };
@@ -1233,6 +1257,77 @@ impl Model {
         self.rebuild_selection();
     }
 
+    /// Open a right-click viewport context menu at (px, py) (CueMol2
+    /// `navi-ctxtmenu-atom`), resolving the atom under the cursor.
+    fn open_context_menu(&mut self, px: f64, py: f64) {
+        let atom = self.resolve_context_atom(px, py);
+        self.context_menu = Some(ContextMenu { x: px, y: py, atom });
+    }
+
+    /// Resolve the atom under the cursor into the context-menu's selection expressions
+    /// + 3D centre, or `None` for empty space.
+    fn resolve_context_atom(&self, px: f64, py: f64) -> Option<ContextAtom> {
+        let snapshot = self
+            .state
+            .active_render_snapshot(&self.selection_text)
+            .ok()?;
+        let (w, h) = self.view_size;
+        let mvp = camera_mvp(&self.camera, w as f64 / h as f64);
+        let (object_u64, atom_index) = pick_atom_screen(
+            &snapshot.atoms,
+            mvp,
+            (px, py),
+            (w as f64, h as f64),
+            PICK_RADIUS_PX,
+        )?;
+        let object_uid = cuemol_core::Uid::new(object_u64);
+        let summary = self.state.atom_summary(object_uid, atom_index).ok()?;
+        let chain_label = if summary.chain_id.is_empty() {
+            "_".to_string()
+        } else {
+            summary.chain_id.clone()
+        };
+        let resid_sel = if summary.chain_id.is_empty() {
+            format!("resid {}", summary.residue_id)
+        } else {
+            format!("chain {} and resid {}", summary.chain_id, summary.residue_id)
+        };
+        let center = snapshot
+            .atoms
+            .iter()
+            .find(|atom| atom.object_uid == Some(object_u64) && atom.atom_index == Some(atom_index))
+            .map(|atom| [atom.center.x, atom.center.y, atom.center.z]);
+        Some(ContextAtom {
+            label: format!(
+                "{} {}{}:{} (chain {chain_label})",
+                summary.serial, summary.residue_name, summary.residue_id, summary.name
+            ),
+            atom_sel: format!("aid {}", summary.serial),
+            resid_sel,
+            chain_sel: format!("chain {}", summary.chain_id),
+            center,
+        })
+    }
+
+    /// Apply a context-menu selection expression and close the menu.
+    fn context_select(&mut self, expr: &str) {
+        self.set_selection(expr);
+        self.context_menu = None;
+    }
+
+    /// Center the camera at a 3D point (context-menu "Center at this atom").
+    fn context_center(&mut self, center: [f64; 3]) {
+        self.camera
+            .set_center(cuemol_core::Vector4::new3(center[0], center[1], center[2]));
+        self.context_menu = None;
+        self.rerender();
+    }
+
+    /// Close the context menu without acting.
+    fn close_context_menu(&mut self) {
+        self.context_menu = None;
+    }
+
     /// Orbit the camera (left-drag): `dx`/`dy` are degrees about the Y/X axes.
     fn rotate_camera(&mut self, dx_deg: f64, dy_deg: f64) {
         if let Ok(rotation) = self
@@ -1564,6 +1659,7 @@ fn app() -> Element {
     let show_console = model.read().show_console;
     let show_properties = model.read().show_properties;
     let console_log = model.read().log.clone();
+    let context_menu = model.read().context_menu.clone();
 
     // Animation playback loop (CueMol2 SimpleSpin): an executor-agnostic timer ticks
     // ~60 fps; while `anim_playing` is set, each tick spins the camera + re-renders.
@@ -2445,13 +2541,17 @@ fn app() -> Element {
                             model.write().set_view_size(size.width as u32, size.height as u32);
                         }
                     },
+                    // Suppress the browser's native menu so the right-click drives ours.
+                    oncontextmenu: move |e: MouseEvent| e.prevent_default(),
                     onmousedown: move |e: MouseEvent| {
                         let kind = match e.trigger_button() {
                             Some(MouseButton::Secondary) => DragKind::Pan,
                             _ => DragKind::Orbit,
                         };
                         let p = e.element_coordinates();
-                        model.write().drag = Some(DragState {
+                        let mut m = model.write();
+                        m.close_context_menu(); // a new press dismisses an open menu
+                        m.drag = Some(DragState {
                             kind,
                             last_x: p.x,
                             last_y: p.y,
@@ -2487,10 +2587,14 @@ fn app() -> Element {
                     onmouseup: move |e: MouseEvent| {
                         let finished = model.write().drag.take();
                         if let Some(state) = finished {
-                            // A left release that barely moved is a pick, not an orbit.
-                            if state.kind == DragKind::Orbit && state.moved < CLICK_MAX_MOVE {
+                            if state.moved < CLICK_MAX_MOVE {
                                 let p = e.element_coordinates();
-                                model.write().pick_at(p.x, p.y);
+                                // Left barely-moved = pick; right barely-moved = context
+                                // menu (a right-DRAG past the threshold stays a pan).
+                                match state.kind {
+                                    DragKind::Orbit => model.write().pick_at(p.x, p.y),
+                                    DragKind::Pan => model.write().open_context_menu(p.x, p.y),
+                                }
                             }
                         }
                     },
@@ -2519,6 +2623,53 @@ fn app() -> Element {
                                     transform:translateY(-100%);font-size:11px;color:#eaf0f8;\
                                     pointer-events:none;white-space:nowrap;text-shadow:0 0 2px #000;",
                             "{label.text}"
+                        }
+                    }
+                    // Right-click atom context menu (CueMol2 navi-ctxtmenu-atom).
+                    if let Some(menu) = context_menu.clone() {
+                        div {
+                            style: "position:absolute;left:{menu.x}px;top:{menu.y}px;z-index:40;\
+                                    min-width:170px;background:{COL_PANEL};border:1px solid {COL_BORDER};\
+                                    border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,0.5);padding:4px 0;\
+                                    font-size:12px;",
+                            if let Some(atom) = menu.atom.clone() {
+                                div { style: "padding:4px 12px;color:{COL_ACCENT};border-bottom:1px solid {COL_BORDER};",
+                                    "{atom.label}"
+                                }
+                                if let Some(center) = atom.center {
+                                    div { style: "padding:4px 14px;cursor:pointer;color:{COL_TEXT};",
+                                        onclick: move |_| model.write().context_center(center),
+                                        "Center at this atom"
+                                    }
+                                }
+                                div { style: "padding:4px 14px;cursor:pointer;color:{COL_TEXT};",
+                                    onclick: { let s = atom.atom_sel.clone(); move |_| model.write().context_select(&s) },
+                                    "Select this atom"
+                                }
+                                div { style: "padding:4px 14px;cursor:pointer;color:{COL_TEXT};",
+                                    onclick: { let s = atom.resid_sel.clone(); move |_| model.write().context_select(&s) },
+                                    "Select residue"
+                                }
+                                div { style: "padding:4px 14px;cursor:pointer;color:{COL_TEXT};",
+                                    onclick: { let s = atom.chain_sel.clone(); move |_| model.write().context_select(&s) },
+                                    "Select chain"
+                                }
+                                for radius in [3.0_f64, 5.0, 7.0, 10.0] {
+                                    div {
+                                        key: "around-{radius}",
+                                        style: "padding:4px 14px;cursor:pointer;color:{COL_TEXT};",
+                                        onclick: { let s = format!("{} around {radius}", atom.atom_sel); move |_| model.write().context_select(&s) },
+                                        "Around {radius:.0} Å"
+                                    }
+                                }
+                                div { style: "border-top:1px solid {COL_BORDER};margin:2px 0;" }
+                            } else {
+                                div { style: "padding:4px 12px;color:{COL_TEXT_DIM};", "(no atom under cursor)" }
+                            }
+                            div { style: "padding:4px 14px;cursor:pointer;color:{COL_TEXT};",
+                                onclick: move |_| model.write().context_select("none"),
+                                "Clear selection"
+                            }
                         }
                     }
                 }
@@ -3016,6 +3167,40 @@ mod tests {
             first,
             "it landed in slot 2"
         );
+    }
+
+    #[test]
+    fn right_click_context_menu_in_dioxus() {
+        // Right-click viewport context menu (CueMol2 navi-ctxtmenu-atom): open / select /
+        // center / close. The atom-resolution path reuses pick_at's tested pick machinery;
+        // here the empty-space path + the action methods are verified.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+
+        // An empty-space right-click opens the menu with no atom.
+        model.open_context_menu(-50.0, -50.0);
+        let menu = model.context_menu.clone().expect("menu opened");
+        assert!(menu.atom.is_none(), "off-screen click resolves no atom");
+
+        // A context-select applies the expression + closes the menu.
+        model.context_select("resid 1");
+        assert_eq!(model.selection_text, "resid 1", "context select set selection");
+        assert!(model.context_menu.is_none(), "select closes the menu");
+
+        // Center moves the camera + closes the menu.
+        model.open_context_menu(-50.0, -50.0);
+        model.context_center([1.0, 2.0, 3.0]);
+        let center = model.camera.center();
+        assert!(
+            (center.x - 1.0).abs() < 1e-6 && (center.y - 2.0).abs() < 1e-6,
+            "camera centered at the atom"
+        );
+        assert!(model.context_menu.is_none(), "center closes the menu");
+
+        // Close dismisses without acting.
+        model.open_context_menu(10.0, 10.0);
+        model.close_context_menu();
+        assert!(model.context_menu.is_none());
     }
 
     #[test]
