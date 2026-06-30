@@ -1914,6 +1914,41 @@ impl DesktopAppState {
             .collect();
         Ok(cuemol_render::RenderMesh { vertices, indices })
     }
+
+    /// Build the molecular surface and CLIP it by a plane, returning the cross-section
+    /// as a renderable mesh for live in-viewport display (CueMol2 surface cutter, live
+    /// mode). Same build+cut path as `write_cut_surface_obj` but converted to a
+    /// `RenderMesh` instead of written to OBJ.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_cut_surface_mesh(
+        &self,
+        object_uid: Uid,
+        selection_text: &str,
+        density: f64,
+        probe_radius: f64,
+        normal: cuemol_core::Vector4,
+        position: cuemol_core::Vector4,
+    ) -> Result<cuemol_render::RenderMesh> {
+        let mut surface = self.build_surface(object_uid, selection_text, density, probe_radius)?;
+        surface.cut_by_plane(1.0, normal, position, false);
+        let mesh = surface.mesh();
+        let color = [0.76, 0.79, 0.84, 1.0];
+        let vertices = mesh
+            .vertices()
+            .iter()
+            .map(|vertex| cuemol_render::MeshVertex {
+                position: vertex.position,
+                normal: vertex.normal,
+                color,
+            })
+            .collect();
+        let indices = mesh
+            .triangles()
+            .iter()
+            .flat_map(|triangle| triangle.iter().copied())
+            .collect();
+        Ok(cuemol_render::RenderMesh { vertices, indices })
+    }
 }
 
 fn append_object_snapshot(

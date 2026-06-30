@@ -360,6 +360,10 @@ pub struct CueMolGpuiApp {
     /// Molecular-surface (SES) display + a cached mesh (the SES is expensive).
     show_surface: bool,
     surface_mesh: Option<cuemol_render::RenderMesh>,
+    /// Live in-viewport surface clipping: display the surface as the plane cross-section.
+    clip_surface: bool,
+    /// Clip-plane offset along +Z from the bbox centre (Å).
+    clip_offset: f64,
     /// Hydrogen-bond dashed lines.
     show_hbonds: bool,
     /// Atom/residue labels overlaid on the selected atoms.
@@ -447,6 +451,8 @@ impl CueMolGpuiApp {
             density_solid_mesh: None,
             show_surface: false,
             surface_mesh: None,
+            clip_surface: false,
+            clip_offset: 0.0,
             show_hbonds: false,
             show_labels: false,
             theme_light: false,
@@ -747,25 +753,74 @@ impl CueMolGpuiApp {
     fn toggle_surface(&mut self) {
         self.show_surface = !self.show_surface;
         if self.show_surface && self.surface_mesh.is_none() {
-            if let Some(uid) = self
-                .state
-                .active_object_summaries()
-                .first()
-                .map(|object| object.uid)
-            {
-                match self
-                    .state
-                    .build_surface_mesh(uid, &self.applied_selection, 1.0, 1.4)
-                {
-                    Ok(mesh) => self.surface_mesh = Some(mesh),
-                    Err(error) => {
-                        self.show_surface = false;
-                        self.set_status(format!("Surface failed: {error}"));
-                    }
-                }
-            }
+            self.rebuild_surface_mesh();
         }
         self.refresh_scene(false);
+    }
+
+    /// (Re)build the cached surface mesh — clipped by the plane when `clip_surface` is
+    /// set (live cross-section), else the full surface.
+    fn rebuild_surface_mesh(&mut self) {
+        let Some(uid) = self
+            .state
+            .active_object_summaries()
+            .first()
+            .map(|object| object.uid)
+        else {
+            return;
+        };
+        let result = if self.clip_surface {
+            let normal = cuemol_core::Vector4::new3(0.0, 0.0, 1.0);
+            let position = self
+                .state
+                .active_render_snapshot(&self.applied_selection)
+                .ok()
+                .and_then(|snapshot| snapshot.bounds)
+                .map(|(min, max)| {
+                    cuemol_core::Vector4::new3(
+                        (min.x + max.x) / 2.0,
+                        (min.y + max.y) / 2.0,
+                        (min.z + max.z) / 2.0 + self.clip_offset,
+                    )
+                })
+                .unwrap_or_else(|| cuemol_core::Vector4::new3(0.0, 0.0, self.clip_offset));
+            self.state
+                .build_cut_surface_mesh(uid, &self.applied_selection, 1.0, 1.4, normal, position)
+        } else {
+            self.state
+                .build_surface_mesh(uid, &self.applied_selection, 1.0, 1.4)
+        };
+        match result {
+            Ok(mesh) => self.surface_mesh = Some(mesh),
+            Err(error) => {
+                self.show_surface = false;
+                self.set_status(format!("Surface failed: {error}"));
+            }
+        }
+    }
+
+    /// Toggle live in-viewport surface clipping (CueMol2 surface cutter, live mode).
+    fn toggle_clip_surface(&mut self) {
+        self.clip_surface = !self.clip_surface;
+        if self.show_surface {
+            self.rebuild_surface_mesh();
+            self.refresh_scene(false);
+        }
+        self.set_status(if self.clip_surface {
+            "Surface clipping: on"
+        } else {
+            "Surface clipping: off"
+        });
+    }
+
+    /// Nudge the clip plane along +Z by `delta` Å and re-clip live.
+    fn nudge_clip_offset(&mut self, delta: f64) {
+        self.clip_offset += delta;
+        if self.clip_surface && self.show_surface {
+            self.rebuild_surface_mesh();
+            self.refresh_scene(false);
+        }
+        self.set_status(format!("Clip plane Z = {:.1} Å", self.clip_offset));
     }
 
     /// Apply a selection expression (CueMol2 Selection quick-selects), keeping the
@@ -2163,6 +2218,33 @@ impl CueMolGpuiApp {
                     menu_item("mi-viewprops", "Scene / View properties")
                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                             this.show_view_properties();
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    menu_item("mi-clip", "Toggle surface clip (live)")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.toggle_clip_surface();
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    menu_item("mi-clip-up", "Clip plane +2 Å")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.nudge_clip_offset(2.0);
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    menu_item("mi-clip-dn", "Clip plane −2 Å")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.nudge_clip_offset(-2.0);
                             this.open_menu = None;
                             cx.notify();
                         }))
@@ -5086,6 +5168,24 @@ mod tests {
             "perf ({})",
             app.status
         );
+    }
+
+    #[test]
+    fn live_surface_clipping_in_gpui() {
+        let Some((mut app, _object)) = app_with_molecule() else {
+            return;
+        };
+        app.applied_selection = "resid 1:5".to_string(); // cheap SES
+        let tris = |app: &CueMolGpuiApp| app.surface_mesh.as_ref().map(|m| m.indices.len()).unwrap_or(0);
+        app.toggle_surface();
+        let full = tris(&app);
+        assert!(full > 0, "full surface built");
+        app.toggle_clip_surface();
+        assert!(app.clip_surface, "clip enabled");
+        let clipped = tris(&app);
+        assert!(clipped <= full, "clipping doesn't add geometry");
+        app.nudge_clip_offset(50.0);
+        assert_ne!(tris(&app), clipped, "moving the plane re-clips live");
     }
 
     #[test]

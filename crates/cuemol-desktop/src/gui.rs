@@ -386,6 +386,10 @@ struct GuiApplication {
     /// expensive, so it is computed once on enable, not every rebuild).
     show_surface: bool,
     surface_mesh: Option<cuemol_render::RenderMesh>,
+    /// Live in-viewport surface clipping: display the surface as the plane cross-section.
+    clip_surface: bool,
+    /// Clip-plane offset along +Z from the bbox centre (Å).
+    clip_offset: f64,
     /// Atom/residue labels overlaid on the selected atoms in the 3D view.
     show_labels: bool,
     /// Hydrogen-bond dashed lines (heavy-atom N···O heuristic).
@@ -646,6 +650,8 @@ impl GuiApplication {
             density_solid_mesh: None,
             show_surface: false,
             surface_mesh: None,
+            clip_surface: false,
+            clip_offset: 0.0,
             show_labels: false,
             show_hbonds: false,
             light_theme: false,
@@ -1559,6 +1565,23 @@ impl GuiApplication {
                 .clicked()
             {
                 self.toggle_surface();
+            }
+            let clip_label = if self.clip_surface { "Clip ✓" } else { "Clip" };
+            if ui
+                .button(clip_label)
+                .on_hover_text("Live in-viewport surface clipping at the cut plane")
+                .clicked()
+            {
+                self.toggle_clip_surface();
+            }
+            if self.clip_surface {
+                let mut offset = self.clip_offset;
+                if ui
+                    .add(egui::Slider::new(&mut offset, -20.0..=20.0).text("Clip Z"))
+                    .changed()
+                {
+                    self.set_clip_offset(offset);
+                }
             }
             let labels_label = if self.show_labels { "Labels ✓" } else { "Labels" };
             if ui
@@ -3115,28 +3138,79 @@ impl GuiApplication {
     fn toggle_surface(&mut self) {
         self.show_surface = !self.show_surface;
         if self.show_surface && self.surface_mesh.is_none() {
-            if let Some(object_uid) = self
-                .molstruct_object
-                .or_else(|| self.state.active_object_summaries().first().map(|o| o.uid))
-            {
-                match self.state.build_surface_mesh(
-                    object_uid,
-                    &self.selection_text,
-                    self.surface_density,
-                    self.surface_probe_radius,
-                ) {
-                    Ok(mesh) => {
-                        self.surface_mesh = Some(mesh);
-                        self.set_status("Surface generated");
-                    }
-                    Err(error) => {
-                        self.show_surface = false;
-                        self.set_status(format!("Surface failed: {error}"));
-                    }
-                }
-            }
+            self.rebuild_surface_mesh();
         }
         self.rebuild_snapshot();
+    }
+
+    /// (Re)build the cached surface mesh — clipped by the plane when `clip_surface` is
+    /// set (live cross-section), else the full surface.
+    fn rebuild_surface_mesh(&mut self) {
+        let Some(object_uid) = self
+            .molstruct_object
+            .or_else(|| self.state.active_object_summaries().first().map(|o| o.uid))
+        else {
+            return;
+        };
+        let result = if self.clip_surface {
+            let normal = cuemol_core::Vector4::new3(0.0, 0.0, 1.0);
+            let position = self
+                .state
+                .active_render_snapshot(&self.selection_text)
+                .ok()
+                .and_then(|snapshot| snapshot.bounds)
+                .map(|(min, max)| {
+                    cuemol_core::Vector4::new3(
+                        (min.x + max.x) / 2.0,
+                        (min.y + max.y) / 2.0,
+                        (min.z + max.z) / 2.0 + self.clip_offset,
+                    )
+                })
+                .unwrap_or_else(|| cuemol_core::Vector4::new3(0.0, 0.0, self.clip_offset));
+            self.state.build_cut_surface_mesh(
+                object_uid,
+                &self.selection_text,
+                self.surface_density,
+                self.surface_probe_radius,
+                normal,
+                position,
+            )
+        } else {
+            self.state.build_surface_mesh(
+                object_uid,
+                &self.selection_text,
+                self.surface_density,
+                self.surface_probe_radius,
+            )
+        };
+        match result {
+            Ok(mesh) => {
+                self.surface_mesh = Some(mesh);
+                self.set_status("Surface generated");
+            }
+            Err(error) => {
+                self.show_surface = false;
+                self.set_status(format!("Surface failed: {error}"));
+            }
+        }
+    }
+
+    /// Toggle live in-viewport surface clipping (CueMol2 surface cutter, live mode).
+    fn toggle_clip_surface(&mut self) {
+        self.clip_surface = !self.clip_surface;
+        if self.show_surface {
+            self.rebuild_surface_mesh();
+            self.rebuild_snapshot();
+        }
+    }
+
+    /// Set the clip-plane offset and re-clip live if the surface is shown.
+    fn set_clip_offset(&mut self, value: f64) {
+        self.clip_offset = value;
+        if self.clip_surface && self.show_surface {
+            self.rebuild_surface_mesh();
+            self.rebuild_snapshot();
+        }
     }
 
     /// Overlay residue/atom labels on the selected atoms (CueMol2 atom labels). Each
@@ -5966,6 +6040,32 @@ mod tests {
         app.show_hbonds = false;
         app.rebuild_snapshot();
         assert_eq!(app.snapshot.bonds.len(), base, "removed on toggle off");
+    }
+
+    #[test]
+    fn live_surface_clipping_in_egui() {
+        // Live in-viewport surface clipping: enabling clip rebuilds the displayed surface
+        // as the plane cross-section, and moving the offset re-clips it live.
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        app.selection_text = "resid 1:5".to_string();
+        let tris = |app: &GuiApplication| {
+            app.surface_mesh.as_ref().map(|m| m.indices.len()).unwrap_or(0)
+        };
+        app.toggle_surface();
+        let full = tris(&app);
+        assert!(full > 0, "full surface built");
+        app.toggle_clip_surface();
+        assert!(app.clip_surface, "clip enabled");
+        let clipped = tris(&app);
+        assert!(clipped <= full, "clipping doesn't add geometry");
+        app.set_clip_offset(50.0);
+        assert_ne!(tris(&app), clipped, "moving the plane re-clips live");
     }
 
     #[test]

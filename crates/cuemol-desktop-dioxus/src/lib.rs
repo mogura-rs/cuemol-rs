@@ -213,8 +213,11 @@ struct Model {
     /// Which ribbon tab is active (CueMol2 topbar): Home / Measure / Animation.
     ribbon_tab: RibbonTab,
     /// Surface-cutter plane offset along +Z from the bbox centre (Å) — the interactive
-    /// plane control for the cut-surface export.
+    /// plane control for the cut-surface export AND the live clip plane.
     cut_offset: f64,
+    /// When set, the displayed molecular surface is CLIPPED by the cut plane (live
+    /// in-viewport cross-section), rebuilt as the offset slider moves.
+    clip_surface: bool,
     /// Open right-click viewport context menu, or `None`.
     context_menu: Option<ContextMenu>,
     /// Undo / redo stacks (CueMol2 Edit → Undo/Redo). Each entry is a full clone of the
@@ -279,6 +282,7 @@ impl Model {
             show_properties: false,
             ribbon_tab: RibbonTab::Home,
             cut_offset: 0.0,
+            clip_surface: false,
             context_menu: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -1165,25 +1169,78 @@ impl Model {
     fn toggle_surface(&mut self) {
         self.show_surface = !self.show_surface;
         if self.show_surface && self.surface_mesh.is_none() {
-            if let Some(uid) = self
-                .state
-                .active_object_summaries()
-                .first()
-                .map(|object| object.uid)
-            {
-                match self
-                    .state
-                    .build_surface_mesh(uid, &self.selection_text, 1.0, 1.4)
-                {
-                    Ok(mesh) => self.surface_mesh = Some(mesh),
-                    Err(error) => {
-                        self.show_surface = false;
-                        self.status = format!("Surface failed: {error}");
-                    }
-                }
-            }
+            self.rebuild_surface_mesh();
         }
         self.rebuild_selection();
+    }
+
+    /// The cut-plane position: the bbox centre shifted by `cut_offset` along +Z (shared
+    /// by the OBJ export and the live clip).
+    fn cut_position(&self) -> cuemol_core::Vector4 {
+        self.current_render_snapshot()
+            .and_then(|snapshot| snapshot.bounds)
+            .map(|(min, max)| {
+                cuemol_core::Vector4::new3(
+                    (min.x + max.x) / 2.0,
+                    (min.y + max.y) / 2.0,
+                    (min.z + max.z) / 2.0 + self.cut_offset,
+                )
+            })
+            .unwrap_or_else(|| cuemol_core::Vector4::new3(0.0, 0.0, self.cut_offset))
+    }
+
+    /// (Re)build the cached molecular-surface mesh — clipped by the cut plane when
+    /// `clip_surface` is set (live cross-section), else the full surface.
+    fn rebuild_surface_mesh(&mut self) {
+        let Some(uid) = self
+            .state
+            .active_object_summaries()
+            .first()
+            .map(|object| object.uid)
+        else {
+            return;
+        };
+        let result = if self.clip_surface {
+            let normal = cuemol_core::Vector4::new3(0.0, 0.0, 1.0);
+            let position = self.cut_position();
+            self.state
+                .build_cut_surface_mesh(uid, &self.selection_text, 1.0, 1.4, normal, position)
+        } else {
+            self.state
+                .build_surface_mesh(uid, &self.selection_text, 1.0, 1.4)
+        };
+        match result {
+            Ok(mesh) => self.surface_mesh = Some(mesh),
+            Err(error) => {
+                self.show_surface = false;
+                self.status = format!("Surface failed: {error}");
+            }
+        }
+    }
+
+    /// Toggle live in-viewport surface clipping (CueMol2 surface cutter, live mode):
+    /// the displayed surface becomes the plane cross-section, moved by the offset slider.
+    fn toggle_clip_surface(&mut self) {
+        self.clip_surface = !self.clip_surface;
+        if self.show_surface {
+            self.rebuild_surface_mesh();
+            self.rebuild_selection();
+        }
+        self.status = if self.clip_surface {
+            "Surface clipping: on".into()
+        } else {
+            "Surface clipping: off".into()
+        };
+    }
+
+    /// Set the cut-plane offset; if the surface is shown + clipping, rebuild it live so
+    /// the cross-section follows the slider in the viewport.
+    fn set_cut_offset(&mut self, value: f64) {
+        self.cut_offset = value;
+        if self.clip_surface && self.show_surface {
+            self.rebuild_surface_mesh();
+            self.rebuild_selection();
+        }
     }
 
     fn render_uri(&self) -> Option<String> {
@@ -2227,9 +2284,15 @@ fn app() -> Element {
                                 oninput: move |e| {
                                     if let Ok(value) = e.value().parse::<f64>() {
                                         cut_offset_input.set(value);
-                                        model.write().cut_offset = value;
+                                        model.write().set_cut_offset(value);
                                     }
                                 },
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                title: "Live in-viewport surface clipping at the cut plane",
+                                onclick: move |_| model.write().toggle_clip_surface(),
+                                "Clip"
                             }
                         }
                         // Bond editor: make/remove a bond between two atom serial ids.
@@ -3254,6 +3317,31 @@ mod tests {
             "script lines echoed into the log"
         );
         let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn live_surface_clipping_in_dioxus() {
+        // Live in-viewport surface clipping: enabling clip rebuilds the displayed surface
+        // as the plane cross-section, and moving the offset re-clips it live.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        model.selection_text = "resid 1:5".to_string(); // cheap SES
+        let tris = |model: &Model| model.surface_mesh.as_ref().map(|m| m.indices.len()).unwrap_or(0);
+
+        model.toggle_surface();
+        let full = tris(&model);
+        assert!(full > 0, "full surface built");
+
+        // Enable clipping → the surface becomes the cut cross-section (no new geometry).
+        model.toggle_clip_surface();
+        assert!(model.clip_surface, "clip enabled");
+        let clipped = tris(&model);
+        assert!(clipped <= full, "clipping doesn't add geometry");
+
+        // Move the plane far outside the molecule → the cross-section changes (live).
+        model.set_cut_offset(50.0);
+        let far = tris(&model);
+        assert_ne!(far, clipped, "moving the plane re-clips the surface live");
     }
 
     #[test]
