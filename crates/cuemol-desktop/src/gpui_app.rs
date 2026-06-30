@@ -272,6 +272,9 @@ pub struct CueMolGpuiApp {
     /// Symmetry panel toggles (CueMol2 "Unit cell" / "Symm mol").
     show_unit_cell: bool,
     show_symm_mates: bool,
+    /// Density-map chickenwire contour toggle + its sigma level.
+    show_density_contour: bool,
+    density_level: f64,
     /// Console / status log (newest last), capped to avoid unbounded growth.
     log_lines: Vec<String>,
     /// Most-recently-opened file paths (newest first, capped at 10).
@@ -344,6 +347,8 @@ impl CueMolGpuiApp {
             show_bottom: true,
             show_unit_cell: false,
             show_symm_mates: false,
+            show_density_contour: false,
+            density_level: 1.5,
             log_lines: Vec::new(),
             recent_paths: Vec::new(),
             undo_stack: Vec::new(),
@@ -396,6 +401,11 @@ impl CueMolGpuiApp {
             &mut snapshot,
             self.show_unit_cell,
             self.show_symm_mates,
+        );
+        self.state.append_density_geometry(
+            &mut snapshot,
+            self.density_level,
+            self.show_density_contour,
         );
         Some(snapshot)
     }
@@ -458,6 +468,12 @@ impl CueMolGpuiApp {
 
     fn toggle_symm_mates(&mut self) {
         self.show_symm_mates = !self.show_symm_mates;
+        self.refresh_scene(false);
+    }
+
+    /// Density map "chickenwire" contour toggle (CueMol2 Density map panel).
+    fn toggle_density_contour(&mut self) {
+        self.show_density_contour = !self.show_density_contour;
         self.refresh_scene(false);
     }
 
@@ -1945,6 +1961,24 @@ impl CueMolGpuiApp {
                 .child(color_btn("sel-sc", "Sidechain").on_click(cx.listener(
                     |this, _: &gpui::ClickEvent, _, cx| {
                         this.set_selection("bysidech *", cx);
+                        cx.notify();
+                    },
+                )))
+                .into_any_element(),
+        );
+
+        // Density map chickenwire contour (CueMol2 densitymap-panel.xul).
+        rows.push(section_label("Density map").into_any_element());
+        rows.push(
+            div()
+                .flex()
+                .flex_row()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .child(color_btn("den-contour", "Show contour").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.toggle_density_contour();
                         cx.notify();
                     },
                 )))

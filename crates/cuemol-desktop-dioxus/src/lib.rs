@@ -120,6 +120,9 @@ struct Model {
     /// and the home-cell symmetry-mate copies.
     show_unit_cell: bool,
     show_symm_mates: bool,
+    /// Density-map chickenwire contour toggle + its sigma level.
+    show_density_contour: bool,
+    density_level: f64,
 }
 
 impl Model {
@@ -152,6 +155,8 @@ impl Model {
             selection_text: String::new(),
             show_unit_cell: false,
             show_symm_mates: false,
+            show_density_contour: false,
+            density_level: 1.5,
         };
         model.rebuild_after_load();
         model
@@ -169,6 +174,11 @@ impl Model {
             &mut snapshot,
             self.show_unit_cell,
             self.show_symm_mates,
+        );
+        self.state.append_density_geometry(
+            &mut snapshot,
+            self.density_level,
+            self.show_density_contour,
         );
         Some(snapshot)
     }
@@ -262,6 +272,12 @@ impl Model {
 
     fn toggle_symm_mates(&mut self) {
         self.show_symm_mates = !self.show_symm_mates;
+        self.rebuild_selection();
+    }
+
+    /// Density map "chickenwire" contour toggle (CueMol2 Density map panel).
+    fn toggle_density_contour(&mut self) {
+        self.show_density_contour = !self.show_density_contour;
         self.rebuild_selection();
     }
 
@@ -740,6 +756,15 @@ fn app() -> Element {
                                 "Sidechain"
                             }
                         }
+                        // Density map chickenwire contour (CueMol2 densitymap-panel.xul).
+                        div { style: "{section_header_style}", "Density map" }
+                        div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().toggle_density_contour(),
+                                "Show contour"
+                            }
+                        }
                     }
                 }
                 // 3D viewport: scroll to zoom, left-drag to orbit, right-drag to
@@ -1029,6 +1054,22 @@ mod tests {
         assert!(
             rainbow > element + 10,
             "rainbow must spread carbon colours: element={element} rainbow={rainbow}"
+        );
+    }
+
+    #[test]
+    fn density_contour_toggle_flips_and_keeps_the_render_path_sound() {
+        // The dioxus density toggle flips the flag and routes through the same shared
+        // append_density_geometry the egui front end's test proves adds a contour; here
+        // (no map loaded) it must simply leave the render path panic-free.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        assert!(!model.show_density_contour);
+        model.toggle_density_contour();
+        assert!(model.show_density_contour);
+        assert!(
+            model.current_render_snapshot().is_some(),
+            "the snapshot path stays sound with the contour toggled on"
         );
     }
 
