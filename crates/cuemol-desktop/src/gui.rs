@@ -432,6 +432,10 @@ struct GuiApplication {
     perf_measure: bool,
     animation_frames: usize,
     animation_playing: bool,
+    /// Animation timeline objects (CueMol2 `anim-panel` list) + the elapsed playback
+    /// time in seconds while playing.
+    animation_objects: Vec<AnimObject>,
+    animation_elapsed: f32,
     superpose_reference: Option<cuemol_core::Uid>,
     superpose_moving: Option<cuemol_core::Uid>,
     superpose_reference_selection: String,
@@ -525,6 +529,33 @@ enum BottomTab {
 enum SelectionTab {
     Command,
     Editor,
+}
+
+/// Animation-object kind (a desktop-side subset of CueMol2's anim objects:
+/// `SimpleSpin` / a back-and-forth rock / a hold).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnimKind {
+    Spin,
+    Rock,
+    Pause,
+}
+
+impl AnimKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Spin => "Spin",
+            Self::Rock => "Rock",
+            Self::Pause => "Pause",
+        }
+    }
+}
+
+/// One animation object in the timeline (CueMol2 `anim-panel` list row): a kind and a
+/// duration in seconds. Played in sequence; the camera is driven while it is active.
+#[derive(Debug, Clone, PartialEq)]
+struct AnimObject {
+    kind: AnimKind,
+    duration: f32,
 }
 
 /// Object-level coloring scheme chosen in the Coloring panel (CueMol2
@@ -682,6 +713,8 @@ impl GuiApplication {
             perf_measure: false,
             animation_frames: 0,
             animation_playing: false,
+            animation_objects: Vec::new(),
+            animation_elapsed: 0.0,
             superpose_reference: None,
             superpose_moving: None,
             superpose_reference_selection: "name CA".to_string(),
@@ -731,10 +764,11 @@ impl GuiApplication {
         } else {
             egui::Visuals::dark()
         });
-        // Animation playback: a continuous camera spin (CueMol2 SimpleSpin) while playing.
-        // Keep requesting repaints so the spin animates frame to frame.
+        // Animation playback: drive the camera from the timeline objects (or a simple
+        // spin when the list is empty). Keep requesting repaints so it animates.
         if self.animation_playing {
-            camera.rotate_by(2.0, 0.0);
+            let dt = ctx.input(|input| input.stable_dt).clamp(0.0, 0.1);
+            self.advance_animation(dt, camera);
             ctx.request_repaint();
         }
         // CueMol2 window order (uxp_gui `cuemol2.xul`):
@@ -2085,18 +2119,100 @@ impl GuiApplication {
         }
     }
 
-    /// Animation section — frame state (full anim-element list in a later pass).
+    /// Advance the animation timeline by `dt` seconds, driving the camera from the
+    /// active object (CueMol2 anim playback). Loops at the total duration; an empty
+    /// list falls back to a simple continuous spin (SimpleSpin).
+    fn advance_animation(&mut self, dt: f32, camera: &mut CameraController) {
+        if self.animation_objects.is_empty() {
+            camera.rotate_by(120.0 * dt, 0.0);
+            return;
+        }
+        let total: f32 = self
+            .animation_objects
+            .iter()
+            .map(|object| object.duration.max(0.01))
+            .sum();
+        self.animation_elapsed += dt;
+        if self.animation_elapsed >= total {
+            self.animation_elapsed %= total;
+        }
+        let mut acc = 0.0;
+        for object in &self.animation_objects {
+            let d = object.duration.max(0.01);
+            if self.animation_elapsed < acc + d {
+                match object.kind {
+                    AnimKind::Spin => camera.rotate_by(120.0 * dt, 0.0),
+                    AnimKind::Rock => {
+                        let dir = if (self.animation_elapsed - acc) / d < 0.5 {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                        camera.rotate_by(120.0 * dt * dir, 0.0);
+                    }
+                    AnimKind::Pause => {}
+                }
+                break;
+            }
+            acc += d;
+        }
+    }
+
+    /// Animation panel — the timeline object list (CueMol2 `anim-panel`): Add (Spin /
+    /// Rock / Pause) / Delete / Move up·down + Play / Stop.
     fn animation_section(&mut self, ui: &mut egui::Ui) {
-        ui.label(format!("Morph frames: {}", self.animation_frames));
         ui.horizontal(|ui| {
+            ui.menu_button("Add", |ui| {
+                for kind in [AnimKind::Spin, AnimKind::Rock, AnimKind::Pause] {
+                    if ui.button(kind.label()).clicked() {
+                        self.animation_objects.push(AnimObject {
+                            kind,
+                            duration: 3.0,
+                        });
+                        ui.close();
+                    }
+                }
+            });
             let play = if self.animation_playing { "⏸ Pause" } else { "▶ Play" };
             if ui.button(play).clicked() {
                 self.animation_playing = !self.animation_playing;
             }
             if ui.button("⏹ Stop").clicked() {
                 self.animation_playing = false;
+                self.animation_elapsed = 0.0;
             }
         });
+        ui.separator();
+        if self.animation_objects.is_empty() {
+            ui.weak("No animation objects — Add a Spin / Rock / Pause (or Play for a spin).");
+            return;
+        }
+        let mut delete: Option<usize> = None;
+        let mut move_up: Option<usize> = None;
+        for (index, object) in self.animation_objects.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("{}. {}", index + 1, object.kind.label()));
+                ui.add(
+                    egui::DragValue::new(&mut object.duration)
+                        .speed(0.1)
+                        .range(0.1..=60.0)
+                        .suffix(" s"),
+                );
+                if index > 0 && ui.small_button("↑").clicked() {
+                    move_up = Some(index);
+                }
+                if ui.small_button("🗑").on_hover_text("Delete").clicked() {
+                    delete = Some(index);
+                }
+            });
+        }
+        if let Some(index) = move_up {
+            self.animation_objects.swap(index - 1, index);
+        }
+        if let Some(index) = delete {
+            self.animation_objects.remove(index);
+            self.animation_elapsed = 0.0;
+        }
     }
 
     /// Properties — CueMol2 opens object/renderer properties as a modal dialog
@@ -6017,6 +6133,35 @@ mod tests {
     }
 
     #[test]
+    fn animation_timeline_drives_the_camera() {
+        // A Spin object rotates the camera while active; a Pause object holds it.
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.animation_objects.push(AnimObject {
+            kind: AnimKind::Spin,
+            duration: 3.0,
+        });
+        let before = camera.orientation;
+        app.advance_animation(0.1, &mut camera);
+        assert!(
+            !camera.orientation.abs_diff_eq(before, 1.0e-5),
+            "a Spin object rotates the camera"
+        );
+
+        app.animation_objects = vec![AnimObject {
+            kind: AnimKind::Pause,
+            duration: 3.0,
+        }];
+        app.animation_elapsed = 0.0;
+        let still = camera.orientation;
+        app.advance_animation(0.1, &mut camera);
+        assert!(
+            camera.orientation.abs_diff_eq(still, 1.0e-6),
+            "a Pause object holds the camera"
+        );
+    }
+
+    #[test]
     fn animation_play_spins_the_camera() {
         // Playing the animation continuously spins the camera (CueMol2 SimpleSpin);
         // stopping leaves it still.
@@ -6182,6 +6327,11 @@ mod tests {
             if let Some(uid) = app.state.active_object_summaries().first().map(|o| o.uid) {
                 app.apply_object_coloring(uid, ColoringMode::Rainbow);
             }
+            // A couple of animation objects so the Animation panel list renders.
+            app.animation_objects = vec![
+                AnimObject { kind: AnimKind::Spin, duration: 3.0 },
+                AnimObject { kind: AnimKind::Pause, duration: 1.0 },
+            ];
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(420.0, 1500.0))
                 .build(|ctx| {
