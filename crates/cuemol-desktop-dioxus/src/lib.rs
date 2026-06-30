@@ -171,6 +171,9 @@ struct Model {
     animation_elapsed: f64,
     /// Light vs dark UI theme (CueMol2's native look is light; dark is the default).
     theme_light: bool,
+    /// Viewport background clear colour (CueMol2 Scene → Background): cycles
+    /// dark / black / white. RGBA in 0..1 for the offscreen renderer.
+    bg_clear: [f64; 4],
     /// Undo / redo stacks (CueMol2 Edit → Undo/Redo). Each entry is a full clone of the
     /// scene state taken before a mutating edit, mirroring the egui/gpui front ends.
     undo_stack: Vec<DioxusUndo>,
@@ -227,6 +230,7 @@ impl Model {
             animation_objects: Vec::new(),
             animation_elapsed: 0.0,
             theme_light: false,
+            bg_clear: VIEW_CLEAR,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         };
@@ -439,6 +443,41 @@ impl Model {
             self.animation_objects.remove(index);
             self.animation_elapsed = 0.0;
         }
+    }
+
+    /// Move the animation object at `index` one slot toward the front (`delta`=-1) or
+    /// back (`delta`=+1) — CueMol2 anim-panel Up/Down reorder.
+    fn move_anim(&mut self, index: usize, delta: i32) {
+        let target = index as i32 + delta;
+        if index < self.animation_objects.len() && target >= 0 && (target as usize) < self.animation_objects.len() {
+            self.animation_objects.swap(index, target as usize);
+            self.animation_elapsed = 0.0;
+        }
+    }
+
+    /// Cycle the viewport background: dark → black → white → dark (CueMol2 Scene →
+    /// Background). Re-renders so the new clear colour shows immediately.
+    fn cycle_background(&mut self) {
+        const DARK: [f64; 4] = VIEW_CLEAR;
+        const BLACK: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
+        const WHITE: [f64; 4] = [1.0, 1.0, 1.0, 1.0];
+        let (next, label) = if self.bg_clear == DARK {
+            (BLACK, "black")
+        } else if self.bg_clear == BLACK {
+            (WHITE, "white")
+        } else {
+            (DARK, "dark")
+        };
+        self.bg_clear = next;
+        self.status = format!("Background: {label}");
+        self.rerender();
+    }
+
+    /// Discard all undo/redo history (CueMol2 Edit → Clear undo data).
+    fn clear_undo_data(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.status = "Undo data cleared".into();
     }
 
     /// Nudge a numeric renderer property (bond/atom radius) by a clamped delta and
@@ -732,6 +771,8 @@ impl Model {
             "fit_view" => self.fit_view(),
             "toggle_projection" => self.toggle_projection(),
             "reassign_ss" => self.reassign_secondary(),
+            "background" => self.cycle_background(),
+            "clear_undo" => self.clear_undo_data(),
             "sel_none" => self.set_selection("none"),
             "sel_all" => self.set_selection("*"),
             "col_element" => self.color_element(),
@@ -824,7 +865,7 @@ impl Model {
         }
         let (w, h) = self.view_size;
         let mvp = camera_mvp(&self.camera, w as f64 / h as f64);
-        let rgba = renderer.render(std::slice::from_ref(mesh), mvp, w, h, VIEW_CLEAR)?;
+        let rgba = renderer.render(std::slice::from_ref(mesh), mvp, w, h, self.bg_clear)?;
         let png = encode_rgba_png(&rgba, w, h);
         Some(format!("data:image/png;base64,{}", base64_encode(&png)))
     }
@@ -1150,6 +1191,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
         1 => &[
             ("Undo", "undo"),
             ("Redo", "redo"),
+            ("Clear undo data", "clear_undo"),
             ("Select all", "sel_all"),
             ("Clear selection", "sel_none"),
         ], // Edit
@@ -1158,7 +1200,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("Rainbow coloring", "col_rainbow"),
             ("B-factor coloring", "col_bfactor"),
         ], // Render
-        3 => &[("New tab", "new_scene")], // Scene
+        3 => &[("New tab", "new_scene"), ("Background (cycle)", "background")], // Scene
         4 => &[
             ("Fit view", "fit_view"),
             ("Toggle projection", "toggle_projection"),
@@ -1854,6 +1896,18 @@ fn app() -> Element {
                                 span { style: "color:{COL_TEXT};width:120px;", "{ai + 1}. {label} ({duration:.1}s)" }
                                 button {
                                     style: "{color_btn_style}",
+                                    title: "Move up",
+                                    onclick: { let i = ai; move |_| model.write().move_anim(i, -1) },
+                                    "▲"
+                                }
+                                button {
+                                    style: "{color_btn_style}",
+                                    title: "Move down",
+                                    onclick: { let i = ai; move |_| model.write().move_anim(i, 1) },
+                                    "▼"
+                                }
+                                button {
+                                    style: "{color_btn_style}",
                                     onclick: { let i = ai; move |_| model.write().remove_anim(i) },
                                     "Delete"
                                 }
@@ -2367,6 +2421,47 @@ mod tests {
             model.undo_stack.len(),
             undo_before + 1,
             "reassign is undoable"
+        );
+    }
+
+    #[test]
+    fn background_clear_undo_and_anim_reorder_in_dioxus() {
+        // Parity for Scene → Background cycle, Edit → Clear undo data, and anim Up/Down.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+
+        // Background cycles dark → black → white → dark (3 steps return to start).
+        let dark = model.bg_clear;
+        model.cycle_background();
+        assert_ne!(model.bg_clear, dark, "background changed");
+        model.cycle_background();
+        model.cycle_background();
+        assert_eq!(model.bg_clear, dark, "background cycles back after 3 steps");
+
+        // Clear undo data empties both stacks.
+        model.set_selection("resid 1");
+        model.delete_selected_atoms();
+        assert!(!model.undo_stack.is_empty(), "edit pushed an undo entry");
+        model.clear_undo_data();
+        assert!(
+            model.undo_stack.is_empty() && model.redo_stack.is_empty(),
+            "clear_undo_data empties both stacks"
+        );
+
+        // Animation reorder swaps adjacent objects.
+        model.add_anim(cuemol_desktop_core::AnimKind::Spin);
+        model.add_anim(cuemol_desktop_core::AnimKind::Rock);
+        let first = model.animation_objects[0].kind.label();
+        model.move_anim(0, 1);
+        assert_ne!(
+            model.animation_objects[0].kind.label(),
+            first,
+            "first anim moved down"
+        );
+        assert_eq!(
+            model.animation_objects[1].kind.label(),
+            first,
+            "it landed in slot 2"
         );
     }
 
