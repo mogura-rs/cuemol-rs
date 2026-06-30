@@ -1438,6 +1438,37 @@ impl DesktopAppState {
         surface.create_ses_from_mol(object.mol(), selector, density, probe_radius);
         Ok(surface)
     }
+
+    /// Build a molecular surface (SES) for an object and convert it to a renderable
+    /// triangle mesh (CueMol2 `molsurf` renderer DISPLAY — until now the desktop only
+    /// EXPORTED the surface to OBJ, never drew it). A front end caches the mesh and adds
+    /// it to the snapshot. Light-grey, lit by the per-vertex SES normals.
+    pub fn build_surface_mesh(
+        &self,
+        object_uid: Uid,
+        selection_text: &str,
+        density: f64,
+        probe_radius: f64,
+    ) -> Result<cuemol_render::RenderMesh> {
+        let surface = self.build_surface(object_uid, selection_text, density, probe_radius)?;
+        let mesh = surface.mesh();
+        let color = [0.76, 0.79, 0.84, 1.0];
+        let vertices = mesh
+            .vertices()
+            .iter()
+            .map(|vertex| cuemol_render::MeshVertex {
+                position: vertex.position,
+                normal: vertex.normal,
+                color,
+            })
+            .collect();
+        let indices = mesh
+            .triangles()
+            .iter()
+            .flat_map(|triangle| triangle.iter().copied())
+            .collect();
+        Ok(cuemol_render::RenderMesh { vertices, indices })
+    }
 }
 
 fn append_object_snapshot(

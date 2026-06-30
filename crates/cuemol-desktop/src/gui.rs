@@ -374,6 +374,10 @@ struct GuiApplication {
     /// (CueMol2 Density map panel level slider).
     show_density_contour: bool,
     density_level: f64,
+    /// Molecular-surface (SES) display: the toggle + a cached mesh (the SES is
+    /// expensive, so it is computed once on enable, not every rebuild).
+    show_surface: bool,
+    surface_mesh: Option<cuemol_render::RenderMesh>,
     /// Force every left-dock accordion section open (an "expand all panels" aid, also
     /// used to snapshot the bodies inside the REAL narrow dock for layout review).
     force_open_all_panels: bool,
@@ -619,6 +623,8 @@ impl GuiApplication {
             show_symm_mates: false,
             show_density_contour: false,
             density_level: 1.5,
+            show_surface: false,
+            surface_mesh: None,
             force_open_all_panels: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
@@ -1496,6 +1502,14 @@ impl GuiApplication {
             };
             if ui.button(toggle).on_hover_text("Expand / collapse all").clicked() {
                 self.molstruct_expand_all = !self.molstruct_expand_all;
+            }
+            let surface_label = if self.show_surface { "Surface ✓" } else { "Surface" };
+            if ui
+                .button(surface_label)
+                .on_hover_text("Show / hide the molecular surface (SES)")
+                .clicked()
+            {
+                self.toggle_surface();
             }
         });
 
@@ -2809,6 +2823,52 @@ impl GuiApplication {
             self.density_level,
             self.show_density_contour,
         );
+        // Cached molecular surface (SES) mesh, when shown.
+        if self.show_surface {
+            if let Some(mesh) = self.surface_mesh.clone() {
+                for vertex in &mesh.vertices {
+                    let p = vertex.position;
+                    self.snapshot.bounds = Some(match self.snapshot.bounds {
+                        Some((min, max)) => (
+                            Vector4::new3(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z)),
+                            Vector4::new3(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z)),
+                        ),
+                        None => (p, p),
+                    });
+                }
+                self.snapshot.meshes.push(mesh);
+            }
+        }
+    }
+
+    /// Toggle the molecular-surface (SES) display. On enable, compute the SES mesh once
+    /// (it is expensive) for the active molecule at the current selection and cache it;
+    /// the cached mesh is added to every subsequent snapshot until toggled off.
+    fn toggle_surface(&mut self) {
+        self.show_surface = !self.show_surface;
+        if self.show_surface && self.surface_mesh.is_none() {
+            if let Some(object_uid) = self
+                .molstruct_object
+                .or_else(|| self.state.active_object_summaries().first().map(|o| o.uid))
+            {
+                match self.state.build_surface_mesh(
+                    object_uid,
+                    &self.selection_text,
+                    self.surface_density,
+                    self.surface_probe_radius,
+                ) {
+                    Ok(mesh) => {
+                        self.surface_mesh = Some(mesh);
+                        self.set_status("Surface generated");
+                    }
+                    Err(error) => {
+                        self.show_surface = false;
+                        self.set_status(format!("Surface failed: {error}"));
+                    }
+                }
+            }
+        }
+        self.rebuild_snapshot();
     }
 
     fn draw_center_mark(&self, ui: &egui::Ui, rect: egui::Rect) {
@@ -5566,6 +5626,54 @@ mod tests {
     }
 
     #[test]
+    fn surface_display_adds_an_ses_mesh_to_the_snapshot() {
+        // Molecular-surface DISPLAY (until now the desktop only EXPORTED the SES to OBJ):
+        // build_surface_mesh yields a triangle mesh, and toggling Surface adds/removes it
+        // from the snapshot. A small selection keeps the SES grid cheap for the test.
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        let object_uid = app
+            .state
+            .active_object_summaries()
+            .first()
+            .map(|object| object.uid)
+            .expect("1CRN loads as one object");
+
+        let mesh = app
+            .state
+            .build_surface_mesh(object_uid, "resid 1:3", 1.0, 1.4)
+            .expect("SES builds");
+        assert!(
+            mesh.vertices.len() > 10 && mesh.indices.len() >= 30,
+            "the SES is a real triangle mesh ({} verts, {} indices)",
+            mesh.vertices.len(),
+            mesh.indices.len()
+        );
+
+        app.molstruct_object = Some(object_uid);
+        app.selection_text = "resid 1:3".to_string();
+        let base_meshes = app.snapshot.meshes.len();
+        app.toggle_surface();
+        assert!(app.show_surface, "surface toggled on");
+        assert!(
+            app.snapshot.meshes.len() > base_meshes,
+            "the SES mesh is added to the snapshot"
+        );
+        app.toggle_surface();
+        assert!(!app.show_surface);
+        assert_eq!(
+            app.snapshot.meshes.len(),
+            base_meshes,
+            "the SES mesh is removed when toggled off"
+        );
+    }
+
+    #[test]
     fn density_contour_appears_when_toggled() {
         // Wire the orphaned MapMeshRenderer contour into the GUI: toggling "Show contour"
         // on a (synthetic) density map adds chickenwire line segments to the snapshot.
@@ -5915,6 +6023,35 @@ mod tests {
                         std::fs::write(&path, png).expect("write density_3d.png");
                         eprintln!("snapshot written to {}", path.display());
                     }
+                }
+            }
+        }
+
+        // (7) 3D render of the molecular surface (SES) — the formerly export-only
+        // surface now drawn in the viewport. A moderate selection keeps the SES cheap.
+        if let Some(pdb) = reference_pdb_path() {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            app.open_path = pdb.to_string_lossy().to_string();
+            app.open_current_path(&mut camera);
+            app.selection_text = "resid 1:25".to_string();
+            app.toggle_surface();
+            if !app.snapshot.meshes.is_empty() {
+                camera.fit_snapshot(&app.snapshot);
+                let (w, h) = (900u32, 700u32);
+                let mvp = camera
+                    .view_projection(w as f32 / h as f32)
+                    .to_cols_array_2d();
+                if let Some(png) = crate::offscreen::render_snapshot_png(
+                    &app.snapshot,
+                    mvp,
+                    w,
+                    h,
+                    [0.02, 0.02, 0.05, 1.0],
+                ) {
+                    let path = out_dir.join("surface_3d.png");
+                    std::fs::write(&path, png).expect("write surface_3d.png");
+                    eprintln!("snapshot written to {}", path.display());
                 }
             }
         }
