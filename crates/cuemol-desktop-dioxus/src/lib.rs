@@ -187,6 +187,8 @@ struct Model {
     log: Vec<String>,
     /// Whether the bottom output console is shown.
     show_console: bool,
+    /// Whether the floating Properties inspector is shown (CueMol2 properties dialog).
+    show_properties: bool,
     /// Which ribbon tab is active (CueMol2 topbar): Home / Measure / Animation.
     ribbon_tab: RibbonTab,
     /// Surface-cutter plane offset along +Z from the bbox centre (Å) — the interactive
@@ -251,6 +253,7 @@ impl Model {
             bg_clear: VIEW_CLEAR,
             log: Vec::new(),
             show_console: false,
+            show_properties: false,
             ribbon_tab: RibbonTab::Home,
             cut_offset: 0.0,
             undo_stack: Vec::new(),
@@ -1068,6 +1071,7 @@ impl Model {
             "apbs" => self.write_apbs(),
             "cut_surface" => self.write_cut_surface(),
             "toggle_console" => self.show_console = !self.show_console,
+            "toggle_properties" => self.show_properties = !self.show_properties,
             "view_props" => self.show_view_properties(),
             "perf" => self.measure_performance(),
             "show_script" => {
@@ -1506,6 +1510,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("Fit view", "fit_view"),
             ("Toggle projection", "toggle_projection"),
             ("Toggle output console", "toggle_console"),
+            ("Toggle properties inspector", "toggle_properties"),
             ("Scene / View properties", "view_props"),
             ("Toggle light/dark theme", "toggle_theme"),
             ("Surface", "surface"),
@@ -1557,6 +1562,7 @@ fn app() -> Element {
     let mut cut_offset_input = use_signal(|| 0.0_f64);
     let ribbon_tab = model.read().ribbon_tab;
     let show_console = model.read().show_console;
+    let show_properties = model.read().show_properties;
     let console_log = model.read().log.clone();
 
     // Animation playback loop (CueMol2 SimpleSpin): an executor-agnostic timer ticks
@@ -2517,6 +2523,37 @@ fn app() -> Element {
                     }
                 }
             }
+            // Floating Properties inspector (CueMol2 properties dialog): the selected
+            // object + its renderers (type / visibility / geometry). Toggled from View.
+            if show_properties {
+                div {
+                    style: "position:absolute;top:120px;right:16px;z-index:30;width:260px;\
+                            max-height:60vh;overflow-y:auto;background:{COL_PANEL};\
+                            border:1px solid {COL_BORDER};border-radius:6px;\
+                            box-shadow:0 6px 20px rgba(0,0,0,0.45);",
+                    div { style: "display:flex;justify-content:space-between;align-items:center;\
+                                  {panel_title_style}",
+                        span { "Properties" }
+                        span {
+                            style: "cursor:pointer;color:{COL_TEXT_DIM};padding:0 4px;",
+                            onclick: move |_| model.write().show_properties = false,
+                            "✕"
+                        }
+                    }
+                    for (oi , (uid , name)) in objects.iter().enumerate() {
+                        div { key: "prop-obj-{oi}",
+                            div { style: "{section_line_style}font-weight:bold;", "◆ {name}" }
+                            for (ri , (_o , _r , rname , bondw , sphr , visible)) in renderers.iter().enumerate().filter(|(_, r)| &r.0 == uid) {
+                                div {
+                                    key: "prop-r-{oi}-{ri}",
+                                    style: "{section_line_style}",
+                                    {format!("  {} {} — bond {:.2} / atom {:.2}", if *visible { "●" } else { "○" }, rname, bondw, sphr)}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // Output console (CueMol2 bottom output panel): scrollback log + a command
             // line (evaluates a selection) + a script loader. Toggled from the View menu.
             if show_console {
@@ -2999,6 +3036,11 @@ mod tests {
             model.log.iter().any(|line| line.starts_with("Performance:")),
             "performance logged"
         );
+
+        // Properties inspector toggles from the View menu.
+        assert!(!model.show_properties);
+        model.run_menu_action("toggle_properties");
+        assert!(model.show_properties, "properties inspector toggled on");
     }
 
     #[test]
