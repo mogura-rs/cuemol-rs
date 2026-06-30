@@ -747,6 +747,90 @@ impl Model {
         self.rebuild_selection();
     }
 
+    /// Count non-bonded atom contacts for the current selection within 4 Å (CueMol2
+    /// Tools → Interaction/Contacts) and report the count in the status bar (dioxus has
+    /// no contact-list table; the count is the useful headless summary).
+    fn find_contacts(&mut self) {
+        let Some(uid) = self.first_object_uid() else {
+            return;
+        };
+        let selection = self.selection_text.clone();
+        let selection = if selection.trim().is_empty() {
+            "*".to_string()
+        } else {
+            selection
+        };
+        match self
+            .state
+            .calc_atom_contacts_in_object(uid, &selection, 0.0, 4.0, false, 200)
+        {
+            // JSON is `[[a,b],[c,d],…]` or "" — pairs = '[' count minus the outer bracket.
+            Ok(json) => {
+                let count = json.matches('[').count().saturating_sub(1);
+                self.status = format!("Found {count} contact(s) within 4.0 Å");
+            }
+            Err(error) => self.status = format!("Contacts failed: {error}"),
+        }
+    }
+
+    /// Superpose the second molecule onto the first by all-atom SSM fit (CueMol2
+    /// Tools → Superposition). Needs ≥2 objects; repositions the moving molecule.
+    fn superpose(&mut self) {
+        let objects: Vec<_> = self
+            .state
+            .active_object_summaries()
+            .iter()
+            .map(|object| object.uid)
+            .collect();
+        if objects.len() < 2 {
+            self.status = "Superpose needs two molecules (open a second)".into();
+            return;
+        }
+        self.push_undo();
+        match self.state.superpose_objects(objects[0], "*", objects[1], "*") {
+            Ok(_) => self.status = "Superposed molecule 2 onto molecule 1".into(),
+            Err(error) => self.status = format!("Superpose failed: {error}"),
+        }
+        self.rebuild_selection();
+    }
+
+    /// Append the second molecule as a morph end-state of the first (CueMol2 Tools →
+    /// Morphing); the two must share an atom count. The fraction slider then
+    /// interpolates via `apply_morph`.
+    fn add_morph_frame(&mut self) {
+        let objects: Vec<_> = self
+            .state
+            .active_object_summaries()
+            .iter()
+            .map(|object| object.uid)
+            .collect();
+        if objects.len() < 2 {
+            self.status = "Morph needs two conformers (open a second)".into();
+            return;
+        }
+        match self
+            .state
+            .append_morph_frame_from_object(objects[0], objects[1], "frame")
+        {
+            Ok(summary) => self.status = format!("Morph: {} frame(s)", summary.frame_count),
+            Err(error) => self.status = format!("Morph frame failed: {error}"),
+        }
+    }
+
+    /// Interpolate the first molecule's coordinates to morph fraction `frame`
+    /// (0=start … N=last appended frame), re-tessellating (CueMol2 Tools → Morphing).
+    fn apply_morph(&mut self, frame: f64) {
+        let Some(uid) = self.first_object_uid() else {
+            return;
+        };
+        self.push_undo();
+        match self.state.apply_morph_frame(uid, frame) {
+            Ok(_) => self.status = format!("Morph @ {frame:.2}"),
+            Err(error) => self.status = format!("Morph apply failed: {error}"),
+        }
+        self.rebuild_selection();
+    }
+
     /// Renumber the residues of the selected atoms starting at `start` (CueMol2
     /// Edit → Renumber residues). An empty selection applies to the whole molecule.
     fn renumber_residues(&mut self, start: i32) {
@@ -773,6 +857,8 @@ impl Model {
             "reassign_ss" => self.reassign_secondary(),
             "background" => self.cycle_background(),
             "clear_undo" => self.clear_undo_data(),
+            "contacts" => self.find_contacts(),
+            "superpose" => self.superpose(),
             "sel_none" => self.set_selection("none"),
             "sel_all" => self.set_selection("*"),
             "col_element" => self.color_element(),
@@ -1214,6 +1300,8 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
         5 => &[
             ("Generate surface", "surface"),
             ("Reassign secondary structure", "reassign_ss"),
+            ("Find contacts", "contacts"),
+            ("Superpose molecules", "superpose"),
         ], // Tools
         7 => &[("About", "about")],              // Help
         _ => &[],
@@ -1236,6 +1324,8 @@ fn app() -> Element {
     let mut sel_input_text = use_signal(String::new);
     // PDB ID for the Get-PDB (RCSB download) field.
     let mut pdb_id_text = use_signal(String::new);
+    // Morph interpolation fraction (Tools → Morphing slider).
+    let mut morph_frac = use_signal(|| 0.0_f64);
 
     // Animation playback loop (CueMol2 SimpleSpin): an executor-agnostic timer ticks
     // ~60 fps; while `anim_playing` is set, each tick spins the camera + re-renders.
@@ -1714,6 +1804,46 @@ fn app() -> Element {
                                 title: "Recompute secondary structure (DSSP)",
                                 onclick: move |_| model.write().reassign_secondary(),
                                 "Reassign SS"
+                            }
+                        }
+                        // Analysis tools (CueMol2 Tools menu): contacts / superposition /
+                        // morphing. Results show in the status bar.
+                        div { style: "{section_header_style}", "Tools" }
+                        div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
+                            button {
+                                style: "{color_btn_style}",
+                                title: "Count non-bonded contacts within 4 Å of the selection",
+                                onclick: move |_| model.write().find_contacts(),
+                                "Contacts"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                title: "Superpose molecule 2 onto molecule 1 (needs 2 molecules)",
+                                onclick: move |_| model.write().superpose(),
+                                "Superpose"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                title: "Add molecule 2 as a morph end-state of molecule 1",
+                                onclick: move |_| model.write().add_morph_frame(),
+                                "Morph frame"
+                            }
+                        }
+                        div { style: "display:flex;gap:6px;align-items:center;padding:2px 12px;",
+                            span { style: "font-size:11px;color:{COL_TEXT_DIM};width:48px;", "Morph" }
+                            input {
+                                r#type: "range",
+                                min: "0",
+                                max: "1",
+                                step: "0.05",
+                                value: "{morph_frac}",
+                                style: "flex:1;",
+                                oninput: move |e| {
+                                    if let Ok(value) = e.value().parse::<f64>() {
+                                        morph_frac.set(value);
+                                        model.write().apply_morph(value);
+                                    }
+                                },
                             }
                         }
                         // Measure (CueMol2 AtomIntr): distance/angle/torsion of selection.
@@ -2462,6 +2592,49 @@ mod tests {
             model.animation_objects[1].kind.label(),
             first,
             "it landed in slot 2"
+        );
+    }
+
+    #[test]
+    fn tools_contacts_superpose_and_morph_in_dioxus() {
+        // Parity for Tools → Contacts / Superposition / Morphing. Two copies of 1CRN
+        // give superpose/morph a second molecule.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb.clone(), pdb]);
+        assert!(
+            model.state.active_object_summaries().len() >= 2,
+            "two molecules loaded into one scene"
+        );
+
+        // Contacts: 1CRN has many non-bonded contacts within 4 Å.
+        model.set_selection("*");
+        model.find_contacts();
+        assert!(
+            model.status.starts_with("Found ") && !model.status.starts_with("Found 0"),
+            "contacts found ({})",
+            model.status
+        );
+
+        // Superpose molecule 2 onto molecule 1 (identical copies) succeeds.
+        model.superpose();
+        assert_eq!(
+            model.status, "Superposed molecule 2 onto molecule 1",
+            "superpose ({})",
+            model.status
+        );
+
+        // Morph: append molecule 2 as a frame of molecule 1, then interpolate.
+        model.add_morph_frame();
+        assert!(
+            model.status.starts_with("Morph: "),
+            "morph frame appended ({})",
+            model.status
+        );
+        model.apply_morph(0.5);
+        assert!(
+            model.status.starts_with("Morph @"),
+            "morph applied ({})",
+            model.status
         );
     }
 
