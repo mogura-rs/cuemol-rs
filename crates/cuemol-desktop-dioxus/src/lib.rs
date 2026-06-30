@@ -562,6 +562,30 @@ impl Model {
         self.status = "Redo".into();
     }
 
+    /// Download a structure from the RCSB PDB by 4-character ID and load it (CueMol2
+    /// File → Get PDB). Uses `curl` (a subprocess, no HTTP crate), mirroring the egui
+    /// front end's downloader.
+    fn get_pdb(&mut self, pdb_id: &str) {
+        let id = pdb_id.trim();
+        if id.is_empty() {
+            self.status = "Get PDB: enter a 4-character ID".into();
+            return;
+        }
+        let url = rcsb_pdb_url(id);
+        let path = std::env::temp_dir().join(format!("cuemol-pdb-{}.pdb", sanitize_pdb_id(id)));
+        match std::process::Command::new("curl")
+            .arg("-fsSL")
+            .arg("-o")
+            .arg(&path)
+            .arg(&url)
+            .status()
+        {
+            Ok(status) if status.success() => self.open_path(path),
+            Ok(status) => self.status = format!("Get PDB failed: curl status {status}"),
+            Err(error) => self.status = format!("Get PDB failed: {error}"),
+        }
+    }
+
     /// Save the active scene to a `.qsc` file (CueMol2 File → Save scene). Read-only
     /// on the model; the shared-core writer serializes the scene + its qdfpdb data.
     fn save_scene(&mut self, path: &str) {
@@ -1011,6 +1035,22 @@ impl Model {
     }
 }
 
+/// The RCSB download URL for a PDB ID (lower-cased, like the C++/egui path).
+fn rcsb_pdb_url(pdb_id: &str) -> String {
+    format!(
+        "https://files.rcsb.org/download/{}.pdb",
+        pdb_id.trim().to_ascii_lowercase()
+    )
+}
+
+/// Keep only filename-safe characters from a PDB ID for the temp path.
+fn sanitize_pdb_id(pdb_id: &str) -> String {
+    pdb_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
+}
+
 /// Build an auto-framed camera for a scene from its bounding box. (Local copy of
 /// the gpui shell's helper; kept here so this crate stays self-contained and the
 /// gpui WIP file is untouched.)
@@ -1129,6 +1169,8 @@ fn app() -> Element {
     let mut edit_renum_text = use_signal(String::new);
     // Free-text selection expression (the full selection grammar, beyond quick-selects).
     let mut sel_input_text = use_signal(String::new);
+    // PDB ID for the Get-PDB (RCSB download) field.
+    let mut pdb_id_text = use_signal(String::new);
 
     // Animation playback loop (CueMol2 SimpleSpin): an executor-agnostic timer ticks
     // ~60 fps; while `anim_playing` is set, each tick spins the camera + re-renders.
@@ -1354,6 +1396,26 @@ fn app() -> Element {
                         model.write().export_scene(&path);
                     },
                     "Export"
+                }
+                input {
+                    style: "width:64px;{open_btn_style}",
+                    placeholder: "PDB ID",
+                    oninput: move |e| pdb_id_text.set(e.value()),
+                    onkeydown: move |e| {
+                        if e.key() == Key::Enter {
+                            let id = pdb_id_text.peek().trim().to_string();
+                            model.write().get_pdb(&id);
+                        }
+                    },
+                }
+                button {
+                    style: "{open_btn_style}",
+                    title: "Download a structure from RCSB by PDB ID",
+                    onclick: move |_| {
+                        let id = pdb_id_text.peek().trim().to_string();
+                        model.write().get_pdb(&id);
+                    },
+                    "Get PDB"
                 }
                 span { style: "color:{COL_TEXT_DIM};margin-left:12px;", "Dioxus" }
             }
@@ -2246,6 +2308,25 @@ mod tests {
         assert_eq!(total(&model), before, "second undo restored again");
         model.undo();
         assert_eq!(model.status, "Nothing to undo", "undo stack is now empty");
+    }
+
+    #[test]
+    fn get_pdb_builds_the_rcsb_url_and_guards_empty_input() {
+        // The download URL + filename sanitization are pure (network-free); the empty-id
+        // guard short-circuits before any curl call. The actual fetch mirrors the egui
+        // front end's shipped downloader, so it isn't re-tested over the network here.
+        assert_eq!(
+            rcsb_pdb_url("1CRN"),
+            "https://files.rcsb.org/download/1crn.pdb"
+        );
+        assert_eq!(sanitize_pdb_id("1c/r n"), "1crn");
+        let mut model = Model::new(Vec::new());
+        model.get_pdb("   ");
+        assert!(
+            model.status.contains("Get PDB"),
+            "empty id is guarded ({})",
+            model.status
+        );
     }
 
     #[test]
