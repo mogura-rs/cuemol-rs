@@ -133,6 +133,8 @@ struct Model {
     show_hbonds: bool,
     /// Atom/residue labels overlaid on the selected atoms.
     show_labels: bool,
+    /// Which top menu's dropdown is open (index into the menu bar), or `None`.
+    menu_open: Option<usize>,
 }
 
 impl Model {
@@ -173,6 +175,7 @@ impl Model {
             surface_mesh: None,
             show_hbonds: false,
             show_labels: false,
+            menu_open: None,
         };
         model.rebuild_after_load();
         model
@@ -318,6 +321,26 @@ impl Model {
     /// Atom-label display toggle (overlaid on the composited image; no re-tessellation).
     fn toggle_labels(&mut self) {
         self.show_labels = !self.show_labels;
+    }
+
+    /// Run a menu-bar dropdown action and close the menu.
+    fn run_menu_action(&mut self, action: &str) {
+        match action {
+            "new_scene" => self.new_scene_tab(),
+            "sel_none" => self.set_selection("none"),
+            "sel_all" => self.set_selection("*"),
+            "col_element" => self.color_element(),
+            "col_rainbow" => self.color_rainbow(),
+            "col_bfactor" => self.color_bfactor(),
+            "surface" => self.toggle_surface(),
+            "den_contour" => self.toggle_density_contour(),
+            "den_solid" => self.toggle_density_solid(),
+            "hbonds" => self.toggle_hbonds(),
+            "labels" => self.toggle_labels(),
+            "about" => self.status = "CueMol2-rs — Dioxus front end".into(),
+            _ => {}
+        }
+        self.menu_open = None;
     }
 
     /// Switch to another scene tab (CueMol2 multi-scene `tabmolview`).
@@ -676,6 +699,31 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Root Dioxus component: owns the [`Model`] signal and renders the whole window.
+/// Dropdown items `(label, action)` for the menu-bar entry at `index` (matches the
+/// menu-name list in the RSX). Empty menus have no dropdown.
+fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
+    match index {
+        0 => &[("New scene tab", "new_scene")], // File
+        1 => &[("Select all", "sel_all"), ("Clear selection", "sel_none")], // Edit
+        2 => &[
+            ("Element coloring", "col_element"),
+            ("Rainbow coloring", "col_rainbow"),
+            ("B-factor coloring", "col_bfactor"),
+        ], // Render
+        3 => &[("New tab", "new_scene")], // Scene
+        4 => &[
+            ("Surface", "surface"),
+            ("Density contour", "den_contour"),
+            ("Density solid", "den_solid"),
+            ("H-bonds", "hbonds"),
+            ("Labels", "labels"),
+        ], // View
+        5 => &[("Generate surface", "surface")], // Tools
+        7 => &[("About", "about")],              // Help
+        _ => &[],
+    }
+}
+
 fn app() -> Element {
     let paths = use_context::<InitialPaths>();
     let mut model = use_signal(move || Model::new(paths.0.clone()));
@@ -699,6 +747,7 @@ fn app() -> Element {
             m.state.active_scene(),
         )
     };
+    let menu_open = model.read().menu_open;
 
     let root_style = format!(
         "display:flex;flex-direction:column;height:100vh;width:100vw;margin:0;\
@@ -738,8 +787,6 @@ fn app() -> Element {
         "display:flex;align-items:center;gap:4px;height:28px;padding:0 12px;background:{COL_PANEL};\
          border-bottom:1px solid {COL_BORDER};flex:0 0 auto;font-size:12px;"
     );
-    let menu_item_style =
-        format!("padding:2px 8px;border-radius:4px;color:{COL_TEXT};cursor:default;");
     let section_header_style = format!(
         "padding:6px 12px 2px;color:{COL_ACCENT};font-size:11px;\
          border-bottom:1px solid {COL_BORDER};margin-top:6px;"
@@ -790,11 +837,41 @@ fn app() -> Element {
                 }
                 span { style: "color:{COL_TEXT_DIM};margin-left:12px;", "Dioxus" }
             }
-            // Menu bar (CueMol2 cuemol2-menus.xul). Visual structure; functional
-            // dropdowns are a later pass — file open works via the header field.
-            div { style: "{menubar_style}",
-                for menu in ["File", "Edit", "Render", "Scene", "View", "Tools", "Window", "Help"] {
-                    span { key: "{menu}", style: "{menu_item_style}", "{menu}" }
+            // Menu bar (CueMol2 cuemol2-menus.xul) — functional dropdowns.
+            div { style: "position:relative;{menubar_style}",
+                for (mi , menu) in ["File", "Edit", "Render", "Scene", "View", "Tools", "Window", "Help"].iter().enumerate() {
+                    div { key: "menu-{mi}", style: "position:relative;",
+                        span {
+                            style: if menu_open == Some(mi) {
+                                format!("padding:2px 8px;border-radius:4px;cursor:pointer;background:{COL_PANEL};color:{COL_TEXT};")
+                            } else {
+                                format!("padding:2px 8px;border-radius:4px;cursor:pointer;color:{COL_TEXT};")
+                            },
+                            onclick: move |_| {
+                                let mut m = model.write();
+                                m.menu_open = if m.menu_open == Some(mi) { None } else { Some(mi) };
+                            },
+                            "{menu}"
+                        }
+                        if menu_open == Some(mi) && !menu_items(mi).is_empty() {
+                            div {
+                                style: "position:absolute;top:100%;left:0;z-index:20;min-width:160px;\
+                                        background:{COL_PANEL};border:1px solid {COL_BORDER};border-radius:4px;\
+                                        box-shadow:0 4px 12px rgba(0,0,0,0.4);padding:4px 0;",
+                                for (ii , item) in menu_items(mi).iter().enumerate() {
+                                    div {
+                                        key: "mi-{mi}-{ii}",
+                                        style: "padding:4px 14px;cursor:pointer;font-size:12px;color:{COL_TEXT};white-space:nowrap;",
+                                        onclick: {
+                                            let action = item.1;
+                                            move |_| model.write().run_menu_action(action)
+                                        },
+                                        "{item.0}"
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             // Scene tabs (CueMol2 multi-scene tabmolview): one tab per scene + "+".
