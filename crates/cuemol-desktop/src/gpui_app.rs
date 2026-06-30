@@ -849,6 +849,26 @@ impl CueMolGpuiApp {
         self.set_status("Redo");
     }
 
+    /// Discard all undo/redo history (CueMol2 Edit → Clear undo data).
+    fn clear_undo_data(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.set_status("Undo data cleared");
+    }
+
+    /// Move the animation object at `index` one slot toward the front (`delta`=-1) or
+    /// back (`delta`=+1) — CueMol2 anim-panel Up/Down reorder.
+    fn move_anim(&mut self, index: usize, delta: i32) {
+        let target = index as i32 + delta;
+        if index < self.animation_objects.len()
+            && target >= 0
+            && (target as usize) < self.animation_objects.len()
+        {
+            self.animation_objects.swap(index, target as usize);
+            self.animation_elapsed = 0.0;
+        }
+    }
+
     fn add_recent(&mut self, path: PathBuf) {
         self.recent_paths.retain(|p| p != &path);
         self.recent_paths.insert(0, path);
@@ -1872,6 +1892,15 @@ impl CueMolGpuiApp {
                     menu_item("mi-redo", "Redo")
                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                             this.redo();
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    menu_item("mi-clear-undo", "Clear undo data")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.clear_undo_data();
                             this.open_menu = None;
                             cx.notify();
                         }))
@@ -3036,6 +3065,22 @@ impl CueMolGpuiApp {
                         object.kind.label(),
                         object.duration
                     )))
+                    .child(
+                        button(eid(format!("anim-up-{index}")), "▲")
+                            .text_xs()
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.move_anim(index, -1);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        button(eid(format!("anim-down-{index}")), "▼")
+                            .text_xs()
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.move_anim(index, 1);
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         danger_button(eid(format!("anim-del-{index}")), "Delete")
                             .text_xs()
@@ -4622,6 +4667,37 @@ mod tests {
         app.delete_renderer(object, renderer);
         assert_eq!(app.renderers(object).len(), before, "delete undoes the add");
         assert_eq!(app.selected_renderer, None);
+    }
+
+    #[test]
+    fn clear_undo_data_and_anim_reorder_in_gpui() {
+        let Some((mut app, object)) = app_with_molecule() else {
+            return;
+        };
+        // An edit pushes an undo entry; Clear-undo-data empties both stacks.
+        app.create_renderer(object, "cpk", "cpk");
+        assert!(!app.undo_stack.is_empty(), "create pushed an undo entry");
+        app.clear_undo_data();
+        assert!(
+            app.undo_stack.is_empty() && app.redo_stack.is_empty(),
+            "clear_undo_data empties both stacks"
+        );
+
+        // Animation reorder swaps adjacent objects.
+        app.add_anim(AnimKind::Spin);
+        app.add_anim(AnimKind::Rock);
+        let first = app.animation_objects[0].kind.label();
+        app.move_anim(0, 1);
+        assert_ne!(
+            app.animation_objects[0].kind.label(),
+            first,
+            "first anim moved down"
+        );
+        assert_eq!(
+            app.animation_objects[1].kind.label(),
+            first,
+            "it landed in slot 2"
+        );
     }
 
     #[test]
