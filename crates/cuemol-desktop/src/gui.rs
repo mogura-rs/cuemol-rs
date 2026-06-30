@@ -2816,19 +2816,26 @@ impl GuiApplication {
     }
 
     fn load_script_into_log(&mut self) {
-        match fs::read_to_string(self.script_path.trim()) {
-            Ok(script) => {
-                self.log_lines
-                    .push(format!("Loaded script: {}", self.script_path.trim()));
-                for line in script.lines().take(20) {
+        let script = match fs::read_to_string(self.script_path.trim()) {
+            Ok(script) => script,
+            Err(error) => {
+                self.set_status(format!("Error: {error}"));
+                return;
+            }
+        };
+        // Run the JS with the embedded boa engine (cuemol.print/select/color).
+        match self.state.run_script_js(&script) {
+            Ok((log, selection)) => {
+                for line in log.lines() {
                     self.log_lines.push(format!("  {line}"));
                 }
-                if script.lines().count() > 20 {
-                    self.log_lines.push("  ...".to_string());
+                if let Some(expr) = selection {
+                    self.selection_text = expr;
+                    self.rebuild_snapshot();
                 }
-                self.set_status("Script loaded into log");
+                self.set_status("Script executed");
             }
-            Err(error) => self.set_status(format!("Error: {error}")),
+            Err(error) => self.set_status(format!("Script error: {error}")),
         }
     }
 
@@ -6040,6 +6047,31 @@ mod tests {
         app.show_hbonds = false;
         app.rebuild_snapshot();
         assert_eq!(app.snapshot.bonds.len(), base, "removed on toggle off");
+    }
+
+    #[test]
+    fn execute_script_runs_real_js_in_egui() {
+        // Execute-script RUNS JavaScript via boa (not load+preview): JS arithmetic +
+        // cuemol.print logs the result, and cuemol.select applies a selection.
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        let script = std::env::temp_dir().join("cuemol_egui_script.js");
+        std::fs::write(&script, "cuemol.print('val=' + (10/2)); cuemol.select('chain A');")
+            .unwrap();
+        app.script_path = script.to_string_lossy().to_string();
+        app.load_script_into_log();
+        assert!(
+            app.log_lines.iter().any(|line| line.contains("val=5")),
+            "JS executed + printed, log: {:?}",
+            app.log_lines
+        );
+        assert_eq!(app.selection_text, "chain A", "script applied a selection");
+        let _ = std::fs::remove_file(&script);
     }
 
     #[test]

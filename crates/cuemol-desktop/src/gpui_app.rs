@@ -1338,17 +1338,25 @@ impl CueMolGpuiApp {
     /// Execute script). HONEST SCOPE: CueMol2 embeds a JS engine; a faithful interpreter
     /// is the categorical floor (see the gap map). This loads + previews, like egui.
     fn run_script(&mut self, path: &str) {
-        match std::fs::read_to_string(path.trim()) {
-            Ok(text) => {
-                self.set_status(format!(
-                    "Loaded script: {} (JS engine not embedded — preview only)",
-                    path.trim()
-                ));
-                for line in text.lines().take(50) {
+        let text = match std::fs::read_to_string(path.trim()) {
+            Ok(text) => text,
+            Err(error) => {
+                self.set_status(format!("Script load failed: {error}"));
+                return;
+            }
+        };
+        match self.state.run_script_js(&text) {
+            Ok((log, selection)) => {
+                for line in log.lines() {
                     self.log_lines.push(format!("  {line}"));
                 }
+                if let Some(expr) = selection {
+                    self.applied_selection = expr;
+                    self.refresh_scene(true);
+                }
+                self.set_status("Script executed");
             }
-            Err(error) => self.set_status(format!("Script load failed: {error}")),
+            Err(error) => self.set_status(format!("Script error: {error}")),
         }
     }
 
@@ -5147,14 +5155,16 @@ mod tests {
         let Some((mut app, _object)) = app_with_molecule() else {
             return;
         };
-        // Execute script echoes a file into the console log.
+        // Execute script RUNS the JS (boa) and logs cuemol.print output + applies select.
         let script = std::env::temp_dir().join("cuemol_gpui_script.js");
-        std::fs::write(&script, "// hi\nbar();\n").unwrap();
+        std::fs::write(&script, "cuemol.print('scripted ' + (2*3)); cuemol.select('resid 1');").unwrap();
         app.run_script(script.to_str().unwrap());
         assert!(
-            app.log_lines.iter().any(|l| l.contains("bar();")),
-            "script lines echoed into the log"
+            app.log_lines.iter().any(|l| l.contains("scripted 6")),
+            "JS executed + printed (boa), log: {:?}",
+            app.log_lines
         );
+        assert_eq!(app.applied_selection, "resid 1", "script applied a selection");
         let _ = std::fs::remove_file(&script);
 
         // Scene/View properties log the camera info.

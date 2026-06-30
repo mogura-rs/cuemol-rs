@@ -19,7 +19,7 @@ license = "MIT"
 
 [dependencies]
 # Shared GUI-agnostic logic + the wgpu offscreen renderer (behind `offscreen`).
-cuemol-desktop-core = { path = "../cuemol-desktop-core", features = ["offscreen"] }
+cuemol-desktop-core = { path = "../cuemol-desktop-core", features = ["offscreen", "scripting"] }
 # Domain types referenced directly by the viewport/camera code.
 cuemol-core = { path = "../cuemol-core" }
 cuemol-qsys = { path = "../cuemol-qsys" }

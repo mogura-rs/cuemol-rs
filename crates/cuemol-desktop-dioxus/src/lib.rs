@@ -537,25 +537,35 @@ impl Model {
         }
     }
 
-    /// Load a script file and echo its lines into the output console (CueMol2 Tools →
-    /// Execute script). NOTE: CueMol2 embeds a JS engine; a faithful interpreter is the
-    /// categorical floor (see the gap map, alongside lcms CMYK / on-screen GPU). This
-    /// matches the egui front end — it loads + displays the script, it does not run JS.
+    /// Run a script file with the embedded boa JS engine (CueMol2 Tools → Execute
+    /// script). The `cuemol` global exposes print/select/color; the full JS language
+    /// runs, so a script can compute selections programmatically. Output goes to the
+    /// console; a `select(...)` applies to the live selection.
     fn execute_script(&mut self, path: &str) {
         let path = path.trim();
         if path.is_empty() {
             self.status = "Script: enter a path".into();
             return;
         }
-        match std::fs::read_to_string(path) {
-            Ok(text) => {
-                self.show_console = true;
-                self.log_line(format!("Loaded script: {path} (JS engine not embedded — preview only)"));
-                for line in text.lines().take(50) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                self.log_line(format!("Script load failed: {error}"));
+                return;
+            }
+        };
+        self.show_console = true;
+        match self.state.run_script_js(&text) {
+            Ok((log, selection)) => {
+                for line in log.lines() {
                     self.log.push(format!("  {line}"));
                 }
+                if let Some(expr) = selection {
+                    self.set_selection(&expr);
+                }
+                self.log_line("Script executed");
             }
-            Err(error) => self.log_line(format!("Script load failed: {error}")),
+            Err(error) => self.log_line(format!("Script error: {error}")),
         }
     }
 
@@ -3305,17 +3315,16 @@ mod tests {
         assert_eq!(model.selection_text, "resid 1", "command set the selection");
 
         let script = std::env::temp_dir().join("cuemol_test_script.js");
-        std::fs::write(&script, "// hello\nfoo();\n").unwrap();
+        // Real JS execution (boa): arithmetic + cuemol.print + cuemol.select.
+        std::fs::write(&script, "cuemol.print('sum=' + (3+4)); cuemol.select('resid 2');").unwrap();
         model.execute_script(script.to_str().unwrap());
         assert!(model.show_console, "Execute script opens the console");
         assert!(
-            model.log.iter().any(|line| line.contains("Loaded script")),
-            "script load logged"
+            model.log.iter().any(|line| line.contains("sum=7")),
+            "JS executed + printed (boa), log: {:?}",
+            model.log
         );
-        assert!(
-            model.log.iter().any(|line| line.contains("foo();")),
-            "script lines echoed into the log"
-        );
+        assert_eq!(model.selection_text, "resid 2", "script applied a selection");
         let _ = std::fs::remove_file(&script);
     }
 

@@ -44,6 +44,7 @@ winit = { version = "0.30.12", optional = true }
 default = []
 native-gui = [
   "cuemol-desktop-core/offscreen",
+  "cuemol-desktop-core/scripting",
   "dep:bytemuck",
   "dep:egui",
   "dep:egui-wgpu",
@@ -57,6 +58,7 @@ native-gui = [
 # the 3D molecular view offscreen and is composited as an image.
 gpui-gui = [
   "cuemol-desktop-core/offscreen",
+  "cuemol-desktop-core/scripting",
   "dep:bytemuck",
   "dep:glam",
   "dep:gpui",

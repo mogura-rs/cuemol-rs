@@ -1949,6 +1949,120 @@ impl DesktopAppState {
             .collect();
         Ok(cuemol_render::RenderMesh { vertices, indices })
     }
+
+    /// Execute a JavaScript source string with the embedded boa engine (CueMol2 Tools →
+    /// Execute script). A `cuemol` global exposes `print(msg)`, `select(expr)`, and
+    /// `color(scheme)`; the full JS LANGUAGE runs (arithmetic / loops / strings), so a
+    /// script can compute selection strings programmatically. Returns the printed log +
+    /// the last `select(...)` expression (the front end applies it to its selection).
+    /// `color(...)` is applied here. A real engine (not the load+preview fallback); the
+    /// binding surface is a starting subset of CueMol2's script API.
+    #[cfg(feature = "scripting")]
+    pub fn run_script_js(&mut self, source: &str) -> Result<(String, Option<String>)> {
+        use boa_engine::{js_string, object::ObjectInitializer, property::Attribute};
+        use boa_engine::{Context, JsResult, JsValue, NativeFunction, Source};
+
+        fn arg0(args: &[JsValue], context: &mut Context) -> String {
+            args.first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_string(context)
+                .map(|value| value.to_std_string_escaped())
+                .unwrap_or_default()
+        }
+        fn js_print(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            script_cmds::push(ScriptCmd::Print(arg0(args, ctx)));
+            Ok(JsValue::undefined())
+        }
+        fn js_select(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            script_cmds::push(ScriptCmd::Select(arg0(args, ctx)));
+            Ok(JsValue::undefined())
+        }
+        fn js_color(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            script_cmds::push(ScriptCmd::Color(arg0(args, ctx)));
+            Ok(JsValue::undefined())
+        }
+
+        let _ = script_cmds::drain(); // clear any stale buffer
+        let mut context = Context::default();
+        let cuemol = ObjectInitializer::new(&mut context)
+            .function(NativeFunction::from_fn_ptr(js_print), js_string!("print"), 1)
+            .function(NativeFunction::from_fn_ptr(js_select), js_string!("select"), 1)
+            .function(NativeFunction::from_fn_ptr(js_color), js_string!("color"), 1)
+            .build();
+        context
+            .register_global_property(js_string!("cuemol"), cuemol, Attribute::all())
+            .map_err(|error| CueMolError::invalid_argument(format!("script setup: {error}")))?;
+        context
+            .eval(Source::from_bytes(source))
+            .map_err(|error| CueMolError::invalid_argument(format!("script error: {error}")))?;
+
+        let mut log = String::new();
+        let mut selection = None;
+        for cmd in script_cmds::drain() {
+            match cmd {
+                ScriptCmd::Print(message) => {
+                    log.push_str(&message);
+                    log.push('\n');
+                }
+                ScriptCmd::Select(expr) => selection = Some(expr),
+                ScriptCmd::Color(scheme) => self.apply_script_color(&scheme),
+            }
+        }
+        Ok((log, selection))
+    }
+
+    /// Apply a `cuemol.color(scheme)` call (element / rainbow / bfactor) to every
+    /// molecule, via the same object-coloring path the Coloring panel uses.
+    #[cfg(feature = "scripting")]
+    fn apply_script_color(&mut self, scheme: &str) {
+        let (coloring_type, attrs) = match scheme.to_ascii_lowercase().as_str() {
+            "rainbow" => {
+                let mut attrs = std::collections::BTreeMap::new();
+                attrs.insert("mode".to_string(), "mol".to_string());
+                attrs.insert("start_hue".to_string(), "240".to_string());
+                attrs.insert("end_hue".to_string(), "0".to_string());
+                (Some("RainbowColoring".to_string()), attrs)
+            }
+            "bfactor" | "bfac" => (
+                Some("BfacColoring".to_string()),
+                std::collections::BTreeMap::new(),
+            ),
+            _ => (None, std::collections::BTreeMap::new()),
+        };
+        let uids: Vec<Uid> = self
+            .active_object_summaries()
+            .iter()
+            .map(|object| object.uid)
+            .collect();
+        for uid in uids {
+            let _ = self.set_object_coloring(uid, coloring_type.clone(), attrs.clone());
+        }
+    }
+}
+
+/// Script-command buffer bridging boa's GC-managed native closures to the host state
+/// (single-threaded GUI, so a thread-local is the simplest safe channel).
+#[cfg(feature = "scripting")]
+enum ScriptCmd {
+    Print(String),
+    Select(String),
+    Color(String),
+}
+
+#[cfg(feature = "scripting")]
+mod script_cmds {
+    use super::ScriptCmd;
+    use std::cell::RefCell;
+    thread_local! {
+        static CMDS: RefCell<Vec<ScriptCmd>> = const { RefCell::new(Vec::new()) };
+    }
+    pub(super) fn push(cmd: ScriptCmd) {
+        CMDS.with(|cells| cells.borrow_mut().push(cmd));
+    }
+    pub(super) fn drain() -> Vec<ScriptCmd> {
+        CMDS.with(|cells| cells.borrow_mut().drain(..).collect())
+    }
 }
 
 fn append_object_snapshot(
@@ -2484,6 +2598,27 @@ pub fn pick_atom_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn run_script_js_executes_real_javascript() {
+        // The embedded boa engine runs the full JS language (var / arithmetic / string
+        // concat), and the `cuemol` binding records print + select. This is real
+        // execution, not load+preview.
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, selection) = app
+            .run_script_js("var n = 1 + 2; cuemol.print('n=' + n); cuemol.select('resid ' + n);")
+            .expect("script runs");
+        assert!(log.contains("n=3"), "JS arithmetic + print ran: {log:?}");
+        assert_eq!(
+            selection.as_deref(),
+            Some("resid 3"),
+            "the selection was built programmatically in JS"
+        );
+        // A syntax error surfaces as an Err, not a panic.
+        assert!(app.run_script_js("this is not js (((").is_err());
+    }
 
     /// Build a pickable atom at a world position (object_uid/atom_index set).
     fn pick_atom_fixture(
