@@ -388,6 +388,8 @@ struct GuiApplication {
     show_console: bool,
     viewport_rect: Option<egui::Rect>,
     pixels_per_point: f32,
+    shift_down: bool,
+    viewport_menu: Option<ViewportMenu>,
     perf_measure: bool,
     animation_frames: usize,
     animation_playing: bool,
@@ -503,6 +505,13 @@ enum MeasureMode {
     Torsion,
 }
 
+/// Pending viewport right-click context menu (CueMol2 `navi-ctxtmenu-atom`).
+#[derive(Debug, Clone, Copy)]
+struct ViewportMenu {
+    pos: egui::Pos2,
+    hit: Option<PickHit>,
+}
+
 /// Left-dock accordion sections mirroring CueMol2's `cuemol2-panels.js`
 /// registration order in the `sidepanelholder`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -593,6 +602,8 @@ impl GuiApplication {
             show_console: false,
             viewport_rect: None,
             pixels_per_point: 1.0,
+            shift_down: false,
+            viewport_menu: None,
             perf_measure: false,
             animation_frames: 0,
             animation_playing: false,
@@ -664,7 +675,7 @@ impl GuiApplication {
         self.dialogs(ctx, camera);
     }
 
-    fn central_view(&mut self, ctx: &egui::Context, _camera: &mut CameraController) {
+    fn central_view(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
             .show(ctx, |ui| {
@@ -684,6 +695,130 @@ impl GuiApplication {
                     });
                 });
             });
+        self.viewport_context_menu(ctx, camera);
+    }
+
+    /// Right-click atom context menu over the 3D view (CueMol2 `navi-ctxtmenu-atom`):
+    /// Center at / Select atom·residue·chain / Around {3,5,7,10 Å} / Clear.
+    fn viewport_context_menu(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        let Some(menu) = self.viewport_menu else {
+            return;
+        };
+        // Resolve the picked atom up front so the menu closure stays self-borrow-free.
+        let atom_info = menu.hit.and_then(|hit| {
+            let object_uid = cuemol_core::Uid::new(hit.object_uid);
+            let atom = self.state.atom_summary(object_uid, hit.atom_index).ok()?;
+            let center = self
+                .snapshot
+                .atoms
+                .iter()
+                .find(|a| {
+                    a.object_uid == Some(hit.object_uid) && a.atom_index == Some(hit.atom_index)
+                })
+                .map(|a| vec3_from_vector(a.center));
+            Some((atom, center))
+        });
+
+        enum Choice {
+            Center(Vec3),
+            Select(String),
+            Around(String, f64),
+            Clear,
+        }
+        let mut chosen: Option<Choice> = None;
+        let mut close = false;
+
+        egui::Area::new(egui::Id::new("viewport_ctx_menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(menu.pos)
+            .show(ctx, |ui| {
+                egui::Frame::menu(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(240.0);
+                    if let Some((atom, center)) = &atom_info {
+                        let chain = if atom.chain_id.is_empty() {
+                            "_"
+                        } else {
+                            atom.chain_id.as_str()
+                        };
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} {}{}:{}  (chain {chain})",
+                                atom.serial, atom.residue_name, atom.residue_id, atom.name
+                            ))
+                            .strong(),
+                        );
+                        ui.separator();
+                        let atom_sel = format!("aid {}", atom.serial);
+                        let resid_sel = if atom.chain_id.is_empty() {
+                            format!("resid {}", atom.residue_id)
+                        } else {
+                            format!("chain {} and resid {}", atom.chain_id, atom.residue_id)
+                        };
+                        let chain_sel = format!("chain {}", atom.chain_id);
+                        if let Some(center) = center {
+                            if ui.button("Center at this atom").clicked() {
+                                chosen = Some(Choice::Center(*center));
+                                close = true;
+                            }
+                        }
+                        if ui.button("Select this atom").clicked() {
+                            chosen = Some(Choice::Select(atom_sel.clone()));
+                            close = true;
+                        }
+                        if ui.button("Select residue").clicked() {
+                            chosen = Some(Choice::Select(resid_sel));
+                            close = true;
+                        }
+                        if ui.button("Select chain").clicked() {
+                            chosen = Some(Choice::Select(chain_sel));
+                            close = true;
+                        }
+                        ui.menu_button("Around", |ui| {
+                            for radius in [3.0_f64, 5.0, 7.0, 10.0] {
+                                if ui.button(format!("{radius:.0} Å")).clicked() {
+                                    chosen = Some(Choice::Around(atom_sel.clone(), radius));
+                                    close = true;
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.separator();
+                    } else {
+                        ui.label("(no atom under cursor)");
+                        ui.separator();
+                    }
+                    if ui.button("Clear selection").clicked() {
+                        chosen = Some(Choice::Clear);
+                        close = true;
+                    }
+                });
+            });
+
+        if let Some(choice) = chosen {
+            match choice {
+                Choice::Center(center) => {
+                    camera.target = center;
+                    self.set_status("Centered at atom");
+                }
+                Choice::Select(sel) => {
+                    self.selection_text = sel;
+                    self.push_selection_history();
+                    self.rebuild_snapshot();
+                }
+                Choice::Around(base, radius) => {
+                    self.selection_text = format!("({base}) around {radius}");
+                    self.push_selection_history();
+                    self.rebuild_snapshot();
+                }
+                Choice::Clear => {
+                    self.selection_text.clear();
+                    self.rebuild_snapshot();
+                }
+            }
+        }
+        if close || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.viewport_menu = None;
+        }
     }
 
     /// Horizontal scene-tab strip above the 3D view (CueMol2 `tabmolview` multi-tab).
@@ -3063,22 +3198,44 @@ impl GuiApplication {
 
     fn handle_window_event(&mut self, event: &WindowEvent, camera: &mut CameraController) -> bool {
         match event {
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.shift_down = modifiers.state().shift_key();
+                false
+            }
             WindowEvent::MouseInput { state, button, .. } => match state {
                 ElementState::Pressed if self.pointer_in_viewport(camera.last_cursor) => {
-                    camera.drag_mode = CameraDragMode::from_button(*button);
+                    // Shift+left = zoom drag (CueMol2 default view-input preset).
+                    camera.drag_mode = if *button == MouseButton::Left && self.shift_down {
+                        Some(CameraDragMode::Zoom)
+                    } else {
+                        CameraDragMode::from_button(*button)
+                    };
                     camera.last_drag_cursor = camera.last_cursor;
                     camera.drag_total = 0.0;
+                    self.viewport_menu = None;
                     camera.drag_mode.is_some()
                 }
                 ElementState::Released => {
                     let was_dragging = camera.drag_mode.is_some();
+                    let in_viewport = self.pointer_in_viewport(camera.last_cursor);
+                    let is_click = camera.drag_total < 4.0 && in_viewport;
                     let should_pick = *button == MouseButton::Left
                         && camera.drag_mode == Some(CameraDragMode::Rotate)
-                        && camera.drag_total < 4.0
-                        && self.pointer_in_viewport(camera.last_cursor);
+                        && is_click;
                     if should_pick {
                         if let Some(position) = camera.last_cursor {
                             self.pick_atom_at(camera, position);
+                        }
+                    }
+                    // Right-click (no drag) opens the atom context menu
+                    // (CueMol2 `navi-ctxtmenu-atom`).
+                    let should_menu = *button == MouseButton::Right
+                        && camera.drag_mode == Some(CameraDragMode::Pan)
+                        && is_click;
+                    if should_menu {
+                        if let Some(position) = camera.last_cursor {
+                            let hit = self.pick_hit(camera, position);
+                            self.viewport_menu = Some(ViewportMenu { pos: position, hit });
                         }
                     }
                     camera.drag_mode = None;
@@ -3117,6 +3274,8 @@ impl GuiApplication {
                                 None => camera.rotate_by(dx, dy),
                             },
                             CameraDragMode::Pan => camera.pan_by(dx, dy),
+                            // Drag up to zoom in, down to zoom out.
+                            CameraDragMode::Zoom => camera.zoom_by(-dy * 0.1),
                         }
                         camera.drag_total += dx.abs() + dy.abs();
                         changed = dx != 0.0 || dy != 0.0;
@@ -3251,6 +3410,8 @@ struct PickHit {
 enum CameraDragMode {
     Rotate,
     Pan,
+    /// Shift+left drag = zoom (CueMol2 default view-input preset).
+    Zoom,
 }
 
 impl CameraDragMode {
@@ -4671,6 +4832,37 @@ mod tests {
             });
             // MolStruct chain-select wrote a selection; Symmetry found 1CRN's cell.
             assert!(!app.state.active_crystal_summaries().is_empty());
+
+            // Exercise the viewport right-click context menu render path against a
+            // real picked atom (catches a panic in navi-ctxtmenu-atom without a window).
+            app.viewport_rect =
+                Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)));
+            let first = app
+                .snapshot
+                .atoms
+                .iter()
+                .find_map(|atom| Some((atom.object_uid?, atom.atom_index?)))
+                .expect("loaded molecule has a pickable atom");
+            app.viewport_menu = Some(ViewportMenu {
+                pos: egui::pos2(100.0, 100.0),
+                hit: Some(PickHit {
+                    object_uid: first.0,
+                    atom_index: first.1,
+                }),
+            });
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                app.ui(ctx, &mut camera);
+            });
+            assert!(app.viewport_menu.is_some(), "menu stays open until chosen");
         }
+    }
+
+    #[test]
+    fn shift_left_drag_zooms_the_camera() {
+        let mut camera = CameraController::default();
+        let start = camera.ortho_scale;
+        // Dragging up in zoom mode reduces ortho_scale (zoom in).
+        camera.zoom_by(-(-20.0) * 0.1);
+        assert!(camera.ortho_scale < start, "shift+left drag-up should zoom in");
     }
 }
