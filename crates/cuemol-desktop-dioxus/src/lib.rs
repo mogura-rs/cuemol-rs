@@ -649,7 +649,7 @@ fn app() -> Element {
 
     // Derive view data under a short read borrow, then release it before RSX so
     // the event handlers (which write the signal) never alias the read guard.
-    let (status, scene_name, image_uri, rows, sections) = {
+    let (status, scene_name, image_uri, rows, sections, seq_chains) = {
         let m = model.read();
         (
             m.status.clone(),
@@ -657,6 +657,7 @@ fn app() -> Element {
             m.image_uri.clone(),
             m.tree_rows(),
             m.panel_sections(),
+            m.state.active_sequence_view(&m.selection_text),
         )
     };
 
@@ -708,6 +709,14 @@ fn app() -> Element {
     let color_btn_style = format!(
         "height:22px;padding:0 8px;border-radius:4px;border:1px solid {COL_BORDER};\
          background:{COL_BG};color:{COL_TEXT};cursor:pointer;font-size:11px;"
+    );
+    let seq_cell_style = format!(
+        "display:inline-block;width:13px;text-align:center;font-family:monospace;\
+         font-size:12px;cursor:pointer;color:{COL_TEXT};"
+    );
+    let seq_cell_sel_style = format!(
+        "display:inline-block;width:13px;text-align:center;font-family:monospace;\
+         font-size:12px;cursor:pointer;color:#fff;background:{COL_ACCENT};"
     );
 
     rsx! {
@@ -852,6 +861,33 @@ fn app() -> Element {
                                 style: "{color_btn_style}",
                                 onclick: move |_| model.write().toggle_hbonds(),
                                 "H-bonds"
+                            }
+                        }
+                        // Interactive sequence viewer (CueMol2 seqpanel): clickable
+                        // 1-letter cells, selected residues highlighted.
+                        if !seq_chains.is_empty() {
+                            div { style: "{section_header_style}", "Sequence" }
+                            for (ci , chain) in seq_chains.iter().enumerate() {
+                                div { key: "seqc-{ci}",
+                                    div {
+                                        style: "padding:2px 12px 0;color:{COL_TEXT_DIM};font-size:10px;",
+                                        "chain {chain.chain_id} ({chain.residues.len()})"
+                                    }
+                                    div { style: "padding:0 12px 4px;line-height:1.5;",
+                                        for (ri , residue) in chain.residues.iter().enumerate() {
+                                            span {
+                                                key: "seq-{ci}-{ri}",
+                                                style: if residue.selected { "{seq_cell_sel_style}" } else { "{seq_cell_style}" },
+                                                title: "{residue.res_name} {residue.res_id}",
+                                                onclick: {
+                                                    let sel = residue.selection.clone();
+                                                    move |_| model.write().set_selection(&sel)
+                                                },
+                                                "{residue.letter}"
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

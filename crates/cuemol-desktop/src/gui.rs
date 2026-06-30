@@ -1,38 +1,4 @@
 use crate::{DesktopAppState, GuiLoadedPath, GuiSequenceSummary};
-
-/// One-letter code for a residue name (20 amino acids + nucleotides), `X` otherwise.
-/// Used by the interactive sequence viewer.
-fn residue_one_letter(res_name: &str) -> String {
-    let code = match res_name.trim().to_ascii_uppercase().as_str() {
-        "ALA" => 'A',
-        "ARG" => 'R',
-        "ASN" => 'N',
-        "ASP" => 'D',
-        "CYS" => 'C',
-        "GLN" => 'Q',
-        "GLU" => 'E',
-        "GLY" => 'G',
-        "HIS" => 'H',
-        "ILE" => 'I',
-        "LEU" => 'L',
-        "LYS" => 'K',
-        "MET" => 'M',
-        "PHE" => 'F',
-        "PRO" => 'P',
-        "SER" => 'S',
-        "THR" => 'T',
-        "TRP" => 'W',
-        "TYR" => 'Y',
-        "VAL" => 'V',
-        "DA" | "A" => 'a',
-        "DC" | "C" => 'c',
-        "DG" | "G" => 'g',
-        "DT" | "T" => 't',
-        "DU" | "U" => 'u',
-        _ => 'X',
-    };
-    code.to_string()
-}
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::Rgba8;
 use cuemol_render::{MeshVertex, RenderAtom, RenderBond, RenderSceneSnapshot};
@@ -2321,64 +2287,42 @@ impl GuiApplication {
     /// Interactive per-residue sequence viewer (CueMol2 `seqpanel`): each residue is a
     /// clickable 1-letter cell that selects it; cells whose atoms are in the current
     /// selection are highlighted, so the sequence and the 3D selection stay in sync.
+    /// Built from the shared-core `active_sequence_view`.
     fn sequence_tab(&mut self, ui: &mut egui::Ui) {
-        let tree = self.state.active_structure_tree();
-        if tree.is_empty() {
+        let chains = self.state.active_sequence_view(&self.selection_text);
+        if chains.is_empty() {
             ui.weak("No molecule loaded.");
             return;
         }
-        // Selected atom indices per object (from the live snapshot).
-        let mut selected: std::collections::HashMap<u64, std::collections::HashSet<usize>> =
-            std::collections::HashMap::new();
-        for atom in self.snapshot.atoms.iter().filter(|atom| atom.selected) {
-            if let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) {
-                selected.entry(object_uid).or_default().insert(atom_index);
-            }
-        }
-
         let mut clicked: Option<String> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for object in &tree {
-                let object_selected = selected.get(&object.object_uid.get());
-                for chain in &object.chains {
-                    let chain_disp = if chain.chain_id.is_empty() {
-                        "_"
-                    } else {
-                        chain.chain_id.as_str()
-                    };
-                    ui.monospace(format!(
-                        "{} : chain {} ({} res)",
-                        object.object_name,
-                        chain_disp,
-                        chain.residues.len()
-                    ));
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        for residue in &chain.residues {
-                            let is_selected = object_selected
-                                .map(|set| {
-                                    residue.atoms.iter().any(|atom| set.contains(&atom.atom_index))
-                                })
-                                .unwrap_or(false);
-                            let letter = residue_one_letter(&residue.res_name);
-                            let response = ui
-                                .selectable_label(is_selected, egui::RichText::new(letter).monospace())
-                                .on_hover_text(format!(
-                                    "{} {}",
-                                    residue.res_name.trim(),
-                                    residue.res_id
-                                ));
-                            if response.clicked() {
-                                clicked = Some(if chain.chain_id.is_empty() {
-                                    format!("resid {}", residue.res_id)
-                                } else {
-                                    format!("chain {} and resid {}", chain.chain_id, residue.res_id)
-                                });
-                            }
+            for chain in &chains {
+                let chain_disp = if chain.chain_id.is_empty() {
+                    "_"
+                } else {
+                    chain.chain_id.as_str()
+                };
+                ui.monospace(format!(
+                    "{} : chain {} ({} res)",
+                    chain.object_name,
+                    chain_disp,
+                    chain.residues.len()
+                ));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for residue in &chain.residues {
+                        let response = ui
+                            .selectable_label(
+                                residue.selected,
+                                egui::RichText::new(&residue.letter).monospace(),
+                            )
+                            .on_hover_text(format!("{} {}", residue.res_name.trim(), residue.res_id));
+                        if response.clicked() {
+                            clicked = Some(residue.selection.clone());
                         }
-                    });
-                    ui.separator();
-                }
+                    }
+                });
+                ui.separator();
             }
         });
 

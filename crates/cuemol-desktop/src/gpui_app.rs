@@ -2480,49 +2480,50 @@ impl CueMolGpuiApp {
             )
     }
 
+    /// Interactive per-residue sequence viewer (CueMol2 `seqpanel`): each residue is a
+    /// clickable 1-letter cell that selects it; selected residues are highlighted.
+    /// Built from the shared-core `active_sequence_view`.
     fn sequence_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
-        for row in self.state.active_sequence_summaries() {
-            let object_uid = row.object_uid;
-            let chain_id = row.chain_id.clone();
-            let sel_expr = format!("chain {chain_id}");
+        for chain in self.state.active_sequence_view(&self.applied_selection) {
+            rows.push(
+                div()
+                    .text_xs()
+                    .text_color(rgb(COL_TEXT_DIM))
+                    .child(format!(
+                        "{} : chain {} ({} res)",
+                        chain.object_name,
+                        chain.chain_id,
+                        chain.residues.len()
+                    ))
+                    .into_any_element(),
+            );
+            let mut cells: Vec<gpui::AnyElement> = Vec::new();
+            for residue in chain.residues {
+                let sel = residue.selection.clone();
+                let mut cell = div()
+                    .id(eid(format!("seq-{}-{}", chain.object_uid.get(), residue.res_id)))
+                    .font_family("monospace")
+                    .text_xs()
+                    .px(px(1.0))
+                    .cursor_pointer()
+                    .child(residue.letter)
+                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                        this.set_selection(&sel, cx);
+                        cx.notify();
+                    }));
+                if residue.selected {
+                    cell = cell.bg(rgb(COL_ACCENT)).text_color(rgb(0xffffff));
+                }
+                cells.push(cell.into_any_element());
+            }
             rows.push(
                 div()
                     .flex()
                     .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .font_family("monospace")
-                            .text_color(rgb(COL_ACCENT))
-                            .child(format!("{}:{}", row.object_name, row.chain_id)),
-                    )
-                    .child(div().text_xs().text_color(rgb(COL_TEXT_DIM)).child(format!(
-                        "{} res / {} atoms",
-                        row.residue_count, row.atom_count
-                    )))
-                    .child(button(eid(format!("seq-sel-{}-{}", object_uid.get(), chain_id)), "Select")
-                        .text_xs()
-                        .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
-                            this.select_object(object_uid);
-                            if let Some(inputs) = &this.inputs {
-                                let sel = inputs.selection.clone();
-                                let expr = sel_expr.clone();
-                                sel.update(cx, |ti, cx| ti.set_text(expr, cx));
-                            }
-                            this.set_status(format!("Selected chain {chain_id}"));
-                            cx.notify();
-                        })))
-                    .into_any_element(),
-            );
-            rows.push(
-                div()
-                    .font_family("monospace")
-                    .text_xs()
-                    .text_color(rgb(COL_TEXT_DIM))
+                    .flex_wrap()
                     .pb_1()
-                    .child(row.sequence)
+                    .children(cells)
                     .into_any_element(),
             );
         }

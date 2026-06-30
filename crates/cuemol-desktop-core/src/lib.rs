@@ -129,6 +129,28 @@ pub struct GuiStructObject {
     pub chains: Vec<GuiStructChain>,
 }
 
+/// One residue cell in the interactive sequence viewer (CueMol2 `seqpanel`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiSeqResidue {
+    /// One-letter code (20 AA + nucleotides; `X` otherwise).
+    pub letter: String,
+    pub res_id: i32,
+    pub res_name: String,
+    /// Selection expression that picks just this residue (for a click handler).
+    pub selection: String,
+    /// Whether any of this residue's atoms is in the current selection.
+    pub selected: bool,
+}
+
+/// One chain row in the interactive sequence viewer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiSeqChain {
+    pub object_uid: Uid,
+    pub object_name: String,
+    pub chain_id: String,
+    pub residues: Vec<GuiSeqResidue>,
+}
+
 /// Crystal cell / space-group readout for the Symmetry side panel
 /// (CueMol2 `symmetry-panel.xul`).
 #[derive(Debug, Clone, PartialEq)]
@@ -1074,6 +1096,60 @@ impl DesktopAppState {
                 object_name: object.name().to_string(),
                 chains,
             });
+        }
+        out
+    }
+
+    /// The active scene's molecules as an interactive sequence view (CueMol2 `seqpanel`):
+    /// per-chain 1-letter residue cells, each with the selection expression that picks
+    /// it and whether it is currently selected (any atom in `selection_text`). Shared by
+    /// all three front ends so the sequence ↔ 3D selection sync is computed once.
+    pub fn active_sequence_view(&self, selection_text: &str) -> Vec<GuiSeqChain> {
+        let Some(scene_uid) = self.active_scene else {
+            return Vec::new();
+        };
+        let Some(scene) = self.scene_manager().scene(scene_uid) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for object in scene.objects() {
+            let mol = object.mol();
+            let selected: std::collections::HashSet<usize> = parse_gui_selector(selection_text)
+                .ok()
+                .flatten()
+                .map(|selector| mol.select_indices(&selector).into_iter().collect())
+                .unwrap_or_default();
+            let residues = mol.residue_summaries();
+            for chain in mol.chain_summaries() {
+                let mut chain_residues = Vec::new();
+                for key in &chain.residue_keys {
+                    let Some(residue) = residues.iter().find(|residue| &residue.key == key) else {
+                        continue;
+                    };
+                    let is_selected = residue
+                        .atom_indices
+                        .iter()
+                        .any(|index| selected.contains(index));
+                    let selection = if chain.chain_id.is_empty() {
+                        format!("resid {}", key.res_id)
+                    } else {
+                        format!("chain {} and resid {}", chain.chain_id, key.res_id)
+                    };
+                    chain_residues.push(GuiSeqResidue {
+                        letter: residue_one_letter(&residue.res_name).to_string(),
+                        res_id: key.res_id,
+                        res_name: residue.res_name.clone(),
+                        selection,
+                        selected: is_selected,
+                    });
+                }
+                out.push(GuiSeqChain {
+                    object_uid: object.uid(),
+                    object_name: object.name().to_string(),
+                    chain_id: chain.chain_id,
+                    residues: chain_residues,
+                });
+            }
         }
         out
     }
@@ -2142,6 +2218,29 @@ mod tests {
             pick_atom_screen(&[atom], mvp, (50.0, 50.0), (100.0, 100.0), 10.0),
             None
         );
+    }
+
+    #[test]
+    fn active_sequence_view_marks_selected_residues() {
+        // The sequence view returns per-residue 1-letter cells with the selection state
+        // computed from the selection expression, so the front ends can sync the
+        // sequence highlight to the 3D selection.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        if app.open_path(root.join("1CRN.pdb")).is_err() {
+            return;
+        }
+        let chains = app.active_sequence_view("resid 1:3");
+        let chain = chains.first().expect("1CRN has one chain");
+        assert_eq!(chain.residues.len(), 46, "crambin is 46 residues");
+        assert_eq!(chain.residues[0].letter, "T", "1CRN starts with THR (T)");
+        assert!(chain.residues[0].selected, "resid 1 is selected");
+        assert!(chain.residues[2].selected, "resid 3 is selected");
+        assert!(!chain.residues[3].selected, "resid 4 is not selected");
+        assert_eq!(chain.residues[0].selection, "chain A and resid 1");
     }
 
     #[cfg(feature = "offscreen")]
