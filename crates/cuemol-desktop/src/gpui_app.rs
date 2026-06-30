@@ -257,6 +257,10 @@ enum Dialog {
     },
     /// Load + preview a script file in the output console.
     Script,
+    /// Cross-section surface cutter with an interactive plane offset on `target`.
+    SurfaceCutter {
+        target: cuemol_core::Uid,
+    },
 }
 
 /// A point-in-time copy of everything Undo/Redo restores. `DesktopAppState` is
@@ -292,6 +296,7 @@ struct DialogInputs {
     bond_aid1: Option<Entity<TextInput>>,
     bond_aid2: Option<Entity<TextInput>>,
     script_path: Option<Entity<TextInput>>,
+    cut_offset: Option<Entity<TextInput>>,
     config_key: Option<Entity<TextInput>>,
     config_value: Option<Entity<TextInput>>,
     config_path: Option<Entity<TextInput>>,
@@ -1240,7 +1245,8 @@ impl CueMolGpuiApp {
     /// Write a cross-section (cut) molecular-surface OBJ for `target` to the temp dir
     /// (CueMol2 Tools → Surface cutter). The cut plane passes through the selection's
     /// bounding-box centre with a +Z normal — same file-export shape as APBS.
-    fn run_cut_surface(&mut self, target: cuemol_core::Uid) {
+    fn run_cut_surface(&mut self, target: cuemol_core::Uid, offset: f64) {
+        // Cut plane = bbox centre shifted by `offset` Å along +Z (interactive control).
         let center = self
             .state
             .active_render_snapshot(&self.applied_selection)
@@ -1250,10 +1256,10 @@ impl CueMolGpuiApp {
                 cuemol_core::Vector4::new3(
                     (min.x + max.x) / 2.0,
                     (min.y + max.y) / 2.0,
-                    (min.z + max.z) / 2.0,
+                    (min.z + max.z) / 2.0 + offset,
                 )
             })
-            .unwrap_or_else(|| cuemol_core::Vector4::new3(0.0, 0.0, 0.0));
+            .unwrap_or_else(|| cuemol_core::Vector4::new3(0.0, 0.0, offset));
         let normal = cuemol_core::Vector4::new3(0.0, 0.0, 1.0);
         let path = std::env::temp_dir().join("cuemol_cut_surface.obj");
         match self.state.write_cut_surface_obj(
@@ -1549,6 +1555,11 @@ impl CueMolGpuiApp {
         self.dialog = Dialog::Script;
         self.dialog_inputs.script_path =
             Some(cx.new(|cx| TextInput::new(cx, "", "path to .js script")));
+    }
+
+    fn open_cut_dialog(&mut self, target: cuemol_core::Uid, cx: &mut Context<Self>) {
+        self.dialog = Dialog::SurfaceCutter { target };
+        self.dialog_inputs.cut_offset = Some(cx.new(|cx| TextInput::new(cx, "0", "Z offset (Å)")));
     }
 
     fn open_chain_dialog(&mut self, target: cuemol_core::Uid, cx: &mut Context<Self>) {
@@ -2251,10 +2262,10 @@ impl CueMolGpuiApp {
                         .into_any_element(),
                 );
                 items.push(
-                    menu_item("mi-cut-surface", "Surface cutter (OBJ)")
+                    menu_item("mi-cut-surface", "Surface cutter (OBJ)…")
                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                            this.with_selected_object(cx, |this, obj, _cx| {
-                                this.run_cut_surface(obj)
+                            this.with_selected_object(cx, |this, obj, cx| {
+                                this.open_cut_dialog(obj, cx)
                             });
                             this.open_menu = None;
                             cx.notify();
@@ -3508,6 +3519,7 @@ impl CueMolGpuiApp {
             Dialog::Config => self.config_dialog(cx).into_any_element(),
             Dialog::BondEditor { target } => self.bond_dialog(cx, *target).into_any_element(),
             Dialog::Script => self.script_dialog(cx).into_any_element(),
+            Dialog::SurfaceCutter { target } => self.cut_dialog(cx, *target).into_any_element(),
         };
         div()
             .absolute()
@@ -3755,6 +3767,43 @@ impl CueMolGpuiApp {
                                 .map(|i| i.read(cx).text())
                                 .unwrap_or_default();
                             this.run_script(&path);
+                            this.close_dialog();
+                            cx.notify();
+                        },
+                    )))
+                    .child(dialog_cancel(cx)),
+            )
+    }
+
+    fn cut_dialog(&self, cx: &mut Context<Self>, target: cuemol_core::Uid) -> impl IntoElement {
+        let input = self.dialog_inputs.cut_offset.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_color(rgb(col_accent())).child("Surface cutter (OBJ)"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Cut-plane Z offset (Å) from the bounding-box centre"),
+            )
+            .children(input.map(|i| i.into_any_element()))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .justify_end()
+                    .child(button("cut-go", "Cut").on_click(cx.listener(
+                        move |this, _: &gpui::ClickEvent, _, cx| {
+                            let offset = this
+                                .dialog_inputs
+                                .cut_offset
+                                .as_ref()
+                                .and_then(|i| i.read(cx).text().trim().parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            this.run_cut_surface(target, offset);
                             this.close_dialog();
                             cx.notify();
                         },
@@ -5045,7 +5094,7 @@ mod tests {
             return;
         };
         app.applied_selection = "resid 1:3".to_string(); // keep the SES build cheap
-        app.run_cut_surface(object);
+        app.run_cut_surface(object, 0.0);
         assert!(
             app.status.starts_with("Cut surface:"),
             "status: {}",

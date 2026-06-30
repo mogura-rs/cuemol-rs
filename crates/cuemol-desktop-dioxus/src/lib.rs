@@ -189,6 +189,9 @@ struct Model {
     show_console: bool,
     /// Which ribbon tab is active (CueMol2 topbar): Home / Measure / Animation.
     ribbon_tab: RibbonTab,
+    /// Surface-cutter plane offset along +Z from the bbox centre (Å) — the interactive
+    /// plane control for the cut-surface export.
+    cut_offset: f64,
     /// Undo / redo stacks (CueMol2 Edit → Undo/Redo). Each entry is a full clone of the
     /// scene state taken before a mutating edit, mirroring the egui/gpui front ends.
     undo_stack: Vec<DioxusUndo>,
@@ -249,6 +252,7 @@ impl Model {
             log: Vec::new(),
             show_console: false,
             ribbon_tab: RibbonTab::Home,
+            cut_offset: 0.0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         };
@@ -927,6 +931,8 @@ impl Model {
         let Some(uid) = self.first_object_uid() else {
             return;
         };
+        // Cut plane = bbox centre shifted by `cut_offset` along +Z (the interactive
+        // plane control). normal stays +Z.
         let center = self
             .current_render_snapshot()
             .and_then(|snapshot| snapshot.bounds)
@@ -934,10 +940,10 @@ impl Model {
                 cuemol_core::Vector4::new3(
                     (min.x + max.x) / 2.0,
                     (min.y + max.y) / 2.0,
-                    (min.z + max.z) / 2.0,
+                    (min.z + max.z) / 2.0 + self.cut_offset,
                 )
             })
-            .unwrap_or_else(|| cuemol_core::Vector4::new3(0.0, 0.0, 0.0));
+            .unwrap_or_else(|| cuemol_core::Vector4::new3(0.0, 0.0, self.cut_offset));
         let normal = cuemol_core::Vector4::new3(0.0, 0.0, 1.0);
         let path = std::env::temp_dir().join("cuemol_cut_surface.obj");
         match self
@@ -1547,6 +1553,8 @@ fn app() -> Element {
     // Output-console command line + script path (CueMol2 bottom output panel).
     let mut console_cmd = use_signal(String::new);
     let mut script_path = use_signal(String::new);
+    // Surface-cutter plane offset slider value.
+    let mut cut_offset_input = use_signal(|| 0.0_f64);
     let ribbon_tab = model.read().ribbon_tab;
     let show_console = model.read().show_console;
     let console_log = model.read().log.clone();
@@ -2102,6 +2110,24 @@ fn app() -> Element {
                                 title: "Write a cross-section (cut) surface OBJ to the temp dir",
                                 onclick: move |_| model.write().write_cut_surface(),
                                 "Cut surf"
+                            }
+                        }
+                        // Interactive cut-plane offset (Å along +Z from the bbox centre).
+                        div { style: "display:flex;gap:6px;align-items:center;padding:2px 12px;",
+                            span { style: "font-size:11px;color:{COL_TEXT_DIM};width:48px;", "Cut Z" }
+                            input {
+                                r#type: "range",
+                                min: "-20",
+                                max: "20",
+                                step: "1",
+                                value: "{cut_offset_input}",
+                                style: "flex:1;",
+                                oninput: move |e| {
+                                    if let Ok(value) = e.value().parse::<f64>() {
+                                        cut_offset_input.set(value);
+                                        model.write().cut_offset = value;
+                                    }
+                                },
                             }
                         }
                         // Bond editor: make/remove a bond between two atom serial ids.
