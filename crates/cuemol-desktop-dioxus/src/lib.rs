@@ -41,6 +41,18 @@ const PICK_RADIUS_PX: f64 = 12.0;
 // Background of the 3D image (matches --viewport so letterboxed margins blend in).
 const VIEW_CLEAR: [f64; 4] = [0.08, 0.08, 0.11, 1.0];
 
+/// Renderer representation types offered by the Render panel, mirroring the egui
+/// (`gui.rs`) and gpui (`gpui_app.rs`) `RENDERER_TYPES` so all three front ends expose
+/// the same set (CueMol2 Render menu). `(internal_id, display_label)`.
+const RENDERER_TYPES: &[(&str, &str)] = &[
+    ("cpk", "CPK"),
+    ("ballstick", "Ball & Stick"),
+    ("trace", "Trace"),
+    ("ribbon", "Ribbon"),
+    ("cartoon", "Cartoon"),
+    ("tube", "Tube"),
+];
+
 // Dark palette shared by the panels (CSS hex), mirroring the gpui shell.
 // Colors reference CSS custom properties (defined on the root via `theme_vars`), so a
 // light/dark toggle just swaps the root variable values — every baked `{COL_*}` style
@@ -437,6 +449,46 @@ impl Model {
         let _ =
             self.state
                 .set_renderer_property(object_uid, renderer_uid, key, format!("{next:.3}"));
+        self.rebuild_selection();
+    }
+
+    /// Create a renderer of representation `ty` on `object_uid` (CueMol2 Render menu).
+    /// The name is suffixed with the current renderer count so repeated adds stay unique,
+    /// mirroring egui's `open_renderer_dialog` naming. Re-tessellates so the new
+    /// representation appears in the 3D view immediately.
+    fn add_renderer(&mut self, object_uid: cuemol_core::Uid, ty: &str) {
+        let index = self.state.renderer_summaries(object_uid).len();
+        let name = format!("{ty}{index}");
+        match self.state.new_renderer_in_active_scene(object_uid, ty, name) {
+            Ok(_) => self.status = format!("Added {ty} renderer"),
+            Err(error) => self.status = format!("Add renderer failed: {error}"),
+        }
+        self.rebuild_selection();
+    }
+
+    /// Remove a renderer from its object (CueMol2 workspace-tree → Delete).
+    fn delete_renderer(&mut self, object_uid: cuemol_core::Uid, renderer_uid: cuemol_core::Uid) {
+        match self
+            .state
+            .destroy_renderer_in_object(object_uid, renderer_uid)
+        {
+            Ok(_) => self.status = "Renderer deleted".to_string(),
+            Err(error) => self.status = format!("Delete renderer failed: {error}"),
+        }
+        self.rebuild_selection();
+    }
+
+    /// Flip a renderer's visibility (CueMol2 workspace-tree checkbox). `visible` is the
+    /// renderer's CURRENT state; the new state is its negation.
+    fn toggle_renderer_visible(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        visible: bool,
+    ) {
+        let _ = self
+            .state
+            .set_renderer_visible(object_uid, renderer_uid, !visible);
         self.rebuild_selection();
     }
 
@@ -914,8 +966,18 @@ fn app() -> Element {
         let m = model.read();
         m.state.active_measure(&m.selection_text)
     };
-    // Renderers of the active scene's objects + their editable bond/atom radii.
-    let renderers: Vec<(cuemol_core::Uid, cuemol_core::Uid, String, f64, f64)> = {
+    // Active scene's objects (target list for "Add renderer", per-object so a
+    // multi-molecule scene never silently attaches to the wrong one).
+    let objects: Vec<(cuemol_core::Uid, String)> = model
+        .read()
+        .state
+        .active_object_summaries()
+        .iter()
+        .map(|object| (object.uid, object.name.clone()))
+        .collect();
+    // Renderers of the active scene's objects + their editable bond/atom radii + the
+    // live visibility flag (drives the per-row show/hide toggle).
+    let renderers: Vec<(cuemol_core::Uid, cuemol_core::Uid, String, f64, f64, bool)> = {
         let m = model.read();
         let mut out = Vec::new();
         for object in m.state.active_object_summaries() {
@@ -930,7 +992,14 @@ fn app() -> Element {
                     .renderer_property(object.uid, renderer.uid, "sphr")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0.30);
-                out.push((object.uid, renderer.uid, renderer.name, bondw, sphr));
+                out.push((
+                    object.uid,
+                    renderer.uid,
+                    renderer.name,
+                    bondw,
+                    sphr,
+                    renderer.visible,
+                ));
             }
         }
         out
@@ -1169,12 +1238,44 @@ fn app() -> Element {
                         div { style: "{section_line_style}",
                             {measure.clone().unwrap_or_else(|| "Select 2 / 3 / 4 atoms".to_string())}
                         }
-                        // Renderer geometry editing (CueMol2 renderer property dialog).
-                        if !renderers.is_empty() {
+                        // Renderer management: create-by-type / visibility / delete /
+                        // geometry editing (CueMol2 Render menu + renderer property dialog).
+                        if !objects.is_empty() {
                             div { style: "{section_header_style}", "Renderer" }
-                            for (ri , (obj , rend , name , bondw , sphr)) in renderers.iter().enumerate() {
+                            // Add a renderer of a chosen representation, PER OBJECT so a
+                            // multi-molecule scene attaches to the intended one.
+                            for (oi , (obj_uid , obj_name)) in objects.iter().enumerate() {
+                                div { key: "rend-add-{oi}",
+                                    div { style: "{section_line_style}", "Add to {obj_name}:" }
+                                    div { style: "display:flex;gap:4px;padding:2px 12px;flex-wrap:wrap;",
+                                        for (ty , label) in RENDERER_TYPES.iter() {
+                                            button {
+                                                key: "{ty}",
+                                                style: "{color_btn_style}",
+                                                onclick: { let (o, t) = (*obj_uid, *ty); move |_| model.write().add_renderer(o, t) },
+                                                "{label}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            for (ri , (obj , rend , name , bondw , sphr , visible)) in renderers.iter().enumerate() {
                                 div { key: "rend-{ri}",
-                                    div { style: "{section_line_style}", "{name}" }
+                                    div { style: "display:flex;gap:4px;align-items:center;padding:2px 12px;",
+                                        span { style: "flex:1;", "{name}" }
+                                        button {
+                                            style: "{color_btn_style}",
+                                            title: "Toggle visibility",
+                                            onclick: { let (o, r, v) = (*obj, *rend, *visible); move |_| model.write().toggle_renderer_visible(o, r, v) },
+                                            {if *visible { "●" } else { "○" }}
+                                        }
+                                        button {
+                                            style: "{color_btn_style}",
+                                            title: "Delete renderer",
+                                            onclick: { let (o, r) = (*obj, *rend); move |_| model.write().delete_renderer(o, r) },
+                                            "✕"
+                                        }
+                                    }
                                     div { style: "display:flex;gap:4px;align-items:center;padding:2px 12px;",
                                         span { style: "font-size:11px;color:{COL_TEXT_DIM};width:70px;", "Bond {bondw:.2}" }
                                         button {
@@ -1612,6 +1713,62 @@ mod tests {
                 .any(|line| line.contains("THR 1") && line.contains("atoms")),
             "expected a THR 1 residue row (1CRN starts with THR 1)"
         );
+    }
+
+    #[test]
+    fn renderer_create_toggle_delete_round_trips_in_dioxus() {
+        // Render-menu parity with egui/gpui: the dioxus front end can create a
+        // representation by type, flip its visibility, and delete it — all through the
+        // shared-core API (`new_renderer_in_active_scene`/`set_renderer_visible`/
+        // `destroy_renderer_in_object`). Mirrors gpui's
+        // `create_then_delete_renderer_round_trips`. GPU-free (rebuild_selection's
+        // offscreen render self-skips with no adapter).
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        let object = model
+            .state
+            .active_object_summaries()
+            .first()
+            .expect("1CRN loads one object")
+            .uid;
+        let count = |model: &Model| model.state.renderer_summaries(object).len();
+        let cartoons = |model: &Model| {
+            model
+                .state
+                .renderer_summaries(object)
+                .into_iter()
+                .filter(|renderer| renderer.renderer_type == "cartoon")
+                .count()
+        };
+        let before = count(&model);
+        assert_eq!(cartoons(&model), 0, "no cartoon renderer before add");
+
+        // Create a cartoon representation.
+        model.add_renderer(object, "cartoon");
+        assert_eq!(count(&model), before + 1, "add_renderer adds one renderer");
+        assert_eq!(cartoons(&model), 1, "the new renderer is a cartoon");
+
+        // Toggle visibility (created visible → hidden).
+        let renderer = model
+            .state
+            .renderer_summaries(object)
+            .into_iter()
+            .find(|renderer| renderer.renderer_type == "cartoon")
+            .expect("cartoon renderer present");
+        assert!(renderer.visible, "a freshly added renderer is visible");
+        model.toggle_renderer_visible(object, renderer.uid, renderer.visible);
+        let hidden = model
+            .state
+            .renderer_summaries(object)
+            .into_iter()
+            .find(|candidate| candidate.uid == renderer.uid)
+            .expect("renderer still present after toggle");
+        assert!(!hidden.visible, "toggle hides the renderer");
+
+        // Delete it.
+        model.delete_renderer(object, renderer.uid);
+        assert_eq!(count(&model), before, "delete_renderer removes it");
+        assert_eq!(cartoons(&model), 0, "the cartoon renderer is gone");
     }
 
     #[test]
