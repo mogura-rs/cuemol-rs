@@ -1477,6 +1477,62 @@ impl DesktopAppState {
         Ok(surface)
     }
 
+    /// Append hydrogen bonds as dashed cyan lines to the snapshot (CueMol2 H-bond
+    /// display). Heavy-atom heuristic (deposited structures usually lack H): a donor N
+    /// and acceptor O in different residues within 2.4–3.5 Å. No-op unless `show`.
+    pub fn append_hbond_geometry(&self, snapshot: &mut RenderSceneSnapshot, show: bool) {
+        if !show {
+            return;
+        }
+        let Some(scene_uid) = self.active_scene else {
+            return;
+        };
+        let Some(scene) = self.scene_manager().scene(scene_uid) else {
+            return;
+        };
+        let color = cuemol_gfx::ColorSpec {
+            base: cuemol_gfx::ColorBase::Html {
+                r: 120,
+                g: 220,
+                b: 235,
+                a: 255,
+            },
+            modifiers: Vec::new(),
+        };
+        for object in scene.objects() {
+            let atoms = object.mol().atoms();
+            for donor in atoms.iter().filter(|atom| atom.element.eq_ignore_ascii_case("N")) {
+                for acceptor in atoms.iter().filter(|atom| atom.element.eq_ignore_ascii_case("O")) {
+                    if donor.chain_id == acceptor.chain_id
+                        && donor.res_id == acceptor.res_id
+                        && donor.ins_code == acceptor.ins_code
+                    {
+                        continue;
+                    }
+                    let distance = donor.position.sub(acceptor.position).length3d();
+                    if !(2.4..=3.5).contains(&distance) {
+                        continue;
+                    }
+                    // 5 dashes (half dash, half gap) along the donor→acceptor line.
+                    for k in 0..5 {
+                        let t0 = k as f64 / 5.0;
+                        let from = lerp_point(donor.position, acceptor.position, t0);
+                        let to = lerp_point(donor.position, acceptor.position, t0 + 0.1);
+                        snapshot.bonds.push(cuemol_render::RenderBond {
+                            from,
+                            to,
+                            radius: 0.05,
+                            color: Some(color.clone()),
+                            object_uid: None,
+                            atom_indices: None,
+                            selected: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     /// Build a molecular surface (SES) for an object and convert it to a renderable
     /// triangle mesh (CueMol2 `molsurf` renderer DISPLAY — until now the desktop only
     /// EXPORTED the surface to OBJ, never drew it). A front end caches the mesh and adds
@@ -1683,6 +1739,15 @@ fn renderer_render_options(
         apply_renderer_styles(&mut options, renderer, styles, DEFAULT_STYLE_SCOPE);
     }
     options
+}
+
+/// Linear interpolation between two points (used to dash the H-bond lines).
+fn lerp_point(a: cuemol_core::Vector4, b: cuemol_core::Vector4, t: f64) -> cuemol_core::Vector4 {
+    cuemol_core::Vector4::new3(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t,
+    )
 }
 
 fn merge_bounds(

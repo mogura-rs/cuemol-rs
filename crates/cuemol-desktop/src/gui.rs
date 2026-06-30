@@ -384,6 +384,8 @@ struct GuiApplication {
     surface_mesh: Option<cuemol_render::RenderMesh>,
     /// Atom/residue labels overlaid on the selected atoms in the 3D view.
     show_labels: bool,
+    /// Hydrogen-bond dashed lines (heavy-atom N···O heuristic).
+    show_hbonds: bool,
     /// Force every left-dock accordion section open (an "expand all panels" aid, also
     /// used to snapshot the bodies inside the REAL narrow dock for layout review).
     force_open_all_panels: bool,
@@ -634,6 +636,7 @@ impl GuiApplication {
             show_surface: false,
             surface_mesh: None,
             show_labels: false,
+            show_hbonds: false,
             force_open_all_panels: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
@@ -1528,6 +1531,15 @@ impl GuiApplication {
                 .clicked()
             {
                 self.show_labels = !self.show_labels;
+            }
+            let hbond_label = if self.show_hbonds { "H-bonds ✓" } else { "H-bonds" };
+            if ui
+                .button(hbond_label)
+                .on_hover_text("Show hydrogen bonds as dashed lines (N···O heuristic)")
+                .clicked()
+            {
+                self.show_hbonds = !self.show_hbonds;
+                self.rebuild_snapshot();
             }
         });
 
@@ -2857,6 +2869,9 @@ impl GuiApplication {
             self.density_level,
             self.show_density_contour,
         );
+        // Hydrogen-bond dashed lines.
+        self.state
+            .append_hbond_geometry(&mut self.snapshot, self.show_hbonds);
         // Cached filled density isosurface, when shown.
         if self.show_density_solid {
             if let Some(mesh) = self.density_solid_mesh.clone() {
@@ -5736,6 +5751,32 @@ mod tests {
     }
 
     #[test]
+    fn hbonds_add_dashed_lines_for_1crn() {
+        // 1CRN (helices + a β-sheet) has many backbone N···O hydrogen bonds, each drawn
+        // as dashed segments; toggling H-bonds adds them and toggling off removes them.
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        let base = app.snapshot.bonds.len();
+
+        app.show_hbonds = true;
+        app.rebuild_snapshot();
+        let added = app.snapshot.bonds.len() - base;
+        assert!(
+            added > 20,
+            "1CRN's backbone H-bonds add dashed segments, got {added}"
+        );
+
+        app.show_hbonds = false;
+        app.rebuild_snapshot();
+        assert_eq!(app.snapshot.bonds.len(), base, "removed on toggle off");
+    }
+
+    #[test]
     fn surface_display_adds_an_ses_mesh_to_the_snapshot() {
         // Molecular-surface DISPLAY (until now the desktop only EXPORTED the SES to OBJ):
         // build_surface_mesh yields a triangle mesh, and toggling Surface adds/removes it
@@ -6246,6 +6287,33 @@ mod tests {
                         eprintln!("snapshot written to {}", path.display());
                     }
                 }
+            }
+        }
+
+        // (9) 3D render of 1CRN's hydrogen-bond network (dashed cyan lines) over the
+        // ball-and-stick model.
+        if let Some(pdb) = reference_pdb_path() {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            app.open_path = pdb.to_string_lossy().to_string();
+            app.open_current_path(&mut camera);
+            app.show_hbonds = true;
+            app.rebuild_snapshot();
+            camera.fit_snapshot(&app.snapshot);
+            let (w, h) = (900u32, 700u32);
+            let mvp = camera
+                .view_projection(w as f32 / h as f32)
+                .to_cols_array_2d();
+            if let Some(png) = crate::offscreen::render_snapshot_png(
+                &app.snapshot,
+                mvp,
+                w,
+                h,
+                [0.02, 0.02, 0.05, 1.0],
+            ) {
+                let path = out_dir.join("hbonds_3d.png");
+                std::fs::write(&path, png).expect("write hbonds_3d.png");
+                eprintln!("snapshot written to {}", path.display());
             }
         }
     }
