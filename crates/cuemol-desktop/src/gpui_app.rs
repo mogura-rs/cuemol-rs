@@ -1806,22 +1806,42 @@ impl CueMolGpuiApp {
     fn cuemol_extra_panels(&self) -> Vec<gpui::AnyElement> {
         let mut out: Vec<gpui::AnyElement> = Vec::new();
 
-        // --- MolStruct ---
+        // --- MolStruct: chain → residue hierarchy (CueMol2 `molStructTree`), shared
+        // with the egui/dioxus front ends via `active_structure_tree`. Residue rows are
+        // indented with an em-space. ---
         out.push(section_label("MolStruct").into_any_element());
-        let seqs = self.state.active_sequence_summaries();
-        if seqs.is_empty() {
+        let tree = self.state.active_structure_tree();
+        if tree.is_empty() {
             out.push(info_row("No molecule loaded.".into()).into_any_element());
         } else {
-            for seq in seqs {
-                let chain = if seq.chain_id.is_empty() {
-                    "_".to_string()
-                } else {
-                    seq.chain_id.clone()
-                };
-                out.push(
-                    info_row(format!("chain {chain} — {} residues", seq.residue_count))
+            for object in tree {
+                for chain in object.chains {
+                    let chain_id = if chain.chain_id.is_empty() {
+                        "_".to_string()
+                    } else {
+                        chain.chain_id.clone()
+                    };
+                    out.push(
+                        info_row(format!(
+                            "Chain {chain_id} — {} residues",
+                            chain.residues.len()
+                        ))
                         .into_any_element(),
-                );
+                    );
+                    for residue in chain.residues {
+                        let ins = residue.ins_code.map(String::from).unwrap_or_default();
+                        out.push(
+                            info_row(format!(
+                                "\u{2003}{} {}{} · {} atoms",
+                                residue.res_name.trim(),
+                                residue.res_id,
+                                ins,
+                                residue.atoms.len()
+                            ))
+                            .into_any_element(),
+                        );
+                    }
+                }
             }
         }
 

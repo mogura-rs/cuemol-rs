@@ -326,14 +326,29 @@ impl Model {
     fn panel_sections(&self) -> Vec<PanelSection> {
         let mut sections = Vec::new();
 
+        // MolStruct: the chain → residue hierarchy (CueMol2 `molStructTree`), shared
+        // with the egui/gpui front ends via `active_structure_tree`. Residue rows are
+        // indented with an em-space (ASCII leading spaces collapse in HTML).
         let mut lines = Vec::new();
-        for seq in self.state.active_sequence_summaries() {
-            let chain = if seq.chain_id.is_empty() {
-                "_".to_string()
-            } else {
-                seq.chain_id.clone()
-            };
-            lines.push(format!("chain {chain} — {} residues", seq.residue_count));
+        for object in self.state.active_structure_tree() {
+            for chain in &object.chains {
+                let chain_id = if chain.chain_id.is_empty() {
+                    "_"
+                } else {
+                    chain.chain_id.as_str()
+                };
+                lines.push(format!("Chain {chain_id} — {} residues", chain.residues.len()));
+                for residue in &chain.residues {
+                    let ins = residue.ins_code.map(String::from).unwrap_or_default();
+                    lines.push(format!(
+                        "\u{2003}{} {}{} · {} atoms",
+                        residue.res_name.trim(),
+                        residue.res_id,
+                        ins,
+                        residue.atoms.len()
+                    ));
+                }
+            }
         }
         if lines.is_empty() {
             lines.push("No molecule loaded.".into());
@@ -814,6 +829,31 @@ mod tests {
                 uri.len()
             );
         }
+    }
+
+    #[test]
+    fn molstruct_section_shows_the_chain_residue_hierarchy() {
+        // The MolStruct panel descends chain → residue (shared `active_structure_tree`),
+        // not just a per-chain summary, so it carries per-residue rows.
+        let Some(pdb) = ref_1crn() else { return };
+        let model = Model::new(vec![pdb]);
+        let sections = model.panel_sections();
+        let molstruct = sections
+            .iter()
+            .find(|section| section.title == "MolStruct")
+            .expect("MolStruct section present");
+        assert!(
+            molstruct.lines.len() > 40,
+            "expected per-residue rows under the chain, got {} lines",
+            molstruct.lines.len()
+        );
+        assert!(
+            molstruct
+                .lines
+                .iter()
+                .any(|line| line.contains("THR 1") && line.contains("atoms")),
+            "expected a THR 1 residue row (1CRN starts with THR 1)"
+        );
     }
 
     #[test]
