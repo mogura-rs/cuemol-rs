@@ -2040,6 +2040,51 @@ impl GuiApplication {
                             if ui.checkbox(&mut visible, "Visible").changed() {
                                 self.set_renderer_visibility(object.uid, renderer.uid, visible);
                             }
+                            // Editable geometry overrides (CueMol2 renderer property
+                            // dialog): bond cylinder + atom sphere radius. The inline
+                            // attr wins over the style, so the 3D view updates live.
+                            let mut bondw = self
+                                .state
+                                .renderer_property(object.uid, renderer.uid, "bondw")
+                                .and_then(|value| value.parse::<f32>().ok())
+                                .unwrap_or(0.18);
+                            ui.horizontal(|ui| {
+                                ui.label("Bond radius");
+                                if ui
+                                    .add(egui::DragValue::new(&mut bondw).speed(0.01))
+                                    .changed()
+                                {
+                                    bondw = bondw.clamp(0.01, 2.0);
+                                    let _ = self.state.set_renderer_property(
+                                        object.uid,
+                                        renderer.uid,
+                                        "bondw",
+                                        format!("{bondw:.3}"),
+                                    );
+                                    self.rebuild_snapshot();
+                                }
+                            });
+                            let mut sphr = self
+                                .state
+                                .renderer_property(object.uid, renderer.uid, "sphr")
+                                .and_then(|value| value.parse::<f32>().ok())
+                                .unwrap_or(0.30);
+                            ui.horizontal(|ui| {
+                                ui.label("Sphere radius");
+                                if ui
+                                    .add(egui::DragValue::new(&mut sphr).speed(0.01))
+                                    .changed()
+                                {
+                                    sphr = sphr.clamp(0.05, 3.0);
+                                    let _ = self.state.set_renderer_property(
+                                        object.uid,
+                                        renderer.uid,
+                                        "sphr",
+                                        format!("{sphr:.3}"),
+                                    );
+                                    self.rebuild_snapshot();
+                                }
+                            });
                             if ui.button("Delete Renderer").clicked() {
                                 self.delete_renderer(object.uid, renderer.uid);
                             }
@@ -5332,6 +5377,53 @@ mod tests {
             rainbow_colors > element_colors + 10,
             "rainbow must spread carbon colours into a gradient: \
              element={element_colors} rainbow={rainbow_colors}"
+        );
+    }
+
+    #[test]
+    fn setting_a_renderer_bond_radius_changes_the_rendered_geometry() {
+        // The renderer property dialog's "Bond radius" must reach the geometry: setting
+        // the inline `bondw` attribute and re-rendering changes the snapshot's bond
+        // cylinder radii (the inline attr wins over the style in apply_renderer_styles).
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        let object_uid = app
+            .state
+            .active_object_summaries()
+            .first()
+            .map(|object| object.uid)
+            .expect("1CRN loads as one object");
+        // Ensure a renderer exists to target (a plain PDB may render implicitly).
+        let renderer_uid = app
+            .state
+            .renderer_summaries(object_uid)
+            .first()
+            .map(|renderer| renderer.uid)
+            .unwrap_or_else(|| {
+                app.state
+                    .new_renderer_in_active_scene(object_uid, "ballstick", "test")
+                    .expect("create renderer")
+                    .result_renderer
+            });
+
+        app.state
+            .set_renderer_property(object_uid, renderer_uid, "bondw", "0.5")
+            .expect("set bondw");
+        app.rebuild_snapshot();
+        let radius = app
+            .snapshot
+            .bonds
+            .first()
+            .map(|bond| bond.radius)
+            .expect("the rendered scene has bonds");
+        assert!(
+            (radius - 0.5).abs() < 0.05,
+            "bond radius should reflect bondw=0.5, got {radius}"
         );
     }
 

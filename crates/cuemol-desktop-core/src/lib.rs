@@ -676,6 +676,44 @@ impl DesktopAppState {
         Ok(())
     }
 
+    /// Set an inline `.qsc` property attribute on a renderer (CueMol2 renderer property
+    /// dialogs): e.g. `bondw` (bond cylinder radius), `sphr` (atom sphere radius),
+    /// `detail` (tessellation). The snapshot's `apply_renderer_styles` resolves the
+    /// inline attribute ahead of the style default, so the geometry updates on re-render.
+    pub fn set_renderer_property(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<()> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let renderer = object
+            .renderer_mut(renderer_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        renderer.set_qsc_attr(key, value);
+        Ok(())
+    }
+
+    /// The inline value of a renderer property attribute (`None` if unset, so the front
+    /// end can fall back to the style/default). Companion to
+    /// [`set_renderer_property`](Self::set_renderer_property).
+    pub fn renderer_property(
+        &self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        key: &str,
+    ) -> Option<String> {
+        self.scene_manager()
+            .object(object_uid)?
+            .renderer(renderer_uid)?
+            .qsc_attr(key)
+            .map(str::to_string)
+    }
+
     pub fn destroy_renderer_in_object(
         &mut self,
         object_uid: Uid,
