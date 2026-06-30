@@ -255,6 +255,8 @@ enum Dialog {
     BondEditor {
         target: cuemol_core::Uid,
     },
+    /// Load + preview a script file in the output console.
+    Script,
 }
 
 /// A point-in-time copy of everything Undo/Redo restores. `DesktopAppState` is
@@ -289,6 +291,7 @@ struct DialogInputs {
     morph_name: Option<Entity<TextInput>>,
     bond_aid1: Option<Entity<TextInput>>,
     bond_aid2: Option<Entity<TextInput>>,
+    script_path: Option<Entity<TextInput>>,
     config_key: Option<Entity<TextInput>>,
     config_value: Option<Entity<TextInput>>,
     config_path: Option<Entity<TextInput>>,
@@ -1270,6 +1273,71 @@ impl CueMolGpuiApp {
         }
     }
 
+    /// Load a script file and echo its lines into the output console (CueMol2 Tools →
+    /// Execute script). HONEST SCOPE: CueMol2 embeds a JS engine; a faithful interpreter
+    /// is the categorical floor (see the gap map). This loads + previews, like egui.
+    fn run_script(&mut self, path: &str) {
+        match std::fs::read_to_string(path.trim()) {
+            Ok(text) => {
+                self.set_status(format!(
+                    "Loaded script: {} (JS engine not embedded — preview only)",
+                    path.trim()
+                ));
+                for line in text.lines().take(50) {
+                    self.log_lines.push(format!("  {line}"));
+                }
+            }
+            Err(error) => self.set_status(format!("Script load failed: {error}")),
+        }
+    }
+
+    /// Time N offscreen renders and log the average frame time / FPS (CueMol2 Tools →
+    /// Performance measure).
+    fn measure_performance(&mut self) {
+        const FRAMES: u32 = 20;
+        let start = std::time::Instant::now();
+        let mut rendered = 0u32;
+        for _ in 0..FRAMES {
+            if self.render_rgba().is_some() {
+                rendered += 1;
+            }
+        }
+        if rendered == 0 {
+            self.set_status("Performance: no GPU adapter / empty scene");
+            return;
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / rendered as f64;
+        let fps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };
+        self.set_status(format!(
+            "Performance: {ms:.2} ms/frame ({fps:.0} fps) over {rendered} renders"
+        ));
+    }
+
+    /// Log the active camera + crystal-cell properties to the output console (CueMol2
+    /// Scene/View → Properties).
+    fn show_view_properties(&mut self) {
+        let camera = self.state.active_scene_saved_camera().unwrap_or(self.camera.clone());
+        let center = camera.center();
+        self.set_status(format!(
+            "View: center=({:.2},{:.2},{:.2}) zoom={:.1} {}",
+            center.x,
+            center.y,
+            center.z,
+            camera.zoom(),
+            if camera.is_perspective() {
+                "perspective"
+            } else {
+                "orthographic"
+            }
+        ));
+        if let Some(summary) = self.state.active_crystal_summaries().first() {
+            self.log_lines.push(format!(
+                "  cell: a={:.2} b={:.2} c={:.2}  SG={}",
+                summary.a, summary.b, summary.c, summary.space_group_name
+            ));
+        }
+    }
+
     /// Write APBS electrostatics input files (PQR + APBS input + DX target) for `target`
     /// to the temp dir (CueMol2 Tools → APBS). No dialog — paths are derived, reported
     /// in the status bar.
@@ -1475,6 +1543,12 @@ impl CueMolGpuiApp {
         self.dialog = Dialog::BondEditor { target };
         self.dialog_inputs.bond_aid1 = Some(cx.new(|cx| TextInput::new(cx, "", "aid1")));
         self.dialog_inputs.bond_aid2 = Some(cx.new(|cx| TextInput::new(cx, "", "aid2")));
+    }
+
+    fn open_script_dialog(&mut self, cx: &mut Context<Self>) {
+        self.dialog = Dialog::Script;
+        self.dialog_inputs.script_path =
+            Some(cx.new(|cx| TextInput::new(cx, "", "path to .js script")));
     }
 
     fn open_chain_dialog(&mut self, target: cuemol_core::Uid, cx: &mut Context<Self>) {
@@ -2074,6 +2148,15 @@ impl CueMolGpuiApp {
                         }))
                         .into_any_element(),
                 );
+                items.push(
+                    menu_item("mi-viewprops", "Scene / View properties")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.show_view_properties();
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
                 items.push(menu_separator().into_any_element());
                 for (label, bg) in [
                     ("Background: Slate", Background::Slate),
@@ -2179,6 +2262,24 @@ impl CueMolGpuiApp {
                         .into_any_element(),
                 );
                 items.push(menu_separator().into_any_element());
+                items.push(
+                    menu_item("mi-script", "Execute script…")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.open_script_dialog(cx);
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    menu_item("mi-perf", "Performance measure")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.measure_performance();
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
                 items.push(
                     menu_item("mi-config", "Configuration…")
                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
@@ -3406,6 +3507,7 @@ impl CueMolGpuiApp {
             }
             Dialog::Config => self.config_dialog(cx).into_any_element(),
             Dialog::BondEditor { target } => self.bond_dialog(cx, *target).into_any_element(),
+            Dialog::Script => self.script_dialog(cx).into_any_element(),
         };
         div()
             .absolute()
@@ -3622,6 +3724,43 @@ impl CueMolGpuiApp {
             _ => self.set_status("Bond editor: enter two atom ids"),
         }
         cx.notify();
+    }
+
+    fn script_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let input = self.dialog_inputs.script_path.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_color(rgb(col_accent())).child("Execute script"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Loads + previews the file (JS engine not embedded)"),
+            )
+            .children(input.map(|i| i.into_any_element()))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .justify_end()
+                    .child(button("script-run", "Run").on_click(cx.listener(
+                        move |this, _: &gpui::ClickEvent, _, cx| {
+                            let path = this
+                                .dialog_inputs
+                                .script_path
+                                .as_ref()
+                                .map(|i| i.read(cx).text())
+                                .unwrap_or_default();
+                            this.run_script(&path);
+                            this.close_dialog();
+                            cx.notify();
+                        },
+                    )))
+                    .child(dialog_cancel(cx)),
+            )
     }
 
     fn residue_dialog(&self, cx: &mut Context<Self>, target: cuemol_core::Uid) -> impl IntoElement {
@@ -4868,6 +5007,34 @@ mod tests {
         assert!(
             app.status.starts_with("Removed bond"),
             "remove ({})",
+            app.status
+        );
+    }
+
+    #[test]
+    fn script_perf_and_view_properties_log_in_gpui() {
+        let Some((mut app, _object)) = app_with_molecule() else {
+            return;
+        };
+        // Execute script echoes a file into the console log.
+        let script = std::env::temp_dir().join("cuemol_gpui_script.js");
+        std::fs::write(&script, "// hi\nbar();\n").unwrap();
+        app.run_script(script.to_str().unwrap());
+        assert!(
+            app.log_lines.iter().any(|l| l.contains("bar();")),
+            "script lines echoed into the log"
+        );
+        let _ = std::fs::remove_file(&script);
+
+        // Scene/View properties log the camera info.
+        app.show_view_properties();
+        assert!(app.status.starts_with("View:"), "view props ({})", app.status);
+
+        // Performance measure reports either timing or the no-adapter note.
+        app.measure_performance();
+        assert!(
+            app.status.starts_with("Performance:"),
+            "perf ({})",
             app.status
         );
     }
