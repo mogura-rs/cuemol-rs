@@ -269,6 +269,9 @@ pub struct CueMolGpuiApp {
     bottom_tab: BottomTab,
     show_inspector: bool,
     show_bottom: bool,
+    /// Symmetry panel toggles (CueMol2 "Unit cell" / "Symm mol").
+    show_unit_cell: bool,
+    show_symm_mates: bool,
     /// Console / status log (newest last), capped to avoid unbounded growth.
     log_lines: Vec<String>,
     /// Most-recently-opened file paths (newest first, capped at 10).
@@ -339,6 +342,8 @@ impl CueMolGpuiApp {
             // CueMol2 has no right dock; properties open on demand via the toolbar toggle.
             show_inspector: false,
             show_bottom: true,
+            show_unit_cell: false,
+            show_symm_mates: false,
             log_lines: Vec::new(),
             recent_paths: Vec::new(),
             undo_stack: Vec::new(),
@@ -379,8 +384,24 @@ impl CueMolGpuiApp {
     /// applied selection, optionally re-framing the camera (after a load/delete).
     /// This is the retained-mode equivalent of egui rebuilding its snapshot every
     /// frame: call it after any scene mutation or selection change.
+    /// The render snapshot for the applied selection, with the Symmetry panel's crystal
+    /// geometry (unit-cell box / mates) appended via the shared core. Used by the render
+    /// path — NOT by picking, which hit-tests the bare molecule.
+    fn current_render_snapshot(&self) -> Option<cuemol_render::RenderSceneSnapshot> {
+        let mut snapshot = self
+            .state
+            .active_render_snapshot(&self.applied_selection)
+            .ok()?;
+        self.state.append_crystal_geometry(
+            &mut snapshot,
+            self.show_unit_cell,
+            self.show_symm_mates,
+        );
+        Some(snapshot)
+    }
+
     fn refresh_scene(&mut self, reframe: bool) {
-        let snapshot = self.state.active_render_snapshot(&self.applied_selection).ok();
+        let snapshot = self.current_render_snapshot();
         if reframe {
             if let Some(snapshot) = &snapshot {
                 self.camera = frame_camera(snapshot);
@@ -426,6 +447,18 @@ impl CueMolGpuiApp {
 
     fn color_bfactor(&mut self) {
         self.apply_coloring(Some("BfacColoring"), BTreeMap::new());
+    }
+
+    /// Symmetry panel toggles (CueMol2 "Unit cell" / "Symm mol"): re-tessellate so the
+    /// shared crystal geometry appears/disappears.
+    fn toggle_unit_cell(&mut self) {
+        self.show_unit_cell = !self.show_unit_cell;
+        self.refresh_scene(false);
+    }
+
+    fn toggle_symm_mates(&mut self) {
+        self.show_symm_mates = !self.show_symm_mates;
+        self.refresh_scene(false);
     }
 
     /// Pull the live selection text from the input entity; if it differs from the
@@ -1840,6 +1873,30 @@ impl CueMolGpuiApp {
                 .child(color_btn("col-bfac", "B-factor").on_click(cx.listener(
                     |this, _: &gpui::ClickEvent, _, cx| {
                         this.color_bfactor();
+                        cx.notify();
+                    },
+                )))
+                .into_any_element(),
+        );
+
+        // Symmetry actions (CueMol2 symmetry-panel.xul): cell box + symmetry mates.
+        rows.push(section_label("Symmetry actions").into_any_element());
+        rows.push(
+            div()
+                .flex()
+                .flex_row()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .child(color_btn("sym-cell", "Unit cell").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.toggle_unit_cell();
+                        cx.notify();
+                    },
+                )))
+                .child(color_btn("sym-mates", "Symm mol").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.toggle_symm_mates();
                         cx.notify();
                     },
                 )))
