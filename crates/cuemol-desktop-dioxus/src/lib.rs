@@ -15,6 +15,7 @@
 //! via the `onresize` observer), so a click's `element_coordinates()` (also CSS
 //! px) map 1:1 onto image pixels and atom picking needs no DPI math.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use dioxus::html::input_data::MouseButton;
@@ -180,6 +181,48 @@ impl Model {
     /// Cheap relative to first build: reuses the persistent device + cached mesh.
     fn rerender(&mut self) {
         self.image_uri = self.render_uri();
+    }
+
+    /// Apply an object-level coloring scheme to every molecule in the active scene
+    /// (CueMol2 Coloring panel), then re-tessellate. Uses the shared-core
+    /// `set_object_coloring`, so the snapshot's object-coloring cascade recolours each
+    /// carbon (and the ribbon) — identical to the egui front end.
+    fn apply_coloring(&mut self, coloring_type: Option<&str>, attrs: BTreeMap<String, String>) {
+        let uids: Vec<_> = self
+            .state
+            .active_object_summaries()
+            .iter()
+            .map(|object| object.uid)
+            .collect();
+        for uid in uids {
+            let _ = self
+                .state
+                .set_object_coloring(uid, coloring_type.map(String::from), attrs.clone());
+        }
+        self.status = match coloring_type {
+            Some(name) => format!("Coloring: {name}"),
+            None => "Coloring: Element".into(),
+        };
+        self.rebuild_selection();
+    }
+
+    /// Coloring presets wired to the sidebar buttons.
+    fn color_element(&mut self) {
+        self.apply_coloring(None, BTreeMap::new());
+    }
+
+    fn color_rainbow(&mut self) {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("mode".into(), "mol".into());
+        attrs.insert("start_hue".into(), "240".into());
+        attrs.insert("end_hue".into(), "0".into());
+        attrs.insert("sat".into(), "1".into());
+        attrs.insert("bri".into(), "1".into());
+        self.apply_coloring(Some("RainbowColoring"), attrs);
+    }
+
+    fn color_bfactor(&mut self) {
+        self.apply_coloring(Some("BfacColoring"), BTreeMap::new());
     }
 
     fn render_uri(&self) -> Option<String> {
@@ -536,6 +579,10 @@ fn app() -> Element {
          border-bottom:1px solid {COL_BORDER};margin-top:6px;"
     );
     let section_line_style = format!("padding:2px 12px;color:{COL_TEXT};font-size:11px;");
+    let color_btn_style = format!(
+        "height:22px;padding:0 8px;border-radius:4px;border:1px solid {COL_BORDER};\
+         background:{COL_BG};color:{COL_TEXT};cursor:pointer;font-size:11px;"
+    );
 
     rsx! {
         div { style: "{root_style}",
@@ -594,6 +641,25 @@ fn app() -> Element {
                             div { key: "sec-{si}", style: "{section_header_style}", "{sec.title}" }
                             for (li, line) in sec.lines.iter().enumerate() {
                                 div { key: "sec-{si}-l{li}", style: "{section_line_style}", "{line}" }
+                            }
+                        }
+                        // Coloring panel (CueMol2 coloring-panel.xul): object-level scheme.
+                        div { style: "{section_header_style}", "Coloring" }
+                        div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().color_element(),
+                                "Element"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().color_rainbow(),
+                                "Rainbow"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().color_bfactor(),
+                                "B-factor"
                             }
                         }
                     }
@@ -853,6 +919,38 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("THR 1") && line.contains("atoms")),
             "expected a THR 1 residue row (1CRN starts with THR 1)"
+        );
+    }
+
+    #[test]
+    fn coloring_recolors_the_dioxus_snapshot() {
+        // Applying Rainbow through the shared core must spread the carbon atoms across a
+        // hue gradient (one colour per residue) where Element gives a single carbon
+        // colour — the same object-coloring cascade the egui front end uses.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        let distinct = |model: &Model| -> usize {
+            model
+                .state
+                .active_render_snapshot("")
+                .map(|snapshot| {
+                    snapshot
+                        .atoms
+                        .iter()
+                        .filter_map(|atom| atom.color.as_ref())
+                        .map(|color| format!("{color:?}"))
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                })
+                .unwrap_or(0)
+        };
+        model.color_element();
+        let element = distinct(&model);
+        model.color_rainbow();
+        let rainbow = distinct(&model);
+        assert!(
+            rainbow > element + 10,
+            "rainbow must spread carbon colours: element={element} rainbow={rainbow}"
         );
     }
 
