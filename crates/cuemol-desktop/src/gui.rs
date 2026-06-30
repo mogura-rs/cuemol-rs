@@ -386,6 +386,8 @@ struct GuiApplication {
     show_labels: bool,
     /// Hydrogen-bond dashed lines (heavy-atom N···O heuristic).
     show_hbonds: bool,
+    /// Light vs dark UI theme (CueMol2's native XUL look is light; dark is the default).
+    light_theme: bool,
     /// Force every left-dock accordion section open (an "expand all panels" aid, also
     /// used to snapshot the bodies inside the REAL narrow dock for layout review).
     force_open_all_panels: bool,
@@ -637,6 +639,7 @@ impl GuiApplication {
             surface_mesh: None,
             show_labels: false,
             show_hbonds: false,
+            light_theme: false,
             force_open_all_panels: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
@@ -722,6 +725,12 @@ impl GuiApplication {
 
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         self.pixels_per_point = ctx.pixels_per_point();
+        // UI theme (View menu): CueMol2's native XUL look is light; dark is the default.
+        ctx.set_visuals(if self.light_theme {
+            egui::Visuals::light()
+        } else {
+            egui::Visuals::dark()
+        });
         // CueMol2 window order (uxp_gui `cuemol2.xul`):
         // menu bar (top) -> ribbon (top) -> [ left dock | tabbed view | bottom dock ]
         // -> status bar (very bottom). There is no right dock; properties open modally.
@@ -1091,6 +1100,15 @@ impl GuiApplication {
                     }
                 });
                 ui.menu_button("View", |ui| {
+                    ui.menu_button("Theme", |ui| {
+                        if ui.radio_value(&mut self.light_theme, false, "Dark").clicked() {
+                            self.set_status("Dark theme");
+                        }
+                        if ui.radio_value(&mut self.light_theme, true, "Light").clicked() {
+                            self.set_status("Light theme");
+                        }
+                    });
+                    ui.separator();
                     if ui
                         .radio_value(&mut camera.perspective, true, "Perspective")
                         .clicked()
@@ -6060,6 +6078,21 @@ mod tests {
                 });
             harness.run();
             save_harness(&mut harness, &out_dir.join("dock.png"));
+        }
+
+        // (1b2) The shell in the LIGHT theme (View → Theme → Light).
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            app.light_theme = true;
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1366.0, 850.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("theme_light.png"));
         }
 
         // (1c) Atom labels overlaid on a small selection. The egui painter text DOES
