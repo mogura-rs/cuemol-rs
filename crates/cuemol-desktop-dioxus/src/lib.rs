@@ -331,6 +331,31 @@ impl Model {
         self.anim_playing = !self.anim_playing;
     }
 
+    /// Nudge a numeric renderer property (bond/atom radius) by a clamped delta and
+    /// re-tessellate (CueMol2 renderer property dialog), via the shared core.
+    fn adjust_renderer_property(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        key: &str,
+        delta: f64,
+    ) {
+        let (default, min, max) = match key {
+            "sphr" => (0.30, 0.05, 3.0),
+            _ => (0.18, 0.02, 2.0),
+        };
+        let current = self
+            .state
+            .renderer_property(object_uid, renderer_uid, key)
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(default);
+        let next = (current + delta).clamp(min, max);
+        let _ =
+            self.state
+                .set_renderer_property(object_uid, renderer_uid, key, format!("{next:.3}"));
+        self.rebuild_selection();
+    }
+
     /// Run a menu-bar dropdown action and close the menu.
     fn run_menu_action(&mut self, action: &str) {
         match action {
@@ -772,6 +797,27 @@ fn app() -> Element {
         let m = model.read();
         m.state.active_measure(&m.selection_text)
     };
+    // Renderers of the active scene's objects + their editable bond/atom radii.
+    let renderers: Vec<(cuemol_core::Uid, cuemol_core::Uid, String, f64, f64)> = {
+        let m = model.read();
+        let mut out = Vec::new();
+        for object in m.state.active_object_summaries() {
+            for renderer in m.state.renderer_summaries(object.uid) {
+                let bondw = m
+                    .state
+                    .renderer_property(object.uid, renderer.uid, "bondw")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.18);
+                let sphr = m
+                    .state
+                    .renderer_property(object.uid, renderer.uid, "sphr")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.30);
+                out.push((object.uid, renderer.uid, renderer.name, bondw, sphr));
+            }
+        }
+        out
+    };
 
     let root_style = format!(
         "display:flex;flex-direction:column;height:100vh;width:100vw;margin:0;\
@@ -1004,6 +1050,41 @@ fn app() -> Element {
                         div { style: "{section_header_style}", "Measure" }
                         div { style: "{section_line_style}",
                             {measure.clone().unwrap_or_else(|| "Select 2 / 3 / 4 atoms".to_string())}
+                        }
+                        // Renderer geometry editing (CueMol2 renderer property dialog).
+                        if !renderers.is_empty() {
+                            div { style: "{section_header_style}", "Renderer" }
+                            for (ri , (obj , rend , name , bondw , sphr)) in renderers.iter().enumerate() {
+                                div { key: "rend-{ri}",
+                                    div { style: "{section_line_style}", "{name}" }
+                                    div { style: "display:flex;gap:4px;align-items:center;padding:2px 12px;",
+                                        span { style: "font-size:11px;color:{COL_TEXT_DIM};width:70px;", "Bond {bondw:.2}" }
+                                        button {
+                                            style: "{color_btn_style}",
+                                            onclick: { let (o, r) = (*obj, *rend); move |_| model.write().adjust_renderer_property(o, r, "bondw", -0.02) },
+                                            "−"
+                                        }
+                                        button {
+                                            style: "{color_btn_style}",
+                                            onclick: { let (o, r) = (*obj, *rend); move |_| model.write().adjust_renderer_property(o, r, "bondw", 0.02) },
+                                            "+"
+                                        }
+                                    }
+                                    div { style: "display:flex;gap:4px;align-items:center;padding:2px 12px;",
+                                        span { style: "font-size:11px;color:{COL_TEXT_DIM};width:70px;", "Atom {sphr:.2}" }
+                                        button {
+                                            style: "{color_btn_style}",
+                                            onclick: { let (o, r) = (*obj, *rend); move |_| model.write().adjust_renderer_property(o, r, "sphr", -0.05) },
+                                            "−"
+                                        }
+                                        button {
+                                            style: "{color_btn_style}",
+                                            onclick: { let (o, r) = (*obj, *rend); move |_| model.write().adjust_renderer_property(o, r, "sphr", 0.05) },
+                                            "+"
+                                        }
+                                    }
+                                }
+                            }
                         }
                         // Density map chickenwire contour (CueMol2 densitymap-panel.xul).
                         div { style: "{section_header_style}", "Density map" }
