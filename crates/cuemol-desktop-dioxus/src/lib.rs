@@ -123,6 +123,9 @@ struct Model {
     /// Density-map chickenwire contour toggle + its sigma level.
     show_density_contour: bool,
     density_level: f64,
+    /// Filled density isosurface (solid mode) + a cached marching-cubes mesh.
+    show_density_solid: bool,
+    density_solid_mesh: Option<cuemol_render::RenderMesh>,
     /// Molecular-surface (SES) display + a cached mesh (the SES is expensive).
     show_surface: bool,
     surface_mesh: Option<cuemol_render::RenderMesh>,
@@ -160,6 +163,8 @@ impl Model {
             show_symm_mates: false,
             show_density_contour: false,
             density_level: 1.5,
+            show_density_solid: false,
+            density_solid_mesh: None,
             show_surface: false,
             surface_mesh: None,
         };
@@ -185,6 +190,11 @@ impl Model {
             self.density_level,
             self.show_density_contour,
         );
+        if self.show_density_solid {
+            if let Some(mesh) = &self.density_solid_mesh {
+                snapshot.meshes.push(mesh.clone());
+            }
+        }
         if self.show_surface {
             if let Some(mesh) = &self.surface_mesh {
                 snapshot.meshes.push(mesh.clone());
@@ -288,6 +298,19 @@ impl Model {
     /// Density map "chickenwire" contour toggle (CueMol2 Density map panel).
     fn toggle_density_contour(&mut self) {
         self.show_density_contour = !self.show_density_contour;
+        self.rebuild_selection();
+    }
+
+    /// Filled density isosurface (solid mode) toggle. Marches the map once on enable.
+    fn toggle_density_solid(&mut self) {
+        self.show_density_solid = !self.show_density_solid;
+        if self.show_density_solid && self.density_solid_mesh.is_none() {
+            self.density_solid_mesh = self.state.build_density_surface_mesh(self.density_level);
+            if self.density_solid_mesh.is_none() {
+                self.show_density_solid = false;
+                self.status = "No density map for a solid surface".into();
+            }
+        }
         self.rebuild_selection();
     }
 
@@ -799,6 +822,11 @@ fn app() -> Element {
                                 style: "{color_btn_style}",
                                 onclick: move |_| model.write().toggle_density_contour(),
                                 "Show contour"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().toggle_density_solid(),
+                                "Solid"
                             }
                         }
                         // Molecular surface (CueMol2 molsurf renderer display).

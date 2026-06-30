@@ -275,6 +275,9 @@ pub struct CueMolGpuiApp {
     /// Density-map chickenwire contour toggle + its sigma level.
     show_density_contour: bool,
     density_level: f64,
+    /// Filled density isosurface (solid mode) + a cached marching-cubes mesh.
+    show_density_solid: bool,
+    density_solid_mesh: Option<cuemol_render::RenderMesh>,
     /// Molecular-surface (SES) display + a cached mesh (the SES is expensive).
     show_surface: bool,
     surface_mesh: Option<cuemol_render::RenderMesh>,
@@ -352,6 +355,8 @@ impl CueMolGpuiApp {
             show_symm_mates: false,
             show_density_contour: false,
             density_level: 1.5,
+            show_density_solid: false,
+            density_solid_mesh: None,
             show_surface: false,
             surface_mesh: None,
             log_lines: Vec::new(),
@@ -412,6 +417,11 @@ impl CueMolGpuiApp {
             self.density_level,
             self.show_density_contour,
         );
+        if self.show_density_solid {
+            if let Some(mesh) = &self.density_solid_mesh {
+                snapshot.meshes.push(mesh.clone());
+            }
+        }
         if self.show_surface {
             if let Some(mesh) = &self.surface_mesh {
                 snapshot.meshes.push(mesh.clone());
@@ -484,6 +494,19 @@ impl CueMolGpuiApp {
     /// Density map "chickenwire" contour toggle (CueMol2 Density map panel).
     fn toggle_density_contour(&mut self) {
         self.show_density_contour = !self.show_density_contour;
+        self.refresh_scene(false);
+    }
+
+    /// Filled density isosurface (solid mode) toggle. Marches the map once on enable.
+    fn toggle_density_solid(&mut self) {
+        self.show_density_solid = !self.show_density_solid;
+        if self.show_density_solid && self.density_solid_mesh.is_none() {
+            self.density_solid_mesh = self.state.build_density_surface_mesh(self.density_level);
+            if self.density_solid_mesh.is_none() {
+                self.show_density_solid = false;
+                self.set_status("No density map for a solid surface");
+            }
+        }
         self.refresh_scene(false);
     }
 
@@ -2015,6 +2038,12 @@ impl CueMolGpuiApp {
                 .child(color_btn("den-contour", "Show contour").on_click(cx.listener(
                     |this, _: &gpui::ClickEvent, _, cx| {
                         this.toggle_density_contour();
+                        cx.notify();
+                    },
+                )))
+                .child(color_btn("den-solid", "Solid").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.toggle_density_solid();
                         cx.notify();
                     },
                 )))
