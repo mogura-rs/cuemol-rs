@@ -1304,11 +1304,14 @@ fn app() -> Element {
         theme_vars(theme_light)
     );
     let header_style = format!(
-        "display:flex;align-items:center;gap:12px;height:40px;padding:0 16px;\
-         background:{COL_HEADER};border-bottom:1px solid {COL_BORDER};flex:0 0 auto;"
+        // flex-wrap + min-height so the file/fetch controls wrap to a second row on a
+        // narrow window instead of pushing Get-PDB off-screen (no fixed height clip).
+        "display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;min-height:40px;\
+         padding:4px 16px;background:{COL_HEADER};border-bottom:1px solid {COL_BORDER};\
+         flex:0 0 auto;"
     );
     let open_input_style = format!(
-        "margin-left:auto;width:280px;height:24px;padding:0 8px;border-radius:4px;\
+        "margin-left:auto;width:220px;height:24px;padding:0 8px;border-radius:4px;\
          border:1px solid {COL_BORDER};background:{COL_BG};color:{COL_TEXT};\
          font:12px -apple-system,system-ui,sans-serif;outline:none;"
     );
