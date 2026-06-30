@@ -363,6 +363,9 @@ struct GuiApplication {
     bottom_tab: BottomTab,
     render_preset: String,
     render_backend: String,
+    ribbon_tab: RibbonTab,
+    interaction_mode: InteractionMode,
+    measure_mode: MeasureMode,
     show_toolbar: bool,
     show_workspace: bool,
     show_inspector: bool,
@@ -474,6 +477,71 @@ enum BottomTab {
     Render,
 }
 
+/// Ribbon toolbar tabs mirroring CueMol2's `topbar/cuemol2-ribbon.xul`
+/// (`tool-ribbon.js`): Home (navigate), Measure, Animation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RibbonTab {
+    Home,
+    Measure,
+    Animation,
+}
+
+/// Home-tab interaction mode radio group (CueMol2 `navi-toolribbon.js`):
+/// Rotate (default) vs rectangle select.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractionMode {
+    Rotate,
+    RectSelect,
+}
+
+/// Measure-tab radio group (CueMol2 `measure-toolribbon.js`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeasureMode {
+    Distance,
+    Angle,
+    Torsion,
+}
+
+/// Left-dock accordion sections mirroring CueMol2's `cuemol2-panels.js`
+/// registration order in the `sidepanelholder`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeftPanel {
+    Workspace,
+    MolStruct,
+    Selection,
+    Coloring,
+    Symmetry,
+    DensityMap,
+    View,
+    Animation,
+}
+
+impl LeftPanel {
+    const ALL: [LeftPanel; 8] = [
+        LeftPanel::Workspace,
+        LeftPanel::MolStruct,
+        LeftPanel::Selection,
+        LeftPanel::Coloring,
+        LeftPanel::Symmetry,
+        LeftPanel::DensityMap,
+        LeftPanel::View,
+        LeftPanel::Animation,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            LeftPanel::Workspace => "Workspace",
+            LeftPanel::MolStruct => "MolStruct",
+            LeftPanel::Selection => "Selection",
+            LeftPanel::Coloring => "Coloring",
+            LeftPanel::Symmetry => "Symmetry",
+            LeftPanel::DensityMap => "Density map",
+            LeftPanel::View => "View",
+            LeftPanel::Animation => "Animation",
+        }
+    }
+}
+
 impl GuiApplication {
     fn new() -> Self {
         let mut state = DesktopAppState::new();
@@ -499,6 +567,9 @@ impl GuiApplication {
             bottom_tab: BottomTab::Output,
             render_preset: RENDER_PRESETS[1].0.to_string(),
             render_backend: "POV-Ray".to_string(),
+            ribbon_tab: RibbonTab::Home,
+            interaction_mode: InteractionMode::Rotate,
+            measure_mode: MeasureMode::Distance,
             show_toolbar: true,
             show_workspace: true,
             show_inspector: true,
@@ -566,16 +637,32 @@ impl GuiApplication {
 
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         self.pixels_per_point = ctx.pixels_per_point();
-        self.top_bar(ctx, camera);
-        if self.show_workspace {
-            self.workspace_panel(ctx, camera);
+        // CueMol2 window order (uxp_gui `cuemol2.xul`):
+        // menu bar (top) -> ribbon (top) -> [ left dock | tabbed view | bottom dock ]
+        // -> status bar (very bottom). There is no right dock; properties open modally.
+        self.menu_bar(ctx, camera);
+        if self.show_toolbar {
+            self.ribbon_bar(ctx, camera);
         }
-        if self.show_inspector {
-            self.inspector_panel(ctx, camera);
-        }
+        // Register the status bar before the bottom dock so it sits at the very bottom.
+        self.status_bar(ctx);
         if self.show_bottom_panel {
             self.bottom_panel(ctx);
         }
+        if self.show_workspace {
+            self.left_panel(ctx, camera);
+        }
+        // Scene-tab strip registered after the side/bottom docks, so it is confined to
+        // the central content column (above the 3D view), like CueMol2's `tabmolview`.
+        self.scene_tab_strip(ctx, camera);
+        self.central_view(ctx, camera);
+        if self.show_inspector {
+            self.properties_window(ctx, camera);
+        }
+        self.dialogs(ctx, camera);
+    }
+
+    fn central_view(&mut self, ctx: &egui::Context, _camera: &mut CameraController) {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
             .show(ctx, |ui| {
@@ -595,11 +682,53 @@ impl GuiApplication {
                     });
                 });
             });
-        self.dialogs(ctx, camera);
     }
 
-    fn top_bar(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+    /// Horizontal scene-tab strip above the 3D view (CueMol2 `tabmolview` multi-tab).
+    fn scene_tab_strip(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        egui::TopBottomPanel::top("scene_tabs").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let scenes = self.state.scene_summaries();
+                let active = self.state.active_scene();
+                for scene in &scenes {
+                    let selected = Some(scene.uid) == active;
+                    if ui.selectable_label(selected, &scene.name).clicked() && !selected {
+                        self.state.set_active_scene(Some(scene.uid));
+                        self.selected_object = None;
+                        self.selected_renderer = None;
+                        self.rebuild_snapshot();
+                        camera.fit_snapshot(&self.snapshot);
+                    }
+                }
+                if ui
+                    .button("+")
+                    .on_hover_text("New scene tab")
+                    .clicked()
+                {
+                    self.new_scene(camera);
+                }
+            });
+        });
+    }
+
+    /// One-line status bar pinned to the very bottom (CueMol2 `<statusbar>`).
+    fn status_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(&self.status);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(format!(
+                        "{} atoms / {} bonds",
+                        self.snapshot.atom_count(),
+                        self.snapshot.bond_count()
+                    ));
+                });
+            });
+        });
+    }
+
+    fn menu_bar(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New Window").clicked() {
@@ -860,123 +989,328 @@ impl GuiApplication {
                     }
                 });
             });
-            if self.show_toolbar {
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("New Tab").clicked() {
-                        self.new_scene(camera);
-                    }
-                    if ui.button("Open File").clicked() {
-                        self.open_current_path(camera);
-                    }
-                    if ui.button("Save").clicked() {
-                        self.save_current_scene(camera);
-                    }
-                    if ui.button("Save As").clicked() {
-                        self.save_current_scene(camera);
-                    }
-                    ui.separator();
-                    if ui.button("Open Scene").clicked() {
-                        self.open_current_path(camera);
-                    }
-                    if ui.button("Reload Scene").clicked() {
-                        self.reload_current_path(camera);
-                    }
-                    if ui.button("Save Scene").clicked() {
-                        self.save_current_scene(camera);
-                    }
-                    ui.separator();
-                    if ui.button("Get PDB").clicked() {
-                        self.show_get_pdb = true;
-                    }
-                    if ui.button("Render").clicked() {
-                        self.bottom_tab = BottomTab::Render;
-                    }
-                    ui.separator();
-                    if ui.button("Undo").clicked() {
-                        self.undo(camera);
-                    }
-                    if ui.button("Redo").clicked() {
-                        self.redo(camera);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Open");
-                    let open = ui.add_sized(
-                        [360.0, 22.0],
-                        egui::TextEdit::singleline(&mut self.open_path),
-                    );
-                    if open.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                        self.open_current_path(camera);
-                    }
-                    if ui.button("Open").clicked() {
-                        self.open_current_path(camera);
-                    }
-                    if ui.button("Fit").clicked() {
-                        camera.fit_snapshot(&self.snapshot);
-                    }
-                });
+        });
+    }
+
+    /// Ribbon toolbar (CueMol2 `topbar/cuemol2-ribbon.xul`): a tabbed toolbar with
+    /// Home / Measure / Animation tabs sitting directly below the menu bar.
+    fn ribbon_bar(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        egui::TopBottomPanel::top("ribbon").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Home, "Home");
+                ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Measure, "Measure");
+                ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Animation, "Animation");
+            });
+            ui.separator();
+            match self.ribbon_tab {
+                RibbonTab::Home => self.ribbon_home(ui, camera),
+                RibbonTab::Measure => self.ribbon_measure(ui),
+                RibbonTab::Animation => self.ribbon_animation(ui),
             }
         });
     }
 
-    fn workspace_panel(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
-        egui::SidePanel::left("workspace")
+    fn ribbon_home(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        ui.horizontal(|ui| {
+            if ui.button("New Tab").on_hover_text("New scene").clicked() {
+                self.new_scene(camera);
+            }
+            if ui.button("Open").on_hover_text("Open file").clicked() {
+                self.open_current_path(camera);
+            }
+            if ui.button("Save As").on_hover_text("Save file as").clicked() {
+                self.save_selected_object();
+            }
+            ui.separator();
+            if ui.button("Open Scene").clicked() {
+                self.open_current_path(camera);
+            }
+            if ui.button("Reload").on_hover_text("Reload scene").clicked() {
+                self.reload_current_path(camera);
+            }
+            if ui.button("Save Scene").clicked() {
+                self.save_current_scene(camera);
+            }
+            ui.separator();
+            if ui.button("Get PDB").clicked() {
+                self.show_get_pdb = true;
+            }
+            ui.separator();
+            if ui.button("Undo").clicked() {
+                self.undo(camera);
+            }
+            if ui.button("Redo").clicked() {
+                self.redo(camera);
+            }
+            ui.separator();
+            // Interaction-mode radio (CueMol2 Home tab: Rotate / Rect select).
+            ui.selectable_value(&mut self.interaction_mode, InteractionMode::Rotate, "Rotate");
+            ui.selectable_value(
+                &mut self.interaction_mode,
+                InteractionMode::RectSelect,
+                "Rect select",
+            );
+            ui.separator();
+            if ui.button("Fit").clicked() {
+                camera.fit_snapshot(&self.snapshot);
+            }
+        });
+    }
+
+    fn ribbon_measure(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Measure:");
+            ui.selectable_value(&mut self.measure_mode, MeasureMode::Distance, "Distance");
+            ui.selectable_value(&mut self.measure_mode, MeasureMode::Angle, "Angle");
+            ui.selectable_value(&mut self.measure_mode, MeasureMode::Torsion, "Torsion");
+            ui.separator();
+            ui.label("(pick atoms in the 3D view to measure — wired in M3)");
+        });
+    }
+
+    fn ribbon_animation(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let play_label = if self.animation_playing { "⏸ Pause" } else { "▶ Play" };
+            if ui.button(play_label).clicked() {
+                self.animation_playing = !self.animation_playing;
+            }
+            if ui.button("⏹ Stop").clicked() {
+                self.animation_playing = false;
+            }
+            ui.separator();
+            ui.label(format!("frames: {}", self.animation_frames));
+        });
+    }
+
+    /// Left dock: a vertical accordion of CueMol2's eight side panels
+    /// (`cuemol2-panels.js` / `sidepanelholder`). Each is an independently
+    /// collapsible `CollapsingHeader`.
+    fn left_panel(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        egui::SidePanel::left("left_dock")
             .resizable(true)
-            .default_width(260.0)
+            .default_width(240.0)
             .show(ctx, |ui| {
-                ui.heading("Workspace");
-                ui.separator();
-                for scene in self.state.scene_summaries() {
-                    let scene_label = format!("{}  [{} objects]", scene.name, scene.object_count);
-                    let selected_scene = Some(scene.uid) == self.state.active_scene();
-                    if ui.selectable_label(selected_scene, scene_label).clicked() {
-                        self.state.set_active_scene(Some(scene.uid));
-                        self.selected_object = None;
-                        self.selected_renderer = None;
-                        self.rebuild_snapshot();
-                        camera.fit_snapshot(&self.snapshot);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for panel in LeftPanel::ALL {
+                        egui::CollapsingHeader::new(panel.title())
+                            .default_open(matches!(panel, LeftPanel::Workspace))
+                            .show(ui, |ui| {
+                                self.left_panel_body(ui, camera, panel);
+                            });
                     }
-                    ui.indent(format!("scene-{}", scene.uid.get()), |ui| {
-                        for object in self.state.object_summaries(scene.uid) {
-                            let selected = self.selected_object == Some(object.uid);
-                            let label = format!(
-                                "{}  [{} atoms, {} bonds]",
-                                object.name, object.atom_count, object.bond_count
-                            );
-                            if ui.selectable_label(selected, label).clicked() {
-                                self.selected_object = Some(object.uid);
-                                self.selected_renderer = None;
-                            }
-                            ui.indent(format!("object-{}", object.uid.get()), |ui| {
-                                for renderer in self.state.renderer_summaries(object.uid) {
-                                    let selected = self.selected_renderer == Some(renderer.uid);
-                                    let label =
-                                        format!("{} ({})", renderer.name, renderer.renderer_type);
-                                    if ui.selectable_label(selected, label).clicked() {
-                                        self.selected_object = Some(object.uid);
-                                        self.selected_renderer = Some(renderer.uid);
-                                    }
-                                }
-                                if ui.small_button("+ Renderer").clicked() {
-                                    self.open_renderer_dialog(
+                });
+            });
+    }
+
+    fn left_panel_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        camera: &mut CameraController,
+        panel: LeftPanel,
+    ) {
+        match panel {
+            LeftPanel::Workspace => self.workspace_section(ui, camera),
+            LeftPanel::MolStruct => self.molstruct_section(ui),
+            LeftPanel::Selection => self.selection_section(ui),
+            LeftPanel::Coloring => self.coloring_section(ui),
+            LeftPanel::Symmetry => self.symmetry_section(ui),
+            LeftPanel::DensityMap => self.densitymap_section(ui),
+            LeftPanel::View => self.view_section(ui, camera),
+            LeftPanel::Animation => self.animation_section(ui),
+        }
+    }
+
+    /// Workspace section — the scene/object/renderer tree (CueMol2 `objectTree`).
+    fn workspace_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        for scene in self.state.scene_summaries() {
+            let scene_label = format!("{}  [{} objects]", scene.name, scene.object_count);
+            let selected_scene = Some(scene.uid) == self.state.active_scene();
+            if ui.selectable_label(selected_scene, scene_label).clicked() {
+                self.state.set_active_scene(Some(scene.uid));
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.rebuild_snapshot();
+                camera.fit_snapshot(&self.snapshot);
+            }
+            ui.indent(format!("scene-{}", scene.uid.get()), |ui| {
+                for object in self.state.object_summaries(scene.uid) {
+                    let selected = self.selected_object == Some(object.uid);
+                    let label = format!(
+                        "{}  [{} atoms, {} bonds]",
+                        object.name, object.atom_count, object.bond_count
+                    );
+                    if ui.selectable_label(selected, label).clicked() {
+                        self.selected_object = Some(object.uid);
+                        self.selected_renderer = None;
+                    }
+                    ui.indent(format!("object-{}", object.uid.get()), |ui| {
+                        for renderer in self.state.renderer_summaries(object.uid) {
+                            let selected = self.selected_renderer == Some(renderer.uid);
+                            let mut visible = renderer.visible;
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .checkbox(&mut visible, "")
+                                    .on_hover_text("Visible")
+                                    .changed()
+                                {
+                                    self.set_renderer_visibility(
                                         object.uid,
-                                        object.renderer_count + 1,
+                                        renderer.uid,
+                                        visible,
                                     );
+                                }
+                                let label = format!(
+                                    "{} ({})",
+                                    renderer.name, renderer.renderer_type
+                                );
+                                if ui.selectable_label(selected, label).clicked() {
+                                    self.selected_object = Some(object.uid);
+                                    self.selected_renderer = Some(renderer.uid);
                                 }
                             });
                         }
                     });
                 }
             });
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui.button("Zoom").on_hover_text("Zoom at scene").clicked() {
+                camera.fit_snapshot(&self.snapshot);
+            }
+            if ui.button("Add").on_hover_text("Add renderer").clicked() {
+                let target = self.selected_object.or_else(|| {
+                    self.state
+                        .active_object_summaries()
+                        .first()
+                        .map(|object| object.uid)
+                });
+                if let Some(object_uid) = target {
+                    let count = self.state.renderer_summaries(object_uid).len();
+                    self.open_renderer_dialog(object_uid, count + 1);
+                }
+            }
+            if ui.button("Delete").clicked() {
+                if let (Some(object_uid), Some(renderer_uid)) =
+                    (self.selected_object, self.selected_renderer)
+                {
+                    self.delete_renderer(object_uid, renderer_uid);
+                }
+            }
+            if ui.button("Property").clicked() {
+                self.show_inspector = true;
+            }
+        });
     }
 
-    fn inspector_panel(&mut self, ctx: &egui::Context, camera: &CameraController) {
-        egui::SidePanel::right("inspector")
+    /// MolStruct section — chain/residue/atom structure (deepened in M2).
+    fn molstruct_section(&mut self, ui: &mut egui::Ui) {
+        let objects = self.state.active_object_summaries();
+        if objects.is_empty() {
+            ui.weak("No molecule loaded.");
+            return;
+        }
+        for object in objects {
+            ui.label(format!(
+                "{} — {} atoms, {} residues",
+                object.name, object.atom_count, object.residue_count
+            ));
+        }
+        ui.weak("Chain/residue/atom tree wired in M2.");
+    }
+
+    /// Selection section — the command-style selection editor (CueMol2 Command tab).
+    fn selection_section(&mut self, ui: &mut egui::Ui) {
+        ui.label("Selection command");
+        let response = ui.add_sized(
+            [ui.available_width(), 56.0],
+            egui::TextEdit::multiline(&mut self.selection_text)
+                .hint_text("name CA")
+                .font(egui::TextStyle::Monospace),
+        );
+        if response.changed() {
+            self.rebuild_snapshot();
+        }
+        let selected_count = self.snapshot.atoms.iter().filter(|atom| atom.selected).count();
+        ui.horizontal(|ui| {
+            ui.label(format!("Selected: {selected_count}"));
+            if ui.button("Clear").clicked() {
+                self.selection_text.clear();
+                self.rebuild_snapshot();
+            }
+        });
+    }
+
+    /// Coloring section (deepened in M2 with per-type decks).
+    fn coloring_section(&mut self, ui: &mut egui::Ui) {
+        if let Some(renderer_uid) = self.selected_renderer {
+            for object in self.state.active_object_summaries() {
+                if let Some(renderer) = self
+                    .state
+                    .renderer_summaries(object.uid)
+                    .into_iter()
+                    .find(|renderer| renderer.uid == renderer_uid)
+                {
+                    ui.label(format!("Renderer: {}", renderer.name));
+                    break;
+                }
+            }
+        } else {
+            ui.weak("Select a renderer in Workspace.");
+        }
+        ui.weak("Coloring type decks wired in M2.");
+    }
+
+    /// Symmetry section (deepened in M2 with the crystal cell table).
+    fn symmetry_section(&mut self, ui: &mut egui::Ui) {
+        ui.weak("Crystal cell / space group wired in M2.");
+    }
+
+    /// Density-map section (deepened in M2 with contour sliders).
+    fn densitymap_section(&mut self, ui: &mut egui::Ui) {
+        let maps = self
+            .state
+            .active_scene()
+            .map(|scene| self.state.density_map_summaries(scene))
+            .unwrap_or_default();
+        if maps.is_empty() {
+            ui.weak("No density map loaded.");
+        } else {
+            for map in maps {
+                ui.label(map.name);
+            }
+        }
+        ui.weak("Contour sliders wired in M2.");
+    }
+
+    /// View section — projection + Fit (rotary dials wired in M2).
+    fn view_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut camera.perspective, false, "Ortho");
+            ui.radio_value(&mut camera.perspective, true, "Persp");
+        });
+        if ui.button("Fit").clicked() {
+            camera.fit_snapshot(&self.snapshot);
+        }
+        ui.weak("Rotation / Translation / Zoom dials wired in M2.");
+    }
+
+    /// Animation section (deepened in M2 with the anim list).
+    fn animation_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(format!("Frames: {}", self.animation_frames));
+        ui.weak("Animation element list wired in M2.");
+    }
+
+    /// Properties — CueMol2 opens object/renderer properties as a modal dialog
+    /// (no right dock). Interim floating window; promoted to per-renderer modals in M3.
+    fn properties_window(&mut self, ctx: &egui::Context, camera: &CameraController) {
+        let mut open = self.show_inspector;
+        egui::Window::new("Properties")
+            .open(&mut open)
             .resizable(true)
-            .default_width(300.0)
+            .default_width(320.0)
             .show(ctx, |ui| {
-                ui.heading("Inspector");
+                ui.heading("Properties");
                 ui.separator();
                 ui.label("Selection");
                 let response = ui.add_sized(
@@ -1089,6 +1423,7 @@ impl GuiApplication {
                     self.export_current_scene();
                 }
             });
+        self.show_inspector = open;
     }
 
     fn bottom_panel(&mut self, ctx: &egui::Context) {
@@ -1101,14 +1436,6 @@ impl GuiApplication {
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Sequence, "Sequence");
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Animation, "Animation");
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Render, "Render");
-                    ui.separator();
-                    ui.label(&self.status);
-                    ui.separator();
-                    ui.label(format!(
-                        "{} atoms / {} bonds",
-                        self.snapshot.atom_count(),
-                        self.snapshot.bond_count()
-                    ));
                 });
                 ui.separator();
                 match self.bottom_tab {
