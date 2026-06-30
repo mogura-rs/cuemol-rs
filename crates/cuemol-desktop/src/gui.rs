@@ -1,4 +1,6 @@
-use crate::{DesktopAppState, GuiLoadedPath, GuiSequenceSummary};
+// AnimKind/AnimObject + the `anim_spin_direction` timeline stepper are shared via core
+// so egui/gpui/dioxus drive the animation timeline identically.
+use crate::{anim_spin_direction, AnimKind, AnimObject, DesktopAppState, GuiLoadedPath, GuiSequenceSummary};
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::Rgba8;
 use cuemol_render::{MeshVertex, RenderAtom, RenderBond, RenderSceneSnapshot};
@@ -529,33 +531,6 @@ enum BottomTab {
 enum SelectionTab {
     Command,
     Editor,
-}
-
-/// Animation-object kind (a desktop-side subset of CueMol2's anim objects:
-/// `SimpleSpin` / a back-and-forth rock / a hold).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AnimKind {
-    Spin,
-    Rock,
-    Pause,
-}
-
-impl AnimKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Spin => "Spin",
-            Self::Rock => "Rock",
-            Self::Pause => "Pause",
-        }
-    }
-}
-
-/// One animation object in the timeline (CueMol2 `anim-panel` list row): a kind and a
-/// duration in seconds. Played in sequence; the camera is driven while it is active.
-#[derive(Debug, Clone, PartialEq)]
-struct AnimObject {
-    kind: AnimKind,
-    duration: f32,
 }
 
 /// Object-level coloring scheme chosen in the Coloring panel (CueMol2
@@ -2120,42 +2095,13 @@ impl GuiApplication {
     }
 
     /// Advance the animation timeline by `dt` seconds, driving the camera from the
-    /// active object (CueMol2 anim playback). Loops at the total duration; an empty
-    /// list falls back to a simple continuous spin (SimpleSpin).
+    /// active object via the shared-core `anim_spin_direction` (CueMol2 anim playback;
+    /// empty list → a simple continuous spin).
     fn advance_animation(&mut self, dt: f32, camera: &mut CameraController) {
-        if self.animation_objects.is_empty() {
-            camera.rotate_by(120.0 * dt, 0.0);
-            return;
-        }
-        let total: f32 = self
-            .animation_objects
-            .iter()
-            .map(|object| object.duration.max(0.01))
-            .sum();
-        self.animation_elapsed += dt;
-        if self.animation_elapsed >= total {
-            self.animation_elapsed %= total;
-        }
-        let mut acc = 0.0;
-        for object in &self.animation_objects {
-            let d = object.duration.max(0.01);
-            if self.animation_elapsed < acc + d {
-                match object.kind {
-                    AnimKind::Spin => camera.rotate_by(120.0 * dt, 0.0),
-                    AnimKind::Rock => {
-                        let dir = if (self.animation_elapsed - acc) / d < 0.5 {
-                            1.0
-                        } else {
-                            -1.0
-                        };
-                        camera.rotate_by(120.0 * dt * dir, 0.0);
-                    }
-                    AnimKind::Pause => {}
-                }
-                break;
-            }
-            acc += d;
-        }
+        let (elapsed, direction) =
+            anim_spin_direction(&self.animation_objects, self.animation_elapsed as f64, dt as f64);
+        self.animation_elapsed = elapsed as f32;
+        camera.rotate_by(direction as f32 * 120.0 * dt, 0.0);
     }
 
     /// Animation panel — the timeline object list (CueMol2 `anim-panel`): Add (Spin /

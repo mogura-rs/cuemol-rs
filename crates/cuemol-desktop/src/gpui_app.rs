@@ -22,7 +22,8 @@ use gpui::{
 use crate::gpui_widgets::TextInput;
 use crate::offscreen::SceneRenderer;
 use crate::{
-    DesktopAppState, GuiLoadedPath, GuiObjectSummary, GuiRendererSummary, GuiSceneSummary,
+    AnimKind, AnimObject, DesktopAppState, GuiLoadedPath, GuiObjectSummary, GuiRendererSummary,
+    GuiSceneSummary,
 };
 
 /// The persistent text-input entities (always-visible fields). gpui has no
@@ -299,9 +300,12 @@ pub struct CueMolGpuiApp {
     /// Which top-level menu's dropdown is open (`None` = closed). Rendered as a
     /// root-level overlay so it paints above the panels (z-order).
     open_menu: Option<&'static str>,
-    /// Animation tab: keyframe count + play toggle (kept light, mirroring egui).
-    animation_frames: usize,
+    /// Animation tab: play toggle (the timeline objects below drive it).
     animation_playing: bool,
+    /// Animation timeline objects (CueMol2 `anim-panel`) + elapsed playback seconds,
+    /// driven by the shared-core `anim_spin_direction`.
+    animation_objects: Vec<cuemol_desktop_core::AnimObject>,
+    animation_elapsed: f64,
     /// Atom / bond counts of the last tessellated snapshot (for the status bar and
     /// the inspector's "selected atoms" readout). Cached so we don't recompute a
     /// snapshot just to display a number.
@@ -373,8 +377,9 @@ impl CueMolGpuiApp {
             dialog: Dialog::None,
             dialog_inputs: DialogInputs::default(),
             open_menu: None,
-            animation_frames: 0,
             animation_playing: false,
+            animation_objects: Vec::new(),
+            animation_elapsed: 0.0,
             rendered_atom_count: snapshot.as_ref().map(|s| s.atoms.len()).unwrap_or(0),
             rendered_bond_count: snapshot.as_ref().map(|s| s.bonds.len()).unwrap_or(0),
         };
@@ -517,6 +522,14 @@ impl CueMolGpuiApp {
         self.show_labels = !self.show_labels;
     }
 
+    /// Append an animation object to the timeline (CueMol2 anim-panel Add).
+    fn add_anim(&mut self, kind: AnimKind) {
+        self.animation_objects.push(AnimObject {
+            kind,
+            duration: 3.0,
+        });
+    }
+
     /// Toggle animation playback (CueMol2 SimpleSpin). While playing, a spawned task
     /// rotates the camera every ~16 ms until stopped — gpui's frame-timer analogue of
     /// egui's request_repaint loop.
@@ -530,7 +543,13 @@ impl CueMolGpuiApp {
                             if !this.animation_playing {
                                 return false;
                             }
-                            this.rotate_camera(2.0, 0.0);
+                            let (elapsed, direction) = cuemol_desktop_core::anim_spin_direction(
+                                &this.animation_objects,
+                                this.animation_elapsed,
+                                0.016,
+                            );
+                            this.animation_elapsed = elapsed;
+                            this.rotate_camera(direction * 2.0, 0.0);
                             cx.notify();
                             true
                         })
@@ -2775,28 +2794,74 @@ impl CueMolGpuiApp {
 
     fn animation_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let playing = self.animation_playing;
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .p_3()
-            .child(div().child(format!("Frames: {}", self.animation_frames)))
-            .child(button("anim-add", "Add Camera").on_click(cx.listener(
-                |this, _: &gpui::ClickEvent, _, cx| {
-                    this.animation_frames += 1;
-                    this.set_status("Added animation frame");
-                    cx.notify();
-                },
-            )))
-            .child(
-                button("anim-play", if playing { "Stop" } else { "Play" }).on_click(cx.listener(
+        let mut col = div().flex().flex_col().gap_2().p_3().child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(button("anim-spin", "+ Spin").text_xs().on_click(cx.listener(
                     |this, _: &gpui::ClickEvent, _, cx| {
-                        this.toggle_animation(cx);
+                        this.add_anim(AnimKind::Spin);
                         cx.notify();
                     },
-                )),
-            )
+                )))
+                .child(button("anim-rock", "+ Rock").text_xs().on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.add_anim(AnimKind::Rock);
+                        cx.notify();
+                    },
+                )))
+                .child(button("anim-pause", "+ Pause").text_xs().on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.add_anim(AnimKind::Pause);
+                        cx.notify();
+                    },
+                )))
+                .child(
+                    button("anim-play", if playing { "Stop" } else { "Play" }).on_click(
+                        cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.toggle_animation(cx);
+                            cx.notify();
+                        }),
+                    ),
+                ),
+        );
+        if self.animation_objects.is_empty() {
+            col = col.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(COL_TEXT_DIM))
+                    .child("No objects — Add Spin / Rock / Pause (or Play for a spin)."),
+            );
+        }
+        for (index, object) in self.animation_objects.iter().enumerate() {
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().child(format!(
+                        "{}. {} ({:.1}s)",
+                        index + 1,
+                        object.kind.label(),
+                        object.duration
+                    )))
+                    .child(
+                        danger_button(eid(format!("anim-del-{index}")), "Delete")
+                            .text_xs()
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                if index < this.animation_objects.len() {
+                                    this.animation_objects.remove(index);
+                                    this.animation_elapsed = 0.0;
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+        col
     }
 
     fn render_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {

@@ -129,6 +129,68 @@ pub struct GuiStructObject {
     pub chains: Vec<GuiStructChain>,
 }
 
+/// Animation-object kind (a desktop-side subset of CueMol2's anim objects): a
+/// `SimpleSpin`, a back-and-forth rock, or a hold. Shared across all three front ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimKind {
+    Spin,
+    Rock,
+    Pause,
+}
+
+impl AnimKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Spin => "Spin",
+            Self::Rock => "Rock",
+            Self::Pause => "Pause",
+        }
+    }
+}
+
+/// One animation object in the timeline (CueMol2 `anim-panel` row): a kind + duration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimObject {
+    pub kind: AnimKind,
+    pub duration: f64,
+}
+
+/// Advance an animation timeline by `dt` seconds (looping at the total duration) and
+/// return `(new_elapsed, spin_direction)` for the active object — `+1` / `-1` / `0` for
+/// Spin / Rock(by phase) / Pause. An empty list spins forever (`+1`). Each front end
+/// multiplies the direction by its own per-frame angle and applies it to its camera, so
+/// the timeline logic stays shared while the camera API stays front-end-specific.
+pub fn anim_spin_direction(objects: &[AnimObject], elapsed: f64, dt: f64) -> (f64, f64) {
+    if objects.is_empty() {
+        return (0.0, 1.0);
+    }
+    let total: f64 = objects.iter().map(|object| object.duration.max(0.01)).sum();
+    let mut next = elapsed + dt;
+    if next >= total {
+        next %= total;
+    }
+    let mut acc = 0.0;
+    for object in objects {
+        let d = object.duration.max(0.01);
+        if next < acc + d {
+            let direction = match object.kind {
+                AnimKind::Spin => 1.0,
+                AnimKind::Rock => {
+                    if (next - acc) / d < 0.5 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+                }
+                AnimKind::Pause => 0.0,
+            };
+            return (next, direction);
+        }
+        acc += d;
+    }
+    (next, 0.0)
+}
+
 /// A projected atom label for the 3D view (CueMol2 atom labels): the `text` to draw at
 /// image-pixel `(x, y)`. Front ends overlay these over the composited viewport image.
 #[derive(Debug, Clone, PartialEq)]
@@ -2363,6 +2425,21 @@ mod tests {
         assert!((x - 600.0).abs() < 0.1 && (y - 450.0).abs() < 0.1, "got ({x}, {y})");
         // Off-screen → None.
         assert!(project_to_image(id, [5.0, 0.0, 0.0], 800.0, 600.0).is_none());
+    }
+
+    #[test]
+    fn anim_spin_direction_sequences_objects() {
+        let objects = vec![
+            AnimObject { kind: AnimKind::Spin, duration: 1.0 },
+            AnimObject { kind: AnimKind::Pause, duration: 1.0 },
+        ];
+        // In the Spin segment (0..1) → +1.
+        let (elapsed, dir) = anim_spin_direction(&objects, 0.0, 0.1);
+        assert!((elapsed - 0.1).abs() < 1e-6 && dir == 1.0);
+        // In the Pause segment (1..2) → 0.
+        assert_eq!(anim_spin_direction(&objects, 1.0, 0.1).1, 0.0);
+        // Empty list → fallback spin (+1).
+        assert_eq!(anim_spin_direction(&[], 0.0, 0.1).1, 1.0);
     }
 
     #[test]

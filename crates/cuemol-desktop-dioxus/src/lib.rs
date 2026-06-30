@@ -137,6 +137,9 @@ struct Model {
     menu_open: Option<usize>,
     /// Animation playback (CueMol2 SimpleSpin): a continuous camera spin while set.
     anim_playing: bool,
+    /// Animation timeline objects + elapsed seconds (shared-core anim_spin_direction).
+    animation_objects: Vec<cuemol_desktop_core::AnimObject>,
+    animation_elapsed: f64,
 }
 
 impl Model {
@@ -179,6 +182,8 @@ impl Model {
             show_labels: false,
             menu_open: None,
             anim_playing: false,
+            animation_objects: Vec::new(),
+            animation_elapsed: 0.0,
         };
         model.rebuild_after_load();
         model
@@ -329,6 +334,22 @@ impl Model {
     /// Animation playback toggle (CueMol2 SimpleSpin); the use_future loop drives it.
     fn toggle_animation(&mut self) {
         self.anim_playing = !self.anim_playing;
+    }
+
+    /// Append an animation object to the timeline (CueMol2 anim-panel Add).
+    fn add_anim(&mut self, kind: cuemol_desktop_core::AnimKind) {
+        self.animation_objects.push(cuemol_desktop_core::AnimObject {
+            kind,
+            duration: 3.0,
+        });
+    }
+
+    /// Remove the animation object at `index`.
+    fn remove_anim(&mut self, index: usize) {
+        if index < self.animation_objects.len() {
+            self.animation_objects.remove(index);
+            self.animation_elapsed = 0.0;
+        }
     }
 
     /// Nudge a numeric renderer property (bond/atom radius) by a clamped delta and
@@ -769,7 +790,14 @@ fn app() -> Element {
     use_future(move || async move {
         loop {
             if model.read().anim_playing {
-                model.write().rotate_camera(2.0, 0.0);
+                let mut m = model.write();
+                let (elapsed, direction) = cuemol_desktop_core::anim_spin_direction(
+                    &m.animation_objects,
+                    m.animation_elapsed,
+                    0.016,
+                );
+                m.animation_elapsed = elapsed;
+                m.rotate_camera(direction * 2.0, 0.0);
             }
             futures_timer::Delay::new(std::time::Duration::from_millis(16)).await;
         }
@@ -793,6 +821,12 @@ fn app() -> Element {
     };
     let menu_open = model.read().menu_open;
     let anim_playing = model.read().anim_playing;
+    let anim_objects: Vec<(String, f64)> = model
+        .read()
+        .animation_objects
+        .iter()
+        .map(|object| (object.kind.label().to_string(), object.duration))
+        .collect();
     let measure = {
         let m = model.read();
         m.state.active_measure(&m.selection_text)
@@ -1119,13 +1153,40 @@ fn app() -> Element {
                                 "Labels"
                             }
                         }
-                        // Animation playback (CueMol2 SimpleSpin).
+                        // Animation timeline (CueMol2 anim-panel): Add Spin/Rock/Pause + Play.
                         div { style: "{section_header_style}", "Animation" }
                         div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
                             button {
                                 style: "{color_btn_style}",
+                                onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Spin),
+                                "+ Spin"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Rock),
+                                "+ Rock"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Pause),
+                                "+ Pause"
+                            }
+                            button {
+                                style: "{color_btn_style}",
                                 onclick: move |_| model.write().toggle_animation(),
-                                if anim_playing { "⏸ Stop spin" } else { "▶ Play spin" }
+                                if anim_playing { "⏸ Stop" } else { "▶ Play" }
+                            }
+                        }
+                        for (ai , (label , duration)) in anim_objects.iter().enumerate() {
+                            div {
+                                key: "anim-{ai}",
+                                style: "display:flex;gap:6px;align-items:center;padding:2px 12px;font-size:11px;",
+                                span { style: "color:{COL_TEXT};width:120px;", "{ai + 1}. {label} ({duration:.1}s)" }
+                                button {
+                                    style: "{color_btn_style}",
+                                    onclick: { let i = ai; move |_| model.write().remove_anim(i) },
+                                    "Delete"
+                                }
                             }
                         }
                         // Interactive sequence viewer (CueMol2 seqpanel): clickable
