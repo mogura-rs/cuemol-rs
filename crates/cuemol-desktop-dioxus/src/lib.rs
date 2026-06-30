@@ -42,14 +42,31 @@ const PICK_RADIUS_PX: f64 = 12.0;
 const VIEW_CLEAR: [f64; 4] = [0.08, 0.08, 0.11, 1.0];
 
 // Dark palette shared by the panels (CSS hex), mirroring the gpui shell.
-const COL_BG: &str = "#1e1e28";
-const COL_PANEL: &str = "#252530";
-const COL_HEADER: &str = "#2d2d3a";
-const COL_VIEWPORT: &str = "#14141c";
-const COL_BORDER: &str = "#3a3a48";
-const COL_TEXT: &str = "#d6d6e0";
-const COL_TEXT_DIM: &str = "#8a8a9a";
-const COL_ACCENT: &str = "#6db3f2";
+// Colors reference CSS custom properties (defined on the root via `theme_vars`), so a
+// light/dark toggle just swaps the root variable values — every baked `{COL_*}` style
+// follows automatically (CSS variables inherit), no per-style refactor needed.
+const COL_BG: &str = "var(--col-bg)";
+const COL_PANEL: &str = "var(--col-panel)";
+const COL_HEADER: &str = "var(--col-header)";
+const COL_VIEWPORT: &str = "var(--col-viewport)";
+const COL_BORDER: &str = "var(--col-border)";
+const COL_TEXT: &str = "var(--col-text)";
+const COL_TEXT_DIM: &str = "var(--col-text-dim)";
+const COL_ACCENT: &str = "var(--col-accent)";
+
+/// The CSS custom-property block defining the palette for the dark or light theme,
+/// prepended to the root element's style (children inherit the variables).
+fn theme_vars(light: bool) -> &'static str {
+    if light {
+        "--col-bg:#f4f4f6;--col-panel:#eaeaef;--col-header:#deded8;\
+         --col-viewport:#fafafc;--col-border:#c4c4cc;--col-text:#1e1e28;\
+         --col-text-dim:#6a6a78;--col-accent:#1f6fd0;"
+    } else {
+        "--col-bg:#1e1e28;--col-panel:#252530;--col-header:#2d2d3a;\
+         --col-viewport:#14141c;--col-border:#3a3a48;--col-text:#d6d6e0;\
+         --col-text-dim:#8a8a9a;--col-accent:#6db3f2;"
+    }
+}
 
 /// Command-line molecule paths, handed to the root component through Dioxus
 /// context (the component is a plain `fn`, so it can't capture them directly).
@@ -140,6 +157,8 @@ struct Model {
     /// Animation timeline objects + elapsed seconds (shared-core anim_spin_direction).
     animation_objects: Vec<cuemol_desktop_core::AnimObject>,
     animation_elapsed: f64,
+    /// Light vs dark UI theme (CueMol2's native look is light; dark is the default).
+    theme_light: bool,
 }
 
 impl Model {
@@ -184,6 +203,7 @@ impl Model {
             anim_playing: false,
             animation_objects: Vec::new(),
             animation_elapsed: 0.0,
+            theme_light: false,
         };
         model.rebuild_after_load();
         model
@@ -391,6 +411,7 @@ impl Model {
             "den_solid" => self.toggle_density_solid(),
             "hbonds" => self.toggle_hbonds(),
             "labels" => self.toggle_labels(),
+            "toggle_theme" => self.theme_light = !self.theme_light,
             "about" => self.status = "CueMol2-rs — Dioxus front end".into(),
             _ => {}
         }
@@ -766,6 +787,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
         ], // Render
         3 => &[("New tab", "new_scene")], // Scene
         4 => &[
+            ("Toggle light/dark theme", "toggle_theme"),
             ("Surface", "surface"),
             ("Density contour", "den_contour"),
             ("Density solid", "den_solid"),
@@ -821,6 +843,7 @@ fn app() -> Element {
     };
     let menu_open = model.read().menu_open;
     let anim_playing = model.read().anim_playing;
+    let theme_light = model.read().theme_light;
     let anim_objects: Vec<(String, f64)> = model
         .read()
         .animation_objects
@@ -854,9 +877,10 @@ fn app() -> Element {
     };
 
     let root_style = format!(
-        "display:flex;flex-direction:column;height:100vh;width:100vw;margin:0;\
+        "{}display:flex;flex-direction:column;height:100vh;width:100vw;margin:0;\
          background:{COL_BG};color:{COL_TEXT};font:13px -apple-system,system-ui,sans-serif;\
-         overflow:hidden;user-select:none;"
+         overflow:hidden;user-select:none;",
+        theme_vars(theme_light)
     );
     let header_style = format!(
         "display:flex;align-items:center;gap:12px;height:40px;padding:0 16px;\
