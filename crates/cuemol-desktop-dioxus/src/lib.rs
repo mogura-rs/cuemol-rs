@@ -125,6 +125,14 @@ struct PanelSection {
 
 /// Mutable application model, held behind a `Signal`. Not `Clone` (it owns the
 /// wgpu device); the reactive runtime stores it by value and re-renders on write.
+/// Ribbon-toolbar tab (CueMol2 topbar `cuemol2-ribbon.xul`), mirroring the egui shell.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RibbonTab {
+    Home,
+    Measure,
+    Animation,
+}
+
 struct Model {
     state: DesktopAppState,
     status: String,
@@ -174,6 +182,13 @@ struct Model {
     /// Viewport background clear colour (CueMol2 Scene → Background): cycles
     /// dark / black / white. RGBA in 0..1 for the offscreen renderer.
     bg_clear: [f64; 4],
+    /// Output/console log (CueMol2 bottom output panel): a scrollback of action
+    /// results, script output, and errors. The status bar shows only the latest line.
+    log: Vec<String>,
+    /// Whether the bottom output console is shown.
+    show_console: bool,
+    /// Which ribbon tab is active (CueMol2 topbar): Home / Measure / Animation.
+    ribbon_tab: RibbonTab,
     /// Undo / redo stacks (CueMol2 Edit → Undo/Redo). Each entry is a full clone of the
     /// scene state taken before a mutating edit, mirroring the egui/gpui front ends.
     undo_stack: Vec<DioxusUndo>,
@@ -231,6 +246,9 @@ impl Model {
             animation_elapsed: 0.0,
             theme_light: false,
             bg_clear: VIEW_CLEAR,
+            log: Vec::new(),
+            show_console: false,
+            ribbon_tab: RibbonTab::Home,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         };
@@ -471,6 +489,56 @@ impl Model {
         self.bg_clear = next;
         self.status = format!("Background: {label}");
         self.rerender();
+    }
+
+    /// Append a line to the output console (CueMol2 bottom output panel) and mirror it
+    /// to the status bar. Capped scrollback.
+    fn log_line(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        self.status = msg.clone();
+        self.log.push(msg);
+        if self.log.len() > 500 {
+            self.log.remove(0);
+        }
+    }
+
+    /// Load a script file and echo its lines into the output console (CueMol2 Tools →
+    /// Execute script). NOTE: CueMol2 embeds a JS engine; a faithful interpreter is the
+    /// categorical floor (see the gap map, alongside lcms CMYK / on-screen GPU). This
+    /// matches the egui front end — it loads + displays the script, it does not run JS.
+    fn execute_script(&mut self, path: &str) {
+        let path = path.trim();
+        if path.is_empty() {
+            self.status = "Script: enter a path".into();
+            return;
+        }
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                self.show_console = true;
+                self.log_line(format!("Loaded script: {path} (JS engine not embedded — preview only)"));
+                for line in text.lines().take(50) {
+                    self.log.push(format!("  {line}"));
+                }
+            }
+            Err(error) => self.log_line(format!("Script load failed: {error}")),
+        }
+    }
+
+    /// Run a console command line: evaluate a selection expression and log how many
+    /// atoms it matches (CueMol2 bottom-panel command box). Also applies it as the
+    /// active selection.
+    fn run_console_command(&mut self, expr: &str) {
+        let expr = expr.trim().to_string();
+        if expr.is_empty() {
+            return;
+        }
+        self.set_selection(&expr);
+        let count = self
+            .state
+            .active_render_snapshot(&expr)
+            .map(|snapshot| snapshot.atoms.iter().filter(|atom| atom.selected).count())
+            .unwrap_or(0);
+        self.log_line(format!("> {expr}  →  {count} atom(s) selected"));
     }
 
     /// Discard all undo/redo history (CueMol2 Edit → Clear undo data).
@@ -940,6 +1008,11 @@ impl Model {
             "superpose" => self.superpose(),
             "apbs" => self.write_apbs(),
             "cut_surface" => self.write_cut_surface(),
+            "toggle_console" => self.show_console = !self.show_console,
+            "show_script" => {
+                self.show_console = true;
+                self.log_line("Enter a script path in the Output panel and press Run script");
+            }
             "sel_none" => self.set_selection("none"),
             "sel_all" => self.set_selection("*"),
             "col_element" => self.color_element(),
@@ -1371,6 +1444,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
         4 => &[
             ("Fit view", "fit_view"),
             ("Toggle projection", "toggle_projection"),
+            ("Toggle output console", "toggle_console"),
             ("Toggle light/dark theme", "toggle_theme"),
             ("Surface", "surface"),
             ("Density contour", "den_contour"),
@@ -1385,6 +1459,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("Superpose molecules", "superpose"),
             ("APBS electrostatics", "apbs"),
             ("Surface cutter (OBJ)", "cut_surface"),
+            ("Execute script…", "show_script"),
         ], // Tools
         7 => &[("About", "about")],              // Help
         _ => &[],
@@ -1412,6 +1487,12 @@ fn app() -> Element {
     // Bond-editor atom serial fields (Tools → Mol bond editor).
     let mut bond_aid1 = use_signal(String::new);
     let mut bond_aid2 = use_signal(String::new);
+    // Output-console command line + script path (CueMol2 bottom output panel).
+    let mut console_cmd = use_signal(String::new);
+    let mut script_path = use_signal(String::new);
+    let ribbon_tab = model.read().ribbon_tab;
+    let show_console = model.read().show_console;
+    let console_log = model.read().log.clone();
 
     // Animation playback loop (CueMol2 SimpleSpin): an executor-agnostic timer ticks
     // ~60 fps; while `anim_playing` is set, each tick spins the camera + re-renders.
@@ -1698,6 +1779,45 @@ fn app() -> Element {
                             }
                         }
                     }
+                }
+            }
+            // Ribbon toolbar (CueMol2 topbar cuemol2-ribbon.xul): Home / Measure /
+            // Animation tabs, mirroring the egui shell's ribbon.
+            div {
+                style: "display:flex;align-items:center;gap:6px;min-height:30px;padding:2px 12px;\
+                        background:{COL_PANEL};border-bottom:1px solid {COL_BORDER};flex:0 0 auto;\
+                        flex-wrap:wrap;font-size:12px;",
+                for (tab , label) in [(RibbonTab::Home, "Home"), (RibbonTab::Measure, "Measure"), (RibbonTab::Animation, "Animation")] {
+                    span {
+                        key: "{label}",
+                        style: if ribbon_tab == tab {
+                            format!("padding:2px 10px;border-radius:4px;cursor:pointer;background:{COL_BG};color:{COL_ACCENT};")
+                        } else {
+                            format!("padding:2px 10px;border-radius:4px;cursor:pointer;color:{COL_TEXT_DIM};")
+                        },
+                        onclick: move |_| model.write().ribbon_tab = tab,
+                        "{label}"
+                    }
+                }
+                span { style: "width:1px;height:18px;background:{COL_BORDER};margin:0 4px;" }
+                match ribbon_tab {
+                    RibbonTab::Home => rsx! {
+                        button { style: "{color_btn_style}", onclick: move |_| model.write().fit_view(), "Fit" }
+                        button { style: "{color_btn_style}", onclick: move |_| model.write().toggle_projection(), "Projection" }
+                        button { style: "{color_btn_style}", onclick: move |_| model.write().cycle_background(), "Background" }
+                        button { style: "{color_btn_style}", onclick: move |_| { let mut m = model.write(); m.theme_light = !m.theme_light; }, "Theme" }
+                    },
+                    RibbonTab::Measure => rsx! {
+                        span { style: "color:{COL_TEXT};",
+                            {measure.clone().unwrap_or_else(|| "Select 2 / 3 / 4 atoms to measure".to_string())}
+                        }
+                    },
+                    RibbonTab::Animation => rsx! {
+                        button { style: "{color_btn_style}", onclick: move |_| model.write().toggle_animation(), {if anim_playing { "Stop" } else { "Play" }} }
+                        button { style: "{color_btn_style}", onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Spin), "+ Spin" }
+                        button { style: "{color_btn_style}", onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Rock), "+ Rock" }
+                        button { style: "{color_btn_style}", onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Pause), "+ Pause" }
+                    },
                 }
             }
             // Scene tabs (CueMol2 multi-scene tabmolview): one tab per scene + "+".
@@ -2314,6 +2434,50 @@ fn app() -> Element {
                     }
                 }
             }
+            // Output console (CueMol2 bottom output panel): scrollback log + a command
+            // line (evaluates a selection) + a script loader. Toggled from the View menu.
+            if show_console {
+                div {
+                    style: "display:flex;flex-direction:column;height:150px;flex:0 0 auto;\
+                            background:{COL_BG};border-top:1px solid {COL_BORDER};",
+                    div { style: "{panel_title_style}", "Output" }
+                    div { style: "flex:1;min-height:0;overflow-y:auto;padding:4px 12px;\
+                                  font-family:monospace;font-size:11px;color:{COL_TEXT};",
+                        for (li , line) in console_log.iter().enumerate() {
+                            div { key: "log-{li}", "{line}" }
+                        }
+                    }
+                    div { style: "display:flex;gap:4px;align-items:center;padding:4px 12px;\
+                                  border-top:1px solid {COL_BORDER};",
+                        input {
+                            style: "flex:1;{edit_input_style}",
+                            placeholder: "command: a selection expression (e.g. resid 1:10)",
+                            value: "{console_cmd}",
+                            oninput: move |e| console_cmd.set(e.value()),
+                            onkeydown: move |e| {
+                                if e.key() == Key::Enter {
+                                    let cmd = console_cmd.peek().trim().to_string();
+                                    model.write().run_console_command(&cmd);
+                                    console_cmd.set(String::new());
+                                }
+                            },
+                        }
+                        input {
+                            style: "width:140px;{edit_input_style}",
+                            placeholder: "script path",
+                            oninput: move |e| script_path.set(e.value()),
+                        }
+                        button {
+                            style: "{color_btn_style}",
+                            onclick: move |_| {
+                                let path = script_path.peek().trim().to_string();
+                                model.write().execute_script(&path);
+                            },
+                            "Run script"
+                        }
+                    }
+                }
+            }
             // Status bar.
             div { style: "{status_style}", "{status}" }
         }
@@ -2732,6 +2896,34 @@ mod tests {
             first,
             "it landed in slot 2"
         );
+    }
+
+    #[test]
+    fn console_command_and_script_log_in_dioxus() {
+        // Output-console parity: the command line evaluates a selection + logs it, and
+        // Execute-script echoes a script file into the log (JS engine not embedded).
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        model.run_console_command("resid 1");
+        assert!(
+            model.log.iter().any(|line| line.starts_with("> resid 1")),
+            "command logged to the console"
+        );
+        assert_eq!(model.selection_text, "resid 1", "command set the selection");
+
+        let script = std::env::temp_dir().join("cuemol_test_script.js");
+        std::fs::write(&script, "// hello\nfoo();\n").unwrap();
+        model.execute_script(script.to_str().unwrap());
+        assert!(model.show_console, "Execute script opens the console");
+        assert!(
+            model.log.iter().any(|line| line.contains("Loaded script")),
+            "script load logged"
+        );
+        assert!(
+            model.log.iter().any(|line| line.contains("foo();")),
+            "script lines echoed into the log"
+        );
+        let _ = std::fs::remove_file(&script);
     }
 
     #[test]
