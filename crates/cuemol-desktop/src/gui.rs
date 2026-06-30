@@ -1249,8 +1249,45 @@ impl GuiApplication {
             ui.selectable_value(&mut self.measure_mode, MeasureMode::Angle, "Angle");
             ui.selectable_value(&mut self.measure_mode, MeasureMode::Torsion, "Torsion");
             ui.separator();
-            ui.label("(pick atoms in the 3D view to measure — wired in M3)");
+            // Measure the current selection: 2 atoms → distance, 3 → angle, 4 → torsion
+            // (CueMol2 AtomIntr distance/angle/torsion, computed from the picked atoms).
+            match self.measure_selection() {
+                Some(result) => ui.strong(result),
+                None => ui.weak("select 2 / 3 / 4 atoms to measure distance / angle / torsion"),
+            };
         });
+    }
+
+    /// Distance / angle / torsion of the currently selected atoms (in atom-index order),
+    /// the CueMol2 AtomIntr measurement computed over a 2 / 3 / 4-atom selection.
+    fn measure_selection(&self) -> Option<String> {
+        let points: Vec<Vec3> = self
+            .snapshot
+            .atoms
+            .iter()
+            .filter(|atom| atom.selected)
+            .map(|atom| vec3_from_vector(atom.center))
+            .collect();
+        match points.as_slice() {
+            [a, b] => Some(format!("Distance: {:.3} Å", (*b - *a).length())),
+            [a, b, c] => {
+                let u = (*a - *b).normalize_or_zero();
+                let v = (*c - *b).normalize_or_zero();
+                let angle = u.dot(v).clamp(-1.0, 1.0).acos().to_degrees();
+                Some(format!("Angle: {angle:.2}°"))
+            }
+            [a, b, c, d] => {
+                let b1 = *b - *a;
+                let b2 = *c - *b;
+                let b3 = *d - *c;
+                let n1 = b1.cross(b2);
+                let n2 = b2.cross(b3);
+                let m = n1.cross(b2.normalize_or_zero());
+                let torsion = m.dot(n2).atan2(n1.dot(n2)).to_degrees();
+                Some(format!("Torsion: {torsion:.2}°"))
+            }
+            _ => None,
+        }
     }
 
     fn ribbon_animation(&mut self, ui: &mut egui::Ui) {
@@ -5378,6 +5415,51 @@ mod tests {
             "rainbow must spread carbon colours into a gradient: \
              element={element_colors} rainbow={rainbow_colors}"
         );
+    }
+
+    #[test]
+    fn measure_selection_computes_distance_angle_torsion() {
+        // Synthetic, controlled-geometry oracle (independent of any molecule): 2 selected
+        // atoms → distance, 3 → angle, 4 → torsion.
+        let mut app = GuiApplication::new();
+        let atom = |x: f64, y: f64, z: f64| RenderAtom {
+            center: Vector4::new3(x, y, z),
+            radius: 0.3,
+            color: None,
+            object_uid: None,
+            atom_index: None,
+            selected: true,
+            detail: None,
+        };
+        // 3-4-5 right triangle legs → distance 5.
+        app.snapshot.atoms = vec![atom(0.0, 0.0, 0.0), atom(3.0, 4.0, 0.0)];
+        assert!(
+            app.measure_selection().unwrap().contains("5.000"),
+            "distance: {:?}",
+            app.measure_selection()
+        );
+        // Right angle at the central atom → 90°.
+        app.snapshot.atoms = vec![atom(1.0, 0.0, 0.0), atom(0.0, 0.0, 0.0), atom(0.0, 1.0, 0.0)];
+        assert!(
+            app.measure_selection().unwrap().contains("90.00"),
+            "angle: {:?}",
+            app.measure_selection()
+        );
+        // A ±90° dihedral.
+        app.snapshot.atoms = vec![
+            atom(1.0, 0.0, 0.0),
+            atom(0.0, 0.0, 0.0),
+            atom(0.0, 0.0, 1.0),
+            atom(0.0, 1.0, 1.0),
+        ];
+        let torsion = app.measure_selection().unwrap();
+        assert!(
+            torsion.contains("Torsion") && torsion.contains("90.00"),
+            "torsion: {torsion}"
+        );
+        // A single selected atom yields no measurement.
+        app.snapshot.atoms = vec![atom(0.0, 0.0, 0.0)];
+        assert!(app.measure_selection().is_none());
     }
 
     #[test]
