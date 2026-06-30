@@ -731,6 +731,12 @@ impl GuiApplication {
         } else {
             egui::Visuals::dark()
         });
+        // Animation playback: a continuous camera spin (CueMol2 SimpleSpin) while playing.
+        // Keep requesting repaints so the spin animates frame to frame.
+        if self.animation_playing {
+            camera.rotate_by(2.0, 0.0);
+            ctx.request_repaint();
+        }
         // CueMol2 window order (uxp_gui `cuemol2.xul`):
         // menu bar (top) -> ribbon (top) -> [ left dock | tabbed view | bottom dock ]
         // -> status bar (very bottom). There is no right dock; properties open modally.
@@ -6008,6 +6014,31 @@ mod tests {
                 "editor expression must parse: {expr}"
             );
         }
+    }
+
+    #[test]
+    fn animation_play_spins_the_camera() {
+        // Playing the animation continuously spins the camera (CueMol2 SimpleSpin);
+        // stopping leaves it still.
+        let ctx = egui::Context::default();
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+
+        app.animation_playing = true;
+        let before = camera.orientation;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx, &mut camera));
+        assert!(
+            !camera.orientation.abs_diff_eq(before, 1.0e-4),
+            "playing must spin the camera"
+        );
+
+        app.animation_playing = false;
+        let stopped = camera.orientation;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx, &mut camera));
+        assert!(
+            camera.orientation.abs_diff_eq(stopped, 1.0e-6),
+            "stopped must leave the camera still"
+        );
     }
 
     #[test]
