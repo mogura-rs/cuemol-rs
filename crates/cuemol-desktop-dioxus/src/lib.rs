@@ -541,6 +541,59 @@ impl Model {
         self.log_line(format!("> {expr}  →  {count} atom(s) selected"));
     }
 
+    /// Log the active camera + crystal-cell properties to the output console (CueMol2
+    /// Scene/View → Properties).
+    fn show_view_properties(&mut self) {
+        self.show_console = true;
+        let center = self.camera.center();
+        let line = format!(
+            "View: center=({:.2},{:.2},{:.2}) zoom={:.1} {}",
+            center.x,
+            center.y,
+            center.z,
+            self.camera.zoom(),
+            if self.camera.is_perspective() {
+                "perspective"
+            } else {
+                "orthographic"
+            }
+        );
+        self.log_line(line);
+        if let Some(summary) = self.state.active_crystal_summaries().first() {
+            self.log.push(format!(
+                "  cell: a={:.2} b={:.2} c={:.2}  SG={}",
+                summary.a, summary.b, summary.c, summary.space_group_name
+            ));
+        }
+    }
+
+    /// Time 20 offscreen renders and log the average frame time / FPS (CueMol2 Tools →
+    /// Performance measure). Self-skips with no GPU adapter.
+    fn measure_performance(&mut self) {
+        self.show_console = true;
+        if self.renderer.is_none() {
+            self.log_line("Performance: no GPU adapter");
+            return;
+        }
+        const FRAMES: u32 = 20;
+        let start = std::time::Instant::now();
+        let mut rendered = 0u32;
+        for _ in 0..FRAMES {
+            if self.render_uri().is_some() {
+                rendered += 1;
+            }
+        }
+        if rendered == 0 {
+            self.log_line("Performance: empty scene");
+            return;
+        }
+        let ms = start.elapsed().as_secs_f64() * 1000.0 / rendered as f64;
+        let fps = if ms > 0.0 { 1000.0 / ms } else { 0.0 };
+        self.log_line(format!(
+            "Performance: {ms:.2} ms/frame ({fps:.0} fps) over {rendered} renders"
+        ));
+    }
+
     /// Discard all undo/redo history (CueMol2 Edit → Clear undo data).
     fn clear_undo_data(&mut self) {
         self.undo_stack.clear();
@@ -1009,6 +1062,8 @@ impl Model {
             "apbs" => self.write_apbs(),
             "cut_surface" => self.write_cut_surface(),
             "toggle_console" => self.show_console = !self.show_console,
+            "view_props" => self.show_view_properties(),
+            "perf" => self.measure_performance(),
             "show_script" => {
                 self.show_console = true;
                 self.log_line("Enter a script path in the Output panel and press Run script");
@@ -1445,6 +1500,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("Fit view", "fit_view"),
             ("Toggle projection", "toggle_projection"),
             ("Toggle output console", "toggle_console"),
+            ("Scene / View properties", "view_props"),
             ("Toggle light/dark theme", "toggle_theme"),
             ("Surface", "surface"),
             ("Density contour", "den_contour"),
@@ -1460,6 +1516,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("APBS electrostatics", "apbs"),
             ("Surface cutter (OBJ)", "cut_surface"),
             ("Execute script…", "show_script"),
+            ("Performance measure", "perf"),
         ], // Tools
         7 => &[("About", "about")],              // Help
         _ => &[],
@@ -2895,6 +2952,26 @@ mod tests {
             model.animation_objects[1].kind.label(),
             first,
             "it landed in slot 2"
+        );
+    }
+
+    #[test]
+    fn view_properties_and_perf_log_in_dioxus() {
+        // Parity with gpui's Scene/View properties + Performance measure (both log to
+        // the output console). Perf self-skips its timing with no GPU adapter but still
+        // logs a "Performance:" line.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        model.show_view_properties();
+        assert!(model.show_console, "view props opens the console");
+        assert!(
+            model.log.iter().any(|line| line.starts_with("View:")),
+            "view properties logged"
+        );
+        model.measure_performance();
+        assert!(
+            model.log.iter().any(|line| line.starts_with("Performance:")),
+            "performance logged"
         );
     }
 
