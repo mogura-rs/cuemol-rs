@@ -461,6 +461,17 @@ impl CueMolGpuiApp {
         self.refresh_scene(false);
     }
 
+    /// Apply a selection expression (CueMol2 Selection quick-selects), keeping the
+    /// selection input box in sync, then re-tessellate so the highlight updates.
+    fn set_selection(&mut self, expr: &str, cx: &mut Context<Self>) {
+        let expr = expr.to_string();
+        self.applied_selection = expr.clone();
+        if let Some(input) = self.inputs.as_ref().map(|inputs| inputs.selection.clone()) {
+            input.update(cx, move |input, cx| input.set_text(expr, cx));
+        }
+        self.refresh_scene(false);
+    }
+
     /// Pull the live selection text from the input entity; if it differs from the
     /// applied one, adopt it and re-tessellate (no camera re-frame — selection only
     /// changes highlighting/visibility, not the molecule's extent).
@@ -1897,6 +1908,43 @@ impl CueMolGpuiApp {
                 .child(color_btn("sym-mates", "Symm mol").on_click(cx.listener(
                     |this, _: &gpui::ClickEvent, _, cx| {
                         this.toggle_symm_mates();
+                        cx.notify();
+                    },
+                )))
+                .into_any_element(),
+        );
+
+        // Selection quick-selects (CueMol2 selection-panel.xul Editor tab).
+        rows.push(section_label("Selection").into_any_element());
+        rows.push(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .child(color_btn("sel-all", "All").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.set_selection("*", cx);
+                        cx.notify();
+                    },
+                )))
+                .child(color_btn("sel-none", "None").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.set_selection("none", cx);
+                        cx.notify();
+                    },
+                )))
+                .child(color_btn("sel-bb", "Backbone").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.set_selection("bymainch *", cx);
+                        cx.notify();
+                    },
+                )))
+                .child(color_btn("sel-sc", "Sidechain").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.set_selection("bysidech *", cx);
                         cx.notify();
                     },
                 )))
