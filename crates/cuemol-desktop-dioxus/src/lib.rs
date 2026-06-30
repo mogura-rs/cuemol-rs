@@ -689,6 +689,25 @@ impl Model {
         self.rebuild_selection();
     }
 
+    /// Recompute secondary structure (DSSP) on the first molecule (CueMol2 Tools →
+    /// Reassign secondary structure). Updates the `secondary` residue prop the
+    /// cartoon/ribbon renderers + SS coloring read. Defaults match the gpui dialog
+    /// (don't ignore chain breaks, 90° helix-angle threshold).
+    fn reassign_secondary(&mut self) {
+        let Some(uid) = self.first_object_uid() else {
+            return;
+        };
+        self.push_undo();
+        match self
+            .state
+            .assign_secondary_structure_in_object(uid, false, 90.0)
+        {
+            Ok(_) => self.status = "Secondary structure reassigned".into(),
+            Err(error) => self.status = format!("Reassign SS failed: {error}"),
+        }
+        self.rebuild_selection();
+    }
+
     /// Renumber the residues of the selected atoms starting at `start` (CueMol2
     /// Edit → Renumber residues). An empty selection applies to the whole molecule.
     fn renumber_residues(&mut self, start: i32) {
@@ -712,6 +731,7 @@ impl Model {
             "redo" => self.redo(),
             "fit_view" => self.fit_view(),
             "toggle_projection" => self.toggle_projection(),
+            "reassign_ss" => self.reassign_secondary(),
             "sel_none" => self.set_selection("none"),
             "sel_all" => self.set_selection("*"),
             "col_element" => self.color_element(),
@@ -1149,7 +1169,10 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("H-bonds", "hbonds"),
             ("Labels", "labels"),
         ], // View
-        5 => &[("Generate surface", "surface")], // Tools
+        5 => &[
+            ("Generate surface", "surface"),
+            ("Reassign secondary structure", "reassign_ss"),
+        ], // Tools
         7 => &[("About", "about")],              // Help
         _ => &[],
     }
@@ -1638,6 +1661,14 @@ fn app() -> Element {
                                 title: "Delete the atoms in the current selection",
                                 onclick: move |_| model.write().delete_selected_atoms(),
                                 "Delete sel"
+                            }
+                        }
+                        div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
+                            button {
+                                style: "{color_btn_style}",
+                                title: "Recompute secondary structure (DSSP)",
+                                onclick: move |_| model.write().reassign_secondary(),
+                                "Reassign SS"
                             }
                         }
                         // Measure (CueMol2 AtomIntr): distance/angle/torsion of selection.
@@ -2308,6 +2339,32 @@ mod tests {
         assert_eq!(total(&model), before, "second undo restored again");
         model.undo();
         assert_eq!(model.status, "Nothing to undo", "undo stack is now empty");
+    }
+
+    #[test]
+    fn reassign_secondary_structure_wires_dssp_in_dioxus() {
+        // GUI-wiring test for the Tools → Reassign-secondary-structure button: DSSP runs,
+        // preserves the atom set, and is undoable. (The DSSP algorithm itself is verified
+        // by cuemol-molanl's prot2ndry_compat tests, not re-checked here.)
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        let atoms = |model: &Model| {
+            model
+                .state
+                .active_render_snapshot("")
+                .map(|snapshot| snapshot.atoms.len())
+                .unwrap_or(0)
+        };
+        let before = atoms(&model);
+        let undo_before = model.undo_stack.len();
+        model.reassign_secondary();
+        assert_eq!(model.status, "Secondary structure reassigned");
+        assert_eq!(atoms(&model), before, "DSSP does not add/remove atoms");
+        assert_eq!(
+            model.undo_stack.len(),
+            undo_before + 1,
+            "reassign is undoable"
+        );
     }
 
     #[test]
