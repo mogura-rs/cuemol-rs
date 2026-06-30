@@ -123,6 +123,9 @@ struct Model {
     /// Density-map chickenwire contour toggle + its sigma level.
     show_density_contour: bool,
     density_level: f64,
+    /// Molecular-surface (SES) display + a cached mesh (the SES is expensive).
+    show_surface: bool,
+    surface_mesh: Option<cuemol_render::RenderMesh>,
 }
 
 impl Model {
@@ -157,6 +160,8 @@ impl Model {
             show_symm_mates: false,
             show_density_contour: false,
             density_level: 1.5,
+            show_surface: false,
+            surface_mesh: None,
         };
         model.rebuild_after_load();
         model
@@ -180,6 +185,11 @@ impl Model {
             self.density_level,
             self.show_density_contour,
         );
+        if self.show_surface {
+            if let Some(mesh) = &self.surface_mesh {
+                snapshot.meshes.push(mesh.clone());
+            }
+        }
         Some(snapshot)
     }
 
@@ -278,6 +288,32 @@ impl Model {
     /// Density map "chickenwire" contour toggle (CueMol2 Density map panel).
     fn toggle_density_contour(&mut self) {
         self.show_density_contour = !self.show_density_contour;
+        self.rebuild_selection();
+    }
+
+    /// Molecular-surface (SES) display toggle. Computes the SES mesh once on enable
+    /// (it is expensive) via the shared `build_surface_mesh` and caches it.
+    fn toggle_surface(&mut self) {
+        self.show_surface = !self.show_surface;
+        if self.show_surface && self.surface_mesh.is_none() {
+            if let Some(uid) = self
+                .state
+                .active_object_summaries()
+                .first()
+                .map(|object| object.uid)
+            {
+                match self
+                    .state
+                    .build_surface_mesh(uid, &self.selection_text, 1.0, 1.4)
+                {
+                    Ok(mesh) => self.surface_mesh = Some(mesh),
+                    Err(error) => {
+                        self.show_surface = false;
+                        self.status = format!("Surface failed: {error}");
+                    }
+                }
+            }
+        }
         self.rebuild_selection();
     }
 
@@ -765,6 +801,15 @@ fn app() -> Element {
                                 "Show contour"
                             }
                         }
+                        // Molecular surface (CueMol2 molsurf renderer display).
+                        div { style: "{section_header_style}", "Surface" }
+                        div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().toggle_surface(),
+                                "Show surface"
+                            }
+                        }
                     }
                 }
                 // 3D viewport: scroll to zoom, left-drag to orbit, right-drag to
@@ -1054,6 +1099,26 @@ mod tests {
         assert!(
             rainbow > element + 10,
             "rainbow must spread carbon colours: element={element} rainbow={rainbow}"
+        );
+    }
+
+    #[test]
+    fn surface_toggle_builds_and_caches_an_ses_mesh() {
+        // The dioxus Surface toggle builds the SES via the shared build_surface_mesh and
+        // caches a real triangle mesh. A small selection keeps the SES grid cheap.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        model.selection_text = "resid 1:3".to_string();
+        assert!(!model.show_surface);
+        model.toggle_surface();
+        assert!(model.show_surface, "surface toggled on");
+        assert!(
+            model
+                .surface_mesh
+                .as_ref()
+                .map(|mesh| mesh.indices.len() >= 30)
+                .unwrap_or(false),
+            "a real SES triangle mesh is cached"
         );
     }
 
