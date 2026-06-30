@@ -9,6 +9,7 @@
 //! by `DesktopAppState`; the wgpu 3D viewport is a placeholder pending the
 //! offscreen-render compositing step.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -389,6 +390,42 @@ impl CueMolGpuiApp {
         self.rendered_bond_count = snapshot.as_ref().map(|s| s.bonds.len()).unwrap_or(0);
         self.mesh = snapshot.as_ref().map(cuemol_render::tessellate_snapshot);
         self.rerender();
+    }
+
+    /// Apply an object-level coloring scheme to every molecule (CueMol2 Coloring
+    /// panel), then re-tessellate. Shares the core `set_object_coloring` path with the
+    /// egui/dioxus front ends, so the snapshot recolours each carbon ($molcol cascade).
+    fn apply_coloring(&mut self, coloring_type: Option<&str>, attrs: BTreeMap<String, String>) {
+        let uids: Vec<_> = self
+            .state
+            .active_object_summaries()
+            .iter()
+            .map(|object| object.uid)
+            .collect();
+        for uid in uids {
+            let _ = self
+                .state
+                .set_object_coloring(uid, coloring_type.map(String::from), attrs.clone());
+        }
+        self.refresh_scene(false);
+    }
+
+    fn color_element(&mut self) {
+        self.apply_coloring(None, BTreeMap::new());
+    }
+
+    fn color_rainbow(&mut self) {
+        let mut attrs = BTreeMap::new();
+        attrs.insert("mode".into(), "mol".into());
+        attrs.insert("start_hue".into(), "240".into());
+        attrs.insert("end_hue".into(), "0".into());
+        attrs.insert("sat".into(), "1".into());
+        attrs.insert("bri".into(), "1".into());
+        self.apply_coloring(Some("RainbowColoring"), attrs);
+    }
+
+    fn color_bfactor(&mut self) {
+        self.apply_coloring(Some("BfacColoring"), BTreeMap::new());
     }
 
     /// Pull the live selection text from the input entity; if it differs from the
@@ -1777,6 +1814,37 @@ impl CueMolGpuiApp {
         }
         // CueMol2's left dock stacks several panels below the Workspace tree.
         rows.extend(self.cuemol_extra_panels());
+
+        // Coloring panel (CueMol2 coloring-panel.xul): object-level scheme buttons,
+        // sharing the core set_object_coloring path with egui/dioxus.
+        rows.push(section_label("Coloring").into_any_element());
+        rows.push(
+            div()
+                .flex()
+                .flex_row()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .child(color_btn("col-element", "Element").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.color_element();
+                        cx.notify();
+                    },
+                )))
+                .child(color_btn("col-rainbow", "Rainbow").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.color_rainbow();
+                        cx.notify();
+                    },
+                )))
+                .child(color_btn("col-bfac", "B-factor").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.color_bfactor();
+                        cx.notify();
+                    },
+                )))
+                .into_any_element(),
+        );
 
         div()
             .flex()
@@ -3519,6 +3587,22 @@ fn menu_item(id: impl Into<gpui::ElementId>, label: impl Into<String>) -> gpui::
         .cursor_pointer()
         .text_sm()
         .text_color(rgb(COL_TEXT))
+        .hover(|s| s.bg(rgb(COL_BTN)))
+        .child(label.into())
+}
+
+/// A compact bordered button for the side-panel control rows (Coloring etc.).
+fn color_btn(id: impl Into<gpui::ElementId>, label: impl Into<String>) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .px_2()
+        .py_1()
+        .cursor_pointer()
+        .text_xs()
+        .text_color(rgb(COL_TEXT))
+        .border_1()
+        .border_color(rgb(COL_BORDER))
+        .rounded_sm()
         .hover(|s| s.bg(rgb(COL_BTN)))
         .child(label.into())
 }
