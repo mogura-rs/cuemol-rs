@@ -283,6 +283,8 @@ pub struct CueMolGpuiApp {
     surface_mesh: Option<cuemol_render::RenderMesh>,
     /// Hydrogen-bond dashed lines.
     show_hbonds: bool,
+    /// Atom/residue labels overlaid on the selected atoms.
+    show_labels: bool,
     /// Console / status log (newest last), capped to avoid unbounded growth.
     log_lines: Vec<String>,
     /// Most-recently-opened file paths (newest first, capped at 10).
@@ -362,6 +364,7 @@ impl CueMolGpuiApp {
             show_surface: false,
             surface_mesh: None,
             show_hbonds: false,
+            show_labels: false,
             log_lines: Vec::new(),
             recent_paths: Vec::new(),
             undo_stack: Vec::new(),
@@ -506,6 +509,37 @@ impl CueMolGpuiApp {
     fn toggle_hbonds(&mut self) {
         self.show_hbonds = !self.show_hbonds;
         self.refresh_scene(false);
+    }
+
+    /// Atom-label display toggle (overlaid on the composited image; no re-tessellation).
+    fn toggle_labels(&mut self) {
+        self.show_labels = !self.show_labels;
+    }
+
+    /// Absolute-positioned atom labels overlaid on the viewport image (CueMol2 atom
+    /// labels). The projected positions are image (physical) pixels; gpui lays out in
+    /// logical px, so divide by the scale factor.
+    fn label_overlay(&self) -> Vec<gpui::AnyElement> {
+        if !self.show_labels {
+            return Vec::new();
+        }
+        let (w, h) = self.view_size;
+        let mvp = crate::offscreen::camera_mvp(&self.camera, w as f64 / h as f64);
+        let scale = self.scale_factor.max(0.01);
+        self.state
+            .active_atom_labels(&self.applied_selection, mvp, w as f32, h as f32, 80)
+            .into_iter()
+            .map(|label| {
+                div()
+                    .absolute()
+                    .left(px(label.x / scale))
+                    .top(px(label.y / scale))
+                    .text_xs()
+                    .text_color(rgb(0xeaf0f8))
+                    .child(label.text)
+                    .into_any_element()
+            })
+            .collect()
     }
 
     /// Filled density isosurface (solid mode) toggle. Marches the map once on enable.
@@ -2070,6 +2104,12 @@ impl CueMolGpuiApp {
                         cx.notify();
                     },
                 )))
+                .child(color_btn("labels", "Labels").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.toggle_labels();
+                        cx.notify();
+                    },
+                )))
                 .into_any_element(),
         );
 
@@ -2686,7 +2726,8 @@ impl CueMolGpuiApp {
                         .size_full()
                         .object_fit(gpui::ObjectFit::Contain),
                 )
-                .children(center_mark_overlay(self.center_mark)),
+                .children(center_mark_overlay(self.center_mark))
+                .children(self.label_overlay()),
             None => base.gap_2().child(div().text_color(rgb(COL_TEXT_DIM)).child(
                 "3D viewport (wgpu) — load a molecule (or no GPU adapter available)",
             )),

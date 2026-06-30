@@ -129,6 +129,15 @@ pub struct GuiStructObject {
     pub chains: Vec<GuiStructChain>,
 }
 
+/// A projected atom label for the 3D view (CueMol2 atom labels): the `text` to draw at
+/// image-pixel `(x, y)`. Front ends overlay these over the composited viewport image.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuiAtomLabel {
+    pub x: f32,
+    pub y: f32,
+    pub text: String,
+}
+
 /// One residue cell in the interactive sequence viewer (CueMol2 `seqpanel`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiSeqResidue {
@@ -1154,6 +1163,47 @@ impl DesktopAppState {
         out
     }
 
+    /// Project the SELECTED atoms to image-pixel positions + their `RESid:ATOM` text,
+    /// for overlaying atom labels over the composited viewport image (CueMol2 atom
+    /// labels) in the gpui/dioxus front ends. `mvp` is the column-major view-projection
+    /// (`camera_mvp`); `width`/`height` are the image pixel size. Atoms behind the camera
+    /// or off-screen are dropped; capped at `max`.
+    pub fn active_atom_labels(
+        &self,
+        selection_text: &str,
+        mvp: [[f32; 4]; 4],
+        width: f32,
+        height: f32,
+        max: usize,
+    ) -> Vec<GuiAtomLabel> {
+        let Ok(snapshot) = self.active_render_snapshot(selection_text) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for atom in snapshot.atoms.iter().filter(|atom| atom.selected) {
+            if out.len() >= max {
+                break;
+            }
+            let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) else {
+                continue;
+            };
+            let p = atom.center;
+            let Some((sx, sy)) =
+                project_to_image(mvp, [p.x as f32, p.y as f32, p.z as f32], width, height)
+            else {
+                continue;
+            };
+            if let Ok(info) = self.atom_summary(Uid::new(object_uid), atom_index) {
+                out.push(GuiAtomLabel {
+                    x: sx,
+                    y: sy,
+                    text: format!("{}{}:{}", info.residue_name.trim(), info.residue_id, info.name),
+                });
+            }
+        }
+        out
+    }
+
     pub fn active_render_snapshot(&self, selection_text: &str) -> Result<RenderSceneSnapshot> {
         let scene_uid = self
             .active_scene
@@ -1817,6 +1867,33 @@ fn renderer_render_options(
     options
 }
 
+/// Project a world point through a column-major view-projection `mvp` to image-pixel
+/// coordinates `(x, y)` (origin top-left), or `None` if it is behind the camera or
+/// outside the `width`×`height` image. The screen-space mapping used by atom labels.
+fn project_to_image(
+    mvp: [[f32; 4]; 4],
+    point: [f32; 3],
+    width: f32,
+    height: f32,
+) -> Option<(f32, f32)> {
+    let v = [point[0], point[1], point[2], 1.0];
+    let mut clip = [0.0f32; 4];
+    for (row, clip_component) in clip.iter_mut().enumerate() {
+        for (col, vc) in v.iter().enumerate() {
+            *clip_component += mvp[col][row] * vc;
+        }
+    }
+    if clip[3] <= 0.0 {
+        return None;
+    }
+    let sx = (clip[0] / clip[3] + 1.0) * 0.5 * width;
+    let sy = (1.0 - clip[1] / clip[3]) * 0.5 * height;
+    if sx < 0.0 || sx > width || sy < 0.0 || sy > height {
+        return None;
+    }
+    Some((sx, sy))
+}
+
 /// Linear interpolation between two points (used to dash the H-bond lines).
 fn lerp_point(a: cuemol_core::Vector4, b: cuemol_core::Vector4, t: f64) -> cuemol_core::Vector4 {
     cuemol_core::Vector4::new3(
@@ -2218,6 +2295,26 @@ mod tests {
             pick_atom_screen(&[atom], mvp, (50.0, 50.0), (100.0, 100.0), 10.0),
             None
         );
+    }
+
+    #[test]
+    fn project_to_image_maps_clip_space_to_pixels() {
+        let id = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        // Origin maps to the image centre.
+        assert_eq!(
+            project_to_image(id, [0.0, 0.0, 0.0], 800.0, 600.0),
+            Some((400.0, 300.0))
+        );
+        // (0.5, -0.5) → (0.75·w, 0.75·h) — y flips (image origin top-left).
+        let (x, y) = project_to_image(id, [0.5, -0.5, 0.0], 800.0, 600.0).unwrap();
+        assert!((x - 600.0).abs() < 0.1 && (y - 450.0).abs() < 0.1, "got ({x}, {y})");
+        // Off-screen → None.
+        assert!(project_to_image(id, [5.0, 0.0, 0.0], 800.0, 600.0).is_none());
     }
 
     #[test]

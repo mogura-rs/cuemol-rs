@@ -131,6 +131,8 @@ struct Model {
     surface_mesh: Option<cuemol_render::RenderMesh>,
     /// Hydrogen-bond dashed lines.
     show_hbonds: bool,
+    /// Atom/residue labels overlaid on the selected atoms.
+    show_labels: bool,
 }
 
 impl Model {
@@ -170,6 +172,7 @@ impl Model {
             show_surface: false,
             surface_mesh: None,
             show_hbonds: false,
+            show_labels: false,
         };
         model.rebuild_after_load();
         model
@@ -310,6 +313,23 @@ impl Model {
     fn toggle_hbonds(&mut self) {
         self.show_hbonds = !self.show_hbonds;
         self.rebuild_selection();
+    }
+
+    /// Atom-label display toggle (overlaid on the composited image; no re-tessellation).
+    fn toggle_labels(&mut self) {
+        self.show_labels = !self.show_labels;
+    }
+
+    /// Projected atom labels for the selected atoms at the current camera, in image
+    /// pixels (== this viewport's CSS px, so they overlay 1:1). Empty unless shown.
+    fn atom_labels(&self) -> Vec<cuemol_desktop_core::GuiAtomLabel> {
+        if !self.show_labels {
+            return Vec::new();
+        }
+        let (w, h) = self.view_size;
+        let mvp = camera_mvp(&self.camera, w as f64 / h as f64);
+        self.state
+            .active_atom_labels(&self.selection_text, mvp, w as f32, h as f32, 80)
     }
 
     /// Filled density isosurface (solid mode) toggle. Marches the map once on enable.
@@ -649,7 +669,7 @@ fn app() -> Element {
 
     // Derive view data under a short read borrow, then release it before RSX so
     // the event handlers (which write the signal) never alias the read guard.
-    let (status, scene_name, image_uri, rows, sections, seq_chains) = {
+    let (status, scene_name, image_uri, rows, sections, seq_chains, atom_labels) = {
         let m = model.read();
         (
             m.status.clone(),
@@ -658,6 +678,7 @@ fn app() -> Element {
             m.tree_rows(),
             m.panel_sections(),
             m.state.active_sequence_view(&m.selection_text),
+            m.atom_labels(),
         )
     };
 
@@ -688,8 +709,8 @@ fn app() -> Element {
          color:{COL_TEXT_DIM};font-size:11px;flex:0 0 auto;"
     );
     let viewport_style = format!(
-        "display:flex;flex:1;min-width:0;align-items:center;justify-content:center;\
-         background:{COL_VIEWPORT};overflow:hidden;cursor:grab;"
+        "position:relative;display:flex;flex:1;min-width:0;align-items:center;\
+         justify-content:center;background:{COL_VIEWPORT};overflow:hidden;cursor:grab;"
     );
     let status_style = format!(
         "display:flex;align-items:center;height:26px;padding:0 16px;background:{COL_HEADER};\
@@ -862,6 +883,11 @@ fn app() -> Element {
                                 onclick: move |_| model.write().toggle_hbonds(),
                                 "H-bonds"
                             }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().toggle_labels(),
+                                "Labels"
+                            }
                         }
                         // Interactive sequence viewer (CueMol2 seqpanel): clickable
                         // 1-letter cells, selected residues highlighted.
@@ -981,6 +1007,16 @@ fn app() -> Element {
                     } else {
                         div { style: "color:{COL_TEXT_DIM};padding:8px;text-align:center;",
                             "3D viewport (wgpu) — load a molecule (or no GPU adapter available)"
+                        }
+                    }
+                    // Atom labels overlaid at projected positions (CueMol2 atom labels).
+                    for (li , label) in atom_labels.iter().enumerate() {
+                        div {
+                            key: "lbl-{li}",
+                            style: "position:absolute;left:{label.x}px;top:{label.y}px;\
+                                    transform:translateY(-100%);font-size:11px;color:#eaf0f8;\
+                                    pointer-events:none;white-space:nowrap;text-shadow:0 0 2px #000;",
+                            "{label.text}"
                         }
                     }
                 }
