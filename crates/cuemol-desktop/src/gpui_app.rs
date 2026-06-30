@@ -517,6 +517,36 @@ impl CueMolGpuiApp {
         self.show_labels = !self.show_labels;
     }
 
+    /// Toggle animation playback (CueMol2 SimpleSpin). While playing, a spawned task
+    /// rotates the camera every ~16 ms until stopped — gpui's frame-timer analogue of
+    /// egui's request_repaint loop.
+    fn toggle_animation(&mut self, cx: &mut Context<Self>) {
+        self.animation_playing = !self.animation_playing;
+        if self.animation_playing {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    let keep = this
+                        .update(cx, |this, cx| {
+                            if !this.animation_playing {
+                                return false;
+                            }
+                            this.rotate_camera(2.0, 0.0);
+                            cx.notify();
+                            true
+                        })
+                        .unwrap_or(false);
+                    if !keep {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(16))
+                        .await;
+                }
+            })
+            .detach();
+        }
+    }
+
     /// Absolute-positioned atom labels overlaid on the viewport image (CueMol2 atom
     /// labels). The projected positions are image (physical) pixels; gpui lays out in
     /// logical px, so divide by the scale factor.
@@ -2667,7 +2697,7 @@ impl CueMolGpuiApp {
             .child(
                 button("anim-play", if playing { "Stop" } else { "Play" }).on_click(cx.listener(
                     |this, _: &gpui::ClickEvent, _, cx| {
-                        this.animation_playing = !this.animation_playing;
+                        this.toggle_animation(cx);
                         cx.notify();
                     },
                 )),

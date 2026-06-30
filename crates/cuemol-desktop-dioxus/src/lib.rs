@@ -135,6 +135,8 @@ struct Model {
     show_labels: bool,
     /// Which top menu's dropdown is open (index into the menu bar), or `None`.
     menu_open: Option<usize>,
+    /// Animation playback (CueMol2 SimpleSpin): a continuous camera spin while set.
+    anim_playing: bool,
 }
 
 impl Model {
@@ -176,6 +178,7 @@ impl Model {
             show_hbonds: false,
             show_labels: false,
             menu_open: None,
+            anim_playing: false,
         };
         model.rebuild_after_load();
         model
@@ -321,6 +324,11 @@ impl Model {
     /// Atom-label display toggle (overlaid on the composited image; no re-tessellation).
     fn toggle_labels(&mut self) {
         self.show_labels = !self.show_labels;
+    }
+
+    /// Animation playback toggle (CueMol2 SimpleSpin); the use_future loop drives it.
+    fn toggle_animation(&mut self) {
+        self.anim_playing = !self.anim_playing;
     }
 
     /// Run a menu-bar dropdown action and close the menu.
@@ -731,6 +739,17 @@ fn app() -> Element {
     // don't churn the wgpu-owning model signal.
     let mut open_text = use_signal(String::new);
 
+    // Animation playback loop (CueMol2 SimpleSpin): an executor-agnostic timer ticks
+    // ~60 fps; while `anim_playing` is set, each tick spins the camera + re-renders.
+    use_future(move || async move {
+        loop {
+            if model.read().anim_playing {
+                model.write().rotate_camera(2.0, 0.0);
+            }
+            futures_timer::Delay::new(std::time::Duration::from_millis(16)).await;
+        }
+    });
+
     // Derive view data under a short read borrow, then release it before RSX so
     // the event handlers (which write the signal) never alias the read guard.
     let (status, scene_name, image_uri, rows, sections, seq_chains, atom_labels, scenes, active_scene) = {
@@ -748,6 +767,7 @@ fn app() -> Element {
         )
     };
     let menu_open = model.read().menu_open;
+    let anim_playing = model.read().anim_playing;
 
     let root_style = format!(
         "display:flex;flex-direction:column;height:100vh;width:100vw;margin:0;\
@@ -1007,6 +1027,15 @@ fn app() -> Element {
                                 style: "{color_btn_style}",
                                 onclick: move |_| model.write().toggle_labels(),
                                 "Labels"
+                            }
+                        }
+                        // Animation playback (CueMol2 SimpleSpin).
+                        div { style: "{section_header_style}", "Animation" }
+                        div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().toggle_animation(),
+                                if anim_playing { "⏸ Stop spin" } else { "▶ Play spin" }
                             }
                         }
                         // Interactive sequence viewer (CueMol2 seqpanel): clickable
