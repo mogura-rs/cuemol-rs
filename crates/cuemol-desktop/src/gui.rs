@@ -370,6 +370,9 @@ struct GuiApplication {
     show_unit_cell: bool,
     /// Whether the home-cell symmetry-mate copies are drawn (Symmetry panel "Symm mol").
     show_symm_mates: bool,
+    /// Force every left-dock accordion section open (an "expand all panels" aid, also
+    /// used to snapshot the bodies inside the REAL narrow dock for layout review).
+    force_open_all_panels: bool,
     /// Rainbow coloring hue endpoints (degrees) edited in the Coloring panel; the
     /// classic N→C blue→red gradient by default (start 240° = blue, end 0° = red).
     coloring_start_hue: f32,
@@ -610,6 +613,7 @@ impl GuiApplication {
             selection_tab: SelectionTab::Command,
             show_unit_cell: false,
             show_symm_mates: false,
+            force_open_all_panels: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
             selected_renderer: None,
@@ -1275,6 +1279,7 @@ impl GuiApplication {
                     for panel in LeftPanel::ALL {
                         egui::CollapsingHeader::new(panel.title())
                             .default_open(matches!(panel, LeftPanel::Workspace))
+                            .open(self.force_open_all_panels.then_some(true))
                             .show(ui, |ui| {
                                 self.left_panel_body(ui, camera, panel);
                             });
@@ -5461,6 +5466,27 @@ mod tests {
                 });
             harness.run();
             save_harness(&mut harness, &out_dir.join("shell.png"));
+        }
+
+        // (1b) The REAL shell with every accordion section forced open, at the actual
+        // ~240px dock width — verifies the panel bodies (toolbars, combos, hue sliders)
+        // fit / wrap acceptably inside the narrow left dock the user actually opens, not
+        // just in an isolated wide column.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            app.force_open_all_panels = true;
+            if let Some(uid) = app.state.active_object_summaries().first().map(|o| o.uid) {
+                app.apply_object_coloring(uid, ColoringMode::Rainbow);
+            }
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1100.0, 980.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("dock.png"));
         }
 
         // (2) Every left-dock panel body expanded at once, so each panel's CONTROLS
