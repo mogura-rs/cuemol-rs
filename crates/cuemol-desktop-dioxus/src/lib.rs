@@ -543,6 +543,70 @@ impl Model {
         }
     }
 
+    /// The active scene's first molecule, or `None` (with a status message) — the
+    /// target object for the single-molecule editing ops below.
+    fn first_object_uid(&mut self) -> Option<cuemol_core::Uid> {
+        match self.state.active_object_summaries().first() {
+            Some(object) => Some(object.uid),
+            None => {
+                self.status = "No molecule loaded".into();
+                None
+            }
+        }
+    }
+
+    /// Delete the atoms matching the current selection (CueMol2 Edit → Delete atoms).
+    /// Requires a non-empty selection so an empty box can't silently delete everything
+    /// (the core treats an empty selector as "all").
+    fn delete_selected_atoms(&mut self) {
+        if self.selection_text.trim().is_empty() {
+            self.status = "Delete atoms: make a selection first".into();
+            return;
+        }
+        let Some(uid) = self.first_object_uid() else {
+            return;
+        };
+        let selection = self.selection_text.clone();
+        match self.state.delete_atoms_in_object(uid, &selection) {
+            Ok(count) => self.status = format!("Deleted {count} atoms"),
+            Err(error) => self.status = format!("Delete atoms failed: {error}"),
+        }
+        self.rebuild_selection();
+    }
+
+    /// Rename the chain of the selected atoms (CueMol2 Edit → Change chain name). An
+    /// empty selection applies to the whole molecule (core default).
+    fn change_chain(&mut self, chain: &str) {
+        let chain = chain.trim().to_string();
+        if chain.is_empty() {
+            self.status = "Change chain: enter a chain name".into();
+            return;
+        }
+        let Some(uid) = self.first_object_uid() else {
+            return;
+        };
+        let selection = self.selection_text.clone();
+        match self.state.change_chain_in_object(uid, &selection, &chain) {
+            Ok(count) => self.status = format!("Chain → {chain} on {count} atoms"),
+            Err(error) => self.status = format!("Change chain failed: {error}"),
+        }
+        self.rebuild_selection();
+    }
+
+    /// Renumber the residues of the selected atoms starting at `start` (CueMol2
+    /// Edit → Renumber residues). An empty selection applies to the whole molecule.
+    fn renumber_residues(&mut self, start: i32) {
+        let Some(uid) = self.first_object_uid() else {
+            return;
+        };
+        let selection = self.selection_text.clone();
+        match self.state.renumber_residues_in_object(uid, &selection, start) {
+            Ok(count) => self.status = format!("Renumbered {count} atoms from {start}"),
+            Err(error) => self.status = format!("Renumber failed: {error}"),
+        }
+        self.rebuild_selection();
+    }
+
     /// Run a menu-bar dropdown action and close the menu.
     fn run_menu_action(&mut self, action: &str) {
         match action {
@@ -955,6 +1019,9 @@ fn app() -> Element {
     let mut traj_text = use_signal(String::new);
     // Save/export path field, held separately from the model like `open_text`.
     let mut save_text = use_signal(String::new);
+    // Molecule-editing input fields (chain name, residue start), held outside the model.
+    let mut edit_chain_text = use_signal(String::new);
+    let mut edit_renum_text = use_signal(String::new);
 
     // Animation playback loop (CueMol2 SimpleSpin): an executor-agnostic timer ticks
     // ~60 fps; while `anim_playing` is set, each tick spins the camera + re-renders.
@@ -1109,6 +1176,10 @@ fn app() -> Element {
     let seq_cell_style = format!(
         "display:inline-block;width:13px;text-align:center;font-family:monospace;\
          font-size:12px;cursor:pointer;color:{COL_TEXT};"
+    );
+    let edit_input_style = format!(
+        "height:20px;padding:0 6px;border-radius:4px;border:1px solid {COL_BORDER};\
+         background:{COL_BG};color:{COL_TEXT};font-size:11px;outline:none;"
     );
     let seq_cell_sel_style = format!(
         "display:inline-block;width:13px;text-align:center;font-family:monospace;\
@@ -1316,6 +1387,49 @@ fn app() -> Element {
                                 style: "{color_btn_style}",
                                 onclick: move |_| model.write().set_selection("bysidech *"),
                                 "Sidechain"
+                            }
+                        }
+                        // Molecule editing (CueMol2 Edit menu): acts on the current selection
+                        // of the first molecule (change chain / renumber / delete atoms).
+                        div { style: "{section_header_style}", "Edit" }
+                        div { style: "display:flex;gap:4px;align-items:center;padding:4px 12px;flex-wrap:wrap;",
+                            input {
+                                style: "width:52px;{edit_input_style}",
+                                placeholder: "chain",
+                                oninput: move |e| edit_chain_text.set(e.value()),
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| {
+                                    let chain = edit_chain_text.peek().trim().to_string();
+                                    model.write().change_chain(&chain);
+                                },
+                                "Set chain"
+                            }
+                        }
+                        div { style: "display:flex;gap:4px;align-items:center;padding:4px 12px;flex-wrap:wrap;",
+                            input {
+                                style: "width:52px;{edit_input_style}",
+                                placeholder: "start#",
+                                oninput: move |e| edit_renum_text.set(e.value()),
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| {
+                                    match edit_renum_text.peek().trim().parse::<i32>() {
+                                        Ok(start) => model.write().renumber_residues(start),
+                                        Err(_) => {
+                                            model.write().status = "Renumber: enter an integer".into()
+                                        }
+                                    }
+                                },
+                                "Renumber"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                title: "Delete the atoms in the current selection",
+                                onclick: move |_| model.write().delete_selected_atoms(),
+                                "Delete sel"
                             }
                         }
                         // Measure (CueMol2 AtomIntr): distance/angle/torsion of selection.
@@ -1896,6 +2010,61 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn molecule_editing_changes_chain_renumbers_and_deletes_in_dioxus() {
+        // Edit-menu parity with egui/gpui: change chain / renumber residues / delete
+        // atoms act on the current selection of the first molecule via the shared core.
+        // Verified by re-evaluating selections against the EDITED molecule (relational
+        // invariants, not hardcoded counts).
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        // `active_render_snapshot(sel)` draws every atom (default simple renderer) and
+        // flags the `sel`-matching ones `.selected`. So `total` = whole-molecule atom
+        // count (shrinks on delete) and `sel_count` = atoms a selection matches against
+        // the EDITED molecule (drops to 0 once those atoms move chain / renumber away).
+        let total = |model: &Model| -> usize {
+            model
+                .state
+                .active_render_snapshot("")
+                .map(|snapshot| snapshot.atoms.len())
+                .unwrap_or(0)
+        };
+        let sel_count = |model: &Model, sel: &str| -> usize {
+            model
+                .state
+                .active_render_snapshot(sel)
+                .map(|snapshot| snapshot.atoms.iter().filter(|atom| atom.selected).count())
+                .unwrap_or(0)
+        };
+        let atoms = total(&model);
+        assert!(atoms > 300, "1CRN loads its atoms (got {atoms})");
+        assert_eq!(sel_count(&model, "chain A"), atoms, "1CRN is all chain A");
+
+        // Change chain: rename the whole molecule's chain A → Z.
+        model.set_selection("chain A");
+        model.change_chain("Z");
+        assert_eq!(sel_count(&model, "chain A"), 0, "no atom remains on chain A");
+        assert_eq!(sel_count(&model, "chain Z"), atoms, "every atom moved to chain Z");
+
+        // Renumber chain Z residues starting at 100 — the first residue becomes 100.
+        model.set_selection("chain Z");
+        model.renumber_residues(100);
+        assert_eq!(sel_count(&model, "resid 1"), 0, "residue 1 renumbered away");
+        assert!(sel_count(&model, "resid 100") > 0, "first residue is now 100");
+
+        // Delete the (renumbered) first residue.
+        model.set_selection("resid 100");
+        let residue_atoms = sel_count(&model, "resid 100");
+        let before = total(&model);
+        model.delete_selected_atoms();
+        assert_eq!(
+            total(&model),
+            before - residue_atoms,
+            "deletion removed exactly the selected residue's atoms"
+        );
+        assert_eq!(sel_count(&model, "resid 100"), 0, "the deleted residue is gone");
     }
 
     #[test]
