@@ -138,6 +138,8 @@ pub enum AnimKind {
     Pause,
     SlideIn,
     SlideOut,
+    ShowAnim,
+    HideAnim,
 }
 
 impl AnimKind {
@@ -148,6 +150,8 @@ impl AnimKind {
             Self::Pause => "Pause",
             Self::SlideIn => "SlideIn",
             Self::SlideOut => "SlideOut",
+            Self::ShowAnim => "Show",
+            Self::HideAnim => "Hide",
         }
     }
 }
@@ -169,6 +173,10 @@ pub struct AnimFrame {
     pub elapsed: f64,
     pub rotate_dir: f64,
     pub slide_dir: f64,
+    /// Target object visibility for Show/Hide objects (`None` = leave unchanged). The
+    /// front end applies it only when the current visibility differs (so it re-renders
+    /// once on entry, not every frame).
+    pub set_visible: Option<bool>,
 }
 
 /// Advance an animation timeline by `dt` seconds (looping at the total duration) and
@@ -179,6 +187,7 @@ pub fn anim_step(objects: &[AnimObject], elapsed: f64, dt: f64) -> AnimFrame {
             elapsed: 0.0,
             rotate_dir: 1.0,
             slide_dir: 0.0,
+            set_visible: None,
         };
     }
     let total: f64 = objects.iter().map(|object| object.duration.max(0.01)).sum();
@@ -190,17 +199,20 @@ pub fn anim_step(objects: &[AnimObject], elapsed: f64, dt: f64) -> AnimFrame {
     for object in objects {
         let d = object.duration.max(0.01);
         if next < acc + d {
-            let (rotate_dir, slide_dir) = match object.kind {
-                AnimKind::Spin => (1.0, 0.0),
-                AnimKind::Rock => (if (next - acc) / d < 0.5 { 1.0 } else { -1.0 }, 0.0),
-                AnimKind::Pause => (0.0, 0.0),
-                AnimKind::SlideIn => (0.0, -1.0),
-                AnimKind::SlideOut => (0.0, 1.0),
+            let (rotate_dir, slide_dir, set_visible) = match object.kind {
+                AnimKind::Spin => (1.0, 0.0, None),
+                AnimKind::Rock => (if (next - acc) / d < 0.5 { 1.0 } else { -1.0 }, 0.0, None),
+                AnimKind::Pause => (0.0, 0.0, None),
+                AnimKind::SlideIn => (0.0, -1.0, None),
+                AnimKind::SlideOut => (0.0, 1.0, None),
+                AnimKind::ShowAnim => (0.0, 0.0, Some(true)),
+                AnimKind::HideAnim => (0.0, 0.0, Some(false)),
             };
             return AnimFrame {
                 elapsed: next,
                 rotate_dir,
                 slide_dir,
+                set_visible,
             };
         }
         acc += d;
@@ -209,6 +221,7 @@ pub fn anim_step(objects: &[AnimObject], elapsed: f64, dt: f64) -> AnimFrame {
         elapsed: next,
         rotate_dir: 0.0,
         slide_dir: 0.0,
+        set_visible: None,
     }
 }
 

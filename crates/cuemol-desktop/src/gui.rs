@@ -2107,6 +2107,34 @@ impl GuiApplication {
             // zoom_by: +step zooms in, so SlideIn (slide_dir -1) → +step.
             camera.zoom_by(-frame.slide_dir as f32 * 20.0 * dt);
         }
+        if let Some(target) = frame.set_visible {
+            self.apply_anim_visibility(target);
+        }
+    }
+
+    /// Set every renderer's visibility for a Show/Hide animation object, re-tessellating
+    /// only if something actually changed (so it fires once on entry, not every frame).
+    fn apply_anim_visibility(&mut self, target: bool) {
+        let mut changed = false;
+        let objects: Vec<_> = self
+            .state
+            .active_object_summaries()
+            .iter()
+            .map(|object| object.uid)
+            .collect();
+        for object_uid in objects {
+            for renderer in self.state.renderer_summaries(object_uid) {
+                if renderer.visible != target {
+                    let _ = self
+                        .state
+                        .set_renderer_visible(object_uid, renderer.uid, target);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.rebuild_snapshot();
+        }
     }
 
     /// Animation panel — the timeline object list (CueMol2 `anim-panel`): Add (Spin /
@@ -2120,6 +2148,8 @@ impl GuiApplication {
                     AnimKind::Pause,
                     AnimKind::SlideIn,
                     AnimKind::SlideOut,
+                    AnimKind::ShowAnim,
+                    AnimKind::HideAnim,
                 ] {
                     if ui.button(kind.label()).clicked() {
                         self.animation_objects.push(AnimObject {

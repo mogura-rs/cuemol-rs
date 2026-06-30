@@ -356,6 +356,31 @@ impl Model {
         self.anim_playing = !self.anim_playing;
     }
 
+    /// Set every renderer's visibility for a Show/Hide animation object, re-tessellating
+    /// only if something changed.
+    fn apply_anim_visibility(&mut self, target: bool) {
+        let mut changed = false;
+        let objects: Vec<_> = self
+            .state
+            .active_object_summaries()
+            .iter()
+            .map(|object| object.uid)
+            .collect();
+        for object_uid in objects {
+            for renderer in self.state.renderer_summaries(object_uid) {
+                if renderer.visible != target {
+                    let _ = self
+                        .state
+                        .set_renderer_visible(object_uid, renderer.uid, target);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.rebuild_selection();
+        }
+    }
+
     /// Append an animation object to the timeline (CueMol2 anim-panel Add).
     fn add_anim(&mut self, kind: cuemol_desktop_core::AnimKind) {
         self.animation_objects.push(cuemol_desktop_core::AnimObject {
@@ -825,6 +850,9 @@ fn app() -> Element {
                 if frame.slide_dir != 0.0 {
                     m.zoom_camera(1.0 + frame.slide_dir * 0.02);
                 }
+                if let Some(target) = frame.set_visible {
+                    m.apply_anim_visibility(target);
+                }
             }
             futures_timer::Delay::new(std::time::Duration::from_millis(16)).await;
         }
@@ -1209,6 +1237,16 @@ fn app() -> Element {
                                 style: "{color_btn_style}",
                                 onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::SlideOut),
                                 "+ SlideOut"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::ShowAnim),
+                                "+ Show"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::HideAnim),
+                                "+ Hide"
                             }
                             button {
                                 style: "{color_btn_style}",

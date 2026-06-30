@@ -586,6 +586,31 @@ impl CueMolGpuiApp {
         self.show_labels = !self.show_labels;
     }
 
+    /// Set every renderer's visibility for a Show/Hide animation object, re-tessellating
+    /// only if something changed (fires once on entry, not every frame).
+    fn apply_anim_visibility(&mut self, target: bool) {
+        let mut changed = false;
+        let objects: Vec<_> = self
+            .state
+            .active_object_summaries()
+            .iter()
+            .map(|object| object.uid)
+            .collect();
+        for object_uid in objects {
+            for renderer in self.renderers(object_uid) {
+                if renderer.visible != target {
+                    let _ = self
+                        .state
+                        .set_renderer_visible(object_uid, renderer.uid, target);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.refresh_scene(false);
+        }
+    }
+
     /// Append an animation object to the timeline (CueMol2 anim-panel Add).
     fn add_anim(&mut self, kind: AnimKind) {
         self.animation_objects.push(AnimObject {
@@ -618,6 +643,9 @@ impl CueMolGpuiApp {
                             }
                             if frame.slide_dir != 0.0 {
                                 this.zoom_camera(1.0 + frame.slide_dir * 0.02);
+                            }
+                            if let Some(target) = frame.set_visible {
+                                this.apply_anim_visibility(target);
                             }
                             cx.notify();
                             true
@@ -2908,6 +2936,18 @@ impl CueMolGpuiApp {
                 .child(button("anim-slideout", "+ SlideOut").text_xs().on_click(cx.listener(
                     |this, _: &gpui::ClickEvent, _, cx| {
                         this.add_anim(AnimKind::SlideOut);
+                        cx.notify();
+                    },
+                )))
+                .child(button("anim-show", "+ Show").text_xs().on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.add_anim(AnimKind::ShowAnim);
+                        cx.notify();
+                    },
+                )))
+                .child(button("anim-hide", "+ Hide").text_xs().on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.add_anim(AnimKind::HideAnim);
                         cx.notify();
                     },
                 )))
