@@ -245,6 +245,14 @@ impl Model {
         self.apply_coloring(Some("BfacColoring"), BTreeMap::new());
     }
 
+    /// Apply a selection expression (CueMol2 Selection panel quick-selects) and
+    /// re-tessellate so the highlight updates. Shares the molstr selection grammar.
+    fn set_selection(&mut self, expr: &str) {
+        self.selection_text = expr.to_string();
+        self.status = format!("Selection: {expr}");
+        self.rebuild_selection();
+    }
+
     /// Symmetry panel toggles (CueMol2 "Unit cell" / "Symm mol"). Re-tessellate so the
     /// shared crystal geometry appears/disappears in the 3D view.
     fn toggle_unit_cell(&mut self) {
@@ -708,6 +716,30 @@ fn app() -> Element {
                                 "Symm mol"
                             }
                         }
+                        // Selection quick-selects (CueMol2 selection-panel.xul Editor tab).
+                        div { style: "{section_header_style}", "Selection" }
+                        div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().set_selection("*"),
+                                "All"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().set_selection("none"),
+                                "None"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().set_selection("bymainch *"),
+                                "Backbone"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().set_selection("bysidech *"),
+                                "Sidechain"
+                            }
+                        }
                     }
                 }
                 // 3D viewport: scroll to zoom, left-drag to orbit, right-drag to
@@ -997,6 +1029,37 @@ mod tests {
         assert!(
             rainbow > element + 10,
             "rainbow must spread carbon colours: element={element} rainbow={rainbow}"
+        );
+    }
+
+    #[test]
+    fn selection_quick_selects_drive_the_dioxus_selection() {
+        // The sidebar quick-selects set the shared selection grammar and re-tessellate;
+        // `*` selects everything, `bymainch *` a strict non-empty backbone subset.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        let selected = |model: &Model| -> usize {
+            model
+                .state
+                .active_render_snapshot(&model.selection_text)
+                .map(|snapshot| snapshot.atoms.iter().filter(|atom| atom.selected).count())
+                .unwrap_or(0)
+        };
+        let total = model
+            .state
+            .active_render_snapshot("")
+            .map(|snapshot| snapshot.atoms.len())
+            .unwrap_or(0);
+        assert!(total > 0);
+
+        model.set_selection("*");
+        assert_eq!(selected(&model), total, "* selects all atoms");
+
+        model.set_selection("bymainch *");
+        let backbone = selected(&model);
+        assert!(
+            backbone > 0 && backbone < total,
+            "backbone is a strict non-empty subset, got {backbone}/{total}"
         );
     }
 
