@@ -828,6 +828,37 @@ impl CueMolGpuiApp {
         }
     }
 
+    /// Nudge a numeric renderer property (bond/sphere radius) by `delta`, clamped
+    /// (CueMol2 renderer property dialog). The default/min/max are looked up by key.
+    /// Reads the inline value, writes the new one, and re-renders so geometry updates.
+    fn adjust_renderer_property(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        key: &str,
+        delta: f64,
+    ) {
+        // (default, min, max) per property.
+        let (default, min, max) = match key {
+            "sphr" => (0.30, 0.05, 3.0),
+            _ => (0.18, 0.02, 2.0), // bondw and similar widths
+        };
+        let current = self
+            .state
+            .renderer_property(object_uid, renderer_uid, key)
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(default);
+        let next = (current + delta).clamp(min, max);
+        if self
+            .state
+            .set_renderer_property(object_uid, renderer_uid, key, format!("{next:.3}"))
+            .is_ok()
+        {
+            self.refresh_scene(false);
+            self.set_status(format!("{key} = {next:.2}"));
+        }
+    }
+
     fn delete_renderer(&mut self, object_uid: cuemol_core::Uid, renderer_uid: cuemol_core::Uid) {
         self.snapshot_undo();
         match self
@@ -2445,6 +2476,59 @@ impl CueMolGpuiApp {
             if let Some(style) = renderer.style {
                 items.push(kv("style", style).into_any_element());
             }
+            // Editable geometry (CueMol2 renderer property dialog): bond + atom radius.
+            let bondw = self
+                .state
+                .renderer_property(object_uid, renderer_uid, "bondw")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(0.18);
+            let sphr = self
+                .state
+                .renderer_property(object_uid, renderer_uid, "sphr")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(0.30);
+            items.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().child(format!("Bond r {bondw:.2}")))
+                    .child(button("ins-bondw-dn", "−").text_xs().on_click(cx.listener(
+                        move |this, _: &gpui::ClickEvent, _, cx| {
+                            this.adjust_renderer_property(object_uid, renderer_uid, "bondw", -0.02);
+                            cx.notify();
+                        },
+                    )))
+                    .child(button("ins-bondw-up", "+").text_xs().on_click(cx.listener(
+                        move |this, _: &gpui::ClickEvent, _, cx| {
+                            this.adjust_renderer_property(object_uid, renderer_uid, "bondw", 0.02);
+                            cx.notify();
+                        },
+                    )))
+                    .into_any_element(),
+            );
+            items.push(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().child(format!("Atom r {sphr:.2}")))
+                    .child(button("ins-sphr-dn", "−").text_xs().on_click(cx.listener(
+                        move |this, _: &gpui::ClickEvent, _, cx| {
+                            this.adjust_renderer_property(object_uid, renderer_uid, "sphr", -0.05);
+                            cx.notify();
+                        },
+                    )))
+                    .child(button("ins-sphr-up", "+").text_xs().on_click(cx.listener(
+                        move |this, _: &gpui::ClickEvent, _, cx| {
+                            this.adjust_renderer_property(object_uid, renderer_uid, "sphr", 0.05);
+                            cx.notify();
+                        },
+                    )))
+                    .into_any_element(),
+            );
             items.push(
                 div()
                     .flex()
