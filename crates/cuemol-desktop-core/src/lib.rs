@@ -1961,6 +1961,10 @@ impl DesktopAppState {
     ///   the front end).
     /// - Colour: `makeColor(spec)` resolves a colour spec/name to `{r,g,b,a}` bytes;
     ///   `color(scheme)` applies rainbow/bfactor/element colouring to every object.
+    /// - Scene mutations (buffered by name, resolved to Uids at apply time):
+    ///   `setColoring(objName, scheme)`, `setRendererVisible(objName, rendName, bool)`,
+    ///   `setRendererProp(objName, rendName, key, value)` — flat calls onto the existing
+    ///   desktop-core setters (no live proxies).
     /// - Structural queries over the active scene: `getScene()`, `getObjectNames()`,
     ///   `getObject(name)`, `getClassName(name)`, `getRenderer(objName, rendName)`,
     ///   `getRendererNames(objName)`. These read a read-only snapshot built before eval
@@ -1970,8 +1974,8 @@ impl DesktopAppState {
     ///
     /// Returns the printed log + the last `select(...)` expression. A real engine (not the
     /// load+preview fallback). SCOPE: this is the top-frequency subset of CueMol2's script
-    /// API; the deeper live-object model (mutating property setters via chained proxies,
-    /// `createObj`, live `measure`) is not yet bridged.
+    /// API — queries plus flat by-name mutations. The deeper live-object model (chained
+    /// setters via JS proxies, `createObj`, live `measure`) is not yet bridged.
     #[cfg(feature = "scripting")]
     pub fn run_script_js(&mut self, source: &str) -> Result<(String, Option<String>)> {
         use boa_engine::object::builtins::JsArray;
@@ -2001,6 +2005,40 @@ impl DesktopAppState {
         }
         fn js_color(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             script_cmds::push(ScriptCmd::Color(arg0(args, ctx)));
+            Ok(JsValue::undefined())
+        }
+        // --- scene mutations (buffered by name; resolved to Uids at apply time) ---
+        fn js_set_coloring(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            script_cmds::push(ScriptCmd::SetColoring {
+                object: arg0(args, ctx),
+                scheme: argn(args, 1, ctx),
+            });
+            Ok(JsValue::undefined())
+        }
+        fn js_set_renderer_visible(
+            _t: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let visible = args.get(2).map(JsValue::to_boolean).unwrap_or(true);
+            script_cmds::push(ScriptCmd::SetRendererVisible {
+                object: arg0(args, ctx),
+                renderer: argn(args, 1, ctx),
+                visible,
+            });
+            Ok(JsValue::undefined())
+        }
+        fn js_set_renderer_prop(
+            _t: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            script_cmds::push(ScriptCmd::SetRendererProp {
+                object: arg0(args, ctx),
+                renderer: argn(args, 1, ctx),
+                key: argn(args, 2, ctx),
+                value: argn(args, 3, ctx),
+            });
             Ok(JsValue::undefined())
         }
         // --- pure builders (validate + return, no host mutation) ---
@@ -2172,6 +2210,21 @@ impl DesktopAppState {
             .function(NativeFunction::from_fn_ptr(js_print), js_string!("println"), 1)
             .function(NativeFunction::from_fn_ptr(js_select), js_string!("select"), 1)
             .function(NativeFunction::from_fn_ptr(js_color), js_string!("color"), 1)
+            .function(
+                NativeFunction::from_fn_ptr(js_set_coloring),
+                js_string!("setColoring"),
+                2,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_set_renderer_visible),
+                js_string!("setRendererVisible"),
+                3,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_set_renderer_prop),
+                js_string!("setRendererProp"),
+                4,
+            )
             .function(NativeFunction::from_fn_ptr(js_make_sel), js_string!("makeSel"), 1)
             .function(NativeFunction::from_fn_ptr(js_make_color), js_string!("makeColor"), 1)
             .function(NativeFunction::from_fn_ptr(js_get_scene), js_string!("getScene"), 0)
@@ -2213,6 +2266,33 @@ impl DesktopAppState {
                 }
                 ScriptCmd::Select(expr) => selection = Some(expr),
                 ScriptCmd::Color(scheme) => self.apply_script_color(&scheme),
+                ScriptCmd::SetColoring { object, scheme } => {
+                    if let Some(uid) = self.object_uid_by_name(&object) {
+                        let (coloring_type, attrs) = coloring_for_scheme(&scheme);
+                        let _ = self.set_object_coloring(uid, coloring_type, attrs);
+                    }
+                }
+                ScriptCmd::SetRendererVisible {
+                    object,
+                    renderer,
+                    visible,
+                } => {
+                    if let Some((obj_uid, rend_uid)) = self.renderer_uid_by_name(&object, &renderer)
+                    {
+                        let _ = self.set_renderer_visible(obj_uid, rend_uid, visible);
+                    }
+                }
+                ScriptCmd::SetRendererProp {
+                    object,
+                    renderer,
+                    key,
+                    value,
+                } => {
+                    if let Some((obj_uid, rend_uid)) = self.renderer_uid_by_name(&object, &renderer)
+                    {
+                        let _ = self.set_renderer_property(obj_uid, rend_uid, key, value);
+                    }
+                }
             }
         }
         Ok((log, selection))
@@ -2266,20 +2346,7 @@ impl DesktopAppState {
     /// molecule, via the same object-coloring path the Coloring panel uses.
     #[cfg(feature = "scripting")]
     fn apply_script_color(&mut self, scheme: &str) {
-        let (coloring_type, attrs) = match scheme.to_ascii_lowercase().as_str() {
-            "rainbow" => {
-                let mut attrs = std::collections::BTreeMap::new();
-                attrs.insert("mode".to_string(), "mol".to_string());
-                attrs.insert("start_hue".to_string(), "240".to_string());
-                attrs.insert("end_hue".to_string(), "0".to_string());
-                (Some("RainbowColoring".to_string()), attrs)
-            }
-            "bfactor" | "bfac" => (
-                Some("BfacColoring".to_string()),
-                std::collections::BTreeMap::new(),
-            ),
-            _ => (None, std::collections::BTreeMap::new()),
-        };
+        let (coloring_type, attrs) = coloring_for_scheme(scheme);
         let uids: Vec<Uid> = self
             .active_object_summaries()
             .iter()
@@ -2288,6 +2355,51 @@ impl DesktopAppState {
         for uid in uids {
             let _ = self.set_object_coloring(uid, coloring_type.clone(), attrs.clone());
         }
+    }
+
+    /// Resolve an object's Uid from its scene name (script mutations carry names, not
+    /// Uids, and resolve at apply time against the live scene).
+    #[cfg(feature = "scripting")]
+    fn object_uid_by_name(&self, name: &str) -> Option<Uid> {
+        self.active_object_summaries()
+            .into_iter()
+            .find(|object| object.name == name)
+            .map(|object| object.uid)
+    }
+
+    /// Resolve an (object Uid, renderer Uid) pair from their names.
+    #[cfg(feature = "scripting")]
+    fn renderer_uid_by_name(&self, object: &str, renderer: &str) -> Option<(Uid, Uid)> {
+        let object_uid = self.object_uid_by_name(object)?;
+        let renderer_uid = self
+            .renderer_summaries(object_uid)
+            .into_iter()
+            .find(|summary| summary.name == renderer)
+            .map(|summary| summary.uid)?;
+        Some((object_uid, renderer_uid))
+    }
+}
+
+/// Map a `color`/`setColoring` scheme keyword to a (coloring-type, attrs) pair — the
+/// shared translation used by both `cuemol.color(scheme)` (all objects) and
+/// `cuemol.setColoring(objName, scheme)` (one object). Unknown → element/CPK default.
+#[cfg(feature = "scripting")]
+fn coloring_for_scheme(
+    scheme: &str,
+) -> (Option<String>, std::collections::BTreeMap<String, String>) {
+    match scheme.to_ascii_lowercase().as_str() {
+        "rainbow" => {
+            let mut attrs = std::collections::BTreeMap::new();
+            attrs.insert("mode".to_string(), "mol".to_string());
+            attrs.insert("start_hue".to_string(), "240".to_string());
+            attrs.insert("end_hue".to_string(), "0".to_string());
+            (Some("RainbowColoring".to_string()), attrs)
+        }
+        "bfactor" | "bfac" => (
+            Some("BfacColoring".to_string()),
+            std::collections::BTreeMap::new(),
+        ),
+        _ => (None, std::collections::BTreeMap::new()),
     }
 }
 
@@ -2298,6 +2410,21 @@ enum ScriptCmd {
     Print(String),
     Select(String),
     Color(String),
+    SetColoring {
+        object: String,
+        scheme: String,
+    },
+    SetRendererVisible {
+        object: String,
+        renderer: String,
+        visible: bool,
+    },
+    SetRendererProp {
+        object: String,
+        renderer: String,
+        key: String,
+        value: String,
+    },
 }
 
 #[cfg(feature = "scripting")]
@@ -2997,6 +3124,54 @@ mod tests {
         assert!(log.contains("rend=r1:"), "getRenderer name: {log:?}");
         assert!(log.contains("missing=null"), "unknown object → null: {log:?}");
         assert!(log.contains("scene=work nobj=1"), "scene name + object count: {log:?}");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn run_script_js_mutates_scene_by_name() {
+        // Flat by-name mutations resolve to Uids at apply time and drive the existing
+        // desktop-core setters. Oracles read the effect back through the query APIs:
+        // object coloring becomes the C++ RainbowColoring scheme, the renderer is hidden,
+        // and its `bondw` inline property (a C++-true attr name) is set.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        app.new_renderer_in_active_scene(object, "ballstick", "r1")
+            .unwrap();
+
+        app.run_script_js(
+            "cuemol.setColoring('crambin', 'rainbow'); \
+             cuemol.setRendererVisible('crambin', 'r1', false); \
+             cuemol.setRendererProp('crambin', 'r1', 'bondw', '0.5');",
+        )
+        .expect("script runs");
+
+        assert_eq!(
+            app.object_coloring_type(object).as_deref(),
+            Some("RainbowColoring"),
+            "setColoring applied the rainbow scheme"
+        );
+        let renderer = app
+            .renderer_summaries(object)
+            .into_iter()
+            .find(|summary| summary.name == "r1")
+            .expect("r1 exists");
+        assert!(!renderer.visible, "setRendererVisible hid r1");
+        assert_eq!(
+            app.renderer_property(object, renderer.uid, "bondw").as_deref(),
+            Some("0.5"),
+            "setRendererProp set bondw"
+        );
+
+        // An unknown object name is a silent no-op — not a panic, not an Err.
+        app.run_script_js("cuemol.setColoring('nope', 'bfactor');")
+            .expect("no-op on unknown object");
     }
 
     /// Build a pickable atom at a world position (object_uid/atom_index set).
