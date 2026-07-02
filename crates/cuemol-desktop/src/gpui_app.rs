@@ -658,6 +658,22 @@ impl CueMolGpuiApp {
         self.refresh_scene(false);
     }
 
+    /// Nudge the SCAPOT colour ± scale by `delta` (clamped at 0 = robust auto) and
+    /// rebuild if the potential surface is showing.
+    fn nudge_potential_scale(&mut self, delta: f64) {
+        let next = (self.state.potential_scale().unwrap_or(0.0) + delta).max(0.0);
+        self.state.set_potential_scale((next > 0.0).then_some(next));
+        if self.potential_surface {
+            self.rebuild_surface_mesh();
+        }
+        let label = self
+            .state
+            .potential_scale()
+            .map(|s| format!("Potential ± scale = {s:.1}"))
+            .unwrap_or_else(|| "Potential ± scale = auto".to_string());
+        self.set_status(label);
+    }
+
     /// Load an AMBER mdcrd trajectory onto the active object (MolAnim source).
     fn load_trajectory(&mut self, path: &str) {
         if let Some(uid) = self.state.active_object_summaries().first().map(|o| o.uid) {
@@ -3446,7 +3462,20 @@ impl CueMolGpuiApp {
                             this.toggle_potential_surface();
                             cx.notify();
                         })),
-                    ),
+                    )
+                    // SCAPOT colour ± scale nudge (0 = robust auto, 2·rmsd).
+                    .child(button("pot-scale-dn", "±−").text_xs().on_click(cx.listener(
+                        |this, _: &gpui::ClickEvent, _, cx| {
+                            this.nudge_potential_scale(-1.0);
+                            cx.notify();
+                        },
+                    )))
+                    .child(button("pot-scale-up", "±+").text_xs().on_click(cx.listener(
+                        |this, _: &gpui::ClickEvent, _, cx| {
+                            this.nudge_potential_scale(1.0);
+                            cx.notify();
+                        },
+                    ))),
             );
         }
         if self.animation_objects.is_empty() {

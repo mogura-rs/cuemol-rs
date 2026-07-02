@@ -52,6 +52,11 @@ pub struct DesktopAppState {
     /// contour/isosurface features never pick it up. See
     /// [`build_surface_potential_mesh`](DesktopAppState::build_surface_potential_mesh).
     surface_potential: Option<DensityMap>,
+    /// The ± half-width (in potential units) mapping to full red/blue for the SCAPOT
+    /// surface (the C++ `m_dParLow/High` span around the neutral mid). `None` = the
+    /// robust auto default (2·rmsd), which — unlike the field min/max — is not washed
+    /// out by near-atom potential spikes. `Some(s)` clamps the gradient to `mid ± s`.
+    potential_scale: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,6 +374,7 @@ impl Default for DesktopAppState {
             next_density_map_uid: 1,
             trajectories: BTreeMap::new(),
             surface_potential: None,
+            potential_scale: None,
         }
     }
 }
@@ -1950,6 +1956,48 @@ impl DesktopAppState {
             .map(|map| (map.min_density(), map.max_density()))
     }
 
+    /// Set the SCAPOT gradient ± half-width (potential units): `Some(s)` clamps the
+    /// red/blue ramp to `mid ± s` (higher contrast on the molecular boundary than the
+    /// spike-dominated field range); `None` restores the robust 2·rmsd auto default.
+    /// A non-positive value is treated as auto.
+    pub fn set_potential_scale(&mut self, scale: Option<f64>) {
+        self.potential_scale = scale.filter(|s| *s > 0.0);
+    }
+
+    /// The user-set SCAPOT ± scale, or `None` when using the auto (2·rmsd) default.
+    pub fn potential_scale(&self) -> Option<f64> {
+        self.potential_scale
+    }
+
+    /// The effective SCAPOT thresholds `(lo, mid, hi)` for a potential map: the neutral
+    /// isopotential `mid` (0 when the map straddles it, else its mean) ± the half-width
+    /// (the user scale, else a robust 2·rmsd — NOT the field min/max, whose near-atom
+    /// spikes wash the boundary surface to near-white). C++ `getColorSca` thresholds.
+    fn potential_thresholds(&self, map: &DensityMap) -> (f64, f64, f64) {
+        let mid = if map.min_density() < 0.0 && map.max_density() > 0.0 {
+            0.0
+        } else {
+            map.mean_density()
+        };
+        let half = self.potential_scale.unwrap_or_else(|| {
+            let rmsd = map.rmsd_density();
+            if rmsd > 1.0e-9 {
+                2.0 * rmsd
+            } else {
+                ((map.max_density() - map.min_density()).abs() * 0.5).max(1.0e-6)
+            }
+        });
+        (mid - half, mid, mid + half)
+    }
+
+    /// The effective SCAPOT `(lo, mid, hi)` for the loaded potential, or `None` if none
+    /// is loaded — for a front end to label the colour scale.
+    pub fn surface_potential_thresholds(&self) -> Option<(f64, f64, f64)> {
+        self.surface_potential
+            .as_ref()
+            .map(|map| self.potential_thresholds(map))
+    }
+
     /// Build a molecular surface and colour every vertex by the loaded electrostatic
     /// potential at that point — the C++ `MolSurfRenderer` SCAPOT mode (`getColorSca`:
     /// sample the scalar field, map through a low→mid→high gradient). The canonical
@@ -1973,7 +2021,8 @@ impl DesktopAppState {
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         let mut surface = MolSurfObj::new();
         surface.create_ses_from_mol(object.mol(), selector, density, probe_radius);
-        Ok(surface_scalar_mesh(&surface, potential))
+        let (lo, mid, hi) = self.potential_thresholds(potential);
+        Ok(surface_scalar_mesh(&surface, potential, lo, mid, hi))
     }
 
     /// Execute a JavaScript source string with the embedded boa engine (CueMol2 Tools →
@@ -2650,20 +2699,16 @@ fn surface_render_mesh(
 /// Convert a built molecular surface to a renderable mesh, colouring each vertex by
 /// the value of a scalar field (electrostatic potential) at that vertex — the C++
 /// `MolSurfRenderer` SCAPOT mode (`getColorSca`). The value is mapped through a
-/// red(low) → white(mid) → blue(high) gradient auto-scaled to the field's range,
-/// with `mid` pinned to 0 when the range straddles it (the neutral isopotential).
+/// red(`lo`) → white(`mid`) → blue(`hi`) gradient at the given explicit thresholds
+/// (C++ `m_dParLow/Mid/High`), NOT the raw field min/max — see
+/// [`DesktopAppState::potential_thresholds`].
 fn surface_scalar_mesh(
     surface: &MolSurfObj,
     scalar: &DensityMap,
+    lo: f64,
+    mid: f64,
+    hi: f64,
 ) -> cuemol_render::RenderMesh {
-    let lo = scalar.min_density();
-    let hi = scalar.max_density();
-    // Neutral point at 0 when the range straddles it, else the midpoint.
-    let mid = if lo < 0.0 && hi > 0.0 {
-        0.0
-    } else {
-        (lo + hi) * 0.5
-    };
     let mesh = surface.mesh();
     let vertices = mesh
         .vertices()
@@ -3864,6 +3909,50 @@ mod tests {
         // Beyond the ends clamps to the endpoint colour.
         assert!(approx(potential_color(-9.0, -1.0, 0.0, 1.0), [1.0, 0.0, 0.0, 1.0]));
         assert!(approx(potential_color(9.0, -1.0, 0.0, 1.0), [0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn surface_potential_thresholds_are_robust_and_user_settable() {
+        // The SCAPOT gradient must NOT auto-scale to the field min/max: real APBS maps
+        // have near-atom potential SPIKES that set min/max and wash the boundary surface
+        // to near-white. Default to a robust mid±2·rmsd; let the user clamp it tighter.
+        let mut app = DesktopAppState::new();
+        // Bulk potential ±1 with two extreme spikes (±100): min/max = ±100, rmsd ≪ 100.
+        let n = 10usize;
+        let mut values = vec![0.0_f64; n * n * n];
+        for (i, v) in values.iter_mut().enumerate() {
+            *v = if i % 2 == 0 { 1.0 } else { -1.0 };
+        }
+        values[0] = 100.0;
+        values[1] = -100.0;
+        app.set_surface_potential_map(DensityMap::from_grid_map(GridMap {
+            counts: [n, n, n],
+            origin: cuemol_core::Vector4::ZERO,
+            delta: [
+                cuemol_core::Vector4::new3(1.0, 0.0, 0.0),
+                cuemol_core::Vector4::new3(0.0, 1.0, 0.0),
+                cuemol_core::Vector4::new3(0.0, 0.0, 1.0),
+            ],
+            values,
+        }));
+        let (min, max) = app.surface_potential_range().unwrap();
+        assert!(min <= -99.0 && max >= 99.0, "field range is spike-dominated (±100)");
+        // Auto thresholds (2·rmsd around 0) ignore the spikes — FAR inside ±100.
+        let (lo, mid, hi) = app.surface_potential_thresholds().unwrap();
+        assert_eq!(mid, 0.0, "neutral mid at 0 for a straddling map");
+        assert!(hi < 90.0 && lo > -90.0, "auto thresholds ignore the ±100 spikes: ({lo},{hi})");
+        assert!((hi + lo).abs() < 1.0e-6, "symmetric around the neutral mid");
+        // A user scale clamps the gradient explicitly (C++ m_dParLow/High).
+        app.set_potential_scale(Some(1.0));
+        let (lo2, _m, hi2) = app.surface_potential_thresholds().unwrap();
+        assert!((hi2 - 1.0).abs() < 1.0e-9 && (lo2 + 1.0).abs() < 1.0e-9, "user scale ±1");
+        // At ±1 scale a potential of 1.0 is now FULLY blue; under the field range it
+        // would wash to near-white — the low-contrast bug this fix closes.
+        assert_eq!(potential_color(1.0, lo2, 0.0, hi2), [0.0, 0.0, 1.0, 1.0]);
+        let washed = potential_color(1.0, min, 0.0, max);
+        assert!(washed[0] > 0.9 && washed[2] > 0.9, "field-range scaling washes to near-white");
+        app.set_potential_scale(Some(-5.0));
+        assert!(app.potential_scale().is_none(), "a non-positive scale restores auto");
     }
 
     #[test]

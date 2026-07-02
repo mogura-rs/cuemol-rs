@@ -1321,6 +1321,15 @@ impl Model {
         self.rebuild_selection();
     }
 
+    /// Set the SCAPOT colour ± scale (0 = robust auto) and rebuild if it is showing.
+    fn set_potential_scale(&mut self, scale: f64) {
+        self.state.set_potential_scale((scale > 0.0).then_some(scale));
+        if self.potential_surface {
+            self.rebuild_surface_mesh();
+            self.rebuild_selection();
+        }
+    }
+
     /// Toggle live in-viewport surface clipping (CueMol2 surface cutter, live mode):
     /// the displayed surface becomes the plane cross-section, moved by the offset slider.
     fn toggle_clip_surface(&mut self) {
@@ -2422,6 +2431,16 @@ fn app() -> Element {
                                 title: "Colour the surface by electrostatic potential (SCAPOT)",
                                 onclick: move |_| model.write().toggle_potential_surface(),
                                 "Potential"
+                            }
+                            input {
+                                style: "width:56px;{edit_input_style}",
+                                r#type: "number",
+                                placeholder: "±auto",
+                                title: "Potential colour ± scale (empty/0 = auto, robust to spikes)",
+                                oninput: move |e| {
+                                    let s = e.value().parse::<f64>().unwrap_or(0.0);
+                                    model.write().set_potential_scale(s);
+                                },
                             }
                         }
                         // Bond editor: make/remove a bond between two atom serial ids.

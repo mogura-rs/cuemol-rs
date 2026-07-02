@@ -1611,6 +1611,21 @@ impl GuiApplication {
                 {
                     self.toggle_potential_surface();
                 }
+                if self.state.has_surface_potential() {
+                    // SCAPOT colour ± scale (potential units); 0 = robust auto (2·rmsd).
+                    let mut scale = self.state.potential_scale().unwrap_or(0.0);
+                    if ui
+                        .add(egui::DragValue::new(&mut scale).speed(0.5).prefix("±"))
+                        .on_hover_text("Potential colour ± scale (0 = auto, robust to spikes)")
+                        .changed()
+                    {
+                        self.state.set_potential_scale((scale > 0.0).then_some(scale));
+                        if self.potential_surface {
+                            self.rebuild_surface_mesh();
+                            self.rebuild_snapshot();
+                        }
+                    }
+                }
             });
             let labels_label = if self.show_labels { "Labels ✓" } else { "Labels" };
             if ui
