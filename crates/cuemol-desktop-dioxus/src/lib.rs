@@ -808,6 +808,15 @@ impl Model {
             self.status = "Save scene: enter a path".into();
             return;
         }
+        // Persist the current viewpoint into the scene's `__current` camera before
+        // writing (mirrors egui/gpui) so a reload restores the exact view; otherwise
+        // the saved `.qsc` loses the user's viewpoint.
+        let mut camera = self.camera.clone();
+        camera.set_name("__current");
+        if let Err(error) = self.state.set_active_scene_camera(camera) {
+            self.status = format!("Save scene failed: {error}");
+            return;
+        }
         match self.state.save_active_scene_qsc(path) {
             Ok(()) => self.status = format!("Saved scene: {path}"),
             Err(error) => self.status = format!("Save scene failed: {error}"),
@@ -1160,6 +1169,7 @@ impl Model {
     fn run_menu_action(&mut self, action: &str) {
         match action {
             "new_scene" => self.new_scene_tab(),
+            "close_scene" => self.close_scene_tab(),
             "undo" => self.undo(),
             "redo" => self.redo(),
             "fit_view" => self.fit_view(),
@@ -1213,6 +1223,28 @@ impl Model {
         self.surface_mesh = None;
         self.density_solid_mesh = None;
         self.rebuild_after_load();
+    }
+
+    /// Close the active scene tab, destroying its objects + density maps (CueMol2
+    /// File → Close). If it was the last scene, a fresh empty one is created so the
+    /// app always has a scene — mirrors the egui/gpui front ends.
+    fn close_scene_tab(&mut self) {
+        match self.state.close_active_scene() {
+            Ok(Some(_)) => {
+                self.surface_mesh = None;
+                self.density_solid_mesh = None;
+                self.status = "Current tab closed".into();
+                self.rebuild_after_load();
+            }
+            Ok(None) => {
+                let _ = self.state.new_scene("Scene", true);
+                self.surface_mesh = None;
+                self.density_solid_mesh = None;
+                self.status = "Last tab closed; new scene created".into();
+                self.rebuild_after_load();
+            }
+            Err(error) => self.status = format!("Close scene failed: {error}"),
+        }
     }
 
     /// Projected atom labels for the selected atoms at the current camera, in image
@@ -1765,6 +1797,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
     match index {
         0 => &[
             ("New scene tab", "new_scene"),
+            ("Close scene", "close_scene"),
             ("Save config", "save_config"),
             ("Load config", "load_config"),
         ], // File
@@ -1780,7 +1813,11 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("Rainbow coloring", "col_rainbow"),
             ("B-factor coloring", "col_bfactor"),
         ], // Render
-        3 => &[("New tab", "new_scene"), ("Background (cycle)", "background")], // Scene
+        3 => &[
+            ("New tab", "new_scene"),
+            ("Close tab", "close_scene"),
+            ("Background (cycle)", "background"),
+        ], // Scene
         4 => &[
             ("Fit view", "fit_view"),
             ("Toggle projection", "toggle_projection"),
@@ -3186,6 +3223,59 @@ mod tests {
         model.delete_renderer(object, renderer.uid);
         assert_eq!(count(&model), before, "delete_renderer removes it");
         assert_eq!(cartoons(&model), 0, "the cartoon renderer is gone");
+    }
+
+    #[test]
+    fn close_scene_and_save_persists_camera_in_dioxus() {
+        // Parity with the egui/gpui front ends' File→Close and save-persists-viewpoint:
+        // (1) `save_scene` stamps the CURRENT camera into the scene's `__current` slot,
+        //     so a reloaded `.qsc` carries the exact view (independent oracle: read the
+        //     reloaded scene's stored camera, not the live one).
+        // (2) `close_scene_tab` on the only scene destroys its objects (a fresh empty
+        //     scene remains so the app always has one).
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        assert_eq!(
+            model.state.active_object_summaries().len(),
+            1,
+            "1CRN loads one object"
+        );
+
+        let dir = std::env::temp_dir().join(format!("cuemol_dioxus_close_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let qsc = dir.join("view.qsc");
+        model
+            .camera
+            .set_center(cuemol_core::Vector4::new3(1.0, 2.0, 3.0));
+        model.camera.set_zoom(42.0);
+        model.save_scene(qsc.to_str().unwrap());
+
+        let reloaded = Model::new(vec![qsc.clone()]);
+        let saved = reloaded
+            .state
+            .active_scene_saved_camera()
+            .expect("saved .qsc carries a __current camera");
+        let c = saved.center();
+        assert!(
+            (c.x - 1.0).abs() < 1e-3 && (c.y - 2.0).abs() < 1e-3 && (c.z - 3.0).abs() < 1e-3,
+            "saved camera center round-trips, got ({}, {}, {})",
+            c.x,
+            c.y,
+            c.z
+        );
+        assert!(
+            (saved.zoom() - 42.0).abs() < 1e-3,
+            "saved camera zoom round-trips, got {}",
+            saved.zoom()
+        );
+
+        model.close_scene_tab();
+        assert_eq!(
+            model.state.active_object_summaries().len(),
+            0,
+            "closing the last scene leaves a fresh empty scene (0 objects)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

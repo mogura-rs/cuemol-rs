@@ -1035,9 +1035,44 @@ impl CueMolGpuiApp {
 
     fn save_scene_qsc(&mut self, path_str: &str) {
         let path = path_str.trim();
+        // Persist the CURRENT viewpoint into the scene's `__current` camera before
+        // writing, so a reload restores the exact view (mirrors the egui front end's
+        // `save_current_scene`). Without this the saved `.qsc` loses the user's view.
+        let mut camera = self.camera.clone();
+        camera.set_name("__current");
+        if let Err(error) = self.state.set_active_scene_camera(camera) {
+            self.set_status(format!("Save scene error: {error}"));
+            return;
+        }
         match self.state.save_active_scene_qsc(path) {
             Ok(()) => self.set_status(format!("Saved scene to {path}")),
             Err(error) => self.set_status(format!("Save scene error: {error}")),
+        }
+    }
+
+    /// Close the active scene tab, destroying its objects + density maps (CueMol2
+    /// File → Close). If it was the last scene, a fresh empty one is created so the
+    /// app always has a scene — mirrors the egui front end's `close_current_scene`.
+    fn close_scene_tab(&mut self) {
+        match self.state.close_active_scene() {
+            Ok(Some(_)) => {
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.surface_mesh = None;
+                self.density_solid_mesh = None;
+                self.set_status("Current tab closed");
+                self.refresh_scene(true);
+            }
+            Ok(None) => {
+                let _ = self.state.new_scene("Scene", true);
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.surface_mesh = None;
+                self.density_solid_mesh = None;
+                self.set_status("Last tab closed; new scene created");
+                self.refresh_scene(true);
+            }
+            Err(error) => self.set_status(format!("Close scene error: {error}")),
         }
     }
 
@@ -1621,9 +1656,15 @@ impl CueMolGpuiApp {
             }
             strip = strip.child(tab);
         }
-        strip.child(color_btn("scene-new", "+").on_click(cx.listener(
+        strip = strip.child(color_btn("scene-new", "+").on_click(cx.listener(
             |this, _: &gpui::ClickEvent, _, cx| {
                 this.new_scene_tab();
+                cx.notify();
+            },
+        )));
+        strip.child(color_btn("scene-close", "×").on_click(cx.listener(
+            |this, _: &gpui::ClickEvent, _, cx| {
+                this.close_scene_tab();
                 cx.notify();
             },
         )))
@@ -5240,6 +5281,61 @@ mod tests {
         app.delete_renderer(object, renderer);
         assert_eq!(app.renderers(object).len(), before, "delete undoes the add");
         assert_eq!(app.selected_renderer, None);
+    }
+
+    #[test]
+    fn close_scene_and_save_persists_camera_in_gpui() {
+        // Parity with the egui front end's File→Close and save-persists-viewpoint:
+        // (1) `save_scene_qsc` stamps the CURRENT camera into the scene's `__current`
+        //     slot, so a reloaded `.qsc` carries the exact view (independent oracle:
+        //     read the reloaded scene's stored camera, not the live one).
+        // (2) `close_scene_tab` on the only scene destroys its objects (a fresh empty
+        //     scene remains so the app always has one).
+        let Some((mut app, _object)) = app_with_molecule() else {
+            return;
+        };
+        let scene = app.state.active_scene().expect("loaded scene");
+        assert_eq!(app.objects(scene).len(), 1, "1CRN loads one object");
+
+        let dir = std::env::temp_dir().join(format!("cuemol_gpui_close_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let qsc = dir.join("view.qsc");
+        app.camera
+            .set_center(cuemol_core::Vector4::new3(1.0, 2.0, 3.0));
+        app.camera.set_zoom(42.0);
+        app.save_scene_qsc(qsc.to_str().unwrap());
+
+        let mut reloaded = CueMolGpuiApp::new(Vec::new());
+        reloaded.open_file(qsc.to_str().unwrap());
+        let saved = reloaded
+            .state
+            .active_scene_saved_camera()
+            .expect("saved .qsc carries a __current camera");
+        let c = saved.center();
+        assert!(
+            (c.x - 1.0).abs() < 1e-3 && (c.y - 2.0).abs() < 1e-3 && (c.z - 3.0).abs() < 1e-3,
+            "saved camera center round-trips, got ({}, {}, {})",
+            c.x,
+            c.y,
+            c.z
+        );
+        assert!(
+            (saved.zoom() - 42.0).abs() < 1e-3,
+            "saved camera zoom round-trips, got {}",
+            saved.zoom()
+        );
+
+        app.close_scene_tab();
+        let active = app
+            .state
+            .active_scene()
+            .expect("a fresh scene remains after closing the last one");
+        assert_eq!(
+            app.objects(active).len(),
+            0,
+            "closing the last scene leaves a fresh empty scene (0 objects)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
