@@ -44,6 +44,8 @@ struct Inputs {
     export_pov: Entity<TextInput>,
     /// AMBER mdcrd trajectory path for the MolAnim animation type.
     trajectory: Entity<TextInput>,
+    /// APBS/OpenDX `.dx` electrostatic-potential map path (potential-coloured surface).
+    potential: Entity<TextInput>,
 }
 
 // Chrome sizes (logical px). Shared by BOTH the on-screen layout and the
@@ -360,6 +362,8 @@ pub struct CueMolGpuiApp {
     /// Molecular-surface (SES) display + a cached mesh (the SES is expensive).
     show_surface: bool,
     surface_mesh: Option<cuemol_render::RenderMesh>,
+    /// Colour the surface by the loaded electrostatic potential (SCAPOT) vs nearest atom.
+    potential_surface: bool,
     /// Live in-viewport surface clipping: display the surface as the plane cross-section.
     clip_surface: bool,
     /// Clip-plane offset along +Z from the bbox centre (Å).
@@ -451,6 +455,7 @@ impl CueMolGpuiApp {
             density_solid_mesh: None,
             show_surface: false,
             surface_mesh: None,
+            potential_surface: false,
             clip_surface: false,
             clip_offset: 0.0,
             show_hbonds: false,
@@ -489,6 +494,7 @@ impl CueMolGpuiApp {
                 save_obj: cx.new(|cx| TextInput::new(cx, "object.pdb", "object.pdb")),
                 export_pov: cx.new(|cx| TextInput::new(cx, "scene.pov", "scene.pov")),
                 trajectory: cx.new(|cx| TextInput::new(cx, "trajectory.mdcrd", "")),
+                potential: cx.new(|cx| TextInput::new(cx, "potential.dx", "")),
             };
             self.inputs = Some(inputs);
         }
@@ -634,6 +640,24 @@ impl CueMolGpuiApp {
         }
     }
 
+    /// Load an APBS/OpenDX `.dx` electrostatic-potential map (potential-coloured surface).
+    fn load_potential(&mut self, path: &str) {
+        match self.state.load_surface_potential(std::path::Path::new(path)) {
+            Ok((lo, hi)) => self.set_status(format!("Potential loaded (range {lo:.2}..{hi:.2})")),
+            Err(error) => self.set_status(format!("Potential load failed: {error}")),
+        }
+    }
+
+    /// Toggle colouring the surface by electrostatic potential (SCAPOT) vs nearest atom.
+    fn toggle_potential_surface(&mut self) {
+        self.potential_surface = !self.potential_surface;
+        if !self.show_surface {
+            self.show_surface = true;
+        }
+        self.rebuild_surface_mesh();
+        self.refresh_scene(false);
+    }
+
     /// Load an AMBER mdcrd trajectory onto the active object (MolAnim source).
     fn load_trajectory(&mut self, path: &str) {
         if let Some(uid) = self.state.active_object_summaries().first().map(|o| o.uid) {
@@ -769,7 +793,11 @@ impl CueMolGpuiApp {
         else {
             return;
         };
-        let result = if self.clip_surface {
+        let result = if self.potential_surface && self.state.has_surface_potential() {
+            // SCAPOT: colour the surface by the loaded electrostatic potential.
+            self.state
+                .build_surface_potential_mesh(uid, &self.applied_selection, 1.0, 1.4)
+        } else if self.clip_surface {
             let normal = cuemol_core::Vector4::new3(0.0, 0.0, 1.0);
             let position = self
                 .state
@@ -3384,6 +3412,41 @@ impl CueMolGpuiApp {
                             cx.notify();
                         },
                     ))),
+            );
+        }
+        // Electrostatic-potential surface (SCAPOT): load an APBS/OpenDX .dx map, then
+        // colour the surface by it (red −, white 0, blue +).
+        if let Some(inputs) = &self.inputs {
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().text_color(rgb(col_text_dim())).child("Potential:"))
+                    .child(div().w(px(180.0)).child(inputs.potential.clone()))
+                    .child(button("pot-load", "Load .dx").text_xs().on_click(cx.listener(
+                        |this, _: &gpui::ClickEvent, _, cx| {
+                            let path = this
+                                .inputs
+                                .as_ref()
+                                .map(|i| i.potential.read(cx).text())
+                                .unwrap_or_default();
+                            this.load_potential(&path);
+                            cx.notify();
+                        },
+                    )))
+                    .child(
+                        button(
+                            "pot-surface",
+                            if self.potential_surface { "Potential ✓" } else { "Potential surf" },
+                        )
+                        .text_xs()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.toggle_potential_surface();
+                            cx.notify();
+                        })),
+                    ),
             );
         }
         if self.animation_objects.is_empty() {

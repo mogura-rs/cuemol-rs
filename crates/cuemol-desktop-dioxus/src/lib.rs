@@ -189,6 +189,10 @@ struct Model {
     /// Molecular-surface (SES) display + a cached mesh (the SES is expensive).
     show_surface: bool,
     surface_mesh: Option<cuemol_render::RenderMesh>,
+    /// Colour the surface by the loaded electrostatic potential (SCAPOT) vs nearest
+    /// atom, and the APBS/OpenDX `.dx` path to load the potential from.
+    potential_surface: bool,
+    potential_path: String,
     /// Hydrogen-bond dashed lines.
     show_hbonds: bool,
     /// Atom/residue labels overlaid on the selected atoms.
@@ -272,6 +276,8 @@ impl Model {
             density_solid_mesh: None,
             show_surface: false,
             surface_mesh: None,
+            potential_surface: false,
+            potential_path: String::new(),
             show_hbonds: false,
             show_labels: false,
             menu_open: None,
@@ -1270,7 +1276,11 @@ impl Model {
         else {
             return;
         };
-        let result = if self.clip_surface {
+        let result = if self.potential_surface && self.state.has_surface_potential() {
+            // SCAPOT: colour the surface by the loaded electrostatic potential.
+            self.state
+                .build_surface_potential_mesh(uid, &self.selection_text, 1.0, 1.4)
+        } else if self.clip_surface {
             let normal = cuemol_core::Vector4::new3(0.0, 0.0, 1.0);
             let position = self.cut_position();
             self.state
@@ -1286,6 +1296,29 @@ impl Model {
                 self.status = format!("Surface failed: {error}");
             }
         }
+    }
+
+    /// Load an APBS/OpenDX `.dx` electrostatic-potential map (potential-coloured surface).
+    fn load_potential(&mut self) {
+        let path = self.potential_path.trim().to_string();
+        if path.is_empty() {
+            self.status = "Enter an APBS .dx path first".to_string();
+            return;
+        }
+        match self.state.load_surface_potential(&path) {
+            Ok((lo, hi)) => self.status = format!("Potential loaded (range {lo:.2}..{hi:.2})"),
+            Err(error) => self.status = format!("Potential load failed: {error}"),
+        }
+    }
+
+    /// Toggle colouring the surface by electrostatic potential (SCAPOT) vs nearest atom.
+    fn toggle_potential_surface(&mut self) {
+        self.potential_surface = !self.potential_surface;
+        if !self.show_surface {
+            self.show_surface = true;
+        }
+        self.rebuild_surface_mesh();
+        self.rebuild_selection();
     }
 
     /// Toggle live in-viewport surface clipping (CueMol2 surface cutter, live mode):
@@ -2368,6 +2401,27 @@ fn app() -> Element {
                                 title: "Live in-viewport surface clipping at the cut plane",
                                 onclick: move |_| model.write().toggle_clip_surface(),
                                 "Clip"
+                            }
+                        }
+                        // Electrostatic-potential surface (SCAPOT): load an APBS/OpenDX
+                        // .dx map, then colour the surface by it (red −, white 0, blue +).
+                        div { style: "display:flex;gap:4px;align-items:center;padding:2px 12px;flex-wrap:wrap;",
+                            input {
+                                style: "flex:1;{edit_input_style}",
+                                placeholder: "potential.dx",
+                                oninput: move |e| model.write().potential_path = e.value(),
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                title: "Load an APBS/OpenDX electrostatic potential map",
+                                onclick: move |_| model.write().load_potential(),
+                                "Load .dx"
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                title: "Colour the surface by electrostatic potential (SCAPOT)",
+                                onclick: move |_| model.write().toggle_potential_surface(),
+                                "Potential"
                             }
                         }
                         // Bond editor: make/remove a bond between two atom serial ids.
@@ -3666,6 +3720,62 @@ mod tests {
                 .unwrap_or(false),
             "a real SES triangle mesh is cached"
         );
+    }
+
+    #[test]
+    fn potential_surface_toggle_colours_the_ses_by_potential() {
+        // The dioxus Potential toggle routes the SES through build_surface_potential_mesh
+        // (SCAPOT). Inject a synthetic potential ramping −x→+x through the residues'
+        // centroid so the cached mesh spans red (negative) → blue (positive).
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        model.selection_text = "resid 1:3".to_string();
+        let uid = model.state.active_object_summaries().first().unwrap().uid;
+        let centroid = {
+            let atoms: Vec<cuemol_core::Vector4> = model
+                .state
+                .scene_manager()
+                .object(uid)
+                .unwrap()
+                .mol()
+                .atoms()
+                .iter()
+                .filter(|a| (1..=3).contains(&a.res_id))
+                .map(|a| a.position)
+                .collect();
+            let n = atoms.len() as f64;
+            let sum = atoms.iter().fold(cuemol_core::Vector4::ZERO, |acc, p| acc + *p);
+            cuemol_core::Vector4::new3(sum.x / n, sum.y / n, sum.z / n)
+        };
+        let n = 80usize;
+        let origin =
+            cuemol_core::Vector4::new3(centroid.x - 40.0, centroid.y - 40.0, centroid.z - 40.0);
+        let mut values = vec![0.0_f64; n * n * n];
+        for sec in 0..n {
+            for row in 0..n {
+                for col in 0..n {
+                    values[col + (row + sec * n) * n] = (origin.x + col as f64) - centroid.x;
+                }
+            }
+        }
+        model.state.set_surface_potential_map(
+            cuemol_desktop_core::DensityMap::from_grid_map(cuemol_desktop_core::GridMap {
+                counts: [n, n, n],
+                origin,
+                delta: [
+                    cuemol_core::Vector4::new3(1.0, 0.0, 0.0),
+                    cuemol_core::Vector4::new3(0.0, 1.0, 0.0),
+                    cuemol_core::Vector4::new3(0.0, 0.0, 1.0),
+                ],
+                values,
+            }),
+        );
+        model.toggle_potential_surface();
+        assert!(model.potential_surface && model.show_surface);
+        let mesh = model.surface_mesh.as_ref().expect("potential SES cached");
+        let red = mesh.vertices.iter().any(|v| v.color[0] > v.color[2] + 0.02);
+        let blue = mesh.vertices.iter().any(|v| v.color[2] > v.color[0] + 0.02);
+        assert!(red && blue, "the SES must span the red→blue potential gradient");
     }
 
     #[test]

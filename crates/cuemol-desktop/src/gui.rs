@@ -390,6 +390,10 @@ struct GuiApplication {
     clip_surface: bool,
     /// Clip-plane offset along +Z from the bbox centre (Å).
     clip_offset: f64,
+    /// Colour the surface by the loaded electrostatic potential (SCAPOT) instead of by
+    /// nearest atom, and the APBS/OpenDX `.dx` path to load the potential from.
+    potential_surface: bool,
+    potential_path: String,
     /// Atom/residue labels overlaid on the selected atoms in the 3D view.
     show_labels: bool,
     /// Hydrogen-bond dashed lines (heavy-atom N···O heuristic).
@@ -652,6 +656,8 @@ impl GuiApplication {
             surface_mesh: None,
             clip_surface: false,
             clip_offset: 0.0,
+            potential_surface: false,
+            potential_path: String::new(),
             show_labels: false,
             show_hbonds: false,
             light_theme: false,
@@ -1583,6 +1589,29 @@ impl GuiApplication {
                     self.set_clip_offset(offset);
                 }
             }
+            // Electrostatic-potential surface (SCAPOT): load an APBS/OpenDX .dx map, then
+            // colour the surface by it (red −, white 0, blue +) instead of by atom.
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.potential_path)
+                        .hint_text("APBS .dx path")
+                        .desired_width(120.0),
+                );
+                if ui.button("Load .dx").on_hover_text("Load an electrostatic potential map").clicked() {
+                    self.load_potential();
+                }
+                let potential_label = if self.potential_surface { "Potential ✓" } else { "Potential" };
+                if ui
+                    .add_enabled(
+                        self.state.has_surface_potential(),
+                        egui::Button::new(potential_label),
+                    )
+                    .on_hover_text("Colour the surface by electrostatic potential (SCAPOT)")
+                    .clicked()
+                {
+                    self.toggle_potential_surface();
+                }
+            });
             let labels_label = if self.show_labels { "Labels ✓" } else { "Labels" };
             if ui
                 .button(labels_label)
@@ -3167,6 +3196,30 @@ impl GuiApplication {
         self.rebuild_snapshot();
     }
 
+    /// Load an APBS/OpenDX `.dx` electrostatic-potential map from `potential_path`.
+    fn load_potential(&mut self) {
+        let path = self.potential_path.trim().to_string();
+        if path.is_empty() {
+            self.set_status("Enter an APBS .dx path first");
+            return;
+        }
+        match self.state.load_surface_potential(&path) {
+            Ok((lo, hi)) => self.set_status(format!("Potential loaded (range {lo:.2}..{hi:.2})")),
+            Err(error) => self.set_status(format!("Potential load failed: {error}")),
+        }
+    }
+
+    /// Toggle colouring the surface by electrostatic potential (SCAPOT) vs by nearest
+    /// atom. Rebuilds the cached surface mesh so the new colouring takes effect.
+    fn toggle_potential_surface(&mut self) {
+        self.potential_surface = !self.potential_surface;
+        if !self.show_surface {
+            self.show_surface = true;
+        }
+        self.rebuild_surface_mesh();
+        self.rebuild_snapshot();
+    }
+
     /// (Re)build the cached surface mesh — clipped by the plane when `clip_surface` is
     /// set (live cross-section), else the full surface.
     fn rebuild_surface_mesh(&mut self) {
@@ -3176,7 +3229,15 @@ impl GuiApplication {
         else {
             return;
         };
-        let result = if self.clip_surface {
+        let result = if self.potential_surface && self.state.has_surface_potential() {
+            // SCAPOT: colour the surface by the loaded electrostatic potential.
+            self.state.build_surface_potential_mesh(
+                object_uid,
+                &self.selection_text,
+                self.surface_density,
+                self.surface_probe_radius,
+            )
+        } else if self.clip_surface {
             let normal = cuemol_core::Vector4::new3(0.0, 0.0, 1.0);
             let position = self
                 .state
@@ -6163,6 +6224,78 @@ mod tests {
             base_meshes,
             "the SES mesh is removed when toggled off"
         );
+    }
+
+    #[test]
+    fn potential_surface_colours_the_ses_by_electrostatic_potential_in_egui() {
+        // The egui Potential toggle routes the SES through build_surface_potential_mesh
+        // (SCAPOT) and adds the potential-coloured mesh to the snapshot. Inject a ramp
+        // potential (−x→+x through the residues' centroid) so the surface spans red→blue.
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        let object_uid = app
+            .state
+            .active_object_summaries()
+            .first()
+            .map(|object| object.uid)
+            .expect("1CRN loads as one object");
+        let centroid = {
+            let atoms: Vec<cuemol_core::Vector4> = app
+                .state
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .mol()
+                .atoms()
+                .iter()
+                .filter(|a| (1..=3).contains(&a.res_id))
+                .map(|a| a.position)
+                .collect();
+            let n = atoms.len() as f64;
+            let sum = atoms.iter().fold(cuemol_core::Vector4::ZERO, |acc, p| acc + *p);
+            cuemol_core::Vector4::new3(sum.x / n, sum.y / n, sum.z / n)
+        };
+        let n = 80usize;
+        let origin =
+            cuemol_core::Vector4::new3(centroid.x - 40.0, centroid.y - 40.0, centroid.z - 40.0);
+        let mut values = vec![0.0_f64; n * n * n];
+        for sec in 0..n {
+            for row in 0..n {
+                for col in 0..n {
+                    values[col + (row + sec * n) * n] = (origin.x + col as f64) - centroid.x;
+                }
+            }
+        }
+        app.state.set_surface_potential_map(
+            cuemol_desktop_core::DensityMap::from_grid_map(cuemol_desktop_core::GridMap {
+                counts: [n, n, n],
+                origin,
+                delta: [
+                    cuemol_core::Vector4::new3(1.0, 0.0, 0.0),
+                    cuemol_core::Vector4::new3(0.0, 1.0, 0.0),
+                    cuemol_core::Vector4::new3(0.0, 0.0, 1.0),
+                ],
+                values,
+            }),
+        );
+        app.molstruct_object = Some(object_uid);
+        app.selection_text = "resid 1:3".to_string();
+        let base_meshes = app.snapshot.meshes.len();
+        app.toggle_potential_surface();
+        assert!(app.potential_surface && app.show_surface);
+        assert!(
+            app.snapshot.meshes.len() > base_meshes,
+            "the potential SES mesh is added to the snapshot"
+        );
+        let mesh = app.surface_mesh.as_ref().expect("potential SES cached");
+        let red = mesh.vertices.iter().any(|v| v.color[0] > v.color[2] + 0.02);
+        let blue = mesh.vertices.iter().any(|v| v.color[2] > v.color[0] + 0.02);
+        assert!(red && blue, "the SES must span the red→blue potential gradient");
     }
 
     #[test]

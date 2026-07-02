@@ -17,9 +17,12 @@ use cuemol_render::PovSceneExporter;
 use cuemol_render::RenderSceneSnapshot;
 use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter};
 use cuemol_xtal::{
-    read_brix_map_file, read_ccp4_map_file, read_opendx_file, read_xplor_map_file, DensityMap,
-    MapMeshRenderer, MapSurfRenderer,
+    read_brix_map_file, read_ccp4_map_file, read_opendx_file, read_xplor_map_file, MapMeshRenderer,
+    MapSurfRenderer,
 };
+// Re-exported so consumers (and tests) can name the scalar-field types the surface
+// potential API takes — e.g. `set_surface_potential_map(DensityMap)`.
+pub use cuemol_xtal::{DensityMap, GridMap};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -43,6 +46,12 @@ pub struct DesktopAppState {
     /// Per-object MD trajectory frames (each frame = atom positions in molecule order),
     /// for the MolAnim animation type. Empty until a trajectory is loaded.
     trajectories: BTreeMap<Uid, Vec<Vec<cuemol_core::Vector4>>>,
+    /// Electrostatic-potential scalar field for potential-coloured surfaces (an
+    /// APBS/OpenDX `.dx` grid, held as a `DensityMap` scalar carrier). `None` until
+    /// a potential is loaded. Kept separate from `density_maps` so the density
+    /// contour/isosurface features never pick it up. See
+    /// [`build_surface_potential_mesh`](DesktopAppState::build_surface_potential_mesh).
+    surface_potential: Option<DensityMap>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,6 +368,7 @@ impl Default for DesktopAppState {
             density_maps: BTreeMap::new(),
             next_density_map_uid: 1,
             trajectories: BTreeMap::new(),
+            surface_potential: None,
         }
     }
 }
@@ -1910,6 +1920,62 @@ impl DesktopAppState {
         Ok(surface_render_mesh(object, &selector, &surface))
     }
 
+    /// Load an electrostatic-potential map (APBS/OpenDX `.dx`) for potential-coloured
+    /// surfaces. Reuses the existing OpenDX grid reader (the density-map `apbs` path);
+    /// the potential is stored as a `DensityMap` scalar carrier — a functional port of
+    /// C++ `OpenDXPotReader` + `ElePotMap` (256-level byte-quantised, not float-exact).
+    /// Returns the `(min, max)` potential range so a front end can label the scale.
+    pub fn load_surface_potential(&mut self, path: impl AsRef<Path>) -> Result<(f64, f64)> {
+        let map = read_density_map(path.as_ref(), "apbs")?;
+        let range = (map.min_density(), map.max_density());
+        self.surface_potential = Some(map);
+        Ok(range)
+    }
+
+    /// Inject a pre-built potential scalar field (used by tests and synthetic maps).
+    pub fn set_surface_potential_map(&mut self, map: DensityMap) {
+        self.surface_potential = Some(map);
+    }
+
+    /// Whether a potential map is loaded (a front end enables its "Potential surface"
+    /// action only when this is true).
+    pub fn has_surface_potential(&self) -> bool {
+        self.surface_potential.is_some()
+    }
+
+    /// The `(min, max)` of the loaded potential, or `None` if none is loaded.
+    pub fn surface_potential_range(&self) -> Option<(f64, f64)> {
+        self.surface_potential
+            .as_ref()
+            .map(|map| (map.min_density(), map.max_density()))
+    }
+
+    /// Build a molecular surface and colour every vertex by the loaded electrostatic
+    /// potential at that point — the C++ `MolSurfRenderer` SCAPOT mode (`getColorSca`:
+    /// sample the scalar field, map through a low→mid→high gradient). The canonical
+    /// red(−)/white(0)/blue(+) electrostatic surface. Errors if no potential is loaded.
+    pub fn build_surface_potential_mesh(
+        &self,
+        object_uid: Uid,
+        selection_text: &str,
+        density: f64,
+        probe_radius: f64,
+    ) -> Result<cuemol_render::RenderMesh> {
+        let potential = self.surface_potential.as_ref().ok_or_else(|| {
+            CueMolError::invalid_argument(
+                "no electrostatic potential loaded (load a .dx map first)",
+            )
+        })?;
+        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let mut surface = MolSurfObj::new();
+        surface.create_ses_from_mol(object.mol(), selector, density, probe_radius);
+        Ok(surface_scalar_mesh(&surface, potential))
+    }
+
     /// Execute a JavaScript source string with the embedded boa engine (CueMol2 Tools →
     /// Execute script). The full JS LANGUAGE runs (arithmetic / loops / strings), and a
     /// `cuemol` global exposes a subset of the real CueMol2 script API:
@@ -2579,6 +2645,72 @@ fn surface_render_mesh(
         .flat_map(|triangle| triangle.iter().copied())
         .collect();
     cuemol_render::RenderMesh { vertices, indices }
+}
+
+/// Convert a built molecular surface to a renderable mesh, colouring each vertex by
+/// the value of a scalar field (electrostatic potential) at that vertex — the C++
+/// `MolSurfRenderer` SCAPOT mode (`getColorSca`). The value is mapped through a
+/// red(low) → white(mid) → blue(high) gradient auto-scaled to the field's range,
+/// with `mid` pinned to 0 when the range straddles it (the neutral isopotential).
+fn surface_scalar_mesh(
+    surface: &MolSurfObj,
+    scalar: &DensityMap,
+) -> cuemol_render::RenderMesh {
+    let lo = scalar.min_density();
+    let hi = scalar.max_density();
+    // Neutral point at 0 when the range straddles it, else the midpoint.
+    let mid = if lo < 0.0 && hi > 0.0 {
+        0.0
+    } else {
+        (lo + hi) * 0.5
+    };
+    let mesh = surface.mesh();
+    let vertices = mesh
+        .vertices()
+        .iter()
+        .map(|vertex| cuemol_render::MeshVertex {
+            position: vertex.position,
+            normal: vertex.normal,
+            color: potential_color(scalar.value_at(vertex.position), lo, mid, hi),
+        })
+        .collect();
+    let indices = mesh
+        .triangles()
+        .iter()
+        .flat_map(|triangle| triangle.iter().copied())
+        .collect();
+    cuemol_render::RenderMesh { vertices, indices }
+}
+
+/// Electrostatic-potential colour (C++ `getColorSca` 3-stop gradient): `value <= lo`
+/// → red, `value >= hi` → blue, `mid` → white, linearly interpolated between. Guards
+/// against a degenerate (zero-width) low or high half.
+fn potential_color(value: f64, lo: f64, mid: f64, hi: f64) -> [f32; 4] {
+    const RED: [f32; 3] = [1.0, 0.0, 0.0];
+    const WHITE: [f32; 3] = [1.0, 1.0, 1.0];
+    const BLUE: [f32; 3] = [0.0, 0.0, 1.0];
+    let lerp = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 4] {
+        let t = t.clamp(0.0, 1.0);
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+            1.0,
+        ]
+    };
+    if value <= lo {
+        return [RED[0], RED[1], RED[2], 1.0];
+    }
+    if value >= hi {
+        return [BLUE[0], BLUE[1], BLUE[2], 1.0];
+    }
+    if value <= mid {
+        let t = if mid > lo { (value - lo) / (mid - lo) } else { 1.0 };
+        lerp(RED, WHITE, t as f32)
+    } else {
+        let t = if hi > mid { (value - mid) / (hi - mid) } else { 1.0 };
+        lerp(WHITE, BLUE, t as f32)
+    }
 }
 
 fn append_object_snapshot(
@@ -3715,6 +3847,118 @@ mod tests {
             !has([0.76, 0.79, 0.84]),
             "no vertex should keep the old flat-grey surface colour"
         );
+    }
+
+    #[test]
+    fn potential_color_is_a_red_white_blue_gradient() {
+        // C++ getColorSca 3-stop gradient: low → red, mid → white, high → blue.
+        let approx = |a: [f32; 4], b: [f32; 4]| {
+            (0..4).all(|k| (a[k] - b[k]).abs() < 1.0e-6)
+        };
+        assert!(approx(potential_color(-1.0, -1.0, 0.0, 1.0), [1.0, 0.0, 0.0, 1.0]));
+        assert!(approx(potential_color(1.0, -1.0, 0.0, 1.0), [0.0, 0.0, 1.0, 1.0]));
+        assert!(approx(potential_color(0.0, -1.0, 0.0, 1.0), [1.0, 1.0, 1.0, 1.0]));
+        // Halfway on each half.
+        assert!(approx(potential_color(-0.5, -1.0, 0.0, 1.0), [1.0, 0.5, 0.5, 1.0]));
+        assert!(approx(potential_color(0.5, -1.0, 0.0, 1.0), [0.5, 0.5, 1.0, 1.0]));
+        // Beyond the ends clamps to the endpoint colour.
+        assert!(approx(potential_color(-9.0, -1.0, 0.0, 1.0), [1.0, 0.0, 0.0, 1.0]));
+        assert!(approx(potential_color(9.0, -1.0, 0.0, 1.0), [0.0, 0.0, 1.0, 1.0]));
+    }
+
+    #[test]
+    fn surface_potential_mesh_colours_by_electrostatic_potential() {
+        // SCAPOT: a molecular surface coloured by an electrostatic potential field.
+        // Synthesise a potential that ramps -x→+x through 0 at the selected residues'
+        // centroid, so the SES over them spans red (negative) → blue (positive).
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        // Centroid of residues 1-3 (the surface selection).
+        let centroid = {
+            let mol = app
+                .scene_manager()
+                .object(object)
+                .unwrap()
+                .mol()
+                .atoms()
+                .iter()
+                .filter(|a| (1..=3).contains(&a.res_id))
+                .map(|a| a.position)
+                .collect::<Vec<_>>();
+            let n = mol.len() as f64;
+            let sum = mol
+                .iter()
+                .fold(cuemol_core::Vector4::ZERO, |acc, p| acc + *p);
+            cuemol_core::Vector4::new3(sum.x / n, sum.y / n, sum.z / n)
+        };
+        // An 80 Å cube of 1 Å voxels around the centroid; value = x − centroid.x, so
+        // the field straddles 0 (min ≈ −40, max ≈ +40) → mid pins to 0.
+        let n = 80usize;
+        let origin = cuemol_core::Vector4::new3(
+            centroid.x - 40.0,
+            centroid.y - 40.0,
+            centroid.z - 40.0,
+        );
+        let mut values = vec![0.0_f64; n * n * n];
+        for sec in 0..n {
+            for row in 0..n {
+                for col in 0..n {
+                    let world_x = origin.x + col as f64;
+                    values[col + (row + sec * n) * n] = world_x - centroid.x;
+                }
+            }
+        }
+        let grid = cuemol_xtal::GridMap {
+            counts: [n, n, n],
+            origin,
+            delta: [
+                cuemol_core::Vector4::new3(1.0, 0.0, 0.0),
+                cuemol_core::Vector4::new3(0.0, 1.0, 0.0),
+                cuemol_core::Vector4::new3(0.0, 0.0, 1.0),
+            ],
+            values,
+        };
+        app.set_surface_potential_map(DensityMap::from_grid_map(grid));
+        assert!(app.has_surface_potential());
+        let (lo, hi) = app.surface_potential_range().unwrap();
+        assert!(lo < 0.0 && hi > 0.0, "potential range must straddle 0: ({lo},{hi})");
+
+        let mesh = app
+            .build_surface_potential_mesh(object, "resid 1:3", 1.0, 1.4)
+            .unwrap();
+        assert!(!mesh.indices.is_empty(), "the SES must be a real mesh");
+        // The surface must span the neutral point: some vertices lean red (negative
+        // side, more red than blue) and some lean blue (positive side). Tested by the
+        // colour's SIGN tint, not saturation — the auto-scaled range is dominated by
+        // the grid corners, so a small local surface is tinted, not saturated.
+        let red = mesh
+            .vertices
+            .iter()
+            .any(|v| v.color[0] > v.color[2] + 0.02);
+        let blue = mesh
+            .vertices
+            .iter()
+            .any(|v| v.color[2] > v.color[0] + 0.02);
+        assert!(red, "surface must have red-leaning (negative-potential) vertices");
+        assert!(blue, "surface must have blue-leaning (positive-potential) vertices");
+
+        // With no potential loaded the call is a clean error, not a panic.
+        let mut empty = DesktopAppState::new();
+        empty.new_scene("w", false);
+        let obj2 = empty
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "c", "pdb")
+            .unwrap()
+            .result_object;
+        assert!(empty
+            .build_surface_potential_mesh(obj2, "resid 1:3", 1.0, 1.4)
+            .is_err());
     }
 
     #[test]
