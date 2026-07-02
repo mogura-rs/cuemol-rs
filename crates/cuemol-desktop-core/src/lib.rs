@@ -1951,25 +1951,46 @@ impl DesktopAppState {
     }
 
     /// Execute a JavaScript source string with the embedded boa engine (CueMol2 Tools →
-    /// Execute script). A `cuemol` global exposes `print(msg)`, `select(expr)`, and
-    /// `color(scheme)`; the full JS LANGUAGE runs (arithmetic / loops / strings), so a
-    /// script can compute selection strings programmatically. Returns the printed log +
-    /// the last `select(...)` expression (the front end applies it to its selection).
-    /// `color(...)` is applied here. A real engine (not the load+preview fallback); the
-    /// binding surface is a starting subset of CueMol2's script API.
+    /// Execute script). The full JS LANGUAGE runs (arithmetic / loops / strings), and a
+    /// `cuemol` global exposes a subset of the real CueMol2 script API:
+    ///
+    /// - Logging (real names + legacy alias): `putLogMsg(msg)` / `println(msg)` /
+    ///   `print(msg)`.
+    /// - Selection: `makeSel(expr)` VALIDATES a selector and returns its string (or
+    ///   `null`); `select(expr)` applies a selector to the current selection (returned to
+    ///   the front end).
+    /// - Colour: `makeColor(spec)` resolves a colour spec/name to `{r,g,b,a}` bytes;
+    ///   `color(scheme)` applies rainbow/bfactor/element colouring to every object.
+    /// - Structural queries over the active scene: `getScene()`, `getObjectNames()`,
+    ///   `getObject(name)`, `getClassName(name)`, `getRenderer(objName, rendName)`,
+    ///   `getRendererNames(objName)`. These read a read-only snapshot built before eval
+    ///   (boa's native closures can't borrow `&mut self`), so they return FROZEN data
+    ///   objects (`{uid, name, type, rendererNames}`), NOT live objects — method chaining
+    ///   like `getObject(n).setProp(...)` is deliberately out of scope (see below).
+    ///
+    /// Returns the printed log + the last `select(...)` expression. A real engine (not the
+    /// load+preview fallback). SCOPE: this is the top-frequency subset of CueMol2's script
+    /// API; the deeper live-object model (mutating property setters via chained proxies,
+    /// `createObj`, live `measure`) is not yet bridged.
     #[cfg(feature = "scripting")]
     pub fn run_script_js(&mut self, source: &str) -> Result<(String, Option<String>)> {
+        use boa_engine::object::builtins::JsArray;
         use boa_engine::{js_string, object::ObjectInitializer, property::Attribute};
-        use boa_engine::{Context, JsResult, JsValue, NativeFunction, Source};
+        use boa_engine::{Context, JsResult, JsString, JsValue, NativeFunction, Source};
 
-        fn arg0(args: &[JsValue], context: &mut Context) -> String {
-            args.first()
+        fn argn(args: &[JsValue], index: usize, context: &mut Context) -> String {
+            args.get(index)
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_string(context)
                 .map(|value| value.to_std_string_escaped())
                 .unwrap_or_default()
         }
+        fn arg0(args: &[JsValue], context: &mut Context) -> String {
+            argn(args, 0, context)
+        }
+
+        // --- log/print commands (buffered, drained after eval) ---
         fn js_print(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             script_cmds::push(ScriptCmd::Print(arg0(args, ctx)));
             Ok(JsValue::undefined())
@@ -1982,20 +2003,205 @@ impl DesktopAppState {
             script_cmds::push(ScriptCmd::Color(arg0(args, ctx)));
             Ok(JsValue::undefined())
         }
+        // --- pure builders (validate + return, no host mutation) ---
+        fn js_make_sel(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            let expr = arg0(args, ctx);
+            match cuemol_molstr::parse_selector(&expr) {
+                Ok(_) => Ok(JsString::from(expr.as_str()).into()),
+                Err(_) => Ok(JsValue::null()),
+            }
+        }
+        fn js_make_color(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            let spec = arg0(args, ctx);
+            match resolve_script_color(&spec) {
+                Some(rgba) => {
+                    let obj = ObjectInitializer::new(ctx)
+                        .property(js_string!("r"), f64::from(rgba.r), Attribute::all())
+                        .property(js_string!("g"), f64::from(rgba.g), Attribute::all())
+                        .property(js_string!("b"), f64::from(rgba.b), Attribute::all())
+                        .property(js_string!("a"), f64::from(rgba.a), Attribute::all())
+                        .build();
+                    Ok(obj.into())
+                }
+                None => Ok(JsValue::null()),
+            }
+        }
+        // --- structural queries (read the pre-built read-only snapshot) ---
+        fn js_get_object_names(
+            _t: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let names: Vec<JsValue> = script_env::with(|env| {
+                env.objects
+                    .iter()
+                    .map(|object| JsString::from(object.name.as_str()).into())
+                    .collect()
+            });
+            Ok(JsArray::from_iter(names, ctx).into())
+        }
+        fn js_get_class_name(
+            _t: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let name = arg0(args, ctx);
+            match script_env::with(|env| {
+                env.objects
+                    .iter()
+                    .find(|object| object.name == name)
+                    .map(|object| object.class.clone())
+            }) {
+                Some(class) => Ok(JsString::from(class.as_str()).into()),
+                None => Ok(JsValue::null()),
+            }
+        }
+        fn js_get_object(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            let name = arg0(args, ctx);
+            let found = script_env::with(|env| {
+                env.objects.iter().find(|object| object.name == name).cloned()
+            });
+            let Some(object) = found else {
+                return Ok(JsValue::null());
+            };
+            let renderer_names: Vec<JsValue> = object
+                .renderers
+                .iter()
+                .map(|renderer| JsString::from(renderer.name.as_str()).into())
+                .collect();
+            let renderer_array = JsArray::from_iter(renderer_names, ctx);
+            let obj = ObjectInitializer::new(ctx)
+                .property(js_string!("uid"), object.uid as f64, Attribute::all())
+                .property(
+                    js_string!("name"),
+                    JsString::from(object.name.as_str()),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("type"),
+                    JsString::from(object.class.as_str()),
+                    Attribute::all(),
+                )
+                .property(js_string!("rendererNames"), renderer_array, Attribute::all())
+                .build();
+            Ok(obj.into())
+        }
+        fn js_get_renderer_names(
+            _t: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let name = arg0(args, ctx);
+            let names: Vec<JsValue> = script_env::with(|env| {
+                env.objects
+                    .iter()
+                    .find(|object| object.name == name)
+                    .map(|object| {
+                        object
+                            .renderers
+                            .iter()
+                            .map(|renderer| JsString::from(renderer.name.as_str()).into())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            Ok(JsArray::from_iter(names, ctx).into())
+        }
+        fn js_get_renderer(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            let object_name = arg0(args, ctx);
+            let renderer_name = argn(args, 1, ctx);
+            let found = script_env::with(|env| {
+                env.objects
+                    .iter()
+                    .find(|object| object.name == object_name)
+                    .and_then(|object| {
+                        object
+                            .renderers
+                            .iter()
+                            .find(|renderer| renderer.name == renderer_name)
+                            .cloned()
+                    })
+            });
+            let Some(renderer) = found else {
+                return Ok(JsValue::null());
+            };
+            let obj = ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("name"),
+                    JsString::from(renderer.name.as_str()),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("type"),
+                    JsString::from(renderer.rtype.as_str()),
+                    Attribute::all(),
+                )
+                .build();
+            Ok(obj.into())
+        }
+        fn js_get_scene(_t: &JsValue, _args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            let (uid, name, object_names) = script_env::with(|env| {
+                (
+                    env.scene_uid,
+                    env.scene_name.clone(),
+                    env.objects
+                        .iter()
+                        .map(|object| JsString::from(object.name.as_str()).into())
+                        .collect::<Vec<JsValue>>(),
+                )
+            });
+            let names_array = JsArray::from_iter(object_names, ctx);
+            let obj = ObjectInitializer::new(ctx)
+                .property(js_string!("uid"), uid as f64, Attribute::all())
+                .property(
+                    js_string!("name"),
+                    JsString::from(name.as_str()),
+                    Attribute::all(),
+                )
+                .property(js_string!("objectNames"), names_array, Attribute::all())
+                .build();
+            Ok(obj.into())
+        }
 
         let _ = script_cmds::drain(); // clear any stale buffer
+        script_env::set(self.build_script_env());
         let mut context = Context::default();
         let cuemol = ObjectInitializer::new(&mut context)
             .function(NativeFunction::from_fn_ptr(js_print), js_string!("print"), 1)
+            .function(NativeFunction::from_fn_ptr(js_print), js_string!("putLogMsg"), 1)
+            .function(NativeFunction::from_fn_ptr(js_print), js_string!("println"), 1)
             .function(NativeFunction::from_fn_ptr(js_select), js_string!("select"), 1)
             .function(NativeFunction::from_fn_ptr(js_color), js_string!("color"), 1)
+            .function(NativeFunction::from_fn_ptr(js_make_sel), js_string!("makeSel"), 1)
+            .function(NativeFunction::from_fn_ptr(js_make_color), js_string!("makeColor"), 1)
+            .function(NativeFunction::from_fn_ptr(js_get_scene), js_string!("getScene"), 0)
+            .function(NativeFunction::from_fn_ptr(js_get_object), js_string!("getObject"), 1)
+            .function(
+                NativeFunction::from_fn_ptr(js_get_object_names),
+                js_string!("getObjectNames"),
+                0,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_get_class_name),
+                js_string!("getClassName"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_get_renderer),
+                js_string!("getRenderer"),
+                2,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_get_renderer_names),
+                js_string!("getRendererNames"),
+                1,
+            )
             .build();
-        context
+        let outcome = context
             .register_global_property(js_string!("cuemol"), cuemol, Attribute::all())
-            .map_err(|error| CueMolError::invalid_argument(format!("script setup: {error}")))?;
-        context
-            .eval(Source::from_bytes(source))
-            .map_err(|error| CueMolError::invalid_argument(format!("script error: {error}")))?;
+            .and_then(|()| context.eval(Source::from_bytes(source)));
+        script_env::clear();
+        outcome.map_err(|error| CueMolError::invalid_argument(format!("script error: {error}")))?;
 
         let mut log = String::new();
         let mut selection = None;
@@ -2010,6 +2216,50 @@ impl DesktopAppState {
             }
         }
         Ok((log, selection))
+    }
+
+    /// Build the read-only [`ScriptEnv`] snapshot the `cuemol` query functions read
+    /// during `eval` (molecule objects are class `MolCoord`, density maps `DensityMap`;
+    /// each object carries its renderer name+type list). Frozen structural data only —
+    /// no live handles.
+    #[cfg(feature = "scripting")]
+    fn build_script_env(&self) -> ScriptEnv {
+        let mut objects = Vec::new();
+        for object in self.active_object_summaries() {
+            let renderers = self
+                .renderer_summaries(object.uid)
+                .into_iter()
+                .map(|renderer| ScriptRend {
+                    name: renderer.name,
+                    rtype: renderer.renderer_type,
+                })
+                .collect();
+            objects.push(ScriptObj {
+                uid: object.uid.get(),
+                name: object.name,
+                class: "MolCoord".to_string(),
+                renderers,
+            });
+        }
+        if let Some(scene_uid) = self.active_scene() {
+            for map in self.density_map_summaries(scene_uid) {
+                objects.push(ScriptObj {
+                    uid: map.uid.get(),
+                    name: map.name,
+                    class: "DensityMap".to_string(),
+                    renderers: Vec::new(),
+                });
+            }
+        }
+        let (scene_uid, scene_name) = match self.active_scene_summary() {
+            Some(scene) => (scene.uid.get(), scene.name),
+            None => (0, String::new()),
+        };
+        ScriptEnv {
+            scene_uid,
+            scene_name,
+            objects,
+        }
     }
 
     /// Apply a `cuemol.color(scheme)` call (element / rainbow / bfactor) to every
@@ -2062,6 +2312,68 @@ mod script_cmds {
     }
     pub(super) fn drain() -> Vec<ScriptCmd> {
         CMDS.with(|cells| cells.borrow_mut().drain(..).collect())
+    }
+}
+
+/// Resolve a `cuemol.makeColor(spec)` argument to RGBA bytes. Handles `rgb()`/`hsb()`/
+/// `#hex` forms directly and X11 colour names via `NamedColor`; an unknown name falls
+/// back to grey (the C++ default), so a non-empty spec always yields a colour.
+#[cfg(feature = "scripting")]
+fn resolve_script_color(spec: &str) -> Option<cuemol_gfx::Rgba8> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = cuemol_gfx::parse_color(trimmed) {
+        if let Some(rgba) = parsed.rgba8() {
+            return Some(rgba);
+        }
+    }
+    Some(cuemol_gfx::NamedColor::from_name(trimmed).resolved_color().rgba8())
+}
+
+/// Read-only snapshot of the active scene handed to the `cuemol` script queries
+/// (`getScene`/`getObject`/...). Populated once before `eval`; boa's native closures
+/// read it (they can't borrow `&self`), mirroring the [`ScriptCmd`] mutation bridge.
+#[cfg(feature = "scripting")]
+#[derive(Clone, Default)]
+struct ScriptEnv {
+    scene_uid: u64,
+    scene_name: String,
+    objects: Vec<ScriptObj>,
+}
+
+#[cfg(feature = "scripting")]
+#[derive(Clone, Default)]
+struct ScriptObj {
+    uid: u64,
+    name: String,
+    class: String,
+    renderers: Vec<ScriptRend>,
+}
+
+#[cfg(feature = "scripting")]
+#[derive(Clone, Default)]
+struct ScriptRend {
+    name: String,
+    rtype: String,
+}
+
+#[cfg(feature = "scripting")]
+mod script_env {
+    use super::ScriptEnv;
+    use std::cell::RefCell;
+    thread_local! {
+        static ENV: RefCell<ScriptEnv> = RefCell::new(ScriptEnv::default());
+    }
+    pub(super) fn set(env: ScriptEnv) {
+        ENV.with(|cell| *cell.borrow_mut() = env);
+    }
+    pub(super) fn clear() {
+        ENV.with(|cell| *cell.borrow_mut() = ScriptEnv::default());
+    }
+    pub(super) fn with<R>(f: impl FnOnce(&ScriptEnv) -> R) -> R {
+        ENV.with(|cell| f(&cell.borrow()))
     }
 }
 
@@ -2618,6 +2930,73 @@ mod tests {
         );
         // A syntax error surfaces as an Err, not a panic.
         assert!(app.run_script_js("this is not js (((").is_err());
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn run_script_js_makecolor_and_makesel_are_faithful() {
+        // Pure builders — no molecule needed. Oracles anchored to C++-true facts:
+        // named "red" resolves to (255,0,0,255) in the shared colour table, and a valid
+        // selector round-trips while a malformed one yields JS null. Also exercises the
+        // real API names putLogMsg / println (aliases of the legacy print).
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _selection) = app
+            .run_script_js(
+                "var c = cuemol.makeColor('red'); \
+                 cuemol.putLogMsg('red=' + c.r + ',' + c.g + ',' + c.b + ',' + c.a); \
+                 var g = cuemol.makeColor('#00ff00'); \
+                 cuemol.println('green=' + g.r + ',' + g.g + ',' + g.b); \
+                 cuemol.print('sel=' + cuemol.makeSel('resid 3')); \
+                 cuemol.print('bad=' + cuemol.makeSel('('));",
+            )
+            .expect("script runs");
+        assert!(log.contains("red=255,0,0,255"), "named red → RGBA: {log:?}");
+        assert!(log.contains("green=0,255,0"), "hex #00ff00 → RGB: {log:?}");
+        assert!(log.contains("sel=resid 3"), "valid selector round-trips: {log:?}");
+        assert!(log.contains("bad=null"), "malformed selector → null: {log:?}");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn run_script_js_queries_scene_objects() {
+        // Structural queries over the read-only snapshot. A loaded PDB is class
+        // `MolCoord` (the C++-true class name, 28 refs in ../cuemol2), the object is
+        // findable by its load name, its renderer is enumerated, and a missing name → null.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        let scene = app.new_scene("work", false).result_scene;
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        app.new_renderer_in_active_scene(object, "simple", "r1")
+            .unwrap();
+        assert_eq!(app.active_scene(), Some(scene));
+
+        let (log, _selection) = app
+            .run_script_js(
+                "cuemol.print('cls=' + cuemol.getClassName('crambin')); \
+                 cuemol.print('names=' + cuemol.getObjectNames().join('|')); \
+                 var o = cuemol.getObject('crambin'); \
+                 cuemol.print('objtype=' + o.type + ' rends=' + o.rendererNames.join(',')); \
+                 var r = cuemol.getRenderer('crambin', 'r1'); \
+                 cuemol.print('rend=' + r.name + ':' + r.type); \
+                 cuemol.print('missing=' + cuemol.getObject('nope')); \
+                 var sc = cuemol.getScene(); \
+                 cuemol.print('scene=' + sc.name + ' nobj=' + sc.objectNames.length);",
+            )
+            .expect("script runs");
+        assert!(log.contains("cls=MolCoord"), "loaded PDB class: {log:?}");
+        assert!(log.contains("crambin"), "object enumerated by name: {log:?}");
+        assert!(log.contains("objtype=MolCoord"), "getObject type: {log:?}");
+        assert!(log.contains("rends="), "renderer list present: {log:?}");
+        assert!(log.contains("r1"), "renderer r1 enumerated: {log:?}");
+        assert!(log.contains("rend=r1:"), "getRenderer name: {log:?}");
+        assert!(log.contains("missing=null"), "unknown object → null: {log:?}");
+        assert!(log.contains("scene=work nobj=1"), "scene name + object count: {log:?}");
     }
 
     /// Build a pickable atom at a world position (object_uid/atom_index set).
