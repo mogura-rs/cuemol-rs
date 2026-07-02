@@ -1406,35 +1406,7 @@ impl DesktopAppState {
                 }
             }
         }
-        match points.as_slice() {
-            [a, b] => Some(format!("Distance: {:.3} Å", b.sub(*a).length3d())),
-            [a, b, c] => {
-                let u = a.sub(*b);
-                let v = c.sub(*b);
-                let denom = u.length3d() * v.length3d();
-                if denom < 1.0e-9 {
-                    return None;
-                }
-                let angle = (u.dot3d(v) / denom).clamp(-1.0, 1.0).acos().to_degrees();
-                Some(format!("Angle: {angle:.2}°"))
-            }
-            [a, b, c, d] => {
-                let b1 = b.sub(*a);
-                let b2 = c.sub(*b);
-                let b3 = d.sub(*c);
-                let len = b2.length3d();
-                if len < 1.0e-9 {
-                    return None;
-                }
-                let b2n = cuemol_core::Vector4::new3(b2.x / len, b2.y / len, b2.z / len);
-                let n1 = b1.cross(b2);
-                let n2 = b2.cross(b3);
-                let m = n1.cross(b2n);
-                let torsion = m.dot3d(n2).atan2(n1.dot3d(n2)).to_degrees();
-                Some(format!("Torsion: {torsion:.2}°"))
-            }
-            _ => None,
-        }
+        measure_points(&points)
     }
 
     pub fn active_render_snapshot(&self, selection_text: &str) -> Result<RenderSceneSnapshot> {
@@ -1973,6 +1945,9 @@ impl DesktopAppState {
     ///   `setColoring(objName, scheme)`, `setRendererVisible(objName, rendName, bool)`,
     ///   `setRendererProp(objName, rendName, key, value)` — flat calls onto the existing
     ///   desktop-core setters (no live proxies).
+    /// - Live computed query: `measure(sel)` returns the distance/angle/torsion of a
+    ///   selection (2/3/4 atoms) computed against the scene's molecules DURING eval —
+    ///   the same math as the Measure ribbon.
     /// - Structural queries over the active scene: `getScene()`, `getObjectNames()`,
     ///   `getObject(name)`, `getClassName(name)`, `getRenderer(objName, rendName)`,
     ///   `getRendererNames(objName)`. These read a read-only snapshot built before eval
@@ -1982,8 +1957,9 @@ impl DesktopAppState {
     ///
     /// Returns the printed log + the last `select(...)` expression. A real engine (not the
     /// load+preview fallback). SCOPE: this is the top-frequency subset of CueMol2's script
-    /// API — queries plus flat by-name mutations. The deeper live-object model (chained
-    /// setters via JS proxies, `createObj`, live `measure`) is not yet bridged.
+    /// API — structural queries, a live computed `measure`, and flat by-name mutations.
+    /// The deeper live-object model (chained property setters via JS proxies reflected in
+    /// the real scene, `createObj`) is not yet bridged.
     #[cfg(feature = "scripting")]
     pub fn run_script_js(&mut self, source: &str) -> Result<(String, Option<String>)> {
         use boa_engine::object::builtins::JsArray;
@@ -2208,6 +2184,29 @@ impl DesktopAppState {
                 .build();
             Ok(obj.into())
         }
+        // Live computed query: measure a selection (2 atoms→distance, 3→angle,
+        // 4→torsion) against the snapshot molecules DURING eval — the same math as the
+        // Measure ribbon, so a script can read a measurement programmatically.
+        fn js_measure(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            let sel = arg0(args, ctx);
+            let result = script_env::with(|env| {
+                let selector = parse_gui_selector(&sel).ok().flatten()?;
+                let mut points = Vec::new();
+                for mol in &env.molecules {
+                    let atoms = mol.atoms();
+                    for index in mol.select_indices(&selector) {
+                        if let Some(atom) = atoms.get(index) {
+                            points.push(atom.position);
+                        }
+                    }
+                }
+                measure_points(&points)
+            });
+            match result {
+                Some(text) => Ok(JsString::from(text.as_str()).into()),
+                None => Ok(JsValue::null()),
+            }
+        }
 
         let _ = script_cmds::drain(); // clear any stale buffer
         script_env::set(self.build_script_env());
@@ -2257,6 +2256,7 @@ impl DesktopAppState {
                 js_string!("getRendererNames"),
                 1,
             )
+            .function(NativeFunction::from_fn_ptr(js_measure), js_string!("measure"), 1)
             .build();
         let outcome = context
             .register_global_property(js_string!("cuemol"), cuemol, Attribute::all())
@@ -2343,10 +2343,16 @@ impl DesktopAppState {
             Some(scene) => (scene.uid.get(), scene.name),
             None => (0, String::new()),
         };
+        let molecules = self
+            .active_scene()
+            .and_then(|uid| self.scene_manager().scene(uid))
+            .map(|scene| scene.objects().iter().map(|object| object.mol().clone()).collect())
+            .unwrap_or_default();
         ScriptEnv {
             scene_uid,
             scene_name,
             objects,
+            molecules,
         }
     }
 
@@ -2476,6 +2482,10 @@ struct ScriptEnv {
     scene_uid: u64,
     scene_name: String,
     objects: Vec<ScriptObj>,
+    /// Clones of the active scene's molecules — enough for `cuemol.measure(sel)` to
+    /// evaluate an arbitrary selector and compute a distance/angle/torsion LIVE during
+    /// eval (the frozen structural snapshot alone can't). Read-only; cloned once per run.
+    molecules: Vec<cuemol_molstr::MolCoord>,
 }
 
 #[cfg(feature = "scripting")]
@@ -2750,6 +2760,41 @@ fn parse_gui_selector(selection_text: &str) -> Result<Option<cuemol_molstr::Sele
         return Ok(None);
     }
     Ok(Some(parse_selector(trimmed)?))
+}
+
+/// CueMol2 AtomIntr measurement from atom positions: 2 → distance, 3 → angle, 4 →
+/// torsion, else `None`. Shared by [`DesktopAppState::active_measure`] and the script
+/// `cuemol.measure(sel)` query, so both yield identical results.
+fn measure_points(points: &[cuemol_core::Vector4]) -> Option<String> {
+    match points {
+        [a, b] => Some(format!("Distance: {:.3} Å", b.sub(*a).length3d())),
+        [a, b, c] => {
+            let u = a.sub(*b);
+            let v = c.sub(*b);
+            let denom = u.length3d() * v.length3d();
+            if denom < 1.0e-9 {
+                return None;
+            }
+            let angle = (u.dot3d(v) / denom).clamp(-1.0, 1.0).acos().to_degrees();
+            Some(format!("Angle: {angle:.2}°"))
+        }
+        [a, b, c, d] => {
+            let b1 = b.sub(*a);
+            let b2 = c.sub(*b);
+            let b3 = d.sub(*c);
+            let len = b2.length3d();
+            if len < 1.0e-9 {
+                return None;
+            }
+            let b2n = cuemol_core::Vector4::new3(b2.x / len, b2.y / len, b2.z / len);
+            let n1 = b1.cross(b2);
+            let n2 = b2.cross(b3);
+            let m = n1.cross(b2n);
+            let torsion = m.dot3d(n2).atan2(n1.dot3d(n2)).to_degrees();
+            Some(format!("Torsion: {torsion:.2}°"))
+        }
+        _ => None,
+    }
 }
 
 fn nonempty_selection(selection_text: &str) -> &str {
@@ -3180,6 +3225,42 @@ mod tests {
         // An unknown object name is a silent no-op — not a panic, not an Err.
         app.run_script_js("cuemol.setColoring('nope', 'bfactor');")
             .expect("no-op on unknown object");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn run_script_js_measure_matches_active_measure() {
+        // cuemol.measure(sel) computes a distance LIVE during eval against the scene's
+        // molecules. Oracle: it must equal DesktopAppState::active_measure(sel) for the
+        // same selection (the Measure-ribbon value) — a two-atom distance on 1CRN.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        app.load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap();
+
+        let sel = "aid 1 or aid 2"; // exactly two atoms → a distance
+        let oracle = app
+            .active_measure(sel)
+            .expect("active_measure yields a distance for two atoms");
+        assert!(oracle.starts_with("Distance:"), "two atoms → distance: {oracle}");
+
+        let (log, _selection) = app
+            .run_script_js(&format!("cuemol.print(cuemol.measure('{sel}'));"))
+            .expect("script runs");
+        assert!(
+            log.trim() == oracle,
+            "script measure() ({}) equals active_measure ({oracle})",
+            log.trim()
+        );
+
+        // A selection that isn't 2/3/4 atoms → null (not a panic).
+        let (log_all, _) = app
+            .run_script_js("cuemol.print('m=' + cuemol.measure('all'));")
+            .expect("script runs");
+        assert!(log_all.contains("m=null"), "non-measurable selection → null: {log_all:?}");
     }
 
     #[test]
