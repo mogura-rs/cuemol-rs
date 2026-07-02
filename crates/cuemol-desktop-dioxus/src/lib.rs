@@ -174,6 +174,8 @@ struct Model {
     view_size: (u32, u32),
     /// The applied selection expression (drives atom highlighting); set by picking.
     selection_text: String,
+    /// Persistent config file path (CueMol2 config save/load — parity with egui/gpui).
+    config_path: String,
     /// Symmetry panel toggles (CueMol2 "Unit cell" / "Symm mol"): draw the cell box
     /// and the home-cell symmetry-mate copies.
     show_unit_cell: bool,
@@ -261,6 +263,7 @@ impl Model {
             drag: None,
             view_size: (INIT_VIEW_W, INIT_VIEW_H),
             selection_text: String::new(),
+            config_path: "cuemol-desktop.conf".to_string(),
             show_unit_cell: false,
             show_symm_mates: false,
             show_density_contour: false,
@@ -1034,6 +1037,24 @@ impl Model {
         }
     }
 
+    /// Save / load the app config file (CueMol2 config persistence — parity with egui and
+    /// gpui). Uses the default `config_path`.
+    fn save_config(&mut self) {
+        let path = self.config_path.trim().to_string();
+        match self.state.save_config_file(&path) {
+            Ok(()) => self.status = format!("Saved config → {path}"),
+            Err(error) => self.status = format!("Save config failed: {error}"),
+        }
+    }
+
+    fn load_config(&mut self) {
+        let path = self.config_path.trim().to_string();
+        match self.state.load_config_file(&path) {
+            Ok(count) => self.status = format!("Loaded {count} config entries ← {path}"),
+            Err(error) => self.status = format!("Load config failed: {error}"),
+        }
+    }
+
     /// Write APBS electrostatics input files (PQR + APBS input + DX target) for the
     /// first molecule to the temp dir (CueMol2 Tools → APBS). No dialog — paths are
     /// derived and reported in the status bar (mirrors the gpui front end).
@@ -1145,6 +1166,8 @@ impl Model {
             "apbs" => self.write_apbs(),
             "cut_surface" => self.write_cut_surface(),
             "surface_obj" => self.write_surface(),
+            "save_config" => self.save_config(),
+            "load_config" => self.load_config(),
             "toggle_console" => self.show_console = !self.show_console,
             "toggle_properties" => self.show_properties = !self.show_properties,
             "view_props" => self.show_view_properties(),
@@ -1691,7 +1714,11 @@ fn base64_encode(data: &[u8]) -> String {
 /// menu-name list in the RSX). Empty menus have no dropdown.
 fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
     match index {
-        0 => &[("New scene tab", "new_scene")], // File
+        0 => &[
+            ("New scene tab", "new_scene"),
+            ("Save config", "save_config"),
+            ("Load config", "load_config"),
+        ], // File
         1 => &[
             ("Undo", "undo"),
             ("Redo", "redo"),
@@ -3427,6 +3454,30 @@ mod tests {
             std::env::temp_dir().join("cuemol_surface.obj").exists(),
             "the SES OBJ was written"
         );
+    }
+
+    #[test]
+    fn config_save_load_round_trips_in_dioxus() {
+        // それぞれ parity: dioxus can now save/load the app config (egui/gpui already
+        // could). Exercises both methods + the wiring end-to-end; core config parsing is
+        // separately covered in desktop-core.
+        let mut model = Model::new(vec![]);
+        let path = std::env::temp_dir().join("cuemol_dioxus_test.conf");
+        model.config_path = path.to_string_lossy().to_string();
+        model.save_config();
+        assert!(
+            model.status.starts_with("Saved config"),
+            "save status ({})",
+            model.status
+        );
+        assert!(path.exists(), "config file written");
+        model.load_config();
+        assert!(
+            model.status.starts_with("Loaded"),
+            "load status ({})",
+            model.status
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
