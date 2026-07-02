@@ -1017,7 +1017,14 @@ impl CueMolGpuiApp {
                 }
                 self.add_recent(path.clone());
                 self.refresh_scene(true);
-                self.set_status(format!("Loaded {}", path.display()));
+                // Note any non-molecule objects skipped on load (surface/map objects).
+                let skipped = self.state.active_scene_skipped_objects();
+                let suffix = if skipped.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({} object(s) skipped)", skipped.len())
+                };
+                self.set_status(format!("Loaded {}{}", path.display(), suffix));
             }
             Err(error) => {
                 self.undo_stack.pop(); // nothing changed; discard the snapshot

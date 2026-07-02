@@ -2653,7 +2653,23 @@ impl GuiApplication {
                 self.selected_renderer = None;
                 self.last_loaded_path = Some(path);
                 self.add_recent_path(self.last_loaded_path.clone().unwrap());
-                self.set_status(format!("Opened scene {}", scene_uid.get()));
+                // Report any non-molecule objects skipped on load (surface/map objects
+                // this port can't render yet) — a partial load is not silent.
+                let skipped = self.state.active_scene_skipped_objects();
+                if skipped.is_empty() {
+                    self.set_status(format!("Opened scene {}", scene_uid.get()));
+                } else {
+                    self.set_status(format!(
+                        "Opened scene {} ({} object(s) skipped: {})",
+                        scene_uid.get(),
+                        skipped.len(),
+                        skipped
+                            .iter()
+                            .map(|(name, ty)| format!("{name} [{ty}]"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
                 self.rebuild_snapshot();
                 // Restore the scene's saved view (a `.qsc` `<camera>`); only a
                 // camera-less scene falls back to auto-framing the bounding box.

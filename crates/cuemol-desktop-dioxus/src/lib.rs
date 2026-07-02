@@ -1387,7 +1387,14 @@ impl Model {
         match self.state.open_path(&path) {
             Ok(_) => {
                 self.selection_text.clear();
-                self.status = format!("Loaded {}", path.display());
+                // Note any non-molecule objects skipped on load (surface/map objects).
+                let skipped = self.state.active_scene_skipped_objects();
+                let suffix = if skipped.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({} object(s) skipped)", skipped.len())
+                };
+                self.status = format!("Loaded {}{}", path.display(), suffix);
                 self.rebuild_after_load();
             }
             Err(error) => {

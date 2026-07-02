@@ -433,6 +433,11 @@ pub struct MolScene {
     objects: Vec<MolObject>,
     cameras: Vec<Camera>,
     next_object_uid: u64,
+    /// `(name, type)` of `.qsc` objects skipped on load because their class is not a
+    /// molecule this port can model yet (e.g. `MolSurf`/`DensityMap` — a surface or map
+    /// object whose datachunk is not PDB). Recorded so the load is graceful (the
+    /// molecules still load) but NOT silent — a front end can surface it.
+    skipped_qsc_objects: Vec<(String, String)>,
 }
 
 impl MolScene {
@@ -446,6 +451,13 @@ impl MolScene {
 
     pub fn objects(&self) -> &[MolObject] {
         &self.objects
+    }
+
+    /// `(name, type)` of objects skipped during the last `.qsc` load because their
+    /// class is not a molecule this port can render yet (surface/map objects). Empty
+    /// for an all-molecule scene. Lets a front end report "N objects not loaded".
+    pub fn skipped_qsc_objects(&self) -> &[(String, String)] {
+        &self.skipped_qsc_objects
     }
 
     pub fn cameras(&self) -> &[Camera] {
@@ -551,6 +563,17 @@ impl MolScene {
             .ok_or_else(|| CueMolError::parse("QSC object element not found"))?;
         let object_name = attr_value(object_line, "name")
             .ok_or_else(|| CueMolError::parse("QSC object name not found"))?;
+        // Object class dispatch: this port loads MolCoord (molecule) objects, whose
+        // datachunk is PDB text. A `.qsc` saved by C++ CueMol2 can also hold non-molecule
+        // objects (MolSurf surface / DensityMap map), whose datachunk is a QDF binary —
+        // feeding that to `read_pdb_str` used to error and fail the WHOLE scene load.
+        // Skip such objects gracefully (the molecules still load) and record them.
+        // A missing `type` means MolCoord (the Rust writer always emits `type="MolCoord"`).
+        let object_type = attr_value(object_line, "type").unwrap_or_else(|| "MolCoord".to_string());
+        if object_type != "MolCoord" {
+            self.skipped_qsc_objects.push((object_name, object_type));
+            return Ok(());
+        }
         let data = attr_value(object_line, "src")
             .and_then(|src| src.strip_prefix("datachunk:").map(str::to_string))
             .and_then(|chunk_id| chunks.get(&chunk_id).cloned())
@@ -750,6 +773,7 @@ impl MolSceneManager {
             objects: Vec::new(),
             cameras: Vec::new(),
             next_object_uid: 1,
+            skipped_qsc_objects: Vec::new(),
         });
         uid
     }
@@ -1367,5 +1391,42 @@ mod tests {
             .map(|object| object.is_visible())
             .collect();
         assert_eq!(objects, vec![true, false], "visibility survives the round-trip");
+    }
+
+    #[test]
+    fn qsc_load_skips_non_molecule_objects_gracefully() {
+        // A `.qsc` saved by C++ CueMol2 can hold non-molecule objects (a MolSurf surface
+        // or DensityMap map) whose datachunk is a QDF binary, not PDB. The loader used to
+        // feed EVERY object's datachunk to `read_pdb_str`, so such an object corrupted or
+        // failed the WHOLE scene load. Now they are identified by `type` and skipped
+        // gracefully — the molecules still load, and the skip is recorded (not silent).
+        let mut manager = MolSceneManager::new();
+        let scene = manager.new_scene("s");
+        let mol = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n",
+        )
+        .unwrap();
+        manager.scene_mut(scene).unwrap().add_molecule("mol1", mol);
+        let xml = manager.scene(scene).unwrap().write_qsc_string();
+        // Splice in a surface object (its datachunk is deliberately absent — the loader
+        // must skip it BEFORE trying to resolve/parse the chunk).
+        let surf = "\t<object type=\"MolSurf\" name=\"surf1\" src=\"datachunk:90000\" srctype=\"qdfsurf\">\n\t</object>\n</scene>";
+        let xml = xml.replace("</scene>", surf);
+
+        let mut reloaded = MolSceneManager::new();
+        let scene2 = reloaded.new_scene("reloaded");
+        // The load must SUCCEED (not error on the surface object)...
+        reloaded.scene_mut(scene2).unwrap().load_qsc_str(&xml).unwrap();
+        let scene_ref = reloaded.scene(scene2).unwrap();
+        // ...load only the molecule...
+        assert_eq!(scene_ref.objects().len(), 1, "only the MolCoord object loads");
+        assert_eq!(scene_ref.objects()[0].name(), "mol1");
+        assert!(scene_ref.objects()[0].mol().atom_count() >= 1);
+        // ...and record the skipped surface (not silently dropped).
+        assert_eq!(
+            scene_ref.skipped_qsc_objects(),
+            &[("surf1".to_string(), "MolSurf".to_string())],
+            "the skipped surface object is recorded"
+        );
     }
 }

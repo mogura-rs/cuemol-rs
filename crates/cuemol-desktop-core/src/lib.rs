@@ -464,6 +464,17 @@ impl DesktopAppState {
         self.last_qsc_status.as_ref()
     }
 
+    /// `(name, type)` of objects skipped when the active scene's `.qsc` was loaded
+    /// because their class is not a molecule this port can render yet (surface/map
+    /// objects). Empty for an all-molecule scene. A front end appends this to its load
+    /// status so a partially-loaded scene is reported, not silently truncated.
+    pub fn active_scene_skipped_objects(&self) -> Vec<(String, String)> {
+        self.active_scene
+            .and_then(|uid| self.scene_manager().scene(uid))
+            .map(|scene| scene.skipped_qsc_objects().to_vec())
+            .unwrap_or_default()
+    }
+
     pub fn scene_summaries(&self) -> Vec<GuiSceneSummary> {
         self.scene_manager()
             .scenes()
