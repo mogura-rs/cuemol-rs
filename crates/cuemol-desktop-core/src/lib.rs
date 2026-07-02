@@ -1875,24 +1875,14 @@ impl DesktopAppState {
         density: f64,
         probe_radius: f64,
     ) -> Result<cuemol_render::RenderMesh> {
-        let surface = self.build_surface(object_uid, selection_text, density, probe_radius)?;
-        let mesh = surface.mesh();
-        let color = [0.76, 0.79, 0.84, 1.0];
-        let vertices = mesh
-            .vertices()
-            .iter()
-            .map(|vertex| cuemol_render::MeshVertex {
-                position: vertex.position,
-                normal: vertex.normal,
-                color,
-            })
-            .collect();
-        let indices = mesh
-            .triangles()
-            .iter()
-            .flat_map(|triangle| triangle.iter().copied())
-            .collect();
-        Ok(cuemol_render::RenderMesh { vertices, indices })
+        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let mut surface = MolSurfObj::new();
+        surface.create_ses_from_mol(object.mol(), selector.clone(), density, probe_radius);
+        Ok(surface_render_mesh(object, &selector, &surface))
     }
 
     /// Build the molecular surface and CLIP it by a plane, returning the cross-section
@@ -1909,25 +1899,15 @@ impl DesktopAppState {
         normal: cuemol_core::Vector4,
         position: cuemol_core::Vector4,
     ) -> Result<cuemol_render::RenderMesh> {
-        let mut surface = self.build_surface(object_uid, selection_text, density, probe_radius)?;
+        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let mut surface = MolSurfObj::new();
+        surface.create_ses_from_mol(object.mol(), selector.clone(), density, probe_radius);
         surface.cut_by_plane(1.0, normal, position, false);
-        let mesh = surface.mesh();
-        let color = [0.76, 0.79, 0.84, 1.0];
-        let vertices = mesh
-            .vertices()
-            .iter()
-            .map(|vertex| cuemol_render::MeshVertex {
-                position: vertex.position,
-                normal: vertex.normal,
-                color,
-            })
-            .collect();
-        let indices = mesh
-            .triangles()
-            .iter()
-            .flat_map(|triangle| triangle.iter().copied())
-            .collect();
-        Ok(cuemol_render::RenderMesh { vertices, indices })
+        Ok(surface_render_mesh(object, &selector, &surface))
     }
 
     /// Execute a JavaScript source string with the embedded boa engine (CueMol2 Tools →
@@ -2520,6 +2500,85 @@ mod script_env {
     pub(super) fn with<R>(f: impl FnOnce(&ScriptEnv) -> R) -> R {
         ENV.with(|cell| f(&cell.borrow()))
     }
+}
+
+/// Convert a built molecular surface to a renderable mesh, colouring each vertex
+/// by its nearest surface-generating atom under the object's coloring cascade —
+/// the C++ `MolSurfRenderer` MOLFANC mode (`getColorMol`: nearest atom via an
+/// atom-position map, then that atom's colour-scheme colour). Reuses the CPK
+/// renderer's per-atom resolver ([`cuemol_molvis::resolve_atom_colors`]) so the
+/// surface matches the atoms the same viewer draws (element/CPK by default;
+/// rainbow/bfac/paint follow the object's scheme on the same carbon cascade the
+/// atoms use). Nearest search is a linear scan over the SELECTED atom subset (the
+/// atoms the surface was built from): O(vertices × selected_atoms), fine for
+/// typical selections; no spatial index until a large-structure test needs one.
+fn surface_render_mesh(
+    object: &MolObject,
+    selector: &Selector,
+    surface: &MolSurfObj,
+) -> cuemol_render::RenderMesh {
+    // Fallback when no atom is available to colour a vertex (the former flat grey).
+    const GREY: [f32; 4] = [0.76, 0.79, 0.84, 1.0];
+    let options = MoleculeRenderOptions {
+        rainbow: cuemol_molvis::rainbow_coloring_from_attrs(object.coloring_type(), |name| {
+            object.coloring_attr(name)
+        }),
+        bfac: cuemol_molvis::bfac_coloring_from_attrs(object.coloring_type(), |name| {
+            object.coloring_attr(name)
+        }),
+        object_paint: object.paint_coloring().to_vec(),
+        ..Default::default()
+    };
+    let atom_colors = cuemol_molvis::resolve_atom_colors(object.mol(), &options);
+    // The surface-generating atom subset: position + resolved [f32;4] colour.
+    let palette: Vec<(cuemol_core::Vector4, [f32; 4])> = object
+        .mol()
+        .select_indices(selector)
+        .into_iter()
+        .filter_map(|index| {
+            let atom = object.mol().atoms().get(index)?;
+            let rgba = atom_colors
+                .get(index)
+                .and_then(|color| color.rgba8())
+                .map(|c| {
+                    [
+                        f32::from(c.r) / 255.0,
+                        f32::from(c.g) / 255.0,
+                        f32::from(c.b) / 255.0,
+                        f32::from(c.a) / 255.0,
+                    ]
+                })
+                .unwrap_or(GREY);
+            Some((atom.position, rgba))
+        })
+        .collect();
+    let mesh = surface.mesh();
+    let vertices = mesh
+        .vertices()
+        .iter()
+        .map(|vertex| {
+            let color = palette
+                .iter()
+                .min_by(|(a, _), (b, _)| {
+                    let da = a.sub(vertex.position).sqlen3d();
+                    let db = b.sub(vertex.position).sqlen3d();
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(_, color)| *color)
+                .unwrap_or(GREY);
+            cuemol_render::MeshVertex {
+                position: vertex.position,
+                normal: vertex.normal,
+                color,
+            }
+        })
+        .collect();
+    let indices = mesh
+        .triangles()
+        .iter()
+        .flat_map(|triangle| triangle.iter().copied())
+        .collect();
+    cuemol_render::RenderMesh { vertices, indices }
 }
 
 fn append_object_snapshot(
@@ -3607,6 +3666,55 @@ mod tests {
         assert_eq!(atom.atom_index, 0);
         assert_eq!(atom.serial, 1);
         assert_eq!(atom.selection_text, "aid 1");
+    }
+
+    #[test]
+    fn surface_mesh_is_coloured_by_nearest_atom_not_flat_grey() {
+        // CueMol2 MolSurfRenderer MOLFANC: each SES vertex takes its nearest atom's
+        // colour-scheme colour (getColorMol). The Rust surface was a flat-grey blob
+        // in all 3 GUIs; this pins the fix — a real triangle mesh whose vertices
+        // carry the per-element CPK colours of the residues under them.
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("work", false);
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        // A small selection (residues 1-3 = THR/THR/CYS, exposing C/N/O/S) keeps the
+        // SES build cheap while still surfacing several element colours.
+        let mesh = app.build_surface_mesh(object, "resid 1:3", 1.0, 1.4).unwrap();
+        assert!(
+            !mesh.indices.is_empty() && !mesh.vertices.is_empty(),
+            "the SES must be a real triangle mesh"
+        );
+        // Quantise to bytes so we can count distinct colours — the flat-grey
+        // regression would collapse this to a single colour.
+        let quant = |c: f32| (c * 255.0).round() as u8;
+        let distinct: std::collections::HashSet<[u8; 3]> = mesh
+            .vertices
+            .iter()
+            .map(|v| [quant(v.color[0]), quant(v.color[1]), quant(v.color[2])])
+            .collect();
+        assert!(
+            distinct.len() > 1,
+            "surface must be multi-coloured (nearest-atom), not flat grey; got {distinct:?}"
+        );
+        // The specific CPK colours of exposed oxygen and carbon must appear, and the
+        // former uniform grey (0.76,0.79,0.84) must be gone.
+        let has = |target: [f32; 3]| {
+            mesh.vertices.iter().any(|v| {
+                (0..3).all(|k| (v.color[k] - target[k]).abs() < 0.02)
+            })
+        };
+        assert!(has([0.92, 0.12, 0.12]), "oxygen-red vertices expected on the SES");
+        assert!(has([0.38, 0.38, 0.38]), "carbon-grey vertices expected on the SES");
+        assert!(
+            !has([0.76, 0.79, 0.84]),
+            "no vertex should keep the old flat-grey surface colour"
+        );
     }
 
     #[test]

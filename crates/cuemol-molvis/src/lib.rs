@@ -3165,23 +3165,20 @@ pub fn tessellate_styled_snapshot(
     }
 }
 
-pub fn molecule_render_snapshot(
+/// Resolve the final display colour for every atom under the object's coloring
+/// cascade — Rainbow > Bfac > paint applied to carbon (the `$molcol` CPKColoring
+/// rule), every other element keeping its CPK element colour — exactly what the
+/// CPK/atom renderer draws.
+///
+/// Extracted from [`molecule_render_snapshot`] (which now calls it, so the two
+/// stay identical by construction) so the molecular-surface renderer can colour
+/// each surface vertex by its nearest atom and MATCH the atoms the same viewer
+/// shows (C++ `MolSurfRenderer::getColorMol`: nearest atom → its scheme colour).
+/// Returns one `ColorSpec` per atom, indexed by atom index.
+pub fn resolve_atom_colors(
     molecule: &MolCoord,
     options: &MoleculeRenderOptions,
-) -> RenderSceneSnapshot {
-    let selected = options
-        .selected_indices
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    // Per-renderer `sel="..."` draw restriction: when present, only these atoms
-    // (and bonds whose both ends are included) are drawn — each keeps its original
-    // index for picking. `None` draws the whole molecule.
-    let draw = options
-        .draw_indices
-        .as_ref()
-        .map(|indices| indices.iter().copied().collect::<std::collections::BTreeSet<_>>());
-    let drawn = |index: usize| draw.as_ref().is_none_or(|set| set.contains(&index));
+) -> Vec<ColorSpec> {
     // Object coloring ($molcol cascade) for an atom renderer: CPKColoring carbon is
     // $molcol, so carbons defer to the object's paint/bfac scheme; other elements
     // keep their CPK colour. Built once when the object declares a scheme.
@@ -3221,6 +3218,39 @@ pub fn molecule_render_snapshot(
         }
         None
     };
+    molecule
+        .atoms()
+        .iter()
+        .enumerate()
+        .map(|(index, atom)| {
+            object_carbon_color(index, atom)
+                .unwrap_or_else(|| atom_color(atom.element.as_str(), options.color_mode))
+        })
+        .collect()
+}
+
+pub fn molecule_render_snapshot(
+    molecule: &MolCoord,
+    options: &MoleculeRenderOptions,
+) -> RenderSceneSnapshot {
+    let selected = options
+        .selected_indices
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    // Per-renderer `sel="..."` draw restriction: when present, only these atoms
+    // (and bonds whose both ends are included) are drawn — each keeps its original
+    // index for picking. `None` draws the whole molecule.
+    let draw = options
+        .draw_indices
+        .as_ref()
+        .map(|indices| indices.iter().copied().collect::<std::collections::BTreeSet<_>>());
+    let drawn = |index: usize| draw.as_ref().is_none_or(|set| set.contains(&index));
+    // Object coloring ($molcol cascade): resolve every atom's final colour once
+    // (Rainbow > Bfac > paint on carbon, else CPK). Shared with the molecular
+    // surface renderer via `resolve_atom_colors` so a nearest-atom-coloured
+    // surface matches these atoms exactly.
+    let atom_colors = resolve_atom_colors(molecule, options);
     let atoms = if options.draw_atoms {
         molecule
             .atoms()
@@ -3228,8 +3258,7 @@ pub fn molecule_render_snapshot(
             .enumerate()
             .filter(|(index, _)| drawn(*index))
             .map(|(index, atom)| {
-                let color = object_carbon_color(index, atom)
-                    .unwrap_or_else(|| atom_color(atom.element.as_str(), options.color_mode));
+                let color = atom_colors[index].clone();
                 RenderAtom::new(
                     Vector4::new3(atom.position.x, atom.position.y, atom.position.z),
                     atom_radius(atom.element.as_str(), options),
