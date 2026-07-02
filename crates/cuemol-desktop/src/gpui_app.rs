@@ -1073,6 +1073,19 @@ impl CueMolGpuiApp {
                         self.state.set_active_scene(Some(scene_uid));
                     }
                 }
+                // Display any surface objects the `.qsc` carried (OBJ/PLY-text MolSurf),
+                // merged into the surface slot and shown via the surface toggle.
+                let surfaces = self.state.active_scene_surface_meshes();
+                if !surfaces.is_empty() {
+                    let mut merged = cuemol_render::RenderMesh::default();
+                    for mesh in surfaces {
+                        let base = merged.vertices.len() as u32;
+                        merged.vertices.extend(mesh.vertices);
+                        merged.indices.extend(mesh.indices.iter().map(|index| base + index));
+                    }
+                    self.surface_mesh = Some(merged);
+                    self.show_surface = true;
+                }
                 self.add_recent(path.clone());
                 self.refresh_scene(true);
                 // Note any non-molecule objects skipped on load (surface/map objects).
@@ -5419,6 +5432,32 @@ mod tests {
         app.import_mesh_surface(path.to_str().unwrap());
         assert!(app.surface_mesh.is_some(), "import must populate the surface slot");
         assert!(app.show_surface, "import must enable the surface display");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn loading_a_qsc_with_an_obj_surface_populates_the_surface_slot() {
+        // Parity with egui: opening a `.qsc` that carries an OBJ-text MolSurf object
+        // shows its surface. Build the .qsc via the real writer + a spliced OBJ surface.
+        let mut builder = cuemol_molstr::MolSceneManager::new();
+        let bscene = builder.new_scene("s");
+        let mol = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n",
+        )
+        .unwrap();
+        builder.scene_mut(bscene).unwrap().add_molecule("mol1", mol);
+        let mut qsc = builder.scene(bscene).unwrap().write_qsc_string();
+        let surf = "\t<object type=\"MolSurf\" name=\"surf1\" src=\"datachunk:90000\" srctype=\"obj\">\n\t</object>\n</scene>";
+        qsc = qsc.replace("</scene>", surf);
+        qsc.push_str(
+            "\n==========START datachunk:90000==========\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n==========END datachunk:90000==========\n",
+        );
+        let path = std::env::temp_dir().join("cuemol_gpui_qsc_surface.qsc");
+        std::fs::write(&path, &qsc).unwrap();
+        let mut app = CueMolGpuiApp::new(Vec::new());
+        app.open_file(path.to_str().unwrap());
+        assert!(app.surface_mesh.is_some(), "a .qsc surface must populate the surface slot");
+        assert!(app.show_surface, "a .qsc surface must enable the surface display");
         let _ = std::fs::remove_file(&path);
     }
 

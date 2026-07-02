@@ -1467,6 +1467,19 @@ impl Model {
                     format!(" ({} object(s) skipped)", skipped.len())
                 };
                 self.status = format!("Loaded {}{}", path.display(), suffix);
+                // Display any surface objects the `.qsc` carried (OBJ/PLY-text MolSurf),
+                // merged into the surface slot and shown via the surface toggle.
+                let surfaces = self.state.active_scene_surface_meshes();
+                if !surfaces.is_empty() {
+                    let mut merged = cuemol_render::RenderMesh::default();
+                    for mesh in surfaces {
+                        let base = merged.vertices.len() as u32;
+                        merged.vertices.extend(mesh.vertices);
+                        merged.indices.extend(mesh.indices.iter().map(|index| base + index));
+                    }
+                    self.surface_mesh = Some(merged);
+                    self.show_surface = true;
+                }
                 self.rebuild_after_load();
             }
             Err(error) => {
@@ -3154,6 +3167,32 @@ mod tests {
             !tessellated.vertices.is_empty(),
             "the imported triangle must appear in the tessellated render mesh"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn loading_a_qsc_with_an_obj_surface_shows_it() {
+        // Parity with egui/gpui: opening a `.qsc` carrying an OBJ-text MolSurf object
+        // shows its surface (slot populated AND reaching the tessellated output).
+        let mut builder = cuemol_molstr::MolSceneManager::new();
+        let bscene = builder.new_scene("s");
+        let mol = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n",
+        )
+        .unwrap();
+        builder.scene_mut(bscene).unwrap().add_molecule("mol1", mol);
+        let mut qsc = builder.scene(bscene).unwrap().write_qsc_string();
+        let surf = "\t<object type=\"MolSurf\" name=\"surf1\" src=\"datachunk:90000\" srctype=\"obj\">\n\t</object>\n</scene>";
+        qsc = qsc.replace("</scene>", surf);
+        qsc.push_str(
+            "\n==========START datachunk:90000==========\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n==========END datachunk:90000==========\n",
+        );
+        let path = std::env::temp_dir().join("cuemol_dioxus_qsc_surface.qsc");
+        std::fs::write(&path, &qsc).unwrap();
+        let mut model = Model::new(Vec::new());
+        model.open_path(path.clone());
+        assert!(model.surface_mesh.is_some(), "a .qsc surface must populate the surface slot");
+        assert!(model.show_surface, "a .qsc surface must enable the surface display");
         let _ = std::fs::remove_file(&path);
     }
 

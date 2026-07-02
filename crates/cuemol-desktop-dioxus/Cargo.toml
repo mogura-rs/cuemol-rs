@@ -37,6 +37,11 @@ dioxus = { version = "0.7", default-features = false, features = [
 # Executor-agnostic async timer for the animation playback loop (use_future).
 futures-timer = "3"
 
+[dev-dependencies]
+# Test-only: build a `.qsc` fixture (scene writer + PDB reader) for the surface-
+# load test. Already in the tree transitively via cuemol-desktop-core.
+cuemol-molstr = { path = "../cuemol-molstr" }
+
 [lib]
 name = "cuemol_desktop_dioxus"
 path = "src/lib.rs"
