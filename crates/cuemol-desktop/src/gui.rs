@@ -394,6 +394,9 @@ struct GuiApplication {
     /// nearest atom, and the APBS/OpenDX `.dx` path to load the potential from.
     potential_surface: bool,
     potential_path: String,
+    /// Path of an external surface mesh (Wavefront OBJ / Stanford PLY) to import
+    /// into the surface-display slot (CueMol2 `ObjReader`/`PLYFileReader`).
+    mesh_import_path: String,
     /// Atom/residue labels overlaid on the selected atoms in the 3D view.
     show_labels: bool,
     /// Hydrogen-bond dashed lines (heavy-atom N···O heuristic).
@@ -658,6 +661,7 @@ impl GuiApplication {
             clip_offset: 0.0,
             potential_surface: false,
             potential_path: String::new(),
+            mesh_import_path: String::new(),
             show_labels: false,
             show_hbonds: false,
             light_theme: false,
@@ -1625,6 +1629,22 @@ impl GuiApplication {
                             self.rebuild_snapshot();
                         }
                     }
+                }
+            });
+            // Import an external surface mesh (Wavefront OBJ / Stanford PLY) into the
+            // surface slot, shown via the same toggle as the computed SES.
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.mesh_import_path)
+                        .hint_text("mesh .obj/.ply path")
+                        .desired_width(120.0),
+                );
+                if ui
+                    .button("Import mesh")
+                    .on_hover_text("Load an OBJ/PLY surface mesh and show it as the surface")
+                    .clicked()
+                {
+                    self.import_mesh_surface();
                 }
             });
             let labels_label = if self.show_labels { "Labels ✓" } else { "Labels" };
@@ -3237,6 +3257,29 @@ impl GuiApplication {
         match self.state.load_surface_potential(&path) {
             Ok((lo, hi)) => self.set_status(format!("Potential loaded (range {lo:.2}..{hi:.2})")),
             Err(error) => self.set_status(format!("Potential load failed: {error}")),
+        }
+    }
+
+    /// Import an external OBJ/PLY surface mesh from `mesh_import_path` into the
+    /// surface slot and show it via the existing surface toggle (CueMol2
+    /// `ObjReader`/`PLYFileReader`). The mesh replaces any computed SES; potential
+    /// colouring is turned off since an imported mesh carries no molecule to sample.
+    fn import_mesh_surface(&mut self) {
+        let path = self.mesh_import_path.trim().to_string();
+        if path.is_empty() {
+            self.set_status("Enter an OBJ/PLY mesh path first");
+            return;
+        }
+        match self.state.load_mesh_surface_file(&path) {
+            Ok(mesh) => {
+                let (verts, tris) = (mesh.vertices.len(), mesh.indices.len() / 3);
+                self.surface_mesh = Some(mesh);
+                self.show_surface = true;
+                self.potential_surface = false;
+                self.set_status(format!("Imported mesh: {verts} vertices, {tris} triangles"));
+                self.rebuild_snapshot();
+            }
+            Err(error) => self.set_status(format!("Mesh import failed: {error}")),
         }
     }
 
@@ -6911,6 +6954,38 @@ mod tests {
             ) {
                 let path = out_dir.join("hbonds_3d.png");
                 std::fs::write(&path, png).expect("write hbonds_3d.png");
+                eprintln!("snapshot written to {}", path.display());
+            }
+        }
+
+        // (imported mesh) 3D render of an external OBJ mesh brought in via
+        // `import_mesh_surface` and shown through the standard surface toggle — the
+        // molecule-independent display path. The mesh is a flat-blue octahedron, so a
+        // recognisable solid should appear enclosing the molecule.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            let obj_path = out_dir.join("imported.obj");
+            std::fs::write(
+                &obj_path,
+                "o oct\n\
+                 v 8 0 0\nv -8 0 0\nv 0 8 0\nv 0 -8 0\nv 0 0 8\nv 0 0 -8\n\
+                 f 1 3 5\nf 3 2 5\nf 2 4 5\nf 4 1 5\n\
+                 f 3 1 6\nf 2 3 6\nf 4 2 6\nf 1 4 6\n",
+            )
+            .expect("write imported.obj");
+            app.mesh_import_path = obj_path.to_string_lossy().to_string();
+            app.import_mesh_surface();
+            assert!(app.surface_mesh.is_some(), "import must populate the surface slot");
+            camera.fit_snapshot(&app.snapshot);
+            let (w, h) = (900u32, 700u32);
+            let mvp = camera.view_projection(w as f32 / h as f32).to_cols_array_2d();
+            if let Some(png) =
+                crate::offscreen::render_snapshot_png(&app.snapshot, mvp, w, h, [0.02, 0.02, 0.05, 1.0])
+            {
+                let path = out_dir.join("imported_mesh_3d.png");
+                std::fs::write(&path, png).expect("write imported_mesh_3d.png");
                 eprintln!("snapshot written to {}", path.display());
             }
         }

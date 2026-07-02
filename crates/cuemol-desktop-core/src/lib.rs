@@ -774,6 +774,36 @@ impl DesktopAppState {
         Some(cuemol_render::RenderMesh { vertices, indices })
     }
 
+    /// Load an external surface mesh — Wavefront OBJ or Stanford PLY, chosen by
+    /// file extension — into a flat-coloured [`RenderMesh`](cuemol_render::RenderMesh)
+    /// for the surface-display slot. This reuses the same standalone (molecule-
+    /// independent) mesh path as [`build_density_surface_mesh`](Self::build_density_surface_mesh),
+    /// so a front end can show a mesh produced by an external tool (MSMS/Connolly,
+    /// Blender, …) or by CueMol's own OBJ writer through the existing surface toggle.
+    pub fn load_mesh_surface_file(&self, path: &str) -> Result<cuemol_render::RenderMesh> {
+        let mesh = if Self::path_has_extension(path, "ply") {
+            cuemol_surface::read_ply_file(path.trim())?
+        } else {
+            cuemol_surface::read_obj_file(path.trim())?
+        };
+        let color = [0.45, 0.65, 0.95, 1.0];
+        let vertices = mesh
+            .vertices()
+            .iter()
+            .map(|vertex| cuemol_render::MeshVertex {
+                position: vertex.position,
+                normal: vertex.normal,
+                color,
+            })
+            .collect();
+        let indices = mesh
+            .triangles()
+            .iter()
+            .flat_map(|triangle| triangle.iter().copied())
+            .collect();
+        Ok(cuemol_render::RenderMesh { vertices, indices })
+    }
+
     /// Insert a pre-built density map (a computed/synthetic `DensityMap`, not read from
     /// a file) into the active scene's map set, returning its uid. Companion to the
     /// file-based [`load_density_map`](Self::load_density_map).
@@ -3903,6 +3933,26 @@ mod tests {
             !has([0.76, 0.79, 0.84]),
             "no vertex should keep the old flat-grey surface colour"
         );
+    }
+
+    #[test]
+    fn load_mesh_surface_reads_an_obj_into_a_flat_render_mesh() {
+        // The import path is molecule-independent: an OBJ (here written by hand,
+        // the same shape the surface crate's OBJ writer emits) loads into a
+        // RenderMesh with matching counts and the flat standalone-surface colour,
+        // ready for the existing surface toggle. No scene / molecule required.
+        let path = std::env::temp_dir().join("cuemol_load_mesh_surface_test.obj");
+        std::fs::write(
+            &path,
+            "o t\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvn 0 0 1\nvn 0 0 1\nvn 0 0 1\nf 1//1 2//2 3//3\n",
+        )
+        .unwrap();
+        let app = DesktopAppState::new();
+        let mesh = app.load_mesh_surface_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.indices.len(), 3, "one triangle -> three indices");
+        assert_eq!(mesh.vertices[0].color, [0.45, 0.65, 0.95, 1.0]);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
