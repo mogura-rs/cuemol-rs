@@ -1186,6 +1186,15 @@ impl Model {
             "load_config" => self.load_config(),
             "toggle_console" => self.show_console = !self.show_console,
             "toggle_properties" => self.show_properties = !self.show_properties,
+            "clear_log" => {
+                self.log.clear();
+                self.status = "Log cleared".into();
+            }
+            "restore_panels" => {
+                self.show_console = false;
+                self.show_properties = false;
+                self.status = "Restored default panel layout".into();
+            }
             "view_props" => self.show_view_properties(),
             "perf" => self.measure_performance(),
             "show_script" => {
@@ -1842,6 +1851,12 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("Execute script…", "show_script"),
             ("Performance measure", "perf"),
         ], // Tools
+        6 => &[
+            ("Toggle output console", "toggle_console"),
+            ("Toggle properties inspector", "toggle_properties"),
+            ("Clear log contents", "clear_log"),
+            ("Restore default panel location", "restore_panels"),
+        ], // Window
         7 => &[("About", "about")],              // Help
         _ => &[],
     }
@@ -3072,6 +3087,27 @@ mod tests {
         assert!(model.image_uri.is_none());
         assert!(!model.tree_rows().is_empty());
         assert_eq!(model.view_size, (INIT_VIEW_W, INIT_VIEW_H));
+    }
+
+    #[test]
+    fn every_top_level_menu_populates() {
+        // Regression: the "Window" menu (index 6) used to fall through to the empty
+        // default arm, so its title showed in the bar (File/Edit/Render/Scene/View/
+        // Tools/Window/Help) but clicking it opened an empty dropdown. All eight
+        // CueMol2 top-level menus must populate.
+        for index in 0..8 {
+            assert!(
+                !menu_items(index).is_empty(),
+                "menu index {index} must expose at least one item"
+            );
+        }
+        // The Window menu specifically must carry the panel/log housekeeping actions.
+        let window: Vec<&str> = menu_items(6).iter().map(|(_, action)| *action).collect();
+        assert!(window.contains(&"clear_log"), "Window menu needs Clear log");
+        assert!(
+            window.contains(&"restore_panels"),
+            "Window menu needs Restore default panel location"
+        );
     }
 
     #[test]

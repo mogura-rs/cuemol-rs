@@ -161,12 +161,17 @@ const RENDERER_TYPES: &[(&str, &str)] = &[
 /// Top-level menus: (title, dropdown left-offset px, title width px). The offsets
 /// are the cumulative widths of the brand (92) + preceding titles, so each
 /// dropdown opens roughly under its title. Keep widths in step with the offsets.
+/// The eight titles mirror CueMol2's `cuemol2-menus.xul` menubar, in the same order:
+/// File, Edit, Render, Scene, View, Tools, Window, Help.
 const MENUS: &[(&str, f32, f32)] = &[
     ("File", 92.0, 46.0),
     ("Edit", 138.0, 46.0),
-    ("View", 184.0, 50.0),
-    ("Tools", 234.0, 56.0),
-    ("Help", 290.0, 50.0),
+    ("Render", 184.0, 62.0),
+    ("Scene", 246.0, 54.0),
+    ("View", 300.0, 50.0),
+    ("Tools", 350.0, 56.0),
+    ("Window", 406.0, 66.0),
+    ("Help", 472.0, 50.0),
 ];
 
 /// Viewport background, toggled from the View menu / toolbar. The slate default
@@ -345,6 +350,10 @@ pub struct CueMolGpuiApp {
     selected_renderer: Option<cuemol_core::Uid>,
     /// View settings.
     background: Background,
+    /// Soft-proof the scene colours for print (CueMol2 Scene menu "Use color
+    /// proofing"). Tracked as a flag for parity with egui, where it is likewise a
+    /// tracked toggle that does not yet feed the offscreen renderer.
+    color_proof: bool,
     center_mark: CenterMarkKind,
     /// Bottom-panel state.
     bottom_tab: BottomTab,
@@ -442,6 +451,7 @@ impl CueMolGpuiApp {
             selected_object: None,
             selected_renderer: None,
             background: Background::Slate,
+            color_proof: false,
             center_mark: CenterMarkKind::Cross,
             bottom_tab: BottomTab::Output,
             // CueMol2 has no right dock; properties open on demand via the toolbar toggle.
@@ -2290,6 +2300,89 @@ impl CueMolGpuiApp {
                         .into_any_element(),
                 );
             }
+            "Render" => {
+                // CueMol2 `render-menu`: POV-Ray / animation rendering + scene export.
+                // These navigate to the bottom Render/Animation tab, whose panels host
+                // the path fields and the "Render" button.
+                items.push(
+                    menu_item("mi-povray", "POV-Ray rendering…")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.bottom_tab = BottomTab::Render;
+                            this.show_bottom = true;
+                            this.set_status(
+                                "Set an output path in the Render tab, then press Render",
+                            );
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    menu_item("mi-anim-render", "Animation rendering…")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.bottom_tab = BottomTab::Animation;
+                            this.show_bottom = true;
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(menu_separator().into_any_element());
+                items.push(
+                    menu_item("mi-export-scene", "Export scene…")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.bottom_tab = BottomTab::Render;
+                            this.show_bottom = true;
+                            this.set_status("Export scene: enter a .pov/.png path in the Render tab");
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+            "Scene" => {
+                // CueMol2 `scene-menu`: background colour, colour proofing, properties.
+                for (label, bg) in [
+                    ("Background: White", Background::White),
+                    ("Background: Black", Background::Black),
+                    ("Background: Slate", Background::Slate),
+                ] {
+                    items.push(
+                        menu_item(eid(format!("mi-scenebg-{label}")), label)
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.set_background(bg);
+                                this.open_menu = None;
+                                cx.notify();
+                            }))
+                            .into_any_element(),
+                    );
+                }
+                items.push(menu_separator().into_any_element());
+                let proof_label = if self.color_proof {
+                    "✓ Use color proofing"
+                } else {
+                    "Use color proofing"
+                };
+                items.push(
+                    menu_item("mi-colorproof", proof_label)
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.color_proof = !this.color_proof;
+                            this.set_status(format!("Color proofing: {}", this.color_proof));
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    menu_item("mi-scene-props", "Properties…")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.show_view_properties();
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
             "View" => {
                 items.push(
                     menu_item("mi-theme", "Toggle light/dark theme")
@@ -2363,22 +2456,6 @@ impl CueMolGpuiApp {
                         }))
                         .into_any_element(),
                 );
-                items.push(menu_separator().into_any_element());
-                for (label, bg) in [
-                    ("Background: Slate", Background::Slate),
-                    ("Background: Black", Background::Black),
-                    ("Background: White", Background::White),
-                ] {
-                    items.push(
-                        menu_item(eid(format!("mi-bg-{label}")), label)
-                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
-                                this.set_background(bg);
-                                this.open_menu = None;
-                                cx.notify();
-                            }))
-                            .into_any_element(),
-                    );
-                }
             }
             "Tools" => {
                 items.push(
@@ -2490,6 +2567,61 @@ impl CueMolGpuiApp {
                     menu_item("mi-config", "Configuration…")
                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                             this.open_config_dialog(cx);
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+            "Window" => {
+                // CueMol2 `window-menu`: panel visibility + log housekeeping. gpui has no
+                // detachable topbar ribbon, so the toggles target the inspector/console
+                // docks (the panels this shell actually has).
+                let inspector_label = if self.show_inspector {
+                    "✓ Inspector panel"
+                } else {
+                    "Inspector panel"
+                };
+                items.push(
+                    menu_item("mi-win-inspector", inspector_label)
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.show_inspector = !this.show_inspector;
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                let console_label = if self.show_bottom {
+                    "✓ Console panel"
+                } else {
+                    "Console panel"
+                };
+                items.push(
+                    menu_item("mi-win-console", console_label)
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.show_bottom = !this.show_bottom;
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(menu_separator().into_any_element());
+                items.push(
+                    menu_item("mi-win-clearlog", "Clear log contents")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.log_lines.clear();
+                            this.set_status("Log cleared");
+                            this.open_menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+                items.push(
+                    menu_item("mi-win-restore", "Restore default panel location")
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.show_inspector = false;
+                            this.show_bottom = true;
+                            this.set_status("Restored default panel layout");
                             this.open_menu = None;
                             cx.notify();
                         }))
@@ -5104,6 +5236,30 @@ mod tests {
         assert_eq!(scenes.len(), 1, "ensure_active_scene should make one scene");
         // The tree accessors return cleanly for the active scene (no objects yet).
         assert_eq!(app.objects(scenes[0].uid).len(), 0);
+    }
+
+    #[test]
+    fn menu_bar_matches_cuemol2_top_level_menus() {
+        // Layout parity with egui/dioxus (and CueMol2 `cuemol2-menus.xul`): the gpui
+        // shell must expose the same eight top-level menus, in the same order. Render,
+        // Scene and Window were previously missing from this shell.
+        let names: Vec<&str> = MENUS.iter().map(|(name, _, _)| *name).collect();
+        assert_eq!(
+            names,
+            ["File", "Edit", "Render", "Scene", "View", "Tools", "Window", "Help"],
+            "gpui menu bar must mirror the CueMol2 menubar order"
+        );
+        // Each dropdown's left offset is the cumulative width of the brand (92) plus the
+        // preceding titles, so it opens under its own title. Verify that invariant so a
+        // future menu insertion can't silently misplace every dropdown to its right.
+        let mut cursor = 92.0_f32;
+        for (name, left, width) in MENUS {
+            assert!(
+                (*left - cursor).abs() < 0.01,
+                "menu {name:?} left {left} should equal running offset {cursor}"
+            );
+            cursor += width;
+        }
     }
 
     #[test]
