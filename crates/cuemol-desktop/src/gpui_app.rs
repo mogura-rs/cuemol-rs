@@ -46,6 +46,8 @@ struct Inputs {
     trajectory: Entity<TextInput>,
     /// APBS/OpenDX `.dx` electrostatic-potential map path (potential-coloured surface).
     potential: Entity<TextInput>,
+    /// External surface-mesh path (Wavefront OBJ / Stanford PLY) to import.
+    mesh_path: Entity<TextInput>,
 }
 
 // Chrome sizes (logical px). Shared by BOTH the on-screen layout and the
@@ -528,6 +530,7 @@ impl CueMolGpuiApp {
                 export_pov: cx.new(|cx| TextInput::new(cx, "scene.pov", "scene.pov")),
                 trajectory: cx.new(|cx| TextInput::new(cx, "trajectory.mdcrd", "")),
                 potential: cx.new(|cx| TextInput::new(cx, "potential.dx", "")),
+                mesh_path: cx.new(|cx| TextInput::new(cx, "mesh .obj/.ply", "")),
             };
             self.inputs = Some(inputs);
         }
@@ -678,6 +681,28 @@ impl CueMolGpuiApp {
         match self.state.load_surface_potential(std::path::Path::new(path)) {
             Ok((lo, hi)) => self.set_status(format!("Potential loaded (range {lo:.2}..{hi:.2})")),
             Err(error) => self.set_status(format!("Potential load failed: {error}")),
+        }
+    }
+
+    /// Import an external OBJ/PLY surface mesh into the surface slot and show it via
+    /// the existing surface toggle (CueMol2 `ObjReader`/`PLYFileReader`), reusing the
+    /// molecule-independent `load_mesh_surface_file` shared with egui/dioxus.
+    fn import_mesh_surface(&mut self, path: &str) {
+        let path = path.trim();
+        if path.is_empty() {
+            self.set_status("Enter an OBJ/PLY mesh path first");
+            return;
+        }
+        match self.state.load_mesh_surface_file(path) {
+            Ok(mesh) => {
+                let (verts, tris) = (mesh.vertices.len(), mesh.indices.len() / 3);
+                self.surface_mesh = Some(mesh);
+                self.show_surface = true;
+                self.potential_surface = false;
+                self.set_status(format!("Imported mesh: {verts} vertices, {tris} triangles"));
+                self.refresh_scene(true);
+            }
+            Err(error) => self.set_status(format!("Mesh import failed: {error}")),
         }
     }
 
@@ -3758,6 +3783,27 @@ impl CueMolGpuiApp {
                         },
                     ))),
             );
+            // Import an external OBJ/PLY surface mesh into the surface slot.
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().text_color(rgb(col_text_dim())).child("Mesh:"))
+                    .child(div().w(px(180.0)).child(inputs.mesh_path.clone()))
+                    .child(button("mesh-import", "Import mesh").text_xs().on_click(cx.listener(
+                        |this, _: &gpui::ClickEvent, _, cx| {
+                            let path = this
+                                .inputs
+                                .as_ref()
+                                .map(|i| i.mesh_path.read(cx).text())
+                                .unwrap_or_default();
+                            this.import_mesh_surface(&path);
+                            cx.notify();
+                        },
+                    ))),
+            );
         }
         if self.animation_objects.is_empty() {
             col = col.child(
@@ -5361,6 +5407,19 @@ mod tests {
             );
             cursor += width;
         }
+    }
+
+    #[test]
+    fn import_mesh_surface_loads_an_obj_into_the_surface_slot() {
+        // Mesh import (parity with egui/dioxus): an OBJ file drops into the surface
+        // slot and turns the surface on, via the molecule-independent core call.
+        let path = std::env::temp_dir().join("cuemol_gpui_import_mesh.obj");
+        std::fs::write(&path, "o t\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+        let mut app = CueMolGpuiApp::new(Vec::new());
+        app.import_mesh_surface(path.to_str().unwrap());
+        assert!(app.surface_mesh.is_some(), "import must populate the surface slot");
+        assert!(app.show_surface, "import must enable the surface display");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

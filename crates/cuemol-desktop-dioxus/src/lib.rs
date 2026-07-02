@@ -193,6 +193,8 @@ struct Model {
     /// atom, and the APBS/OpenDX `.dx` path to load the potential from.
     potential_surface: bool,
     potential_path: String,
+    /// Path of an external surface mesh (OBJ / PLY) to import into the surface slot.
+    mesh_import_path: String,
     /// Hydrogen-bond dashed lines.
     show_hbonds: bool,
     /// Atom/residue labels overlaid on the selected atoms.
@@ -278,6 +280,7 @@ impl Model {
             surface_mesh: None,
             potential_surface: false,
             potential_path: String::new(),
+            mesh_import_path: String::new(),
             show_hbonds: false,
             show_labels: false,
             menu_open: None,
@@ -1349,6 +1352,27 @@ impl Model {
         match self.state.load_surface_potential(&path) {
             Ok((lo, hi)) => self.status = format!("Potential loaded (range {lo:.2}..{hi:.2})"),
             Err(error) => self.status = format!("Potential load failed: {error}"),
+        }
+    }
+
+    /// Import an external OBJ/PLY surface mesh into the surface slot and show it via
+    /// the existing surface toggle (CueMol2 `ObjReader`/`PLYFileReader`), reusing the
+    /// molecule-independent `load_mesh_surface_file`.
+    fn import_mesh(&mut self) {
+        let path = self.mesh_import_path.trim().to_string();
+        if path.is_empty() {
+            self.status = "Enter an OBJ/PLY mesh path first".to_string();
+            return;
+        }
+        match self.state.load_mesh_surface_file(&path) {
+            Ok(mesh) => {
+                let (verts, tris) = (mesh.vertices.len(), mesh.indices.len() / 3);
+                self.surface_mesh = Some(mesh);
+                self.show_surface = true;
+                self.potential_surface = false;
+                self.status = format!("Imported mesh: {verts} vertices, {tris} triangles");
+            }
+            Err(error) => self.status = format!("Mesh import failed: {error}"),
         }
     }
 
@@ -2502,6 +2526,21 @@ fn app() -> Element {
                                 },
                             }
                         }
+                        // Import an external OBJ/PLY surface mesh into the surface slot,
+                        // shown via the same toggle as the computed SES.
+                        div { style: "display:flex;gap:4px;align-items:center;padding:2px 12px;flex-wrap:wrap;",
+                            input {
+                                style: "flex:1;{edit_input_style}",
+                                placeholder: "mesh .obj/.ply",
+                                oninput: move |e| model.write().mesh_import_path = e.value(),
+                            }
+                            button {
+                                style: "{color_btn_style}",
+                                title: "Load an OBJ/PLY surface mesh and show it as the surface",
+                                onclick: move |_| model.write().import_mesh(),
+                                "Import mesh"
+                            }
+                        }
                         // Bond editor: make/remove a bond between two atom serial ids.
                         div { style: "display:flex;gap:4px;align-items:center;padding:2px 12px;flex-wrap:wrap;",
                             input {
@@ -3087,6 +3126,20 @@ mod tests {
         assert!(model.image_uri.is_none());
         assert!(!model.tree_rows().is_empty());
         assert_eq!(model.view_size, (INIT_VIEW_W, INIT_VIEW_H));
+    }
+
+    #[test]
+    fn import_mesh_loads_an_obj_into_the_surface_slot() {
+        // Mesh import (parity with egui): an OBJ file drops into the surface slot and
+        // turns the surface on, via the molecule-independent load_mesh_surface_file.
+        let path = std::env::temp_dir().join("cuemol_dioxus_import_mesh.obj");
+        std::fs::write(&path, "o t\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+        let mut model = Model::new(Vec::new());
+        model.mesh_import_path = path.to_string_lossy().to_string();
+        model.import_mesh();
+        assert!(model.surface_mesh.is_some(), "import must populate the surface slot");
+        assert!(model.show_surface, "import must enable the surface display");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
