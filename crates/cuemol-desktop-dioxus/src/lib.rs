@@ -1011,6 +1011,29 @@ impl Model {
         }
     }
 
+    /// Export the full molecular surface (SES) to an OBJ file — the un-clipped
+    /// counterpart of [`Self::write_cut_surface`]. egui and gpui already expose this;
+    /// dioxus could DISPLAY the SES but not export it until now.
+    fn write_surface(&mut self) {
+        let Some(uid) = self.first_object_uid() else {
+            return;
+        };
+        let path = std::env::temp_dir().join("cuemol_surface.obj");
+        match self
+            .state
+            .write_surface_obj(uid, &self.selection_text, 1.0, 1.4, &path)
+        {
+            Ok(summary) => {
+                self.status = format!(
+                    "Surface OBJ: {} triangles → {}",
+                    summary.triangle_count,
+                    path.display()
+                )
+            }
+            Err(error) => self.status = format!("Surface export failed: {error}"),
+        }
+    }
+
     /// Write APBS electrostatics input files (PQR + APBS input + DX target) for the
     /// first molecule to the temp dir (CueMol2 Tools → APBS). No dialog — paths are
     /// derived and reported in the status bar (mirrors the gpui front end).
@@ -1121,6 +1144,7 @@ impl Model {
             "superpose" => self.superpose(),
             "apbs" => self.write_apbs(),
             "cut_surface" => self.write_cut_surface(),
+            "surface_obj" => self.write_surface(),
             "toggle_console" => self.show_console = !self.show_console,
             "toggle_properties" => self.show_properties = !self.show_properties,
             "view_props" => self.show_view_properties(),
@@ -1700,6 +1724,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("Find contacts", "contacts"),
             ("Superpose molecules", "superpose"),
             ("APBS electrostatics", "apbs"),
+            ("Export surface (OBJ)", "surface_obj"),
             ("Surface cutter (OBJ)", "cut_surface"),
             ("Execute script…", "show_script"),
             ("Performance measure", "perf"),
@@ -3382,6 +3407,25 @@ mod tests {
         assert!(
             std::env::temp_dir().join("cuemol_cut_surface.obj").exists(),
             "the cut-surface OBJ was written"
+        );
+    }
+
+    #[test]
+    fn surface_obj_export_in_dioxus() {
+        // それぞれ parity: dioxus can now export the full SES to OBJ (egui/gpui already
+        // could). A small selection keeps the SES build cheap.
+        let Some(pdb) = ref_1crn() else { return };
+        let mut model = Model::new(vec![pdb]);
+        model.selection_text = "resid 1:3".to_string();
+        model.write_surface();
+        assert!(
+            model.status.starts_with("Surface OBJ:"),
+            "surface export status ({})",
+            model.status
+        );
+        assert!(
+            std::env::temp_dir().join("cuemol_surface.obj").exists(),
+            "the SES OBJ was written"
         );
     }
 
