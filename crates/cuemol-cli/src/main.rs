@@ -20,7 +20,7 @@ use cuemol_render::{
     LuxRendSceneExporter, MqoSceneExporter, PovSceneExporter, RenderMesh, RenderSceneSnapshot,
     StlSceneExporter, WbpSceneExporter,
 };
-use cuemol_surface::read_msms_surface_files;
+use cuemol_surface::{read_msms_surface_files, read_obj_file};
 use cuemol_xtal::read_mtz_file;
 use std::env;
 use std::process::ExitCode;
@@ -323,6 +323,13 @@ fn run() -> Result<(), String> {
             println!("triangles={}", mesh.triangle_count());
             Ok(())
         }
+        "obj-info" => {
+            let path = args.next().ok_or_else(|| "missing OBJ path".to_string())?;
+            let mesh = read_obj_file(path).map_err(|err| err.to_string())?;
+            println!("vertices={}", mesh.vertex_count());
+            println!("triangles={}", mesh.triangle_count());
+            Ok(())
+        }
         "qsc-info" => {
             let path = args.next().ok_or_else(|| "missing QSC path".to_string())?;
             let mut manager = MolSceneManager::new();
@@ -548,6 +555,7 @@ fn print_usage() {
     eprintln!("  cuemol brixmap-info <file.brix|file.omap>");
     eprintln!("  cuemol mtz-info <file.mtz>");
     eprintln!("  cuemol msms-info <file.face> <file.vert>");
+    eprintln!("  cuemol obj-info <file.obj>");
     eprintln!("  cuemol qsc-info <file.qsc>");
     eprintln!("  cuemol mol-array-info <pdb|qdfpdb|cif|mmcif|sdf|mol|mol2|gro|psf|amberprm> <file> <crd|bfac|occ>");
     eprintln!(

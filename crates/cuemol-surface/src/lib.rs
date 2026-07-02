@@ -7,11 +7,13 @@ use std::collections::BTreeMap;
 pub mod analytic_ses;
 pub mod grid_surface;
 pub mod msms;
+pub mod obj;
 pub mod ply;
 pub mod qdf;
 
 pub use grid_surface::{build_grid_isosurface, ScalarField, SurfSphere};
 pub use msms::{read_msms_surface_files, read_msms_surface_str, sniff_msms_content, MsmsReader};
+pub use obj::{read_obj_file, read_obj_str};
 pub use ply::{read_ply_file, read_ply_str};
 pub use qdf::{QdfPotReader, QdfPotWriter, QdfSurfReader, QdfSurfWriter};
 
