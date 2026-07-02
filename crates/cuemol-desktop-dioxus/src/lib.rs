@@ -1370,6 +1370,13 @@ impl Model {
                 self.surface_mesh = Some(mesh);
                 self.show_surface = true;
                 self.potential_surface = false;
+                // Frame the imported mesh (matches gpui/egui refit-on-import), then
+                // re-tessellate so the mesh enters the composited image (the display is
+                // built from `self.mesh`, not `surface_mesh` directly).
+                if let Some(snapshot) = self.current_render_snapshot() {
+                    self.camera = frame_camera(&snapshot);
+                }
+                self.rebuild_selection();
                 self.status = format!("Imported mesh: {verts} vertices, {tris} triangles");
             }
             Err(error) => self.status = format!("Mesh import failed: {error}"),
@@ -3139,6 +3146,14 @@ mod tests {
         model.import_mesh();
         assert!(model.surface_mesh.is_some(), "import must populate the surface slot");
         assert!(model.show_surface, "import must enable the surface display");
+        // The mesh must reach the composited output, not just the slot: the display is
+        // built from `self.mesh`, so import re-tessellates the snapshot (which now
+        // carries the surface mesh) into it. Without that step the import is invisible.
+        let tessellated = model.mesh.as_ref().expect("import must re-tessellate the render mesh");
+        assert!(
+            !tessellated.vertices.is_empty(),
+            "the imported triangle must appear in the tessellated render mesh"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

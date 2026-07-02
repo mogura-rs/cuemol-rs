@@ -1644,7 +1644,7 @@ impl GuiApplication {
                     .on_hover_text("Load an OBJ/PLY surface mesh and show it as the surface")
                     .clicked()
                 {
-                    self.import_mesh_surface();
+                    self.import_mesh_surface(camera);
                 }
             });
             let labels_label = if self.show_labels { "Labels ✓" } else { "Labels" };
@@ -3264,7 +3264,7 @@ impl GuiApplication {
     /// surface slot and show it via the existing surface toggle (CueMol2
     /// `ObjReader`/`PLYFileReader`). The mesh replaces any computed SES; potential
     /// colouring is turned off since an imported mesh carries no molecule to sample.
-    fn import_mesh_surface(&mut self) {
+    fn import_mesh_surface(&mut self, camera: &mut CameraController) {
         let path = self.mesh_import_path.trim().to_string();
         if path.is_empty() {
             self.set_status("Enter an OBJ/PLY mesh path first");
@@ -3278,6 +3278,9 @@ impl GuiApplication {
                 self.potential_surface = false;
                 self.set_status(format!("Imported mesh: {verts} vertices, {tris} triangles"));
                 self.rebuild_snapshot();
+                // Frame the imported mesh (it may sit far from the molecule), matching
+                // gpui's refit-on-import so all three shells behave the same.
+                camera.fit_snapshot(&self.snapshot);
             }
             Err(error) => self.set_status(format!("Mesh import failed: {error}")),
         }
@@ -6976,9 +6979,8 @@ mod tests {
             )
             .expect("write imported.obj");
             app.mesh_import_path = obj_path.to_string_lossy().to_string();
-            app.import_mesh_surface();
+            app.import_mesh_surface(&mut camera);
             assert!(app.surface_mesh.is_some(), "import must populate the surface slot");
-            camera.fit_snapshot(&app.snapshot);
             let (w, h) = (900u32, 700u32);
             let mvp = camera.view_projection(w as f32 / h as f32).to_cols_array_2d();
             if let Some(png) =
