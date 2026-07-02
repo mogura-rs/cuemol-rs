@@ -426,6 +426,18 @@ impl MolObject {
     }
 }
 
+/// A surface object captured from a `.qsc` load. The Rust `.qsc` format stores
+/// datachunks as text (molecules as PDB text; surfaces as OBJ/PLY mesh text), so a
+/// surface object's mesh travels as `data` and a front end converts it to geometry
+/// via the OBJ/PLY readers keyed on `srctype`. (C++ CueMol2 uses a base64 QdfSurf
+/// binary chunk; reading that is a separate follow-up.)
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedSurface {
+    pub name: String,
+    pub srctype: String,
+    pub data: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MolScene {
     uid: Uid,
@@ -438,6 +450,10 @@ pub struct MolScene {
     /// object whose datachunk is not PDB). Recorded so the load is graceful (the
     /// molecules still load) but NOT silent — a front end can surface it.
     skipped_qsc_objects: Vec<(String, String)>,
+    /// Surface objects captured from the last `.qsc` load (mesh text + srctype). A
+    /// front end turns these into displayable meshes; distinct from `skipped` because
+    /// these ARE representable (an OBJ/PLY mesh), just not molecules.
+    loaded_surfaces: Vec<LoadedSurface>,
 }
 
 impl MolScene {
@@ -458,6 +474,13 @@ impl MolScene {
     /// for an all-molecule scene. Lets a front end report "N objects not loaded".
     pub fn skipped_qsc_objects(&self) -> &[(String, String)] {
         &self.skipped_qsc_objects
+    }
+
+    /// Surface objects captured from the last `.qsc` load (OBJ/PLY mesh text + srctype).
+    /// A front end converts each to a displayable mesh via the OBJ/PLY readers. Empty
+    /// for a scene with no surface objects.
+    pub fn loaded_surfaces(&self) -> &[LoadedSurface] {
+        &self.loaded_surfaces
     }
 
     pub fn cameras(&self) -> &[Camera] {
@@ -571,6 +594,25 @@ impl MolScene {
         // A missing `type` means MolCoord (the Rust writer always emits `type="MolCoord"`).
         let object_type = attr_value(object_line, "type").unwrap_or_else(|| "MolCoord".to_string());
         if object_type != "MolCoord" {
+            // A MolSurf surface whose datachunk is OBJ/PLY mesh TEXT (the Rust `.qsc`
+            // convention) carries a mesh this port CAN display: capture it + its srctype
+            // for a front end to convert into geometry. A C++ `qdfsurf` binary chunk (or
+            // any other non-molecule class: DensityMap, …) is still skipped + recorded so
+            // the load stays graceful.
+            let srctype = attr_value(object_line, "srctype").unwrap_or_default();
+            if object_type == "MolSurf" && matches!(srctype.as_str(), "obj" | "ply") {
+                if let Some(data) = attr_value(object_line, "src")
+                    .and_then(|src| src.strip_prefix("datachunk:").map(str::to_string))
+                    .and_then(|chunk_id| chunks.get(&chunk_id).cloned())
+                {
+                    self.loaded_surfaces.push(LoadedSurface {
+                        name: object_name,
+                        srctype,
+                        data,
+                    });
+                    return Ok(());
+                }
+            }
             self.skipped_qsc_objects.push((object_name, object_type));
             return Ok(());
         }
@@ -774,6 +816,7 @@ impl MolSceneManager {
             cameras: Vec::new(),
             next_object_uid: 1,
             skipped_qsc_objects: Vec::new(),
+            loaded_surfaces: Vec::new(),
         });
         uid
     }
@@ -1427,6 +1470,43 @@ mod tests {
             scene_ref.skipped_qsc_objects(),
             &[("surf1".to_string(), "MolSurf".to_string())],
             "the skipped surface object is recorded"
+        );
+    }
+
+    #[test]
+    fn qsc_load_captures_obj_text_surface_object() {
+        // A MolSurf object whose datachunk is OBJ mesh TEXT (the Rust `.qsc` convention)
+        // is CAPTURED into loaded_surfaces so a front end can display it — unlike a
+        // `qdfsurf` binary chunk, which is still skipped. Hand-authored .qsc = the
+        // independent oracle.
+        let mut manager = MolSceneManager::new();
+        let scene = manager.new_scene("s");
+        let mol = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n",
+        )
+        .unwrap();
+        manager.scene_mut(scene).unwrap().add_molecule("mol1", mol);
+        let mut xml = manager.scene(scene).unwrap().write_qsc_string();
+        // Splice in an OBJ-text surface object + its datachunk block (a single triangle).
+        let surf_obj = "\t<object type=\"MolSurf\" name=\"surf1\" src=\"datachunk:90000\" srctype=\"obj\">\n\t</object>\n</scene>";
+        xml = xml.replace("</scene>", surf_obj);
+        xml.push_str(
+            "\n==========START datachunk:90000==========\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n==========END datachunk:90000==========\n",
+        );
+
+        let mut reloaded = MolSceneManager::new();
+        let scene2 = reloaded.new_scene("reloaded");
+        reloaded.scene_mut(scene2).unwrap().load_qsc_str(&xml).unwrap();
+        let scene_ref = reloaded.scene(scene2).unwrap();
+        // The molecule still loads, and the OBJ surface is captured (not skipped).
+        assert_eq!(scene_ref.objects().len(), 1, "the MolCoord object loads");
+        assert_eq!(scene_ref.loaded_surfaces().len(), 1, "the OBJ surface is captured");
+        assert_eq!(scene_ref.loaded_surfaces()[0].name, "surf1");
+        assert_eq!(scene_ref.loaded_surfaces()[0].srctype, "obj");
+        assert!(scene_ref.loaded_surfaces()[0].data.contains("v 0 0 0"));
+        assert!(
+            scene_ref.skipped_qsc_objects().is_empty(),
+            "an OBJ-text surface is displayable, not a skip"
         );
     }
 }

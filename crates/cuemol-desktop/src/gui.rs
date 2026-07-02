@@ -2690,6 +2690,19 @@ impl GuiApplication {
                             .join(", ")
                     ));
                 }
+                // Display any surface objects the `.qsc` carried (OBJ/PLY-text MolSurf
+                // objects), merged into the surface slot and shown via the surface toggle.
+                let surfaces = self.state.active_scene_surface_meshes();
+                if !surfaces.is_empty() {
+                    let mut merged = cuemol_render::RenderMesh::default();
+                    for mesh in surfaces {
+                        let base = merged.vertices.len() as u32;
+                        merged.vertices.extend(mesh.vertices);
+                        merged.indices.extend(mesh.indices.iter().map(|index| base + index));
+                    }
+                    self.surface_mesh = Some(merged);
+                    self.show_surface = true;
+                }
                 self.rebuild_snapshot();
                 // Restore the scene's saved view (a `.qsc` `<camera>`); only a
                 // camera-less scene falls back to auto-framing the bounding box.
@@ -6988,6 +7001,46 @@ mod tests {
             {
                 let path = out_dir.join("imported_mesh_3d.png");
                 std::fs::write(&path, png).expect("write imported_mesh_3d.png");
+                eprintln!("snapshot written to {}", path.display());
+            }
+        }
+
+        // (qsc surface) A `.qsc` that CARRIES an OBJ-text MolSurf object now loads AND
+        // displays the surface (the scene-object → surface-display slice), rendered
+        // offscreen. Verifies the whole chain: loader captures the surface datachunk →
+        // active_scene_surface_meshes converts it → the open handler shows it.
+        {
+            let mut builder = cuemol_molstr::MolSceneManager::new();
+            let bscene = builder.new_scene("s");
+            if let Some(pdb) = reference_pdb_path() {
+                if let Ok(mol) = cuemol_molstr::read_pdb_file(&pdb) {
+                    builder.scene_mut(bscene).unwrap().add_molecule("crambin", mol);
+                }
+            }
+            let mut qsc = builder.scene(bscene).unwrap().write_qsc_string();
+            let surf = "\t<object type=\"MolSurf\" name=\"surf1\" src=\"datachunk:90000\" srctype=\"obj\">\n\t</object>\n</scene>";
+            qsc = qsc.replace("</scene>", surf);
+            qsc.push_str(
+                "\n==========START datachunk:90000==========\nv 8 0 0\nv -8 0 0\nv 0 8 0\nv 0 -8 0\nv 0 0 8\nv 0 0 -8\nf 1 3 5\nf 3 2 5\nf 2 4 5\nf 4 1 5\nf 3 1 6\nf 2 3 6\nf 4 2 6\nf 1 4 6\n==========END datachunk:90000==========\n",
+            );
+            let qsc_path = out_dir.join("surface_scene.qsc");
+            std::fs::write(&qsc_path, &qsc).expect("write surface_scene.qsc");
+
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            app.open_path = qsc_path.to_string_lossy().to_string();
+            app.open_current_path(&mut camera);
+            assert!(
+                app.surface_mesh.is_some(),
+                "loading a .qsc with an OBJ surface must populate the surface slot"
+            );
+            let (w, h) = (900u32, 700u32);
+            let mvp = camera.view_projection(w as f32 / h as f32).to_cols_array_2d();
+            if let Some(png) =
+                crate::offscreen::render_snapshot_png(&app.snapshot, mvp, w, h, [0.02, 0.02, 0.05, 1.0])
+            {
+                let path = out_dir.join("qsc_surface_3d.png");
+                std::fs::write(&path, png).expect("write qsc_surface_3d.png");
                 eprintln!("snapshot written to {}", path.display());
             }
         }

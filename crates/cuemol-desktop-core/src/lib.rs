@@ -475,6 +475,46 @@ impl DesktopAppState {
             .unwrap_or_default()
     }
 
+    /// Convert the active scene's `.qsc`-loaded surface objects (OBJ/PLY mesh text
+    /// captured by the loader) into flat-coloured render meshes — so a `.qsc` that
+    /// carries a surface can DISPLAY it, reusing the molecule-independent surface path
+    /// (`build_density_surface_mesh` / `load_mesh_surface_file`). Empty for a scene
+    /// with no loadable surface objects. A front end appends these to its surface slot.
+    pub fn active_scene_surface_meshes(&self) -> Vec<cuemol_render::RenderMesh> {
+        let Some(scene) = self
+            .active_scene
+            .and_then(|uid| self.scene_manager().scene(uid))
+        else {
+            return Vec::new();
+        };
+        let color = [0.45, 0.65, 0.95, 1.0];
+        scene
+            .loaded_surfaces()
+            .iter()
+            .filter_map(|surface| {
+                let mesh = match surface.srctype.as_str() {
+                    "ply" => cuemol_surface::read_ply_str(&surface.data).ok()?,
+                    _ => cuemol_surface::read_obj_str(&surface.data).ok()?,
+                };
+                let vertices = mesh
+                    .vertices()
+                    .iter()
+                    .map(|vertex| cuemol_render::MeshVertex {
+                        position: vertex.position,
+                        normal: vertex.normal,
+                        color,
+                    })
+                    .collect();
+                let indices = mesh
+                    .triangles()
+                    .iter()
+                    .flat_map(|triangle| triangle.iter().copied())
+                    .collect();
+                Some(cuemol_render::RenderMesh { vertices, indices })
+            })
+            .collect()
+    }
+
     pub fn scene_summaries(&self) -> Vec<GuiSceneSummary> {
         self.scene_manager()
             .scenes()
@@ -3952,6 +3992,38 @@ mod tests {
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.indices.len(), 3, "one triangle -> three indices");
         assert_eq!(mesh.vertices[0].color, [0.45, 0.65, 0.95, 1.0]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn qsc_with_an_obj_text_surface_loads_as_a_display_mesh() {
+        // End-to-end library slice: a `.qsc` carrying an OBJ-text MolSurf object loads,
+        // and active_scene_surface_meshes() converts it into a flat render mesh for the
+        // surface display. The `.qsc` base is the real writer's output with an OBJ
+        // surface + datachunk spliced in (the independent oracle).
+        let mut builder = MolSceneManager::new();
+        let bscene = builder.new_scene("s");
+        let mol = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n",
+        )
+        .unwrap();
+        builder.scene_mut(bscene).unwrap().add_molecule("mol1", mol);
+        let mut qsc = builder.scene(bscene).unwrap().write_qsc_string();
+        let surf = "\t<object type=\"MolSurf\" name=\"surf1\" src=\"datachunk:90000\" srctype=\"obj\">\n\t</object>\n</scene>";
+        qsc = qsc.replace("</scene>", surf);
+        qsc.push_str(
+            "\n==========START datachunk:90000==========\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n==========END datachunk:90000==========\n",
+        );
+        let path = std::env::temp_dir().join("cuemol_core_qsc_surface_test.qsc");
+        std::fs::write(&path, &qsc).unwrap();
+
+        let mut app = DesktopAppState::new();
+        app.load_qsc_file(&path).unwrap();
+        let meshes = app.active_scene_surface_meshes();
+        assert_eq!(meshes.len(), 1, "the OBJ surface object becomes one render mesh");
+        assert_eq!(meshes[0].vertices.len(), 3);
+        assert_eq!(meshes[0].indices.len(), 3, "one triangle -> three indices");
+        assert_eq!(meshes[0].vertices[0].color, [0.45, 0.65, 0.95, 1.0]);
         let _ = std::fs::remove_file(&path);
     }
 
