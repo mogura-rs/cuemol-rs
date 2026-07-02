@@ -2751,15 +2751,32 @@ impl GuiApplication {
     }
 
     fn export_current_scene(&mut self) {
-        match self
-            .state
-            .export_active_scene_pov(self.export_path.trim(), &self.selection_text)
-        {
-            Ok(count) => self.set_status(format!(
-                "Exported {count} atoms to {}",
-                self.export_path.trim()
-            )),
-            Err(error) => self.set_error(error),
+        let path = self.export_path.trim().to_string();
+        // Dispatch on the file extension: `.png` renders an image via the offscreen
+        // wgpu path (the same one the live viewport uses), anything else stays POV-Ray.
+        // Previously every export produced POV-Ray regardless of the typed name.
+        if crate::DesktopAppState::path_has_extension(&path, "png") {
+            let (width, height) = self
+                .viewport_rect
+                .map(|rect| {
+                    (
+                        (rect.width().round() as u32).max(1),
+                        (rect.height().round() as u32).max(1),
+                    )
+                })
+                .unwrap_or((1280, 960));
+            match self
+                .state
+                .export_active_scene_png(&path, width, height, &self.selection_text)
+            {
+                Ok(()) => self.set_status(format!("Exported {width}x{height} image to {path}")),
+                Err(error) => self.set_error(error),
+            }
+        } else {
+            match self.state.export_active_scene_pov(&path, &self.selection_text) {
+                Ok(count) => self.set_status(format!("Exported {count} atoms to {path}")),
+                Err(error) => self.set_error(error),
+            }
         }
     }
 

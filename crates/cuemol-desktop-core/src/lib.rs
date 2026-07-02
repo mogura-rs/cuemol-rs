@@ -1171,6 +1171,14 @@ impl DesktopAppState {
         Ok(())
     }
 
+    /// Whether a file path ends in the given extension (case-insensitive). Front ends
+    /// use it to dispatch "Export scene" between the PNG image path and POV-Ray.
+    pub fn path_has_extension(path: &str, ext: &str) -> bool {
+        Path::new(path.trim())
+            .extension()
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(ext))
+    }
+
     pub fn export_active_scene_pov(
         &self,
         path: impl AsRef<Path>,
@@ -3172,6 +3180,19 @@ mod tests {
         // An unknown object name is a silent no-op — not a panic, not an Err.
         app.run_script_js("cuemol.setColoring('nope', 'bfactor');")
             .expect("no-op on unknown object");
+    }
+
+    #[test]
+    fn path_has_extension_routes_png_vs_pov_export() {
+        // The predicate that routes "Export scene" between the PNG image path and
+        // POV-Ray in all three front ends: case-insensitive, trims, and only true for
+        // the actual trailing extension.
+        assert!(DesktopAppState::path_has_extension("scene.png", "png"));
+        assert!(DesktopAppState::path_has_extension("scene.PNG", "png"));
+        assert!(DesktopAppState::path_has_extension("  out/a.Png  ", "png"));
+        assert!(!DesktopAppState::path_has_extension("scene.pov", "png"));
+        assert!(!DesktopAppState::path_has_extension("scene", "png"));
+        assert!(!DesktopAppState::path_has_extension("png", "png"));
     }
 
     /// Build a pickable atom at a world position (object_uid/atom_index set).

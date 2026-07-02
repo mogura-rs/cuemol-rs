@@ -1002,11 +1002,24 @@ impl CueMolGpuiApp {
         }
     }
 
+    /// Export the active scene. `.png` renders an image via the offscreen wgpu path (the
+    /// same renderer the live viewport composites); any other extension stays POV-Ray.
     fn export_pov(&mut self, path_str: &str) {
         let path = path_str.trim();
-        match self.state.export_active_scene_pov(path, &self.applied_selection) {
-            Ok(count) => self.set_status(format!("Exported {count} atoms to {path}")),
-            Err(error) => self.set_status(format!("Export error: {error}")),
+        if DesktopAppState::path_has_extension(path, "png") {
+            let (width, height) = self.view_size;
+            match self
+                .state
+                .export_active_scene_png(path, width, height, &self.applied_selection)
+            {
+                Ok(()) => self.set_status(format!("Exported {width}x{height} image to {path}")),
+                Err(error) => self.set_status(format!("Export error: {error}")),
+            }
+        } else {
+            match self.state.export_active_scene_pov(path, &self.applied_selection) {
+                Ok(count) => self.set_status(format!("Exported {count} atoms to {path}")),
+                Err(error) => self.set_status(format!("Export error: {error}")),
+            }
         }
     }
 

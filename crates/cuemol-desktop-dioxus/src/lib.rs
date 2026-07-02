@@ -836,9 +836,22 @@ impl Model {
             self.status = "Export scene: enter a path".into();
             return;
         }
-        match self.state.export_active_scene_pov(path, &self.selection_text) {
-            Ok(atoms) => self.status = format!("Exported {atoms} atoms → {path}"),
-            Err(error) => self.status = format!("Export scene failed: {error}"),
+        // `.png` renders an image via the offscreen wgpu path (the same renderer that
+        // composites the live viewport); any other extension stays POV-Ray.
+        if DesktopAppState::path_has_extension(path, "png") {
+            let (width, height) = self.view_size;
+            match self
+                .state
+                .export_active_scene_png(path, width, height, &self.selection_text)
+            {
+                Ok(()) => self.status = format!("Exported {width}x{height} image → {path}"),
+                Err(error) => self.status = format!("Export image failed: {error}"),
+            }
+        } else {
+            match self.state.export_active_scene_pov(path, &self.selection_text) {
+                Ok(atoms) => self.status = format!("Exported {atoms} atoms → {path}"),
+                Err(error) => self.status = format!("Export scene failed: {error}"),
+            }
         }
     }
 
