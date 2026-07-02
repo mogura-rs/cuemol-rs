@@ -137,7 +137,8 @@ fn col_danger() -> u32 {
 
 const INSPECTOR_W: f32 = 320.0;
 const BOTTOM_H: f32 = 180.0;
-const TOOLBAR_H: f32 = 36.0;
+// Two rows now: the ribbon tab strip + the active tab's button row.
+const TOOLBAR_H: f32 = 64.0;
 const SCENE_TAB_H: f32 = 26.0;
 
 /// Renderer types offered in the "Add renderer" dialog (id, human label).
@@ -173,6 +174,25 @@ const MENUS: &[(&str, f32, f32)] = &[
     ("Window", 406.0, 66.0),
     ("Help", 472.0, 50.0),
 ];
+
+/// The tabbed top toolbar (CueMol2 `topbar/cuemol2-ribbon.xul`): a ribbon with a
+/// Home / Measure / Animation tab strip, mirroring the egui and dioxus shells so all
+/// three expose the same top chrome. Previously gpui had a single flat button row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RibbonTab {
+    Home,
+    Measure,
+    Animation,
+}
+
+impl RibbonTab {
+    /// The three ribbon tabs in display order (also drives the parity test).
+    const ALL: [(RibbonTab, &'static str); 3] = [
+        (RibbonTab::Home, "Home"),
+        (RibbonTab::Measure, "Measure"),
+        (RibbonTab::Animation, "Animation"),
+    ];
+}
 
 /// Viewport background, toggled from the View menu / toolbar. The slate default
 /// blends with the surrounding panel chrome; Black/White match the egui options.
@@ -354,6 +374,8 @@ pub struct CueMolGpuiApp {
     /// proofing"). Tracked as a flag for parity with egui, where it is likewise a
     /// tracked toggle that does not yet feed the offscreen renderer.
     color_proof: bool,
+    /// Active tab of the top ribbon toolbar (Home / Measure / Animation).
+    ribbon_tab: RibbonTab,
     center_mark: CenterMarkKind,
     /// Bottom-panel state.
     bottom_tab: BottomTab,
@@ -452,6 +474,7 @@ impl CueMolGpuiApp {
             selected_renderer: None,
             background: Background::Slate,
             color_proof: false,
+            ribbon_tab: RibbonTab::Home,
             center_mark: CenterMarkKind::Cross,
             bottom_tab: BottomTab::Output,
             // CueMol2 has no right dock; properties open on demand via the toolbar toggle.
@@ -2660,17 +2683,46 @@ impl CueMolGpuiApp {
     /// The action toolbar below the header: the high-frequency commands as direct
     /// buttons (the cheap, low-risk parity surface; menus come on top of this).
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Ribbon tab strip (Home / Measure / Animation) over the active tab's row.
+        let mut tabs = div().flex().flex_row().items_center().gap_1();
+        for (tab, label) in RibbonTab::ALL {
+            tabs = tabs.child(
+                toggle_button(eid(format!("rb-{label}")), label, self.ribbon_tab == tab).on_click(
+                    cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                        this.ribbon_tab = tab;
+                        cx.notify();
+                    }),
+                ),
+            );
+        }
+        let content = match self.ribbon_tab {
+            RibbonTab::Home => self.ribbon_home(cx).into_any_element(),
+            RibbonTab::Measure => self.ribbon_measure().into_any_element(),
+            RibbonTab::Animation => self.ribbon_animation(cx).into_any_element(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w_full()
+            .h(px(TOOLBAR_H))
+            .px_3()
+            .py_1()
+            .bg(rgb(col_header()))
+            .border_b_1()
+            .border_color(rgb(col_border()))
+            .child(tabs)
+            .child(content)
+    }
+
+    /// Home ribbon tab: file / scene / view / undo actions (CueMol2 ribbon Home).
+    fn ribbon_home(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
             .w_full()
-            .h(px(TOOLBAR_H))
-            .px_3()
-            .bg(rgb(col_header()))
-            .border_b_1()
-            .border_color(rgb(col_border()))
             .child(button("tb-open", "Open").on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                 let path = this
                     .inputs
@@ -2756,6 +2808,55 @@ impl CueMolGpuiApp {
                     cx.notify();
                 },
             )))
+    }
+
+    /// Measure ribbon tab: distance / angle / torsion of the current 2/3/4-atom
+    /// selection (CueMol2 AtomIntr), reusing the shared-core `active_measure`.
+    fn ribbon_measure(&self) -> impl IntoElement {
+        let readout = self.state.active_measure(&self.applied_selection).unwrap_or_else(|| {
+            "Select 2 / 3 / 4 atoms to measure distance / angle / torsion".into()
+        });
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Measure:"))
+            .child(div().text_xs().text_color(rgb(col_text())).child(readout))
+    }
+
+    /// Animation ribbon tab: play / stop the SimpleSpin timeline (CueMol2 anim-ribbon).
+    fn ribbon_animation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let playing = self.animation_playing;
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .child(
+                button("rb-anim-play", if playing { "⏸ Pause" } else { "▶ Play" }).on_click(
+                    cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                        this.toggle_animation(cx);
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(button("rb-anim-stop", "⏹ Stop").on_click(cx.listener(
+                |this, _: &gpui::ClickEvent, _, cx| {
+                    if this.animation_playing {
+                        this.toggle_animation(cx);
+                    }
+                    cx.notify();
+                },
+            )))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child(if playing { "playing" } else { "stopped" }),
+            )
     }
 
     /// The left scene tree: clickable scene / object / renderer rows that drive the
@@ -5260,6 +5361,17 @@ mod tests {
             );
             cursor += width;
         }
+    }
+
+    #[test]
+    fn ribbon_is_tabbed_home_measure_animation() {
+        // Parity with egui/dioxus (CueMol2 `topbar/cuemol2-ribbon.xul`): the gpui top
+        // toolbar is a tabbed ribbon (Home/Measure/Animation), not a flat button row.
+        let labels: Vec<&str> = RibbonTab::ALL.iter().map(|(_, label)| *label).collect();
+        assert_eq!(labels, ["Home", "Measure", "Animation"]);
+        // A fresh app opens on the Home tab, like the other two shells.
+        let app = CueMolGpuiApp::new(Vec::new());
+        assert_eq!(app.ribbon_tab, RibbonTab::Home);
     }
 
     #[test]
