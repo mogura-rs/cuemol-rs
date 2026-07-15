@@ -196,6 +196,20 @@ impl Default for PdbReader {
     }
 }
 
+impl std::ops::Deref for PdbReader {
+    type Target = ObjReader;
+
+    fn deref(&self) -> &Self::Target {
+        &self.reader
+    }
+}
+
+impl std::ops::DerefMut for PdbReader {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.reader
+    }
+}
+
 impl QdfPdbReader {
     pub fn new() -> Self {
         let mut reader = PdbReader::new();
@@ -247,6 +261,20 @@ impl Default for QdfPdbReader {
     }
 }
 
+impl std::ops::Deref for QdfPdbReader {
+    type Target = PdbReader;
+
+    fn deref(&self) -> &Self::Target {
+        &self.reader
+    }
+}
+
+impl std::ops::DerefMut for QdfPdbReader {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.reader
+    }
+}
+
 impl PdbWriter {
     pub fn new() -> Self {
         Self {
@@ -271,6 +299,10 @@ impl PdbWriter {
         &self.selection
     }
 
+    pub fn get_selection(&self) -> &Selector {
+        self.selection()
+    }
+
     pub fn set_selection(&mut self, value: Selector) {
         self.selection = value;
     }
@@ -287,6 +319,20 @@ impl PdbWriter {
 impl Default for PdbWriter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::ops::Deref for PdbWriter {
+    type Target = ObjWriter;
+
+    fn deref(&self) -> &Self::Target {
+        &self.writer
+    }
+}
+
+impl std::ops::DerefMut for PdbWriter {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.writer
     }
 }
 
@@ -566,8 +612,7 @@ fn write_links_records(output: &mut String, mol: &MolCoord) {
         if !bond.persist {
             continue;
         }
-        let (Some(atom1), Some(atom2)) =
-            (mol.atoms().get(bond.atom1), mol.atoms().get(bond.atom2))
+        let (Some(atom1), Some(atom2)) = (mol.atoms().get(bond.atom1), mol.atoms().get(bond.atom2))
         else {
             continue;
         };
@@ -865,14 +910,22 @@ fn parse_link_line(line: &str) -> Option<LinkRecord> {
 
 fn apply_link_records(mol: &mut MolCoord, records: &[LinkRecord]) {
     for record in records {
-        let Some(atom1) =
-            find_residue_atom(mol, &record.chain1, record.res_id1, record.ins_code1, &record.name1)
-        else {
+        let Some(atom1) = find_residue_atom(
+            mol,
+            &record.chain1,
+            record.res_id1,
+            record.ins_code1,
+            &record.name1,
+        ) else {
             continue;
         };
-        let Some(atom2) =
-            find_residue_atom(mol, &record.chain2, record.res_id2, record.ins_code2, &record.name2)
-        else {
+        let Some(atom2) = find_residue_atom(
+            mol,
+            &record.chain2,
+            record.res_id2,
+            record.ins_code2,
+            &record.name2,
+        ) else {
             continue;
         };
         // add_bond dedups, so a LINK duplicating a template/SSBOND bond is a no-op.
@@ -1122,7 +1175,9 @@ mod tests {
             "{line}\nATOM      1  N   THR A   1      17.047  14.099   3.625  1.00 13.79           N\n"
         );
         let mol = read_pdb_str(&pdb).unwrap();
-        let parsed = mol.cell_params().expect("PDB CRYST1 -> cell params on the molecule");
+        let parsed = mol
+            .cell_params()
+            .expect("PDB CRYST1 -> cell params on the molecule");
         assert_eq!(parsed.space_group_name, "P 1 21 1");
         assert!((parsed.a - 40.960).abs() < 1e-6);
     }
@@ -1151,8 +1206,7 @@ mod tests {
             .find(|line| line.starts_with("CRYST1"))
             .expect("writer emits a CRYST1 record");
         assert_eq!(
-            cryst1,
-            "CRYST1   40.960   18.650   22.520  90.00  90.77  90.00 P 1 21 1      ",
+            cryst1, "CRYST1   40.960   18.650   22.520  90.00  90.77  90.00 P 1 21 1      ",
             "CRYST1 must match the C++ PDBCryst1Handler::write column layout"
         );
 
@@ -1198,13 +1252,7 @@ mod tests {
         let mut mol = read_pdb_str(&pdb).unwrap();
         // A 3-residue alpha helix (1-3) and a 2-residue strand (5-6). Setting
         // secondary2 directly overwrites whatever DSSP assigned to the CA chain.
-        for (resid, sec2) in [
-            (1, "Hs"),
-            (2, "H"),
-            (3, "He"),
-            (5, "Es"),
-            (6, "Ee"),
-        ] {
+        for (resid, sec2) in [(1, "Hs"), (2, "H"), (3, "He"), (5, "Es"), (6, "Ee")] {
             mol.set_residue_prop_str("A", &resid.to_string(), "secondary2", sec2)
                 .unwrap();
         }
@@ -1243,9 +1291,10 @@ mod tests {
     fn write_pdb_emits_secstr_for_a_real_protein() {
         // End-to-end on 1CRN: the default reader runs DSSP -> secondary2, so the
         // writer must surface HELIX/SHEET records (1CRN is helical + has a sheet).
-        let root = std::path::PathBuf::from(option_env!("CUEMOL2_REF_DIR").unwrap_or(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../cuemol2"),
-        ))
+        let root = std::path::PathBuf::from(
+            option_env!("CUEMOL2_REF_DIR")
+                .unwrap_or(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../cuemol2")),
+        )
         .join("tests/test_data");
         let fixture = root.join("1CRN.pdb");
         if !fixture.exists() {
@@ -1256,7 +1305,10 @@ mod tests {
         let helices = written.lines().filter(|l| l.starts_with("HELIX")).count();
         let sheets = written.lines().filter(|l| l.starts_with("SHEET")).count();
         assert!(helices > 0, "1CRN is helical -> at least one HELIX record");
-        assert!(sheets > 0, "1CRN has a beta sheet -> at least one SHEET record");
+        assert!(
+            sheets > 0,
+            "1CRN has a beta sheet -> at least one SHEET record"
+        );
     }
 
     #[test]
@@ -1300,8 +1352,22 @@ mod tests {
     }
 
     const LINK_LINE: &str = concat!(
-        "LINK  ", "      ", " O1 ", " ", "LIG", " ", "A", "   1", " ",
-        "               ", " C3 ", " ", "LIG", " ", "A", "   2"
+        "LINK  ",
+        "      ",
+        " O1 ",
+        " ",
+        "LIG",
+        " ",
+        "A",
+        "   1",
+        " ",
+        "               ",
+        " C3 ",
+        " ",
+        "LIG",
+        " ",
+        "A",
+        "   2"
     );
 
     #[test]
@@ -1360,7 +1426,11 @@ ATOM      2  C3  LIG A   2       5.000   0.000   0.000  1.00  0.00           C
 
         // Full round-trip: the bond survives load -> write -> reload.
         let reloaded = read_pdb_str(&written).unwrap();
-        assert_eq!(reloaded.bond_count(), 1, "the LINK bond survives the round-trip");
+        assert_eq!(
+            reloaded.bond_count(),
+            1,
+            "the LINK bond survives the round-trip"
+        );
 
         // A structure whose only bonds are from topology emits NO LINK record
         // (those bonds are not `persist`). 1-residue ALA: CA-only -> no bonds, but

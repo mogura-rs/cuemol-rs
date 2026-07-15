@@ -546,6 +546,20 @@ impl Default for QdfMolFileReader {
     }
 }
 
+impl std::ops::Deref for QdfMolFileReader {
+    type Target = ObjReader;
+
+    fn deref(&self) -> &Self::Target {
+        &self.reader
+    }
+}
+
+impl std::ops::DerefMut for QdfMolFileReader {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.reader
+    }
+}
+
 /// `ObjWriter` facade for QDF molecules (handler name `qdfmol`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QdfMolFileWriter {
@@ -575,6 +589,20 @@ impl QdfMolFileWriter {
 impl Default for QdfMolFileWriter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::ops::Deref for QdfMolFileWriter {
+    type Target = ObjWriter;
+
+    fn deref(&self) -> &Self::Target {
+        &self.writer
+    }
+}
+
+impl std::ops::DerefMut for QdfMolFileWriter {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.writer
     }
 }
 
@@ -716,7 +744,12 @@ mod tests {
         src.append_atom1(a, "A", 1, "ALA");
         // A second atom WITHOUT aniso: it must not gain spurious props (C++ skips
         // an all-zero set on read).
-        src.append_atom1(atom("CB", "A", 1, "ALA", "C", [1.5, 0.0, 0.0]), "A", 1, "ALA");
+        src.append_atom1(
+            atom("CB", "A", 1, "ALA", "C", [1.5, 0.0, 0.0]),
+            "A",
+            1,
+            "ALA",
+        );
 
         let bytes = write_qdf_mol_bytes(&src);
         let dst = read_qdf_mol_bytes(&bytes).expect("read back QDF molecule");
@@ -731,7 +764,11 @@ mod tests {
         }
         // The bare atom carries no aniso props.
         for (_, prop) in ANISO_COLUMNS {
-            assert_eq!(dst.atoms()[1].int_prop(prop), None, "{prop} must stay unset");
+            assert_eq!(
+                dst.atoms()[1].int_prop(prop),
+                None,
+                "{prop} must stay unset"
+            );
         }
     }
 

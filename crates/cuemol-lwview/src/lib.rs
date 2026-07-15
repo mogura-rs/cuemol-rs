@@ -1,4 +1,5 @@
 use cuemol_core::{Uid, Vector4};
+use cuemol_gfx::RawHitData;
 use cuemol_qsys::{Renderer, Scene, SceneObject};
 use std::collections::BTreeMap;
 
@@ -207,6 +208,13 @@ impl LWRenderer {
         Self::default()
     }
 
+    pub fn with_uid(uid: Uid) -> Self {
+        Self {
+            renderer: Renderer::with_uid("lwrend", uid),
+            ..Self::default()
+        }
+    }
+
     pub fn renderer(&self) -> &Renderer {
         &self.renderer
     }
@@ -225,6 +233,10 @@ impl LWRenderer {
 
     pub fn data_id(&self) -> i32 {
         self.data_id
+    }
+
+    pub fn get_data_id(&self) -> i32 {
+        self.data_id()
     }
 
     pub fn set_data_id(&mut self, value: i32) {
@@ -279,6 +291,31 @@ impl LWRenderer {
     pub fn is_hit_test_supported(&self) -> bool {
         !self.hit_indices.is_empty()
     }
+
+    pub fn interp_hit(&self, hit_data: &dyn RawHitData, object: &LWObject) -> String {
+        let size = hit_data.data_size(self.renderer.uid());
+        if size == 0 {
+            return String::new();
+        }
+        let Some(hit_index) = hit_data.data_at(self.renderer.uid(), 0, 0) else {
+            return String::new();
+        };
+        let Some(hit) = object.hit_data(hit_index) else {
+            return String::new();
+        };
+        let position = hit.position();
+        format!(
+            "\"objtype\":\"LWObject\",\"size\":{size},\"message\":\"{}\",\"x\":{},\"y\":{},\"z\":{},",
+            escape_json(hit.message()),
+            position.x,
+            position.y,
+            position.z,
+        )
+    }
+}
+
+fn escape_json(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -371,6 +408,23 @@ mod tests {
         renderer.unloading();
         assert!(!renderer.is_display_cache_valid());
         assert!(!renderer.is_hittest_cache_valid());
+    }
+
+    #[test]
+    fn lw_renderer_interprets_hit_metadata_from_the_client_object() {
+        let mut object = LWObject::new();
+        object.add_point_hit(7, Vector4::new3(1.0, 2.0, 3.0), "atom \"CA\"");
+        let mut renderer = LWRenderer::with_uid(Uid::new(5));
+        renderer.set_hit_indices(vec![0]);
+        let mut context = cuemol_gfx::HittestContext::new();
+        context.add_hit(Uid::new(5), 0.2, vec![0]);
+        let mut data = cuemol_gfx::HitData::new();
+        data.create_nearest(&context);
+
+        assert_eq!(
+            renderer.interp_hit(&data, &object),
+            "\"objtype\":\"LWObject\",\"size\":1,\"message\":\"atom \\\"CA\\\"\",\"x\":1,\"y\":2,\"z\":3,"
+        );
     }
 
     #[test]

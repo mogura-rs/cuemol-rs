@@ -66,9 +66,10 @@ fn topology_builds_backbone_orders_peptide_links_and_disulfides_on_1crn() {
 
     // ARG10 side chain: the guanidinium has a C=N double bond (CZ=NH1 or CZ=NH2).
     let cz = atom_index(&mol, 10, "CZ").unwrap();
-    let double_to_cz = mol.bonds().iter().any(|bond| {
-        (bond.atom1 == cz || bond.atom2 == cz) && bond.order == BondOrder::Double
-    });
+    let double_to_cz = mol
+        .bonds()
+        .iter()
+        .any(|bond| (bond.atom1 == cz || bond.atom2 == cz) && bond.order == BondOrder::Double);
     assert!(double_to_cz, "ARG10 guanidinium C=N double bond");
 
     // --- Peptide (poly) links between consecutive residues ---

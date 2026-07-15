@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+use std::fmt;
+use std::rc::Rc;
+
 pub trait EditInfo {
     fn undo(&mut self) -> bool;
     fn redo(&mut self) -> bool;
@@ -37,6 +41,46 @@ pub struct UndoManager {
     nesting: usize,
     disabled: bool,
 }
+
+#[derive(Clone)]
+pub struct UndoManagerHandle(Rc<RefCell<UndoManager>>);
+
+impl Default for UndoManagerHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UndoManagerHandle {
+    pub fn new() -> Self {
+        Self(Rc::new(RefCell::new(UndoManager::new())))
+    }
+
+    pub fn with<R>(&self, function: impl FnOnce(&UndoManager) -> R) -> R {
+        function(&self.0.borrow())
+    }
+
+    pub fn with_mut<R>(&self, function: impl FnOnce(&mut UndoManager) -> R) -> R {
+        function(&mut self.0.borrow_mut())
+    }
+}
+
+impl fmt::Debug for UndoManagerHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("UndoManagerHandle")
+            .field(&Rc::as_ptr(&self.0))
+            .finish()
+    }
+}
+
+impl PartialEq for UndoManagerHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for UndoManagerHandle {}
 
 impl UndoManager {
     pub fn new() -> Self {
@@ -113,6 +157,9 @@ impl UndoManager {
     }
 
     pub fn commit_txn(&mut self) -> bool {
+        if self.disabled {
+            return false;
+        }
         if self.nesting == 0 {
             return false;
         }
@@ -123,10 +170,10 @@ impl UndoManager {
         let Some(txn) = self.active.take() else {
             return false;
         };
+        self.redo_stack.clear();
         if txn.is_empty() {
             return true;
         }
-        self.redo_stack.clear();
         self.undo_stack.push(txn);
         true
     }
@@ -136,6 +183,13 @@ impl UndoManager {
     }
 
     pub fn rollback_txn(&mut self) -> bool {
+        if self.disabled {
+            return false;
+        }
+        if self.nesting > 1 {
+            self.nesting -= 1;
+            return true;
+        }
         let Some(mut txn) = self.active.take() else {
             return false;
         };
@@ -157,10 +211,15 @@ impl UndoManager {
         let Some(mut txn) = self.undo_stack.pop() else {
             return false;
         };
+        self.disabled = true;
         let mut ok = true;
         for edit in txn.edits.iter_mut().rev() {
-            ok &= edit.undo();
+            if !edit.undo() {
+                ok = false;
+                break;
+            }
         }
+        self.disabled = false;
         self.redo_stack.push(txn);
         ok
     }
@@ -172,19 +231,40 @@ impl UndoManager {
         let Some(mut txn) = self.redo_stack.pop() else {
             return false;
         };
+        self.disabled = true;
         let mut ok = true;
         for edit in &mut txn.edits {
-            ok &= edit.redo();
+            if !edit.redo() {
+                ok = false;
+                break;
+            }
         }
+        self.disabled = false;
         self.undo_stack.push(txn);
         ok
+    }
+
+    pub fn undo_n(&mut self, index: usize) -> bool {
+        for _ in 0..=index {
+            if !self.undo() {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn redo_n(&mut self, index: usize) -> bool {
+        for _ in 0..=index {
+            if !self.redo() {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn clear_all_info(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.active = None;
-        self.nesting = 0;
     }
 
     pub fn clear_undo_data(&mut self) {
@@ -210,11 +290,31 @@ impl UndoManager {
             .nth(index)
             .map(|txn| txn.description.as_str())
     }
+
+    pub fn undo_desc_list(&self) -> Vec<&str> {
+        self.undo_stack
+            .iter()
+            .rev()
+            .take_while(|txn| txn.edits.iter().all(|edit| edit.is_undoable()))
+            .map(|txn| txn.description.as_str())
+            .collect()
+    }
+
+    pub fn redo_desc_list(&self) -> Vec<&str> {
+        self.redo_stack
+            .iter()
+            .rev()
+            .take_while(|txn| txn.edits.iter().all(|edit| edit.is_redoable()))
+            .map(|txn| txn.description.as_str())
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     #[derive(Default)]
     struct CountEditInfo {
@@ -231,6 +331,48 @@ mod tests {
         fn redo(&mut self) -> bool {
             self.redo_count += 1;
             true
+        }
+    }
+
+    struct RecordingEditInfo {
+        name: &'static str,
+        calls: Rc<RefCell<Vec<String>>>,
+        undoable: bool,
+        redoable: bool,
+        undo_result: bool,
+        redo_result: bool,
+    }
+
+    impl RecordingEditInfo {
+        fn successful(name: &'static str, calls: Rc<RefCell<Vec<String>>>) -> Self {
+            Self {
+                name,
+                calls,
+                undoable: true,
+                redoable: true,
+                undo_result: true,
+                redo_result: true,
+            }
+        }
+    }
+
+    impl EditInfo for RecordingEditInfo {
+        fn undo(&mut self) -> bool {
+            self.calls.borrow_mut().push(format!("undo:{}", self.name));
+            self.undo_result
+        }
+
+        fn redo(&mut self) -> bool {
+            self.calls.borrow_mut().push(format!("redo:{}", self.name));
+            self.redo_result
+        }
+
+        fn is_undoable(&self) -> bool {
+            self.undoable
+        }
+
+        fn is_redoable(&self) -> bool {
+            self.redoable
         }
     }
 
@@ -278,5 +420,97 @@ mod tests {
         manager.commit_txn();
         assert!(!manager.is_in_txn());
         assert!(manager.is_undoable());
+    }
+
+    #[test]
+    fn nested_rollback_waits_for_the_outer_transaction_and_reverses_edits() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut manager = UndoManager::new();
+        manager.start_txn("outer");
+        manager.add_edit_info(Box::new(RecordingEditInfo::successful(
+            "first",
+            Rc::clone(&calls),
+        )));
+        manager.start_txn("inner");
+        manager.add_edit_info(Box::new(RecordingEditInfo::successful(
+            "second",
+            Rc::clone(&calls),
+        )));
+
+        assert!(manager.rollback_txn());
+        assert!(manager.is_in_txn());
+        assert!(calls.borrow().is_empty());
+        assert!(manager.rollback_txn());
+        assert!(!manager.is_in_txn());
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &["undo:second".to_string(), "undo:first".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_commit_discards_redo_and_clear_preserves_pending_transaction() {
+        let mut manager = UndoManager::new();
+        manager.start_txn("recorded");
+        manager.add_edit_info(Box::new(CountEditInfo::default()));
+        assert!(manager.commit_txn());
+        assert!(manager.undo());
+        assert_eq!(manager.redo_size(), 1);
+
+        manager.start_txn("empty");
+        assert!(manager.commit_txn());
+        assert_eq!(manager.redo_size(), 0);
+
+        manager.start_txn("pending");
+        manager.clear_all_info();
+        assert!(manager.is_in_txn());
+        assert!(manager.commit_txn());
+    }
+
+    #[test]
+    fn multi_step_undo_redo_and_description_lists_follow_stack_order() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut manager = UndoManager::new();
+        for name in ["one", "two"] {
+            manager.start_txn(name);
+            manager.add_edit_info(Box::new(RecordingEditInfo::successful(
+                name,
+                Rc::clone(&calls),
+            )));
+            manager.commit_txn();
+        }
+        assert_eq!(manager.undo_desc_list(), vec!["two", "one"]);
+        assert!(manager.undo_n(1));
+        assert_eq!(manager.redo_desc_list(), vec!["one", "two"]);
+        assert!(manager.redo_n(1));
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[
+                "undo:two".to_string(),
+                "undo:one".to_string(),
+                "redo:one".to_string(),
+                "redo:two".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_edit_stops_transaction_execution_and_reenables_recording() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut manager = UndoManager::new();
+        manager.start_txn("failure");
+        manager.add_edit_info(Box::new(RecordingEditInfo::successful(
+            "skipped",
+            Rc::clone(&calls),
+        )));
+        let mut failing = RecordingEditInfo::successful("failing", Rc::clone(&calls));
+        failing.undo_result = false;
+        manager.add_edit_info(Box::new(failing));
+        manager.commit_txn();
+
+        assert!(!manager.undo());
+        assert_eq!(calls.borrow().as_slice(), &["undo:failing".to_string()]);
+        assert!(!manager.is_disabled());
+        assert_eq!(manager.redo_size(), 1);
     }
 }

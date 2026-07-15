@@ -8,6 +8,7 @@ pub struct LDom2Node {
     contents: String,
     attr_flag: bool,
     default_flag: bool,
+    read_only: bool,
     consumed: bool,
     error_msgs: Vec<String>,
     children: Vec<LDom2Node>,
@@ -74,6 +75,14 @@ impl LDom2Node {
         self.default_flag = value;
     }
 
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    pub fn set_read_only(&mut self, value: bool) {
+        self.read_only = value;
+    }
+
     pub fn is_consumed(&self) -> bool {
         self.consumed
     }
@@ -84,6 +93,10 @@ impl LDom2Node {
 
     pub fn child_count(&self) -> usize {
         self.children.len()
+    }
+
+    pub fn is_leaf(&self) -> bool {
+        self.type_name.is_empty()
     }
 
     pub fn append_child(&mut self, tag_name: impl Into<String>) -> &mut LDom2Node {
@@ -163,6 +176,10 @@ impl LDom2Node {
     pub fn children(&self) -> &[LDom2Node] {
         &self.children
     }
+
+    pub fn children_mut(&mut self) -> &mut [LDom2Node] {
+        &mut self.children
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +213,12 @@ impl LDom2Tree {
     }
 }
 
+impl From<LDom2Node> for LDom2Tree {
+    fn from(top: LDom2Node) -> Self {
+        Self { top }
+    }
+}
+
 pub fn write_ldom2_xml(tree: &LDom2Tree) -> String {
     let mut output = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
     write_node(&mut output, tree.top(), 0);
@@ -212,20 +235,28 @@ fn write_node(output: &mut String, node: &LDom2Node, indent: usize) {
     output.push('<');
     output.push_str(node.tag_name());
 
-    let type_attr = node.str_attr("type").to_string();
-    let type_value = if !node.type_name().is_empty() {
-        node.type_name()
-    } else {
-        &type_attr
-    };
-    if !type_value.is_empty() {
-        write_attr(output, "type", type_value);
+    let permit_user_type_attr = node.is_read_only() && node.child_count() != 0;
+    if !permit_user_type_attr {
+        let type_attr = node.str_attr("type").to_string();
+        let type_value = if !node.type_name().is_empty() {
+            node.type_name()
+        } else {
+            &type_attr
+        };
+        if !type_value.is_empty() {
+            write_attr(output, "type", type_value);
+        }
     }
     if !node.value().is_empty() {
         write_attr(output, "value", node.value());
     }
     for child in node.children().iter().filter(|child| child.is_attr()) {
-        if child.tag_name() != "type" && child.tag_name() != "id" && !child.value().is_empty() {
+        if child.is_default() || child.is_read_only() {
+            continue;
+        }
+        let reserved =
+            child.tag_name() == "id" || (!permit_user_type_attr && child.tag_name() == "type");
+        if !reserved {
             write_attr(output, child.tag_name(), child.value());
         }
     }
@@ -233,7 +264,14 @@ fn write_node(output: &mut String, node: &LDom2Node, indent: usize) {
     let element_children = node
         .children()
         .iter()
-        .filter(|child| !child.is_attr() && !child.is_default())
+        .filter(|child| {
+            !child.is_attr()
+                && if child.is_read_only() {
+                    has_modified_nodes(child)
+                } else {
+                    !child.is_default()
+                }
+        })
         .collect::<Vec<_>>();
 
     if element_children.is_empty() && node.contents().is_empty() {
@@ -258,6 +296,13 @@ fn write_node(output: &mut String, node: &LDom2Node, indent: usize) {
     output.push_str("</");
     output.push_str(node.tag_name());
     output.push('>');
+}
+
+fn has_modified_nodes(node: &LDom2Node) -> bool {
+    if node.children().is_empty() {
+        return !node.is_read_only() && !node.is_default();
+    }
+    node.children().iter().any(has_modified_nodes)
 }
 
 fn write_attr(output: &mut String, name: &str, value: &str) {

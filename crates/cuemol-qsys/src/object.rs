@@ -1,11 +1,14 @@
-use crate::Renderer;
-use cuemol_core::Uid;
+use crate::{ObjectEvent, Renderer, SceneEvent, ScrEventManagerHandle};
+use cuemol_core::{EventCaster, SharedEventListener, Uid, UidGenerator};
 use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneObject<T> {
     uid: Uid,
     scene_uid: Option<Uid>,
+    class_name: String,
     name: String,
     visible: bool,
     ui_locked: bool,
@@ -17,7 +20,10 @@ pub struct SceneObject<T> {
     xform_matrix: cuemol_core::Matrix4,
     ui_order: i32,
     renderers: BTreeMap<Uid, Renderer>,
-    next_renderer_uid: u64,
+    uid_generator: UidGenerator,
+    event_caster: Arc<EventCaster<ObjectEvent>>,
+    scene_event_caster: Option<Arc<EventCaster<SceneEvent>>>,
+    event_manager: Option<ScrEventManagerHandle>,
     data: T,
 }
 
@@ -26,6 +32,7 @@ impl<T> SceneObject<T> {
         Self {
             uid,
             scene_uid: None,
+            class_name: "Object".to_string(),
             name: String::new(),
             visible: true,
             ui_locked: false,
@@ -37,7 +44,10 @@ impl<T> SceneObject<T> {
             xform_matrix: cuemol_core::Matrix4::IDENTITY,
             ui_order: uid.get() as i32,
             renderers: BTreeMap::new(),
-            next_renderer_uid: 1,
+            uid_generator: UidGenerator::starting_after(uid.get()),
+            event_caster: Arc::new(EventCaster::new()),
+            scene_event_caster: None,
+            event_manager: None,
             data,
         }
     }
@@ -62,6 +72,10 @@ impl<T> SceneObject<T> {
         self.scene_uid()
     }
 
+    pub fn get_scene(&self) -> Option<Uid> {
+        self.scene_uid()
+    }
+
     pub fn set_scene_uid(&mut self, scene_uid: Option<Uid>) {
         self.scene_uid = scene_uid;
         for renderer in self.renderers.values_mut() {
@@ -69,12 +83,44 @@ impl<T> SceneObject<T> {
         }
     }
 
+    pub fn class_name(&self) -> &str {
+        &self.class_name
+    }
+
+    pub fn set_class_name(&mut self, class_name: impl Into<String>) {
+        self.class_name = class_name.into();
+    }
+
+    pub(crate) fn attach_scene_event_caster(&mut self, caster: Arc<EventCaster<SceneEvent>>) {
+        self.scene_event_caster = Some(caster);
+    }
+
+    pub(crate) fn attach_event_manager(&mut self, manager: ScrEventManagerHandle) {
+        self.event_manager = Some(manager.clone());
+        for renderer in self.renderers.values_mut() {
+            renderer.attach_event_manager(manager.clone());
+        }
+    }
+
+    pub(crate) fn attach_uid_generator(&mut self, generator: UidGenerator) {
+        generator.ensure_after(self.uid);
+        for uid in self.renderers.keys() {
+            generator.ensure_after(*uid);
+        }
+        self.uid_generator = generator;
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    pub fn get_name(&self) -> &str {
+        self.name()
+    }
+
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
+        self.fire_property_changed("name");
     }
 
     pub fn is_visible(&self) -> bool {
@@ -87,6 +133,7 @@ impl<T> SceneObject<T> {
 
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
+        self.fire_property_changed("visible");
     }
 
     pub fn is_ui_locked(&self) -> bool {
@@ -99,6 +146,7 @@ impl<T> SceneObject<T> {
 
     pub fn set_ui_locked(&mut self, locked: bool) {
         self.ui_locked = locked;
+        self.fire_property_changed("locked");
     }
 
     pub fn is_ui_collapsed(&self) -> bool {
@@ -111,10 +159,15 @@ impl<T> SceneObject<T> {
 
     pub fn set_ui_collapsed(&mut self, collapsed: bool) {
         self.ui_collapsed = collapsed;
+        self.fire_property_changed("ui_collapsed");
     }
 
     pub fn modified(&self) -> bool {
         self.modified
+    }
+
+    pub fn get_modified_flag(&self) -> bool {
+        self.modified()
     }
 
     pub fn set_modified(&mut self, modified: bool) {
@@ -125,20 +178,34 @@ impl<T> SceneObject<T> {
         &self.source
     }
 
+    pub fn get_source(&self) -> &str {
+        self.source()
+    }
+
     pub fn set_source(&mut self, source: impl Into<String>) {
         self.source = source.into();
+        self.fire_property_changed("src");
     }
 
     pub fn source_type(&self) -> &str {
         &self.source_type
     }
 
+    pub fn get_source_type(&self) -> &str {
+        self.source_type()
+    }
+
     pub fn set_source_type(&mut self, source_type: impl Into<String>) {
         self.source_type = source_type.into();
+        self.fire_property_changed("srctype");
     }
 
     pub fn alt_source(&self) -> &str {
         &self.alt_source
+    }
+
+    pub fn get_alt_source(&self) -> &str {
+        self.alt_source()
     }
 
     pub fn alt_src(&self) -> &str {
@@ -147,6 +214,7 @@ impl<T> SceneObject<T> {
 
     pub fn set_alt_source(&mut self, value: impl Into<String>) {
         self.alt_source = value.into();
+        self.fire_property_changed("alt_src");
     }
 
     pub fn set_alt_src(&mut self, value: impl Into<String>) {
@@ -157,12 +225,17 @@ impl<T> SceneObject<T> {
         self.xform_matrix
     }
 
+    pub fn get_xform_matrix(&self) -> cuemol_core::Matrix4 {
+        self.xform_matrix()
+    }
+
     pub fn xform_mat(&self) -> cuemol_core::Matrix4 {
         self.xform_matrix()
     }
 
     pub fn set_xform_matrix(&mut self, value: cuemol_core::Matrix4) {
         self.xform_matrix = value;
+        self.fire_property_changed("xformMat");
     }
 
     pub fn set_xform_mat(&mut self, value: cuemol_core::Matrix4) {
@@ -173,17 +246,28 @@ impl<T> SceneObject<T> {
         self.ui_order
     }
 
+    pub fn get_ui_order(&self) -> i32 {
+        self.ui_order()
+    }
+
     pub fn set_ui_order(&mut self, value: i32) {
         self.ui_order = value;
+        self.fire_property_changed("ui_order");
     }
 
     pub fn create_renderer(&mut self, type_name: impl Into<String>) -> Uid {
-        let uid = Uid::new(self.next_renderer_uid);
-        self.next_renderer_uid += 1;
+        let uid = self.uid_generator.next_uid();
         let mut renderer = Renderer::with_uid(type_name, uid);
         renderer.set_client_obj_uid(self.uid);
         renderer.set_scene_uid(self.scene_uid.unwrap_or(Uid::new(0)));
+        if let Some(caster) = self.scene_event_caster.as_ref() {
+            renderer.attach_scene_event_caster(Arc::clone(caster));
+        }
+        if let Some(manager) = self.event_manager.as_ref() {
+            renderer.attach_event_manager(manager.clone());
+        }
         self.renderers.insert(uid, renderer);
+        self.fire_renderer_scene_event(SceneEvent::SCE_REND_ADDED, uid);
         uid
     }
 
@@ -206,9 +290,17 @@ impl<T> SceneObject<T> {
         if self.renderers.contains_key(&uid) {
             return false;
         }
+        self.uid_generator.ensure_after(uid);
         renderer.set_client_obj_uid(self.uid);
         renderer.set_scene_uid(self.scene_uid.unwrap_or(Uid::new(0)));
+        if let Some(caster) = self.scene_event_caster.as_ref() {
+            renderer.attach_scene_event_caster(Arc::clone(caster));
+        }
+        if let Some(manager) = self.event_manager.as_ref() {
+            renderer.attach_event_manager(manager.clone());
+        }
         self.renderers.insert(uid, renderer);
+        self.fire_renderer_scene_event(SceneEvent::SCE_REND_ADDED, uid);
         true
     }
 
@@ -259,6 +351,10 @@ impl<T> SceneObject<T> {
     }
 
     pub fn destroy_renderer(&mut self, uid: Uid) -> bool {
+        if !self.renderers.contains_key(&uid) {
+            return false;
+        }
+        self.fire_renderer_scene_event(SceneEvent::SCE_REND_REMOVING, uid);
         self.renderers.remove(&uid).is_some()
     }
 
@@ -271,7 +367,7 @@ impl<T> SceneObject<T> {
     }
 
     pub fn renderer_by_index(&self, index: usize) -> Option<&Renderer> {
-        self.renderers.values().nth(index)
+        self.sorted_renderers().get(index).copied()
     }
 
     pub fn get_renderer_by_index(&self, index: usize) -> Option<&Renderer> {
@@ -279,7 +375,13 @@ impl<T> SceneObject<T> {
     }
 
     pub fn renderer_uids(&self) -> Vec<Uid> {
-        self.renderers.keys().copied().collect()
+        let mut renderers = self.renderers.values().collect::<Vec<_>>();
+        renderers.sort_by_key(|renderer| (renderer.ui_order(), renderer.uid()));
+        renderers.into_iter().map(crate::Renderer::uid).collect()
+    }
+
+    pub fn get_rend_array(&self) -> Vec<&Renderer> {
+        self.sorted_renderers()
     }
 
     pub fn rend_uid_list(&self) -> String {
@@ -292,6 +394,60 @@ impl<T> SceneObject<T> {
 
     pub fn rend_uids(&self) -> String {
         self.rend_uid_list()
+    }
+
+    pub fn get_rend_uid_list(&self) -> String {
+        self.rend_uid_list()
+    }
+
+    pub fn flat_renderer_list_json(&self) -> String {
+        let entries = self
+            .sorted_renderers()
+            .into_iter()
+            .filter(|renderer| renderer.type_name() != "*group")
+            .map(renderer_data_json)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{entries}]")
+    }
+
+    pub fn get_flat_rend_list_json(&self) -> String {
+        self.flat_renderer_list_json()
+    }
+
+    pub fn grouped_renderer_list_json(&self) -> String {
+        let entries = self
+            .sorted_renderers()
+            .into_iter()
+            .filter(|renderer| renderer.group_name().is_empty())
+            .map(|renderer| {
+                let mut json = renderer_data_json(renderer);
+                if renderer.type_name() == "*group" {
+                    let children = self
+                        .sorted_renderers()
+                        .into_iter()
+                        .filter(|child| child.group_name() == renderer.name())
+                        .map(renderer_data_json)
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    json.pop();
+                    json.push_str(&format!(",\"childNodes\":[{children}]}}"));
+                }
+                json
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{entries}]")
+    }
+
+    pub fn get_grouped_rend_list_json(&self) -> String {
+        self.grouped_renderer_list_json()
+    }
+
+    fn sorted_renderers(&self) -> Vec<&Renderer> {
+        let mut renderers = self.renderers.values().collect::<Vec<_>>();
+        renderers.sort_by_key(|renderer| (renderer.ui_order(), renderer.uid()));
+        renderers
     }
 
     pub fn search_compatible_renderer_names(&self) -> String {
@@ -309,6 +465,7 @@ impl<T> SceneObject<T> {
     pub fn force_embed(&mut self) {
         self.source = format!("datachunk:{}", self.uid.get());
         self.alt_source.clear();
+        self.fire_property_changed("src");
     }
 
     pub fn data(&self) -> &T {
@@ -318,11 +475,82 @@ impl<T> SceneObject<T> {
     pub fn data_mut(&mut self) -> &mut T {
         &mut self.data
     }
+
+    pub fn add_listener(&self, listener: SharedEventListener<ObjectEvent>) -> i32 {
+        self.event_caster.add(listener).map_or(-1, |id| id as i32)
+    }
+
+    pub fn remove_listener(&self, id: i32) -> bool {
+        id >= 0 && self.event_caster.remove(id as u64).is_some()
+    }
+
+    pub fn fire_object_event(&self, event: &mut ObjectEvent) {
+        event.set_source(self.scene_uid.map_or(0, Uid::get));
+        self.event_caster.replica_fire(event);
+        if let Some(manager) = self.event_manager.as_ref() {
+            let _ = manager.with(|manager| manager.fire_object_event(event));
+        }
+    }
+
+    fn fire_property_changed(&self, property_name: &str) {
+        let mut event = ObjectEvent::new();
+        event.set_event_type(ObjectEvent::OBE_PROPCHG);
+        event.set_target(self.uid.get());
+        event.set_descr(property_name);
+        self.fire_object_event(&mut event);
+    }
+
+    fn fire_renderer_scene_event(&self, event_type: i32, renderer_uid: Uid) {
+        let Some(caster) = self.scene_event_caster.as_ref() else {
+            return;
+        };
+        let mut event = SceneEvent::new();
+        event.set_event_type(event_type);
+        event.set_source(self.scene_uid.map_or(0, Uid::get));
+        event.set_target(renderer_uid.get());
+        caster.replica_fire(&mut event);
+    }
+}
+
+impl<T> fmt::Display for SceneObject<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Object(name={}, UID={})", self.name, self.uid.get())
+    }
+}
+
+fn renderer_data_json(renderer: &Renderer) -> String {
+    let prefix = format!(
+        "{{\"name\":\"{}\",\"type\":\"{}\",\"ui_order\":{},\"visible\":{},\"locked\":{}",
+        escape_json(renderer.name()),
+        escape_json(renderer.type_name()),
+        renderer.ui_order(),
+        renderer.is_visible(),
+        renderer.is_ui_locked()
+    );
+    if renderer.type_name() == "*group" {
+        format!(
+            "{prefix},\"ui_collapsed\":false,\"ID\":{}}}",
+            renderer.uid().get()
+        )
+    } else {
+        format!("{prefix},\"ID\":{}}}", renderer.uid().get())
+    }
+}
+
+fn escape_json(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuemol_core::shared_event_listener;
+    use std::sync::Mutex;
 
     #[test]
     fn object_defaults_match_qsys_reference() {
@@ -333,6 +561,7 @@ mod tests {
         assert!(!object.is_ui_locked());
         assert!(!object.modified());
         assert!(!object.is_ui_collapsed());
+        assert_eq!(object.class_name(), "Object");
         assert_eq!(object.name(), "");
         assert_eq!(object.source(), "");
     }
@@ -344,5 +573,59 @@ mod tests {
         object.force_embed();
         assert!(object.source().starts_with("datachunk:"));
         assert_eq!(object.alt_source(), "");
+    }
+
+    #[test]
+    fn object_property_events_include_object_target_and_scene_source() {
+        let mut object = SceneObject::new(Uid::new(7), ());
+        object.set_scene_uid(Some(Uid::new(3)));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        let id = object.add_listener(shared_event_listener(move |event: &mut ObjectEvent| {
+            listener_events.lock().unwrap().push(event.clone());
+        }));
+
+        object.set_name("object");
+        object.set_visible(false);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|event| event.event_type() == ObjectEvent::OBE_PROPCHG));
+        assert!(events.iter().all(|event| event.target() == 7));
+        assert!(events.iter().all(|event| event.source() == 3));
+        assert_eq!(events[0].descr(), "name");
+        assert_eq!(events[1].descr(), "visible");
+        drop(events);
+        assert!(object.remove_listener(id));
+    }
+
+    #[test]
+    fn renderer_list_json_supports_flat_and_grouped_reference_shapes() {
+        let mut object = SceneObject::new(Uid::new(1), ());
+        let mut group = Renderer::with_uid("*group", Uid::new(2));
+        group.set_name("grp");
+        group.set_ui_order(10);
+        assert!(object.attach_renderer(group));
+
+        let mut child = Renderer::with_uid("simple", Uid::new(3));
+        child.set_name("child");
+        child.set_group_name("grp");
+        child.set_ui_order(20);
+        assert!(object.attach_renderer(child));
+
+        let mut standalone = Renderer::with_uid("cpk", Uid::new(4));
+        standalone.set_name("solo");
+        standalone.set_ui_order(5);
+        assert!(object.attach_renderer(standalone));
+
+        let flat = object.get_flat_rend_list_json();
+        assert!(!flat.contains("*group"));
+        assert!(flat.find("solo").unwrap() < flat.find("child").unwrap());
+        let grouped = object.get_grouped_rend_list_json();
+        assert!(grouped.contains("\"type\":\"*group\""));
+        assert!(grouped.contains("\"childNodes\":[{\"name\":\"child\""));
+        assert_eq!(object.rend_uids(), "4,2,3");
+        assert_eq!(object.get_renderer_by_index(0).unwrap().name(), "solo");
     }
 }

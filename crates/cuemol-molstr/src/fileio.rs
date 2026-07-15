@@ -5,12 +5,12 @@ use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
-pub(crate) fn read_text_maybe_compressed(path: impl AsRef<Path>) -> Result<String> {
+pub fn read_text_maybe_compressed(path: impl AsRef<Path>) -> Result<String> {
     let bytes = read_bytes_maybe_compressed(path)?;
     String::from_utf8(bytes).map_err(|err| CueMolError::parse(format!("invalid UTF-8 text: {err}")))
 }
 
-pub(crate) fn read_bytes_maybe_compressed(path: impl AsRef<Path>) -> Result<Vec<u8>> {
+pub fn read_bytes_maybe_compressed(path: impl AsRef<Path>) -> Result<Vec<u8>> {
     let path = path.as_ref();
     match detect_compression(path)? {
         CompressionEncoding::Raw => Ok(fs::read(path)?),

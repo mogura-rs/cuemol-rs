@@ -53,8 +53,16 @@ impl InOutHandler {
         &self.name
     }
 
+    pub fn get_name(&self) -> &str {
+        self.name()
+    }
+
     pub fn type_descr(&self) -> &str {
         &self.type_descr
+    }
+
+    pub fn get_type_descr(&self) -> &str {
+        self.type_descr()
     }
 
     pub fn typedescr(&self) -> &str {
@@ -63,6 +71,10 @@ impl InOutHandler {
 
     pub fn file_ext(&self) -> &str {
         &self.file_ext
+    }
+
+    pub fn get_file_ext(&self) -> &str {
+        self.file_ext()
     }
 
     pub fn fileext(&self) -> &str {
@@ -149,12 +161,20 @@ impl InOutHandler {
         self.compress_mode
     }
 
+    pub fn get_compress_mode(&self) -> i32 {
+        self.compress_mode()
+    }
+
     pub fn set_compress_mode(&mut self, value: i32) {
         self.compress_mode = value;
     }
 
     pub fn base64_flag(&self) -> bool {
         self.base64
+    }
+
+    pub fn get_base64_flag(&self) -> bool {
+        self.base64_flag()
     }
 
     pub fn base64(&self) -> bool {

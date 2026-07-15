@@ -204,7 +204,11 @@ pub fn add_concave_patch(
     ndiv: usize,
 ) {
     let ndiv = ndiv.max(1);
-    let dir = |a: Vector4| (a - probe).normalize3d().unwrap_or(Vector4::new3(0.0, 0.0, 1.0));
+    let dir = |a: Vector4| {
+        (a - probe)
+            .normalize3d()
+            .unwrap_or(Vector4::new3(0.0, 0.0, 1.0))
+    };
     let (d_i, d_j, d_k) = (dir(a_i), dir(a_j), dir(a_k));
 
     // Triangular grid of barycentric points (a·d_i + b·d_j + c·d_k, a+b+c=ndiv),
@@ -274,7 +278,9 @@ pub fn accessible_concave_probes_with_atoms(
 pub fn build_concave_patches(atoms: &[(Vector4, f64)], r_p: f64, ndiv: usize) -> SurfaceMesh {
     let mut mesh = SurfaceMesh::new();
     for (probe, [i, j, k]) in accessible_concave_probes_with_atoms(atoms, r_p) {
-        add_concave_patch(&mut mesh, probe, r_p, atoms[i].0, atoms[j].0, atoms[k].0, ndiv);
+        add_concave_patch(
+            &mut mesh, probe, r_p, atoms[i].0, atoms[j].0, atoms[k].0, ndiv,
+        );
     }
     mesh
 }
@@ -322,7 +328,12 @@ pub fn add_convex_cap(
     for i in 0..stacks {
         for j in 0..slices {
             // A quad's two triangles are emitted only where all corners are exposed.
-            let (a, b, c, d) = (grid[i][j], grid[i][j + 1], grid[i + 1][j], grid[i + 1][j + 1]);
+            let (a, b, c, d) = (
+                grid[i][j],
+                grid[i][j + 1],
+                grid[i + 1][j],
+                grid[i + 1][j + 1],
+            );
             if let (Some(a), Some(b), Some(c)) = (a, b, c) {
                 mesh.push_triangle([a, c, b]);
             }
@@ -335,7 +346,12 @@ pub fn add_convex_cap(
 
 /// Build the convex component of the analytic SES — every atom's exposed van der
 /// Waals cap.
-pub fn build_convex_caps(atoms: &[(Vector4, f64)], r_p: f64, stacks: usize, slices: usize) -> SurfaceMesh {
+pub fn build_convex_caps(
+    atoms: &[(Vector4, f64)],
+    r_p: f64,
+    stacks: usize,
+    slices: usize,
+) -> SurfaceMesh {
     let mut mesh = SurfaceMesh::new();
     for idx in 0..atoms.len() {
         add_convex_cap(&mut mesh, atoms, idx, r_p, stacks, slices);
@@ -382,8 +398,14 @@ pub fn add_saddle_torus(
     } else {
         Vector4::new3(0.0, 1.0, 0.0)
     };
-    let e1 = axis.cross(seed).normalize3d().unwrap_or(Vector4::new3(0.0, 1.0, 0.0));
-    let e2 = axis.cross(e1).normalize3d().unwrap_or(Vector4::new3(0.0, 0.0, 1.0));
+    let e1 = axis
+        .cross(seed)
+        .normalize3d()
+        .unwrap_or(Vector4::new3(0.0, 1.0, 0.0));
+    let e2 = axis
+        .cross(e1)
+        .normalize3d()
+        .unwrap_or(Vector4::new3(0.0, 0.0, 1.0));
 
     let n_theta = n_theta.max(3);
     let n_t = n_t.max(1);
@@ -441,7 +463,9 @@ pub fn build_analytic_ses(atoms: &[(Vector4, f64)], r_p: f64, detail: usize) -> 
         }
     }
     for (probe, [i, j, k]) in accessible_concave_probes_with_atoms(atoms, r_p) {
-        add_concave_patch(&mut mesh, probe, r_p, atoms[i].0, atoms[j].0, atoms[k].0, detail);
+        add_concave_patch(
+            &mut mesh, probe, r_p, atoms[i].0, atoms[j].0, atoms[k].0, detail,
+        );
     }
     mesh
 }
@@ -502,9 +526,18 @@ mod tests {
 
         // Both probe positions touch all three atoms (distance = r_atom + r_p).
         for probe in [c.probe_plus, c.probe_minus] {
-            assert!(((probe - a_i).length3d() - (r_i + r_p)).abs() < 1e-7, "touch i");
-            assert!(((probe - a_j).length3d() - (r_j + r_p)).abs() < 1e-7, "touch j");
-            assert!(((probe - a_k).length3d() - (r_k + r_p)).abs() < 1e-7, "touch k");
+            assert!(
+                ((probe - a_i).length3d() - (r_i + r_p)).abs() < 1e-7,
+                "touch i"
+            );
+            assert!(
+                ((probe - a_j).length3d() - (r_j + r_p)).abs() < 1e-7,
+                "touch j"
+            );
+            assert!(
+                ((probe - a_k).length3d() - (r_k + r_p)).abs() < 1e-7,
+                "touch k"
+            );
         }
         // The two positions are mirror images across the atom plane (z = 0 here).
         assert!((c.probe_plus.z + c.probe_minus.z).abs() < 1e-9);
@@ -532,7 +565,11 @@ mod tests {
         // A probe touching its three atoms is accessible; an atom sitting on it
         // buries it (overlaps the probe sphere).
         assert!(probe_is_accessible(c.probe_plus, &atoms, r_p));
-        assert!(!probe_is_accessible(c.probe_plus, &[(c.probe_plus, 0.5)], r_p));
+        assert!(!probe_is_accessible(
+            c.probe_plus,
+            &[(c.probe_plus, 0.5)],
+            r_p
+        ));
 
         // Burying the +z probe with a 4th atom removes it from the surface set.
         let mut buried = atoms.clone();
@@ -567,7 +604,10 @@ mod tests {
             );
             // The patch is concave: its outward normal points back toward the probe.
             let to_probe = (probe - vtx.position).normalize3d().unwrap();
-            assert!(vtx.normal.dot3d(to_probe) > 0.999, "inward (concave) normal");
+            assert!(
+                vtx.normal.dot3d(to_probe) > 0.999,
+                "inward (concave) normal"
+            );
         }
         // The whole-molecule build covers both probe patches.
         let full = build_concave_patches(&atoms, r_p, 4);
@@ -582,7 +622,10 @@ mod tests {
         let mut mesh = SurfaceMesh::new();
         add_convex_cap(&mut mesh, &solo, 0, r_p, 12, 16);
         for vtx in mesh.vertices() {
-            assert!((vtx.position.length3d() - 1.6).abs() < 1e-9, "on the vdW sphere");
+            assert!(
+                (vtx.position.length3d() - 1.6).abs() < 1e-9,
+                "on the vdW sphere"
+            );
             let outward = vtx.position.normalize3d().unwrap();
             assert!(vtx.normal.dot3d(outward) > 0.999, "outward (convex) normal");
         }
@@ -593,7 +636,10 @@ mod tests {
         let pair = [(v(0.0, 0.0, 0.0), 1.6), (v(2.0, 0.0, 0.0), 1.6)];
         let caps = build_convex_caps(&pair, r_p, 12, 16);
         assert!(caps.triangle_count() < 2 * full, "facing caps are clipped");
-        assert!(caps.triangle_count() > full, "but most of each sphere survives");
+        assert!(
+            caps.triangle_count() > full,
+            "but most of each sphere survives"
+        );
     }
 
     #[test]

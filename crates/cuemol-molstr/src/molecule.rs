@@ -1,5 +1,7 @@
 use crate::selection::Selector;
+use crate::SolidColoring;
 use cuemol_core::{ByteArray, CueMolError, Matrix4, Result, Vector4};
+use cuemol_gfx::SolidColor;
 use cuemol_qsys::View;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -126,13 +128,22 @@ pub struct ChainSummary {
     pub residue_keys: Vec<ResidueKey>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MolCoord {
     atoms: Vec<Atom>,
     bonds: Vec<Bond>,
     residue_props: BTreeMap<ResidueKey, BTreeMap<String, String>>,
+    selection: Selector,
+    coloring: SolidColoring,
+    default_color: SolidColor,
     atoms_moved_generation: usize,
     cell_params: Option<cuemol_core::CellParams>,
+}
+
+impl Default for MolCoord {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MolCoord {
@@ -141,6 +152,9 @@ impl MolCoord {
             atoms: Vec::new(),
             bonds: Vec::new(),
             residue_props: BTreeMap::new(),
+            selection: Selector::All,
+            coloring: SolidColoring::new(),
+            default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
             atoms_moved_generation: 0,
             cell_params: None,
         }
@@ -151,9 +165,48 @@ impl MolCoord {
             atoms,
             bonds: Vec::new(),
             residue_props: BTreeMap::new(),
+            selection: Selector::All,
+            coloring: SolidColoring::new(),
+            default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
             atoms_moved_generation: 0,
             cell_params: None,
         }
+    }
+
+    pub fn selection(&self) -> &Selector {
+        &self.selection
+    }
+
+    pub fn get_selection(&self) -> &Selector {
+        self.selection()
+    }
+
+    pub fn coloring(&self) -> &SolidColoring {
+        &self.coloring
+    }
+
+    pub fn get_col_schm(&self) -> &SolidColoring {
+        self.coloring()
+    }
+
+    pub fn set_col_schm(&mut self, value: SolidColoring) {
+        self.coloring = value;
+    }
+
+    pub fn default_color(&self) -> &SolidColor {
+        &self.default_color
+    }
+
+    pub fn get_default_color(&self) -> &SolidColor {
+        self.default_color()
+    }
+
+    pub fn set_default_color(&mut self, value: SolidColor) {
+        self.default_color = value;
+    }
+
+    pub fn set_selection(&mut self, selection: Selector) {
+        self.selection = selection;
     }
 
     /// Crystallographic unit-cell parameters (from PDB CRYST1 or mmCIF
@@ -570,10 +623,7 @@ impl MolCoord {
 
     /// Replace the entire residue-property table (used to restore a snapshot, e.g.
     /// for undo of a secondary-structure edit).
-    pub fn set_all_residue_props(
-        &mut self,
-        props: BTreeMap<ResidueKey, BTreeMap<String, String>>,
-    ) {
+    pub fn set_all_residue_props(&mut self, props: BTreeMap<ResidueKey, BTreeMap<String, String>>) {
         self.residue_props = props;
     }
 
@@ -591,6 +641,10 @@ impl MolCoord {
         crate::prot2ndry::calc_prot_2ndry2(self, ignore_bulge, dhangl);
     }
 
+    pub fn calc_prot2ndry2(&mut self, ignore_bulge: bool, dhangl: f64) {
+        self.calc_prot_2ndry2(ignore_bulge, dhangl);
+    }
+
     pub fn center_pos(&self, selector: Option<&Selector>) -> Option<Vector4> {
         let indices = selected_or_all_indices(self, selector);
         if indices.is_empty() {
@@ -604,7 +658,7 @@ impl MolCoord {
     }
 
     pub fn get_center_pos(&self, selected: bool) -> Option<Vector4> {
-        let selector = selected.then_some(&Selector::All);
+        let selector = selected.then_some(&self.selection);
         self.center_pos(selector)
     }
 
@@ -613,7 +667,7 @@ impl MolCoord {
     }
 
     pub fn get_bound_box_min(&self, selected: bool) -> Option<Vector4> {
-        let selector = selected.then_some(&Selector::All);
+        let selector = selected.then_some(&self.selection);
         self.bound_box_min(selector)
     }
 
@@ -622,7 +676,7 @@ impl MolCoord {
     }
 
     pub fn get_bound_box_max(&self, selected: bool) -> Option<Vector4> {
-        let selector = selected.then_some(&Selector::All);
+        let selector = selected.then_some(&self.selection);
         self.bound_box_max(selector)
     }
 
@@ -635,19 +689,51 @@ impl MolCoord {
     }
 
     pub fn fit_view(&self, view: &mut View, selected: bool) -> bool {
-        let selector = selected.then_some(&Selector::All);
+        let selector = selected.then_some(&self.selection);
         self.fit_view2(view, selector)
     }
 
     pub fn fit_view2(&self, view: &mut View, selector: Option<&Selector>) -> bool {
-        let Some(center) = self.center_pos(selector) else {
+        let indices = selected_or_all_indices(self, selector);
+        let Some(first) = indices.first().copied() else {
             return false;
         };
-        view.set_view_center(center);
-        if let Some((min, max)) = self.bounding_box_for(selector) {
-            let span = (max - min).length3d().max(1.0);
-            view.set_zoom((100.0 / span).clamp(1.0, 1000.0));
+        let rotation = Matrix4::make_rot_mat(view.rot_quat());
+        let inverse = rotation.invert().unwrap_or(Matrix4::IDENTITY);
+        let mut min = rotation.mul_vec(self.atoms[first].position);
+        let mut max = min;
+        for index in indices.into_iter().skip(1) {
+            let position = rotation.mul_vec(self.atoms[index].position);
+            min.x = min.x.min(position.x);
+            min.y = min.y.min(position.y);
+            min.z = min.z.min(position.z);
+            max.x = max.x.max(position.x);
+            max.y = max.y.max(position.y);
+            max.z = max.z.max(position.z);
         }
+        let margin = (max - min).scale(0.2);
+        min = min - margin;
+        max = max + margin;
+
+        view.set_view_center(inverse.mul_vec((min + max).scale(0.5)));
+        let frame_aspect = if view.width() > 0 && view.height() > 0 {
+            f64::from(view.width()) / f64::from(view.height())
+        } else {
+            1.0
+        };
+        let map_width = max.x - min.x;
+        let map_height = max.y - min.y;
+        let map_aspect = if map_height > 0.0 {
+            map_width / map_height
+        } else {
+            f64::INFINITY
+        };
+        view.set_zoom(if map_aspect > frame_aspect {
+            map_width / frame_aspect
+        } else {
+            map_height
+        });
+        view.set_slab_depth(max.z - min.z);
         true
     }
 
@@ -773,6 +859,11 @@ impl MolCoord {
         selected.len()
     }
 
+    pub fn delete_atoms(&mut self, selector: &Selector) -> bool {
+        self.delete_selected_atoms(selector);
+        true
+    }
+
     pub fn copy_selected_atoms_from(
         &mut self,
         source: &MolCoord,
@@ -826,6 +917,10 @@ impl MolCoord {
         }
 
         Ok(selected.len())
+    }
+
+    pub fn copy_atoms(&mut self, source: &MolCoord, selector: &Selector) -> bool {
+        self.copy_selected_atoms_from(source, selector).is_ok()
     }
 
     pub fn crd_array(&self) -> ByteArray {
@@ -1224,6 +1319,27 @@ mod tests {
         assert_eq!(mol.atoms_moved_generation(), 0);
         mol.fire_atoms_moved();
         assert_eq!(mol.atoms_moved_generation(), 1);
+    }
+
+    #[test]
+    fn molcoord_fit_view_matches_rotated_bounding_box_contract() {
+        let mut first = atom(1, "A", 1, "N", 0.0);
+        first.position = Vector4::new3(0.0, 0.0, 0.0);
+        let mut second = atom(2, "A", 1, "CA", 30.0);
+        second.position = Vector4::new3(30.0, 10.0, 40.0);
+        let mut mol = MolCoord::with_atoms(vec![first, second]);
+        mol.set_selection(parse_selector("name CA").unwrap());
+        assert_eq!(
+            mol.get_center_pos(true),
+            Some(Vector4::new3(30.0, 10.0, 40.0))
+        );
+
+        let mut view = View::new(cuemol_core::Uid::new(1), cuemol_core::Uid::new(2));
+        view.set_view_size(200, 100);
+        assert!(mol.fit_view(&mut view, false));
+        assert_eq!(view.view_center(), Vector4::new3(15.0, 5.0, 20.0));
+        assert!((view.zoom() - 21.0).abs() < 1.0e-12);
+        assert!((view.slab_depth() - 56.0).abs() < 1.0e-12);
     }
 
     #[test]

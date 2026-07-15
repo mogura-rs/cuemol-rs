@@ -14,14 +14,54 @@ pub mod qdf;
 pub use grid_surface::{build_grid_isosurface, ScalarField, SurfSphere};
 pub use msms::{read_msms_surface_files, read_msms_surface_str, sniff_msms_content, MsmsReader};
 pub use obj::{read_obj_file, read_obj_str};
-pub use ply::{read_ply_file, read_ply_str};
+pub use ply::{read_ply_bytes, read_ply_file, read_ply_str};
 pub use qdf::{QdfPotReader, QdfPotWriter, QdfSurfReader, QdfSurfWriter};
 
 pub type MS2TestRenderer = Ms2TestRenderer;
 pub type MSMSFileReader = MsmsFileReader;
 pub type OpenDXPotReader = OpenDxPotReader;
+pub type PLYFileReader = PlyFileReader;
 pub type PQRFileWriter = PqrFileWriter;
 pub type XYZRFileWriter = XyzrFileWriter;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlyFileReader {
+    reader: ObjReader,
+}
+
+impl PlyFileReader {
+    pub fn new() -> Self {
+        Self {
+            reader: ObjReader::new("ply", "PLY polygon file (*.ply)", "*.ply"),
+        }
+    }
+
+    pub fn reader(&self) -> &ObjReader {
+        &self.reader
+    }
+
+    pub fn reader_mut(&mut self) -> &mut ObjReader {
+        &mut self.reader
+    }
+
+    pub fn handler(&self) -> &InOutHandler {
+        self.reader.handler()
+    }
+
+    pub fn read_file(&self, path: impl AsRef<std::path::Path>) -> cuemol_core::Result<SurfaceMesh> {
+        read_ply_file(path)
+    }
+
+    pub fn read_bytes(&self, input: &[u8]) -> cuemol_core::Result<SurfaceMesh> {
+        read_ply_bytes(input)
+    }
+}
+
+impl Default for PlyFileReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MsmsFileReader {
@@ -105,6 +145,28 @@ impl Default for OpenDxPotReader {
     }
 }
 
+macro_rules! impl_obj_reader_deref {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl std::ops::Deref for $ty {
+                type Target = ObjReader;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.reader
+                }
+            }
+
+            impl std::ops::DerefMut for $ty {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    &mut self.reader
+                }
+            }
+        )+
+    };
+}
+
+impl_obj_reader_deref!(PlyFileReader, MsmsFileReader, OpenDxPotReader);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PqrFileWriter {
     writer: ObjWriter,
@@ -139,6 +201,10 @@ impl PqrFileWriter {
         self.selection.as_ref()
     }
 
+    pub fn get_selection(&self) -> Option<&Selector> {
+        self.selection()
+    }
+
     pub fn sel(&self) -> Option<&Selector> {
         self.selection()
     }
@@ -155,6 +221,10 @@ impl PqrFileWriter {
         self.use_h
     }
 
+    pub fn is_use_h(&self) -> bool {
+        self.use_h()
+    }
+
     pub fn set_use_h(&mut self, value: bool) {
         self.use_h = value;
     }
@@ -164,6 +234,10 @@ impl PqrFileWriter {
     }
 
     pub fn ns(&self) -> &str {
+        self.namespace()
+    }
+
+    pub fn get_ns(&self) -> &str {
         self.namespace()
     }
 
@@ -231,6 +305,20 @@ impl Default for PqrFileWriter {
     }
 }
 
+impl std::ops::Deref for PqrFileWriter {
+    type Target = ObjWriter;
+
+    fn deref(&self) -> &Self::Target {
+        &self.writer
+    }
+}
+
+impl std::ops::DerefMut for PqrFileWriter {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.writer
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct XyzrFileWriter {
     writer: ObjWriter,
@@ -259,6 +347,10 @@ impl XyzrFileWriter {
 
     pub fn selection(&self) -> Option<&Selector> {
         self.selection.as_ref()
+    }
+
+    pub fn get_selection(&self) -> Option<&Selector> {
+        self.selection()
     }
 
     pub fn sel(&self) -> Option<&Selector> {
@@ -295,6 +387,20 @@ impl XyzrFileWriter {
 impl Default for XyzrFileWriter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::ops::Deref for XyzrFileWriter {
+    type Target = ObjWriter;
+
+    fn deref(&self) -> &Self::Target {
+        &self.writer
+    }
+}
+
+impl std::ops::DerefMut for XyzrFileWriter {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.writer
     }
 }
 
@@ -745,12 +851,24 @@ impl MolSurfObj {
         &self.orig_mol
     }
 
+    pub fn get_orig_mol_name(&self) -> &str {
+        self.orig_mol()
+    }
+
     pub fn set_orig_mol(&mut self, value: impl Into<String>) {
         self.orig_mol = value.into();
     }
 
+    pub fn set_orig_mol_name(&mut self, value: impl Into<String>) {
+        self.set_orig_mol(value);
+    }
+
     pub fn orig_sel(&self) -> &str {
         &self.orig_sel
+    }
+
+    pub fn get_orig_sel(&self) -> &str {
+        self.orig_sel()
     }
 
     pub fn set_orig_sel(&mut self, value: impl Into<String>) {
@@ -761,6 +879,10 @@ impl MolSurfObj {
         self.orig_den
     }
 
+    pub fn get_orig_den(&self) -> f64 {
+        self.orig_den()
+    }
+
     pub fn set_orig_den(&mut self, value: f64) {
         self.orig_den = value;
     }
@@ -769,8 +891,16 @@ impl MolSurfObj {
         self.orig_prad
     }
 
+    pub fn get_orig_probe_rad(&self) -> f64 {
+        self.orig_prad()
+    }
+
     pub fn set_orig_prad(&mut self, value: f64) {
         self.orig_prad = value;
+    }
+
+    pub fn set_orig_probe_rad(&mut self, value: f64) {
+        self.set_orig_prad(value);
     }
 
     pub fn cut_planes(&self) -> &[CutPlane] {
@@ -1048,6 +1178,10 @@ impl MolSurfRenderer {
         &self.default_color
     }
 
+    pub fn get_default_color(&self) -> &SolidColor {
+        self.default_color()
+    }
+
     pub fn defaultcolor(&self) -> &SolidColor {
         self.default_color()
     }
@@ -1064,6 +1198,10 @@ impl MolSurfRenderer {
         self.cull_face
     }
 
+    pub fn is_cull_face(&self) -> bool {
+        self.cull_face()
+    }
+
     pub fn set_cull_face(&mut self, value: bool) {
         self.cull_face = value;
     }
@@ -1072,12 +1210,20 @@ impl MolSurfRenderer {
         self.draw_mode
     }
 
+    pub fn get_draw_mode(&self) -> i32 {
+        self.draw_mode()
+    }
+
     pub fn set_draw_mode(&mut self, value: i32) {
         self.draw_mode = value;
     }
 
     pub fn color_mode(&self) -> i32 {
         self.color_mode
+    }
+
+    pub fn get_color_mode(&self) -> i32 {
+        self.color_mode()
     }
 
     pub fn colormode(&self) -> i32 {
@@ -1096,28 +1242,56 @@ impl MolSurfRenderer {
         &self.target
     }
 
+    pub fn get_tgt_obj_name(&self) -> &str {
+        self.target()
+    }
+
     pub fn set_target(&mut self, value: impl Into<String>) {
         self.target = value.into();
+    }
+
+    pub fn set_tgt_obj_name(&mut self, value: impl Into<String>) {
+        self.set_target(value);
     }
 
     pub fn width(&self) -> f64 {
         self.width
     }
 
+    pub fn get_line_width(&self) -> f64 {
+        self.width()
+    }
+
     pub fn set_width(&mut self, value: f64) {
         self.width = value;
+    }
+
+    pub fn set_line_width(&mut self, value: f64) {
+        self.set_width(value);
     }
 
     pub fn elepot(&self) -> &str {
         &self.elepot
     }
 
+    pub fn get_tgt_ele_pot_name(&self) -> &str {
+        self.elepot()
+    }
+
     pub fn set_elepot(&mut self, value: impl Into<String>) {
         self.elepot = value.into();
     }
 
+    pub fn set_tgt_ele_pot_name(&mut self, value: impl Into<String>) {
+        self.set_elepot(value);
+    }
+
     pub fn color_map_name(&self) -> &str {
         &self.elepot
+    }
+
+    pub fn get_color_map_name(&self) -> &str {
+        self.color_map_name()
     }
 
     pub fn get_color_map_obj(&self) -> Option<&MultiGradient> {
@@ -1136,11 +1310,19 @@ impl MolSurfRenderer {
         self.low_param()
     }
 
+    pub fn get_low_par(&self) -> f64 {
+        self.low_param()
+    }
+
     pub fn set_low_param(&mut self, value: f64) {
         self.low_param = value;
     }
 
     pub fn set_lowpar(&mut self, value: f64) {
+        self.set_low_param(value);
+    }
+
+    pub fn set_low_par(&mut self, value: f64) {
         self.set_low_param(value);
     }
 
@@ -1152,11 +1334,19 @@ impl MolSurfRenderer {
         self.mid_param()
     }
 
+    pub fn get_mid_par(&self) -> f64 {
+        self.mid_param()
+    }
+
     pub fn set_mid_param(&mut self, value: f64) {
         self.mid_param = value;
     }
 
     pub fn set_midpar(&mut self, value: f64) {
+        self.set_mid_param(value);
+    }
+
+    pub fn set_mid_par(&mut self, value: f64) {
         self.set_mid_param(value);
     }
 
@@ -1168,11 +1358,19 @@ impl MolSurfRenderer {
         self.high_param()
     }
 
+    pub fn get_high_par(&self) -> f64 {
+        self.high_param()
+    }
+
     pub fn set_high_param(&mut self, value: f64) {
         self.high_param = value;
     }
 
     pub fn set_highpar(&mut self, value: f64) {
+        self.set_high_param(value);
+    }
+
+    pub fn set_high_par(&mut self, value: f64) {
         self.set_high_param(value);
     }
 
@@ -1184,11 +1382,19 @@ impl MolSurfRenderer {
         self.high_color()
     }
 
+    pub fn get_high_col(&self) -> &SolidColor {
+        self.high_color()
+    }
+
     pub fn set_high_color(&mut self, value: SolidColor) {
         self.high_color = value;
     }
 
     pub fn set_highcol(&mut self, value: SolidColor) {
+        self.set_high_color(value);
+    }
+
+    pub fn set_high_col(&mut self, value: SolidColor) {
         self.set_high_color(value);
     }
 
@@ -1200,11 +1406,19 @@ impl MolSurfRenderer {
         self.mid_color()
     }
 
+    pub fn get_mid_col(&self) -> &SolidColor {
+        self.mid_color()
+    }
+
     pub fn set_mid_color(&mut self, value: SolidColor) {
         self.mid_color = value;
     }
 
     pub fn set_midcol(&mut self, value: SolidColor) {
+        self.set_mid_color(value);
+    }
+
+    pub fn set_mid_col(&mut self, value: SolidColor) {
         self.set_mid_color(value);
     }
 
@@ -1216,6 +1430,10 @@ impl MolSurfRenderer {
         self.low_color()
     }
 
+    pub fn get_low_col(&self) -> &SolidColor {
+        self.low_color()
+    }
+
     pub fn set_low_color(&mut self, value: SolidColor) {
         self.low_color = value;
     }
@@ -1224,12 +1442,48 @@ impl MolSurfRenderer {
         self.set_low_color(value);
     }
 
+    pub fn set_low_col(&mut self, value: SolidColor) {
+        self.set_low_color(value);
+    }
+
     pub fn multi_grad(&self) -> &MultiGradient {
         &self.multi_grad
     }
 
+    pub fn get_multi_grad(&self) -> &MultiGradient {
+        self.multi_grad()
+    }
+
+    pub fn is_wire_frame(&self) -> bool {
+        self.draw_mode == Self::SFDRAW_LINE
+    }
+
+    pub fn is_dot_surf(&self) -> bool {
+        self.draw_mode == Self::SFDRAW_POINT
+    }
+
+    pub fn get_col_schm(&self) -> SolidColoring {
+        self.coloring()
+    }
+
+    pub fn set_col_schm(&mut self, value: SolidColoring) {
+        self.set_coloring(value);
+    }
+
+    pub fn get_mol_sel(&self) -> &str {
+        self.selection()
+    }
+
+    pub fn set_mol_sel(&mut self, value: impl Into<String>) {
+        self.set_selection(value);
+    }
+
     pub fn ramp_above(&self) -> bool {
         self.ramp_above
+    }
+
+    pub fn is_ramp_above(&self) -> bool {
+        self.ramp_above()
     }
 
     pub fn set_ramp_above(&mut self, value: bool) {
@@ -1238,6 +1492,10 @@ impl MolSurfRenderer {
 
     pub fn ramp_value(&self) -> f64 {
         self.ramp_value
+    }
+
+    pub fn get_ramp_value(&self) -> f64 {
+        self.ramp_value()
     }
 
     pub fn set_ramp_value(&mut self, value: f64) {
@@ -1264,12 +1522,20 @@ impl MolSurfRenderer {
         &self.show_selection
     }
 
+    pub fn get_show_sel(&self) -> &str {
+        self.show_selection()
+    }
+
     pub fn showsel(&self) -> &str {
         self.show_selection()
     }
 
     pub fn set_show_selection(&mut self, value: impl Into<String>) {
         self.show_selection = value.into();
+    }
+
+    pub fn set_show_sel(&mut self, value: impl Into<String>) {
+        self.set_show_selection(value);
     }
 
     pub fn set_showsel(&mut self, value: impl Into<String>) {
@@ -1352,6 +1618,10 @@ impl DirectSurfRenderer {
         self.color_mode
     }
 
+    pub fn get_color_mode(&self) -> i32 {
+        self.color_mode()
+    }
+
     pub fn colormode(&self) -> i32 {
         self.color_mode()
     }
@@ -1368,12 +1638,24 @@ impl DirectSurfRenderer {
         &self.target
     }
 
+    pub fn get_tgt_obj_name(&self) -> &str {
+        self.target()
+    }
+
     pub fn set_target(&mut self, value: impl Into<String>) {
         self.target = value.into();
     }
 
+    pub fn set_tgt_obj_name(&mut self, value: impl Into<String>) {
+        self.set_target(value);
+    }
+
     pub fn detail(&self) -> i32 {
         self.detail
+    }
+
+    pub fn get_detail(&self) -> i32 {
+        self.detail()
     }
 
     pub fn set_detail(&mut self, value: i32) {
@@ -1382,6 +1664,10 @@ impl DirectSurfRenderer {
 
     pub fn probe_radius(&self) -> f64 {
         self.probe_radius
+    }
+
+    pub fn get_probe_radius(&self) -> f64 {
+        self.probe_radius()
     }
 
     pub fn proberad(&self) -> f64 {
@@ -1400,12 +1686,20 @@ impl DirectSurfRenderer {
         self.surface_type
     }
 
+    pub fn get_surf_type(&self) -> i32 {
+        self.surface_type()
+    }
+
     pub fn surftype(&self) -> i32 {
         self.surface_type()
     }
 
     pub fn set_surface_type(&mut self, value: i32) {
         self.surface_type = value;
+    }
+
+    pub fn set_surf_type(&mut self, value: i32) {
+        self.set_surface_type(value);
     }
 
     pub fn set_surftype(&mut self, value: i32) {
@@ -1416,12 +1710,20 @@ impl DirectSurfRenderer {
         self.surface_algorithm
     }
 
+    pub fn get_surf_algor(&self) -> i32 {
+        self.surface_algorithm()
+    }
+
     pub fn surfalgor(&self) -> i32 {
         self.surface_algorithm()
     }
 
     pub fn set_surface_algorithm(&mut self, value: i32) {
         self.surface_algorithm = value;
+    }
+
+    pub fn set_surf_algor(&mut self, value: i32) {
+        self.set_surface_algorithm(value);
     }
 
     pub fn set_surfalgor(&mut self, value: i32) {
@@ -1432,12 +1734,20 @@ impl DirectSurfRenderer {
         self.cull_face
     }
 
+    pub fn is_cull_face(&self) -> bool {
+        self.cull_face()
+    }
+
     pub fn set_cull_face(&mut self, value: bool) {
         self.cull_face = value;
     }
 
     pub fn draw_mode(&self) -> i32 {
         self.draw_mode
+    }
+
+    pub fn get_draw_mode(&self) -> i32 {
+        self.draw_mode()
     }
 
     pub fn set_draw_mode(&mut self, value: i32) {
@@ -1448,12 +1758,24 @@ impl DirectSurfRenderer {
         self.width
     }
 
+    pub fn get_line_width(&self) -> f64 {
+        self.width()
+    }
+
     pub fn set_width(&mut self, value: f64) {
         self.width = value;
     }
 
+    pub fn set_line_width(&mut self, value: f64) {
+        self.set_width(value);
+    }
+
     pub fn show_selection(&self) -> &str {
         &self.show_selection
+    }
+
+    pub fn get_show_sel(&self) -> &str {
+        self.show_selection()
     }
 
     pub fn showsel(&self) -> &str {
@@ -1462,6 +1784,10 @@ impl DirectSurfRenderer {
 
     pub fn set_show_selection(&mut self, value: impl Into<String>) {
         self.show_selection = value.into();
+    }
+
+    pub fn set_show_sel(&mut self, value: impl Into<String>) {
+        self.set_show_selection(value);
     }
 
     pub fn set_showsel(&mut self, value: impl Into<String>) {
@@ -1496,12 +1822,24 @@ impl DirectSurfRenderer {
         &self.elepot
     }
 
+    pub fn get_tgt_ele_pot_name(&self) -> &str {
+        self.elepot()
+    }
+
     pub fn set_elepot(&mut self, value: impl Into<String>) {
         self.elepot = value.into();
     }
 
+    pub fn set_tgt_ele_pot_name(&mut self, value: impl Into<String>) {
+        self.set_elepot(value);
+    }
+
     pub fn low_param(&self) -> f64 {
         self.low_param
+    }
+
+    pub fn get_low_par(&self) -> f64 {
+        self.low_param()
     }
 
     pub fn lowpar(&self) -> f64 {
@@ -1512,12 +1850,20 @@ impl DirectSurfRenderer {
         self.low_param = value;
     }
 
+    pub fn set_low_par(&mut self, value: f64) {
+        self.set_low_param(value);
+    }
+
     pub fn set_lowpar(&mut self, value: f64) {
         self.set_low_param(value);
     }
 
     pub fn mid_param(&self) -> f64 {
         self.mid_param
+    }
+
+    pub fn get_mid_par(&self) -> f64 {
+        self.mid_param()
     }
 
     pub fn midpar(&self) -> f64 {
@@ -1528,12 +1874,20 @@ impl DirectSurfRenderer {
         self.mid_param = value;
     }
 
+    pub fn set_mid_par(&mut self, value: f64) {
+        self.set_mid_param(value);
+    }
+
     pub fn set_midpar(&mut self, value: f64) {
         self.set_mid_param(value);
     }
 
     pub fn high_param(&self) -> f64 {
         self.high_param
+    }
+
+    pub fn get_high_par(&self) -> f64 {
+        self.high_param()
     }
 
     pub fn highpar(&self) -> f64 {
@@ -1544,12 +1898,20 @@ impl DirectSurfRenderer {
         self.high_param = value;
     }
 
+    pub fn set_high_par(&mut self, value: f64) {
+        self.set_high_param(value);
+    }
+
     pub fn set_highpar(&mut self, value: f64) {
         self.set_high_param(value);
     }
 
     pub fn high_color(&self) -> &SolidColor {
         &self.high_color
+    }
+
+    pub fn get_high_col(&self) -> &SolidColor {
+        self.high_color()
     }
 
     pub fn highcol(&self) -> &SolidColor {
@@ -1560,12 +1922,20 @@ impl DirectSurfRenderer {
         self.high_color = value;
     }
 
+    pub fn set_high_col(&mut self, value: SolidColor) {
+        self.set_high_color(value);
+    }
+
     pub fn set_highcol(&mut self, value: SolidColor) {
         self.set_high_color(value);
     }
 
     pub fn mid_color(&self) -> &SolidColor {
         &self.mid_color
+    }
+
+    pub fn get_mid_col(&self) -> &SolidColor {
+        self.mid_color()
     }
 
     pub fn midcol(&self) -> &SolidColor {
@@ -1576,12 +1946,20 @@ impl DirectSurfRenderer {
         self.mid_color = value;
     }
 
+    pub fn set_mid_col(&mut self, value: SolidColor) {
+        self.set_mid_color(value);
+    }
+
     pub fn set_midcol(&mut self, value: SolidColor) {
         self.set_mid_color(value);
     }
 
     pub fn low_color(&self) -> &SolidColor {
         &self.low_color
+    }
+
+    pub fn get_low_col(&self) -> &SolidColor {
+        self.low_color()
     }
 
     pub fn lowcol(&self) -> &SolidColor {
@@ -1592,12 +1970,20 @@ impl DirectSurfRenderer {
         self.low_color = value;
     }
 
+    pub fn set_low_col(&mut self, value: SolidColor) {
+        self.set_low_color(value);
+    }
+
     pub fn set_lowcol(&mut self, value: SolidColor) {
         self.set_low_color(value);
     }
 
     pub fn ramp_above(&self) -> bool {
         self.ramp_above
+    }
+
+    pub fn is_ramp_above(&self) -> bool {
+        self.ramp_above()
     }
 
     pub fn set_ramp_above(&mut self, value: bool) {
@@ -1608,8 +1994,62 @@ impl DirectSurfRenderer {
         self.ramp_value
     }
 
+    pub fn get_ramp_value(&self) -> f64 {
+        self.ramp_value()
+    }
+
     pub fn set_ramp_value(&mut self, value: f64) {
         self.ramp_value = value;
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct DirectSurfRenderer2 {
+    inner: DirectSurfRenderer,
+}
+
+impl DirectSurfRenderer2 {
+    pub const DS_SCAPOT: i32 = DirectSurfRenderer::DS_SCAPOT;
+    pub const DS_MOLFANC: i32 = DirectSurfRenderer::DS_MOLFANC;
+    pub const DS_VDW: i32 = DirectSurfRenderer::DS_VDW;
+    pub const DS_SAS: i32 = DirectSurfRenderer::DS_SAS;
+    pub const DS_SES: i32 = DirectSurfRenderer::DS_SES;
+    pub const SFDRAW_FILL: i32 = DirectSurfRenderer::SFDRAW_FILL;
+    pub const SFDRAW_LINE: i32 = DirectSurfRenderer::SFDRAW_LINE;
+    pub const SFDRAW_POINT: i32 = DirectSurfRenderer::SFDRAW_POINT;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        "dsurf2"
+    }
+
+    pub fn as_renderer(&self) -> &DirectSurfRenderer {
+        &self.inner
+    }
+
+    pub fn as_renderer_mut(&mut self) -> &mut DirectSurfRenderer {
+        &mut self.inner
+    }
+
+    pub fn into_renderer(self) -> DirectSurfRenderer {
+        self.inner
+    }
+}
+
+impl std::ops::Deref for DirectSurfRenderer2 {
+    type Target = DirectSurfRenderer;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_renderer()
+    }
+}
+
+impl std::ops::DerefMut for DirectSurfRenderer2 {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_renderer_mut()
     }
 }
 
@@ -1623,6 +2063,32 @@ impl Ms2TestRenderer {
 
     pub fn type_name(&self) -> &'static str {
         "ms2test"
+    }
+
+    pub fn render_mesh(&self, molecule: &MolCoord) -> SurfaceMesh {
+        let spheres = molecule
+            .atoms()
+            .iter()
+            .map(|atom| grid_surface::SurfSphere {
+                center: atom.position,
+                radius: 3.0,
+            })
+            .collect::<Vec<_>>();
+        let mut mesh = SurfaceMesh::new();
+        grid_surface::build_sphere_union_surface(&mut mesh, &spheres, 0.2);
+        mesh
+    }
+
+    pub fn center(&self) -> Vector4 {
+        Vector4::ZERO
+    }
+
+    pub fn get_center(&self) -> Vector4 {
+        self.center()
+    }
+
+    pub fn is_hit_test_supported(&self) -> bool {
+        false
     }
 }
 
@@ -1761,6 +2227,10 @@ impl HoleSurfBuilder {
         &self.target_mol
     }
 
+    pub fn get_target_mol(&self) -> &str {
+        self.target_mol()
+    }
+
     pub fn set_target_mol(&mut self, value: impl Into<String>) {
         self.target_mol = value.into();
     }
@@ -1769,12 +2239,20 @@ impl HoleSurfBuilder {
         &self.target_sel
     }
 
+    pub fn get_target_sel(&self) -> &str {
+        self.target_sel()
+    }
+
     pub fn set_target_sel(&mut self, value: impl Into<String>) {
         self.target_sel = value.into();
     }
 
     pub fn dir_norm(&self) -> Vector4 {
         self.dir_norm
+    }
+
+    pub fn get_dir_norm(&self) -> Vector4 {
+        self.dir_norm()
     }
 
     pub fn dirnorm(&self) -> Vector4 {
@@ -1793,6 +2271,10 @@ impl HoleSurfBuilder {
         self.start_pos
     }
 
+    pub fn get_start_pos(&self) -> Vector4 {
+        self.start_pos()
+    }
+
     pub fn startpos(&self) -> Vector4 {
         self.start_pos()
     }
@@ -1809,6 +2291,10 @@ impl HoleSurfBuilder {
         self.surf_den
     }
 
+    pub fn get_surf_den(&self) -> f64 {
+        self.surf_den()
+    }
+
     pub fn set_surf_den(&mut self, value: f64) {
         self.surf_den = value;
     }
@@ -1817,12 +2303,20 @@ impl HoleSurfBuilder {
         self.surf_probe_r
     }
 
+    pub fn get_surf_probe_r(&self) -> f64 {
+        self.surf_probe_r()
+    }
+
     pub fn set_surf_probe_r(&mut self, value: f64) {
         self.surf_probe_r = value;
     }
 
     pub fn result(&self) -> Option<&MolSurfObj> {
         self.result.as_ref()
+    }
+
+    pub fn get_result(&self) -> Option<&MolSurfObj> {
+        self.result()
     }
 
     pub fn doit(&mut self) {
@@ -2153,16 +2647,48 @@ mod tests {
         let renderer = DirectSurfRenderer::new();
         assert_eq!(renderer.type_name(), "directsurf");
         assert_eq!(renderer.color_mode(), DirectSurfRenderer::DS_MOLFANC);
+        assert_eq!(renderer.get_color_mode(), DirectSurfRenderer::DS_MOLFANC);
         assert_eq!(renderer.detail(), 6);
+        assert_eq!(renderer.get_detail(), 6);
         assert_eq!(renderer.probe_radius(), 1.4);
+        assert_eq!(renderer.get_probe_radius(), 1.4);
         assert_eq!(renderer.surface_type(), DirectSurfRenderer::DS_SES);
+        assert_eq!(renderer.get_surf_type(), DirectSurfRenderer::DS_SES);
         assert_eq!(renderer.surface_algorithm(), DirectSurfRenderer::DS_EDTSURF);
         assert_eq!(renderer.draw_mode(), DirectSurfRenderer::SFDRAW_FILL);
+        assert_eq!(renderer.get_draw_mode(), DirectSurfRenderer::SFDRAW_FILL);
         assert_eq!(renderer.width(), 1.2);
+        assert_eq!(renderer.get_line_width(), 1.2);
         assert_eq!(renderer.vdw_radius("H"), 1.2);
         assert_eq!(renderer.vdw_radius("Xe"), 1.7);
         assert!(!renderer.ramp_above());
+        assert!(!renderer.is_ramp_above());
         assert_eq!(renderer.ramp_value(), 1.4);
+
+        let renderer2 = DirectSurfRenderer2::new();
+        assert_eq!(renderer2.type_name(), "dsurf2");
+        assert_eq!(renderer2.get_color_mode(), DirectSurfRenderer2::DS_MOLFANC);
+        assert_eq!(renderer2.get_surf_type(), DirectSurfRenderer2::DS_SES);
+        assert_eq!(renderer2.get_draw_mode(), DirectSurfRenderer2::SFDRAW_FILL);
+        assert_eq!(renderer2.get_probe_radius(), 1.4);
+    }
+
+    #[test]
+    fn ms2_test_renderer_builds_the_reference_sas_mesh() {
+        let renderer = Ms2TestRenderer::new();
+        let molecule = MolCoord::with_atoms(vec![surface_atom(1, "CA", "C", 0.0)]);
+        let mesh = renderer.render_mesh(&molecule);
+        assert_eq!(renderer.type_name(), "ms2test");
+        assert!(!renderer.is_hit_test_supported());
+        assert_eq!(renderer.get_center(), Vector4::ZERO);
+        assert!(mesh.vertex_count() > 100);
+        assert!(mesh.triangle_count() > 100);
+        let max_x = mesh
+            .vertices()
+            .iter()
+            .map(|vertex| vertex.position.x)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!((max_x - 3.0).abs() < 0.3);
     }
 
     #[test]

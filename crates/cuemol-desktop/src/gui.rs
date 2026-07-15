@@ -953,11 +953,7 @@ impl GuiApplication {
                         camera.fit_snapshot(&self.snapshot);
                     }
                 }
-                if ui
-                    .button("+")
-                    .on_hover_text("New scene tab")
-                    .clicked()
-                {
+                if ui.button("+").on_hover_text("New scene tab").clicked() {
                     self.new_scene(camera);
                 }
             });
@@ -1126,6 +1122,7 @@ impl GuiApplication {
                         .checkbox(&mut self.color_proofing, "Use color proofing")
                         .clicked()
                     {
+                        self.rebuild_snapshot();
                         self.set_status(format!("Color proofing: {}", self.color_proofing));
                     }
                     if ui.button("Properties...").clicked() {
@@ -1135,10 +1132,16 @@ impl GuiApplication {
                 });
                 ui.menu_button("View", |ui| {
                     ui.menu_button("Theme", |ui| {
-                        if ui.radio_value(&mut self.light_theme, false, "Dark").clicked() {
+                        if ui
+                            .radio_value(&mut self.light_theme, false, "Dark")
+                            .clicked()
+                        {
                             self.set_status("Dark theme");
                         }
-                        if ui.radio_value(&mut self.light_theme, true, "Light").clicked() {
+                        if ui
+                            .radio_value(&mut self.light_theme, true, "Light")
+                            .clicked()
+                        {
                             self.set_status("Light theme");
                         }
                     });
@@ -1306,7 +1309,11 @@ impl GuiApplication {
             }
             ui.separator();
             // Interaction-mode radio (CueMol2 Home tab: Rotate / Rect select).
-            ui.selectable_value(&mut self.interaction_mode, InteractionMode::Rotate, "Rotate");
+            ui.selectable_value(
+                &mut self.interaction_mode,
+                InteractionMode::Rotate,
+                "Rotate",
+            );
             ui.selectable_value(
                 &mut self.interaction_mode,
                 InteractionMode::RectSelect,
@@ -1369,7 +1376,11 @@ impl GuiApplication {
 
     fn ribbon_animation(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let play_label = if self.animation_playing { "⏸ Pause" } else { "▶ Play" };
+            let play_label = if self.animation_playing {
+                "⏸ Pause"
+            } else {
+                "▶ Play"
+            };
             if ui.button(play_label).clicked() {
                 self.animation_playing = !self.animation_playing;
             }
@@ -1453,16 +1464,10 @@ impl GuiApplication {
                                     .on_hover_text("Visible")
                                     .changed()
                                 {
-                                    self.set_renderer_visibility(
-                                        object.uid,
-                                        renderer.uid,
-                                        visible,
-                                    );
+                                    self.set_renderer_visibility(object.uid, renderer.uid, visible);
                                 }
-                                let label = format!(
-                                    "{} ({})",
-                                    renderer.name, renderer.renderer_type
-                                );
+                                let label =
+                                    format!("{} ({})", renderer.name, renderer.renderer_type);
                                 if ui.selectable_label(selected, label).clicked() {
                                     self.selected_object = Some(object.uid);
                                     self.selected_renderer = Some(renderer.uid);
@@ -1537,7 +1542,10 @@ impl GuiApplication {
                 }
             });
         self.molstruct_object = selected;
-        let Some(object) = tree.iter().find(|object| Some(object.object_uid) == selected) else {
+        let Some(object) = tree
+            .iter()
+            .find(|object| Some(object.object_uid) == selected)
+        else {
             return;
         };
 
@@ -1548,13 +1556,25 @@ impl GuiApplication {
         let mut center = false;
         let mut zoom = false;
         ui.horizontal(|ui| {
-            if ui.button("Select").on_hover_text("Select all atoms").clicked() {
+            if ui
+                .button("Select")
+                .on_hover_text("Select all atoms")
+                .clicked()
+            {
                 apply = Some("*".to_string());
             }
-            if ui.button("Center").on_hover_text("Center view on selection").clicked() {
+            if ui
+                .button("Center")
+                .on_hover_text("Center view on selection")
+                .clicked()
+            {
                 center = true;
             }
-            if ui.button("Zoom").on_hover_text("Zoom to fit molecule").clicked() {
+            if ui
+                .button("Zoom")
+                .on_hover_text("Zoom to fit molecule")
+                .clicked()
+            {
                 zoom = true;
             }
             if ui.button("Property").clicked() {
@@ -1565,10 +1585,18 @@ impl GuiApplication {
             } else {
                 "Expand"
             };
-            if ui.button(toggle).on_hover_text("Expand / collapse all").clicked() {
+            if ui
+                .button(toggle)
+                .on_hover_text("Expand / collapse all")
+                .clicked()
+            {
                 self.molstruct_expand_all = !self.molstruct_expand_all;
             }
-            let surface_label = if self.show_surface { "Surface ✓" } else { "Surface" };
+            let surface_label = if self.show_surface {
+                "Surface ✓"
+            } else {
+                "Surface"
+            };
             if ui
                 .button(surface_label)
                 .on_hover_text("Show / hide the molecular surface (SES)")
@@ -1576,7 +1604,11 @@ impl GuiApplication {
             {
                 self.toggle_surface();
             }
-            let clip_label = if self.clip_surface { "Clip ✓" } else { "Clip" };
+            let clip_label = if self.clip_surface {
+                "Clip ✓"
+            } else {
+                "Clip"
+            };
             if ui
                 .button(clip_label)
                 .on_hover_text("Live in-viewport surface clipping at the cut plane")
@@ -1601,10 +1633,18 @@ impl GuiApplication {
                         .hint_text("APBS .dx path")
                         .desired_width(120.0),
                 );
-                if ui.button("Load .dx").on_hover_text("Load an electrostatic potential map").clicked() {
+                if ui
+                    .button("Load .dx")
+                    .on_hover_text("Load an electrostatic potential map")
+                    .clicked()
+                {
                     self.load_potential();
                 }
-                let potential_label = if self.potential_surface { "Potential ✓" } else { "Potential" };
+                let potential_label = if self.potential_surface {
+                    "Potential ✓"
+                } else {
+                    "Potential"
+                };
                 if ui
                     .add_enabled(
                         self.state.has_surface_potential(),
@@ -1623,7 +1663,8 @@ impl GuiApplication {
                         .on_hover_text("Potential colour ± scale (0 = auto, robust to spikes)")
                         .changed()
                     {
-                        self.state.set_potential_scale((scale > 0.0).then_some(scale));
+                        self.state
+                            .set_potential_scale((scale > 0.0).then_some(scale));
                         if self.potential_surface {
                             self.rebuild_surface_mesh();
                             self.rebuild_snapshot();
@@ -1647,7 +1688,11 @@ impl GuiApplication {
                     self.import_mesh_surface(camera);
                 }
             });
-            let labels_label = if self.show_labels { "Labels ✓" } else { "Labels" };
+            let labels_label = if self.show_labels {
+                "Labels ✓"
+            } else {
+                "Labels"
+            };
             if ui
                 .button(labels_label)
                 .on_hover_text("Label the selected atoms in the 3D view")
@@ -1655,7 +1700,11 @@ impl GuiApplication {
             {
                 self.show_labels = !self.show_labels;
             }
-            let hbond_label = if self.show_hbonds { "H-bonds ✓" } else { "H-bonds" };
+            let hbond_label = if self.show_hbonds {
+                "H-bonds ✓"
+            } else {
+                "H-bonds"
+            };
             if ui
                 .button(hbond_label)
                 .on_hover_text("Show hydrogen bonds as dashed lines (N···O heuristic)")
@@ -1688,8 +1737,7 @@ impl GuiApplication {
                         self.molstruct_expand_all,
                     )
                     .show_header(ui, |ui| {
-                        let label =
-                            format!("Chain {chain_disp}  ({} res)", chain.residues.len());
+                        let label = format!("Chain {chain_disp}  ({} res)", chain.residues.len());
                         if ui.selectable_label(false, label).clicked() {
                             apply = Some(format!("chain {}", chain.chain_id));
                         }
@@ -1724,8 +1772,7 @@ impl GuiApplication {
                             })
                             .body(|ui| {
                                 for atom in &residue.atoms {
-                                    let atom_label =
-                                        format!("{}  ({})", atom.name, atom.element);
+                                    let atom_label = format!("{}  ({})", atom.name, atom.element);
                                     if ui.selectable_label(false, atom_label).clicked() {
                                         apply = Some(format!("aid {}", atom.serial));
                                     }
@@ -1766,9 +1813,9 @@ impl GuiApplication {
         if count > 0 {
             return Some(sum / count as f32);
         }
-        self.snapshot.bounds.map(|(min, max)| {
-            (vec3_from_vector(min) + vec3_from_vector(max)) * 0.5
-        })
+        self.snapshot
+            .bounds
+            .map(|(min, max)| (vec3_from_vector(min) + vec3_from_vector(max)) * 0.5)
     }
 
     /// Selection section (CueMol2 `selection-panel.xul`): a molecule selector and two
@@ -1816,7 +1863,12 @@ impl GuiApplication {
             SelectionTab::Editor => self.selection_editor_tab(ui, &sequences),
         }
 
-        let selected_count = self.snapshot.atoms.iter().filter(|atom| atom.selected).count();
+        let selected_count = self
+            .snapshot
+            .atoms
+            .iter()
+            .filter(|atom| atom.selected)
+            .count();
         ui.separator();
         ui.label(format!("Selected: {selected_count} atoms"));
     }
@@ -1900,7 +1952,11 @@ impl GuiApplication {
             ui.label("Chain");
             ui.horizontal_wrapped(|ui| {
                 for chain in &chains {
-                    let label = if chain.is_empty() { "_" } else { chain.as_str() };
+                    let label = if chain.is_empty() {
+                        "_"
+                    } else {
+                        chain.as_str()
+                    };
                     if ui.button(label).clicked() {
                         set = Some(format!("chain {chain}"));
                     }
@@ -2037,15 +2093,27 @@ impl GuiApplication {
             ColoringMode::Rainbow => {
                 let mut attrs = std::collections::BTreeMap::new();
                 attrs.insert("mode".to_string(), "mol".to_string());
-                attrs.insert("start_hue".to_string(), format!("{:.0}", self.coloring_start_hue));
-                attrs.insert("end_hue".to_string(), format!("{:.0}", self.coloring_end_hue));
+                attrs.insert(
+                    "start_hue".to_string(),
+                    format!("{:.0}", self.coloring_start_hue),
+                );
+                attrs.insert(
+                    "end_hue".to_string(),
+                    format!("{:.0}", self.coloring_end_hue),
+                );
                 attrs.insert("sat".to_string(), "1".to_string());
                 attrs.insert("bri".to_string(), "1".to_string());
                 (Some("RainbowColoring".to_string()), attrs)
             }
-            ColoringMode::Bfac => (Some("BfacColoring".to_string()), std::collections::BTreeMap::new()),
+            ColoringMode::Bfac => (
+                Some("BfacColoring".to_string()),
+                std::collections::BTreeMap::new(),
+            ),
         };
-        if let Err(error) = self.state.set_object_coloring(object_uid, coloring_type, attrs) {
+        if let Err(error) = self
+            .state
+            .set_object_coloring(object_uid, coloring_type, attrs)
+        {
             self.set_status(format!("Coloring failed: {error}"));
             return;
         }
@@ -2074,16 +2142,17 @@ impl GuiApplication {
                     ui.label(format!("{:.3}, {:.3}, {:.3}", cell.a, cell.b, cell.c));
                     ui.end_row();
                     ui.label("α, β, γ (°)");
-                    ui.label(format!("{:.2}, {:.2}, {:.2}", cell.alpha, cell.beta, cell.gamma));
+                    ui.label(format!(
+                        "{:.2}, {:.2}, {:.2}",
+                        cell.alpha, cell.beta, cell.gamma
+                    ));
                     ui.end_row();
                 });
         }
         ui.separator();
         // CueMol2 Symmetry panel "Unit cell" / "Symm mol" toggles: draw the cell box
         // and the home-cell symmetry-mate copies.
-        let mut changed = ui
-            .checkbox(&mut self.show_unit_cell, "Unit cell")
-            .changed();
+        let mut changed = ui.checkbox(&mut self.show_unit_cell, "Unit cell").changed();
         changed |= ui
             .checkbox(&mut self.show_symm_mates, "Symm mol")
             .on_hover_text("Show symmetry-related molecules in the unit cell")
@@ -2138,7 +2207,8 @@ impl GuiApplication {
                 changed = true;
                 // A level change invalidates the cached solid mesh; rebuild it if shown.
                 if self.show_density_solid {
-                    self.density_solid_mesh = self.state.build_density_surface_mesh(self.density_level);
+                    self.density_solid_mesh =
+                        self.state.build_density_surface_mesh(self.density_level);
                 }
             }
         });
@@ -2171,14 +2241,34 @@ impl GuiApplication {
         }
         ui.separator();
         ui.label("Translation (Å)");
-        ui.add(egui::DragValue::new(&mut camera.target.x).prefix("X ").speed(0.2));
-        ui.add(egui::DragValue::new(&mut camera.target.y).prefix("Y ").speed(0.2));
-        ui.add(egui::DragValue::new(&mut camera.target.z).prefix("Z ").speed(0.2));
+        ui.add(
+            egui::DragValue::new(&mut camera.target.x)
+                .prefix("X ")
+                .speed(0.2),
+        );
+        ui.add(
+            egui::DragValue::new(&mut camera.target.y)
+                .prefix("Y ")
+                .speed(0.2),
+        );
+        ui.add(
+            egui::DragValue::new(&mut camera.target.z)
+                .prefix("Z ")
+                .speed(0.2),
+        );
         ui.separator();
         ui.label("Zoom / Slab");
-        ui.add(egui::DragValue::new(&mut camera.ortho_scale).prefix("Zoom ").speed(1.0));
+        ui.add(
+            egui::DragValue::new(&mut camera.ortho_scale)
+                .prefix("Zoom ")
+                .speed(1.0),
+        );
         camera.ortho_scale = camera.ortho_scale.max(1.0);
-        ui.add(egui::DragValue::new(&mut camera.distance).prefix("Dist ").speed(1.0));
+        ui.add(
+            egui::DragValue::new(&mut camera.distance)
+                .prefix("Dist ")
+                .speed(1.0),
+        );
         if ui.button("Fit").clicked() {
             camera.fit_snapshot(&self.snapshot);
         }
@@ -2188,7 +2278,11 @@ impl GuiApplication {
     /// active object via the shared-core `anim_spin_direction` (CueMol2 anim playback;
     /// empty list → a simple continuous spin).
     fn advance_animation(&mut self, dt: f32, camera: &mut CameraController) {
-        let frame = anim_step(&self.animation_objects, self.animation_elapsed as f64, dt as f64);
+        let frame = anim_step(
+            &self.animation_objects,
+            self.animation_elapsed as f64,
+            dt as f64,
+        );
         self.animation_elapsed = frame.elapsed as f32;
         if frame.rotate_dir != 0.0 {
             camera.rotate_by(frame.rotate_dir as f32 * 120.0 * dt, 0.0);
@@ -2247,6 +2341,7 @@ impl GuiApplication {
             ui.menu_button("Add", |ui| {
                 for kind in [
                     AnimKind::Spin,
+                    AnimKind::CameraMotion,
                     AnimKind::Rock,
                     AnimKind::Pause,
                     AnimKind::SlideIn,
@@ -2264,7 +2359,11 @@ impl GuiApplication {
                     }
                 }
             });
-            let play = if self.animation_playing { "⏸ Pause" } else { "▶ Play" };
+            let play = if self.animation_playing {
+                "⏸ Pause"
+            } else {
+                "▶ Play"
+            };
             if ui.button(play).clicked() {
                 self.animation_playing = !self.animation_playing;
             }
@@ -2573,7 +2672,11 @@ impl GuiApplication {
                                 residue.selected,
                                 egui::RichText::new(&residue.letter).monospace(),
                             )
-                            .on_hover_text(format!("{} {}", residue.res_name.trim(), residue.res_id));
+                            .on_hover_text(format!(
+                                "{} {}",
+                                residue.res_name.trim(),
+                                residue.res_id
+                            ));
                         if response.clicked() {
                             clicked = Some(residue.selection.clone());
                         }
@@ -2673,8 +2776,8 @@ impl GuiApplication {
                 self.selected_renderer = None;
                 self.last_loaded_path = Some(path);
                 self.add_recent_path(self.last_loaded_path.clone().unwrap());
-                // Report any non-molecule objects skipped on load (surface/map objects
-                // this port can't render yet) — a partial load is not silent.
+                // Report unsupported object classes or source formats so a partial
+                // scene load is not silent.
                 let skipped = self.state.active_scene_skipped_objects();
                 if skipped.is_empty() {
                     self.set_status(format!("Opened scene {}", scene_uid.get()));
@@ -2698,7 +2801,9 @@ impl GuiApplication {
                     for mesh in surfaces {
                         let base = merged.vertices.len() as u32;
                         merged.vertices.extend(mesh.vertices);
-                        merged.indices.extend(mesh.indices.iter().map(|index| base + index));
+                        merged
+                            .indices
+                            .extend(mesh.indices.iter().map(|index| base + index));
                     }
                     self.surface_mesh = Some(merged);
                     self.show_surface = true;
@@ -2866,7 +2971,10 @@ impl GuiApplication {
                 Err(error) => self.set_error(error),
             }
         } else {
-            match self.state.export_active_scene_pov(&path, &self.selection_text) {
+            match self
+                .state
+                .export_active_scene_pov(&path, &self.selection_text)
+            {
                 Ok(count) => self.set_status(format!("Exported {count} atoms to {path}")),
                 Err(error) => self.set_error(error),
             }
@@ -3218,6 +3326,11 @@ impl GuiApplication {
                 self.snapshot.meshes.push(mesh);
             }
         }
+        if self.color_proofing {
+            if self.state.apply_color_proof(&mut self.snapshot).is_err() {
+                cuemol_render::apply_generic_color_proof(&mut self.snapshot);
+            }
+        }
     }
 
     /// Grow the live snapshot bounds to enclose every vertex of a mesh (so Fit frames
@@ -3424,7 +3537,12 @@ impl GuiApplication {
                 .state
                 .atom_summary(cuemol_core::Uid::new(object_uid), atom_index)
             {
-                Ok(info) => format!("{}{}:{}", info.residue_name.trim(), info.residue_id, info.name),
+                Ok(info) => format!(
+                    "{}{}:{}",
+                    info.residue_name.trim(),
+                    info.residue_id,
+                    info.name
+                ),
                 Err(_) => continue,
             };
             painter.text(
@@ -3534,7 +3652,12 @@ impl GuiApplication {
                 ui.checkbox(&mut self.show_workspace, "Workspace panel");
                 ui.checkbox(&mut self.show_inspector, "Inspector panel");
                 ui.checkbox(&mut self.show_bottom_panel, "Bottom panel");
-                ui.checkbox(&mut self.color_proofing, "Color proofing");
+                if ui
+                    .checkbox(&mut self.color_proofing, "Color proofing")
+                    .changed()
+                {
+                    self.rebuild_snapshot();
+                }
             });
         self.show_options = open;
     }
@@ -5045,11 +5168,14 @@ impl GpuState {
                     .max(1.0);
                 (x, y, w, h)
             }
-            None => (0.0, 0.0, self.config.width as f32, self.config.height as f32),
+            None => (
+                0.0,
+                0.0,
+                self.config.width as f32,
+                self.config.height as f32,
+            ),
         };
-        let camera_uniform = self
-            .camera
-            .uniform(PhysicalSize::new(vw as u32, vh as u32));
+        let camera_uniform = self.camera.uniform(PhysicalSize::new(vw as u32, vh as u32));
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
         for (id, image_delta) in &textures_delta.set {
@@ -6006,8 +6132,10 @@ mod tests {
 
             // Exercise the viewport right-click context menu render path against a
             // real picked atom (catches a panic in navi-ctxtmenu-atom without a window).
-            app.viewport_rect =
-                Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)));
+            app.viewport_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            ));
             let first = app
                 .snapshot
                 .atoms
@@ -6091,7 +6219,11 @@ mod tests {
             app.measure_selection()
         );
         // Right angle at the central atom → 90°.
-        app.snapshot.atoms = vec![atom(1.0, 0.0, 0.0), atom(0.0, 0.0, 0.0), atom(0.0, 1.0, 0.0)];
+        app.snapshot.atoms = vec![
+            atom(1.0, 0.0, 0.0),
+            atom(0.0, 0.0, 0.0),
+            atom(0.0, 1.0, 0.0),
+        ];
         assert!(
             app.measure_selection().unwrap().contains("90.00"),
             "angle: {:?}",
@@ -6229,8 +6361,11 @@ mod tests {
         app.open_path = pdb.to_string_lossy().to_string();
         app.open_current_path(&mut camera);
         let script = std::env::temp_dir().join("cuemol_egui_script.js");
-        std::fs::write(&script, "cuemol.print('val=' + (10/2)); cuemol.select('chain A');")
-            .unwrap();
+        std::fs::write(
+            &script,
+            "cuemol.print('val=' + (10/2)); cuemol.select('chain A');",
+        )
+        .unwrap();
         app.script_path = script.to_string_lossy().to_string();
         app.load_script_into_log();
         assert!(
@@ -6255,7 +6390,10 @@ mod tests {
         app.open_current_path(&mut camera);
         app.selection_text = "resid 1:5".to_string();
         let tris = |app: &GuiApplication| {
-            app.surface_mesh.as_ref().map(|m| m.indices.len()).unwrap_or(0)
+            app.surface_mesh
+                .as_ref()
+                .map(|m| m.indices.len())
+                .unwrap_or(0)
         };
         app.toggle_surface();
         let full = tris(&app);
@@ -6347,7 +6485,9 @@ mod tests {
                 .map(|a| a.position)
                 .collect();
             let n = atoms.len() as f64;
-            let sum = atoms.iter().fold(cuemol_core::Vector4::ZERO, |acc, p| acc + *p);
+            let sum = atoms
+                .iter()
+                .fold(cuemol_core::Vector4::ZERO, |acc, p| acc + *p);
             cuemol_core::Vector4::new3(sum.x / n, sum.y / n, sum.z / n)
         };
         let n = 80usize;
@@ -6361,18 +6501,19 @@ mod tests {
                 }
             }
         }
-        app.state.set_surface_potential_map(
-            cuemol_desktop_core::DensityMap::from_grid_map(cuemol_desktop_core::GridMap {
-                counts: [n, n, n],
-                origin,
-                delta: [
-                    cuemol_core::Vector4::new3(1.0, 0.0, 0.0),
-                    cuemol_core::Vector4::new3(0.0, 1.0, 0.0),
-                    cuemol_core::Vector4::new3(0.0, 0.0, 1.0),
-                ],
-                values,
-            }),
-        );
+        app.state
+            .set_surface_potential_map(cuemol_desktop_core::DensityMap::from_grid_map(
+                cuemol_desktop_core::GridMap {
+                    counts: [n, n, n],
+                    origin,
+                    delta: [
+                        cuemol_core::Vector4::new3(1.0, 0.0, 0.0),
+                        cuemol_core::Vector4::new3(0.0, 1.0, 0.0),
+                        cuemol_core::Vector4::new3(0.0, 0.0, 1.0),
+                    ],
+                    values,
+                },
+            ));
         app.molstruct_object = Some(object_uid);
         app.selection_text = "resid 1:3".to_string();
         let base_meshes = app.snapshot.meshes.len();
@@ -6385,7 +6526,10 @@ mod tests {
         let mesh = app.surface_mesh.as_ref().expect("potential SES cached");
         let red = mesh.vertices.iter().any(|v| v.color[0] > v.color[2] + 0.02);
         let blue = mesh.vertices.iter().any(|v| v.color[2] > v.color[0] + 0.02);
-        assert!(red && blue, "the SES must span the red→blue potential gradient");
+        assert!(
+            red && blue,
+            "the SES must span the red→blue potential gradient"
+        );
     }
 
     #[test]
@@ -6509,7 +6653,11 @@ mod tests {
 
         app.show_symm_mates = false;
         app.rebuild_snapshot();
-        assert_eq!(app.snapshot.atoms.len(), base_atoms, "toggling off removes copies");
+        assert_eq!(
+            app.snapshot.atoms.len(),
+            base_atoms,
+            "toggling off removes copies"
+        );
     }
 
     #[test]
@@ -6594,7 +6742,10 @@ mod tests {
         let start = camera.ortho_scale;
         // Dragging up in zoom mode reduces ortho_scale (zoom in).
         camera.zoom_by(-(-20.0) * 0.1);
-        assert!(camera.ortho_scale < start, "shift+left drag-up should zoom in");
+        assert!(
+            camera.ortho_scale < start,
+            "shift+left drag-up should zoom in"
+        );
     }
 
     /// Opt-in visual self-verification: render the whole CueMol2 shell to a PNG via
@@ -6731,8 +6882,14 @@ mod tests {
             }
             // A couple of animation objects so the Animation panel list renders.
             app.animation_objects = vec![
-                AnimObject { kind: AnimKind::Spin, duration: 3.0 },
-                AnimObject { kind: AnimKind::Pause, duration: 1.0 },
+                AnimObject {
+                    kind: AnimKind::Spin,
+                    duration: 3.0,
+                },
+                AnimObject {
+                    kind: AnimKind::Pause,
+                    duration: 1.0,
+                },
             ];
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(420.0, 1500.0))
@@ -6993,12 +7150,21 @@ mod tests {
             .expect("write imported.obj");
             app.mesh_import_path = obj_path.to_string_lossy().to_string();
             app.import_mesh_surface(&mut camera);
-            assert!(app.surface_mesh.is_some(), "import must populate the surface slot");
+            assert!(
+                app.surface_mesh.is_some(),
+                "import must populate the surface slot"
+            );
             let (w, h) = (900u32, 700u32);
-            let mvp = camera.view_projection(w as f32 / h as f32).to_cols_array_2d();
-            if let Some(png) =
-                crate::offscreen::render_snapshot_png(&app.snapshot, mvp, w, h, [0.02, 0.02, 0.05, 1.0])
-            {
+            let mvp = camera
+                .view_projection(w as f32 / h as f32)
+                .to_cols_array_2d();
+            if let Some(png) = crate::offscreen::render_snapshot_png(
+                &app.snapshot,
+                mvp,
+                w,
+                h,
+                [0.02, 0.02, 0.05, 1.0],
+            ) {
                 let path = out_dir.join("imported_mesh_3d.png");
                 std::fs::write(&path, png).expect("write imported_mesh_3d.png");
                 eprintln!("snapshot written to {}", path.display());
@@ -7014,7 +7180,10 @@ mod tests {
             let bscene = builder.new_scene("s");
             if let Some(pdb) = reference_pdb_path() {
                 if let Ok(mol) = cuemol_molstr::read_pdb_file(&pdb) {
-                    builder.scene_mut(bscene).unwrap().add_molecule("crambin", mol);
+                    builder
+                        .scene_mut(bscene)
+                        .unwrap()
+                        .add_molecule("crambin", mol);
                 }
             }
             let mut qsc = builder.scene(bscene).unwrap().write_qsc_string();
@@ -7035,10 +7204,16 @@ mod tests {
                 "loading a .qsc with an OBJ surface must populate the surface slot"
             );
             let (w, h) = (900u32, 700u32);
-            let mvp = camera.view_projection(w as f32 / h as f32).to_cols_array_2d();
-            if let Some(png) =
-                crate::offscreen::render_snapshot_png(&app.snapshot, mvp, w, h, [0.02, 0.02, 0.05, 1.0])
-            {
+            let mvp = camera
+                .view_projection(w as f32 / h as f32)
+                .to_cols_array_2d();
+            if let Some(png) = crate::offscreen::render_snapshot_png(
+                &app.snapshot,
+                mvp,
+                w,
+                h,
+                [0.02, 0.02, 0.05, 1.0],
+            ) {
                 let path = out_dir.join("qsc_surface_3d.png");
                 std::fs::write(&path, png).expect("write qsc_surface_3d.png");
                 eprintln!("snapshot written to {}", path.display());
@@ -7052,7 +7227,10 @@ mod tests {
                 image.save(path).expect("save snapshot PNG");
                 eprintln!("snapshot written to {}", path.display());
             }
-            Err(err) => eprintln!("no GPU adapter for kittest, skipping {}: {err}", path.display()),
+            Err(err) => eprintln!(
+                "no GPU adapter for kittest, skipping {}: {err}",
+                path.display()
+            ),
         }
     }
 }

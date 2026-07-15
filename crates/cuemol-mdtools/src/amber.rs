@@ -678,26 +678,22 @@ fn resolve_amber_element(atomic_number: i32, mass: f64, amber_type: &str) -> Str
 }
 
 fn atomic_number_symbol(value: i32) -> Option<&'static str> {
-    Some(match value {
-        1 => "H",
-        6 => "C",
-        7 => "N",
-        8 => "O",
-        9 => "F",
-        11 => "Na",
-        12 => "Mg",
-        15 => "P",
-        16 => "S",
-        17 => "Cl",
-        19 => "K",
-        20 => "Ca",
-        26 => "Fe",
-        30 => "Zn",
-        35 => "Br",
-        53 => "I",
-        _ => return None,
-    })
+    usize::try_from(value)
+        .ok()
+        .and_then(|number| ELEMENT_SYMBOLS.get(number).copied())
+        .filter(|symbol| !symbol.is_empty())
 }
+
+const ELEMENT_SYMBOLS: [&str; 119] = [
+    "", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S",
+    "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge",
+    "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd",
+    "In", "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd",
+    "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
+    "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm",
+    "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn",
+    "Nh", "Fl", "Mc", "Lv", "Ts", "Og",
+];
 
 fn mass_symbol(mass: f64) -> Option<&'static str> {
     let near = |target: f64| (target - 0.5..target + 0.5).contains(&mass);
@@ -731,4 +727,19 @@ fn parse_fortran_real(token: &str, message: &'static str) -> Result<f64> {
 
 fn fixed_ascii(input: &str, start: usize, end: usize) -> Option<&str> {
     std::str::from_utf8(input.as_bytes().get(start..end)?).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_number_symbols_cover_the_periodic_table() {
+        assert_eq!(atomic_number_symbol(1), Some("H"));
+        assert_eq!(atomic_number_symbol(14), Some("Si"));
+        assert_eq!(atomic_number_symbol(79), Some("Au"));
+        assert_eq!(atomic_number_symbol(118), Some("Og"));
+        assert_eq!(atomic_number_symbol(0), None);
+        assert_eq!(atomic_number_symbol(119), None);
+    }
 }

@@ -5,9 +5,8 @@
 //! `gpui-gui-direction` memory). This module is the panel shell that reuses the
 //! headless [`DesktopAppState`] logic, exactly as `GuiApplication` does for egui.
 //!
-//! This first milestone is the panel layout + scene/object/renderer tree driven
-//! by `DesktopAppState`; the wgpu 3D viewport is a placeholder pending the
-//! offscreen-render compositing step.
+//! The scene is tessellated and rendered offscreen with wgpu, then composited into
+//! the retained gpui layout alongside the scene/object/renderer panels.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -101,40 +100,88 @@ fn theme_light_on() -> bool {
     THEME_LIGHT.with(|flag| flag.get())
 }
 fn col_bg() -> u32 {
-    if theme_light_on() { COL_BG_LIGHT } else { COL_BG_DARK }
+    if theme_light_on() {
+        COL_BG_LIGHT
+    } else {
+        COL_BG_DARK
+    }
 }
 fn col_panel() -> u32 {
-    if theme_light_on() { COL_PANEL_LIGHT } else { COL_PANEL_DARK }
+    if theme_light_on() {
+        COL_PANEL_LIGHT
+    } else {
+        COL_PANEL_DARK
+    }
 }
 fn col_header() -> u32 {
-    if theme_light_on() { COL_HEADER_LIGHT } else { COL_HEADER_DARK }
+    if theme_light_on() {
+        COL_HEADER_LIGHT
+    } else {
+        COL_HEADER_DARK
+    }
 }
 fn col_viewport() -> u32 {
-    if theme_light_on() { COL_VIEWPORT_LIGHT } else { COL_VIEWPORT_DARK }
+    if theme_light_on() {
+        COL_VIEWPORT_LIGHT
+    } else {
+        COL_VIEWPORT_DARK
+    }
 }
 fn col_border() -> u32 {
-    if theme_light_on() { COL_BORDER_LIGHT } else { COL_BORDER_DARK }
+    if theme_light_on() {
+        COL_BORDER_LIGHT
+    } else {
+        COL_BORDER_DARK
+    }
 }
 fn col_text() -> u32 {
-    if theme_light_on() { COL_TEXT_LIGHT } else { COL_TEXT_DARK }
+    if theme_light_on() {
+        COL_TEXT_LIGHT
+    } else {
+        COL_TEXT_DARK
+    }
 }
 fn col_text_dim() -> u32 {
-    if theme_light_on() { COL_TEXT_DIM_LIGHT } else { COL_TEXT_DIM_DARK }
+    if theme_light_on() {
+        COL_TEXT_DIM_LIGHT
+    } else {
+        COL_TEXT_DIM_DARK
+    }
 }
 fn col_accent() -> u32 {
-    if theme_light_on() { COL_ACCENT_LIGHT } else { COL_ACCENT_DARK }
+    if theme_light_on() {
+        COL_ACCENT_LIGHT
+    } else {
+        COL_ACCENT_DARK
+    }
 }
 fn col_btn() -> u32 {
-    if theme_light_on() { COL_BTN_LIGHT } else { COL_BTN_DARK }
+    if theme_light_on() {
+        COL_BTN_LIGHT
+    } else {
+        COL_BTN_DARK
+    }
 }
 fn col_btn_hover() -> u32 {
-    if theme_light_on() { COL_BTN_HOVER_LIGHT } else { COL_BTN_HOVER_DARK }
+    if theme_light_on() {
+        COL_BTN_HOVER_LIGHT
+    } else {
+        COL_BTN_HOVER_DARK
+    }
 }
 fn col_sel() -> u32 {
-    if theme_light_on() { COL_SEL_LIGHT } else { COL_SEL_DARK }
+    if theme_light_on() {
+        COL_SEL_LIGHT
+    } else {
+        COL_SEL_DARK
+    }
 }
 fn col_danger() -> u32 {
-    if theme_light_on() { COL_DANGER_LIGHT } else { COL_DANGER_DARK }
+    if theme_light_on() {
+        COL_DANGER_LIGHT
+    } else {
+        COL_DANGER_DARK
+    }
 }
 
 const INSPECTOR_W: f32 = 320.0;
@@ -372,9 +419,8 @@ pub struct CueMolGpuiApp {
     selected_renderer: Option<cuemol_core::Uid>,
     /// View settings.
     background: Background,
-    /// Soft-proof the scene colours for print (CueMol2 Scene menu "Use color
-    /// proofing"). Tracked as a flag for parity with egui, where it is likewise a
-    /// tracked toggle that does not yet feed the offscreen renderer.
+    /// Soft-proof scene colours for print through a configured ICC profile, with
+    /// the Generic CMYK fallback when no profile is configured.
     color_proof: bool,
     /// Active tab of the top ribbon toolbar (Home / Measure / Animation).
     ribbon_tab: RibbonTab,
@@ -523,7 +569,11 @@ impl CueMolGpuiApp {
             let inputs = Inputs {
                 selection: cx.new(|cx| TextInput::new(cx, "name CA", &initial)),
                 open_path: cx.new(|cx| {
-                    TextInput::new(cx, "path/to/file.pdb", "../cuemol2/tests/test_data/1CRN.pdb")
+                    TextInput::new(
+                        cx,
+                        "path/to/file.pdb",
+                        "../cuemol2/tests/test_data/1CRN.pdb",
+                    )
                 }),
                 save_qsc: cx.new(|cx| TextInput::new(cx, "scene.qsc", "scene.qsc")),
                 save_obj: cx.new(|cx| TextInput::new(cx, "object.pdb", "object.pdb")),
@@ -570,6 +620,11 @@ impl CueMolGpuiApp {
                 snapshot.meshes.push(mesh.clone());
             }
         }
+        if self.color_proof {
+            if self.state.apply_color_proof(&mut snapshot).is_err() {
+                cuemol_render::apply_generic_color_proof(&mut snapshot);
+            }
+        }
         Some(snapshot)
     }
 
@@ -597,9 +652,9 @@ impl CueMolGpuiApp {
             .map(|object| object.uid)
             .collect();
         for uid in uids {
-            let _ = self
-                .state
-                .set_object_coloring(uid, coloring_type.map(String::from), attrs.clone());
+            let _ =
+                self.state
+                    .set_object_coloring(uid, coloring_type.map(String::from), attrs.clone());
         }
         self.refresh_scene(false);
     }
@@ -678,7 +733,10 @@ impl CueMolGpuiApp {
 
     /// Load an APBS/OpenDX `.dx` electrostatic-potential map (potential-coloured surface).
     fn load_potential(&mut self, path: &str) {
-        match self.state.load_surface_potential(std::path::Path::new(path)) {
+        match self
+            .state
+            .load_surface_potential(std::path::Path::new(path))
+        {
             Ok((lo, hi)) => self.set_status(format!("Potential loaded (range {lo:.2}..{hi:.2})")),
             Err(error) => self.set_status(format!("Potential load failed: {error}")),
         }
@@ -759,49 +817,47 @@ impl CueMolGpuiApp {
     fn toggle_animation(&mut self, cx: &mut Context<Self>) {
         self.animation_playing = !self.animation_playing;
         if self.animation_playing {
-            cx.spawn(async move |this, cx| {
-                loop {
-                    let keep = this
-                        .update(cx, |this, cx| {
-                            if !this.animation_playing {
-                                return false;
-                            }
-                            let frame = cuemol_desktop_core::anim_step(
-                                &this.animation_objects,
-                                this.animation_elapsed,
-                                0.016,
-                            );
-                            this.animation_elapsed = frame.elapsed;
-                            if frame.rotate_dir != 0.0 {
-                                this.rotate_camera(frame.rotate_dir * 2.0, 0.0);
-                            }
-                            if frame.slide_dir != 0.0 {
-                                this.zoom_camera(1.0 + frame.slide_dir * 0.02);
-                            }
-                            if let Some(target) = frame.set_visible {
-                                this.apply_anim_visibility(target);
-                            }
-                            if let Some(fraction) = frame.frame_fraction {
-                                if let Some(uid) =
-                                    this.state.active_object_summaries().first().map(|o| o.uid)
-                                {
-                                    if this.state.object_has_trajectory(uid) {
-                                        this.state.apply_trajectory_fraction(uid, fraction);
-                                        this.refresh_scene(false);
-                                    }
+            cx.spawn(async move |this, cx| loop {
+                let keep = this
+                    .update(cx, |this, cx| {
+                        if !this.animation_playing {
+                            return false;
+                        }
+                        let frame = cuemol_desktop_core::anim_step(
+                            &this.animation_objects,
+                            this.animation_elapsed,
+                            0.016,
+                        );
+                        this.animation_elapsed = frame.elapsed;
+                        if frame.rotate_dir != 0.0 {
+                            this.rotate_camera(frame.rotate_dir * 2.0, 0.0);
+                        }
+                        if frame.slide_dir != 0.0 {
+                            this.zoom_camera(1.0 + frame.slide_dir * 0.02);
+                        }
+                        if let Some(target) = frame.set_visible {
+                            this.apply_anim_visibility(target);
+                        }
+                        if let Some(fraction) = frame.frame_fraction {
+                            if let Some(uid) =
+                                this.state.active_object_summaries().first().map(|o| o.uid)
+                            {
+                                if this.state.object_has_trajectory(uid) {
+                                    this.state.apply_trajectory_fraction(uid, fraction);
+                                    this.refresh_scene(false);
                                 }
                             }
-                            cx.notify();
-                            true
-                        })
-                        .unwrap_or(false);
-                    if !keep {
-                        break;
-                    }
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(16))
-                        .await;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
                 }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
             })
             .detach();
         }
@@ -886,8 +942,14 @@ impl CueMolGpuiApp {
                     )
                 })
                 .unwrap_or_else(|| cuemol_core::Vector4::new3(0.0, 0.0, self.clip_offset));
-            self.state
-                .build_cut_surface_mesh(uid, &self.applied_selection, 1.0, 1.4, normal, position)
+            self.state.build_cut_surface_mesh(
+                uid,
+                &self.applied_selection,
+                1.0,
+                1.4,
+                normal,
+                position,
+            )
         } else {
             self.state
                 .build_surface_mesh(uid, &self.applied_selection, 1.0, 1.4)
@@ -1068,8 +1130,7 @@ impl CueMolGpuiApp {
                         self.selected_object = Some(object_uid);
                         self.selected_renderer = None;
                     }
-                    GuiLoadedPath::Scene { scene_uid }
-                    | GuiLoadedPath::Map { scene_uid, .. } => {
+                    GuiLoadedPath::Scene { scene_uid } | GuiLoadedPath::Map { scene_uid, .. } => {
                         self.state.set_active_scene(Some(scene_uid));
                     }
                 }
@@ -1081,7 +1142,9 @@ impl CueMolGpuiApp {
                     for mesh in surfaces {
                         let base = merged.vertices.len() as u32;
                         merged.vertices.extend(mesh.vertices);
-                        merged.indices.extend(mesh.indices.iter().map(|index| base + index));
+                        merged
+                            .indices
+                            .extend(mesh.indices.iter().map(|index| base + index));
                     }
                     self.surface_mesh = Some(merged);
                     self.show_surface = true;
@@ -1173,7 +1236,10 @@ impl CueMolGpuiApp {
                 Err(error) => self.set_status(format!("Export error: {error}")),
             }
         } else {
-            match self.state.export_active_scene_pov(path, &self.applied_selection) {
+            match self
+                .state
+                .export_active_scene_pov(path, &self.applied_selection)
+            {
                 Ok(count) => self.set_status(format!("Exported {count} atoms to {path}")),
                 Err(error) => self.set_status(format!("Export error: {error}")),
             }
@@ -1184,7 +1250,11 @@ impl CueMolGpuiApp {
 
     fn create_renderer(&mut self, object_uid: cuemol_core::Uid, ty: &str, name: &str) {
         self.snapshot_undo();
-        let name = if name.trim().is_empty() { ty } else { name.trim() };
+        let name = if name.trim().is_empty() {
+            ty
+        } else {
+            name.trim()
+        };
         match self
             .state
             .new_renderer_in_active_scene(object_uid, ty, name)
@@ -1220,7 +1290,11 @@ impl CueMolGpuiApp {
         {
             Ok(()) => {
                 self.refresh_scene(false);
-                self.set_status(if visible { "Renderer hidden" } else { "Renderer shown" });
+                self.set_status(if visible {
+                    "Renderer hidden"
+                } else {
+                    "Renderer shown"
+                });
             }
             Err(error) => {
                 self.undo_stack.pop();
@@ -1496,10 +1570,9 @@ impl CueMolGpuiApp {
             center,
             &path,
         ) {
-            Ok(summary) => self.set_status(format!(
-                "Cut surface: {} triangles",
-                summary.triangle_count
-            )),
+            Ok(summary) => {
+                self.set_status(format!("Cut surface: {} triangles", summary.triangle_count))
+            }
             Err(error) => self.set_status(format!("Cut surface error: {error}")),
         }
     }
@@ -1555,7 +1628,10 @@ impl CueMolGpuiApp {
     /// Log the active camera + crystal-cell properties to the output console (CueMol2
     /// Scene/View → Properties).
     fn show_view_properties(&mut self) {
-        let camera = self.state.active_scene_saved_camera().unwrap_or(self.camera.clone());
+        let camera = self
+            .state
+            .active_scene_saved_camera()
+            .unwrap_or(self.camera.clone());
         let center = camera.center();
         self.set_status(format!(
             "View: center=({:.2},{:.2},{:.2}) zoom={:.1} {}",
@@ -1617,20 +1693,16 @@ impl CueMolGpuiApp {
         }
     }
 
-    fn run_morph_append(
-        &mut self,
-        target: cuemol_core::Uid,
-        source: cuemol_core::Uid,
-        name: &str,
-    ) {
+    fn run_morph_append(&mut self, target: cuemol_core::Uid, source: cuemol_core::Uid, name: &str) {
         self.snapshot_undo();
         match self
             .state
             .append_morph_frame_from_object(target, source, name)
         {
-            Ok(summary) => {
-                self.set_status(format!("Appended morph frame ({} frames)", summary.frame_count))
-            }
+            Ok(summary) => self.set_status(format!(
+                "Appended morph frame ({} frames)",
+                summary.frame_count
+            )),
             Err(error) => {
                 self.undo_stack.pop();
                 self.set_status(format!("Morph error: {error}"));
@@ -1927,7 +1999,13 @@ impl CueMolGpuiApp {
         }
         let (w, h) = self.view_size;
         let mvp = crate::offscreen::camera_mvp(&self.camera, w as f64 / h as f64);
-        renderer.render(std::slice::from_ref(mesh), mvp, w, h, self.background.clear())
+        renderer.render(
+            std::slice::from_ref(mesh),
+            mvp,
+            w,
+            h,
+            self.background.clear(),
+        )
     }
 
     /// Update the offscreen resolution to match the live window and re-render if
@@ -1938,7 +2016,12 @@ impl CueMolGpuiApp {
         // (+ bottom panel, when shown) vertically. Keeping this in step with the
         // panel-visibility flags means the offscreen render matches the visible
         // region exactly instead of stretching.
-        let chrome_w = SIDEBAR_W + if self.show_inspector { INSPECTOR_W } else { 0.0 };
+        let chrome_w = SIDEBAR_W
+            + if self.show_inspector {
+                INSPECTOR_W
+            } else {
+                0.0
+            };
         let chrome_h = HEADER_H
             + TOOLBAR_H
             + SCENE_TAB_H
@@ -2043,8 +2126,8 @@ impl Render for CueMolGpuiApp {
         let menu = self
             .open_menu
             .map(|_| self.menu_overlay(cx).into_any_element());
-        let dialog = (self.dialog != Dialog::None)
-            .then(|| self.dialog_overlay(cx).into_any_element());
+        let dialog =
+            (self.dialog != Dialog::None).then(|| self.dialog_overlay(cx).into_any_element());
 
         div()
             .relative()
@@ -2131,24 +2214,30 @@ impl CueMolGpuiApp {
                     })),
             );
         }
-        bar.child(div().flex_1().px_3().text_color(rgb(col_text_dim())).child(format!("scene: {active}")))
-            // Right-aligned panel toggles (mirrors egui's Options/Window menu).
-            .child(
-                toggle_button("tgl-inspector", "Inspector", self.show_inspector).on_click(
-                    cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                        this.show_inspector = !this.show_inspector;
-                        cx.notify();
-                    }),
-                ),
-            )
-            .child(
-                toggle_button("tgl-bottom", "Console", self.show_bottom)
-                    .mr_2()
-                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                        this.show_bottom = !this.show_bottom;
-                        cx.notify();
-                    })),
-            )
+        bar.child(
+            div()
+                .flex_1()
+                .px_3()
+                .text_color(rgb(col_text_dim()))
+                .child(format!("scene: {active}")),
+        )
+        // Right-aligned panel toggles (mirrors egui's Options/Window menu).
+        .child(
+            toggle_button("tgl-inspector", "Inspector", self.show_inspector).on_click(cx.listener(
+                |this, _: &gpui::ClickEvent, _, cx| {
+                    this.show_inspector = !this.show_inspector;
+                    cx.notify();
+                },
+            )),
+        )
+        .child(
+            toggle_button("tgl-bottom", "Console", self.show_bottom)
+                .mr_2()
+                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    this.show_bottom = !this.show_bottom;
+                    cx.notify();
+                })),
+        )
     }
 
     /// The open menu's dropdown, rendered as a root-level overlay (so it paints
@@ -2394,7 +2483,9 @@ impl CueMolGpuiApp {
                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                             this.bottom_tab = BottomTab::Render;
                             this.show_bottom = true;
-                            this.set_status("Export scene: enter a .pov/.png path in the Render tab");
+                            this.set_status(
+                                "Export scene: enter a .pov/.png path in the Render tab",
+                            );
                             this.open_menu = None;
                             cx.notify();
                         }))
@@ -2428,6 +2519,7 @@ impl CueMolGpuiApp {
                     menu_item("mi-colorproof", proof_label)
                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                             this.color_proof = !this.color_proof;
+                            this.refresh_scene(false);
                             this.set_status(format!("Color proofing: {}", this.color_proof));
                             this.open_menu = None;
                             cx.notify();
@@ -2761,15 +2853,17 @@ impl CueMolGpuiApp {
             .items_center()
             .gap_2()
             .w_full()
-            .child(button("tb-open", "Open").on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                let path = this
-                    .inputs
-                    .as_ref()
-                    .map(|i| i.open_path.read(cx).text())
-                    .unwrap_or_default();
-                this.open_file(&path);
-                cx.notify();
-            })))
+            .child(button("tb-open", "Open").on_click(cx.listener(
+                |this, _: &gpui::ClickEvent, _, cx| {
+                    let path = this
+                        .inputs
+                        .as_ref()
+                        .map(|i| i.open_path.read(cx).text())
+                        .unwrap_or_default();
+                    this.open_file(&path);
+                    cx.notify();
+                },
+            )))
             .child(button("tb-savescene", "Save scene").on_click(cx.listener(
                 |this, _: &gpui::ClickEvent, _, cx| {
                     let path = this
@@ -2851,16 +2945,24 @@ impl CueMolGpuiApp {
     /// Measure ribbon tab: distance / angle / torsion of the current 2/3/4-atom
     /// selection (CueMol2 AtomIntr), reusing the shared-core `active_measure`.
     fn ribbon_measure(&self) -> impl IntoElement {
-        let readout = self.state.active_measure(&self.applied_selection).unwrap_or_else(|| {
-            "Select 2 / 3 / 4 atoms to measure distance / angle / torsion".into()
-        });
+        let readout = self
+            .state
+            .active_measure(&self.applied_selection)
+            .unwrap_or_else(|| {
+                "Select 2 / 3 / 4 atoms to measure distance / angle / torsion".into()
+            });
         div()
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
             .w_full()
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Measure:"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Measure:"),
+            )
             .child(div().text_xs().text_color(rgb(col_text())).child(readout))
     }
 
@@ -3100,12 +3202,14 @@ impl CueMolGpuiApp {
                 .gap_1()
                 .px_2()
                 .py_1()
-                .child(color_btn("den-contour", "Show contour").on_click(cx.listener(
-                    |this, _: &gpui::ClickEvent, _, cx| {
-                        this.toggle_density_contour();
-                        cx.notify();
-                    },
-                )))
+                .child(
+                    color_btn("den-contour", "Show contour").on_click(cx.listener(
+                        |this, _: &gpui::ClickEvent, _, cx| {
+                            this.toggle_density_contour();
+                            cx.notify();
+                        },
+                    )),
+                )
                 .child(color_btn("den-solid", "Solid").on_click(cx.listener(
                     |this, _: &gpui::ClickEvent, _, cx| {
                         this.toggle_density_solid();
@@ -3272,15 +3376,17 @@ impl CueMolGpuiApp {
                         .text_color(rgb(col_text_dim()))
                         .child(format!("Selected atoms: {}", self.rendered_atom_count)),
                 )
-                .child(button("ins-clearsel", "Clear").text_xs().on_click(cx.listener(
-                    |this, _: &gpui::ClickEvent, _, cx| {
-                        if let Some(inputs) = &this.inputs {
-                            let sel = inputs.selection.clone();
-                            sel.update(cx, |ti, cx| ti.set_text("", cx));
-                        }
-                        cx.notify();
-                    },
-                )))
+                .child(
+                    button("ins-clearsel", "Clear")
+                        .text_xs()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            if let Some(inputs) = &this.inputs {
+                                let sel = inputs.selection.clone();
+                                sel.update(cx, |ti, cx| ti.set_text("", cx));
+                            }
+                            cx.notify();
+                        })),
+                )
                 .into_any_element(),
         );
 
@@ -3306,30 +3412,38 @@ impl CueMolGpuiApp {
                     .flex_row()
                     .flex_wrap()
                     .gap_2()
-                    .child(button("ins-addr", "Add renderer").text_xs().on_click(cx.listener(
-                        move |this, _: &gpui::ClickEvent, _, cx| {
-                            this.open_new_renderer_dialog(object_uid, cx);
-                            cx.notify();
-                        },
-                    )))
-                    .child(button("ins-chain", "Chain ID").text_xs().on_click(cx.listener(
-                        move |this, _: &gpui::ClickEvent, _, cx| {
-                            this.open_chain_dialog(object_uid, cx);
-                            cx.notify();
-                        },
-                    )))
-                    .child(button("ins-renum", "Renumber").text_xs().on_click(cx.listener(
-                        move |this, _: &gpui::ClickEvent, _, cx| {
-                            this.open_residue_dialog(object_uid, cx);
-                            cx.notify();
-                        },
-                    )))
-                    .child(danger_button("ins-delatoms", "Delete atoms").text_xs().on_click(
-                        cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
-                            this.open_delete_atoms_dialog(object_uid, cx);
-                            cx.notify();
-                        }),
-                    ))
+                    .child(
+                        button("ins-addr", "Add renderer")
+                            .text_xs()
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.open_new_renderer_dialog(object_uid, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        button("ins-chain", "Chain ID")
+                            .text_xs()
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.open_chain_dialog(object_uid, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        button("ins-renum", "Renumber")
+                            .text_xs()
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.open_residue_dialog(object_uid, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        danger_button("ins-delatoms", "Delete atoms")
+                            .text_xs()
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.open_delete_atoms_dialog(object_uid, cx);
+                                cx.notify();
+                            })),
+                    )
                     .into_any_element(),
             );
             if let Some(inputs) = &self.inputs {
@@ -3422,18 +3536,22 @@ impl CueMolGpuiApp {
                     .flex()
                     .flex_row()
                     .gap_2()
-                    .child(checkbox("ins-vis", renderer.visible, "Visible").on_click(cx.listener(
-                        move |this, _: &gpui::ClickEvent, _, cx| {
-                            this.toggle_renderer_visible(object_uid, renderer_uid);
-                            cx.notify();
-                        },
-                    )))
-                    .child(danger_button("ins-delrend", "Delete").text_xs().on_click(cx.listener(
-                        move |this, _: &gpui::ClickEvent, _, cx| {
-                            this.delete_renderer(object_uid, renderer_uid);
-                            cx.notify();
-                        },
-                    )))
+                    .child(
+                        checkbox("ins-vis", renderer.visible, "Visible").on_click(cx.listener(
+                            move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.toggle_renderer_visible(object_uid, renderer_uid);
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        danger_button("ins-delrend", "Delete")
+                            .text_xs()
+                            .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.delete_renderer(object_uid, renderer_uid);
+                                cx.notify();
+                            })),
+                    )
                     .into_any_element(),
             );
         }
@@ -3560,20 +3678,14 @@ impl CueMolGpuiApp {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .child(button("log-clear", "Clear").text_xs().on_click(cx.listener(
-                        |this, _: &gpui::ClickEvent, _, cx| {
-                            this.log_lines.clear();
-                            cx.notify();
-                        },
-                    ))),
-            )
+            .child(div().flex().flex_row().gap_2().px_2().py_1().child(
+                button("log-clear", "Clear").text_xs().on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        this.log_lines.clear();
+                        cx.notify();
+                    },
+                )),
+            ))
             .child(
                 div()
                     .id("output-scroll")
@@ -3615,7 +3727,11 @@ impl CueMolGpuiApp {
             for residue in chain.residues {
                 let sel = residue.selection.clone();
                 let mut cell = div()
-                    .id(eid(format!("seq-{}-{}", chain.object_uid.get(), residue.res_id)))
+                    .id(eid(format!(
+                        "seq-{}-{}",
+                        chain.object_uid.get(),
+                        residue.res_id
+                    )))
                     .font_family("monospace")
                     .text_xs()
                     .px(px(1.0))
@@ -3669,54 +3785,78 @@ impl CueMolGpuiApp {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(button("anim-spin", "+ Spin").text_xs().on_click(cx.listener(
-                    |this, _: &gpui::ClickEvent, _, cx| {
-                        this.add_anim(AnimKind::Spin);
-                        cx.notify();
-                    },
-                )))
-                .child(button("anim-rock", "+ Rock").text_xs().on_click(cx.listener(
-                    |this, _: &gpui::ClickEvent, _, cx| {
-                        this.add_anim(AnimKind::Rock);
-                        cx.notify();
-                    },
-                )))
-                .child(button("anim-pause", "+ Pause").text_xs().on_click(cx.listener(
-                    |this, _: &gpui::ClickEvent, _, cx| {
-                        this.add_anim(AnimKind::Pause);
-                        cx.notify();
-                    },
-                )))
-                .child(button("anim-slidein", "+ SlideIn").text_xs().on_click(cx.listener(
-                    |this, _: &gpui::ClickEvent, _, cx| {
-                        this.add_anim(AnimKind::SlideIn);
-                        cx.notify();
-                    },
-                )))
-                .child(button("anim-slideout", "+ SlideOut").text_xs().on_click(cx.listener(
-                    |this, _: &gpui::ClickEvent, _, cx| {
-                        this.add_anim(AnimKind::SlideOut);
-                        cx.notify();
-                    },
-                )))
-                .child(button("anim-show", "+ Show").text_xs().on_click(cx.listener(
-                    |this, _: &gpui::ClickEvent, _, cx| {
-                        this.add_anim(AnimKind::ShowAnim);
-                        cx.notify();
-                    },
-                )))
-                .child(button("anim-hide", "+ Hide").text_xs().on_click(cx.listener(
-                    |this, _: &gpui::ClickEvent, _, cx| {
-                        this.add_anim(AnimKind::HideAnim);
-                        cx.notify();
-                    },
-                )))
-                .child(button("anim-mol", "+ MolAnim").text_xs().on_click(cx.listener(
-                    |this, _: &gpui::ClickEvent, _, cx| {
-                        this.add_anim(AnimKind::MolAnim);
-                        cx.notify();
-                    },
-                )))
+                .child(
+                    button("anim-spin", "+ Spin")
+                        .text_xs()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.add_anim(AnimKind::Spin);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("anim-camera", "+ Camera")
+                        .text_xs()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.add_anim(AnimKind::CameraMotion);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("anim-rock", "+ Rock")
+                        .text_xs()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.add_anim(AnimKind::Rock);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("anim-pause", "+ Noop")
+                        .text_xs()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.add_anim(AnimKind::Pause);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("anim-slidein", "+ SlideIn")
+                        .text_xs()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.add_anim(AnimKind::SlideIn);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("anim-slideout", "+ SlideOut")
+                        .text_xs()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.add_anim(AnimKind::SlideOut);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("anim-show", "+ Show")
+                        .text_xs()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.add_anim(AnimKind::ShowAnim);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("anim-hide", "+ Hide")
+                        .text_xs()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.add_anim(AnimKind::HideAnim);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    button("anim-mol", "+ MolAnim")
+                        .text_xs()
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.add_anim(AnimKind::MolAnim);
+                            cx.notify();
+                        })),
+                )
                 .child(
                     button("anim-play", if playing { "Stop" } else { "Play" }).on_click(
                         cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
@@ -3728,26 +3868,32 @@ impl CueMolGpuiApp {
         );
         // MolAnim source: load an AMBER mdcrd trajectory onto the active object.
         if let Some(inputs) = &self.inputs {
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_xs().text_color(rgb(col_text_dim())).child("Traj:"))
-                    .child(div().w(px(180.0)).child(inputs.trajectory.clone()))
-                    .child(button("anim-loadtraj", "Load traj").text_xs().on_click(cx.listener(
-                        |this, _: &gpui::ClickEvent, _, cx| {
-                            let path = this
-                                .inputs
-                                .as_ref()
-                                .map(|i| i.trajectory.read(cx).text())
-                                .unwrap_or_default();
-                            this.load_trajectory(&path);
-                            cx.notify();
-                        },
-                    ))),
-            );
+            col =
+                col.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(col_text_dim()))
+                                .child("Traj:"),
+                        )
+                        .child(div().w(px(180.0)).child(inputs.trajectory.clone()))
+                        .child(button("anim-loadtraj", "Load traj").text_xs().on_click(
+                            cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                let path = this
+                                    .inputs
+                                    .as_ref()
+                                    .map(|i| i.trajectory.read(cx).text())
+                                    .unwrap_or_default();
+                                this.load_trajectory(&path);
+                                cx.notify();
+                            }),
+                        )),
+                );
         }
         // Electrostatic-potential surface (SCAPOT): load an APBS/OpenDX .dx map, then
         // colour the surface by it (red −, white 0, blue +).
@@ -3758,29 +3904,42 @@ impl CueMolGpuiApp {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(div().text_xs().text_color(rgb(col_text_dim())).child("Potential:"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(col_text_dim()))
+                            .child("Potential:"),
+                    )
                     .child(div().w(px(180.0)).child(inputs.potential.clone()))
-                    .child(button("pot-load", "Load .dx").text_xs().on_click(cx.listener(
-                        |this, _: &gpui::ClickEvent, _, cx| {
-                            let path = this
-                                .inputs
-                                .as_ref()
-                                .map(|i| i.potential.read(cx).text())
-                                .unwrap_or_default();
-                            this.load_potential(&path);
-                            cx.notify();
-                        },
-                    )))
+                    .child(
+                        button("pot-load", "Load .dx")
+                            .text_xs()
+                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                let path = this
+                                    .inputs
+                                    .as_ref()
+                                    .map(|i| i.potential.read(cx).text())
+                                    .unwrap_or_default();
+                                this.load_potential(&path);
+                                cx.notify();
+                            })),
+                    )
                     .child(
                         button(
                             "pot-surface",
-                            if self.potential_surface { "Potential ✓" } else { "Potential surf" },
+                            if self.potential_surface {
+                                "Potential ✓"
+                            } else {
+                                "Potential surf"
+                            },
                         )
                         .text_xs()
-                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                            this.toggle_potential_surface();
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(
+                            |this, _: &gpui::ClickEvent, _, cx| {
+                                this.toggle_potential_surface();
+                                cx.notify();
+                            },
+                        )),
                     )
                     // SCAPOT colour ± scale nudge (0 = robust auto, 2·rmsd).
                     .child(button("pot-scale-dn", "±−").text_xs().on_click(cx.listener(
@@ -3797,26 +3956,32 @@ impl CueMolGpuiApp {
                     ))),
             );
             // Import an external OBJ/PLY surface mesh into the surface slot.
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_xs().text_color(rgb(col_text_dim())).child("Mesh:"))
-                    .child(div().w(px(180.0)).child(inputs.mesh_path.clone()))
-                    .child(button("mesh-import", "Import mesh").text_xs().on_click(cx.listener(
-                        |this, _: &gpui::ClickEvent, _, cx| {
-                            let path = this
-                                .inputs
-                                .as_ref()
-                                .map(|i| i.mesh_path.read(cx).text())
-                                .unwrap_or_default();
-                            this.import_mesh_surface(&path);
-                            cx.notify();
-                        },
-                    ))),
-            );
+            col =
+                col.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(col_text_dim()))
+                                .child("Mesh:"),
+                        )
+                        .child(div().w(px(180.0)).child(inputs.mesh_path.clone()))
+                        .child(button("mesh-import", "Import mesh").text_xs().on_click(
+                            cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                let path = this
+                                    .inputs
+                                    .as_ref()
+                                    .map(|i| i.mesh_path.read(cx).text())
+                                    .unwrap_or_default();
+                                this.import_mesh_surface(&path);
+                                cx.notify();
+                            }),
+                        )),
+                );
         }
         if self.animation_objects.is_empty() {
             col = col.child(
@@ -3878,7 +4043,11 @@ impl CueMolGpuiApp {
             .items_center()
             .gap_3()
             .p_3()
-            .child(div().text_color(rgb(col_text_dim())).child("Backend: POV-Ray"))
+            .child(
+                div()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Backend: POV-Ray"),
+            )
             .child(button("render-go", "Render").on_click(cx.listener(
                 |this, _: &gpui::ClickEvent, _, cx| {
                     let path = this
@@ -3906,16 +4075,18 @@ impl CueMolGpuiApp {
             .bg(rgb(col_viewport()))
             // Scroll to zoom, left-drag to orbit, right-drag to pan — each mutates
             // the camera and re-renders the offscreen wgpu image.
-            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                let dy = match event.delta {
-                    gpui::ScrollDelta::Lines(p) => p.y as f64,
-                    gpui::ScrollDelta::Pixels(p) => f32::from(p.y) as f64 / 40.0,
-                };
-                if dy != 0.0 {
-                    this.zoom_camera(if dy > 0.0 { 0.9 } else { 1.1 });
-                    cx.notify();
-                }
-            }))
+            .on_scroll_wheel(
+                cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
+                    let dy = match event.delta {
+                        gpui::ScrollDelta::Lines(p) => p.y as f64,
+                        gpui::ScrollDelta::Pixels(p) => f32::from(p.y) as f64 / 40.0,
+                    };
+                    if dy != 0.0 {
+                        this.zoom_camera(if dy > 0.0 { 0.9 } else { 1.1 });
+                        cx.notify();
+                    }
+                }),
+            )
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, _window, _cx| {
@@ -3929,29 +4100,31 @@ impl CueMolGpuiApp {
                     this.drag = Some((gpui::MouseButton::Right, event.position));
                 }),
             )
-            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
-                let Some((button, last)) = this.drag else {
-                    return;
-                };
-                // The starting button must still be held; otherwise a mouse-up was
-                // missed (released off the viewport) — cancel the gesture.
-                if event.pressed_button != Some(button) {
-                    this.drag = None;
-                    return;
-                }
-                let dx = f32::from(event.position.x - last.x) as f64;
-                let dy = f32::from(event.position.y - last.y) as f64;
-                this.drag = Some((button, event.position));
-                match button {
-                    gpui::MouseButton::Left => this.rotate_camera(dx * 0.5, dy * 0.5),
-                    gpui::MouseButton::Right => {
-                        let vp_h = this.view_size.1;
-                        this.pan_camera(dx, dy, vp_h);
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui::MouseMoveEvent, _window, cx| {
+                    let Some((button, last)) = this.drag else {
+                        return;
+                    };
+                    // The starting button must still be held; otherwise a mouse-up was
+                    // missed (released off the viewport) — cancel the gesture.
+                    if event.pressed_button != Some(button) {
+                        this.drag = None;
+                        return;
                     }
-                    _ => {}
-                }
-                cx.notify();
-            }))
+                    let dx = f32::from(event.position.x - last.x) as f64;
+                    let dy = f32::from(event.position.y - last.y) as f64;
+                    this.drag = Some((button, event.position));
+                    match button {
+                        gpui::MouseButton::Left => this.rotate_camera(dx * 0.5, dy * 0.5),
+                        gpui::MouseButton::Right => {
+                            let vp_h = this.view_size.1;
+                            this.pan_camera(dx, dy, vp_h);
+                        }
+                        _ => {}
+                    }
+                    cx.notify();
+                }),
+            )
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseUpEvent, _window, cx| {
@@ -3985,9 +4158,11 @@ impl CueMolGpuiApp {
                 )
                 .children(center_mark_overlay(self.center_mark))
                 .children(self.label_overlay()),
-            None => base.gap_2().child(div().text_color(rgb(col_text_dim())).child(
-                "3D viewport (wgpu) — load a molecule (or no GPU adapter available)",
-            )),
+            None => base.gap_2().child(
+                div()
+                    .text_color(rgb(col_text_dim()))
+                    .child("3D viewport (wgpu) — load a molecule (or no GPU adapter available)"),
+            ),
         }
     }
 
@@ -4031,26 +4206,35 @@ impl CueMolGpuiApp {
         let body = match &self.dialog {
             Dialog::None => div().into_any_element(),
             Dialog::About => self.about_dialog(cx).into_any_element(),
-            Dialog::NewRenderer { target, ty } => {
-                self.new_renderer_dialog(cx, *target, ty.clone()).into_any_element()
-            }
+            Dialog::NewRenderer { target, ty } => self
+                .new_renderer_dialog(cx, *target, ty.clone())
+                .into_any_element(),
             Dialog::ChainId { target } => self.chain_dialog(cx, *target).into_any_element(),
             Dialog::ResidueNum { target } => self.residue_dialog(cx, *target).into_any_element(),
-            Dialog::DeleteAtoms { target } => self.delete_atoms_dialog(cx, *target).into_any_element(),
-            Dialog::GetPdb => self.get_pdb_dialog(cx).into_any_element(),
-            Dialog::Superpose { reference, moving } => {
-                self.superpose_dialog(cx, *reference, *moving).into_any_element()
+            Dialog::DeleteAtoms { target } => {
+                self.delete_atoms_dialog(cx, *target).into_any_element()
             }
+            Dialog::GetPdb => self.get_pdb_dialog(cx).into_any_element(),
+            Dialog::Superpose { reference, moving } => self
+                .superpose_dialog(cx, *reference, *moving)
+                .into_any_element(),
             Dialog::Contacts { target, hbond } => {
                 self.contacts_dialog(cx, *target, *hbond).into_any_element()
             }
-            Dialog::Secondary { target, ignore_breaks } => {
-                self.secondary_dialog(cx, *target, *ignore_breaks).into_any_element()
-            }
+            Dialog::Secondary {
+                target,
+                ignore_breaks,
+            } => self
+                .secondary_dialog(cx, *target, *ignore_breaks)
+                .into_any_element(),
             Dialog::Surface { target } => self.surface_dialog(cx, *target).into_any_element(),
-            Dialog::Morph { target, source, frame } => {
-                self.morph_dialog(cx, *target, *source, *frame).into_any_element()
-            }
+            Dialog::Morph {
+                target,
+                source,
+                frame,
+            } => self
+                .morph_dialog(cx, *target, *source, *frame)
+                .into_any_element(),
             Dialog::Config => self.config_dialog(cx).into_any_element(),
             Dialog::BondEditor { target } => self.bond_dialog(cx, *target).into_any_element(),
             Dialog::Script => self.script_dialog(cx).into_any_element(),
@@ -4150,7 +4334,12 @@ impl CueMolGpuiApp {
                     .overflow_y_scroll()
                     .children(type_rows),
             )
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Name"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Name"),
+            )
             .children(name_input.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -4258,7 +4447,9 @@ impl CueMolGpuiApp {
     /// Make and Remove buttons).
     fn apply_bond_dialog(&mut self, target: cuemol_core::Uid, make: bool, cx: &mut Context<Self>) {
         let parse = |field: &Option<Entity<TextInput>>| -> Option<i32> {
-            field.as_ref().and_then(|i| i.read(cx).text().trim().parse::<i32>().ok())
+            field
+                .as_ref()
+                .and_then(|i| i.read(cx).text().trim().parse::<i32>().ok())
         };
         match (
             parse(&self.dialog_inputs.bond_aid1),
@@ -4316,7 +4507,11 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(col_accent())).child("Surface cutter (OBJ)"))
+            .child(
+                div()
+                    .text_color(rgb(col_accent()))
+                    .child("Surface cutter (OBJ)"),
+            )
             .child(
                 div()
                     .text_xs()
@@ -4353,7 +4548,11 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(col_accent())).child("Renumber residues"))
+            .child(
+                div()
+                    .text_color(rgb(col_accent()))
+                    .child("Renumber residues"),
+            )
             .child(
                 div()
                     .text_xs()
@@ -4518,11 +4717,20 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(col_accent())).child("Molecular superposition"))
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!(
-                "Reference: object {}  ·  pick a moving object:",
-                reference.get()
-            )))
+            .child(
+                div()
+                    .text_color(rgb(col_accent()))
+                    .child("Molecular superposition"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child(format!(
+                        "Reference: object {}  ·  pick a moving object:",
+                        reference.get()
+                    )),
+            )
             .child(
                 div()
                     .id("sp-list")
@@ -4533,9 +4741,19 @@ impl CueMolGpuiApp {
                     .overflow_y_scroll()
                     .children(obj_rows),
             )
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Reference selection"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Reference selection"),
+            )
             .children(ref_sel.map(|i| i.into_any_element()))
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Moving selection"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Moving selection"),
+            )
             .children(mov_sel.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -4592,22 +4810,38 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(col_accent())).child("Interaction / contacts"))
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!(
-                "Object {}  ·  selection: {sel_label}",
-                target.get()
-            )))
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Distance min / max (Å)"))
+            .child(
+                div()
+                    .text_color(rgb(col_accent()))
+                    .child("Interaction / contacts"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child(format!(
+                        "Object {}  ·  selection: {sel_label}",
+                        target.get()
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Distance min / max (Å)"),
+            )
             .children(cmin.map(|i| i.into_any_element()))
             .children(cmax.map(|i| i.into_any_element()))
-            .child(checkbox("ct-hbond", hbond, "H-bond candidates only").on_click(cx.listener(
-                |this, _: &gpui::ClickEvent, _, cx| {
-                    if let Dialog::Contacts { hbond, .. } = &mut this.dialog {
-                        *hbond = !*hbond;
-                    }
-                    cx.notify();
-                },
-            )))
+            .child(
+                checkbox("ct-hbond", hbond, "H-bond candidates only").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        if let Dialog::Contacts { hbond, .. } = &mut this.dialog {
+                            *hbond = !*hbond;
+                        }
+                        cx.notify();
+                    },
+                )),
+            )
             .child(
                 div()
                     .flex()
@@ -4641,17 +4875,33 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(col_accent())).child("Reassign secondary structure"))
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!("Object {}", target.get())))
-            .child(checkbox("ss-breaks", ignore_breaks, "Ignore chain breaks").on_click(cx.listener(
-                |this, _: &gpui::ClickEvent, _, cx| {
-                    if let Dialog::Secondary { ignore_breaks, .. } = &mut this.dialog {
-                        *ignore_breaks = !*ignore_breaks;
-                    }
-                    cx.notify();
-                },
-            )))
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Helix angle threshold (deg)"))
+            .child(
+                div()
+                    .text_color(rgb(col_accent()))
+                    .child("Reassign secondary structure"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child(format!("Object {}", target.get())),
+            )
+            .child(
+                checkbox("ss-breaks", ignore_breaks, "Ignore chain breaks").on_click(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx| {
+                        if let Dialog::Secondary { ignore_breaks, .. } = &mut this.dialog {
+                            *ignore_breaks = !*ignore_breaks;
+                        }
+                        cx.notify();
+                    },
+                )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Helix angle threshold (deg)"),
+            )
             .children(angle.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -4661,7 +4911,13 @@ impl CueMolGpuiApp {
                     .justify_end()
                     .child(button("ss-go", "Assign").on_click(cx.listener(
                         move |this, _: &gpui::ClickEvent, _, cx| {
-                            let ignore = matches!(this.dialog, Dialog::Secondary { ignore_breaks: true, .. });
+                            let ignore = matches!(
+                                this.dialog,
+                                Dialog::Secondary {
+                                    ignore_breaks: true,
+                                    ..
+                                }
+                            );
                             let angle = parse_input(&this.dialog_inputs.secondary_angle, cx, 90.0);
                             this.run_secondary(target, ignore, angle);
                             this.close_dialog();
@@ -4685,15 +4941,34 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(col_accent())).child("Molecular surface (OBJ)"))
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!(
-                "Object {}  ·  selection: {sel_label}",
-                target.get()
-            )))
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Density / probe radius"))
+            .child(
+                div()
+                    .text_color(rgb(col_accent()))
+                    .child("Molecular surface (OBJ)"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child(format!(
+                        "Object {}  ·  selection: {sel_label}",
+                        target.get()
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Density / probe radius"),
+            )
             .children(density.map(|i| i.into_any_element()))
             .children(probe.map(|i| i.into_any_element()))
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Output OBJ path"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Output OBJ path"),
+            )
             .children(path.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -4768,11 +5043,20 @@ impl CueMolGpuiApp {
             .flex()
             .flex_col()
             .gap_2()
-            .child(div().text_color(rgb(col_accent())).child("Morphing animation"))
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!(
-                "Target object {}  ·  source frame object:",
-                target.get()
-            )))
+            .child(
+                div()
+                    .text_color(rgb(col_accent()))
+                    .child("Morphing animation"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child(format!(
+                        "Target object {}  ·  source frame object:",
+                        target.get()
+                    )),
+            )
             .child(
                 div()
                     .id("mo-list")
@@ -4783,7 +5067,12 @@ impl CueMolGpuiApp {
                     .overflow_y_scroll()
                     .children(obj_rows),
             )
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Frame name"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Frame name"),
+            )
             .children(name.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -4812,7 +5101,12 @@ impl CueMolGpuiApp {
                             cx.notify();
                         },
                     )))
-                    .child(div().text_xs().text_color(rgb(col_text_dim())).child(format!("frame {frame:.2}")))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(col_text_dim()))
+                            .child(format!("frame {frame:.2}")),
+                    )
                     .child(button("mo-dec", "-").on_click(cx.listener(
                         |this, _: &gpui::ClickEvent, _, cx| {
                             if let Dialog::Morph { frame, .. } = &mut this.dialog {
@@ -4863,7 +5157,12 @@ impl CueMolGpuiApp {
             .flex_col()
             .gap_2()
             .child(div().text_color(rgb(col_accent())).child("Configuration"))
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Key / value"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Key / value"),
+            )
             .children(key.map(|i| i.into_any_element()))
             .children(value.map(|i| i.into_any_element()))
             .child(
@@ -4907,7 +5206,12 @@ impl CueMolGpuiApp {
                         },
                     ))),
             )
-            .child(div().text_xs().text_color(rgb(col_text_dim())).child("Config file path"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(col_text_dim()))
+                    .child("Config file path"),
+            )
             .children(path.map(|i| i.into_any_element()))
             .child(
                 div()
@@ -5090,7 +5394,13 @@ fn viewport_pixels(window: &Window, chrome_w: f32, chrome_h: f32) -> (u32, u32) 
 
 /// Pure core of [`viewport_pixels`] (no `Window`, so it is unit-testable): logical
 /// window size + DPI scale - chrome -> physical viewport pixels, clamped to >= 1×1.
-fn viewport_pixels_from(win_w: f32, win_h: f32, scale: f32, chrome_w: f32, chrome_h: f32) -> (u32, u32) {
+fn viewport_pixels_from(
+    win_w: f32,
+    win_h: f32,
+    scale: f32,
+    chrome_w: f32,
+    chrome_h: f32,
+) -> (u32, u32) {
     let w = ((win_w - chrome_w).max(1.0) * scale).round() as u32;
     let h = ((win_h - chrome_h).max(1.0) * scale).round() as u32;
     (w.max(1), h.max(1))
@@ -5137,7 +5447,9 @@ fn danger_button(
     id: impl Into<gpui::ElementId>,
     label: impl Into<String>,
 ) -> gpui::Stateful<gpui::Div> {
-    button(id, label).bg(rgb(col_danger())).hover(|s| s.bg(rgb(0xd6695f)))
+    button(id, label)
+        .bg(rgb(col_danger()))
+        .hover(|s| s.bg(rgb(0xd6695f)))
 }
 
 /// A header pill that reads as on/off (panel-visibility toggles).
@@ -5214,8 +5526,17 @@ fn tree_row_el(
         .bg(rgb(if selected { col_sel() } else { col_panel() }))
         .cursor_pointer()
         .hover(|s| s.bg(rgb(if selected { col_sel() } else { col_btn() })))
-        .child(div().text_color(rgb(col_text_dim())).child(mark.to_string()))
-        .child(div().flex_1().text_color(rgb(name_color)).child(name.to_string()))
+        .child(
+            div()
+                .text_color(rgb(col_text_dim()))
+                .child(mark.to_string()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_color(rgb(name_color))
+                .child(name.to_string()),
+        )
         .child(
             div()
                 .text_color(rgb(col_text_dim()))
@@ -5231,12 +5552,20 @@ fn kv(key: &str, value: impl Into<String>) -> gpui::Div {
         .flex_row()
         .justify_between()
         .gap_2()
-        .child(div().text_xs().text_color(rgb(col_text_dim())).child(key.to_string()))
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(col_text_dim()))
+                .child(key.to_string()),
+        )
         .child(div().text_xs().child(value.into()))
 }
 
 /// A dropdown menu row (full-width, hover-highlighted).
-fn menu_item(id: impl Into<gpui::ElementId>, label: impl Into<String>) -> gpui::Stateful<gpui::Div> {
+fn menu_item(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<String>,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .w_full()
@@ -5250,7 +5579,10 @@ fn menu_item(id: impl Into<gpui::ElementId>, label: impl Into<String>) -> gpui::
 }
 
 /// A compact bordered button for the side-panel control rows (Coloring etc.).
-fn color_btn(id: impl Into<gpui::ElementId>, label: impl Into<String>) -> gpui::Stateful<gpui::Div> {
+fn color_btn(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<String>,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .px_2()
@@ -5303,14 +5635,16 @@ fn dialog_cancel(cx: &mut Context<CueMolGpuiApp>) -> gpui::Stateful<gpui::Div> {
 
 /// A right-aligned single close button row (for the About dialog).
 fn dialog_buttons_close(cx: &mut Context<CueMolGpuiApp>, label: &str) -> impl IntoElement {
-    div().flex().flex_row().justify_end().child(
-        button("dlg-ok", label.to_string()).on_click(cx.listener(
+    div()
+        .flex()
+        .flex_row()
+        .justify_end()
+        .child(button("dlg-ok", label.to_string()).on_click(cx.listener(
             |this, _: &gpui::ClickEvent, _, cx| {
                 this.close_dialog();
                 cx.notify();
             },
-        )),
-    )
+        )))
 }
 
 /// The viewport center-mark overlay (`None` when disabled). Cross = two dim bars;
@@ -5430,7 +5764,10 @@ mod tests {
         std::fs::write(&path, "o t\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
         let mut app = CueMolGpuiApp::new(Vec::new());
         app.import_mesh_surface(path.to_str().unwrap());
-        assert!(app.surface_mesh.is_some(), "import must populate the surface slot");
+        assert!(
+            app.surface_mesh.is_some(),
+            "import must populate the surface slot"
+        );
         assert!(app.show_surface, "import must enable the surface display");
         let _ = std::fs::remove_file(&path);
     }
@@ -5456,8 +5793,14 @@ mod tests {
         std::fs::write(&path, &qsc).unwrap();
         let mut app = CueMolGpuiApp::new(Vec::new());
         app.open_file(path.to_str().unwrap());
-        assert!(app.surface_mesh.is_some(), "a .qsc surface must populate the surface slot");
-        assert!(app.show_surface, "a .qsc surface must enable the surface display");
+        assert!(
+            app.surface_mesh.is_some(),
+            "a .qsc surface must populate the surface slot"
+        );
+        assert!(
+            app.show_surface,
+            "a .qsc surface must enable the surface display"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -5629,7 +5972,10 @@ mod tests {
         let Some((app, _object)) = app_with_molecule() else {
             return;
         };
-        assert!(app.selected_object.is_some(), "load should select the object");
+        assert!(
+            app.selected_object.is_some(),
+            "load should select the object"
+        );
         assert!(app.rendered_atom_count > 0, "1CRN has atoms");
         assert_eq!(app.recent_paths.len(), 1, "open records a recent path");
         assert!(app.status.starts_with("Loaded"), "status: {}", app.status);
@@ -5711,11 +6057,7 @@ mod tests {
         };
         // Serials 1 and 100 aren't bonded — make then remove.
         app.run_bond(object, 1, 100, true);
-        assert!(
-            app.status.starts_with("Made bond"),
-            "make ({})",
-            app.status
-        );
+        assert!(app.status.starts_with("Made bond"), "make ({})", app.status);
         app.run_bond(object, 1, 100, false);
         assert!(
             app.status.starts_with("Removed bond"),
@@ -5731,19 +6073,30 @@ mod tests {
         };
         // Execute script RUNS the JS (boa) and logs cuemol.print output + applies select.
         let script = std::env::temp_dir().join("cuemol_gpui_script.js");
-        std::fs::write(&script, "cuemol.print('scripted ' + (2*3)); cuemol.select('resid 1');").unwrap();
+        std::fs::write(
+            &script,
+            "cuemol.print('scripted ' + (2*3)); cuemol.select('resid 1');",
+        )
+        .unwrap();
         app.run_script(script.to_str().unwrap());
         assert!(
             app.log_lines.iter().any(|l| l.contains("scripted 6")),
             "JS executed + printed (boa), log: {:?}",
             app.log_lines
         );
-        assert_eq!(app.applied_selection, "resid 1", "script applied a selection");
+        assert_eq!(
+            app.applied_selection, "resid 1",
+            "script applied a selection"
+        );
         let _ = std::fs::remove_file(&script);
 
         // Scene/View properties log the camera info.
         app.show_view_properties();
-        assert!(app.status.starts_with("View:"), "view props ({})", app.status);
+        assert!(
+            app.status.starts_with("View:"),
+            "view props ({})",
+            app.status
+        );
 
         // Performance measure reports either timing or the no-adapter note.
         app.measure_performance();
@@ -5760,7 +6113,12 @@ mod tests {
             return;
         };
         app.applied_selection = "resid 1:5".to_string(); // cheap SES
-        let tris = |app: &CueMolGpuiApp| app.surface_mesh.as_ref().map(|m| m.indices.len()).unwrap_or(0);
+        let tris = |app: &CueMolGpuiApp| {
+            app.surface_mesh
+                .as_ref()
+                .map(|m| m.indices.len())
+                .unwrap_or(0)
+        };
         app.toggle_surface();
         let full = tris(&app);
         assert!(full > 0, "full surface built");
@@ -5870,7 +6228,11 @@ mod tests {
         app.create_renderer(object, "ballstick", "bs");
         assert_eq!(app.renderers(object).len(), before + 1);
         app.undo();
-        assert_eq!(app.renderers(object).len(), before, "undo removes the renderer");
+        assert_eq!(
+            app.renderers(object).len(),
+            before,
+            "undo removes the renderer"
+        );
         app.redo();
         assert_eq!(app.renderers(object).len(), before + 1, "redo re-adds it");
     }
@@ -5883,7 +6245,10 @@ mod tests {
         let before = app.selected_object_summary().unwrap().atom_count;
         app.delete_atoms(object, "name CA");
         let after = app.selected_object_summary().unwrap().atom_count;
-        assert!(after < before, "deleting CA atoms reduces the count ({after} < {before})");
+        assert!(
+            after < before,
+            "deleting CA atoms reduces the count ({after} < {before})"
+        );
         app.undo();
         assert_eq!(
             app.selected_object_summary().unwrap().atom_count,
@@ -5907,7 +6272,10 @@ mod tests {
             "secondary structure did not succeed: {}",
             app.status
         );
-        assert_eq!(app.selected_object_summary().unwrap().atom_count, atoms_before);
+        assert_eq!(
+            app.selected_object_summary().unwrap().atom_count,
+            atoms_before
+        );
     }
 
     #[test]
@@ -5920,7 +6288,10 @@ mod tests {
         // Success pushes the JSON result line THEN the status; assert it actually
         // ran (status is the success message) rather than just that the log grew
         // (an error also appends a status line).
-        assert!(app.log_lines.len() > before, "contacts should log a result line");
+        assert!(
+            app.log_lines.len() > before,
+            "contacts should log a result line"
+        );
         assert!(
             app.status.contains("computed"),
             "contacts did not succeed: {}",

@@ -149,9 +149,7 @@ fn count_inliers(m: &Matrix4, ref_cas: &[Ca], mov_cas: &[Ca]) -> usize {
         .iter()
         .filter(|mc| {
             let p = apply(m, mc.pos);
-            ref_cas
-                .iter()
-                .any(|rc| dist(rc.pos, p) <= MATCH_CUTOFF)
+            ref_cas.iter().any(|rc| dist(rc.pos, p) <= MATCH_CUTOFF)
         })
         .count()
 }
@@ -185,7 +183,12 @@ fn sse_compatible(a: &Sse, b: &Sse) -> bool {
 /// Seed transform: search SSE-centroid triples for a geometry-consistent
 /// correspondence (matching types + preserved pairwise distances), build a
 /// candidate transform from each, and keep the one with the most CA inliers.
-fn seed_transform(ref_sses: &[Sse], mov_sses: &[Sse], ref_cas: &[Ca], mov_cas: &[Ca]) -> Option<Matrix4> {
+fn seed_transform(
+    ref_sses: &[Sse],
+    mov_sses: &[Sse],
+    ref_cas: &[Ca],
+    mov_cas: &[Ca],
+) -> Option<Matrix4> {
     let n = ref_sses.len();
     let m = mov_sses.len();
     let mut best: Option<(usize, Matrix4)> = None;
@@ -351,8 +354,7 @@ mod tests {
     fn three_helix_structure() -> MolCoord {
         let mut mol = MolCoord::new();
         let mut serial = 1;
-        for (h, (&(ox, oy, oz), &len)) in
-            HELIX_ORIGINS.iter().zip(HELIX_LENGTHS.iter()).enumerate()
+        for (h, (&(ox, oy, oz), &len)) in HELIX_ORIGINS.iter().zip(HELIX_LENGTHS.iter()).enumerate()
         {
             for r in 0..len {
                 let resid = (h as i32) * 100 + r as i32 + 1;
@@ -455,14 +457,20 @@ mod tests {
         let pairs: Vec<(Vector4, Vector4)> = pts
             .iter()
             .map(|p| {
-                let mov = Vector4::new3(c * p.x - s * p.y + 5.0, s * p.x + c * p.y - 3.0, p.z + 2.0);
+                let mov =
+                    Vector4::new3(c * p.x - s * p.y + 5.0, s * p.x + c * p.y - 3.0, p.z + 2.0);
                 (*p, mov) // (reference=original, moving=rotated)
             })
             .collect();
         let m = rigid_fit_matrix(&pairs).unwrap();
         for (refp, movp) in &pairs {
             let got = apply(&m, *movp);
-            assert!(dist(*refp, got) < 1.0e-6, "fit off: {:?} vs {:?}", refp, got);
+            assert!(
+                dist(*refp, got) < 1.0e-6,
+                "fit off: {:?} vs {:?}",
+                refp,
+                got
+            );
         }
     }
 

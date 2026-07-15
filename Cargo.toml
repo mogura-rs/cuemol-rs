@@ -53,3 +53,6 @@ cuemol-molclient = { path = "crates/cuemol-molclient" }
 cuemol-render = { path = "crates/cuemol-render" }
 cuemol-desktop-core = { path = "crates/cuemol-desktop-core" }
 cuemol-desktop = { path = "crates/cuemol-desktop" }
+regex = "1.12"
+shlex = "1.3"
+libloading = "0.8.9"

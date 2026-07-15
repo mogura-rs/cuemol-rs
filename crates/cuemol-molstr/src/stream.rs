@@ -1,4 +1,5 @@
 use cuemol_core::{ByteArray, CueMolError, Result};
+use cuemol_qsys::InOutHandler;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
@@ -186,6 +187,22 @@ impl StreamManager {
         }
     }
 
+    pub fn get_cat_objreader(&self) -> i32 {
+        HandlerCategory::OBJ_READER
+    }
+
+    pub fn get_cat_objwriter(&self) -> i32 {
+        HandlerCategory::OBJ_WRITER
+    }
+
+    pub fn get_cat_scereader(&self) -> i32 {
+        HandlerCategory::SCENE_READER
+    }
+
+    pub fn get_cat_scewriter(&self) -> i32 {
+        HandlerCategory::SCENE_WRITER
+    }
+
     pub fn handlers(&self) -> &[StreamHandlerInfo] {
         &self.handlers
     }
@@ -231,6 +248,17 @@ impl StreamManager {
         self.handlers
             .iter()
             .find(|handler| handler.nickname == nickname && handler.category == category)
+    }
+
+    pub fn create_handler(&self, nickname: &str, category: i32) -> Option<InOutHandler> {
+        let category = HandlerCategory::from_code(category).ok()?;
+        let info = self.handler_by_nickname(nickname, category)?;
+        Some(InOutHandler::new(
+            info.nickname.clone(),
+            info.descr.clone(),
+            info.fext.clone(),
+            category.code(),
+        ))
     }
 
     pub fn get_reader_info_json(&self) -> String {
@@ -320,6 +348,10 @@ impl StreamManager {
         ByteArray::copy_from_u8(
             format!("<object type=\"{}\"/>", escape_xml(type_override)).as_bytes(),
         )
+    }
+
+    pub fn to_xml2<T>(&self, object: &T, type_override: &str) -> ByteArray {
+        self.to_xml_2(object, type_override)
     }
 
     pub fn array_to_xml<T>(&self, array: &[T]) -> ByteArray {

@@ -1,6 +1,6 @@
 use crate::{parse_selector, Atom, MolCoord, ResidueKey, ResidueSummary, Selector};
 use cuemol_core::Result;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
 pub struct AtomIterator<'a> {
@@ -29,8 +29,24 @@ impl<'a> AtomIterator<'a> {
         self.target
     }
 
+    pub fn get_target(&self) -> &'a MolCoord {
+        self.target()
+    }
+
+    pub fn set_target(&mut self, target: &'a MolCoord) {
+        *self = Self::new(target, self.selection.clone());
+    }
+
     pub fn selection(&self) -> &Selector {
         &self.selection
+    }
+
+    pub fn get_selection(&self) -> &Selector {
+        self.selection()
+    }
+
+    pub fn set_selection(&mut self, selection: Selector) {
+        *self = Self::new(self.target, selection);
     }
 
     pub fn first(&mut self) {
@@ -69,6 +85,8 @@ impl std::fmt::Display for AtomIterator<'_> {
 
 #[derive(Debug, Clone)]
 pub struct ResidIterator<'a> {
+    target: &'a MolCoord,
+    selection: Selector,
     residues: Vec<ResidueView<'a>>,
     cursor: usize,
 }
@@ -91,6 +109,8 @@ impl<'a> ResidIterator<'a> {
             .map(|summary| ResidueView { target, summary })
             .collect();
         Self {
+            target,
+            selection,
             residues,
             cursor: 0,
         }
@@ -98,6 +118,30 @@ impl<'a> ResidIterator<'a> {
 
     pub fn all(target: &'a MolCoord) -> Self {
         Self::new(target, Selector::All)
+    }
+
+    pub fn target(&self) -> &'a MolCoord {
+        self.target
+    }
+
+    pub fn get_target(&self) -> &'a MolCoord {
+        self.target()
+    }
+
+    pub fn set_target(&mut self, target: &'a MolCoord) {
+        *self = Self::new(target, self.selection.clone());
+    }
+
+    pub fn selection(&self) -> &Selector {
+        &self.selection
+    }
+
+    pub fn get_selection(&self) -> &Selector {
+        self.selection()
+    }
+
+    pub fn set_selection(&mut self, selection: Selector) {
+        *self = Self::new(self.target, selection);
     }
 
     pub fn first(&mut self) {
@@ -135,6 +179,10 @@ pub struct ResidueView<'a> {
 }
 
 impl<'a> ResidueView<'a> {
+    pub fn molecule(&self) -> &'a MolCoord {
+        self.target
+    }
+
     pub fn key(&self) -> &ResidueKey {
         &self.summary.key
     }
@@ -190,6 +238,8 @@ impl std::fmt::Display for ResidueView<'_> {
 
 #[derive(Debug, Clone)]
 pub struct ChainIterator<'a> {
+    target: &'a MolCoord,
+    selection: Selector,
     chains: Vec<ChainView<'a>>,
     cursor: usize,
 }
@@ -213,11 +263,40 @@ impl<'a> ChainIterator<'a> {
                 chain_id: summary.chain_id,
             })
             .collect();
-        Self { chains, cursor: 0 }
+        Self {
+            target,
+            selection,
+            chains,
+            cursor: 0,
+        }
     }
 
     pub fn all(target: &'a MolCoord) -> Self {
         Self::new(target, Selector::All)
+    }
+
+    pub fn target(&self) -> &'a MolCoord {
+        self.target
+    }
+
+    pub fn get_target(&self) -> &'a MolCoord {
+        self.target()
+    }
+
+    pub fn set_target(&mut self, target: &'a MolCoord) {
+        *self = Self::new(target, self.selection.clone());
+    }
+
+    pub fn selection(&self) -> &Selector {
+        &self.selection
+    }
+
+    pub fn get_selection(&self) -> &Selector {
+        self.selection()
+    }
+
+    pub fn set_selection(&mut self, selection: Selector) {
+        *self = Self::new(self.target, selection);
     }
 
     pub fn first(&mut self) {
@@ -255,6 +334,10 @@ pub struct ChainView<'a> {
 }
 
 impl<'a> ChainView<'a> {
+    pub fn molecule(&self) -> &'a MolCoord {
+        self.target
+    }
+
     pub fn name(&self) -> &str {
         &self.chain_id
     }
@@ -346,6 +429,14 @@ impl ResidRangeSet {
         ))
     }
 
+    pub fn contains(&self, residue: &crate::MolResidue) -> bool {
+        self.residues.contains(&ResidueKey::new(
+            residue.chain_name().to_string(),
+            residue.index().number,
+            residue.index().ins_code,
+        ))
+    }
+
     pub fn residues(&self) -> &BTreeSet<ResidueKey> {
         &self.residues
     }
@@ -364,23 +455,48 @@ impl ResidRangeSet {
 
 impl std::fmt::Display for ResidRangeSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let body = self
-            .residues
-            .iter()
-            .map(residue_selector_fragment)
+        let mut chains = BTreeMap::<&str, Vec<&ResidueKey>>::new();
+        for residue in &self.residues {
+            chains
+                .entry(residue.chain_id.as_str())
+                .or_default()
+                .push(residue);
+        }
+        let body = chains
+            .into_iter()
+            .map(|(chain, residues)| format!("'{chain}'.{}.*", format_residue_ranges(&residues)))
             .collect::<Vec<_>>()
-            .join(" or ");
+            .join("|");
         f.write_str(&body)
     }
 }
 
-fn residue_selector_fragment(key: &ResidueKey) -> String {
-    let chain = if key.chain_id.is_empty() {
-        "(empty)".to_string()
-    } else {
-        key.chain_id.clone()
+fn format_residue_ranges(residues: &[&ResidueKey]) -> String {
+    let Some(first) = residues.first().copied() else {
+        return String::new();
     };
-    format!("(chain {chain} and resi {})", key.script_index())
+    let mut ranges = Vec::new();
+    let mut start = first;
+    let mut end = first;
+    for residue in residues.iter().copied().skip(1) {
+        if residue.ins_code == end.ins_code && residue.res_id == end.res_id + 1 {
+            end = residue;
+        } else {
+            ranges.push(format_residue_range(start, end));
+            start = residue;
+            end = residue;
+        }
+    }
+    ranges.push(format_residue_range(start, end));
+    ranges.join(",")
+}
+
+fn format_residue_range(start: &ResidueKey, end: &ResidueKey) -> String {
+    if start.res_id == end.res_id && start.ins_code == end.ins_code {
+        start.script_index()
+    } else {
+        format!("{}:{}", start.script_index(), end.script_index())
+    }
 }
 
 #[cfg(test)]
@@ -428,6 +544,9 @@ mod tests {
         assert!(!iter.has_more());
         iter.first();
         assert_eq!(iter.get().unwrap().serial, 2);
+        iter.set_selection(parse_selector("chain B").unwrap());
+        assert_eq!(iter.get_id(), Some(3));
+        assert_eq!(iter.get_target().atom_count(), 3);
         assert!(iter.to_string().contains("AtomIterator"));
     }
 
@@ -443,12 +562,16 @@ mod tests {
         assert_eq!(residue.atoms_json(), "[1,2]");
         residues.next();
         assert!(!residues.has_more());
+        residues.set_selection(parse_selector("chain B").unwrap());
+        assert_eq!(residues.get().unwrap().chain_name(), "B");
 
         let mut chains = ChainIterator::all(&mol);
         assert_eq!(chains.get().unwrap().name(), "A");
         assert_eq!(chains.get().unwrap().resids_json(), "[\"1\"]");
         chains.next();
         assert_eq!(chains.get().unwrap().name(), "B");
+        chains.set_selection(parse_selector("chain A").unwrap());
+        assert_eq!(chains.get().unwrap().name(), "A");
     }
 
     #[test]
@@ -460,14 +583,28 @@ mod tests {
         assert_eq!(ranges.residues().len(), 1);
         assert!(ranges.contains_atom(&mol.atoms()[0]));
         assert!(!ranges.contains_atom(&mol.atoms()[2]));
-        assert!(ranges.to_string().contains("chain A"));
+        assert_eq!(ranges.to_string(), "'A'.1.*");
         assert!(ranges.to_selection().unwrap().matches(&mol.atoms()[0]));
 
         ranges.append(&mol, &parse_selector("chain B").unwrap());
         assert_eq!(ranges.residues().len(), 2);
+        assert_eq!(ranges.to_string(), "'A'.1.*|'B'.2.*");
         ranges.remove(&mol, &parse_selector("chain A").unwrap());
         assert_eq!(ranges.residues().len(), 1);
         ranges.clear();
         assert!(matches!(ranges.to_selection().unwrap(), Selector::None));
+    }
+
+    #[test]
+    fn residue_range_format_compresses_reference_intervals() {
+        let keys = [
+            ResidueKey::new("A", 1, None),
+            ResidueKey::new("A", 2, None),
+            ResidueKey::new("A", 4, None),
+            ResidueKey::new("A", 5, Some('A')),
+            ResidueKey::new("A", 6, Some('A')),
+        ];
+        let refs = keys.iter().collect::<Vec<_>>();
+        assert_eq!(format_residue_ranges(&refs), "1:2,4,5A:6A");
     }
 }

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 cuemol-core.workspace = true
+cuemol-gfx.workspace = true
 cuemol-qsys.workspace = true
 
 [lib]

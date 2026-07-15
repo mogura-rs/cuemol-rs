@@ -18,7 +18,9 @@ const CYL_TRIS: usize = 10 * 2; // SEGS * 2
 
 fn ref_data_path(name: &str) -> std::path::PathBuf {
     let base = std::env::var("CUEMOL2_REF_DIR").unwrap_or_else(|_| "../cuemol2".to_string());
-    std::path::Path::new(&base).join("tests/test_data").join(name)
+    std::path::Path::new(&base)
+        .join("tests/test_data")
+        .join(name)
 }
 
 #[test]

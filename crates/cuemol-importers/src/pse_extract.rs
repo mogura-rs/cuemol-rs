@@ -28,6 +28,7 @@ use crate::PickleValue;
 // `names` list element layout: [name, type, visible, repOn, extra, data, ...].
 const NAME_TYPE: usize = 1;
 const NAME_DATA: usize = 5;
+const NAME_NAME: usize = 0;
 const OBJ_TYPE_MOLECULE: i64 = 0;
 
 // Molecule `data` block layout.
@@ -53,6 +54,14 @@ const AT_OCC: usize = 15;
 
 /// Extract every molecule object from a parsed `.pse` session tree.
 pub fn extract_pse_molecules(tree: &PickleValue) -> Vec<MolCoord> {
+    extract_pse_named_molecules(tree)
+        .into_iter()
+        .map(|(_, molecule)| molecule)
+        .collect()
+}
+
+/// Extract molecule names and coordinates from a parsed PyMOL session.
+pub fn extract_pse_named_molecules(tree: &PickleValue) -> Vec<(String, MolCoord)> {
     let mut molecules = Vec::new();
     let Some(names) = tree.get("names").and_then(PickleValue::as_list) else {
         return molecules;
@@ -62,9 +71,14 @@ pub fn extract_pse_molecules(tree: &PickleValue) -> Vec<MolCoord> {
         if element.index(NAME_TYPE).and_then(PickleValue::as_i64) != Some(OBJ_TYPE_MOLECULE) {
             continue;
         }
+        let name = element
+            .index(NAME_NAME)
+            .and_then(PickleValue::as_str)
+            .unwrap_or("molecule")
+            .to_string();
         if let Some(data) = element.index(NAME_DATA).and_then(PickleValue::as_list) {
             if let Some(molecule) = extract_one(data) {
-                molecules.push(molecule);
+                molecules.push((name, molecule));
             }
         }
     }
@@ -220,9 +234,21 @@ mod tests {
         assert_eq!(mols.len(), 1);
         let atoms = mols[0].atoms();
         assert_eq!(atoms[0].name, "A0");
-        assert!((atoms[0].position.x - 20.0).abs() < 1e-6, "A0 x={}", atoms[0].position.x);
-        assert!((atoms[1].position.x - 30.0).abs() < 1e-6, "A1 x={}", atoms[1].position.x);
-        assert!((atoms[2].position.x - 10.0).abs() < 1e-6, "A2 x={}", atoms[2].position.x);
+        assert!(
+            (atoms[0].position.x - 20.0).abs() < 1e-6,
+            "A0 x={}",
+            atoms[0].position.x
+        );
+        assert!(
+            (atoms[1].position.x - 30.0).abs() < 1e-6,
+            "A1 x={}",
+            atoms[1].position.x
+        );
+        assert!(
+            (atoms[2].position.x - 10.0).abs() < 1e-6,
+            "A2 x={}",
+            atoms[2].position.x
+        );
     }
 
     #[test]

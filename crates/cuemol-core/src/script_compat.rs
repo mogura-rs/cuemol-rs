@@ -1,8 +1,12 @@
-use crate::Vector4;
+use crate::{LVarArgs, Result, Vector4};
 
 pub trait LScrObject {}
 
-pub trait LScrCallBack: LScrObject {}
+pub trait LScrCallBack: LScrObject {
+    fn invoke(&self, _args: &mut LVarArgs) -> Result<bool> {
+        Ok(false)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassAEnum {

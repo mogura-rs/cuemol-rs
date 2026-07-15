@@ -10,10 +10,10 @@ pub use cif_map::{density_map_from_cif, parse_cif_map_coeffs, CifMapCoeffs};
 pub use cuemol_molstr::{
     read_brix_map_bytes, read_brix_map_file, read_brix_map_with_header_bytes,
     read_brix_map_with_header_file, read_ccp4_map_bytes, read_ccp4_map_file,
-    read_ccp4_map_with_header_bytes, read_ccp4_map_with_header_file, read_mmcif_map_file,
-    read_opendx_file, read_opendx_str, read_xplor_map_file, read_xplor_map_str,
-    read_xplor_map_with_header_file, read_xplor_map_with_header_str, BrixHeader, BrixMap,
-    Ccp4Header, Ccp4Map, GridMap, MapStats, XplorHeader, XplorMap,
+    read_ccp4_map_with_header_bytes, read_ccp4_map_with_header_file, read_opendx_file,
+    read_opendx_str, read_xplor_map_file, read_xplor_map_str, read_xplor_map_with_header_file,
+    read_xplor_map_with_header_str, BrixHeader, BrixMap, Ccp4Header, Ccp4Map, GridMap, MapStats,
+    XplorHeader, XplorMap,
 };
 pub use cuemol_symm::CrystalInfo;
 pub use map_renderers::{
@@ -34,6 +34,18 @@ pub type GLSLMapMeshRenderer = GlslMapMeshRenderer;
 pub type GLSLMapMeshRenderer2 = GlslMapMeshRenderer2;
 pub type GLSLMapVolRenderer = GlslMapVolRenderer;
 pub type MTZ2MapReader = Mtz2MapReader;
+
+/// Read map coefficients from an mmCIF file and synthesize the density map.
+/// Compressed inputs use the same gzip/bzip2/xz path as molecule readers.
+pub fn read_mmcif_map_file(path: impl AsRef<std::path::Path>) -> cuemol_core::Result<DensityMap> {
+    let input = cuemol_molstr::read_text_maybe_compressed(path)?;
+    if input.starts_with("version https://git-lfs.github.com/spec/v1") {
+        return Err(cuemol_core::CueMolError::parse(
+            "mmCIF map is a Git LFS pointer",
+        ));
+    }
+    density_map_from_cif(&input, -1.0, 0.33)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DensityMapFormat {
@@ -205,6 +217,10 @@ impl MmcifMapReader {
         self.resolution()
     }
 
+    pub fn get_resoln(&self) -> f64 {
+        self.resolution()
+    }
+
     pub fn set_resolution(&mut self, value: f64) {
         self.resolution = value;
     }
@@ -215,6 +231,10 @@ impl MmcifMapReader {
 
     pub fn grid_size(&self) -> f64 {
         self.grid_size
+    }
+
+    pub fn get_grid_size(&self) -> f64 {
+        self.grid_size()
     }
 
     pub fn gridsize(&self) -> f64 {
@@ -244,7 +264,7 @@ impl MmcifMapReader {
         &self,
         path: impl AsRef<std::path::Path>,
     ) -> cuemol_core::Result<DensityMap> {
-        let input = std::fs::read_to_string(path)?;
+        let input = cuemol_molstr::read_text_maybe_compressed(path)?;
         self.build_density_map_from_str(&input)
     }
 }
@@ -254,6 +274,28 @@ impl Default for MmcifMapReader {
         Self::new()
     }
 }
+
+macro_rules! impl_obj_reader_deref {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl std::ops::Deref for $ty {
+                type Target = ObjReader;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.reader
+                }
+            }
+
+            impl std::ops::DerefMut for $ty {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    &mut self.reader
+                }
+            }
+        )+
+    };
+}
+
+impl_obj_reader_deref!(BrixMapReader, Ccp4MapReader, MmcifMapReader);
 
 #[cfg(test)]
 mod tests {

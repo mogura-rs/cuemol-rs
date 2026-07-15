@@ -1,4 +1,5 @@
 use cuemol_core::{Matrix4, Vector4};
+use cuemol_gfx::RawHitData;
 use cuemol_gfx::SolidColor;
 use cuemol_qsys::DispListRenderer;
 use std::collections::BTreeMap;
@@ -109,16 +110,32 @@ impl CrystalInfo {
         self.gamma = gamma;
     }
 
+    pub fn a(&self) -> f64 {
+        self.a
+    }
+
     pub fn set_a(&mut self, value: f64) {
         self.a = value;
+    }
+
+    pub fn b(&self) -> f64 {
+        self.b
     }
 
     pub fn set_b(&mut self, value: f64) {
         self.b = value;
     }
 
+    pub fn c(&self) -> f64 {
+        self.c
+    }
+
     pub fn set_c(&mut self, value: f64) {
         self.c = value;
+    }
+
+    pub fn alpha(&self) -> f64 {
+        self.alpha
     }
 
     pub fn set_alpha(&mut self, value: f64) {
@@ -137,12 +154,24 @@ impl CrystalInfo {
         self.gamma = value;
     }
 
+    pub fn gamma(&self) -> f64 {
+        self.gamma
+    }
+
     pub fn nsg(&self) -> i32 {
         self.nsg
     }
 
+    pub fn get_sg(&self) -> i32 {
+        self.nsg()
+    }
+
     pub fn set_nsg(&mut self, value: i32) {
         self.nsg = value;
+    }
+
+    pub fn set_sg(&mut self, value: i32) {
+        self.set_nsg(value);
     }
 
     pub fn space_group(&self) -> i32 {
@@ -217,6 +246,10 @@ impl CrystalInfo {
             .to_string()
     }
 
+    pub fn get_lattice_name(&self) -> String {
+        self.lattice_name()
+    }
+
     pub fn lattice(&self) -> String {
         self.lattice_name()
     }
@@ -228,6 +261,10 @@ impl CrystalInfo {
             .to_string()
     }
 
+    pub fn get_hm_space_group_name(&self) -> String {
+        self.hm_space_group_name()
+    }
+
     pub fn hm_spacegroup(&self) -> String {
         self.hm_space_group_name()
     }
@@ -237,6 +274,10 @@ impl CrystalInfo {
             .get_name(self.nsg)
             .unwrap_or("(unknown)")
             .to_string()
+    }
+
+    pub fn get_space_group_name(&self) -> String {
+        self.space_group_name()
     }
 
     pub fn sys_name_to_id(name: &str) -> i32 {
@@ -386,6 +427,13 @@ pub struct SymmRenderer {
     update_required: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymmetryHit {
+    pub symmetry_id: usize,
+    pub atom_id: i32,
+    pub symmetry_name: String,
+}
+
 impl Default for SymmRenderer {
     fn default() -> Self {
         Self {
@@ -413,12 +461,24 @@ impl SymmRenderer {
         self.maxop
     }
 
+    pub fn get_max_op(&self) -> i32 {
+        self.maxop()
+    }
+
     pub fn set_maxop(&mut self, value: i32) {
         self.maxop = value;
     }
 
+    pub fn set_max_op(&mut self, value: i32) {
+        self.set_maxop(value);
+    }
+
     pub fn extent(&self) -> f64 {
         self.extent
+    }
+
+    pub fn get_extent(&self) -> f64 {
+        self.extent()
     }
 
     pub fn set_extent(&mut self, value: f64) {
@@ -430,13 +490,25 @@ impl SymmRenderer {
         self.unitcell
     }
 
+    pub fn is_unit_cell_mode(&self) -> bool {
+        self.unitcell()
+    }
+
     pub fn set_unitcell(&mut self, value: bool) {
         self.unitcell = value;
         self.update_required = true;
     }
 
+    pub fn set_unit_cell_mode(&mut self, value: bool) {
+        self.set_unitcell(value);
+    }
+
     pub fn autoupdate(&self) -> bool {
         self.autoupdate
+    }
+
+    pub fn is_auto_update(&self) -> bool {
+        self.autoupdate()
     }
 
     pub fn set_autoupdate(&mut self, value: bool) {
@@ -444,8 +516,16 @@ impl SymmRenderer {
         self.update_required = true;
     }
 
+    pub fn set_auto_update(&mut self, value: bool) {
+        self.set_autoupdate(value);
+    }
+
     pub fn center(&self) -> Vector4 {
         self.center
+    }
+
+    pub fn get_center(&self) -> Vector4 {
+        self.center()
     }
 
     pub fn set_center(&mut self, value: Vector4) {
@@ -480,6 +560,24 @@ impl SymmRenderer {
             .get(symid)
             .map(|operator| operator.matrix)
             .unwrap_or(Matrix4::IDENTITY)
+    }
+
+    pub fn interpret_hit(
+        &self,
+        renderer_id: cuemol_core::Uid,
+        hit_data: &dyn RawHitData,
+    ) -> Option<SymmetryHit> {
+        if hit_data.data_size(renderer_id) != 1 {
+            return None;
+        }
+        let symmetry_id = usize::try_from(hit_data.data_at(renderer_id, 0, 0)?).ok()?;
+        let atom_id = hit_data.data_at(renderer_id, 0, 1)?;
+        let symmetry_name = self.operators.get(symmetry_id)?.name.clone();
+        Some(SymmetryHit {
+            symmetry_id,
+            atom_id,
+            symmetry_name,
+        })
     }
 
     /// Generate the per-unit-cell symmetry-mate transforms for a molecule
@@ -562,13 +660,25 @@ impl UnitCellRenderer {
         self.width
     }
 
+    pub fn get_line_width(&self) -> f64 {
+        self.width()
+    }
+
     pub fn set_width(&mut self, value: f64) {
         self.width = value;
         self.disp_list.invalidate_display_cache();
     }
 
+    pub fn set_line_width(&mut self, value: f64) {
+        self.set_width(value);
+    }
+
     pub fn color(&self) -> &SolidColor {
         &self.color
+    }
+
+    pub fn get_color(&self) -> &SolidColor {
+        self.color()
     }
 
     pub fn set_color(&mut self, value: SolidColor) {
@@ -580,9 +690,17 @@ impl UnitCellRenderer {
         &self.labelcolor
     }
 
+    pub fn get_label_color(&self) -> &SolidColor {
+        self.labelcolor()
+    }
+
     pub fn set_labelcolor(&mut self, value: SolidColor) {
         self.labelcolor = value;
         self.disp_list.invalidate_display_cache();
+    }
+
+    pub fn set_label_color(&mut self, value: SolidColor) {
+        self.set_labelcolor(value);
     }
 
     pub fn is_hit_test_supported(&self) -> bool {
@@ -1063,6 +1181,7 @@ fn json_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuemol_gfx::{HitData, HittestContext};
 
     #[test]
     fn crystal_info_defaults_and_transforms_match_reference() {
@@ -1074,9 +1193,19 @@ mod tests {
         assert_eq!(crystal.beta, 90.0);
         assert_eq!(crystal.gamma, 90.0);
         assert_eq!(crystal.nsg, 1);
+        assert_eq!(crystal.a(), 100.0);
+        assert_eq!(crystal.b(), 100.0);
+        assert_eq!(crystal.c(), 100.0);
+        assert_eq!(crystal.alpha(), 90.0);
+        assert_eq!(crystal.beta(), 90.0);
+        assert_eq!(crystal.gamma(), 90.0);
+        assert_eq!(crystal.get_sg(), 1);
         assert_eq!(crystal.lattice_name(), "TRICLINIC");
+        assert_eq!(crystal.get_lattice_name(), "TRICLINIC");
         assert_eq!(crystal.hm_space_group_name(), "P 1");
+        assert_eq!(crystal.get_hm_space_group_name(), "P 1");
         assert_eq!(crystal.space_group_name(), "P1");
+        assert_eq!(crystal.get_space_group_name(), "P1");
 
         let orth = crystal.frac_to_orth(Vector4::new3(0.5, 0.25, 0.1));
         assert_eq!(orth, Vector4::new3(50.0, 25.0, 10.0));
@@ -1409,6 +1538,39 @@ mod tests {
         assert_eq!(renderer.get_xform_matrix(99), Matrix4::IDENTITY);
         renderer.clear();
         assert!(renderer.operators().is_empty());
+    }
+
+    #[test]
+    fn symm_renderer_interprets_only_a_single_hit() {
+        let mut renderer = SymmRenderer::new();
+        renderer.set_operators(vec![
+            SymmetryOperator {
+                name: "x,y,z".to_string(),
+                matrix: Matrix4::IDENTITY,
+            },
+            SymmetryOperator {
+                name: "-x,-y,-z".to_string(),
+                matrix: Matrix4::IDENTITY,
+            },
+        ]);
+        let renderer_id = cuemol_core::Uid::new(9);
+        let mut context = HittestContext::new();
+        context.add_hit(renderer_id, 0.2, vec![1, 42]);
+        let mut hit_data = HitData::new();
+        hit_data.create_nearest(&context);
+
+        assert_eq!(
+            renderer.interpret_hit(renderer_id, &hit_data),
+            Some(SymmetryHit {
+                symmetry_id: 1,
+                atom_id: 42,
+                symmetry_name: "-x,-y,-z".to_string(),
+            })
+        );
+
+        context.add_hit(renderer_id, 0.3, vec![0, 7]);
+        hit_data.create_all(&context);
+        assert_eq!(renderer.interpret_hit(renderer_id, &hit_data), None);
     }
 
     #[test]

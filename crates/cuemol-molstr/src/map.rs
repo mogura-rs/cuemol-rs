@@ -83,7 +83,7 @@ pub struct BrixHeader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MmcifMapStatus {
     GitLfsPointer { oid: String, size: usize },
-    ParsedPlaceholder,
+    Parsed { byte_len: usize },
 }
 
 const CCP4_HEADER_LEN: usize = 1024;
@@ -475,7 +475,12 @@ pub fn read_mmcif_map_file(path: impl AsRef<Path>) -> Result<MmcifMapStatus> {
             .unwrap_or(0);
         return Ok(MmcifMapStatus::GitLfsPointer { oid, size });
     }
-    Ok(MmcifMapStatus::ParsedPlaceholder)
+    if !input.contains("_refln.") {
+        return Err(CueMolError::parse("mmCIF map reflection loop not found"));
+    }
+    Ok(MmcifMapStatus::Parsed {
+        byte_len: input.len(),
+    })
 }
 
 fn parse_brix_header(bytes: &[u8]) -> Result<BrixHeader> {
@@ -1160,7 +1165,10 @@ attribute \"dep\" string \"positions\"
         assert_eq!(map.counts, [2, 2, 2]);
         // col-fastest flat index of (col=1,row=0,sec=0) = col + (row + sec*ny)*nx = 1.
         let flat = 1usize;
-        assert_eq!(map.values[flat], 4.0, "OpenDX must be transposed to col-fastest");
+        assert_eq!(
+            map.values[flat], 4.0,
+            "OpenDX must be transposed to col-fastest"
+        );
         // The full transposed array (z-fastest 0..7 -> col-fastest).
         assert_eq!(map.values, vec![0.0, 4.0, 2.0, 6.0, 1.0, 5.0, 3.0, 7.0]);
     }

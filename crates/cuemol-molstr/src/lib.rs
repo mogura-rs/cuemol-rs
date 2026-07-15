@@ -18,6 +18,7 @@ pub mod stream;
 pub mod toppar;
 
 pub use chem::{ElemSym, MolAtom, MolBond, MolChain, MolResidue, ResidIndex, INVALID_UID};
+pub use fileio::{read_bytes_maybe_compressed, read_text_maybe_compressed};
 pub use iterators::{
     AtomIterator, ChainIterator, ChainView, ResidIterator, ResidRangeSet, ResidueView,
 };

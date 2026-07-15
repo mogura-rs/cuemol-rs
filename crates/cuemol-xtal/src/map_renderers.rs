@@ -1,7 +1,7 @@
-use cuemol_core::Vector4;
+use cuemol_core::{Matrix4, Vector4};
 use cuemol_gfx::SolidColor;
 use cuemol_molstr::{GridMap, Selector};
-use cuemol_qsys::{DispListRenderer, MultiGradient, ScalarObject};
+use cuemol_qsys::{DispListRenderer, MultiGradient, ScalarObject, View};
 use cuemol_surface::{build_grid_isosurface, MolSurfObj, ScalarField, SurfaceMesh};
 use cuemol_symm::CrystalInfo;
 
@@ -183,6 +183,57 @@ impl DensityMap {
         (center, radius)
     }
 
+    pub fn fit_view(&self, view: &mut View, _dummy: bool) {
+        let orth = self.get_orth_mat();
+        let eye = orth.mul_mat(Matrix4::make_rot_mat(view.rot_quat()));
+        let corners = [
+            Vector4::new4(0.0, 0.0, 0.0, 1.0),
+            Vector4::new4(1.0, 0.0, 0.0, 1.0),
+            Vector4::new4(0.0, 1.0, 0.0, 1.0),
+            Vector4::new4(0.0, 0.0, 1.0, 1.0),
+            Vector4::new4(1.0, 1.0, 0.0, 1.0),
+            Vector4::new4(0.0, 1.0, 1.0, 1.0),
+            Vector4::new4(1.0, 0.0, 1.0, 1.0),
+            Vector4::new4(1.0, 1.0, 1.0, 1.0),
+        ];
+        let (min, max) = transformed_bounds(orth, &corners);
+        let (eye_min, eye_max) = transformed_bounds(eye, &corners);
+
+        view.set_view_center((min + max).scale(0.5));
+
+        let width = f64::from(view.width());
+        let height = f64::from(view.height());
+        let frame_aspect = if width > 0.0 && height > 0.0 {
+            width / height
+        } else {
+            1.0
+        };
+        let map_width = (eye_max.x - eye_min.x).abs();
+        let map_height = (eye_max.y - eye_min.y).abs();
+        let map_aspect = if map_height > 0.0 {
+            map_width / map_height
+        } else {
+            f64::INFINITY
+        };
+        let zoom = if map_aspect > frame_aspect {
+            map_width / frame_aspect
+        } else {
+            map_height
+        };
+        view.set_zoom(zoom);
+
+        let slab_depth = (eye_max.z - eye_min.z).abs();
+        if view.slab_depth() > slab_depth {
+            return;
+        }
+        if view.view_dist() * 2.0 > slab_depth {
+            view.set_slab_depth(slab_depth);
+        } else {
+            view.set_view_dist(slab_depth / 2.0);
+            view.set_slab_depth(slab_depth);
+        }
+    }
+
     fn update_stats(&mut self, values: &[f64]) {
         if values.is_empty() {
             self.min_density = 0.0;
@@ -252,6 +303,23 @@ impl DensityMap {
             project_axis(rel, self.delta[2]).floor() as isize + self.start[2],
         ]
     }
+}
+
+fn transformed_bounds(matrix: Matrix4, points: &[Vector4]) -> (Vector4, Vector4) {
+    let first = matrix.mul_vec(points[0]);
+    points
+        .iter()
+        .skip(1)
+        .fold((first, first), |(mut min, mut max), point| {
+            let point = matrix.mul_vec(*point);
+            min.x = min.x.min(point.x);
+            min.y = min.y.min(point.y);
+            min.z = min.z.min(point.z);
+            max.x = max.x.max(point.x);
+            max.y = max.y.max(point.y);
+            max.z = max.z.max(point.z);
+            (min, max)
+        })
 }
 
 fn cell_from_delta(delta: [Vector4; 3], intervals: [usize; 3]) -> CrystalInfo {
@@ -501,6 +569,10 @@ impl MapRenderer {
         self.color_mode.code()
     }
 
+    pub fn get_color_mode(&self) -> i32 {
+        self.color_mode_code()
+    }
+
     pub fn set_color_mode(&mut self, value: MapColorMode) {
         self.color_mode = value;
         self.invalidate_display_cache();
@@ -519,6 +591,10 @@ impl MapRenderer {
         &self.color
     }
 
+    pub fn get_color(&self) -> &SolidColor {
+        self.color()
+    }
+
     pub fn set_color(&mut self, value: SolidColor) {
         self.color = value;
     }
@@ -527,13 +603,25 @@ impl MapRenderer {
         self.siglevel
     }
 
+    pub fn get_sig_level(&self) -> f64 {
+        self.siglevel()
+    }
+
     pub fn set_siglevel(&mut self, value: f64) {
         self.siglevel = value;
         self.invalidate_display_cache();
     }
 
+    pub fn set_sig_level(&mut self, value: f64) {
+        self.set_siglevel(value);
+    }
+
     pub fn extent(&self) -> f64 {
         self.extent
+    }
+
+    pub fn get_extent(&self) -> f64 {
+        self.extent()
     }
 
     pub fn set_extent(&mut self, value: f64) {
@@ -545,6 +633,10 @@ impl MapRenderer {
         self.center
     }
 
+    pub fn get_center(&self) -> Vector4 {
+        self.center()
+    }
+
     pub fn set_center(&mut self, value: Vector4) {
         self.center = value;
         self.invalidate_display_cache();
@@ -552,6 +644,10 @@ impl MapRenderer {
 
     pub fn use_pbc(&self) -> bool {
         self.use_pbc
+    }
+
+    pub fn is_use_pbc(&self) -> bool {
+        self.use_pbc()
     }
 
     pub fn set_use_pbc(&mut self, value: bool) {
@@ -563,12 +659,24 @@ impl MapRenderer {
         self.use_abslevel
     }
 
+    pub fn is_use_abs_lev(&self) -> bool {
+        self.use_abslevel()
+    }
+
     pub fn set_use_abslevel(&mut self, value: bool) {
         self.use_abslevel = value;
     }
 
+    pub fn set_use_abs_lev(&mut self, value: bool) {
+        self.set_use_abslevel(value);
+    }
+
     pub fn bndry_rng(&self) -> f64 {
         self.bndry_rng
+    }
+
+    pub fn get_bndry_rng(&self) -> f64 {
+        self.bndry_rng()
     }
 
     pub fn set_bndry_rng(&mut self, value: f64) {
@@ -580,6 +688,10 @@ impl MapRenderer {
         &self.bndry_molname
     }
 
+    pub fn get_bndry_mol_name(&self) -> &str {
+        self.bndry_molname()
+    }
+
     pub fn set_bndry_molname(&mut self, value: impl Into<String>) {
         let value = value.into();
         if self.bndry_molname != value {
@@ -588,8 +700,16 @@ impl MapRenderer {
         }
     }
 
+    pub fn set_bndry_mol_name(&mut self, value: impl Into<String>) {
+        self.set_bndry_molname(value);
+    }
+
     pub fn bndry_sel(&self) -> Option<&Selector> {
         self.bndry_sel.as_ref()
+    }
+
+    pub fn get_bndry_sel(&self) -> Option<&Selector> {
+        self.bndry_sel()
     }
 
     pub fn set_bndry_sel(&mut self, value: Option<Selector>) {
@@ -603,12 +723,20 @@ impl MapRenderer {
         &self.multi_grad
     }
 
+    pub fn get_multi_grad(&self) -> &MultiGradient {
+        self.multi_grad()
+    }
+
     pub fn multi_grad_mut(&mut self) -> &mut MultiGradient {
         &mut self.multi_grad
     }
 
     pub fn color_mapname(&self) -> &str {
         &self.color_mapname
+    }
+
+    pub fn get_color_map_name(&self) -> &str {
+        self.color_mapname()
     }
 
     pub fn get_color_map_obj(&self) -> Option<&MultiGradient> {
@@ -620,8 +748,16 @@ impl MapRenderer {
         self.invalidate_display_cache();
     }
 
+    pub fn set_color_map_name(&mut self, value: impl Into<String>) {
+        self.set_color_mapname(value);
+    }
+
     pub fn level(&self, scalar: &impl ScalarObject) -> f64 {
         self.siglevel * scalar.rmsd_density()
+    }
+
+    pub fn get_level(&self, scalar: &impl ScalarObject) -> f64 {
+        self.level(scalar)
     }
 
     pub fn set_level(&mut self, scalar: &impl ScalarObject, value: f64) {
@@ -642,6 +778,10 @@ impl MapRenderer {
         }
     }
 
+    pub fn get_max_level(&self, scalar: &impl ScalarObject) -> f64 {
+        self.max_level(scalar)
+    }
+
     pub fn min_level(&self, scalar: &impl ScalarObject) -> f64 {
         let rmsd = scalar.rmsd_density();
         if rmsd.abs() < 1.0e-12 {
@@ -649,6 +789,10 @@ impl MapRenderer {
         } else {
             scalar.min_density() / rmsd
         }
+    }
+
+    pub fn get_min_level(&self, scalar: &impl ScalarObject) -> f64 {
+        self.min_level(scalar)
     }
 
     pub fn display_cache_valid(&self) -> bool {
@@ -706,18 +850,34 @@ impl MapMeshRenderer {
         self.width
     }
 
+    pub fn get_line_width(&self) -> f64 {
+        self.width()
+    }
+
     pub fn set_width(&mut self, value: f64) {
         self.width = value;
         self.map.invalidate_display_cache();
+    }
+
+    pub fn set_line_width(&mut self, value: f64) {
+        self.set_width(value);
     }
 
     pub fn bufsize(&self) -> i32 {
         self.bufsize
     }
 
+    pub fn get_buf_size(&self) -> i32 {
+        self.bufsize()
+    }
+
     pub fn set_bufsize(&mut self, value: i32) {
         self.bufsize = value.max(10);
         self.map.invalidate_display_cache();
+    }
+
+    pub fn set_buf_size(&mut self, value: i32) {
+        self.set_bufsize(value);
     }
 
     pub fn autoupdate(&self) -> bool {
@@ -741,6 +901,10 @@ impl MapMeshRenderer {
         (half * scalar.col_grid_size())
             .min(half * scalar.row_grid_size())
             .min(half * scalar.sec_grid_size())
+    }
+
+    pub fn get_max_extent(&self, scalar: &impl ScalarObject) -> f64 {
+        self.max_extent(scalar)
     }
 
     /// Contour the density into wireframe line segments at the renderer's level
@@ -987,9 +1151,17 @@ impl MapSurfRenderer {
         self.cullface
     }
 
+    pub fn is_cull_face(&self) -> bool {
+        self.cullface()
+    }
+
     pub fn set_cullface(&mut self, value: bool) {
         self.cullface = value;
         self.map.invalidate_display_cache();
+    }
+
+    pub fn set_cull_face(&mut self, value: bool) {
+        self.set_cullface(value);
     }
 
     pub fn drawmode(&self) -> MapSurfaceDrawMode {
@@ -1000,13 +1172,29 @@ impl MapSurfRenderer {
         self.drawmode.code()
     }
 
+    pub fn get_draw_mode(&self) -> i32 {
+        self.drawmode_code()
+    }
+
     pub fn set_drawmode(&mut self, value: MapSurfaceDrawMode) {
         self.drawmode = value;
         self.map.invalidate_display_cache();
     }
 
+    pub fn set_draw_mode(&mut self, value: i32) {
+        self.set_drawmode(match value {
+            Self::MSRDRAW_LINE => MapSurfaceDrawMode::Line,
+            Self::MSRDRAW_POINT => MapSurfaceDrawMode::Point,
+            _ => MapSurfaceDrawMode::Fill,
+        });
+    }
+
     pub fn width(&self) -> f64 {
         self.width
+    }
+
+    pub fn get_line_width(&self) -> f64 {
+        self.width()
     }
 
     pub fn set_width(&mut self, value: f64) {
@@ -1014,8 +1202,16 @@ impl MapSurfRenderer {
         self.map.invalidate_display_cache();
     }
 
+    pub fn set_line_width(&mut self, value: f64) {
+        self.set_width(value);
+    }
+
     pub fn binning(&self) -> i32 {
         self.binning
+    }
+
+    pub fn get_bin_fac(&self) -> i32 {
+        self.binning()
     }
 
     pub fn set_binning(&mut self, value: i32) {
@@ -1023,8 +1219,16 @@ impl MapSurfRenderer {
         self.map.invalidate_display_cache();
     }
 
+    pub fn set_bin_fac(&mut self, value: i32) {
+        self.set_binning(value);
+    }
+
     pub fn max_grids(&self) -> i32 {
         self.max_grids
+    }
+
+    pub fn get_max_grids(&self) -> i32 {
+        self.max_grids()
     }
 
     pub fn set_max_grids(&mut self, value: i32) {
@@ -1033,6 +1237,10 @@ impl MapSurfRenderer {
 
     pub fn max_extent(&self, scalar: &impl ScalarObject) -> f64 {
         self.max_grids as f64 * scalar.col_grid_size() / 2.0
+    }
+
+    pub fn get_max_extent(&self, scalar: &impl ScalarObject) -> f64 {
+        self.max_extent(scalar)
     }
 
     /// Contour the density into a triangle isosurface at the renderer's level.
@@ -1054,13 +1262,25 @@ impl MapSurfRenderer {
         self.glrender_mode
     }
 
+    pub fn get_gl_render_mode(&self) -> i32 {
+        self.glrender_mode()
+    }
+
     pub fn set_glrender_mode(&mut self, value: i32) {
         self.map.invalidate_display_cache();
         self.glrender_mode = value;
     }
 
+    pub fn set_gl_render_mode(&mut self, value: i32) {
+        self.set_glrender_mode(value);
+    }
+
     pub fn omp_thr(&self) -> i32 {
         self.omp_thr
+    }
+
+    pub fn get_omp_thr(&self) -> i32 {
+        self.omp_thr()
     }
 
     pub fn set_omp_thr(&mut self, value: i32) {
@@ -1256,17 +1476,33 @@ impl GlslMapMeshRenderer {
         self.width
     }
 
+    pub fn get_line_width(&self) -> f64 {
+        self.width()
+    }
+
     pub fn set_width(&mut self, value: f64) {
         self.width = value;
         self.invalidate_display_cache();
+    }
+
+    pub fn set_line_width(&mut self, value: f64) {
+        self.set_width(value);
     }
 
     pub fn bufsize(&self) -> i32 {
         self.bufsize
     }
 
+    pub fn get_buf_size(&self) -> i32 {
+        self.bufsize()
+    }
+
     pub fn set_bufsize(&mut self, value: i32) {
         self.bufsize = value;
+    }
+
+    pub fn set_buf_size(&mut self, value: i32) {
+        self.set_bufsize(value);
     }
 
     pub fn autoupdate(&self) -> bool {
@@ -1305,6 +1541,10 @@ impl GlslMapMeshRenderer {
         (50.0 * scalar.col_grid_size())
             .min(50.0 * scalar.row_grid_size())
             .min(50.0 * scalar.sec_grid_size())
+    }
+
+    pub fn get_max_extent(&self, scalar: &impl ScalarObject) -> f64 {
+        self.max_extent(scalar)
     }
 
     pub fn invalidate_display_cache(&mut self) {
@@ -1381,8 +1621,16 @@ impl GlslMapVolRenderer {
         self.xferfn_type
     }
 
+    pub fn get_xfer_fn_type(&self) -> i32 {
+        self.xferfn_type()
+    }
+
     pub fn set_xferfn_type(&mut self, value: i32) {
         self.xferfn_type = value;
+    }
+
+    pub fn set_xfer_fn_type(&mut self, value: i32) {
+        self.set_xferfn_type(value);
     }
 
     pub fn shader_checked(&self) -> bool {
@@ -1407,11 +1655,42 @@ impl GlslMapVolRenderer {
             .max(scalar.sec_no() as f64 * scalar.sec_grid_size() / 2.0)
     }
 
+    pub fn get_max_extent(&self, scalar: &impl ScalarObject) -> f64 {
+        self.max_extent(scalar)
+    }
+
     pub fn invalidate_display_cache(&mut self) {
         self.map.invalidate_display_cache();
         self.map_texture_ok = false;
     }
 }
+
+macro_rules! impl_map_renderer_deref {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl std::ops::Deref for $ty {
+                type Target = MapRenderer;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.map
+                }
+            }
+
+            impl std::ops::DerefMut for $ty {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    &mut self.map
+                }
+            }
+        )+
+    };
+}
+
+impl_map_renderer_deref!(
+    MapMeshRenderer,
+    MapSurfRenderer,
+    GlslMapMeshRenderer,
+    GlslMapVolRenderer,
+);
 
 fn project_axis(value: Vector4, axis: Vector4) -> f64 {
     let denom = axis.sqlen3d();
@@ -1524,6 +1803,25 @@ attribute \"dep\" string \"positions\"
         let b_axis = map.conv_to_orth(Vector4::new3(0.0, 2.0, 0.0));
         assert!((b_axis.x + 6.0).abs() < 1.0e-10);
         assert!((b_axis.y - 10.392304845413264).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn density_map_fit_view_matches_reference_cell_bounds() {
+        let mut map = DensityMap::from_grid_map(test_grid());
+        map.set_xtal_params(30.0, 10.0, 40.0, 90.0, 90.0, 90.0);
+        let mut view = View::new(cuemol_core::Uid::new(1), cuemol_core::Uid::new(1));
+        view.set_view_size(200, 100);
+        view.set_slab_depth(20.0);
+
+        map.fit_view(&mut view, false);
+
+        let center = view.view_center();
+        assert!((center.x - 15.0).abs() < 1.0e-10);
+        assert!((center.y - 5.0).abs() < 1.0e-10);
+        assert!((center.z - 20.0).abs() < 1.0e-10);
+        assert!((view.zoom() - 15.0).abs() < 1.0e-10);
+        assert!((view.slab_depth() - 40.0).abs() < 1.0e-10);
+        assert!((view.view_dist() - 200.0).abs() < 1.0e-10);
     }
 
     #[test]

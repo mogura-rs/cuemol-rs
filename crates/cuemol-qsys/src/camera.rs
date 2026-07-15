@@ -4,21 +4,31 @@ use std::collections::BTreeMap;
 const F_EPS4: f64 = 1.0e-4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VisibilitySetting {
+    visible: bool,
+    is_object: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StereoMode {
     None,
     Parallel,
     Cross,
+    Hardware,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CenterMark {
     None,
     Cross,
+    Axis,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Camera {
     name: String,
+    source: String,
+    alt_source: String,
     zoom: f64,
     slab_depth: f64,
     cam_dist: f64,
@@ -28,13 +38,15 @@ pub struct Camera {
     center_mark: CenterMark,
     center: Vector4,
     rotation: Quat,
-    visibility: BTreeMap<String, bool>,
+    visibility: BTreeMap<u64, VisibilitySetting>,
 }
 
 impl Default for Camera {
     fn default() -> Self {
         Self {
             name: String::new(),
+            source: String::new(),
+            alt_source: String::new(),
             zoom: 50.0,
             slab_depth: 50.0,
             cam_dist: 200.0,
@@ -58,12 +70,44 @@ impl Camera {
         &self.name
     }
 
+    pub fn get_name(&self) -> &str {
+        self.name()
+    }
+
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
     }
 
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn get_source(&self) -> &str {
+        self.source()
+    }
+
+    pub fn set_source(&mut self, source: impl Into<String>) {
+        self.source = source.into();
+    }
+
+    pub fn alt_source(&self) -> &str {
+        &self.alt_source
+    }
+
+    pub fn set_alt_source(&mut self, source: impl Into<String>) {
+        self.alt_source = source.into();
+    }
+
+    pub fn update_source_path(&mut self, source: impl Into<String>) {
+        self.set_source(source);
+    }
+
     pub fn zoom(&self) -> f64 {
         self.zoom
+    }
+
+    pub fn get_zoom(&self) -> f64 {
+        self.zoom()
     }
 
     pub fn set_zoom(&mut self, zoom: f64) {
@@ -74,12 +118,20 @@ impl Camera {
         self.slab_depth
     }
 
+    pub fn get_slab_depth(&self) -> f64 {
+        self.slab_depth()
+    }
+
     pub fn set_slab_depth(&mut self, slab_depth: f64) {
         self.slab_depth = slab_depth.clamp(0.1, 10000.0);
     }
 
     pub fn cam_dist(&self) -> f64 {
         self.cam_dist
+    }
+
+    pub fn get_cam_dist(&self) -> f64 {
+        self.cam_dist()
     }
 
     pub fn set_cam_dist(&mut self, cam_dist: f64) {
@@ -98,6 +150,10 @@ impl Camera {
         self.stereo_mode
     }
 
+    pub fn get_stereo_mode(&self) -> StereoMode {
+        self.stereo_mode()
+    }
+
     pub fn set_stereo_mode(&mut self, stereo_mode: StereoMode) {
         self.stereo_mode = stereo_mode;
     }
@@ -114,12 +170,20 @@ impl Camera {
         self.center_mark
     }
 
+    pub fn get_center_mark(&self) -> CenterMark {
+        self.center_mark()
+    }
+
     pub fn set_center_mark(&mut self, center_mark: CenterMark) {
         self.center_mark = center_mark;
     }
 
     pub fn center(&self) -> Vector4 {
         self.center
+    }
+
+    pub fn get_center(&self) -> Vector4 {
+        self.center()
     }
 
     pub fn set_center(&mut self, center: Vector4) {
@@ -130,8 +194,16 @@ impl Camera {
         self.rotation
     }
 
+    pub fn get_rot_quat(&self) -> Quat {
+        self.rotation()
+    }
+
     pub fn set_rotation(&mut self, rotation: Quat) {
         self.rotation = rotation;
+    }
+
+    pub fn set_rot_quat(&mut self, rotation: Quat) {
+        self.set_rotation(rotation);
     }
 
     pub fn visibility_size(&self) -> usize {
@@ -142,6 +214,10 @@ impl Camera {
         self.visibility_size()
     }
 
+    pub fn get_vis_size(&self) -> usize {
+        self.visibility_size()
+    }
+
     pub fn visibility_json(&self) -> String {
         if self.visibility.is_empty() {
             return "{}".to_string();
@@ -149,7 +225,17 @@ impl Camera {
         let entries = self
             .visibility
             .iter()
-            .map(|(name, visible)| format!("\"{}\":{}", escape_json(name), visible))
+            .map(|(uid, setting)| {
+                let kind = if setting.is_object {
+                    "object"
+                } else {
+                    "renderer"
+                };
+                format!(
+                    "\"{uid}\":{{\"uid\":{uid},\"type\":\"{kind}\",\"include\":true,\"visible\":{}}}",
+                    setting.visible
+                )
+            })
             .collect::<Vec<_>>();
         format!("{{{}}}", entries.join(","))
     }
@@ -179,13 +265,11 @@ impl Camera {
     }
 
     pub fn load_vis_settings<T>(&self, scene: &mut crate::Scene<T>) {
-        for (key, visible) in &self.visibility {
-            let Some((is_object, uid)) = parse_visibility_key(key) else {
-                continue;
-            };
-            if is_object {
+        for (uid, setting) in &self.visibility {
+            let uid = cuemol_core::Uid::new(*uid);
+            if setting.is_object {
                 if let Some(object) = scene.object_mut(uid) {
-                    object.set_visible(*visible);
+                    object.set_visible(setting.visible);
                 }
             } else if let Some(object_uid) = scene.object_uids().into_iter().find(|object_uid| {
                 scene
@@ -196,7 +280,7 @@ impl Camera {
                     .object_mut(object_uid)
                     .and_then(|object| object.renderer_mut(uid))
                 {
-                    renderer.set_visible(*visible);
+                    renderer.set_visible(setting.visible);
                 }
             }
         }
@@ -211,21 +295,13 @@ impl Camera {
     }
 
     pub fn vis_append(&mut self, target_id: u64, visible: bool, is_object: bool) {
-        let prefix = if is_object { "obj" } else { "rend" };
         self.visibility
-            .insert(format!("{prefix}:{target_id}"), visible);
+            .entry(target_id)
+            .or_insert(VisibilitySetting { visible, is_object });
     }
 
     pub fn vis_remove(&mut self, target_id: u64) -> bool {
-        let obj = self
-            .visibility
-            .remove(&format!("obj:{target_id}"))
-            .is_some();
-        let rend = self
-            .visibility
-            .remove(&format!("rend:{target_id}"))
-            .is_some();
-        obj || rend
+        self.visibility.remove(&target_id).is_some()
     }
 
     pub fn to_camera_data(&self) -> String {
@@ -252,11 +328,12 @@ impl Camera {
         );
         push_field(&mut output, "center", &format_vector(self.center));
         push_field(&mut output, "rotation", &format_quat(self.rotation));
-        for (target, visible) in &self.visibility {
+        for (uid, setting) in &self.visibility {
+            let prefix = if setting.is_object { "obj" } else { "rend" };
             push_field(
                 &mut output,
                 "vis",
-                &format!("{},{}", escape_field(target), visible),
+                &format!("{prefix}:{uid},{}", setting.visible),
             );
         }
         output
@@ -285,19 +362,15 @@ impl Camera {
                 "rotation" => camera.set_rotation(parse_quat(value)?),
                 "vis" => {
                     let (target, visible) = value.rsplit_once(',')?;
-                    camera
-                        .visibility
-                        .insert(unescape_field(target)?, visible.parse().ok()?);
+                    let target = unescape_field(target)?;
+                    let (is_object, uid) = parse_visibility_key(&target)?;
+                    camera.vis_append(uid.get(), visible.parse().ok()?, is_object);
                 }
                 _ => {}
             }
         }
         Some(camera)
     }
-}
-
-fn escape_json(input: &str) -> String {
-    input.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn push_field(output: &mut String, key: &str, value: &str) {
@@ -310,16 +383,18 @@ fn push_field(output: &mut String, key: &str, value: &str) {
 fn stereo_mode_name(mode: StereoMode) -> &'static str {
     match mode {
         StereoMode::None => "none",
-        StereoMode::Parallel => "parallel",
+        StereoMode::Parallel => "para",
         StereoMode::Cross => "cross",
+        StereoMode::Hardware => "hardware",
     }
 }
 
 fn parse_stereo_mode(value: &str) -> Option<StereoMode> {
     match value {
         "none" => Some(StereoMode::None),
-        "parallel" => Some(StereoMode::Parallel),
+        "para" | "parallel" => Some(StereoMode::Parallel),
         "cross" => Some(StereoMode::Cross),
+        "hardware" => Some(StereoMode::Hardware),
         _ => None,
     }
 }
@@ -327,14 +402,16 @@ fn parse_stereo_mode(value: &str) -> Option<StereoMode> {
 fn center_mark_name(mark: CenterMark) -> &'static str {
     match mark {
         CenterMark::None => "none",
-        CenterMark::Cross => "cross",
+        CenterMark::Cross => "crosshair",
+        CenterMark::Axis => "axis",
     }
 }
 
 fn parse_center_mark(value: &str) -> Option<CenterMark> {
     match value {
         "none" => Some(CenterMark::None),
-        "cross" => Some(CenterMark::Cross),
+        "cross" | "crosshair" => Some(CenterMark::Cross),
+        "axis" => Some(CenterMark::Axis),
         _ => None,
     }
 }
@@ -410,6 +487,8 @@ mod tests {
     fn camera_defaults_match_qsys_reference() {
         let camera = Camera::default();
         assert_eq!(camera.zoom(), 50.0);
+        assert_eq!(camera.source(), "");
+        assert_eq!(camera.alt_source(), "");
         assert_eq!(camera.slab_depth(), 50.0);
         assert_eq!(camera.cam_dist(), 200.0);
         assert_eq!(camera.stereo_distance(), 1.0);
@@ -472,5 +551,50 @@ mod tests {
             .renderer(renderer_uid)
             .unwrap()
             .is_visible());
+    }
+
+    #[test]
+    fn camera_roundtrips_all_scriptable_display_modes() {
+        for stereo_mode in [
+            StereoMode::None,
+            StereoMode::Parallel,
+            StereoMode::Cross,
+            StereoMode::Hardware,
+        ] {
+            for center_mark in [CenterMark::None, CenterMark::Cross, CenterMark::Axis] {
+                let mut camera = Camera::new();
+                camera.set_stereo_mode(stereo_mode);
+                camera.set_center_mark(center_mark);
+                let restored = Camera::from_camera_data(&camera.to_camera_data()).unwrap();
+                assert_eq!(restored.stereo_mode(), stereo_mode);
+                assert_eq!(restored.center_mark(), center_mark);
+            }
+        }
+    }
+
+    #[test]
+    fn camera_tracks_primary_and_alternative_sources() {
+        let mut camera = Camera::new();
+        camera.set_source("primary.cam");
+        camera.set_alt_source("fallback.cam");
+        assert_eq!(camera.source(), "primary.cam");
+        assert_eq!(camera.alt_source(), "fallback.cam");
+        camera.update_source_path("resolved.cam");
+        assert_eq!(camera.source(), "resolved.cam");
+    }
+
+    #[test]
+    fn camera_visibility_json_matches_reference_shape() {
+        let mut camera = Camera::new();
+        camera.vis_append(10, false, true);
+        camera.vis_append(20, true, false);
+        camera.vis_append(10, true, false);
+        assert_eq!(camera.visibility_size(), 2);
+        assert_eq!(
+            camera.get_vis_set_json(),
+            "{\"10\":{\"uid\":10,\"type\":\"object\",\"include\":true,\"visible\":false},\"20\":{\"uid\":20,\"type\":\"renderer\",\"include\":true,\"visible\":true}}"
+        );
+        assert!(camera.vis_remove(10));
+        assert!(!camera.vis_remove(10));
     }
 }

@@ -9,7 +9,7 @@ use std::process::Command;
 pub mod pickle;
 pub use pickle::{parse_pickle, PickleValue};
 pub mod pse_extract;
-pub use pse_extract::extract_pse_molecules;
+pub use pse_extract::{extract_pse_molecules, extract_pse_named_molecules};
 
 pub use cuemol_molstr::{
     read_mmcif_file, read_mmcif_file_with_options, read_mmcif_str, read_mmcif_str_with_options,
@@ -374,6 +374,28 @@ impl Default for SdfMolReader {
     }
 }
 
+macro_rules! impl_obj_reader_deref {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl std::ops::Deref for $ty {
+                type Target = ObjReader;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.reader
+                }
+            }
+
+            impl std::ops::DerefMut for $ty {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    &mut self.reader
+                }
+            }
+        )+
+    };
+}
+
+impl_obj_reader_deref!(Mol2MolReader, MmcifMolReader, SdfMolReader);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SdfMolWriter {
     writer: ObjWriter,
@@ -404,6 +426,10 @@ impl SdfMolWriter {
         &self.selection
     }
 
+    pub fn get_selection(&self) -> &Selector {
+        self.selection()
+    }
+
     pub fn set_selection(&mut self, value: Selector) {
         self.selection = value;
     }
@@ -412,6 +438,20 @@ impl SdfMolWriter {
 impl Default for SdfMolWriter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::ops::Deref for SdfMolWriter {
+    type Target = ObjWriter;
+
+    fn deref(&self) -> &Self::Target {
+        &self.writer
+    }
+}
+
+impl std::ops::DerefMut for SdfMolWriter {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.writer
     }
 }
 
@@ -489,8 +529,16 @@ impl PseFileReader {
         self.client_scene = Some(scene_uid);
     }
 
+    pub fn attach(&mut self, scene_uid: Uid) {
+        self.attach_scene(scene_uid);
+    }
+
     pub fn detach_scene(&mut self) -> Option<Uid> {
         self.client_scene.take()
+    }
+
+    pub fn detach(&mut self) -> Option<Uid> {
+        self.detach_scene()
     }
 
     pub fn client_scene(&self) -> Option<Uid> {
@@ -598,6 +646,11 @@ impl PseFileReader {
     pub fn read_molecules(&self) -> Result<Vec<cuemol_molstr::MolCoord>> {
         let tree = self.parse_pickle_tree()?;
         Ok(extract_pse_molecules(&tree))
+    }
+
+    pub fn read_named_molecules(&self) -> Result<Vec<(String, cuemol_molstr::MolCoord)>> {
+        let tree = self.parse_pickle_tree()?;
+        Ok(extract_pse_named_molecules(&tree))
     }
 }
 

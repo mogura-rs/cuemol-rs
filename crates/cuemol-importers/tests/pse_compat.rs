@@ -81,5 +81,9 @@ fn extracts_a_full_protein_from_a_real_pse() {
     let max_res = atoms.iter().map(|a| a.res_id).max().unwrap();
     assert_eq!(max_res, 46, "1CRN spans residues 1..=46");
     // A protein has many bonds (not just a handful).
-    assert!(mol.bonds().len() > 300, "too few bonds: {}", mol.bonds().len());
+    assert!(
+        mol.bonds().len() > 300,
+        "too few bonds: {}",
+        mol.bonds().len()
+    );
 }

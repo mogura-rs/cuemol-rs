@@ -41,7 +41,10 @@ fn render_qsc_renders_a_styled_scene_to_obj() {
     // oracle for that lives in cuemol-desktop-core's snapshot test.)
     let verts = obj.lines().filter(|line| line.starts_with("v ")).count();
     let faces = obj.lines().filter(|line| line.starts_with("f ")).count();
-    assert!(verts > 1000, "expected a substantial mesh, got {verts} vertices");
+    assert!(
+        verts > 1000,
+        "expected a substantial mesh, got {verts} vertices"
+    );
     assert!(faces > 1000, "expected real faces, got {faces}");
     // Never emit a degenerate `f 0` (1-based OBJ indices).
     assert!(!obj.contains("f 0 "), "OBJ must use 1-based face indices");

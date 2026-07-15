@@ -203,7 +203,8 @@ fn run() -> Result<(), String> {
             let path = args
                 .next()
                 .ok_or_else(|| "missing CNS parameter file path".to_string())?;
-            let db = cuemol_molstr::cns_par::read_cns_par_file(path).map_err(|err| err.to_string())?;
+            let db =
+                cuemol_molstr::cns_par::read_cns_par_file(path).map_err(|err| err.to_string())?;
             println!("bonds={}", db.bond_count());
             println!("angles={}", db.angle_count());
             println!("dihedrals={}", db.dihedral_count());
@@ -406,7 +407,7 @@ fn run() -> Result<(), String> {
                 other => return Err(format!("unknown molecule array: {other}")),
             };
             println!("type={}", array.elem_type_code());
-            println!("length={}", array.length());
+            println!("length={}", array.elem_count());
             println!("bytes={}", array.byte_len());
             if matches!(array_name.as_str(), "crd" | "bfac" | "occ") {
                 let values = array.copy_to_f32().map_err(|err| err.to_string())?;
@@ -438,7 +439,7 @@ fn run() -> Result<(), String> {
             let array = mol.sel_array(&selector);
             let values = array.copy_to_i32().map_err(|err| err.to_string())?;
             println!("type={}", array.elem_type_code());
-            println!("length={}", array.length());
+            println!("length={}", array.elem_count());
             println!(
                 "values={}",
                 values
@@ -573,7 +574,9 @@ fn print_usage() {
     eprintln!(
         "  cuemol export-scene <file.pdb|.cif|.sdf|.mol2> <out.stl|.obj|.pov|.mqo|.lxs|.cfg(LuxCore)|.wbp(Warabi)>"
     );
-    eprintln!("  cuemol render-qsc <file.qsc> <out.stl|.obj>   (renders the scene with resolved styles)");
+    eprintln!(
+        "  cuemol render-qsc <file.qsc> <out.stl|.obj>   (renders the scene with resolved styles)"
+    );
 }
 
 fn parse_stream_category(value: &str) -> Result<HandlerCategory, String> {
@@ -616,11 +619,10 @@ fn scene_center_size(snapshot: &RenderSceneSnapshot) -> (cuemol_core::Vector4, f
                 (min.y + max.y) / 2.0,
                 (min.z + max.z) / 2.0,
             );
-            let size = ((max.x - min.x).powi(2)
-                + (max.y - min.y).powi(2)
-                + (max.z - min.z).powi(2))
-            .sqrt()
-            .max(1.0);
+            let size =
+                ((max.x - min.x).powi(2) + (max.y - min.y).powi(2) + (max.z - min.z).powi(2))
+                    .sqrt()
+                    .max(1.0);
             (center, size)
         }
         None => (cuemol_core::Vector4::new3(0.0, 0.0, 0.0), 10.0),
@@ -639,7 +641,9 @@ fn format_from_ext(path: &str) -> Result<&'static str, String> {
     } else if lower.ends_with(".mol2") {
         Ok("mol2")
     } else {
-        Err(format!("cannot infer molecule format from extension: {path}"))
+        Err(format!(
+            "cannot infer molecule format from extension: {path}"
+        ))
     }
 }
 
@@ -676,7 +680,9 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
             .write_scene_string(&mesh, center, size, false)
             .into_bytes()
     } else if lower.ends_with(".mqo") {
-        MqoSceneExporter::new().write_mqo_string(name, &mesh).into_bytes()
+        MqoSceneExporter::new()
+            .write_mqo_string(name, &mesh)
+            .into_bytes()
     } else if lower.ends_with(".lxs") {
         let (center, size) = scene_center_size(&snapshot);
         LuxRendSceneExporter::new()
@@ -706,7 +712,9 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
 /// scene's actual styling — the production consumer of the style-resolution chain.
 fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
     let mut manager = MolSceneManager::new();
-    let scene_uid = manager.load_qsc_file(input).map_err(|err| err.to_string())?;
+    let scene_uid = manager
+        .load_qsc_file(input)
+        .map_err(|err| err.to_string())?;
     let scene = manager
         .scene(scene_uid)
         .ok_or_else(|| "loaded scene not found".to_string())?;
@@ -749,16 +757,16 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             }
             // Object rainbow/bfac coloring — only when the renderer set no own scheme.
             if options.rainbow.is_none() {
-                options.rainbow = cuemol_molvis::rainbow_coloring_from_attrs(
-                    object.coloring_type(),
-                    |name| object.coloring_attr(name),
-                );
+                options.rainbow =
+                    cuemol_molvis::rainbow_coloring_from_attrs(object.coloring_type(), |name| {
+                        object.coloring_attr(name)
+                    });
             }
             if options.bfac.is_none() {
-                options.bfac = cuemol_molvis::bfac_coloring_from_attrs(
-                    object.coloring_type(),
-                    |name| object.coloring_attr(name),
-                );
+                options.bfac =
+                    cuemol_molvis::bfac_coloring_from_attrs(object.coloring_type(), |name| {
+                        object.coloring_attr(name)
+                    });
             }
             let mut snapshot = if rtype == "atomintr" {
                 // Measurement lines between the renderer's atom pairs, not the
@@ -815,7 +823,9 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
     } else if lower.ends_with(".obj") {
         combined.to_obj_string(name).into_bytes()
     } else {
-        return Err(format!("unsupported output format (use .stl/.obj): {output}"));
+        return Err(format!(
+            "unsupported output format (use .stl/.obj): {output}"
+        ));
     };
     std::fs::write(output, &bytes).map_err(|err| err.to_string())?;
     eprintln!(
@@ -868,7 +878,8 @@ fn is_mainchain_trace_type(renderer_type: &str) -> bool {
 fn merge_mesh(dst: &mut RenderMesh, src: &RenderMesh) {
     let base = dst.vertices.len() as u32;
     dst.vertices.extend(src.vertices.iter().cloned());
-    dst.indices.extend(src.indices.iter().map(|index| index + base));
+    dst.indices
+        .extend(src.indices.iter().map(|index| index + base));
 }
 
 /// LuxCore export — a multi-file scene: `<base>.cfg` (render config) +

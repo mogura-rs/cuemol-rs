@@ -33,7 +33,7 @@ pub enum DragState {
 }
 
 /// Mouse-drag tracker: a ring buffer of samples + the drag state machine.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MouseEventHandler {
     buf: VecDeque<DragSample>,
     state: DragState,

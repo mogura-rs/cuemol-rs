@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 cuemol-core.workspace = true
+libloading.workspace = true
 
 [lib]
 name = "cuemol_gfx"

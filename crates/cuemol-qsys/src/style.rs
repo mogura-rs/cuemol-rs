@@ -38,12 +38,20 @@ impl StyleSet {
         self.uid
     }
 
+    pub fn get_uid(&self) -> u64 {
+        self.uid()
+    }
+
     pub fn set_uid(&mut self, value: u64) {
         self.uid = value;
     }
 
     pub fn source(&self) -> &str {
         &self.source
+    }
+
+    pub fn get_source(&self) -> &str {
+        self.source()
     }
 
     pub fn set_source(&mut self, value: impl Into<String>) {
@@ -54,6 +62,10 @@ impl StyleSet {
         &self.name
     }
 
+    pub fn get_name(&self) -> &str {
+        self.name()
+    }
+
     pub fn set_name(&mut self, value: impl Into<String>) {
         self.name = value.into();
         self.modified = true;
@@ -61,6 +73,10 @@ impl StyleSet {
 
     pub fn read_only(&self) -> bool {
         self.read_only
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only()
     }
 
     pub fn readonly(&self) -> bool {
@@ -77,6 +93,10 @@ impl StyleSet {
 
     pub fn modified(&self) -> bool {
         self.modified
+    }
+
+    pub fn is_modified(&self) -> bool {
+        self.modified()
     }
 
     pub fn set_modified(&mut self, value: bool) {
@@ -272,6 +292,10 @@ impl StyleManager {
         &self.default_dir
     }
 
+    pub fn get_default_dir(&self) -> &str {
+        self.default_dir()
+    }
+
     pub fn set_default_dir(&mut self, value: impl Into<String>) {
         self.default_dir = value.into();
     }
@@ -382,6 +406,14 @@ impl StyleManager {
             .and_then(|set| set.get_color(name))
     }
 
+    pub fn get_color2(&self, name: &str, scope_id: u64, style_set_id: u64) -> Option<&SolidColor> {
+        self.scopes
+            .get(&scope_id)?
+            .iter()
+            .find(|set| set.uid() == style_set_id)?
+            .get_color(name)
+    }
+
     pub fn set_color(
         &mut self,
         key: impl AsRef<str>,
@@ -426,6 +458,16 @@ impl StyleManager {
                 .then(|| set.get_str_data(category, key))
         })
         .unwrap_or_default()
+    }
+
+    pub fn get_str_data2(
+        &self,
+        category: &str,
+        key: &str,
+        scope_id: u64,
+        _style_set_id: u64,
+    ) -> String {
+        self.get_str_data(category, key, scope_id)
     }
 
     pub fn set_str_data(
@@ -932,6 +974,8 @@ mod tests {
 
         assert!(manager.set_color("molcol", SolidColor::from_rgb(0.0, 1.0, 0.0), 10, uid));
         assert!(manager.get_color("molcol", 10).is_some());
+        assert!(manager.get_color2("molcol", 10, uid).is_some());
+        assert!(manager.get_color2("molcol", 11, uid).is_none());
         assert_eq!(manager.color_defs_json(10), "[\"molcol\"]");
 
         assert!(manager.set_str_data("sel", "all", "*", 10, uid));
@@ -975,11 +1019,28 @@ mod tests {
         assert!(set.has_style("DefaultCPK"));
 
         // Geometry attributes parse from the `<style>` element attributes.
-        assert_eq!(manager.style_attr(0, "DefaultBallStick", "bondw").as_deref(), Some("0.2"));
-        assert_eq!(manager.style_attr(0, "DefaultBallStick", "sphr").as_deref(), Some("0.3"));
-        assert_eq!(manager.style_attr(0, "ThickBallStick", "bondw").as_deref(), Some("0.3"));
-        assert_eq!(manager.style_attr(0, "ThickBallStick", "sphr").as_deref(), Some("0.5"));
-        assert_eq!(manager.style_attr(0, "DefaultCPK", "detail").as_deref(), Some("10"));
+        assert_eq!(
+            manager
+                .style_attr(0, "DefaultBallStick", "bondw")
+                .as_deref(),
+            Some("0.2")
+        );
+        assert_eq!(
+            manager.style_attr(0, "DefaultBallStick", "sphr").as_deref(),
+            Some("0.3")
+        );
+        assert_eq!(
+            manager.style_attr(0, "ThickBallStick", "bondw").as_deref(),
+            Some("0.3")
+        );
+        assert_eq!(
+            manager.style_attr(0, "ThickBallStick", "sphr").as_deref(),
+            Some("0.5")
+        );
+        assert_eq!(
+            manager.style_attr(0, "DefaultCPK", "detail").as_deref(),
+            Some("10")
+        );
         // An undefined attribute on a real style is None, not empty string.
         assert!(manager.style_attr(0, "DefaultCPK", "bondw").is_none());
         // An unknown style is None.
@@ -998,11 +1059,15 @@ mod tests {
         // `DefaultLabel` carries color/font; `DefaultAtomIntr` carries width —
         // the two contribute disjoint attributes, both resolvable from the list.
         assert_eq!(
-            manager.resolve_style_attr(0, "DefaultLabel,DefaultAtomIntr", "width").as_deref(),
+            manager
+                .resolve_style_attr(0, "DefaultLabel,DefaultAtomIntr", "width")
+                .as_deref(),
             Some("1.0")
         );
         assert_eq!(
-            manager.resolve_style_attr(0, "DefaultLabel,DefaultAtomIntr", "color").as_deref(),
+            manager
+                .resolve_style_attr(0, "DefaultLabel,DefaultAtomIntr", "color")
+                .as_deref(),
             Some("Yellow")
         );
         // Later style overrides earlier when both define an attribute:
@@ -1015,7 +1080,9 @@ mod tests {
         );
         // Whitespace tolerance + unknown names skipped.
         assert_eq!(
-            manager.resolve_style_attr(0, " DefaultBallStick , ", "bondw").as_deref(),
+            manager
+                .resolve_style_attr(0, " DefaultBallStick , ", "bondw")
+                .as_deref(),
             Some("0.2")
         );
         assert!(manager.resolve_style_attr(0, "", "bondw").is_none());
@@ -1029,19 +1096,27 @@ mod tests {
         // DefaultRibbon's nested <helix tuber="6.0" width="0.2"/> and
         // <sheet tuber="7.0" width="0.2"/> cross-section sub-elements.
         assert_eq!(
-            manager.style_child_attr(0, "DefaultRibbon", "helix", "tuber").as_deref(),
+            manager
+                .style_child_attr(0, "DefaultRibbon", "helix", "tuber")
+                .as_deref(),
             Some("6.0")
         );
         assert_eq!(
-            manager.style_child_attr(0, "DefaultRibbon", "helix", "width").as_deref(),
+            manager
+                .style_child_attr(0, "DefaultRibbon", "helix", "width")
+                .as_deref(),
             Some("0.2")
         );
         assert_eq!(
-            manager.style_child_attr(0, "DefaultRibbon", "sheet", "tuber").as_deref(),
+            manager
+                .style_child_attr(0, "DefaultRibbon", "sheet", "tuber")
+                .as_deref(),
             Some("7.0")
         );
         // No <coil> sub-element in DefaultRibbon.
-        assert!(manager.style_child_attr(0, "DefaultRibbon", "coil", "width").is_none());
+        assert!(manager
+            .style_child_attr(0, "DefaultRibbon", "coil", "width")
+            .is_none());
         // Resolve across a style list (later style wins): RoundRibbon's helix is
         // elliptical with the same tuber=6.0.
         assert_eq!(
@@ -1071,7 +1146,10 @@ mod tests {
         let mut manager = StyleManager::new();
         let uid = manager.load_style_set_from_file(5, &path, true);
         assert_ne!(uid, INVALID_UID);
-        assert_eq!(manager.style_attr(5, "MyBallStick", "bondw").as_deref(), Some("0.42"));
+        assert_eq!(
+            manager.style_attr(5, "MyBallStick", "bondw").as_deref(),
+            Some("0.42")
+        );
         assert!(manager.get_style_set(uid).unwrap().has_color("Crimson"));
 
         std::fs::remove_file(&path).ok();
@@ -1108,7 +1186,9 @@ mod tests {
         .unwrap();
         manager.load_style_set_from_file(0, &path, true);
         assert_eq!(
-            manager.style_child_type(0, "MyRainbow", "coloring").as_deref(),
+            manager
+                .style_child_type(0, "MyRainbow", "coloring")
+                .as_deref(),
             Some("RainbowColoring")
         );
         assert_eq!(

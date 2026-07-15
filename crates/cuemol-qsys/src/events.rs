@@ -1,4 +1,7 @@
-use cuemol_core::LString;
+use cuemol_core::{IndexedTable, LLogEvent, LScrCallBack, LString, LVarArgs, Result};
+use std::cell::RefCell;
+use std::fmt;
+use std::rc::Rc;
 
 pub const INVALID_UID: u64 = 0;
 
@@ -20,6 +23,14 @@ macro_rules! delegate_event_accessors {
             self.inner.set_target(value);
         }
 
+        pub fn source(&self) -> u64 {
+            self.inner.source()
+        }
+
+        pub fn set_source(&mut self, value: u64) {
+            self.inner.set_source(value);
+        }
+
         pub fn descr(&self) -> &str {
             self.inner.descr()
         }
@@ -30,8 +41,74 @@ macro_rules! delegate_event_accessors {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScrEventManager;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptEventSlot {
+    pub category: LString,
+    pub target_type: i32,
+    pub event_type: i32,
+    pub source_uid: u64,
+}
+
+pub type SharedViewEventListener = Rc<RefCell<dyn FnMut(&mut ViewEvent)>>;
+
+pub fn shared_view_event_listener<F>(listener: F) -> SharedViewEventListener
+where
+    F: FnMut(&mut ViewEvent) + 'static,
+{
+    Rc::new(RefCell::new(listener))
+}
+
+pub struct ScrEventManager {
+    callback: Option<Rc<dyn LScrCallBack>>,
+    slots: IndexedTable<ScriptEventSlot>,
+    view_listeners: Vec<(u64, SharedViewEventListener)>,
+}
+
+#[derive(Clone)]
+pub struct ScrEventManagerHandle(Rc<RefCell<ScrEventManager>>);
+
+impl Default for ScrEventManagerHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScrEventManagerHandle {
+    pub fn new() -> Self {
+        Self(Rc::new(RefCell::new(ScrEventManager::new())))
+    }
+
+    pub fn with<R>(&self, function: impl FnOnce(&ScrEventManager) -> R) -> R {
+        function(&self.0.borrow())
+    }
+
+    pub fn with_mut<R>(&self, function: impl FnOnce(&mut ScrEventManager) -> R) -> R {
+        function(&mut self.0.borrow_mut())
+    }
+}
+
+impl fmt::Debug for ScrEventManagerHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("ScrEventManagerHandle")
+            .field(&Rc::as_ptr(&self.0))
+            .finish()
+    }
+}
+
+impl PartialEq for ScrEventManagerHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ScrEventManagerHandle {}
+
+impl Default for ScrEventManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ScrEventManager {
     pub const SEM_ANY: i32 = -1;
@@ -51,6 +128,14 @@ impl ScrEventManager {
     pub const SEM_PROPCHG: i32 = 3;
     pub const SEM_CHANGED: i32 = 4;
     pub const SEM_OTHER: i32 = 9999;
+
+    pub fn new() -> Self {
+        Self {
+            callback: None,
+            slots: IndexedTable::new(),
+            view_listeners: Vec::new(),
+        }
+    }
 
     pub fn sem_any(&self) -> i32 {
         Self::SEM_ANY
@@ -116,12 +201,238 @@ impl ScrEventManager {
         Self::SEM_OTHER
     }
 
-    pub fn add_listener<C: cuemol_core::LScrCallBack + ?Sized>(&self, _callback: &C) -> i32 {
+    pub fn get_sem_any(&self) -> i32 {
+        self.sem_any()
+    }
+
+    pub fn get_sem_log(&self) -> i32 {
+        self.sem_log()
+    }
+
+    pub fn get_sem_indev(&self) -> i32 {
+        self.sem_indev()
+    }
+
+    pub fn get_sem_scene(&self) -> i32 {
+        self.sem_scene()
+    }
+
+    pub fn get_sem_object(&self) -> i32 {
+        self.sem_object()
+    }
+
+    pub fn get_sem_renderer(&self) -> i32 {
+        self.sem_renderer()
+    }
+
+    pub fn get_sem_view(&self) -> i32 {
+        self.sem_view()
+    }
+
+    pub fn get_sem_camera(&self) -> i32 {
+        self.sem_camera()
+    }
+
+    pub fn get_sem_style(&self) -> i32 {
+        self.sem_style()
+    }
+
+    pub fn get_sem_anim(&self) -> i32 {
+        self.sem_anim()
+    }
+
+    pub fn get_sem_extnd(&self) -> i32 {
+        self.sem_extnd()
+    }
+
+    pub fn get_sem_added(&self) -> i32 {
+        self.sem_added()
+    }
+
+    pub fn get_sem_removing(&self) -> i32 {
+        self.sem_removing()
+    }
+
+    pub fn get_sem_propchg(&self) -> i32 {
+        self.sem_propchg()
+    }
+
+    pub fn get_sem_changed(&self) -> i32 {
+        self.sem_changed()
+    }
+
+    pub fn get_sem_other(&self) -> i32 {
+        self.sem_other()
+    }
+
+    pub fn get_indev_shift(&self) -> i32 {
+        InDevEvent::INDEV_SHIFT
+    }
+
+    pub fn get_indev_ctrl(&self) -> i32 {
+        InDevEvent::INDEV_CTRL
+    }
+
+    pub fn get_indev_alt(&self) -> i32 {
+        InDevEvent::INDEV_ALT
+    }
+
+    pub fn get_indev_lbtn(&self) -> i32 {
+        InDevEvent::INDEV_LBTN
+    }
+
+    pub fn get_indev_mbtn(&self) -> i32 {
+        InDevEvent::INDEV_MBTN
+    }
+
+    pub fn get_indev_rbtn(&self) -> i32 {
+        InDevEvent::INDEV_RBTN
+    }
+
+    pub fn add_listener(&mut self, callback: Rc<dyn LScrCallBack>) -> i32 {
+        self.callback = Some(callback);
         0
     }
 
-    pub fn remove_listener(&self, _id: i32) -> bool {
-        false
+    pub fn remove_listener(&mut self, _id: i32) -> bool {
+        self.callback = None;
+        true
+    }
+
+    pub fn append(
+        &mut self,
+        category: impl Into<LString>,
+        target_type: i32,
+        event_type: i32,
+        source_uid: i64,
+    ) -> i32 {
+        self.slots.put(ScriptEventSlot {
+            category: category.into(),
+            target_type,
+            event_type,
+            source_uid: if source_uid < 0 {
+                INVALID_UID
+            } else {
+                source_uid as u64
+            },
+        })
+    }
+
+    pub fn remove(&mut self, slot_id: i32) -> bool {
+        self.slots.remove(&slot_id).is_some()
+    }
+
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn fire_object_event(&self, event: &ObjectEvent) -> Result<bool> {
+        self.fire_category(event.category(), event.source(), event.json())
+    }
+
+    pub fn fire_scene_event(&self, event: &SceneEvent) -> Result<bool> {
+        self.fire_category(event.category(), event.source(), event.json())
+    }
+
+    pub fn fire_renderer_event(&self, event: &RendererEvent) -> Result<bool> {
+        self.fire_category(event.category(), event.source(), event.json())
+    }
+
+    pub fn fire_view_event(&mut self, event: &mut ViewEvent) -> Result<bool> {
+        self.fire_native_view_event(event);
+        self.fire_category(event.category(), event.source(), event.json())
+    }
+
+    pub fn fire_log_event(&self, event: &LLogEvent) -> Result<bool> {
+        self.fire_event_script(
+            "log",
+            Self::SEM_LOG,
+            Self::SEM_ADDED,
+            INVALID_UID,
+            event.get_json(),
+        )
+    }
+
+    pub fn add_view_listener(&mut self, filter_uid: u64, listener: SharedViewEventListener) {
+        self.view_listeners.push((filter_uid, listener));
+    }
+
+    pub fn remove_view_listener(&mut self, listener: &SharedViewEventListener) -> bool {
+        let before = self.view_listeners.len();
+        self.view_listeners
+            .retain(|(_, current)| !Rc::ptr_eq(current, listener));
+        self.view_listeners.len() != before
+    }
+
+    pub fn view_listener_count(&self) -> usize {
+        self.view_listeners.len()
+    }
+
+    fn fire_native_view_event(&self, event: &mut ViewEvent) {
+        let listeners = self.view_listeners.clone();
+        for (filter_uid, listener) in listeners {
+            if filter_uid == INVALID_UID
+                || filter_uid == event.target()
+                || filter_uid == event.source()
+            {
+                listener.borrow_mut()(event);
+            }
+        }
+    }
+
+    pub fn fire_event_script(
+        &self,
+        category: impl AsRef<str>,
+        target_type: i32,
+        event_type: i32,
+        source_uid: u64,
+        event_json: LString,
+    ) -> Result<bool> {
+        let Some(callback) = self.callback.as_ref() else {
+            return Ok(false);
+        };
+        let category = category.as_ref();
+        for (slot_id, slot) in self.slots.iter() {
+            if slot.source_uid != INVALID_UID && slot.source_uid != source_uid {
+                continue;
+            }
+            if !slot.category.is_empty() && !slot.category.equals(category) {
+                continue;
+            }
+            if slot.target_type >= 0 && target_type & slot.target_type == 0 {
+                continue;
+            }
+            if slot.event_type >= 0 && slot.event_type != event_type {
+                continue;
+            }
+
+            let mut args = LVarArgs::new(6);
+            args.at(0).set_int_value(*slot_id);
+            args.at(1).set_string_value(category);
+            args.at(2).set_int_value(target_type);
+            args.at(3).set_int_value(event_type);
+            args.at(4).set_int_value(source_uid as i32);
+            args.at(5).set_string_value(event_json.clone());
+            if callback.invoke(&mut args)?
+                && args.retval().is_bool()
+                && args.retval().get_bool_value()?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn fire_category(
+        &self,
+        category: Option<(LString, i32, i32)>,
+        source_uid: u64,
+        json: LString,
+    ) -> Result<bool> {
+        let Some((category, target_type, event_type)) = category else {
+            return Ok(false);
+        };
+        self.fire_event_script(category.as_str(), target_type, event_type, source_uid, json)
     }
 }
 
@@ -140,6 +451,7 @@ pub struct InDevEvent {
     move_y: i32,
     velo_x: f64,
     velo_y: f64,
+    gesture_axis: i32,
 }
 
 impl Default for InDevEvent {
@@ -158,6 +470,7 @@ impl Default for InDevEvent {
             move_y: 0,
             velo_x: 0.0,
             velo_y: 0.0,
+            gesture_axis: 0,
         }
     }
 }
@@ -339,6 +652,14 @@ impl InDevEvent {
 
     pub fn set_velo_y(&mut self, value: f64) {
         self.velo_y = value;
+    }
+
+    pub fn gesture_axis(&self) -> i32 {
+        self.gesture_axis
+    }
+
+    pub fn set_gesture_axis(&mut self, value: i32) {
+        self.gesture_axis = value;
     }
 
     pub fn json(&self) -> LString {
@@ -667,6 +988,33 @@ fn escape_json(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuemol_core::{LScrObject, LVariant};
+    use std::cell::RefCell;
+
+    type RecordedCall = (i32, String, i32, i32, i32, String);
+
+    struct RecordingCallback {
+        calls: Rc<RefCell<Vec<RecordedCall>>>,
+        consume_slot: i32,
+    }
+
+    impl LScrObject for RecordingCallback {}
+
+    impl LScrCallBack for RecordingCallback {
+        fn invoke(&self, args: &mut LVarArgs) -> Result<bool> {
+            self.calls.borrow_mut().push((
+                args.get(0).get_int_value()?,
+                args.get(1).get_string_value()?.as_str().to_string(),
+                args.get(2).get_int_value()?,
+                args.get(3).get_int_value()?,
+                args.get(4).get_int_value()?,
+                args.get(5).get_string_value()?.as_str().to_string(),
+            ));
+            let consumed = args.get(0).get_int_value()? == self.consume_slot;
+            *args.retval_mut() = LVariant::Boolean(consumed);
+            Ok(true)
+        }
+    }
 
     #[test]
     fn qsys_event_constants_match_reference_values() {
@@ -790,5 +1138,86 @@ mod tests {
         cache.invalidate();
         cache.invalidate_hit();
         cache.invalidate_hit();
+    }
+
+    #[test]
+    fn script_event_manager_filters_slots_and_stops_on_consumed_event() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let callback = Rc::new(RecordingCallback {
+            calls: Rc::clone(&calls),
+            consume_slot: 2,
+        });
+        let mut manager = ScrEventManager::new();
+        assert_eq!(manager.add_listener(callback), 0);
+        assert_eq!(manager.append("other", ScrEventManager::SEM_ANY, -1, -1), 0);
+        assert_eq!(
+            manager.append(
+                "objectAdded",
+                ScrEventManager::SEM_OBJECT,
+                ScrEventManager::SEM_ADDED,
+                42,
+            ),
+            1
+        );
+        assert_eq!(manager.append("", ScrEventManager::SEM_ANY, -1, -1), 2);
+        assert_eq!(manager.append("", ScrEventManager::SEM_ANY, -1, -1), 3);
+
+        let mut event = SceneEvent::new();
+        event.set_event_type(SceneEvent::SCE_OBJ_ADDED);
+        event.set_source(42);
+        event.set_target(7);
+        event.set_descr("created");
+        assert!(manager.fire_scene_event(&event).unwrap());
+
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, 1);
+        assert_eq!(calls[0].1, "objectAdded");
+        assert_eq!(calls[0].2, ScrEventManager::SEM_OBJECT);
+        assert_eq!(calls[0].3, ScrEventManager::SEM_ADDED);
+        assert_eq!(calls[0].4, 42);
+        assert!(calls[0].5.contains("target_uid"));
+        assert_eq!(calls[1].0, 2);
+        drop(calls);
+
+        assert!(manager.remove(1));
+        assert!(!manager.remove(1));
+        assert_eq!(manager.slot_count(), 3);
+        assert!(manager.remove_listener(0));
+        assert!(!manager.fire_scene_event(&event).unwrap());
+    }
+
+    #[test]
+    fn native_view_listeners_use_target_and_source_uid_filters() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let all_calls = Rc::clone(&calls);
+        let all = shared_view_event_listener(move |event| {
+            all_calls.borrow_mut().push(("all", event.target()));
+        });
+        let source_calls = Rc::clone(&calls);
+        let source = shared_view_event_listener(move |event| {
+            source_calls.borrow_mut().push(("source", event.source()));
+        });
+        let missed_calls = Rc::clone(&calls);
+        let missed = shared_view_event_listener(move |event| {
+            missed_calls.borrow_mut().push(("missed", event.target()));
+        });
+
+        let mut manager = ScrEventManager::new();
+        manager.add_view_listener(INVALID_UID, Rc::clone(&all));
+        manager.add_view_listener(20, Rc::clone(&source));
+        manager.add_view_listener(99, missed);
+        let mut event = ViewEvent::new();
+        event.set_event_type(ViewEvent::VWE_ACTIVATED);
+        event.set_target(10);
+        event.set_source(20);
+        assert!(!manager.fire_view_event(&mut event).unwrap());
+        assert_eq!(calls.borrow().as_slice(), &[("all", 10), ("source", 20)]);
+
+        manager.add_view_listener(INVALID_UID, Rc::clone(&all));
+        assert_eq!(manager.view_listener_count(), 4);
+        assert!(manager.remove_view_listener(&all));
+        assert_eq!(manager.view_listener_count(), 2);
+        assert!(!manager.remove_view_listener(&all));
     }
 }

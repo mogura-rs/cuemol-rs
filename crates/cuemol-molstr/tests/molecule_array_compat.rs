@@ -12,7 +12,8 @@ fn molecule_coordinate_array_matches_reference_shape_and_values() {
     let array = mol.crd_array();
     assert_eq!(array.elem_type(), ElementType::Float32);
     assert_eq!(array.elem_type_code(), ByteArray::FLOAT32);
-    assert_eq!(array.length(), mol.atom_count() * 3);
+    assert_eq!(array.elem_count(), mol.atom_count() * 3);
+    assert_eq!(array.length(), mol.atom_count() * 3 * 4);
     assert_eq!(array.byte_len(), 327 * 3 * 4);
 
     let values = array.copy_to_f32().unwrap();
@@ -32,16 +33,19 @@ fn molecule_property_arrays_match_reference_values() {
 
     let bfac = mol.prop_array("bfac");
     assert_eq!(bfac.elem_type_code(), ByteArray::FLOAT32);
-    assert_eq!(bfac.length(), 327);
+    assert_eq!(bfac.elem_count(), 327);
+    assert_eq!(bfac.length(), 327 * 4);
     assert!((bfac.copy_to_f32().unwrap()[0] - 13.79).abs() < 1.0e-5);
 
     let occ = mol.prop_array("occ");
     assert_eq!(occ.elem_type_code(), ByteArray::FLOAT32);
-    assert_eq!(occ.length(), 327);
+    assert_eq!(occ.elem_count(), 327);
+    assert_eq!(occ.length(), 327 * 4);
     assert!((occ.copy_to_f32().unwrap()[0] - 1.0).abs() < 1.0e-6);
 
     let unknown = mol.prop_array("unknown");
-    assert_eq!(unknown.length(), 327);
+    assert_eq!(unknown.elem_count(), 327);
+    assert_eq!(unknown.length(), 327 * 4);
     assert!(unknown
         .copy_to_f32()
         .unwrap()

@@ -223,8 +223,16 @@ impl SolidColor {
         f64::from(self.a()) / 255.0
     }
 
+    pub fn get_alpha(&self) -> f64 {
+        self.alpha()
+    }
+
     pub fn material(&self) -> &str {
         &self.material
+    }
+
+    pub fn get_material(&self) -> &str {
+        self.material()
     }
 
     pub fn set_material(&mut self, value: impl Into<String>) {
@@ -324,6 +332,10 @@ pub trait AbstractColor {
     fn is_in_gamut(&self, _context_id: u64) -> bool {
         true
     }
+
+    fn get_material(&self) -> String {
+        self.material()
+    }
 }
 
 impl AbstractColor for SolidColor {
@@ -406,12 +418,20 @@ impl NamedColor {
         &self.material
     }
 
+    pub fn get_material(&self) -> &str {
+        self.material()
+    }
+
     pub fn set_material(&mut self, value: impl Into<String>) {
         self.material = value.into();
     }
 
     pub fn alpha(&self) -> f64 {
         self.alpha
+    }
+
+    pub fn get_alpha(&self) -> f64 {
+        self.alpha()
     }
 
     pub fn set_alpha(&mut self, value: f64) {
@@ -422,24 +442,48 @@ impl NamedColor {
         self.mod_h
     }
 
+    pub fn get_mod_hue(&self) -> f64 {
+        self.mod_h()
+    }
+
     pub fn set_mod_h(&mut self, value: f64) {
         self.mod_h = value;
+    }
+
+    pub fn set_mod_hue(&mut self, value: f64) {
+        self.set_mod_h(value);
     }
 
     pub fn mod_s(&self) -> f64 {
         self.mod_s
     }
 
+    pub fn get_mod_sat(&self) -> f64 {
+        self.mod_s()
+    }
+
     pub fn set_mod_s(&mut self, value: f64) {
         self.mod_s = value;
+    }
+
+    pub fn set_mod_sat(&mut self, value: f64) {
+        self.set_mod_s(value);
     }
 
     pub fn mod_b(&self) -> f64 {
         self.mod_b
     }
 
+    pub fn get_mod_bri(&self) -> f64 {
+        self.mod_b()
+    }
+
     pub fn set_mod_b(&mut self, value: f64) {
         self.mod_b = value;
+    }
+
+    pub fn set_mod_bri(&mut self, value: f64) {
+        self.set_mod_b(value);
     }
 
     pub fn is_alpha_default(&self) -> bool {
@@ -558,12 +602,20 @@ impl MolColorRef {
         &self.material
     }
 
+    pub fn get_material(&self) -> &str {
+        self.material()
+    }
+
     pub fn set_material(&mut self, value: impl Into<String>) {
         self.material = value.into();
     }
 
     pub fn alpha(&self) -> f64 {
         self.alpha
+    }
+
+    pub fn get_alpha(&self) -> f64 {
+        self.alpha()
     }
 
     pub fn set_alpha(&mut self, value: f64) {
@@ -574,24 +626,48 @@ impl MolColorRef {
         self.mod_h
     }
 
+    pub fn get_mod_hue(&self) -> f64 {
+        self.mod_h()
+    }
+
     pub fn set_mod_h(&mut self, value: f64) {
         self.mod_h = value;
+    }
+
+    pub fn set_mod_hue(&mut self, value: f64) {
+        self.set_mod_h(value);
     }
 
     pub fn mod_s(&self) -> f64 {
         self.mod_s
     }
 
+    pub fn get_mod_sat(&self) -> f64 {
+        self.mod_s()
+    }
+
     pub fn set_mod_s(&mut self, value: f64) {
         self.mod_s = value;
+    }
+
+    pub fn set_mod_sat(&mut self, value: f64) {
+        self.set_mod_s(value);
     }
 
     pub fn mod_b(&self) -> f64 {
         self.mod_b
     }
 
+    pub fn get_mod_bri(&self) -> f64 {
+        self.mod_b()
+    }
+
     pub fn set_mod_b(&mut self, value: f64) {
         self.mod_b = value;
+    }
+
+    pub fn set_mod_bri(&mut self, value: f64) {
+        self.set_mod_b(value);
     }
 
     pub fn is_alpha_set(&self) -> bool {
@@ -716,6 +792,10 @@ impl GradientColor {
         self.rho()
     }
 
+    pub fn get_grad_param(&self) -> f64 {
+        self.grad_param()
+    }
+
     pub fn set_grad_param(&mut self, value: f64) {
         self.set_rho(value);
     }
@@ -740,6 +820,10 @@ impl GradientColor {
         self.col1()
     }
 
+    pub fn get_grad_color1(&self) -> &SolidColor {
+        self.grad_color1()
+    }
+
     pub fn set_grad_color1(&mut self, value: SolidColor) {
         self.set_col1(value);
     }
@@ -762,6 +846,10 @@ impl GradientColor {
 
     pub fn grad_color2(&self) -> &SolidColor {
         self.col2()
+    }
+
+    pub fn get_grad_color2(&self) -> &SolidColor {
+        self.grad_color2()
     }
 
     pub fn set_grad_color2(&mut self, value: SolidColor) {
@@ -802,6 +890,10 @@ impl GradientColor {
 
     pub fn material(&self) -> &str {
         self.col1.material()
+    }
+
+    pub fn get_material(&self) -> &str {
+        self.material()
     }
 }
 

@@ -418,6 +418,10 @@ impl NameLabelRenderer {
         self.max_label
     }
 
+    pub fn get_max_label(&self) -> i32 {
+        self.max_label()
+    }
+
     pub fn maxlabel(&self) -> i32 {
         self.max_label()
     }
@@ -459,6 +463,10 @@ impl NameLabelRenderer {
         self.font_size
     }
 
+    pub fn get_font_size(&self) -> f64 {
+        self.font_size()
+    }
+
     pub fn set_font_size(&mut self, value: f64) {
         if (self.font_size - value).abs() > 1.0e-8 {
             self.font_size = value;
@@ -468,6 +476,10 @@ impl NameLabelRenderer {
 
     pub fn font_name(&self) -> &str {
         &self.font_name
+    }
+
+    pub fn get_font_name(&self) -> &str {
+        self.font_name()
     }
 
     pub fn set_font_name(&mut self, value: impl Into<String>) {
@@ -482,6 +494,10 @@ impl NameLabelRenderer {
         &self.font_style
     }
 
+    pub fn get_font_style(&self) -> &str {
+        self.font_style()
+    }
+
     pub fn set_font_style(&mut self, value: impl Into<String>) {
         let value = value.into();
         if self.font_style != value {
@@ -494,12 +510,20 @@ impl NameLabelRenderer {
         &self.font_weight
     }
 
+    pub fn get_font_wgt(&self) -> &str {
+        self.font_weight()
+    }
+
     pub fn set_font_weight(&mut self, value: impl Into<String>) {
         let value = value.into();
         if self.font_weight != value {
             self.font_weight = value;
             self.invalidate_all();
         }
+    }
+
+    pub fn set_font_wgt(&mut self, value: impl Into<String>) {
+        self.set_font_weight(value);
     }
 
     pub fn is_transparent(&self) -> bool {
@@ -744,6 +768,10 @@ impl SelectionRenderer {
         &self.selection
     }
 
+    pub fn get_selection(&self) -> &Selector {
+        self.selection()
+    }
+
     pub fn set_selection_text(&mut self, value: impl Into<String>) -> Result<()> {
         let value = value.into();
         let selection = parse_selector(&value)?;
@@ -850,6 +878,10 @@ impl RectSelDrawObj {
         self.end_y = y;
     }
 
+    pub fn r#move(&mut self, x: i32, y: i32) {
+        self.move_to(x, y);
+    }
+
     pub fn end(&mut self) {
         self.started = false;
     }
@@ -858,16 +890,32 @@ impl RectSelDrawObj {
         self.start_x.min(self.end_x)
     }
 
+    pub fn get_left(&self) -> i32 {
+        self.left()
+    }
+
     pub fn top(&self) -> i32 {
         self.start_y.min(self.end_y)
+    }
+
+    pub fn get_top(&self) -> i32 {
+        self.top()
     }
 
     pub fn width(&self) -> i32 {
         (self.start_x - self.end_x).abs()
     }
 
+    pub fn get_width(&self) -> i32 {
+        self.width()
+    }
+
     pub fn height(&self) -> i32 {
         (self.start_y - self.end_y).abs()
+    }
+
+    pub fn get_height(&self) -> i32 {
+        self.height()
     }
 }
 
@@ -915,6 +963,10 @@ impl SimpleRenderer {
         self.line_width
     }
 
+    pub fn get_line_width(&self) -> f64 {
+        self.line_width()
+    }
+
     pub fn set_line_width(&mut self, value: f64) {
         self.line_width = value;
         self.invalidate_display_cache();
@@ -924,6 +976,10 @@ impl SimpleRenderer {
         self.val_bond
     }
 
+    pub fn get_val_bond(&self) -> bool {
+        self.val_bond()
+    }
+
     pub fn set_val_bond(&mut self, value: bool) {
         self.val_bond = value;
         self.invalidate_display_cache();
@@ -931,6 +987,10 @@ impl SimpleRenderer {
 
     pub fn vb_scl1(&self) -> f64 {
         self.vb_scl1
+    }
+
+    pub fn get_vb_scl1(&self) -> f64 {
+        self.vb_scl1()
     }
 
     pub fn vb_scl_1(&self) -> f64 {
@@ -948,6 +1008,10 @@ impl SimpleRenderer {
 
     pub fn vb_scl2(&self) -> f64 {
         self.vb_scl2
+    }
+
+    pub fn get_vb_scl2(&self) -> f64 {
+        self.vb_scl2()
     }
 
     pub fn vb_scl_2(&self) -> f64 {
@@ -1015,6 +1079,10 @@ impl TraceRenderer {
         self.line_width
     }
 
+    pub fn get_line_width(&self) -> f64 {
+        self.line_width()
+    }
+
     pub fn set_line_width(&mut self, value: f64) {
         self.line_width = value;
         self.invalidate_display_cache();
@@ -1026,6 +1094,10 @@ impl TraceRenderer {
 
     pub fn piv_atom_name(&self) -> &str {
         &self.piv_atom_name
+    }
+
+    pub fn get_piv_atom_name(&self) -> &str {
+        self.piv_atom_name()
     }
 
     pub fn pivotatom(&self) -> &str {

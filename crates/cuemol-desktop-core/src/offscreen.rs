@@ -19,6 +19,15 @@ struct GpuVertex {
     color: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DepthParams {
+    near: f32,
+    far: f32,
+    perspective: f32,
+    _padding: f32,
+}
+
 // Flat color in the vertex's world normal, two-sided diffuse (Lambert) shading
 // against a fixed light so curved surfaces (spheres/cylinders) get a brightness
 // gradient — `abs(dot)` keeps back faces lit (no black interiors) and leaves
@@ -30,6 +39,13 @@ struct VsOut {
     @location(1) normal: vec3<f32>,
 };
 @group(0) @binding(0) var<uniform> mvp: mat4x4<f32>;
+struct DepthParams {
+    near: f32,
+    far: f32,
+    perspective: f32,
+    padding: f32,
+};
+@group(0) @binding(1) var<uniform> depth_params: DepthParams;
 @vertex
 fn vs(@location(0) position: vec4<f32>, @location(1) normal: vec4<f32>, @location(2) color: vec4<f32>) -> VsOut {
     var out: VsOut;
@@ -45,6 +61,22 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let lambert = abs(dot(n, light));
     let intensity = 0.4 + 0.6 * lambert;
     return vec4<f32>(in.color.rgb * intensity, in.color.a);
+}
+@fragment
+fn fs_depth(in: VsOut) -> @location(0) vec4<f32> {
+    let d = in.clip.z;
+    var linear_depth = depth_params.near + d * (depth_params.far - depth_params.near);
+    if depth_params.perspective > 0.5 {
+        linear_depth = (depth_params.near * depth_params.far) /
+            (depth_params.far - d * (depth_params.far - depth_params.near));
+    }
+    let normalized = clamp(
+        (linear_depth - depth_params.near) / (depth_params.far - depth_params.near),
+        0.0,
+        1.0,
+    );
+    let gray = 1.0 - normalized;
+    return vec4<f32>(gray, gray, gray, 1.0);
 }
 "#;
 
@@ -62,7 +94,40 @@ pub fn render_meshes_offscreen(
     height: u32,
     clear: [f64; 4],
 ) -> Option<Vec<u8>> {
-    pollster::block_on(render_impl(meshes, mvp, width.max(1), height.max(1), clear))
+    pollster::block_on(render_impl(
+        meshes,
+        mvp,
+        width.max(1),
+        height.max(1),
+        clear,
+        None,
+    ))
+}
+
+/// Render a linearized grayscale depth image. Near geometry is white, far
+/// geometry and the background are black, matching CueMol's depth export.
+pub fn render_meshes_depth_offscreen(
+    meshes: &[RenderMesh],
+    mvp: [[f32; 4]; 4],
+    width: u32,
+    height: u32,
+    near: f64,
+    far: f64,
+    perspective: bool,
+) -> Option<Vec<u8>> {
+    pollster::block_on(render_impl(
+        meshes,
+        mvp,
+        width.max(1),
+        height.max(1),
+        [0.0, 0.0, 0.0, 1.0],
+        Some(DepthParams {
+            near: near as f32,
+            far: far as f32,
+            perspective: f32::from(perspective),
+            _padding: 0.0,
+        }),
+    ))
 }
 
 /// A persistent wgpu context (device + queue + render pipeline) that an
@@ -78,6 +143,7 @@ pub struct SceneRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    depth_pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
 }
 
@@ -91,11 +157,12 @@ impl SceneRenderer {
 
     async fn new_async() -> Option<Self> {
         let (device, queue) = create_device().await?;
-        let (pipeline, bind_layout) = build_pipeline(&device);
+        let (pipeline, depth_pipeline, bind_layout) = build_pipeline(&device);
         Some(Self {
             device,
             queue,
             pipeline,
+            depth_pipeline,
             bind_layout,
         })
     }
@@ -120,6 +187,7 @@ impl SceneRenderer {
             width,
             height,
             clear,
+            None,
         )
     }
 
@@ -136,6 +204,38 @@ impl SceneRenderer {
         let mesh = tessellate_snapshot(snapshot);
         self.render(&[mesh], mvp, width, height, clear)
     }
+
+    /// Render meshes as a linearized grayscale depth image while reusing the
+    /// persistent device and depth pipeline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_depth(
+        &self,
+        meshes: &[RenderMesh],
+        mvp: [[f32; 4]; 4],
+        width: u32,
+        height: u32,
+        near: f64,
+        far: f64,
+        perspective: bool,
+    ) -> Option<Vec<u8>> {
+        draw_meshes(
+            &self.device,
+            &self.queue,
+            &self.depth_pipeline,
+            &self.bind_layout,
+            meshes,
+            mvp,
+            width,
+            height,
+            [0.0, 0.0, 0.0, 1.0],
+            Some(DepthParams {
+                near: near as f32,
+                far: far as f32,
+                perspective: if perspective { 1.0 } else { 0.0 },
+                _padding: 0.0,
+            }),
+        )
+    }
 }
 
 async fn render_impl(
@@ -144,21 +244,24 @@ async fn render_impl(
     width: u32,
     height: u32,
     clear: [f64; 4],
+    depth_params: Option<DepthParams>,
 ) -> Option<Vec<u8>> {
     // The free-function path builds a throwaway device + pipeline each call
     // (fine for one-shot exports); `SceneRenderer` reuses them across frames.
     let (device, queue) = create_device().await?;
-    let (pipeline, bind_layout) = build_pipeline(&device);
+    let (pipeline, depth_pipeline, bind_layout) = build_pipeline(&device);
+    let selected_pipeline = depth_params.map(|_| &depth_pipeline).unwrap_or(&pipeline);
     draw_meshes(
         &device,
         &queue,
-        &pipeline,
+        selected_pipeline,
         &bind_layout,
         meshes,
         mvp,
         width,
         height,
         clear,
+        depth_params,
     )
 }
 
@@ -188,19 +291,37 @@ async fn create_device() -> Option<(wgpu::Device, wgpu::Queue)> {
 
 /// Build the mesh render pipeline + its MVP bind-group layout. The pipeline is
 /// format/shader-fixed, so it can be built once and reused across frames.
-fn build_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+fn build_pipeline(
+    device: &wgpu::Device,
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+    wgpu::BindGroupLayout,
+) {
     let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("offscreen-mvp-layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
             },
-            count: None,
-        }],
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
     });
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -212,8 +333,9 @@ fn build_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::BindGro
         bind_group_layouts: &[&bind_layout],
         push_constant_ranges: &[],
     });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("offscreen-pipeline"),
+    let make_pipeline = |label, fragment_entry| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -227,7 +349,7 @@ fn build_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::BindGro
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: Some("fs"),
+            entry_point: Some(fragment_entry),
             targets: &[Some(wgpu::ColorTargetState {
                 format: COLOR_FORMAT,
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -250,8 +372,11 @@ fn build_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::BindGro
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
         cache: None,
-    });
-    (pipeline, bind_layout)
+    })
+    };
+    let pipeline = make_pipeline("offscreen-pipeline", "fs");
+    let depth_pipeline = make_pipeline("offscreen-depth-pipeline", "fs_depth");
+    (pipeline, depth_pipeline, bind_layout)
 }
 
 /// Rasterize `meshes` into a `width`x`height` RGBA8 image using a pre-built
@@ -269,6 +394,7 @@ fn draw_meshes(
     width: u32,
     height: u32,
     clear: [f64; 4],
+    depth_params: Option<DepthParams>,
 ) -> Option<Vec<u8>> {
     let width = width.max(1);
     let height = height.max(1);
@@ -316,14 +442,31 @@ fn draw_meshes(
         contents: bytemuck::cast_slice(&mvp),
         usage: wgpu::BufferUsages::UNIFORM,
     });
+    let depth_params = depth_params.unwrap_or(DepthParams {
+        near: 0.1,
+        far: 1.0,
+        perspective: 0.0,
+        _padding: 0.0,
+    });
+    let depth_params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("offscreen-depth-params"),
+        contents: bytemuck::bytes_of(&depth_params),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
 
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("offscreen-mvp-bind"),
         layout: bind_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: mvp_buf.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: mvp_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: depth_params_buf.as_entire_binding(),
+            },
+        ],
     });
 
     let color = device.create_texture(&wgpu::TextureDescriptor {
@@ -515,6 +658,15 @@ pub fn camera_mvp(camera: &Camera, aspect: f64) -> [[f32; 4]; 4] {
     out
 }
 
+/// Near and far distances used by [`camera_mvp`].
+pub fn camera_depth_range(camera: &Camera) -> (f64, f64) {
+    let slab = camera.slab_depth().max(1.0e-3);
+    (
+        (camera.cam_dist() - slab / 2.0).max(1.0e-3),
+        camera.cam_dist() + slab / 2.0,
+    )
+}
+
 /// Render a whole molecular scene (atoms + bonds + meshes) to an offscreen RGBA8
 /// image — the full 3D image the gpui GUI will composite. Returns `None` when no
 /// GPU adapter is available.
@@ -529,15 +681,66 @@ pub fn render_snapshot_offscreen(
     render_meshes_offscreen(&[mesh], mvp, width, height, clear)
 }
 
+/// Render a whole scene as a linearized grayscale depth image.
+pub fn render_snapshot_depth_offscreen(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    let aspect = width.max(1) as f64 / height.max(1) as f64;
+    let mvp = camera_mvp(camera, aspect);
+    let (near, far) = camera_depth_range(camera);
+    let mesh = tessellate_snapshot(snapshot);
+    render_meshes_depth_offscreen(
+        &[mesh],
+        mvp,
+        width,
+        height,
+        near,
+        far,
+        camera.is_perspective(),
+    )
+}
+
 /// Encode an RGBA8 image (`width*height*4` bytes, row-major) as PNG bytes.
 pub fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    encode_png(rgba, width, height, true, 72.0)
+}
+
+/// Encode an RGBA8 render as RGB or RGBA PNG and store its physical resolution.
+pub fn encode_png(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    use_alpha: bool,
+    resolution_dpi: f64,
+) -> Vec<u8> {
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut out, width, height);
-        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_color(if use_alpha {
+            png::ColorType::Rgba
+        } else {
+            png::ColorType::Rgb
+        });
         encoder.set_depth(png::BitDepth::Eight);
+        let pixels_per_meter = (resolution_dpi.max(0.0) * 39.370_078_740_157_48).round() as u32;
+        encoder.set_pixel_dims(Some(png::PixelDimensions {
+            xppu: pixels_per_meter,
+            yppu: pixels_per_meter,
+            unit: png::Unit::Meter,
+        }));
         let mut writer = encoder.write_header().expect("write PNG header");
-        writer.write_image_data(rgba).expect("write PNG data");
+        if use_alpha {
+            writer.write_image_data(rgba).expect("write PNG data");
+        } else {
+            let rgb = rgba
+                .chunks_exact(4)
+                .flat_map(|pixel| pixel[..3].iter().copied())
+                .collect::<Vec<_>>();
+            writer.write_image_data(&rgb).expect("write PNG data");
+        }
     }
     out
 }
@@ -554,6 +757,17 @@ pub fn render_snapshot_png(
 ) -> Option<Vec<u8>> {
     let rgba = render_snapshot_offscreen(snapshot, mvp, width, height, clear)?;
     Some(encode_rgba_png(&rgba, width, height))
+}
+
+/// Render a whole scene to a grayscale depth PNG.
+pub fn render_snapshot_depth_png(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    let rgba = render_snapshot_depth_offscreen(snapshot, camera, width, height)?;
+    Some(encode_rgba_png(&rgba, width.max(1), height.max(1)))
 }
 
 #[cfg(test)]
@@ -632,6 +846,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn depth_render_is_white_near_geometry_on_black_background() {
+        let mesh = RenderMesh {
+            vertices: vec![
+                vert(-0.9, -0.9, [1.0; 4]),
+                vert(0.9, -0.9, [1.0; 4]),
+                vert(0.0, 0.9, [1.0; 4]),
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let Some(img) = render_meshes_depth_offscreen(&[mesh], IDENTITY, 64, 64, 0.1, 1.0, false)
+        else {
+            return;
+        };
+        let centre = pixel(&img, 64, 32, 32);
+        assert!(centre[0] > 240 && centre[1] == centre[0] && centre[2] == centre[0]);
+        let corner = pixel(&img, 64, 1, 1);
+        assert!(corner[0] < 10 && corner[1] < 10 && corner[2] < 10);
+    }
+
+    #[test]
+    fn png_encoder_honors_rgb_and_resolution_options() {
+        let png_bytes = encode_png(&[10, 20, 30, 40], 1, 1, false, 144.0);
+        let decoder = png::Decoder::new(&png_bytes[..]);
+        let mut reader = decoder.read_info().expect("read PNG info");
+        assert_eq!(reader.info().color_type, png::ColorType::Rgb);
+        let dims = reader.info().pixel_dims.expect("physical resolution");
+        assert_eq!(dims.unit, png::Unit::Meter);
+        assert!((dims.xppu as i64 - 5669).abs() <= 1);
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).expect("decode PNG frame");
+        assert_eq!(info.buffer_size(), 3);
+        assert_eq!(&buf[..3], &[10, 20, 30]);
     }
 
     fn solid(r: f32, g: f32, b: f32) -> Option<ColorSpec> {
@@ -775,11 +1024,15 @@ mod tests {
             meshes: Vec::new(),
             bounds: None,
         };
-        let Some(png_bytes) = render_snapshot_png(&snapshot, IDENTITY, 48, 48, [0.0, 0.0, 0.0, 1.0])
+        let Some(png_bytes) =
+            render_snapshot_png(&snapshot, IDENTITY, 48, 48, [0.0, 0.0, 0.0, 1.0])
         else {
             return;
         };
-        assert!(png_bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG");
+        assert!(
+            png_bytes.starts_with(&[0x89, b'P', b'N', b'G']),
+            "not a PNG"
+        );
 
         let decoder = png::Decoder::new(&png_bytes[..]);
         let mut reader = decoder.read_info().expect("read PNG info");
@@ -863,7 +1116,8 @@ mod tests {
         };
         camera.set_rotation(camera.rotation().rotate_y(50.0).unwrap());
         let mvp_b = camera_mvp(&camera, 1.0);
-        let img_b = render_snapshot_offscreen(&snapshot, mvp_b, 80, 80, [0.0, 0.0, 0.0, 1.0]).unwrap();
+        let img_b =
+            render_snapshot_offscreen(&snapshot, mvp_b, 80, 80, [0.0, 0.0, 0.0, 1.0]).unwrap();
 
         // A meaningful fraction of pixels changed -> the view actually rotated.
         let changed = img_a
@@ -871,7 +1125,10 @@ mod tests {
             .zip(&img_b)
             .filter(|(a, b)| (**a as i32 - **b as i32).abs() > 24)
             .count();
-        assert!(changed > 300, "camera rotation barely changed the view: {changed}");
+        assert!(
+            changed > 300,
+            "camera rotation barely changed the view: {changed}"
+        );
     }
 
     #[test]
@@ -925,11 +1182,22 @@ mod tests {
             return;
         };
         let reused = renderer
-            .render(std::slice::from_ref(&mesh), IDENTITY, 64, 64, [0.0, 0.0, 0.0, 1.0])
+            .render(
+                std::slice::from_ref(&mesh),
+                IDENTITY,
+                64,
+                64,
+                [0.0, 0.0, 0.0, 1.0],
+            )
             .expect("SceneRenderer produced no image");
-        let oneshot =
-            render_meshes_offscreen(std::slice::from_ref(&mesh), IDENTITY, 64, 64, [0.0, 0.0, 0.0, 1.0])
-                .expect("free function produced no image");
+        let oneshot = render_meshes_offscreen(
+            std::slice::from_ref(&mesh),
+            IDENTITY,
+            64,
+            64,
+            [0.0, 0.0, 0.0, 1.0],
+        )
+        .expect("free function produced no image");
         assert_eq!(
             reused, oneshot,
             "SceneRenderer output differs from the free function"

@@ -4,42 +4,136 @@ use std::fmt;
 
 pub const INVALID_UID: u64 = 0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ElemSym {
-    XX,
-    H,
-    C,
-    N,
-    O,
-    S,
-    P,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ElemSym(u8);
 
+#[allow(non_upper_case_globals)]
 impl ElemSym {
+    pub const H: Self = Self(1);
+    pub const He: Self = Self(2);
+    pub const Li: Self = Self(3);
+    pub const Be: Self = Self(4);
+    pub const B: Self = Self(5);
+    pub const C: Self = Self(6);
+    pub const N: Self = Self(7);
+    pub const O: Self = Self(8);
+    pub const F: Self = Self(9);
+    pub const Ne: Self = Self(10);
+    pub const Na: Self = Self(11);
+    pub const Mg: Self = Self(12);
+    pub const Al: Self = Self(13);
+    pub const Si: Self = Self(14);
+    pub const P: Self = Self(15);
+    pub const S: Self = Self(16);
+    pub const Cl: Self = Self(17);
+    pub const Ar: Self = Self(18);
+    pub const K: Self = Self(19);
+    pub const Ca: Self = Self(20);
+    pub const Sc: Self = Self(21);
+    pub const Ti: Self = Self(22);
+    pub const V: Self = Self(23);
+    pub const Cr: Self = Self(24);
+    pub const Mn: Self = Self(25);
+    pub const Fe: Self = Self(26);
+    pub const Co: Self = Self(27);
+    pub const Ni: Self = Self(28);
+    pub const Cu: Self = Self(29);
+    pub const Zn: Self = Self(30);
+    pub const Ga: Self = Self(31);
+    pub const Ge: Self = Self(32);
+    pub const As: Self = Self(33);
+    pub const Se: Self = Self(34);
+    pub const Br: Self = Self(35);
+    pub const Kr: Self = Self(36);
+    pub const Rb: Self = Self(37);
+    pub const Sr: Self = Self(38);
+    pub const Y: Self = Self(39);
+    pub const Zr: Self = Self(40);
+    pub const Nb: Self = Self(41);
+    pub const Mo: Self = Self(42);
+    pub const Tc: Self = Self(43);
+    pub const Ru: Self = Self(44);
+    pub const Rh: Self = Self(45);
+    pub const Pd: Self = Self(46);
+    pub const Ag: Self = Self(47);
+    pub const Cd: Self = Self(48);
+    pub const In: Self = Self(49);
+    pub const Sn: Self = Self(50);
+    pub const Sb: Self = Self(51);
+    pub const Te: Self = Self(52);
+    pub const I: Self = Self(53);
+    pub const Xe: Self = Self(54);
+    pub const Cs: Self = Self(55);
+    pub const Ba: Self = Self(56);
+    pub const La: Self = Self(57);
+    pub const Ce: Self = Self(58);
+    pub const Pr: Self = Self(59);
+    pub const Nd: Self = Self(60);
+    pub const Pm: Self = Self(61);
+    pub const Sm: Self = Self(62);
+    pub const Eu: Self = Self(63);
+    pub const Gd: Self = Self(64);
+    pub const Tb: Self = Self(65);
+    pub const Dy: Self = Self(66);
+    pub const Ho: Self = Self(67);
+    pub const Er: Self = Self(68);
+    pub const Tm: Self = Self(69);
+    pub const Yb: Self = Self(70);
+    pub const Lu: Self = Self(71);
+    pub const Hf: Self = Self(72);
+    pub const Ta: Self = Self(73);
+    pub const W: Self = Self(74);
+    pub const Re: Self = Self(75);
+    pub const Os: Self = Self(76);
+    pub const Ir: Self = Self(77);
+    pub const Pt: Self = Self(78);
+    pub const Au: Self = Self(79);
+    pub const Hg: Self = Self(80);
+    pub const Tl: Self = Self(81);
+    pub const Pb: Self = Self(82);
+    pub const Bi: Self = Self(83);
+    pub const Po: Self = Self(84);
+    pub const At: Self = Self(85);
+    pub const Rn: Self = Self(86);
+    pub const Fr: Self = Self(87);
+    pub const Ra: Self = Self(88);
+    pub const Ac: Self = Self(89);
+    pub const Th: Self = Self(90);
+    pub const Pa: Self = Self(91);
+    pub const U: Self = Self(92);
+    pub const Np: Self = Self(93);
+    pub const Pu: Self = Self(94);
+    pub const XX: Self = Self(255);
+
     pub fn from_name(name: &str) -> Self {
-        match name.trim().to_ascii_uppercase().as_str() {
-            "H" => Self::H,
-            "C" => Self::C,
-            "N" => Self::N,
-            "O" => Self::O,
-            "S" => Self::S,
-            "P" => Self::P,
-            _ => Self::XX,
-        }
+        let name = name.trim();
+        ELEMENT_SYMBOLS
+            .iter()
+            .position(|symbol| !symbol.is_empty() && symbol.eq_ignore_ascii_case(name))
+            .map_or(Self::XX, |number| Self(number as u8))
     }
 
     pub fn name(self) -> &'static str {
-        match self {
-            Self::XX => "XX",
-            Self::H => "H",
-            Self::C => "C",
-            Self::N => "N",
-            Self::O => "O",
-            Self::S => "S",
-            Self::P => "P",
-        }
+        ELEMENT_SYMBOLS
+            .get(usize::from(self.0))
+            .copied()
+            .filter(|symbol| !symbol.is_empty())
+            .unwrap_or("Unknown")
+    }
+
+    pub fn atomic_number(self) -> Option<u8> {
+        (1..=94).contains(&self.0).then_some(self.0)
     }
 }
+
+const ELEMENT_SYMBOLS: [&str; 95] = [
+    "", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne", "Na", "Mg", "Al", "Si", "P", "S",
+    "Cl", "Ar", "K", "Ca", "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga", "Ge",
+    "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd",
+    "In", "Sn", "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd",
+    "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
+    "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct ResidIndex {
@@ -256,12 +350,20 @@ impl MolAtom {
         self.id
     }
 
+    pub fn get_id(&self) -> i32 {
+        self.id()
+    }
+
     pub fn set_id(&mut self, value: i32) {
         self.id = value;
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn get_name(&self) -> &str {
+        self.name()
     }
 
     pub fn set_name(&mut self, value: impl Into<String>) {
@@ -272,12 +374,20 @@ impl MolAtom {
         &self.chain_name
     }
 
+    pub fn get_chain_name(&self) -> &str {
+        self.chain_name()
+    }
+
     pub fn set_chain_name(&mut self, value: impl Into<String>) {
         self.chain_name = value.into();
     }
 
     pub fn res_name(&self) -> &str {
         &self.res_name
+    }
+
+    pub fn get_res_name(&self) -> &str {
+        self.res_name()
     }
 
     pub fn resid_name(&self) -> &str {
@@ -296,6 +406,14 @@ impl MolAtom {
         self.res_index
     }
 
+    pub fn resid_index(&self) -> String {
+        self.res_index.script_string()
+    }
+
+    pub fn get_res_index_scr(&self) -> String {
+        self.resid_index()
+    }
+
     pub fn set_res_index(&mut self, value: ResidIndex) {
         self.res_index = value;
     }
@@ -304,12 +422,20 @@ impl MolAtom {
         self.bfac
     }
 
+    pub fn get_bfac(&self) -> f64 {
+        self.bfac()
+    }
+
     pub fn set_bfac(&mut self, value: f64) {
         self.bfac = value;
     }
 
     pub fn occ(&self) -> f64 {
         self.occ
+    }
+
+    pub fn get_occ(&self) -> f64 {
+        self.occ()
     }
 
     pub fn set_occ(&mut self, value: f64) {
@@ -326,6 +452,10 @@ impl MolAtom {
             .unwrap_or_default()
     }
 
+    pub fn get_conf_id_scr(&self) -> String {
+        self.confid()
+    }
+
     pub fn set_conf_id(&mut self, value: Option<char>) {
         self.conf_id = value;
     }
@@ -334,14 +464,12 @@ impl MolAtom {
         self.conf_id = value.as_ref().chars().next();
     }
 
+    pub fn set_conf_id_scr(&mut self, value: impl AsRef<str>) {
+        self.set_confid(value);
+    }
+
     pub fn get_u(&self, i: usize, j: usize) -> f64 {
-        let Some(anisou) = self.anisou else {
-            return 0.0;
-        };
-        if i == 0 || j == 0 || i > 3 || j > 3 {
-            return 0.0;
-        }
-        anisou[i - 1][j - 1]
+        self.u(i, j).unwrap_or(0.0)
     }
 
     pub fn cname(&self) -> &str {
@@ -368,6 +496,10 @@ impl MolAtom {
         self.element.name()
     }
 
+    pub fn get_element_name(&self) -> &'static str {
+        self.element_name()
+    }
+
     pub fn set_pos(&mut self, value: Vector4) -> Result<()> {
         if self.xform.is_some() {
             return Err(CueMolError::invalid_argument(
@@ -384,6 +516,18 @@ impl MolAtom {
             xform.xform3d(&mut pos);
         }
         pos
+    }
+
+    pub fn get_pos(&self) -> Vector4 {
+        self.pos()
+    }
+
+    pub fn get_pos_scr(&self) -> Vector4 {
+        self.pos()
+    }
+
+    pub fn set_pos_scr(&mut self, value: Vector4) -> Result<()> {
+        self.set_pos(value)
     }
 
     pub fn set_raw_pos(&mut self, value: Vector4) {
@@ -457,13 +601,18 @@ impl MolAtom {
     }
 
     pub fn format_msg(&self) -> String {
-        format!(
+        let mut message = format!(
             "{} {} {} {}",
             self.chain_name,
             self.res_name,
             self.res_index.script_string(),
             self.name
-        )
+        );
+        if let Some(conf_id) = self.conf_id {
+            message.push(':');
+            message.push(conf_id);
+        }
+        message
     }
 
     pub fn set_atom_prop_int(&mut self, name: impl Into<String>, value: i32) {
@@ -489,11 +638,19 @@ impl MolAtom {
         }
     }
 
+    pub fn get_atom_prop_int(&self, name: &str) -> Option<i32> {
+        self.atom_prop_int(name)
+    }
+
     pub fn atom_prop_real(&self, name: &str) -> Option<f64> {
         match self.props.get(name) {
             Some(AtomProp::Real(value)) => Some(*value),
             _ => None,
         }
+    }
+
+    pub fn get_atom_prop_real(&self, name: &str) -> Option<f64> {
+        self.atom_prop_real(name)
     }
 
     pub fn atom_prop_str(&self, name: &str) -> Option<&str> {
@@ -515,6 +672,10 @@ impl MolAtom {
 
     pub fn remove_atom_prop(&mut self, name: &str) -> bool {
         self.props.remove(name).is_some()
+    }
+
+    pub fn dihedral(&self, atom2: &Self, atom3: &Self, atom4: &Self) -> Result<f64> {
+        Vector4::dihedral(self.pos(), atom2.pos(), atom3.pos(), atom4.pos())
     }
 }
 
@@ -556,6 +717,10 @@ impl MolResidue {
         &self.name
     }
 
+    pub fn get_name(&self) -> &str {
+        self.name()
+    }
+
     pub fn set_name(&mut self, value: impl Into<String>) {
         self.name = value.into();
     }
@@ -564,12 +729,24 @@ impl MolResidue {
         &self.res_type
     }
 
+    pub fn get_type(&self) -> &str {
+        self.res_type()
+    }
+
+    pub fn set_type(&mut self, value: impl Into<String>) {
+        self.set_res_type(value);
+    }
+
     pub fn set_res_type(&mut self, value: impl Into<String>) {
         self.res_type = value.into();
     }
 
     pub fn chain_name(&self) -> &str {
         &self.chain_name
+    }
+
+    pub fn get_chain_name(&self) -> &str {
+        self.chain_name()
     }
 
     pub fn set_chain_name(&mut self, value: impl Into<String>) {
@@ -582,6 +759,8 @@ impl MolResidue {
 
     pub fn set_index(&mut self, value: ResidIndex) {
         self.index = value;
+        self.scr_index = value.number;
+        self.str_index = value.script_string();
     }
 
     pub fn atom_size(&self) -> usize {
@@ -630,19 +809,65 @@ impl MolResidue {
     }
 
     pub fn set_scr_index(&mut self, value: i32) {
+        self.index = ResidIndex::new(value);
         self.scr_index = value;
+        self.str_index = self.index.script_string();
     }
 
     pub fn scr_index(&self) -> i32 {
-        self.scr_index
+        self.index.number
     }
 
     pub fn set_str_index(&mut self, value: impl Into<String>) {
-        self.str_index = value.into();
+        let value = value.into();
+        if let Ok(index) = ResidIndex::parse(&value) {
+            self.index = index;
+            self.scr_index = index.number;
+            self.str_index = index.script_string();
+        }
     }
 
-    pub fn str_index(&self) -> &str {
-        &self.str_index
+    pub fn str_index(&self) -> String {
+        self.index.script_string()
+    }
+
+    pub fn get_str_index(&self) -> String {
+        self.str_index()
+    }
+
+    pub fn get_scr_index(&self) -> i32 {
+        self.scr_index()
+    }
+
+    pub fn get_atoms_json(&self) -> String {
+        let entries = self
+            .atoms
+            .iter()
+            .map(|atom| {
+                format!(
+                    "{{\"name\":\"{}\",\"id\":{},\"elem\":\"{}\"}}",
+                    json_escape(atom.name()),
+                    atom.id(),
+                    json_escape(atom.element_name())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{entries}]")
+    }
+
+    pub fn get_atom(&self, name: &str) -> Option<&MolAtom> {
+        self.atoms
+            .iter()
+            .find(|atom| atom.name() == name && atom.conf_id().is_none())
+            .or_else(|| self.atoms.iter().find(|atom| atom.name() == name))
+    }
+
+    pub fn get_atom_alt_conf(&self, name: &str, conf_id: &str) -> Option<&MolAtom> {
+        let conf_id = conf_id.chars().next();
+        self.atoms
+            .iter()
+            .find(|atom| atom.name() == name && atom.conf_id() == conf_id)
     }
 
     pub fn set_prop_str(&mut self, key: impl Into<String>, value: impl Into<String>) {
@@ -666,12 +891,21 @@ impl MolResidue {
     }
 
     pub fn get_pivot_pos(&self) -> Vector4 {
-        self.atoms
+        if let Some(position) = self
+            .atoms
             .iter()
             .find(|atom| atom.name() == self.pivot_atom_name())
             .map(MolAtom::pos)
-            .or_else(|| self.atoms.first().map(MolAtom::pos))
-            .unwrap_or(Vector4::ZERO)
+        {
+            return position;
+        }
+        if self.atoms.is_empty() {
+            return Vector4::ZERO;
+        }
+        self.atoms
+            .iter()
+            .fold(Vector4::ZERO, |sum, atom| sum + atom.pos())
+            / self.atoms.len() as f64
     }
 
     pub fn set_pivot_atom_name(&mut self, value: impl Into<String>) {
@@ -684,6 +918,18 @@ impl MolResidue {
 
     pub fn is_linked_to_index(&self, value: ResidIndex) -> bool {
         self.link_next_index == Some(value)
+    }
+}
+
+impl fmt::Display for MolResidue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} {}",
+            self.chain_name,
+            self.index.script_string(),
+            self.name
+        )
     }
 }
 
@@ -701,6 +947,10 @@ impl MolChain {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn get_name(&self) -> &str {
+        self.name()
     }
 
     pub fn set_name(&mut self, value: impl Into<String>) {
@@ -748,6 +998,27 @@ impl MolChain {
         Ok(self.residue(index))
     }
 
+    pub fn get_residue(&self, index: &str) -> Result<Option<&MolResidue>> {
+        self.residue_by_str(index)
+    }
+
+    pub fn get_resids_json(&self) -> String {
+        let entries = self
+            .residues_in_index_order()
+            .into_iter()
+            .map(|residue| {
+                format!(
+                    "{{\"name\":\"{}\",\"single\":\"{}\",\"sel\":false,\"index\":\"{}\"}}",
+                    json_escape(residue.name()),
+                    json_escape(residue.prop_str("single").unwrap_or("")),
+                    json_escape(&residue.index().script_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{entries}]")
+    }
+
     pub fn residues(&self) -> &[MolResidue] {
         &self.residues
     }
@@ -759,12 +1030,26 @@ impl MolChain {
     }
 }
 
+impl fmt::Display for MolChain {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn molbond_defaults_and_accessors_match_reference() {
+        assert_eq!(ElemSym::from_name("ca"), ElemSym::Ca);
+        assert_eq!(ElemSym::Ca.name(), "Ca");
+        assert_eq!(ElemSym::Pu.atomic_number(), Some(94));
+        assert_eq!(ElemSym::XX.name(), "Unknown");
         let mut bond = MolBond::new();
         assert_eq!(bond.atom1(), -1);
         assert_eq!(bond.atom2(), -1);
@@ -834,6 +1119,7 @@ mod tests {
         atom.set_u(0, 1, 0.05).unwrap();
         assert!(atom.has_anisou());
         assert_eq!(atom.u(1, 0).unwrap(), 0.05);
+        assert_eq!(atom.get_u(0, 1), 0.05);
 
         atom.set_atom_prop_int("myInt", 42);
         atom.set_atom_prop_real("myReal", 2.75);
@@ -842,7 +1128,7 @@ mod tests {
         assert_eq!(atom.atom_prop_real("myReal"), Some(2.75));
         assert_eq!(atom.atom_prop_str("myStr"), Some("hello"));
         assert!(atom.remove_atom_prop("myInt"));
-        assert!(atom.format_msg().contains("ALA"));
+        assert_eq!(atom.format_msg(), "A ALA 10 CA:B");
         assert_eq!(atom.to_string(), atom.format_msg());
 
         atom.set_parent_uid(999);
@@ -864,7 +1150,7 @@ mod tests {
         residue.set_pivot_atom_name("CA");
         assert_eq!(residue.name(), "ALA");
         assert_eq!(residue.res_type(), "protein");
-        assert_eq!(residue.scr_index(), 7);
+        assert_eq!(residue.scr_index(), 10);
         assert_eq!(residue.str_index(), "10A");
         assert_eq!(residue.pivot_atom_name(), "CA");
         residue.set_link_next_index(Some(ResidIndex::new(11)));
@@ -878,6 +1164,11 @@ mod tests {
         assert!(residue.append_atom(atom));
         assert_eq!(residue.atom_size(), 1);
         assert_eq!(residue.atom_id("CA", Some('A')), Some(1));
+        assert_eq!(residue.get_atom_alt_conf("CA", "A").unwrap().id(), 1);
+        assert_eq!(
+            residue.get_atoms_json(),
+            "[{\"name\":\"CA\",\"id\":1,\"elem\":\"Unknown\"}]"
+        );
         assert_eq!(residue.alt_confs("CA").len(), 1);
         residue.set_prop_str("color", "red");
         assert_eq!(residue.prop_str("color"), Some("red"));
@@ -901,6 +1192,11 @@ mod tests {
             ResidIndex::new(1)
         );
         assert!(chain.residue_by_str("1").unwrap().is_some());
+        assert!(chain.get_residue("1").unwrap().is_some());
+        assert_eq!(
+            chain.get_resids_json(),
+            "[{\"name\":\"\",\"single\":\"\",\"sel\":false,\"index\":\"1\"},{\"name\":\"\",\"single\":\"\",\"sel\":false,\"index\":\"3\"}]"
+        );
         assert!(chain.remove_residue(ResidIndex::new(3)));
     }
 }

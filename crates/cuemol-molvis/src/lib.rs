@@ -97,6 +97,10 @@ impl DistPickDrawObj {
         self.append_position(atom.position);
         true
     }
+
+    pub fn append(&mut self, molecule: &MolCoord, atom_id: i32) -> bool {
+        self.append_atom(molecule, atom_id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -432,8 +436,20 @@ impl Cpk2Renderer {
         self.gl_render_mode
     }
 
+    pub fn get_gl_render_mode(&self) -> i32 {
+        self.gl_render_mode()
+    }
+
+    pub fn glrender_mode(&self) -> i32 {
+        self.gl_render_mode()
+    }
+
     pub fn set_gl_render_mode(&mut self, value: i32) {
         self.gl_render_mode = value;
+    }
+
+    pub fn set_glrender_mode(&mut self, value: i32) {
+        self.set_gl_render_mode(value);
     }
 
     pub fn use_shader(&self) -> bool {
@@ -581,12 +597,20 @@ impl BallStickRenderer {
         self.valbond_mode
     }
 
+    pub fn get_vb_mode(&self) -> i32 {
+        self.valbond_mode()
+    }
+
     pub fn valbond(&self) -> i32 {
         self.valbond_mode()
     }
 
     pub fn set_valbond_mode(&mut self, value: i32) {
         self.valbond_mode = value;
+    }
+
+    pub fn set_vb_mode(&mut self, value: i32) {
+        self.set_valbond_mode(value);
     }
 
     pub fn set_valbond(&mut self, value: i32) {
@@ -597,8 +621,20 @@ impl BallStickRenderer {
         self.gl_render_mode
     }
 
+    pub fn get_gl_render_mode(&self) -> i32 {
+        self.gl_render_mode()
+    }
+
+    pub fn glrender_mode(&self) -> i32 {
+        self.gl_render_mode()
+    }
+
     pub fn set_gl_render_mode(&mut self, value: i32) {
         self.gl_render_mode = value;
+    }
+
+    pub fn set_glrender_mode(&mut self, value: i32) {
+        self.set_gl_render_mode(value);
     }
 
     pub fn draw_ring_only(&self) -> bool {
@@ -677,6 +713,22 @@ impl AnIsoURenderer {
         &mut self.ball_stick
     }
 
+    pub fn get_bondw(&self) -> f64 {
+        self.ball_stick.bondw()
+    }
+
+    pub fn set_bondw(&mut self, value: f64) {
+        self.ball_stick.set_bondw(value);
+    }
+
+    pub fn get_sphr(&self) -> f64 {
+        self.ball_stick.sphr()
+    }
+
+    pub fn set_sphr(&mut self, value: f64) {
+        self.ball_stick.set_sphr(value);
+    }
+
     pub fn drawdisc(&self) -> bool {
         self.drawdisc
     }
@@ -705,8 +757,16 @@ impl AnIsoURenderer {
         self.maxverts
     }
 
+    pub fn get_glu_vert_max(&self) -> i32 {
+        self.maxverts()
+    }
+
     pub fn set_maxverts(&mut self, value: i32) {
         self.maxverts = value;
+    }
+
+    pub fn set_glu_vert_max(&mut self, value: i32) {
+        self.set_maxverts(value);
     }
 }
 
@@ -830,6 +890,10 @@ impl AtomIntrRenderer {
         self.mode
     }
 
+    pub fn get_mode(&self) -> i32 {
+        self.mode()
+    }
+
     pub fn set_mode(&mut self, value: i32) {
         self.mode = value;
     }
@@ -838,12 +902,24 @@ impl AtomIntrRenderer {
         self.showlabel
     }
 
+    pub fn is_show_label(&self) -> bool {
+        self.showlabel()
+    }
+
     pub fn set_showlabel(&mut self, value: bool) {
         self.showlabel = value;
     }
 
+    pub fn set_show_label(&mut self, value: bool) {
+        self.set_showlabel(value);
+    }
+
     pub fn detail(&self) -> i32 {
         self.detail
+    }
+
+    pub fn get_detail(&self) -> i32 {
+        self.detail()
     }
 
     pub fn set_detail(&mut self, value: i32) {
@@ -872,6 +948,10 @@ impl AtomIntrRenderer {
         self.stipples[0]
     }
 
+    pub fn get_stipple0(&self) -> f64 {
+        self.stipple0()
+    }
+
     pub fn stipple_0(&self) -> f64 {
         self.stipple0()
     }
@@ -886,6 +966,10 @@ impl AtomIntrRenderer {
 
     pub fn stipple1(&self) -> f64 {
         self.stipples[1]
+    }
+
+    pub fn get_stipple1(&self) -> f64 {
+        self.stipple1()
     }
 
     pub fn stipple_1(&self) -> f64 {
@@ -904,6 +988,10 @@ impl AtomIntrRenderer {
         self.stipples[2]
     }
 
+    pub fn get_stipple2(&self) -> f64 {
+        self.stipple2()
+    }
+
     pub fn stipple_2(&self) -> f64 {
         self.stipple2()
     }
@@ -918,6 +1006,10 @@ impl AtomIntrRenderer {
 
     pub fn stipple3(&self) -> f64 {
         self.stipples[3]
+    }
+
+    pub fn get_stipple3(&self) -> f64 {
+        self.stipple3()
     }
 
     pub fn stipple_3(&self) -> f64 {
@@ -936,6 +1028,10 @@ impl AtomIntrRenderer {
         self.stipples[4]
     }
 
+    pub fn get_stipple4(&self) -> f64 {
+        self.stipple4()
+    }
+
     pub fn stipple_4(&self) -> f64 {
         self.stipple4()
     }
@@ -950,6 +1046,10 @@ impl AtomIntrRenderer {
 
     pub fn stipple5(&self) -> f64 {
         self.stipples[5]
+    }
+
+    pub fn get_stipple5(&self) -> f64 {
+        self.stipple5()
     }
 
     pub fn stipple_5(&self) -> f64 {
@@ -968,6 +1068,10 @@ impl AtomIntrRenderer {
         self.width
     }
 
+    pub fn get_width(&self) -> f64 {
+        self.width()
+    }
+
     pub fn set_width(&mut self, value: f64) {
         self.width = value;
     }
@@ -982,6 +1086,10 @@ impl AtomIntrRenderer {
 
     pub fn start_cap_type(&self) -> i32 {
         self.start_cap_type
+    }
+
+    pub fn get_start_cap_type(&self) -> i32 {
+        self.start_cap_type()
     }
 
     pub fn start_captype(&self) -> i32 {
@@ -1008,6 +1116,10 @@ impl AtomIntrRenderer {
         self.end_cap_type
     }
 
+    pub fn get_end_cap_type(&self) -> i32 {
+        self.end_cap_type()
+    }
+
     pub fn end_captype(&self) -> i32 {
         self.end_cap_type()
     }
@@ -1032,6 +1144,10 @@ impl AtomIntrRenderer {
         self.arrow_height
     }
 
+    pub fn get_arrow_height(&self) -> f64 {
+        self.arrow_height()
+    }
+
     pub fn arrowheight(&self) -> f64 {
         self.arrow_height()
     }
@@ -1046,6 +1162,10 @@ impl AtomIntrRenderer {
 
     pub fn arrow_width(&self) -> f64 {
         self.arrow_width
+    }
+
+    pub fn get_arrow_width(&self) -> f64 {
+        self.arrow_width()
     }
 
     pub fn arrowwidth(&self) -> f64 {
@@ -1363,12 +1483,20 @@ impl DisoRenderer {
         self.detail
     }
 
+    pub fn get_detail(&self) -> i32 {
+        self.detail()
+    }
+
     pub fn set_detail(&mut self, value: i32) {
         self.detail = value;
     }
 
     pub fn width(&self) -> f64 {
         self.width
+    }
+
+    pub fn get_width(&self) -> f64 {
+        self.width()
     }
 
     pub fn set_width(&mut self, value: f64) {
@@ -1379,20 +1507,40 @@ impl DisoRenderer {
         self.dotsep
     }
 
+    pub fn get_dot_sep(&self) -> f64 {
+        self.dotsep()
+    }
+
     pub fn set_dotsep(&mut self, value: f64) {
         self.dotsep = value;
+    }
+
+    pub fn set_dot_sep(&mut self, value: f64) {
+        self.set_dotsep(value);
     }
 
     pub fn loopsize(&self) -> f64 {
         self.loopsize
     }
 
+    pub fn get_strength(&self) -> f64 {
+        self.loopsize()
+    }
+
     pub fn set_loopsize(&mut self, value: f64) {
         self.loopsize = value;
     }
 
+    pub fn set_strength(&mut self, value: f64) {
+        self.set_loopsize(value);
+    }
+
     pub fn loopsize2(&self) -> f64 {
         self.loopsize2
+    }
+
+    pub fn get_strength2(&self) -> f64 {
+        self.loopsize2()
     }
 
     pub fn loopsize_2(&self) -> f64 {
@@ -1403,6 +1551,10 @@ impl DisoRenderer {
         self.loopsize2 = value;
     }
 
+    pub fn set_strength2(&mut self, value: f64) {
+        self.set_loopsize2(value);
+    }
+
     pub fn set_loopsize_2(&mut self, value: f64) {
         self.set_loopsize2(value);
     }
@@ -1411,8 +1563,16 @@ impl DisoRenderer {
         &self.target
     }
 
+    pub fn get_tgt_rend_name(&self) -> &str {
+        self.target()
+    }
+
     pub fn set_target(&mut self, value: impl Into<String>) {
         self.target = value.into();
+    }
+
+    pub fn set_tgt_rend_name(&mut self, value: impl Into<String>) {
+        self.set_target(value);
     }
 }
 
@@ -1470,6 +1630,10 @@ impl TubeSection {
         self.width
     }
 
+    pub fn get_width(&self) -> f64 {
+        self.width()
+    }
+
     pub fn set_width(&mut self, value: f64) {
         self.width = value;
         self.invalidate();
@@ -1477,6 +1641,10 @@ impl TubeSection {
 
     pub fn tuber(&self) -> f64 {
         self.tuber
+    }
+
+    pub fn get_tuber(&self) -> f64 {
+        self.tuber()
     }
 
     pub fn set_tuber(&mut self, value: f64) {
@@ -1488,6 +1656,10 @@ impl TubeSection {
         self.sharp
     }
 
+    pub fn get_sharp(&self) -> f64 {
+        self.sharp()
+    }
+
     pub fn set_sharp(&mut self, value: f64) {
         self.sharp = value;
         self.invalidate();
@@ -1497,13 +1669,25 @@ impl TubeSection {
         self.section_type
     }
 
+    pub fn get_type(&self) -> i32 {
+        self.section_type()
+    }
+
     pub fn set_section_type(&mut self, value: i32) {
         self.section_type = value;
         self.invalidate();
     }
 
+    pub fn set_type(&mut self, value: i32) {
+        self.set_section_type(value);
+    }
+
     pub fn detail(&self) -> i32 {
         self.detail
+    }
+
+    pub fn get_detail(&self) -> i32 {
+        self.detail()
     }
 
     pub fn set_detail(&mut self, value: i32) {
@@ -1558,13 +1742,25 @@ impl JctTable {
         self.jct_type
     }
 
+    pub fn get_type(&self) -> i32 {
+        self.jct_type()
+    }
+
     pub fn set_jct_type(&mut self, value: i32) {
         self.jct_type = value;
         self.invalidate();
     }
 
+    pub fn set_type(&mut self, value: i32) {
+        self.set_jct_type(value);
+    }
+
     pub fn gamma(&self) -> f64 {
         self.gamma
+    }
+
+    pub fn get_gamma(&self) -> f64 {
+        self.gamma()
     }
 
     pub fn set_gamma(&mut self, value: f64) {
@@ -1576,6 +1772,10 @@ impl JctTable {
         self.basw
     }
 
+    pub fn get_basw(&self) -> f64 {
+        self.basw()
+    }
+
     pub fn set_basw(&mut self, value: f64) {
         self.basw = value;
         self.invalidate();
@@ -1583,6 +1783,10 @@ impl JctTable {
 
     pub fn arrow(&self) -> f64 {
         self.arrow
+    }
+
+    pub fn get_arrow(&self) -> f64 {
+        self.arrow()
     }
 
     pub fn set_arrow(&mut self, value: f64) {
@@ -1633,12 +1837,24 @@ impl SplineRenderer {
         self.axialdetail
     }
 
+    pub fn get_axial_detail(&self) -> i32 {
+        self.axialdetail()
+    }
+
     pub fn set_axialdetail(&mut self, value: i32) {
         self.axialdetail = value;
     }
 
+    pub fn set_axial_detail(&mut self, value: i32) {
+        self.set_axialdetail(value);
+    }
+
     pub fn smooth(&self) -> f64 {
         self.smooth
+    }
+
+    pub fn get_smooth(&self) -> f64 {
+        self.smooth()
     }
 
     pub fn set_smooth(&mut self, value: f64) {
@@ -1649,12 +1865,24 @@ impl SplineRenderer {
         self.smoothcolor
     }
 
+    pub fn is_smooth_color(&self) -> bool {
+        self.smoothcolor()
+    }
+
     pub fn set_smoothcolor(&mut self, value: bool) {
         self.smoothcolor = value;
     }
 
+    pub fn set_smooth_color(&mut self, value: bool) {
+        self.set_smoothcolor(value);
+    }
+
     pub fn line_width(&self) -> f64 {
         self.line_width
+    }
+
+    pub fn get_line_width(&self) -> f64 {
+        self.line_width()
     }
 
     pub fn set_line_width(&mut self, value: f64) {
@@ -1663,6 +1891,10 @@ impl SplineRenderer {
 
     pub fn start_cap_type(&self) -> i32 {
         self.start_cap_type
+    }
+
+    pub fn get_start_cap_type(&self) -> i32 {
+        self.start_cap_type()
     }
 
     pub fn start_captype(&self) -> i32 {
@@ -1689,6 +1921,10 @@ impl SplineRenderer {
         self.end_cap_type
     }
 
+    pub fn get_end_cap_type(&self) -> i32 {
+        self.end_cap_type()
+    }
+
     pub fn end_captype(&self) -> i32 {
         self.end_cap_type()
     }
@@ -1713,8 +1949,16 @@ impl SplineRenderer {
         self.segend_fade
     }
 
+    pub fn is_seg_end_fade(&self) -> bool {
+        self.segend_fade()
+    }
+
     pub fn set_segend_fade(&mut self, value: bool) {
         self.segend_fade = value;
+    }
+
+    pub fn set_seg_end_fade(&mut self, value: bool) {
+        self.set_segend_fade(value);
     }
 }
 
@@ -1768,12 +2012,20 @@ impl TubeRenderer {
         &self.section
     }
 
+    pub fn get_tube_section(&self) -> &TubeSection {
+        self.section()
+    }
+
     pub fn section_mut(&mut self) -> &mut TubeSection {
         &mut self.section
     }
 
     pub fn putty_mode(&self) -> i32 {
         self.putty_mode
+    }
+
+    pub fn get_putty_mode(&self) -> i32 {
+        self.putty_mode()
     }
 
     pub fn set_putty_mode(&mut self, value: i32) {
@@ -1784,6 +2036,10 @@ impl TubeRenderer {
         self.putty_tgt
     }
 
+    pub fn get_putty_tgt(&self) -> i32 {
+        self.putty_tgt()
+    }
+
     pub fn set_putty_tgt(&mut self, value: i32) {
         self.putty_tgt = value;
     }
@@ -1792,16 +2048,32 @@ impl TubeRenderer {
         self.putty_hiscl
     }
 
+    pub fn get_putty_hi_scl(&self) -> f64 {
+        self.putty_hiscl()
+    }
+
     pub fn set_putty_hiscl(&mut self, value: f64) {
         self.putty_hiscl = value;
+    }
+
+    pub fn set_putty_hi_scl(&mut self, value: f64) {
+        self.set_putty_hiscl(value);
     }
 
     pub fn putty_loscl(&self) -> f64 {
         self.putty_loscl
     }
 
+    pub fn get_putty_lo_scl(&self) -> f64 {
+        self.putty_loscl()
+    }
+
     pub fn set_putty_loscl(&mut self, value: f64) {
         self.putty_loscl = value;
+    }
+
+    pub fn set_putty_lo_scl(&mut self, value: f64) {
+        self.set_putty_loscl(value);
     }
 }
 
@@ -1856,20 +2128,40 @@ impl NARenderer {
         self.show_tube
     }
 
+    pub fn get_rend_tube(&self) -> bool {
+        self.show_tube()
+    }
+
     pub fn set_show_tube(&mut self, value: bool) {
         self.show_tube = value;
+    }
+
+    pub fn set_rend_tube(&mut self, value: bool) {
+        self.set_show_tube(value);
     }
 
     pub fn show_basepair(&self) -> bool {
         self.show_basepair
     }
 
+    pub fn is_show_bp(&self) -> bool {
+        self.show_basepair()
+    }
+
     pub fn set_show_basepair(&mut self, value: bool) {
         self.show_basepair = value;
     }
 
+    pub fn set_show_bp(&mut self, value: bool) {
+        self.set_show_basepair(value);
+    }
+
     pub fn base_size(&self) -> f64 {
         self.base_size
+    }
+
+    pub fn get_base_size(&self) -> f64 {
+        self.base_size()
     }
 
     pub fn set_base_size(&mut self, value: f64) {
@@ -1880,6 +2172,10 @@ impl NARenderer {
         self.base_detail
     }
 
+    pub fn get_base_detail(&self) -> i32 {
+        self.base_detail()
+    }
+
     pub fn set_base_detail(&mut self, value: i32) {
         self.base_detail = value;
     }
@@ -1888,12 +2184,20 @@ impl NARenderer {
         self.base_thick
     }
 
+    pub fn get_base_thick(&self) -> f64 {
+        self.base_thick()
+    }
+
     pub fn set_base_thick(&mut self, value: f64) {
         self.base_thick = value;
     }
 
     pub fn base_type(&self) -> i32 {
         self.base_type
+    }
+
+    pub fn get_base_type(&self) -> i32 {
+        self.base_type()
     }
 
     pub fn set_base_type(&mut self, value: i32) {
@@ -1963,12 +2267,20 @@ impl RibbonRenderer {
         &self.helix
     }
 
+    pub fn get_helix_section(&self) -> &TubeSection {
+        self.helix()
+    }
+
     pub fn helix_mut(&mut self) -> &mut TubeSection {
         &mut self.helix
     }
 
     pub fn sheet(&self) -> &TubeSection {
         &self.sheet
+    }
+
+    pub fn get_sheet_section(&self) -> &TubeSection {
+        self.sheet()
     }
 
     pub fn sheet_mut(&mut self) -> &mut TubeSection {
@@ -1979,6 +2291,10 @@ impl RibbonRenderer {
         &self.coil
     }
 
+    pub fn get_coil_section(&self) -> &TubeSection {
+        self.coil()
+    }
+
     pub fn coil_mut(&mut self) -> &mut TubeSection {
         &mut self.coil
     }
@@ -1987,20 +2303,56 @@ impl RibbonRenderer {
         &self.helixhead
     }
 
+    pub fn get_helix_head(&self) -> &JctTable {
+        self.helixhead()
+    }
+
+    pub fn helixhead_mut(&mut self) -> &mut JctTable {
+        &mut self.helixhead
+    }
+
     pub fn helixtail(&self) -> &JctTable {
         &self.helixtail
+    }
+
+    pub fn get_helix_tail(&self) -> &JctTable {
+        self.helixtail()
+    }
+
+    pub fn helixtail_mut(&mut self) -> &mut JctTable {
+        &mut self.helixtail
     }
 
     pub fn sheethead(&self) -> &JctTable {
         &self.sheethead
     }
 
+    pub fn get_sheet_head(&self) -> &JctTable {
+        self.sheethead()
+    }
+
+    pub fn sheethead_mut(&mut self) -> &mut JctTable {
+        &mut self.sheethead
+    }
+
     pub fn sheettail(&self) -> &JctTable {
         &self.sheettail
     }
 
+    pub fn get_sheet_tail(&self) -> &JctTable {
+        self.sheettail()
+    }
+
+    pub fn sheettail_mut(&mut self) -> &mut JctTable {
+        &mut self.sheettail
+    }
+
     pub fn helix_smooth(&self) -> f64 {
         self.helix_smooth
+    }
+
+    pub fn get_helix_smooth(&self) -> f64 {
+        self.helix_smooth()
     }
 
     pub fn set_helix_smooth(&mut self, value: f64) {
@@ -2011,12 +2363,20 @@ impl RibbonRenderer {
         self.sheet_smooth
     }
 
+    pub fn get_sheet_smooth(&self) -> f64 {
+        self.sheet_smooth()
+    }
+
     pub fn set_sheet_smooth(&mut self, value: f64) {
         self.sheet_smooth = value;
     }
 
     pub fn coil_smooth(&self) -> f64 {
         self.coil_smooth
+    }
+
+    pub fn get_coil_smooth(&self) -> f64 {
+        self.coil_smooth()
     }
 
     pub fn set_coil_smooth(&mut self, value: f64) {
@@ -2027,32 +2387,64 @@ impl RibbonRenderer {
         self.helix_usebackcol
     }
 
+    pub fn is_use_hb_col(&self) -> bool {
+        self.helix_usebackcol()
+    }
+
     pub fn set_helix_usebackcol(&mut self, value: bool) {
         self.helix_usebackcol = value;
+    }
+
+    pub fn set_use_hb_col(&mut self, value: bool) {
+        self.set_helix_usebackcol(value);
     }
 
     pub fn helix_backcol(&self) -> &SolidColor {
         &self.helix_backcol
     }
 
+    pub fn get_helix_back_col(&self) -> &SolidColor {
+        self.helix_backcol()
+    }
+
     pub fn set_helix_backcol(&mut self, value: SolidColor) {
         self.helix_backcol = value;
+    }
+
+    pub fn set_helix_back_col(&mut self, value: SolidColor) {
+        self.set_helix_backcol(value);
     }
 
     pub fn sheet_usesidecol(&self) -> bool {
         self.sheet_usesidecol
     }
 
+    pub fn is_use_ss_col(&self) -> bool {
+        self.sheet_usesidecol()
+    }
+
     pub fn set_sheet_usesidecol(&mut self, value: bool) {
         self.sheet_usesidecol = value;
+    }
+
+    pub fn set_use_ss_col(&mut self, value: bool) {
+        self.set_sheet_usesidecol(value);
     }
 
     pub fn sheet_sidecol(&self) -> &SolidColor {
         &self.sheet_sidecol
     }
 
+    pub fn get_sheet_side_col(&self) -> &SolidColor {
+        self.sheet_sidecol()
+    }
+
     pub fn set_sheet_sidecol(&mut self, value: SolidColor) {
         self.sheet_sidecol = value;
+    }
+
+    pub fn set_sheet_side_col(&mut self, value: SolidColor) {
+        self.set_sheet_sidecol(value);
     }
 }
 
@@ -2137,16 +2529,32 @@ impl Ribbon2Renderer {
         self.axialdetail
     }
 
+    pub fn get_axial_detail(&self) -> i32 {
+        self.axialdetail()
+    }
+
     pub fn set_axialdetail(&mut self, value: i32) {
         self.axialdetail = value;
+    }
+
+    pub fn set_axial_detail(&mut self, value: i32) {
+        self.set_axialdetail(value);
     }
 
     pub fn smoothcolor(&self) -> bool {
         self.smoothcolor
     }
 
+    pub fn is_smooth_color(&self) -> bool {
+        self.smoothcolor()
+    }
+
     pub fn set_smoothcolor(&mut self, value: bool) {
         self.smoothcolor = value;
+    }
+
+    pub fn set_smooth_color(&mut self, value: bool) {
+        self.set_smoothcolor(value);
     }
 
     pub fn anchor_selection(&self) -> &str {
@@ -2155,6 +2563,10 @@ impl Ribbon2Renderer {
 
     pub fn anchor_sel(&self) -> &str {
         self.anchor_selection()
+    }
+
+    pub fn get_anchor_sel(&self) -> &str {
+        self.anchor_sel()
     }
 
     pub fn set_anchor_selection(&mut self, value: impl Into<String>) {
@@ -2169,8 +2581,16 @@ impl Ribbon2Renderer {
         self.anchor_weight
     }
 
+    pub fn get_anchor_wgt(&self) -> f64 {
+        self.anchor_weight()
+    }
+
     pub fn set_anchor_weight(&mut self, value: f64) {
         self.anchor_weight = value;
+    }
+
+    pub fn set_anchor_wgt(&mut self, value: f64) {
+        self.set_anchor_weight(value);
     }
 
     pub fn helix_ribbon(&self) -> bool {
@@ -2191,6 +2611,10 @@ impl Ribbon2Renderer {
 
     pub fn helix_width_mode(&self) -> i32 {
         self.helix_width_mode
+    }
+
+    pub fn get_helix_width_mode(&self) -> i32 {
+        self.helix_width_mode()
     }
 
     pub fn set_helix_width_mode(&mut self, value: i32) {
@@ -2275,32 +2699,92 @@ impl Ribbon2Renderer {
         &self.helix
     }
 
+    pub fn get_helix_section(&self) -> &TubeSection {
+        self.helix()
+    }
+
+    pub fn helix_mut(&mut self) -> &mut TubeSection {
+        &mut self.helix
+    }
+
     pub fn sheet(&self) -> &TubeSection {
         &self.sheet
+    }
+
+    pub fn get_sheet_section(&self) -> &TubeSection {
+        self.sheet()
+    }
+
+    pub fn sheet_mut(&mut self) -> &mut TubeSection {
+        &mut self.sheet
     }
 
     pub fn coil(&self) -> &TubeSection {
         &self.coil
     }
 
+    pub fn get_coil_section(&self) -> &TubeSection {
+        self.coil()
+    }
+
+    pub fn coil_mut(&mut self) -> &mut TubeSection {
+        &mut self.coil
+    }
+
     pub fn sheethead(&self) -> &JctTable {
         &self.sheethead
+    }
+
+    pub fn get_sheet_head(&self) -> &JctTable {
+        self.sheethead()
+    }
+
+    pub fn sheethead_mut(&mut self) -> &mut JctTable {
+        &mut self.sheethead
     }
 
     pub fn ribhelix(&self) -> &TubeSection {
         &self.ribhelix
     }
 
+    pub fn get_rib_helix_section(&self) -> &TubeSection {
+        self.ribhelix()
+    }
+
+    pub fn ribhelix_mut(&mut self) -> &mut TubeSection {
+        &mut self.ribhelix
+    }
+
     pub fn ribhelix_head(&self) -> &JctTable {
         &self.ribhelix_head
+    }
+
+    pub fn get_rib_helix_head(&self) -> &JctTable {
+        self.ribhelix_head()
+    }
+
+    pub fn ribhelix_head_mut(&mut self) -> &mut JctTable {
+        &mut self.ribhelix_head
     }
 
     pub fn ribhelix_tail(&self) -> &JctTable {
         &self.ribhelix_tail
     }
 
+    pub fn get_rib_helix_tail(&self) -> &JctTable {
+        self.ribhelix_tail()
+    }
+
+    pub fn ribhelix_tail_mut(&mut self) -> &mut JctTable {
+        &mut self.ribhelix_tail
+    }
+
     pub fn start_cap_type(&self) -> i32 {
         self.start_cap_type
+    }
+
+    pub fn get_start_cap_type(&self) -> i32 {
+        self.start_cap_type()
     }
 
     pub fn start_captype(&self) -> i32 {
@@ -2327,6 +2811,10 @@ impl Ribbon2Renderer {
         self.end_cap_type
     }
 
+    pub fn get_end_cap_type(&self) -> i32 {
+        self.end_cap_type()
+    }
+
     pub fn end_captype(&self) -> i32 {
         self.end_cap_type()
     }
@@ -2351,8 +2839,16 @@ impl Ribbon2Renderer {
         self.segend_fade
     }
 
+    pub fn is_seg_end_fade(&self) -> bool {
+        self.segend_fade()
+    }
+
     pub fn set_segend_fade(&mut self, value: bool) {
         self.segend_fade = value;
+    }
+
+    pub fn set_seg_end_fade(&mut self, value: bool) {
+        self.set_segend_fade(value);
     }
 
     pub fn dump_curvature(&self) -> bool {
@@ -2409,12 +2905,20 @@ impl RainbowColoring {
         self.start_hue
     }
 
+    pub fn get_start_hue(&self) -> f64 {
+        self.start_hue()
+    }
+
     pub fn set_start_hue(&mut self, value: f64) {
         self.start_hue = value;
     }
 
     pub fn end_hue(&self) -> f64 {
         self.end_hue
+    }
+
+    pub fn get_end_hue(&self) -> f64 {
+        self.end_hue()
     }
 
     pub fn set_end_hue(&mut self, value: f64) {
@@ -2441,12 +2945,20 @@ impl RainbowColoring {
         self.mode
     }
 
+    pub fn get_mode(&self) -> i32 {
+        self.mode()
+    }
+
     pub fn set_mode(&mut self, value: i32) {
         self.mode = value;
     }
 
     pub fn incr_mode(&self) -> i32 {
         self.incr_mode
+    }
+
+    pub fn get_incr_mode(&self) -> i32 {
+        self.incr_mode()
     }
 
     pub fn set_incr_mode(&mut self, value: i32) {
@@ -2464,8 +2976,8 @@ impl RainbowColoring {
             (self.end_hue - self.start_hue) / total as f64
         };
         let hue = self.start_hue + index as f64 * del_hue;
-        let color = SolidColor::create_hsb((hue / 360.0).rem_euclid(1.0), self.sat, self.bri, 1.0)
-            .rgba8();
+        let color =
+            SolidColor::create_hsb((hue / 360.0).rem_euclid(1.0), self.sat, self.bri, 1.0).rgba8();
         [
             color.r as f32 / 255.0,
             color.g as f32 / 255.0,
@@ -2491,6 +3003,10 @@ impl ScriptColoring {
 
     pub fn script(&self) -> &str {
         &self.script
+    }
+
+    pub fn get_script(&self) -> &str {
+        self.script()
     }
 
     pub fn set_script(&mut self, value: impl Into<String>) {
@@ -2537,6 +3053,10 @@ impl PaintColoring {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn get_size(&self) -> i32 {
+        i32::try_from(self.len()).unwrap_or(i32::MAX)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -3057,14 +3577,20 @@ pub fn apply_renderer_styles(
 
     // Putty (C++ TubeRenderer width modulation by B-factor/occupancy): exact qsc
     // attr names + enum values from TubeRenderer.qif.
-    if let Some(mode) = renderer.resolved_attr("putty_mode", styles, scope_id).as_deref() {
+    if let Some(mode) = renderer
+        .resolved_attr("putty_mode", styles, scope_id)
+        .as_deref()
+    {
         options.putty.mode = match mode {
             "linear1" => PuttyMode::Linear,
             "scale1" => PuttyMode::Scale,
             _ => PuttyMode::Off,
         };
     }
-    if let Some(target) = renderer.resolved_attr("putty_tgt", styles, scope_id).as_deref() {
+    if let Some(target) = renderer
+        .resolved_attr("putty_tgt", styles, scope_id)
+        .as_deref()
+    {
         options.putty.target = match target {
             "occ" => PuttyTarget::Occupancy,
             _ => PuttyTarget::BFactor,
@@ -3090,7 +3616,13 @@ pub fn apply_renderer_styles(
     // the object, handled in the snapshot).
     if let Some(coloring_type) = renderer.resolved_child_type("coloring", styles, scope_id) {
         let attrs: std::collections::BTreeMap<String, String> = [
-            "start_hue", "end_hue", "sat", "bri", "mode", "lowpar", "highpar",
+            "start_hue",
+            "end_hue",
+            "sat",
+            "bri",
+            "mode",
+            "lowpar",
+            "highpar",
         ]
         .iter()
         .filter_map(|key| {
@@ -3175,10 +3707,7 @@ pub fn tessellate_styled_snapshot(
 /// each surface vertex by its nearest atom and MATCH the atoms the same viewer
 /// shows (C++ `MolSurfRenderer::getColorMol`: nearest atom → its scheme colour).
 /// Returns one `ColorSpec` per atom, indexed by atom index.
-pub fn resolve_atom_colors(
-    molecule: &MolCoord,
-    options: &MoleculeRenderOptions,
-) -> Vec<ColorSpec> {
+pub fn resolve_atom_colors(molecule: &MolCoord, options: &MoleculeRenderOptions) -> Vec<ColorSpec> {
     // Object coloring ($molcol cascade) for an atom renderer: CPKColoring carbon is
     // $molcol, so carbons defer to the object's paint/bfac scheme; other elements
     // keep their CPK colour. Built once when the object declares a scheme.
@@ -3241,10 +3770,12 @@ pub fn molecule_render_snapshot(
     // Per-renderer `sel="..."` draw restriction: when present, only these atoms
     // (and bonds whose both ends are included) are drawn — each keeps its original
     // index for picking. `None` draws the whole molecule.
-    let draw = options
-        .draw_indices
-        .as_ref()
-        .map(|indices| indices.iter().copied().collect::<std::collections::BTreeSet<_>>());
+    let draw = options.draw_indices.as_ref().map(|indices| {
+        indices
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+    });
     let drawn = |index: usize| draw.as_ref().is_none_or(|set| set.contains(&index));
     // Object coloring ($molcol cascade): resolve every atom's final colour once
     // (Rainbow > Bfac > paint on carbon, else CPK). Shared with the molecular
@@ -3264,11 +3795,7 @@ pub fn molecule_render_snapshot(
                     atom_radius(atom.element.as_str(), options),
                     Some(color),
                 )
-                .with_picking(
-                    options.object_uid,
-                    Some(index),
-                    selected.contains(&index),
-                )
+                .with_picking(options.object_uid, Some(index), selected.contains(&index))
                 .with_detail(options.sphere_detail)
             })
             .collect::<Vec<_>>()
@@ -3368,10 +3895,12 @@ pub fn mainchain_trace_snapshot(
         .mainchain_radius
         .unwrap_or_else(|| (options.bond_radius * 3.0).clamp(0.18, 0.6));
 
-    let draw = options
-        .draw_indices
-        .as_ref()
-        .map(|indices| indices.iter().copied().collect::<std::collections::BTreeSet<_>>());
+    let draw = options.draw_indices.as_ref().map(|indices| {
+        indices
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+    });
     let chains = collect_mainchain_pivots(molecule, draw.as_ref());
     let putty = options.putty;
 
@@ -3410,11 +3939,20 @@ pub fn mainchain_trace_snapshot(
             radius_at(raw)
         };
         for (i, point) in samples.iter().enumerate() {
-            atoms.push(RenderAtom::new(*point, radius_of_sample(i), Some(color.clone())));
+            atoms.push(RenderAtom::new(
+                *point,
+                radius_of_sample(i),
+                Some(color.clone()),
+            ));
         }
         for (i, segment) in samples.windows(2).enumerate() {
             let r = (radius_of_sample(i) + radius_of_sample(i + 1)) * 0.5;
-            bonds.push(RenderBond::new(segment[0], segment[1], r, Some(color.clone())));
+            bonds.push(RenderBond::new(
+                segment[0],
+                segment[1],
+                r,
+                Some(color.clone()),
+            ));
         }
     }
 
@@ -3456,10 +3994,7 @@ fn apply_putty_to_width_scales(
 /// Min/max/mean of the putty target value over every backbone pivot (C++
 /// `TubeRenderer::beginRend` precompute). Returns the identity `(0,1,0.5)` when
 /// putty is off or there are no pivots.
-fn putty_value_stats(
-    chains: &[Vec<MainchainPoint>],
-    putty: &PuttyOptions,
-) -> (f64, f64, f64) {
+fn putty_value_stats(chains: &[Vec<MainchainPoint>], putty: &PuttyOptions) -> (f64, f64, f64) {
     if putty.mode == PuttyMode::Off {
         return (0.0, 1.0, 0.5);
     }
@@ -3694,7 +4229,10 @@ fn collect_mainchain_pivots(
             // Per-renderer `sel="..."`: skip residues with no selected atom so a
             // sel'd ribbon traces only its selection, not the whole backbone.
             let included = draw.is_none_or(|set| {
-                residue.atom_indices().iter().any(|index| set.contains(index))
+                residue
+                    .atom_indices()
+                    .iter()
+                    .any(|index| set.contains(index))
             });
             if included {
                 if let Some((point, cutoff)) = mainchain_pivot_point(molecule, residue) {
@@ -3876,7 +4414,9 @@ impl CubicSpline {
             let mut xvec = vec![zero; equ_no];
             xvec[equ_no - 1] = yvec[equ_no - 1].scale(-1.0 / m[equ_no - 1]);
             for i in (0..equ_no - 1).rev() {
-                xvec[i] = yvec[i].add_vec(xvec[i + 1].scale(h[i + 1])).scale(-1.0 / m[i]);
+                xvec[i] = yvec[i]
+                    .add_vec(xvec[i + 1].scale(h[i + 1]))
+                    .scale(-1.0 / m[i]);
             }
 
             // assemble the per-interval cubic coefficients (local parameter [0,1])
@@ -3918,8 +4458,18 @@ impl CubicSpline {
         let c3 = self.coeff3[ncoeff];
         let f = par - ncoeff as f64;
 
-        let position = c3.scale(f).add_vec(c2).scale(f).add_vec(c1).scale(f).add_vec(c0);
-        let tangent = c3.scale(3.0 * f).add_vec(c2.scale(2.0)).scale(f).add_vec(c1);
+        let position = c3
+            .scale(f)
+            .add_vec(c2)
+            .scale(f)
+            .add_vec(c1)
+            .scale(f)
+            .add_vec(c0);
+        let tangent = c3
+            .scale(3.0 * f)
+            .add_vec(c2.scale(2.0))
+            .scale(f)
+            .add_vec(c1);
         let curvature = c3.scale(6.0 * f).add_vec(c2.scale(2.0));
         SplineSample {
             position,
@@ -3985,10 +4535,12 @@ pub fn ribbon_mesh_snapshot(
     // C++ Ribbon/Spline `axialdetail`: spline subdivisions per residue (default 8).
     let subdiv = options.ribbon_axial_detail.unwrap_or(8).max(1) as usize;
     let scale = ((options.bond_radius * 4.0).clamp(0.25, 0.8)) as f64;
-    let draw = options
-        .draw_indices
-        .as_ref()
-        .map(|indices| indices.iter().copied().collect::<std::collections::BTreeSet<_>>());
+    let draw = options.draw_indices.as_ref().map(|indices| {
+        indices
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+    });
     let chains = collect_mainchain_pivots(molecule, draw.as_ref());
     // Putty (TubeRenderer): modulate the ribbon width per residue by the B-factor/
     // occupancy, on top of the section width scales. Stats are over all pivots.
@@ -4013,8 +4565,12 @@ pub fn ribbon_mesh_snapshot(
         if pivots.len() < 2 {
             continue;
         }
-        let (samples, sections, mut width_scales) =
-            sample_backbone(pivots, subdiv, options.anchor_weight, options.linear_backbone);
+        let (samples, sections, mut width_scales) = sample_backbone(
+            pivots,
+            subdiv,
+            options.anchor_weight,
+            options.linear_backbone,
+        );
         if putty.mode != PuttyMode::Off {
             apply_putty_to_width_scales(
                 &mut width_scales,
@@ -4367,8 +4923,7 @@ pub fn ring_meshes_snapshot(molecule: &MolCoord) -> RenderSceneSnapshot {
             // Triangle fan: centroid (vertex 0) to each consecutive ring edge.
             let n = verts.len() as u32;
             for k in 0..n {
-                mesh.indices
-                    .extend_from_slice(&[0, 1 + k, 1 + (k + 1) % n]);
+                mesh.indices.extend_from_slice(&[0, 1 + k, 1 + (k + 1) % n]);
             }
             meshes.push(mesh);
         }
@@ -4681,7 +5236,7 @@ pub fn anisou_ellipsoid_mesh(
             let phi = std::f64::consts::TAU * j as f64 / slices as f64;
             let (sp, cp) = (phi.sin(), phi.cos());
             let uu = [st * cp, st * sp, ct]; // unit-sphere point (= unit normal)
-            // position = center + scale · M · uu
+                                             // position = center + scale · M · uu
             let mu = [
                 m[0][0] * uu[0],
                 m[1][0] * uu[0] + m[1][1] * uu[1],
@@ -4969,11 +5524,17 @@ mod tests {
 
         // Inline `.qsc` attribute overrides the named style (applyStyles order).
         let (override_bond, _) = styled_ballstick_radii("DefaultBallStick", Some("0.9"));
-        assert!((override_bond - 0.9).abs() < 1.0e-6, "inline override {override_bond}");
+        assert!(
+            (override_bond - 0.9).abs() < 1.0e-6,
+            "inline override {override_bond}"
+        );
 
         // No style => the hardcoded default radius is left untouched.
         let (plain_bond, _) = styled_ballstick_radii("", None);
-        assert!((plain_bond - 0.08).abs() < 1.0e-6, "plain default {plain_bond}");
+        assert!(
+            (plain_bond - 0.08).abs() < 1.0e-6,
+            "plain default {plain_bond}"
+        );
     }
 
     /// Tessellate a single-atom CPK scene, either resolving the named `style`
@@ -5004,7 +5565,9 @@ mod tests {
             Some(detail) => options.sphere_detail = detail,
             None => apply_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE),
         }
-        tessellate_styled_snapshot(obj.mol(), &options).vertices.len()
+        tessellate_styled_snapshot(obj.mol(), &options)
+            .vertices
+            .len()
     }
 
     #[test]
@@ -5203,13 +5766,16 @@ mod tests {
             let dists: Vec<f64> = ring
                 .iter()
                 .map(|v| {
-                    let (dx, dy, dz) =
-                        (v.position.x - c.0, v.position.y - c.1, v.position.z - c.2);
+                    let (dx, dy, dz) = (v.position.x - c.0, v.position.y - c.1, v.position.z - c.2);
                     (dx * dx + dy * dy + dz * dz).sqrt()
                 })
                 .collect();
             dists.iter().cloned().fold(0.0_f64, f64::max)
-                / dists.iter().cloned().fold(f64::INFINITY, f64::min).max(1.0e-9)
+                / dists
+                    .iter()
+                    .cloned()
+                    .fold(f64::INFINITY, f64::min)
+                    .max(1.0e-9)
         };
         let styled_aspect = aspect(&options);
         let default_aspect = aspect(&MoleculeRenderOptions::default());
@@ -5251,18 +5817,30 @@ mod tests {
         let eps = 1e-6;
         let left = spline.interpolate(2.0 - eps);
         let right = spline.interpolate(2.0 + eps);
-        assert!((left.tangent - right.tangent).length3d() < 1e-3, "C1 at knot");
-        assert!((left.curvature - right.curvature).length3d() < 1e-3, "C2 at knot");
+        assert!(
+            (left.tangent - right.tangent).length3d() < 1e-3,
+            "C1 at knot"
+        );
+        assert!(
+            (left.curvature - right.curvature).length3d() < 1e-3,
+            "C2 at knot"
+        );
 
         // (5) The analytic tangent matches a central finite difference of position.
         let mid = spline.interpolate(1.5);
         let fd = (spline.interpolate(1.5 + eps).position - spline.interpolate(1.5 - eps).position)
             .scale(1.0 / (2.0 * eps));
-        assert!((mid.tangent - fd).length3d() < 1e-4, "tangent vs finite diff");
+        assert!(
+            (mid.tangent - fd).length3d() < 1e-4,
+            "tangent vs finite diff"
+        );
 
         // (6) The curve actually bends: the mid-segment sample leaves the chord.
         let chord_mid = (pts[1] + pts[2]).scale(0.5);
-        assert!((mid.position - chord_mid).length3d() > 1e-3, "curve deviates from chord");
+        assert!(
+            (mid.position - chord_mid).length3d() > 1e-3,
+            "curve deviates from chord"
+        );
     }
 
     fn intr_atom(serial: i32, x: f64, y: f64, z: f64) -> Atom {
@@ -5297,7 +5875,14 @@ mod tests {
         let scale = 1.5;
 
         // Isotropic U = 0.01 Å²: the ellipsoid is a sphere of radius scale·0.1.
-        let iso = anisou_ellipsoid_mesh(center, [0.01, 0.01, 0.01, 0.0, 0.0, 0.0], scale, color, 8, 12);
+        let iso = anisou_ellipsoid_mesh(
+            center,
+            [0.01, 0.01, 0.01, 0.0, 0.0, 0.0],
+            scale,
+            color,
+            8,
+            12,
+        );
         let dist = |v: &MeshVertex| (v.position - center).length3d();
         let max = iso.vertices.iter().map(dist).fold(0.0_f64, f64::max);
         let min = iso.vertices.iter().map(dist).fold(f64::INFINITY, f64::min);
@@ -5314,19 +5899,28 @@ mod tests {
                 v.position.y - center.y,
                 v.position.z - center.z,
             ];
-            assert!((quad_form(d, u) - scale * scale).abs() < 1e-6, "vertex off contour");
+            assert!(
+                (quad_form(d, u) - scale * scale).abs() < 1e-6,
+                "vertex off contour"
+            );
         }
 
         // The principal stretch is along x (largest U component) — wider than y.
-        let ext = |f: &dyn Fn(&MeshVertex) -> f64| {
-            ell.vertices.iter().map(f).fold(0.0_f64, f64::max)
-        };
+        let ext =
+            |f: &dyn Fn(&MeshVertex) -> f64| ell.vertices.iter().map(f).fold(0.0_f64, f64::max);
         let max_x = ext(&|v| (v.position.x - center.x).abs());
         let max_y = ext(&|v| (v.position.y - center.y).abs());
         assert!(max_x > max_y, "elongated along the dominant axis");
 
         // A non-positive-definite tensor falls back to an isotropic sphere (no NaNs).
-        let bad = anisou_ellipsoid_mesh(center, [-1.0, 0.01, 0.01, 0.0, 0.0, 0.0], scale, color, 6, 8);
+        let bad = anisou_ellipsoid_mesh(
+            center,
+            [-1.0, 0.01, 0.01, 0.0, 0.0, 0.0],
+            scale,
+            color,
+            6,
+            8,
+        );
         assert!(bad.vertices.iter().all(|v| v.position.x.is_finite()));
     }
 
@@ -5345,7 +5939,11 @@ mod tests {
         let snap = disorder_lines_snapshot(&mol, 1.0, 0.2, 1.0, -1.0);
         assert!(!snap.atoms.is_empty(), "gap should be dotted");
         // ~10 dots (10 Å / 1 Å spacing), all between the two pivots.
-        assert!(snap.atoms.len() >= 8 && snap.atoms.len() <= 12, "got {}", snap.atoms.len());
+        assert!(
+            snap.atoms.len() >= 8 && snap.atoms.len() <= 12,
+            "got {}",
+            snap.atoms.len()
+        );
         assert!(snap
             .atoms
             .iter()
@@ -5431,13 +6029,23 @@ mod tests {
         let first = on.atoms.first().unwrap().radius;
         let last = on.atoms.last().unwrap().radius;
         // Low-B end scaled by 1/loscl (~0.33), high-B end by hiscl (~3.0).
-        assert!(first < r0, "low-B end should be thinner than the off radius");
-        assert!(last > first + 0.1, "high-B end should be thicker: {first} vs {last}");
+        assert!(
+            first < r0,
+            "low-B end should be thinner than the off radius"
+        );
+        assert!(
+            last > first + 0.1,
+            "high-B end should be thicker: {first} vs {last}"
+        );
     }
 
     #[test]
     fn mainchain_radius_overrides_the_trace_tube_width() {
-        let mol = MolCoord::with_atoms(vec![diso_ca(1, 1, 0.0), diso_ca(2, 2, 3.0), diso_ca(3, 3, 6.0)]);
+        let mol = MolCoord::with_atoms(vec![
+            diso_ca(1, 1, 0.0),
+            diso_ca(2, 2, 3.0),
+            diso_ca(3, 3, 6.0),
+        ]);
         // Default radius is derived from bond_radius (0.08*3 = 0.24).
         let def = mainchain_trace_snapshot(&mol, &MoleculeRenderOptions::default());
         assert!((def.atoms[0].radius - 0.24).abs() < 1.0e-6);
@@ -5512,7 +6120,11 @@ mod tests {
 
         assert_eq!(mol.calc_base_pair(5.0, 30.0), 1);
         let on = na_base_sticks_snapshot(&mol, 0.3, true);
-        assert_eq!(on.bonds.len(), base_only + 1, "one ladder rung for the pair");
+        assert_eq!(
+            on.bonds.len(),
+            base_only + 1,
+            "one ladder rung for the pair"
+        );
         // The rung connects the glycosidic N atoms: A.N9 (1,0) <-> U.N1 (1,2).
         assert!(
             on.bonds.iter().any(|b| {
@@ -5522,7 +6134,10 @@ mod tests {
             "rung connects the paired bases' glycosidic N atoms"
         );
         // With show_basepair off, the rung is gone.
-        assert_eq!(na_base_sticks_snapshot(&mol, 0.3, false).bonds.len(), base_only);
+        assert_eq!(
+            na_base_sticks_snapshot(&mol, 0.3, false).bonds.len(),
+            base_only
+        );
     }
 
     #[test]
@@ -5618,7 +6233,7 @@ mod tests {
             intr_atom(6, 0.0, 1.0, 0.0),
             intr_atom(7, 0.0, 0.0, 0.0),
             intr_atom(8, 1.0, 0.0, 0.0),
-            intr_atom(9, 1.0, 0.0, 1.0), // torsion 6-7-8-9 = +90 deg
+            intr_atom(9, 1.0, 0.0, 1.0),   // torsion 6-7-8-9 = +90 deg
             intr_atom(10, 1.0, 0.0, -1.0), // torsion 6-7-8-10 = -90 deg
         ]);
 
@@ -5763,10 +6378,8 @@ mod tests {
     #[test]
     fn mainchain_trace_snapshot_uses_only_pivot_atoms() {
         // Side-chain atoms must not change the backbone trace.
-        let backbone_only = MolCoord::with_atoms(vec![
-            ca_atom(1, 0.0, 0.0, 0.0),
-            ca_atom(2, 1.0, 0.0, 0.0),
-        ]);
+        let backbone_only =
+            MolCoord::with_atoms(vec![ca_atom(1, 0.0, 0.0, 0.0), ca_atom(2, 1.0, 0.0, 0.0)]);
         let mut cb1 = sample_atom("CB", "C", 0.0, 1.0, 0.0);
         cb1.res_id = 1;
         let mut cb2 = sample_atom("CB", "C", 1.0, 1.0, 0.0);
@@ -5950,7 +6563,8 @@ mod tests {
         assert_eq!(w, 5.0);
         assert_eq!(t, 0.1);
         // The default keeps the historical flat helix band (2.2 x 0.7).
-        let (dw, dt, _) = section_params(Secondary::Helix, 1.0, &RibbonSections::default(), &styled);
+        let (dw, dt, _) =
+            section_params(Secondary::Helix, 1.0, &RibbonSections::default(), &styled);
         assert_eq!(dw, 2.2);
         assert_eq!(dt, 0.7);
         // Sheet/coil factors are independent.
@@ -6013,8 +6627,13 @@ mod tests {
         let snap = ribbon_mesh_snapshot(&mol, &MoleculeRenderOptions::default());
         assert_eq!(snap.mesh_count(), 1);
         // Every vertex carries the helix color and a unit normal.
-        let helix_color =
-            section_params(Secondary::Helix, 1.0, &RibbonSections::default(), &StyledRibbonSections::default()).2;
+        let helix_color = section_params(
+            Secondary::Helix,
+            1.0,
+            &RibbonSections::default(),
+            &StyledRibbonSections::default(),
+        )
+        .2;
         assert!(snap.meshes[0]
             .vertices
             .iter()
@@ -6049,8 +6668,7 @@ mod tests {
             let dists: Vec<f64> = ring
                 .iter()
                 .map(|v| {
-                    let (dx, dy, dz) =
-                        (v.position.x - cx, v.position.y - cy, v.position.z - cz);
+                    let (dx, dy, dz) = (v.position.x - cx, v.position.y - cy, v.position.z - cz);
                     (dx * dx + dy * dy + dz * dz).sqrt()
                 })
                 .collect();
@@ -6151,6 +6769,8 @@ mod tests {
         assert!(!renderer.is_rend_bond());
         assert_eq!(renderer.detail(), 10);
         assert_eq!(renderer.gl_render_mode(), Cpk2Renderer::REND_DEFAULT);
+        assert_eq!(renderer.get_gl_render_mode(), Cpk2Renderer::REND_DEFAULT);
+        assert_eq!(renderer.glrender_mode(), Cpk2Renderer::REND_DEFAULT);
         assert_eq!(Cpk2Renderer::REND_VBO, 0);
         assert_eq!(Cpk2Renderer::REND_GLU, 0);
         assert!(!renderer.use_shader());
@@ -6180,7 +6800,12 @@ mod tests {
         assert_eq!(renderer.ring_color().rgba8().g, 255);
         assert_eq!(renderer.ring_color().rgba8().b, 191);
         assert_eq!(renderer.valbond_mode(), BallStickRenderer::VBMODE_OFF);
+        assert_eq!(renderer.get_vb_mode(), BallStickRenderer::VBMODE_OFF);
         assert_eq!(renderer.gl_render_mode(), BallStickRenderer::REND_DEFAULT);
+        assert_eq!(
+            renderer.get_gl_render_mode(),
+            BallStickRenderer::REND_DEFAULT
+        );
         assert_eq!(BallStickRenderer::REND_VBO, 2);
         assert_eq!(BallStickRenderer::REND_GLU, 3);
 
@@ -6193,6 +6818,7 @@ mod tests {
         assert_f64_eq(anisou.discscale(), 1.1);
         assert_f64_eq(anisou.discthick(), 0.1);
         assert_eq!(anisou.maxverts(), 1_000_000);
+        assert_eq!(anisou.get_glu_vert_max(), 1_000_000);
     }
 
     #[test]
@@ -6209,6 +6835,9 @@ mod tests {
         assert_f64_eq(atom_intr.arrow_height(), 1.0);
         assert_f64_eq(atom_intr.arrow_width(), 2.0);
         assert_eq!(atom_intr.font_name(), "sans-serif");
+        assert_eq!(atom_intr.get_mode(), AtomIntrRenderer::AIR_FANCY);
+        assert!(!atom_intr.is_show_label());
+        assert_f64_eq(atom_intr.get_stipple0(), 1.0);
         let dist_id = atom_intr.append("name N", "name CA");
         let angle_id = atom_intr.append_angle_by_id(1, 10, 2, 10, 3, 10);
         let torsion_id = atom_intr.append_torsion_by_id(1, 10, 2, 10, 3, 10, 4, 10);
@@ -6227,13 +6856,20 @@ mod tests {
         assert_f64_eq(diso.loopsize(), 2.0);
         assert_f64_eq(diso.loopsize2(), -1.0);
         assert_eq!(diso.target(), "");
+        assert_f64_eq(diso.get_strength(), 2.0);
+        assert_eq!(diso.get_tgt_rend_name(), "");
 
         let spline = SplineRenderer::new();
         assert_eq!(spline.type_name(), "spline");
         assert_eq!(spline.axialdetail(), 6);
+        assert_eq!(spline.get_axial_detail(), 6);
         assert!(spline.smoothcolor());
+        assert!(spline.is_smooth_color());
+        assert_f64_eq(spline.get_line_width(), 1.2);
         assert_eq!(spline.start_cap_type(), SplineRenderer::TUBE_CAP_SPHR);
+        assert_eq!(spline.get_start_cap_type(), SplineRenderer::TUBE_CAP_SPHR);
         assert_eq!(spline.end_cap_type(), SplineRenderer::TUBE_CAP_SPHR);
+        assert!(!spline.is_seg_end_fade());
     }
 
     #[test]
@@ -6244,45 +6880,69 @@ mod tests {
         assert_f64_eq(section.sharp(), 0.4);
         assert_eq!(section.section_type(), TubeSection::TS_ELLIPTICAL);
         assert_eq!(section.detail(), 16);
+        assert_eq!(section.get_type(), TubeSection::TS_ELLIPTICAL);
+        assert_eq!(section.get_detail(), 16);
 
         let jct = JctTable::new();
         assert_eq!(jct.jct_type(), JctTable::JT_SMOOTH1);
         assert_f64_eq(jct.gamma(), 2.2);
         assert_f64_eq(jct.basw(), 0.0);
         assert_f64_eq(jct.arrow(), 1.8);
+        assert_eq!(jct.get_type(), JctTable::JT_SMOOTH1);
+        assert_f64_eq(jct.get_gamma(), 2.2);
 
         let tube = TubeRenderer::new();
         assert_eq!(tube.type_name(), "tube");
         assert_eq!(tube.putty_mode(), TubeRenderer::TBR_PUTTY_OFF);
+        assert_eq!(tube.get_putty_mode(), TubeRenderer::TBR_PUTTY_OFF);
         assert_eq!(tube.putty_tgt(), TubeRenderer::TBR_PUTTY_BFAC);
+        assert_eq!(tube.get_putty_tgt(), TubeRenderer::TBR_PUTTY_BFAC);
         assert_f64_eq(tube.putty_hiscl(), 3.0);
+        assert_f64_eq(tube.get_putty_hi_scl(), 3.0);
         assert_f64_eq(tube.putty_loscl(), 3.0);
+        assert_f64_eq(tube.get_putty_lo_scl(), 3.0);
+        assert_eq!(tube.get_tube_section(), tube.section());
 
         let na = NARenderer::new();
         assert_eq!(na.type_name(), "nucl");
         assert!(na.show_tube());
+        assert!(na.get_rend_tube());
         assert!(na.show_basepair());
+        assert!(na.is_show_bp());
         assert_f64_eq(na.base_size(), 0.5);
+        assert_f64_eq(na.get_base_size(), 0.5);
         assert_eq!(na.base_detail(), 3);
+        assert_eq!(na.get_base_detail(), 3);
         assert_f64_eq(na.base_thick(), 0.5);
+        assert_f64_eq(na.get_base_thick(), 0.5);
         assert_eq!(na.base_type(), NARenderer::NAREND_BP);
+        assert_eq!(na.get_base_type(), NARenderer::NAREND_BP);
 
         let ribbon = RibbonRenderer::new();
         assert_eq!(ribbon.type_name(), "ribbon");
         assert_f64_eq(ribbon.helix_smooth(), 0.0);
+        assert_eq!(ribbon.get_helix_section(), ribbon.helix());
+        assert_eq!(ribbon.get_sheet_head(), ribbon.sheethead());
+        assert_f64_eq(ribbon.get_helix_smooth(), 0.0);
         assert_f64_eq(ribbon.sheet_smooth(), 0.5);
         assert_f64_eq(ribbon.coil_smooth(), 0.0);
         assert!(!ribbon.helix_usebackcol());
+        assert!(!ribbon.is_use_hb_col());
         assert!(!ribbon.sheet_usesidecol());
+        assert!(!ribbon.is_use_ss_col());
 
         let cartoon = Ribbon2Renderer::new();
         assert_eq!(cartoon.type_name(), "cartoon");
         assert_eq!(cartoon.axialdetail(), 8);
+        assert_eq!(cartoon.get_axial_detail(), 8);
         assert!(!cartoon.smoothcolor());
+        assert!(!cartoon.is_smooth_color());
         assert_f64_eq(cartoon.anchor_weight(), 10.0);
+        assert_f64_eq(cartoon.get_anchor_wgt(), 10.0);
         assert!(!cartoon.helix_ribbon());
         assert_f64_eq(cartoon.helix_smooth(), 3.0);
         assert_eq!(cartoon.helix_width_mode(), Ribbon2Renderer::HWIDTH_AVER);
+        assert_eq!(cartoon.get_helix_width_mode(), Ribbon2Renderer::HWIDTH_AVER);
         assert!(cartoon.is_width_aver());
         assert_f64_eq(cartoon.helix_width(), 2.3);
         assert_f64_eq(cartoon.helix_extend(), 0.5);
@@ -6292,8 +6952,10 @@ mod tests {
         assert_f64_eq(cartoon.sheet_wsmooth(), 5.0);
         assert_f64_eq(cartoon.coil_smooth(), -1.0);
         assert_eq!(cartoon.start_cap_type(), Ribbon2Renderer::TUBE_CAP_FLAT);
+        assert_eq!(cartoon.get_start_cap_type(), Ribbon2Renderer::TUBE_CAP_FLAT);
         assert_eq!(cartoon.end_cap_type(), Ribbon2Renderer::TUBE_CAP_FLAT);
         assert!(!cartoon.segend_fade());
+        assert!(!cartoon.is_seg_end_fade());
         assert!(!cartoon.dump_curvature());
     }
 
@@ -6302,17 +6964,21 @@ mod tests {
         let mut rainbow = RainbowColoring::new();
         assert_eq!(rainbow.type_name(), "rainbow");
         assert_f64_eq(rainbow.start_hue(), 240.0);
+        assert_f64_eq(rainbow.get_start_hue(), 240.0);
         assert_f64_eq(rainbow.end_hue(), 0.0);
         assert_f64_eq(rainbow.sat(), 1.0);
         assert_f64_eq(rainbow.bri(), 1.0);
         assert_eq!(rainbow.mode(), RainbowColoring::RBC_MOL);
+        assert_eq!(rainbow.get_mode(), RainbowColoring::RBC_MOL);
         assert_eq!(rainbow.incr_mode(), RainbowColoring::RBC_INCR_RESID);
+        assert_eq!(rainbow.get_incr_mode(), RainbowColoring::RBC_INCR_RESID);
         rainbow.set_mode(RainbowColoring::RBC_CHAIN);
         assert_eq!(rainbow.mode(), RainbowColoring::RBC_CHAIN);
 
         let mut script = ScriptColoring::new();
         assert_eq!(script.type_name(), "script");
         assert_eq!(script.script(), "");
+        assert_eq!(script.get_script(), "");
         script.set_script("atom.elem == 'C'");
         assert_eq!(script.script(), "atom.elem == 'C'");
 
@@ -6323,6 +6989,7 @@ mod tests {
         paint.insert_before(0, "name N", SolidColor::from_rgb(0.0, 1.0, 0.0));
         paint.insert_before(-1, "name O", SolidColor::from_rgb(0.0, 0.0, 1.0));
         assert_eq!(paint.len(), 3);
+        assert_eq!(paint.get_size(), 3);
         assert_eq!(paint.get_selection_at(0), Some("name N"));
         assert_eq!(paint.get_selection_at(1), Some("name CA"));
         assert_eq!(paint.get_selection_at(2), Some("name O"));

@@ -211,6 +211,9 @@ struct Model {
     /// Viewport background clear colour (CueMol2 Scene → Background): cycles
     /// dark / black / white. RGBA in 0..1 for the offscreen renderer.
     bg_clear: [f64; 4],
+    /// ICC soft proofing, configured through `color:icc_profile` and
+    /// `color:icc_intent` in the shared configuration.
+    color_proof: bool,
     /// Output/console log (CueMol2 bottom output panel): a scrollback of action
     /// results, script output, and errors. The status bar shows only the latest line.
     log: Vec<String>,
@@ -289,6 +292,7 @@ impl Model {
             animation_elapsed: 0.0,
             theme_light: false,
             bg_clear: VIEW_CLEAR,
+            color_proof: false,
             log: Vec::new(),
             show_console: false,
             show_properties: false,
@@ -332,6 +336,9 @@ impl Model {
             if let Some(mesh) = &self.surface_mesh {
                 snapshot.meshes.push(mesh.clone());
             }
+        }
+        if self.color_proof && self.state.apply_color_proof(&mut snapshot).is_err() {
+            cuemol_render::apply_generic_color_proof(&mut snapshot);
         }
         Some(snapshot)
     }
@@ -379,9 +386,9 @@ impl Model {
             .map(|object| object.uid)
             .collect();
         for uid in uids {
-            let _ = self
-                .state
-                .set_object_coloring(uid, coloring_type.map(String::from), attrs.clone());
+            let _ =
+                self.state
+                    .set_object_coloring(uid, coloring_type.map(String::from), attrs.clone());
         }
         self.status = match coloring_type {
             Some(name) => format!("Coloring: {name}"),
@@ -496,10 +503,11 @@ impl Model {
 
     /// Append an animation object to the timeline (CueMol2 anim-panel Add).
     fn add_anim(&mut self, kind: cuemol_desktop_core::AnimKind) {
-        self.animation_objects.push(cuemol_desktop_core::AnimObject {
-            kind,
-            duration: 3.0,
-        });
+        self.animation_objects
+            .push(cuemol_desktop_core::AnimObject {
+                kind,
+                duration: 3.0,
+            });
     }
 
     /// Remove the animation object at `index`.
@@ -514,7 +522,10 @@ impl Model {
     /// back (`delta`=+1) — CueMol2 anim-panel Up/Down reorder.
     fn move_anim(&mut self, index: usize, delta: i32) {
         let target = index as i32 + delta;
-        if index < self.animation_objects.len() && target >= 0 && (target as usize) < self.animation_objects.len() {
+        if index < self.animation_objects.len()
+            && target >= 0
+            && (target as usize) < self.animation_objects.len()
+        {
             self.animation_objects.swap(index, target as usize);
             self.animation_elapsed = 0.0;
         }
@@ -692,7 +703,10 @@ impl Model {
         self.push_undo();
         let index = self.state.renderer_summaries(object_uid).len();
         let name = format!("{ty}{index}");
-        match self.state.new_renderer_in_active_scene(object_uid, ty, name) {
+        match self
+            .state
+            .new_renderer_in_active_scene(object_uid, ty, name)
+        {
             Ok(_) => self.status = format!("Added {ty} renderer"),
             Err(error) => self.status = format!("Add renderer failed: {error}"),
         }
@@ -869,7 +883,10 @@ impl Model {
                 Err(error) => self.status = format!("Export image failed: {error}"),
             }
         } else {
-            match self.state.export_active_scene_pov(path, &self.selection_text) {
+            match self
+                .state
+                .export_active_scene_pov(path, &self.selection_text)
+            {
                 Ok(atoms) => self.status = format!("Exported {atoms} atoms → {path}"),
                 Err(error) => self.status = format!("Export scene failed: {error}"),
             }
@@ -1021,10 +1038,15 @@ impl Model {
             .unwrap_or_else(|| cuemol_core::Vector4::new3(0.0, 0.0, self.cut_offset));
         let normal = cuemol_core::Vector4::new3(0.0, 0.0, 1.0);
         let path = std::env::temp_dir().join("cuemol_cut_surface.obj");
-        match self
-            .state
-            .write_cut_surface_obj(uid, &self.selection_text, 1.0, 1.4, normal, center, &path)
-        {
+        match self.state.write_cut_surface_obj(
+            uid,
+            &self.selection_text,
+            1.0,
+            1.4,
+            normal,
+            center,
+            &path,
+        ) {
             Ok(summary) => {
                 self.status = format!("Cut surface: {} triangles", summary.triangle_count)
             }
@@ -1109,7 +1131,10 @@ impl Model {
             return;
         }
         self.push_undo();
-        match self.state.superpose_objects(objects[0], "*", objects[1], "*") {
+        match self
+            .state
+            .superpose_objects(objects[0], "*", objects[1], "*")
+        {
             Ok(_) => self.status = "Superposed molecule 2 onto molecule 1".into(),
             Err(error) => self.status = format!("Superpose failed: {error}"),
         }
@@ -1161,7 +1186,10 @@ impl Model {
         };
         let selection = self.selection_text.clone();
         self.push_undo();
-        match self.state.renumber_residues_in_object(uid, &selection, start) {
+        match self
+            .state
+            .renumber_residues_in_object(uid, &selection, start)
+        {
             Ok(count) => self.status = format!("Renumbered {count} atoms from {start}"),
             Err(error) => self.status = format!("Renumber failed: {error}"),
         }
@@ -1179,6 +1207,11 @@ impl Model {
             "toggle_projection" => self.toggle_projection(),
             "reassign_ss" => self.reassign_secondary(),
             "background" => self.cycle_background(),
+            "color_proof" => {
+                self.color_proof = !self.color_proof;
+                self.rebuild_selection();
+                self.status = format!("Color proofing: {}", self.color_proof);
+            }
             "clear_undo" => self.clear_undo_data(),
             "contacts" => self.find_contacts(),
             "superpose" => self.superpose(),
@@ -1395,7 +1428,8 @@ impl Model {
 
     /// Set the SCAPOT colour ± scale (0 = robust auto) and rebuild if it is showing.
     fn set_potential_scale(&mut self, scale: f64) {
-        self.state.set_potential_scale((scale > 0.0).then_some(scale));
+        self.state
+            .set_potential_scale((scale > 0.0).then_some(scale));
         if self.potential_surface {
             self.rebuild_surface_mesh();
             self.rebuild_selection();
@@ -1475,7 +1509,9 @@ impl Model {
                     for mesh in surfaces {
                         let base = merged.vertices.len() as u32;
                         merged.vertices.extend(mesh.vertices);
-                        merged.indices.extend(mesh.indices.iter().map(|index| base + index));
+                        merged
+                            .indices
+                            .extend(mesh.indices.iter().map(|index| base + index));
                     }
                     self.surface_mesh = Some(merged);
                     self.show_surface = true;
@@ -1551,7 +1587,10 @@ impl Model {
         let resid_sel = if summary.chain_id.is_empty() {
             format!("resid {}", summary.residue_id)
         } else {
-            format!("chain {} and resid {}", summary.chain_id, summary.residue_id)
+            format!(
+                "chain {} and resid {}",
+                summary.chain_id, summary.residue_id
+            )
         };
         let center = snapshot
             .atoms
@@ -1694,7 +1733,10 @@ impl Model {
                 } else {
                     chain.chain_id.as_str()
                 };
-                lines.push(format!("Chain {chain_id} — {} residues", chain.residues.len()));
+                lines.push(format!(
+                    "Chain {chain_id} — {} residues",
+                    chain.residues.len()
+                ));
                 for residue in &chain.residues {
                     let ins = residue.ins_code.map(String::from).unwrap_or_default();
                     lines.push(format!(
@@ -1870,6 +1912,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("New tab", "new_scene"),
             ("Close tab", "close_scene"),
             ("Background (cycle)", "background"),
+            ("Use color proofing", "color_proof"),
         ], // Scene
         4 => &[
             ("Fit view", "fit_view"),
@@ -1901,7 +1944,7 @@ fn menu_items(index: usize) -> &'static [(&'static str, &'static str)] {
             ("Clear log contents", "clear_log"),
             ("Restore default panel location", "restore_panels"),
         ], // Window
-        7 => &[("About", "about")],              // Help
+        7 => &[("About", "about")], // Help
         _ => &[],
     }
 }
@@ -1974,7 +2017,17 @@ fn app() -> Element {
 
     // Derive view data under a short read borrow, then release it before RSX so
     // the event handlers (which write the signal) never alias the read guard.
-    let (status, scene_name, image_uri, rows, sections, seq_chains, atom_labels, scenes, active_scene) = {
+    let (
+        status,
+        scene_name,
+        image_uri,
+        rows,
+        sections,
+        seq_chains,
+        atom_labels,
+        scenes,
+        active_scene,
+    ) = {
         let m = model.read();
         (
             m.status.clone(),
@@ -2259,8 +2312,9 @@ fn app() -> Element {
                     RibbonTab::Animation => rsx! {
                         button { style: "{color_btn_style}", onclick: move |_| model.write().toggle_animation(), {if anim_playing { "Stop" } else { "Play" }} }
                         button { style: "{color_btn_style}", onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Spin), "+ Spin" }
+                        button { style: "{color_btn_style}", onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::CameraMotion), "+ Camera" }
                         button { style: "{color_btn_style}", onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Rock), "+ Rock" }
-                        button { style: "{color_btn_style}", onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Pause), "+ Pause" }
+                        button { style: "{color_btn_style}", onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Pause), "+ Noop" }
                     },
                 }
             }
@@ -2724,9 +2778,14 @@ fn app() -> Element {
                                 "Labels"
                             }
                         }
-                        // Animation timeline (CueMol2 anim-panel): Add Spin/Rock/Pause + Play.
+                        // Animation timeline (CueMol2 anim-panel): quick-add presets + Play.
                         div { style: "{section_header_style}", "Animation" }
                         div { style: "display:flex;gap:4px;padding:4px 12px;flex-wrap:wrap;",
+                            button {
+                                style: "{color_btn_style}",
+                                onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::CameraMotion),
+                                "+ Camera"
+                            }
                             button {
                                 style: "{color_btn_style}",
                                 onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Spin),
@@ -2740,7 +2799,7 @@ fn app() -> Element {
                             button {
                                 style: "{color_btn_style}",
                                 onclick: move |_| model.write().add_anim(cuemol_desktop_core::AnimKind::Pause),
-                                "+ Pause"
+                                "+ Noop"
                             }
                             button {
                                 style: "{color_btn_style}",
@@ -3157,12 +3216,18 @@ mod tests {
         let mut model = Model::new(Vec::new());
         model.mesh_import_path = path.to_string_lossy().to_string();
         model.import_mesh();
-        assert!(model.surface_mesh.is_some(), "import must populate the surface slot");
+        assert!(
+            model.surface_mesh.is_some(),
+            "import must populate the surface slot"
+        );
         assert!(model.show_surface, "import must enable the surface display");
         // The mesh must reach the composited output, not just the slot: the display is
         // built from `self.mesh`, so import re-tessellates the snapshot (which now
         // carries the surface mesh) into it. Without that step the import is invisible.
-        let tessellated = model.mesh.as_ref().expect("import must re-tessellate the render mesh");
+        let tessellated = model
+            .mesh
+            .as_ref()
+            .expect("import must re-tessellate the render mesh");
         assert!(
             !tessellated.vertices.is_empty(),
             "the imported triangle must appear in the tessellated render mesh"
@@ -3191,8 +3256,14 @@ mod tests {
         std::fs::write(&path, &qsc).unwrap();
         let mut model = Model::new(Vec::new());
         model.open_path(path.clone());
-        assert!(model.surface_mesh.is_some(), "a .qsc surface must populate the surface slot");
-        assert!(model.show_surface, "a .qsc surface must enable the surface display");
+        assert!(
+            model.surface_mesh.is_some(),
+            "a .qsc surface must populate the surface slot"
+        );
+        assert!(
+            model.show_surface,
+            "a .qsc surface must enable the surface display"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -3444,7 +3515,11 @@ mod tests {
 
         let out_pdb = dir.join("out.pdb");
         model.save_object(out_pdb.to_str().unwrap());
-        assert!(out_pdb.exists(), "save_object wrote a file ({})", model.status);
+        assert!(
+            out_pdb.exists(),
+            "save_object wrote a file ({})",
+            model.status
+        );
         let atom_lines = std::fs::read_to_string(&out_pdb)
             .unwrap()
             .lines()
@@ -3496,14 +3571,25 @@ mod tests {
         // Change chain: rename the whole molecule's chain A → Z.
         model.set_selection("chain A");
         model.change_chain("Z");
-        assert_eq!(sel_count(&model, "chain A"), 0, "no atom remains on chain A");
-        assert_eq!(sel_count(&model, "chain Z"), atoms, "every atom moved to chain Z");
+        assert_eq!(
+            sel_count(&model, "chain A"),
+            0,
+            "no atom remains on chain A"
+        );
+        assert_eq!(
+            sel_count(&model, "chain Z"),
+            atoms,
+            "every atom moved to chain Z"
+        );
 
         // Renumber chain Z residues starting at 100 — the first residue becomes 100.
         model.set_selection("chain Z");
         model.renumber_residues(100);
         assert_eq!(sel_count(&model, "resid 1"), 0, "residue 1 renumbered away");
-        assert!(sel_count(&model, "resid 100") > 0, "first residue is now 100");
+        assert!(
+            sel_count(&model, "resid 100") > 0,
+            "first residue is now 100"
+        );
 
         // Delete the (renumbered) first residue.
         model.set_selection("resid 100");
@@ -3515,7 +3601,11 @@ mod tests {
             before - residue_atoms,
             "deletion removed exactly the selected residue's atoms"
         );
-        assert_eq!(sel_count(&model, "resid 100"), 0, "the deleted residue is gone");
+        assert_eq!(
+            sel_count(&model, "resid 100"),
+            0,
+            "the deleted residue is gone"
+        );
     }
 
     #[test]
@@ -3635,7 +3725,10 @@ mod tests {
 
         // A context-select applies the expression + closes the menu.
         model.context_select("resid 1");
-        assert_eq!(model.selection_text, "resid 1", "context select set selection");
+        assert_eq!(
+            model.selection_text, "resid 1",
+            "context select set selection"
+        );
         assert!(model.context_menu.is_none(), "select closes the menu");
 
         // Center moves the camera + closes the menu.
@@ -3669,7 +3762,10 @@ mod tests {
         );
         model.measure_performance();
         assert!(
-            model.log.iter().any(|line| line.starts_with("Performance:")),
+            model
+                .log
+                .iter()
+                .any(|line| line.starts_with("Performance:")),
             "performance logged"
         );
 
@@ -3694,7 +3790,11 @@ mod tests {
 
         let script = std::env::temp_dir().join("cuemol_test_script.js");
         // Real JS execution (boa): arithmetic + cuemol.print + cuemol.select.
-        std::fs::write(&script, "cuemol.print('sum=' + (3+4)); cuemol.select('resid 2');").unwrap();
+        std::fs::write(
+            &script,
+            "cuemol.print('sum=' + (3+4)); cuemol.select('resid 2');",
+        )
+        .unwrap();
         model.execute_script(script.to_str().unwrap());
         assert!(model.show_console, "Execute script opens the console");
         assert!(
@@ -3702,7 +3802,10 @@ mod tests {
             "JS executed + printed (boa), log: {:?}",
             model.log
         );
-        assert_eq!(model.selection_text, "resid 2", "script applied a selection");
+        assert_eq!(
+            model.selection_text, "resid 2",
+            "script applied a selection"
+        );
         let _ = std::fs::remove_file(&script);
     }
 
@@ -3713,7 +3816,13 @@ mod tests {
         let Some(pdb) = ref_1crn() else { return };
         let mut model = Model::new(vec![pdb]);
         model.selection_text = "resid 1:5".to_string(); // cheap SES
-        let tris = |model: &Model| model.surface_mesh.as_ref().map(|m| m.indices.len()).unwrap_or(0);
+        let tris = |model: &Model| {
+            model
+                .surface_mesh
+                .as_ref()
+                .map(|m| m.indices.len())
+                .unwrap_or(0)
+        };
 
         model.toggle_surface();
         let full = tris(&model);
@@ -3917,11 +4026,7 @@ mod tests {
         // Projection toggle flips perspective/orthographic.
         let before = model.camera.is_perspective();
         model.toggle_projection();
-        assert_eq!(
-            model.camera.is_perspective(),
-            !before,
-            "projection toggled"
-        );
+        assert_eq!(model.camera.is_perspective(), !before, "projection toggled");
 
         // Fit re-frames the camera without panicking, yielding a valid (positive) zoom.
         model.fit_view();
@@ -4003,7 +4108,9 @@ mod tests {
                 .map(|a| a.position)
                 .collect();
             let n = atoms.len() as f64;
-            let sum = atoms.iter().fold(cuemol_core::Vector4::ZERO, |acc, p| acc + *p);
+            let sum = atoms
+                .iter()
+                .fold(cuemol_core::Vector4::ZERO, |acc, p| acc + *p);
             cuemol_core::Vector4::new3(sum.x / n, sum.y / n, sum.z / n)
         };
         let n = 80usize;
@@ -4017,24 +4124,29 @@ mod tests {
                 }
             }
         }
-        model.state.set_surface_potential_map(
-            cuemol_desktop_core::DensityMap::from_grid_map(cuemol_desktop_core::GridMap {
-                counts: [n, n, n],
-                origin,
-                delta: [
-                    cuemol_core::Vector4::new3(1.0, 0.0, 0.0),
-                    cuemol_core::Vector4::new3(0.0, 1.0, 0.0),
-                    cuemol_core::Vector4::new3(0.0, 0.0, 1.0),
-                ],
-                values,
-            }),
-        );
+        model
+            .state
+            .set_surface_potential_map(cuemol_desktop_core::DensityMap::from_grid_map(
+                cuemol_desktop_core::GridMap {
+                    counts: [n, n, n],
+                    origin,
+                    delta: [
+                        cuemol_core::Vector4::new3(1.0, 0.0, 0.0),
+                        cuemol_core::Vector4::new3(0.0, 1.0, 0.0),
+                        cuemol_core::Vector4::new3(0.0, 0.0, 1.0),
+                    ],
+                    values,
+                },
+            ));
         model.toggle_potential_surface();
         assert!(model.potential_surface && model.show_surface);
         let mesh = model.surface_mesh.as_ref().expect("potential SES cached");
         let red = mesh.vertices.iter().any(|v| v.color[0] > v.color[2] + 0.02);
         let blue = mesh.vertices.iter().any(|v| v.color[2] > v.color[0] + 0.02);
-        assert!(red && blue, "the SES must span the red→blue potential gradient");
+        assert!(
+            red && blue,
+            "the SES must span the red→blue potential gradient"
+        );
     }
 
     #[test]

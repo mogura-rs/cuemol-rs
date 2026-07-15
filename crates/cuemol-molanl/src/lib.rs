@@ -406,6 +406,10 @@ impl MolAnlManager {
         molecule.calc_prot_2ndry2(ignore_breaks, angle);
     }
 
+    pub fn calc_prot2ndry2(&self, molecule: &mut MolCoord, ignore_breaks: bool, angle: f64) {
+        self.calc_prot_2ndry2(molecule, ignore_breaks, angle);
+    }
+
     pub fn calc_prot_2_ndry_2(&self, molecule: &mut MolCoord, ignore_breaks: bool, angle: f64) {
         self.calc_prot_2ndry2(molecule, ignore_breaks, angle);
     }
@@ -462,6 +466,10 @@ impl MolAnlManager {
         selector: &Selector,
         secondary_type: i32,
     ) {
+        self.set_prot_2ndry(molecule, selector, secondary_type);
+    }
+
+    pub fn set_prot2ndry(&self, molecule: &mut MolCoord, selector: &Selector, secondary_type: i32) {
         self.set_prot_2ndry(molecule, selector, secondary_type);
     }
 }
@@ -902,7 +910,11 @@ mod tests {
             "a collision must abort the rename"
         );
         assert_eq!(mol.residue_count(), 2, "no silent residue merge");
-        assert_eq!(mol.atoms()[1].chain_id, "B", "the molecule is left untouched");
+        assert_eq!(
+            mol.atoms()[1].chain_id,
+            "B",
+            "the molecule is left untouched"
+        );
     }
 
     #[test]
@@ -913,7 +925,8 @@ mod tests {
         let manager = MolAnlManager::new();
         let mut mol = MolCoord::new();
         mol.push_atom(atom(1, "CA", "A", 1, "C", 0.0));
-        mol.set_residue_prop_str("A", "1", "secondary", "Hs").unwrap();
+        mol.set_residue_prop_str("A", "1", "secondary", "Hs")
+            .unwrap();
         let sel = parse_selector("chain A").unwrap();
         assert!(manager.change_chain_name(&mut mol, &sel, "Z"));
         assert_eq!(
@@ -994,7 +1007,9 @@ mod tests {
 
         manager.set_prot_2ndry_with_undo(&mut molecule, &Selector::All, 2, &mut undo);
         assert_eq!(
-            molecule.get_residue_prop_str("A", "1", "secondary").unwrap(),
+            molecule
+                .get_residue_prop_str("A", "1", "secondary")
+                .unwrap(),
             Some("helix")
         );
         assert!(undo.is_undoable());
@@ -1002,13 +1017,17 @@ mod tests {
         assert!(undo.undo(&mut molecule));
         // Before the edit there was no secondary assignment for the residue.
         assert_eq!(
-            molecule.get_residue_prop_str("A", "1", "secondary").unwrap(),
+            molecule
+                .get_residue_prop_str("A", "1", "secondary")
+                .unwrap(),
             None
         );
 
         assert!(undo.redo(&mut molecule));
         assert_eq!(
-            molecule.get_residue_prop_str("A", "1", "secondary").unwrap(),
+            molecule
+                .get_residue_prop_str("A", "1", "secondary")
+                .unwrap(),
             Some("helix")
         );
     }

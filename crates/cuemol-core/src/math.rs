@@ -47,12 +47,20 @@ impl Vector4 {
         self.x
     }
 
+    pub fn get_x(&self) -> f64 {
+        self.x()
+    }
+
     pub fn set_x(&mut self, value: f64) {
         self.x = value;
     }
 
     pub fn y(&self) -> f64 {
         self.y
+    }
+
+    pub fn get_y(&self) -> f64 {
+        self.y()
     }
 
     pub fn set_y(&mut self, value: f64) {
@@ -63,12 +71,20 @@ impl Vector4 {
         self.z
     }
 
+    pub fn get_z(&self) -> f64 {
+        self.z()
+    }
+
     pub fn set_z(&mut self, value: f64) {
         self.z = value;
     }
 
     pub fn w(&self) -> f64 {
         self.w
+    }
+
+    pub fn get_w(&self) -> f64 {
+        self.w()
     }
 
     pub fn set_w(&mut self, value: f64) {
@@ -273,6 +289,10 @@ impl Vector4 {
     pub fn set_strvalue(&mut self, value: &str) -> Result<()> {
         *self = Self::from_script_string(value)?;
         Ok(())
+    }
+
+    pub fn set_str_value(&mut self, value: &str) -> Result<()> {
+        self.set_strvalue(value)
     }
 
     pub fn from_string(input: &str) -> Result<Self> {
@@ -1027,12 +1047,20 @@ impl Quat {
         self.w
     }
 
+    pub fn get_a(&self) -> f64 {
+        self.a()
+    }
+
     pub fn set_a(&mut self, value: f64) {
         self.w = value;
     }
 
     pub fn x(&self) -> f64 {
         self.x
+    }
+
+    pub fn get_x(&self) -> f64 {
+        self.x()
     }
 
     pub fn set_x(&mut self, value: f64) {
@@ -1043,12 +1071,20 @@ impl Quat {
         self.y
     }
 
+    pub fn get_y(&self) -> f64 {
+        self.y()
+    }
+
     pub fn set_y(&mut self, value: f64) {
         self.y = value;
     }
 
     pub fn z(&self) -> f64 {
         self.z
+    }
+
+    pub fn get_z(&self) -> f64 {
+        self.z()
     }
 
     pub fn set_z(&mut self, value: f64) {
@@ -1073,7 +1109,7 @@ impl fmt::Display for Quat {
     }
 }
 
-fn jacobi_eigen3(mut matrix: [[f64; 3]; 3]) -> ([[f64; 3]; 3], [f64; 3]) {
+pub(crate) fn jacobi_eigen3(mut matrix: [[f64; 3]; 3]) -> ([[f64; 3]; 3], [f64; 3]) {
     let mut vectors = [[0.0; 3]; 3];
     for (i, row) in vectors.iter_mut().enumerate() {
         row[i] = 1.0;
@@ -1153,7 +1189,15 @@ mod tests {
         assert!((Vector4::torsion(i, j, k, l_neg).unwrap().to_degrees() + 90.0).abs() < 1.0e-9);
         // Trans (anti) arrangement is +-180.
         let l_trans = Vector4::new3(1.0, -1.0, 0.0);
-        assert!((Vector4::torsion(i, j, k, l_trans).unwrap().to_degrees().abs() - 180.0).abs() < 1.0e-9);
+        assert!(
+            (Vector4::torsion(i, j, k, l_trans)
+                .unwrap()
+                .to_degrees()
+                .abs()
+                - 180.0)
+                .abs()
+                < 1.0e-9
+        );
         // Degenerate (collinear i-j-k) is an error, not a silent zero.
         assert!(Vector4::torsion(j, j, k, l_pos).is_err());
     }

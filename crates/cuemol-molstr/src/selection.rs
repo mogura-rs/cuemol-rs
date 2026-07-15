@@ -99,26 +99,41 @@ pub struct HierSelector {
 #[derive(Debug, Default, Clone)]
 pub struct SelCommand {
     selector: Option<Selector>,
+    original: String,
     pub error_msg: String,
 }
 
 impl SelCommand {
+    pub const SEL_NONE: i32 = 0;
+    pub const SEL_ALL: i32 = 1;
+    pub const SEL_PART: i32 = 2;
+    pub const SEL_UNKNOWN: i32 = 3;
+
     pub fn new() -> Self {
         Self {
             selector: None,
+            original: String::new(),
             error_msg: String::new(),
         }
     }
 
     pub fn compile(&mut self, expression: &str, _flags: u32) -> bool {
+        if expression.is_empty() {
+            self.selector = None;
+            self.original.clear();
+            self.error_msg.clear();
+            return true;
+        }
         match parse_selector(expression) {
             Ok(selector) => {
                 self.selector = Some(selector);
+                self.original = expression.to_string();
                 self.error_msg.clear();
                 true
             }
             Err(error) => {
                 self.selector = None;
+                self.original.clear();
                 self.error_msg = error.to_string().to_ascii_lowercase();
                 false
             }
@@ -126,8 +141,15 @@ impl SelCommand {
     }
 
     pub fn compile_result(&mut self, expression: &str) -> Result<()> {
+        if expression.is_empty() {
+            self.selector = None;
+            self.original.clear();
+            self.error_msg.clear();
+            return Ok(());
+        }
         let selector = parse_selector(expression)?;
         self.selector = Some(selector);
+        self.original = expression.to_string();
         self.error_msg.clear();
         Ok(())
     }
@@ -141,6 +163,115 @@ impl SelCommand {
             .as_ref()
             .map(Selector::dump)
             .unwrap_or_else(|| "(null)".to_string())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.selector.is_none()
+    }
+
+    pub fn is_selected(&self, atom: &Atom) -> bool {
+        self.selector
+            .as_ref()
+            .is_none_or(|selector| selector.matches(atom))
+    }
+
+    pub fn is_selected_resid(&self, residue: &crate::ResidueView<'_>) -> i32 {
+        selection_status(
+            self.selector.as_ref(),
+            residue.molecule(),
+            residue.atom_indices().iter().copied(),
+        )
+    }
+
+    pub fn is_selected_chain(&self, chain: &crate::ChainView<'_>) -> i32 {
+        let molecule = chain.molecule();
+        let statuses = molecule
+            .residue_summaries()
+            .into_iter()
+            .filter(|residue| residue.key.chain_id == chain.name())
+            .map(|residue| {
+                selection_status(
+                    self.selector.as_ref(),
+                    molecule,
+                    residue.atom_indices.into_iter(),
+                )
+            });
+        aggregate_status(statuses)
+    }
+
+    pub fn is_selected_mol(&self, molecule: &MolCoord) -> i32 {
+        let statuses = molecule.chain_summaries().into_iter().map(|chain| {
+            let residue_statuses = molecule
+                .residue_summaries()
+                .into_iter()
+                .filter(|residue| residue.key.chain_id == chain.chain_id)
+                .map(|residue| {
+                    selection_status(
+                        self.selector.as_ref(),
+                        molecule,
+                        residue.atom_indices.into_iter(),
+                    )
+                });
+            aggregate_status(residue_statuses)
+        });
+        aggregate_status(statuses)
+    }
+
+    pub fn get_error_msg(&self) -> &str {
+        &self.error_msg
+    }
+
+    pub fn set_error_msg(&mut self, value: impl Into<String>) {
+        self.error_msg = value.into();
+    }
+
+    #[allow(clippy::inherent_to_string)]
+    pub fn to_string(&self) -> String {
+        if self.selector.is_some() {
+            self.original.clone()
+        } else {
+            String::new()
+        }
+    }
+}
+
+fn selection_status(
+    selector: Option<&Selector>,
+    molecule: &MolCoord,
+    indices: impl Iterator<Item = usize>,
+) -> i32 {
+    let Some(selector) = selector else {
+        return SelCommand::SEL_ALL;
+    };
+    let mut count = 0usize;
+    let mut selected = 0usize;
+    for index in indices {
+        if let Some(atom) = molecule.atoms().get(index) {
+            count += 1;
+            selected += usize::from(selector.matches_in_molecule(atom, molecule));
+        }
+    }
+    match selected {
+        0 if count > 0 => SelCommand::SEL_NONE,
+        value if value == count => SelCommand::SEL_ALL,
+        _ => SelCommand::SEL_PART,
+    }
+}
+
+fn aggregate_status(statuses: impl Iterator<Item = i32>) -> i32 {
+    let statuses = statuses.collect::<Vec<_>>();
+    if statuses
+        .iter()
+        .all(|status| *status != SelCommand::SEL_NONE)
+    {
+        SelCommand::SEL_ALL
+    } else if statuses
+        .iter()
+        .all(|status| *status == SelCommand::SEL_NONE)
+    {
+        SelCommand::SEL_NONE
+    } else {
+        SelCommand::SEL_PART
     }
 }
 
@@ -160,10 +291,7 @@ pub fn parse_selector(input: &str) -> Result<Selector> {
 
 /// Parse a selection, resolving any `sel name` references against `registry`
 /// (named/saved selections). Errors on an unknown or cyclic name.
-pub fn parse_named_selector(
-    input: &str,
-    registry: &HashMap<String, Selector>,
-) -> Result<Selector> {
+pub fn parse_named_selector(input: &str, registry: &HashMap<String, Selector>) -> Result<Selector> {
     parse_selector(input)?.resolve_named(registry)
 }
 
@@ -185,9 +313,9 @@ impl Selector {
         }
         Ok(match self {
             Selector::Ref(name) => {
-                let target = registry.get(name).ok_or_else(|| {
-                    CueMolError::parse(format!("unknown selection name: {name}"))
-                })?;
+                let target = registry
+                    .get(name)
+                    .ok_or_else(|| CueMolError::parse(format!("unknown selection name: {name}")))?;
                 target.resolve_named_depth(registry, depth + 1)?
             }
             Selector::Not(inner) => {
@@ -336,6 +464,12 @@ impl Selector {
             }
             _ => self.matches(atom),
         }
+    }
+}
+
+impl std::fmt::Display for Selector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.dump())
     }
 }
 
@@ -585,19 +719,20 @@ impl HierSelector {
     }
 
     fn matches(&self, atom: &Atom) -> bool {
-        let chain_ok = self.chain == "*"
-            || self
-                .chain
-                .split(',')
-                .any(|v| v.eq_ignore_ascii_case(&atom.chain_id));
+        let chain_ok = hier_name_list_matches(&self.chain, &atom.chain_id, false);
         let residue_ok = self.residue == "*" || residue_selector_matches(&self.residue, atom);
-        let atom_ok = self.atom == "*"
-            || self
-                .atom
-                .split(',')
-                .any(|v| atom.matches_name_case_insensitive(v));
+        let atom_ok = hier_name_list_matches(&self.atom, &atom.name, true);
         chain_ok && residue_ok && atom_ok
     }
+}
+
+fn hier_name_list_matches(input: &str, value: &str, trim_value: bool) -> bool {
+    if input == "*" {
+        return true;
+    }
+    let value = if trim_value { value.trim() } else { value };
+    parse_name_list(input, ListKind::Name)
+        .is_ok_and(|patterns| patterns.iter().any(|pattern| pattern.matches_bare(value)))
 }
 
 fn dump_name_list(values: &[NamePattern]) -> String {
@@ -1577,20 +1712,7 @@ fn is_insertion_residue_token(input: &str) -> bool {
 }
 
 fn simple_regex_matches(pattern: &str, value: &str) -> bool {
-    if let Some(rest) = pattern.strip_prefix('^') {
-        if let Some(prefix) = rest.strip_suffix('$') {
-            value == prefix
-        } else if rest == "[A-Z]" {
-            value
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_uppercase())
-        } else {
-            value.starts_with(rest)
-        }
-    } else {
-        value.contains(pattern)
-    }
+    regex::Regex::new(pattern).is_ok_and(|expression| expression.is_match(value))
 }
 
 fn is_ident_continue(ch: char) -> bool {
@@ -1631,7 +1753,7 @@ fn at_token_start(bytes: &[u8], start: usize, pos: usize) -> bool {
     }
     bytes
         .get(pos.saturating_sub(1))
-        .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b',')
+        .is_some_and(|byte| byte.is_ascii_whitespace() || matches!(*byte, b',' | b'.'))
 }
 
 #[cfg(test)]
@@ -1718,6 +1840,37 @@ ATOM      3  C   THR B   2      15.685  12.755   5.133  1.00  9.19           C
         let selector = parse_selector("chain A and elem C").unwrap();
         let selected = mol.select_indices(&selector);
         assert_eq!(selected, vec![1]);
+        assert_eq!(
+            mol.select_indices(&parse_selector("'A'.1.'CA'").unwrap()),
+            vec![1]
+        );
+        assert_eq!(
+            mol.select_indices(&parse_selector("/^A$/.1./^N|CA$/").unwrap()),
+            vec![0, 1]
+        );
+
+        let mut command = SelCommand::new();
+        assert!(command.is_empty());
+        assert!(command.is_selected(&mol.atoms()[0]));
+        assert_eq!(command.is_selected_mol(&mol), SelCommand::SEL_ALL);
+        assert!(command.compile("name CA", 0));
+        assert_eq!(command.to_string(), "name CA");
+        assert!(!command.is_selected(&mol.atoms()[0]));
+        assert!(command.is_selected(&mol.atoms()[1]));
+        assert_eq!(command.is_selected_mol(&mol), SelCommand::SEL_PART);
+        let residues = crate::ResidIterator::all(&mol);
+        assert_eq!(
+            command.is_selected_resid(residues.get().unwrap()),
+            SelCommand::SEL_PART
+        );
+        let chains = crate::ChainIterator::all(&mol);
+        assert_eq!(
+            command.is_selected_chain(chains.get().unwrap()),
+            SelCommand::SEL_ALL
+        );
+        assert!(command.compile("", 0));
+        assert!(command.is_empty());
+        assert_eq!(command.to_string(), "");
     }
 
     #[test]

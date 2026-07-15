@@ -1,6 +1,7 @@
 use crate::{InOutHandler, RendererFactory, RendererInstance, SceneManager};
 use cuemol_core::{CueMolError, Result, Uid};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +113,10 @@ impl CreatedRenderer {
         self.uid
     }
 
+    pub fn get_uid(&self) -> Uid {
+        self.uid()
+    }
+
     pub fn target_object(&self) -> Uid {
         self.target_object
     }
@@ -126,6 +131,12 @@ impl CreatedRenderer {
 
     pub fn default_style_name(&self) -> &str {
         &self.default_style_name
+    }
+}
+
+impl fmt::Display for CommandInstance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -291,6 +302,10 @@ impl NewSceneCommand {
 
     pub fn scene_name(&self) -> &str {
         &self.scene_name
+    }
+
+    pub fn get_scene_name(&self) -> &str {
+        self.scene_name()
     }
 
     pub fn set_scene_name(&mut self, value: impl Into<String>) {
@@ -838,6 +853,10 @@ impl CommandInstance {
             Self::LoadObject(command) => command.uid,
             Self::LoadScene(command) => command.uid,
         }
+    }
+
+    pub fn get_uid(&self) -> Uid {
+        self.uid()
     }
 
     pub fn to_command_string(&self) -> String {

@@ -25,6 +25,10 @@ impl CueMolError {
         Self::UndefinedReference(message.into())
     }
 
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound(message.into())
+    }
+
     pub fn message(&self) -> &str {
         match self {
             Self::InvalidArgument(message)

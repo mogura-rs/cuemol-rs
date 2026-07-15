@@ -77,7 +77,11 @@ pub struct TextInput {
 impl TextInput {
     /// Build a new input pre-filled with `initial`, showing `placeholder` when
     /// empty. Construct inside `cx.new(|cx| TextInput::new(cx, ...))`.
-    pub fn new(cx: &mut Context<Self>, placeholder: impl Into<SharedString>, initial: &str) -> Self {
+    pub fn new(
+        cx: &mut Context<Self>,
+        placeholder: impl Into<SharedString>,
+        initial: &str,
+    ) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             content: initial.to_string().into(),
@@ -157,7 +161,12 @@ impl TextInput {
         self.replace_text_in_range(None, "", window, cx)
     }
 
-    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Focus this field so the global editing key bindings route their actions
         // here. Without this, clicking a field in a multi-input app leaves focus
         // elsewhere and typing is silently dropped (the gpui example dodges this by
@@ -325,7 +334,11 @@ impl EntityInputHandler for TextInput {
         })
     }
 
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
         self.marked_range
             .as_ref()
             .map(|range| self.range_to_utf16(range))
@@ -349,7 +362,8 @@ impl EntityInputHandler for TextInput {
             .unwrap_or(self.selected_range.clone());
 
         self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
         cx.notify();
@@ -370,7 +384,8 @@ impl EntityInputHandler for TextInput {
             .unwrap_or(self.selected_range.clone());
 
         self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -394,8 +409,14 @@ impl EntityInputHandler for TextInput {
         let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
         Some(Bounds::from_corners(
-            point(bounds.left() + last_layout.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + last_layout.x_for_index(range.end), bounds.bottom()),
+            point(
+                bounds.left() + last_layout.x_for_index(range.start),
+                bounds.top(),
+            ),
+            point(
+                bounds.left() + last_layout.x_for_index(range.end),
+                bounds.bottom(),
+            ),
         ))
     }
 
@@ -526,7 +547,10 @@ impl Element for TextElement {
         };
         let runs = if let Some(marked_range) = input.marked_range.as_ref() {
             vec![
-                TextRun { len: marked_range.start, ..run.clone() },
+                TextRun {
+                    len: marked_range.start,
+                    ..run.clone()
+                },
                 TextRun {
                     len: marked_range.end - marked_range.start,
                     underline: Some(UnderlineStyle {
@@ -536,7 +560,10 @@ impl Element for TextElement {
                     }),
                     ..run.clone()
                 },
-                TextRun { len: display_text.len() - marked_range.end, ..run },
+                TextRun {
+                    len: display_text.len() - marked_range.end,
+                    ..run
+                },
             ]
             .into_iter()
             .filter(|run| run.len > 0)
@@ -546,7 +573,9 @@ impl Element for TextElement {
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window.text_system().shape_line(display_text, font_size, &runs, None);
+        let line = window
+            .text_system()
+            .shape_line(display_text, font_size, &runs, None);
 
         let cursor_pos = line.x_for_index(cursor);
         let (selection, cursor) = if selected_range.is_empty() {
@@ -564,15 +593,25 @@ impl Element for TextElement {
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(bounds.left() + line.x_for_index(selected_range.start), bounds.top()),
-                        point(bounds.left() + line.x_for_index(selected_range.end), bounds.bottom()),
+                        point(
+                            bounds.left() + line.x_for_index(selected_range.start),
+                            bounds.top(),
+                        ),
+                        point(
+                            bounds.left() + line.x_for_index(selected_range.end),
+                            bounds.bottom(),
+                        ),
                     ),
                     rgba(0x3311ff44),
                 )),
                 None,
             )
         };
-        PrepaintState { line: Some(line), cursor, selection }
+        PrepaintState {
+            line: Some(line),
+            cursor,
+            selection,
+        }
     }
 
     fn paint(
@@ -595,7 +634,8 @@ impl Element for TextElement {
             window.paint_quad(selection)
         }
         let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx).unwrap();
+        line.paint(bounds.origin, window.line_height(), window, cx)
+            .unwrap();
 
         if focus_handle.is_focused(window) {
             if let Some(cursor) = prepaint.cursor.take() {

@@ -1,7 +1,16 @@
-use crate::{Camera, SceneObject, View};
-use cuemol_core::Uid;
+use crate::{Camera, SceneEvent, SceneObject, ScrEventManagerHandle, UndoManagerHandle, View};
+use cuemol_core::{EventCaster, SharedEventListener, Uid, UidGenerator};
 use cuemol_gfx::SolidColor;
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AAMethod {
+    None,
+    #[default]
+    Fxaa,
+    Smaa,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scene<T> {
@@ -11,19 +20,27 @@ pub struct Scene<T> {
     source_type: String,
     base_path: String,
     bg_color: SolidColor,
+    ao_enabled: bool,
+    ao_radius: f64,
+    ao_intensity: f64,
+    ao_slices: i32,
+    ao_steps: i32,
+    ao_half_res: bool,
+    aa_method: AAMethod,
+    aa_jitter_level: i32,
     onload: String,
     use_colproof: bool,
     icc_filename: String,
     icc_intent: i32,
-    next_listener_id: i32,
-    listeners: Vec<i32>,
+    event_caster: Arc<EventCaster<SceneEvent>>,
+    event_manager: Option<ScrEventManagerHandle>,
+    undo_manager: UndoManagerHandle,
     modified: bool,
     just_created: bool,
     objects: BTreeMap<Uid, SceneObject<T>>,
     views: BTreeMap<Uid, View>,
     cameras: BTreeMap<String, Camera>,
-    next_object_uid: u64,
-    next_view_uid: u64,
+    uid_generator: UidGenerator,
     active_object_uid: Option<Uid>,
     active_renderer_uid: Option<Uid>,
     active_view_uid: Option<Uid>,
@@ -46,6 +63,10 @@ impl AnimMgrHandle {
 
 impl<T> Scene<T> {
     pub fn new(uid: Uid, name: impl Into<String>) -> Self {
+        Self::with_uid_generator(uid, name, UidGenerator::starting_after(uid.get()))
+    }
+
+    fn with_uid_generator(uid: Uid, name: impl Into<String>, uid_generator: UidGenerator) -> Self {
         Self {
             uid,
             name: name.into(),
@@ -53,19 +74,27 @@ impl<T> Scene<T> {
             source_type: String::new(),
             base_path: String::new(),
             bg_color: SolidColor::from_rgb(0.0, 0.0, 0.0),
+            ao_enabled: false,
+            ao_radius: 4.0,
+            ao_intensity: 2.2,
+            ao_slices: 9,
+            ao_steps: 3,
+            ao_half_res: false,
+            aa_method: AAMethod::Fxaa,
+            aa_jitter_level: 0,
             onload: String::new(),
             use_colproof: false,
             icc_filename: String::new(),
             icc_intent: 0,
-            next_listener_id: 1,
-            listeners: Vec::new(),
+            event_caster: Arc::new(EventCaster::new()),
+            event_manager: None,
+            undo_manager: UndoManagerHandle::new(),
             modified: false,
             just_created: true,
             objects: BTreeMap::new(),
             views: BTreeMap::new(),
             cameras: BTreeMap::new(),
-            next_object_uid: 1,
-            next_view_uid: 1,
+            uid_generator,
             active_object_uid: None,
             active_renderer_uid: None,
             active_view_uid: None,
@@ -76,6 +105,16 @@ impl<T> Scene<T> {
         self.uid
     }
 
+    pub fn attach_event_manager(&mut self, manager: ScrEventManagerHandle) {
+        self.event_manager = Some(manager.clone());
+        for object in self.objects.values_mut() {
+            object.attach_event_manager(manager.clone());
+        }
+        for view in self.views.values_mut() {
+            view.attach_event_manager(manager.clone());
+        }
+    }
+
     pub fn get_uid(&self) -> Uid {
         self.uid()
     }
@@ -84,13 +123,22 @@ impl<T> Scene<T> {
         &self.name
     }
 
+    pub fn get_name(&self) -> &str {
+        self.name()
+    }
+
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
         self.modified = true;
+        self.fire_property_changed("name");
     }
 
     pub fn source(&self) -> &str {
         &self.source
+    }
+
+    pub fn get_source(&self) -> &str {
+        self.source()
     }
 
     pub fn src(&self) -> &str {
@@ -100,10 +148,15 @@ impl<T> Scene<T> {
     pub fn set_source(&mut self, value: impl Into<String>) {
         self.source = value.into();
         self.modified = true;
+        self.fire_property_changed("src");
     }
 
     pub fn source_type(&self) -> &str {
         &self.source_type
+    }
+
+    pub fn get_source_type(&self) -> &str {
+        self.source_type()
     }
 
     pub fn srctype(&self) -> &str {
@@ -113,10 +166,15 @@ impl<T> Scene<T> {
     pub fn set_source_type(&mut self, value: impl Into<String>) {
         self.source_type = value.into();
         self.modified = true;
+        self.fire_property_changed("srctype");
     }
 
     pub fn base_path(&self) -> &str {
         &self.base_path
+    }
+
+    pub fn get_base_path(&self) -> &str {
+        self.base_path()
     }
 
     pub fn base_path_qif(&self) -> &str {
@@ -125,10 +183,15 @@ impl<T> Scene<T> {
 
     pub fn set_base_path(&mut self, value: impl Into<String>) {
         self.base_path = value.into();
+        self.fire_property_changed("base_path");
     }
 
     pub fn bg_color(&self) -> &SolidColor {
         &self.bg_color
+    }
+
+    pub fn get_bg_color(&self) -> &SolidColor {
+        self.bg_color()
     }
 
     pub fn bgcolor(&self) -> &SolidColor {
@@ -138,6 +201,111 @@ impl<T> Scene<T> {
     pub fn set_bg_color(&mut self, value: SolidColor) {
         self.bg_color = value;
         self.modified = true;
+        self.fire_property_changed("bgcolor");
+    }
+
+    pub fn is_ao_enabled(&self) -> bool {
+        self.ao_enabled
+    }
+
+    pub fn set_ao_enabled(&mut self, value: bool) {
+        self.ao_enabled = value;
+        self.mark_render_option_changed("aoEnabled");
+    }
+
+    pub fn ao_radius(&self) -> f64 {
+        self.ao_radius
+    }
+
+    pub fn get_ao_radius(&self) -> f64 {
+        self.ao_radius()
+    }
+
+    pub fn set_ao_radius(&mut self, value: f64) {
+        self.ao_radius = value;
+        self.mark_render_option_changed("aoRadius");
+    }
+
+    pub fn ao_intensity(&self) -> f64 {
+        self.ao_intensity
+    }
+
+    pub fn get_ao_intensity(&self) -> f64 {
+        self.ao_intensity()
+    }
+
+    pub fn set_ao_intensity(&mut self, value: f64) {
+        self.ao_intensity = value;
+        self.mark_render_option_changed("aoIntensity");
+    }
+
+    pub fn ao_slices(&self) -> i32 {
+        self.ao_slices
+    }
+
+    pub fn get_ao_slices(&self) -> i32 {
+        self.ao_slices()
+    }
+
+    pub fn set_ao_slices(&mut self, value: i32) {
+        self.ao_slices = value;
+        self.mark_render_option_changed("aoSlices");
+    }
+
+    pub fn ao_steps(&self) -> i32 {
+        self.ao_steps
+    }
+
+    pub fn get_ao_steps(&self) -> i32 {
+        self.ao_steps()
+    }
+
+    pub fn set_ao_steps(&mut self, value: i32) {
+        self.ao_steps = value;
+        self.mark_render_option_changed("aoSteps");
+    }
+
+    pub fn is_ao_half_res(&self) -> bool {
+        self.ao_half_res
+    }
+
+    pub fn set_ao_half_res(&mut self, value: bool) {
+        self.ao_half_res = value;
+        self.mark_render_option_changed("aoHalfRes");
+    }
+
+    pub fn aa_method(&self) -> AAMethod {
+        self.aa_method
+    }
+
+    pub fn get_aa_method(&self) -> AAMethod {
+        self.aa_method()
+    }
+
+    pub fn set_aa_method(&mut self, value: AAMethod) {
+        self.aa_method = value;
+        self.mark_render_option_changed("aa_method");
+    }
+
+    pub fn aa_jitter_level(&self) -> i32 {
+        self.aa_jitter_level
+    }
+
+    pub fn get_aa_jitter_level(&self) -> i32 {
+        self.aa_jitter_level()
+    }
+
+    pub fn set_aa_jitter_level(&mut self, value: i32) {
+        self.aa_jitter_level = value;
+        self.mark_render_option_changed("aaJitterLevel");
+    }
+
+    fn mark_render_option_changed(&mut self, property_name: &str) {
+        self.modified = true;
+        for view in self.views.values_mut() {
+            view.invalidate();
+        }
+        self.fire_property_changed(property_name);
     }
 
     pub fn onload(&self) -> &str {
@@ -146,6 +314,7 @@ impl<T> Scene<T> {
 
     pub fn set_onload(&mut self, value: impl Into<String>) {
         self.onload = value.into();
+        self.fire_property_changed("onload");
     }
 
     pub fn use_colproof(&self) -> bool {
@@ -156,24 +325,47 @@ impl<T> Scene<T> {
         self.use_colproof()
     }
 
+    pub fn is_use_col_proof(&self) -> bool {
+        self.use_colproof()
+    }
+
     pub fn set_use_colproof(&mut self, value: bool) {
         self.use_colproof = value;
+        self.fire_property_changed("use_colproof");
+    }
+
+    pub fn set_use_col_proof(&mut self, value: bool) {
+        self.set_use_colproof(value);
     }
 
     pub fn icc_filename(&self) -> &str {
         &self.icc_filename
     }
 
+    pub fn get_icc_file_name(&self) -> &str {
+        self.icc_filename()
+    }
+
     pub fn set_icc_filename(&mut self, value: impl Into<String>) {
         self.icc_filename = value.into();
+        self.fire_property_changed("icc_filename");
+    }
+
+    pub fn set_icc_file_name(&mut self, value: impl Into<String>) {
+        self.set_icc_filename(value);
     }
 
     pub fn icc_intent(&self) -> i32 {
         self.icc_intent
     }
 
+    pub fn get_icc_intent(&self) -> i32 {
+        self.icc_intent()
+    }
+
     pub fn set_icc_intent(&mut self, value: i32) {
         self.icc_intent = value;
+        self.fire_property_changed("icc_intent");
     }
 
     pub fn is_modified(&self) -> bool {
@@ -193,14 +385,19 @@ impl<T> Scene<T> {
     }
 
     pub fn add_object(&mut self, name: impl Into<String>, data: T) -> Uid {
-        let uid = Uid::new(self.next_object_uid);
-        self.next_object_uid += 1;
+        let uid = self.uid_generator.next_uid();
         let mut object = SceneObject::new(uid, data);
+        object.attach_uid_generator(self.uid_generator.clone());
         object.set_name(name);
         object.set_scene_uid(Some(self.uid));
+        object.attach_scene_event_caster(Arc::clone(&self.event_caster));
+        if let Some(manager) = self.event_manager.as_ref() {
+            object.attach_event_manager(manager.clone());
+        }
         self.objects.insert(uid, object);
         self.active_object_uid = Some(uid);
         self.modified = true;
+        self.fire_scene_event_type(SceneEvent::SCE_OBJ_ADDED, uid, "");
         uid
     }
 
@@ -209,10 +406,17 @@ impl<T> Scene<T> {
         if self.objects.contains_key(&uid) {
             return false;
         }
+        self.uid_generator.ensure_after(uid);
+        object.attach_uid_generator(self.uid_generator.clone());
         object.set_scene_uid(Some(self.uid));
+        object.attach_scene_event_caster(Arc::clone(&self.event_caster));
+        if let Some(manager) = self.event_manager.as_ref() {
+            object.attach_event_manager(manager.clone());
+        }
         self.objects.insert(uid, object);
         self.active_object_uid = Some(uid);
         self.modified = true;
+        self.fire_scene_event_type(SceneEvent::SCE_OBJ_ADDED, uid, "");
         true
     }
 
@@ -241,7 +445,15 @@ impl<T> Scene<T> {
     }
 
     pub fn object_uids(&self) -> Vec<Uid> {
-        self.objects.keys().copied().collect()
+        let mut objects = self.objects.values().collect::<Vec<_>>();
+        objects.sort_by_key(|object| (object.ui_order(), object.uid()));
+        objects.into_iter().map(SceneObject::uid).collect()
+    }
+
+    pub fn get_obj_array(&self) -> Vec<&SceneObject<T>> {
+        let mut objects = self.objects.values().collect::<Vec<_>>();
+        objects.sort_by_key(|object| (object.ui_order(), object.uid()));
+        objects
     }
 
     pub fn object_uid_list(&self) -> String {
@@ -256,7 +468,15 @@ impl<T> Scene<T> {
         self.object_uid_list()
     }
 
+    pub fn get_obj_uid_list(&self) -> String {
+        self.object_uid_list()
+    }
+
     pub fn destroy_object(&mut self, uid: Uid) -> bool {
+        if !self.objects.contains_key(&uid) {
+            return false;
+        }
+        self.fire_scene_event_type(SceneEvent::SCE_OBJ_REMOVING, uid, "");
         let removed = self.objects.remove(&uid).is_some();
         if removed {
             if self.active_object_uid == Some(uid) {
@@ -268,12 +488,14 @@ impl<T> Scene<T> {
     }
 
     pub fn destroy_all_objects(&mut self) {
-        self.objects.clear();
-        self.active_object_uid = None;
-        self.modified = true;
+        for uid in self.object_uids() {
+            self.destroy_object(uid);
+        }
     }
 
     pub fn clear_all_data(&mut self) {
+        self.undo_manager
+            .with_mut(|manager| manager.clear_all_info());
         self.destroy_all_objects();
         self.views.clear();
         self.cameras.clear();
@@ -281,11 +503,33 @@ impl<T> Scene<T> {
         self.active_renderer_uid = None;
     }
 
+    pub fn clear_all_data_script(&mut self) {
+        self.clear_all_data();
+        self.fire_scene_event_type(SceneEvent::SCE_SCENE_CLEARALL, self.uid, "");
+    }
+
+    pub fn clear_all_data_scr(&mut self) {
+        self.clear_all_data_script();
+    }
+
+    pub fn unloading(&self) {
+        self.fire_scene_event_type(SceneEvent::SCE_SCENE_REMOVING, self.uid, "");
+    }
+
+    pub fn notify_loaded(&mut self) {
+        self.just_created = false;
+        self.fire_scene_event_type(SceneEvent::SCE_SCENE_ONLOADED, self.uid, "");
+    }
+
     pub fn active_object_uid(&self) -> Option<Uid> {
         self.active_object_uid
     }
 
     pub fn active_obj_id(&self) -> Option<Uid> {
+        self.active_object_uid()
+    }
+
+    pub fn get_active_obj_id(&self) -> Option<Uid> {
         self.active_object_uid()
     }
 
@@ -306,6 +550,10 @@ impl<T> Scene<T> {
     }
 
     pub fn active_rend_id(&self) -> Option<Uid> {
+        self.active_renderer_uid()
+    }
+
+    pub fn get_active_rend_id(&self) -> Option<Uid> {
         self.active_renderer_uid()
     }
 
@@ -330,14 +578,17 @@ impl<T> Scene<T> {
     }
 
     pub fn create_view(&mut self) -> Uid {
-        let uid = Uid::new(self.next_view_uid);
-        self.next_view_uid += 1;
+        let uid = self.uid_generator.next_uid();
         let mut view = View::new(uid, self.uid);
+        if let Some(manager) = self.event_manager.as_ref() {
+            view.attach_event_manager(manager.clone());
+        }
         if self.views.is_empty() {
             view.set_active(true);
             self.active_view_uid = Some(uid);
         }
         self.views.insert(uid, view);
+        self.fire_scene_event_type(SceneEvent::SCE_VIEW_ADDED, uid, "");
         uid
     }
 
@@ -346,11 +597,16 @@ impl<T> Scene<T> {
         if self.views.contains_key(&uid) || view.scene_uid() != self.uid {
             return false;
         }
+        self.uid_generator.ensure_after(uid);
         if self.views.is_empty() {
             view.set_active(true);
             self.active_view_uid = Some(uid);
         }
+        if let Some(manager) = self.event_manager.as_ref() {
+            view.attach_event_manager(manager.clone());
+        }
         self.views.insert(uid, view);
+        self.fire_scene_event_type(SceneEvent::SCE_VIEW_ADDED, uid, "");
         true
     }
 
@@ -386,6 +642,10 @@ impl<T> Scene<T> {
         self.views.keys().copied().collect()
     }
 
+    pub fn get_view_array(&self) -> Vec<&View> {
+        self.views.values().collect()
+    }
+
     pub fn view_uid_list(&self) -> String {
         self.view_uids()
             .into_iter()
@@ -398,7 +658,15 @@ impl<T> Scene<T> {
         self.view_uid_list()
     }
 
+    pub fn get_view_uid_list(&self) -> String {
+        self.view_uid_list()
+    }
+
     pub fn destroy_view(&mut self, uid: Uid) -> bool {
+        if !self.views.contains_key(&uid) {
+            return false;
+        }
+        self.fire_scene_event_type(SceneEvent::SCE_VIEW_REMOVING, uid, "");
         let removed = self.views.remove(&uid).is_some();
         if removed && self.active_view_uid == Some(uid) {
             self.active_view_uid = self.views.keys().next().copied();
@@ -417,6 +685,14 @@ impl<T> Scene<T> {
         self.active_view_uid()
     }
 
+    pub fn get_active_view_id(&self) -> Option<Uid> {
+        self.active_view_uid()
+    }
+
+    pub fn get_active_view(&self) -> Option<&View> {
+        self.active_view_uid.and_then(|uid| self.views.get(&uid))
+    }
+
     pub fn set_active_view_id(&mut self, uid: Option<Uid>) -> bool {
         self.set_active_view_uid(uid)
     }
@@ -432,8 +708,10 @@ impl<T> Scene<T> {
         true
     }
 
-    pub fn set_camera(&mut self, name: impl Into<String>, camera: Camera) {
-        self.cameras.insert(name.into(), camera);
+    pub fn set_camera(&mut self, name: impl Into<String>, mut camera: Camera) {
+        let name = name.into();
+        camera.set_name(name.clone());
+        self.cameras.insert(name, camera);
     }
 
     pub fn has_camera(&self, name: &str) -> bool {
@@ -461,10 +739,19 @@ impl<T> Scene<T> {
     }
 
     pub fn save_view_to_camera(&mut self, view_uid: Uid, name: impl Into<String>) -> bool {
+        let name = name.into();
         let Some(view) = self.view(view_uid) else {
             return false;
         };
-        self.cameras.insert(name.into(), view.camera());
+        let source = self
+            .cameras
+            .get(&name)
+            .map(|camera| camera.source().to_string())
+            .unwrap_or_default();
+        let mut camera = view.camera();
+        camera.set_name(name.clone());
+        camera.set_source(source);
+        self.cameras.insert(name, camera);
         true
     }
 
@@ -491,32 +778,155 @@ impl<T> Scene<T> {
         self.load_view_from_camera(view_uid, name)
     }
 
-    pub fn save_camera_to(&self, camera_name: &str, filename: impl AsRef<std::path::Path>) -> bool {
+    pub fn save_camera_to(
+        &mut self,
+        camera_name: &str,
+        filename: impl AsRef<std::path::Path>,
+    ) -> bool {
+        let filename = filename.as_ref();
         let Some(camera) = self.cameras.get(camera_name) else {
             return false;
         };
-        std::fs::write(filename, camera.to_camera_data()).is_ok()
+        if std::fs::write(filename, camera.to_camera_data()).is_err() {
+            return false;
+        }
+        if camera_name != "__current" {
+            let source = filename.to_string_lossy().into_owned();
+            if let Some(camera) = self.cameras.get_mut(camera_name) {
+                camera.set_source(source);
+            }
+        }
+        true
     }
 
     pub fn load_camera(&self, filename: impl AsRef<std::path::Path>) -> Option<Camera> {
-        Camera::from_camera_data(&std::fs::read_to_string(filename).ok()?)
+        let filename = filename.as_ref();
+        let mut camera = Camera::from_camera_data(&std::fs::read_to_string(filename).ok()?)?;
+        camera.set_source(filename.to_string_lossy().into_owned());
+        Some(camera)
     }
 
     pub fn get_anim_mgr(&self) -> AnimMgrHandle {
         AnimMgrHandle::new(self.uid)
     }
 
-    pub fn add_listener<C: cuemol_core::LScrCallBack + ?Sized>(&mut self, _callback: &C) -> i32 {
-        let id = self.next_listener_id;
-        self.next_listener_id += 1;
-        self.listeners.push(id);
-        id
+    pub fn undo_manager(&self) -> UndoManagerHandle {
+        self.undo_manager.clone()
     }
 
-    pub fn remove_listener(&mut self, id: i32) -> bool {
-        let before = self.listeners.len();
-        self.listeners.retain(|value| *value != id);
-        before != self.listeners.len()
+    pub fn is_undoable(&self) -> bool {
+        self.undo_manager.with(crate::UndoManager::is_undoable)
+    }
+
+    pub fn is_redoable(&self) -> bool {
+        self.undo_manager.with(crate::UndoManager::is_redoable)
+    }
+
+    pub fn undo_size(&self) -> usize {
+        self.undo_manager.with(crate::UndoManager::undo_size)
+    }
+
+    pub fn get_undo_size(&self) -> usize {
+        self.undo_size()
+    }
+
+    pub fn redo_size(&self) -> usize {
+        self.undo_manager.with(crate::UndoManager::redo_size)
+    }
+
+    pub fn get_redo_size(&self) -> usize {
+        self.redo_size()
+    }
+
+    pub fn undo_desc(&self, index: usize) -> Option<String> {
+        self.undo_manager
+            .with(|manager| manager.undo_desc(index).map(str::to_string))
+    }
+
+    pub fn get_undo_desc(&self, index: usize) -> Option<String> {
+        self.undo_desc(index)
+    }
+
+    pub fn redo_desc(&self, index: usize) -> Option<String> {
+        self.undo_manager
+            .with(|manager| manager.get_redo_desc(index).map(str::to_string))
+    }
+
+    pub fn get_redo_desc(&self, index: usize) -> Option<String> {
+        self.redo_desc(index)
+    }
+
+    pub fn start_undo_txn(&self, description: impl Into<String>) {
+        self.undo_manager
+            .with_mut(|manager| manager.start_txn(description));
+    }
+
+    pub fn rollback_undo_txn(&self) -> bool {
+        self.undo_manager.with_mut(crate::UndoManager::rollback_txn)
+    }
+
+    pub fn commit_undo_txn(&self) -> bool {
+        let result = self.undo_manager.with_mut(crate::UndoManager::commit_txn);
+        if result {
+            self.fire_scene_event_type(SceneEvent::SCE_SCENE_UNDOINFO, self.uid, "");
+        }
+        result
+    }
+
+    pub fn undo(&self, index: usize) -> bool {
+        self.undo_manager.with_mut(|manager| manager.undo_n(index))
+    }
+
+    pub fn redo(&self, index: usize) -> bool {
+        self.undo_manager.with_mut(|manager| manager.redo_n(index))
+    }
+
+    pub fn clear_undo_data(&self) {
+        let changed = self
+            .undo_manager
+            .with(|manager| manager.undo_size() != 0 || manager.redo_size() != 0);
+        if !changed {
+            return;
+        }
+        self.undo_manager
+            .with_mut(|manager| manager.clear_all_info());
+        self.fire_scene_event_type(SceneEvent::SCE_SCENE_UNDOINFO, self.uid, "");
+    }
+
+    pub fn clear_undo_data_scr(&self) {
+        self.clear_undo_data();
+    }
+
+    pub fn add_listener(&self, listener: SharedEventListener<SceneEvent>) -> i32 {
+        self.event_caster.add(listener).map_or(-1, |id| id as i32)
+    }
+
+    pub fn remove_listener(&self, id: i32) -> bool {
+        id >= 0 && self.event_caster.remove(id as u64).is_some()
+    }
+
+    pub fn listener_count(&self) -> usize {
+        self.event_caster.listener_count()
+    }
+
+    pub fn fire_scene_event(&self, event: &mut SceneEvent) {
+        event.set_source(self.uid.get());
+        self.event_caster.replica_fire(event);
+        if let Some(manager) = self.event_manager.as_ref() {
+            let _ = manager.with(|manager| manager.fire_scene_event(event));
+        }
+    }
+
+    fn fire_scene_event_type(&self, event_type: i32, target: Uid, descr: &str) {
+        let mut event = SceneEvent::new();
+        event.set_event_type(event_type);
+        event.set_target(target.get());
+        event.set_descr(descr);
+        self.fire_scene_event(&mut event);
+    }
+
+    fn fire_property_changed(&self, property_name: &str) {
+        self.fire_scene_event_type(SceneEvent::SCE_SCENE_PROPCHG, self.uid, property_name);
     }
 
     pub fn exec_js_file(&mut self, path: impl AsRef<std::path::Path>) -> bool {
@@ -532,6 +942,10 @@ impl<T> Scene<T> {
         self.exec_js_file(path)
     }
 
+    pub fn dump(&self) {
+        eprintln!("{}", self.to_string());
+    }
+
     #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         format!("Scene({}, {})", self.uid.get(), self.name)
@@ -543,9 +957,10 @@ impl<T> Scene<T> {
             .iter()
             .map(|(name, camera)| {
                 format!(
-                    "{{\"name\":\"{}\",\"zoom\":{}}}",
+                    "{{\"name\":\"{}\",\"vis_size\":{},\"src\":\"{}\"}}",
                     escape_json(name),
-                    camera.zoom()
+                    camera.vis_size(),
+                    escape_json(camera.source())
                 )
             })
             .collect::<Vec<_>>()
@@ -554,39 +969,56 @@ impl<T> Scene<T> {
     }
 
     pub fn get_object_tree_json(&self) -> String {
-        let objects = self
-            .objects
-            .values()
-            .map(|object| {
-                format!(
-                    "{{\"uid\":{},\"name\":\"{}\",\"visible\":{}}}",
-                    object.uid().get(),
-                    escape_json(object.name()),
-                    object.is_visible()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        format!("[{objects}]")
+        self.scene_tree_json(false)
     }
 
     pub fn get_scene_data_json(&self) -> String {
-        format!(
-            "{{\"uid\":{},\"name\":\"{}\",\"objects\":{},\"views\":{}}}",
-            self.uid.get(),
+        self.scene_tree_json(true)
+    }
+
+    fn scene_tree_json(&self, grouped: bool) -> String {
+        let root = format!(
+            "{{\"name\":\"{}\",\"parent\":-1,\"open\":\"true\",\"type\":\"\",\"rends\":[],\"ID\":{}}}",
             escape_json(&self.name),
-            self.object_count(),
-            self.view_count()
-        )
+            self.uid.get()
+        );
+        let mut objects = self.objects.values().collect::<Vec<_>>();
+        objects.sort_by_key(|object| (object.ui_order(), object.uid()));
+        let entries = objects
+            .into_iter()
+            .map(|object| {
+                let renderers = if grouped {
+                    object.grouped_renderer_list_json()
+                } else {
+                    object.flat_renderer_list_json()
+                };
+                format!(
+                    "{{\"name\":\"{}\",\"parent\":-1,\"ui_collapsed\":{},\"ui_order\":{},\"visible\":{},\"locked\":{},\"type\":\"{}\",\"ID\":{},\"rends\":{renderers}}}",
+                    escape_json(object.name()),
+                    object.is_ui_collapsed(),
+                    object.ui_order(),
+                    object.is_visible(),
+                    object.is_ui_locked(),
+                    escape_json(object.class_name()),
+                    object.uid().get()
+                )
+            })
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            format!("[{root}]")
+        } else {
+            format!("[{root},{}]", entries.join(","))
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneManager<T> {
     scenes: BTreeMap<Uid, Scene<T>>,
-    next_scene_uid: u64,
+    uid_generator: UidGenerator,
     active_scene_uid: Option<Uid>,
     perf_meas_samples: Option<i32>,
+    event_manager: ScrEventManagerHandle,
 }
 
 impl<T> Default for SceneManager<T> {
@@ -599,16 +1031,18 @@ impl<T> SceneManager<T> {
     pub fn new() -> Self {
         Self {
             scenes: BTreeMap::new(),
-            next_scene_uid: 1,
+            uid_generator: UidGenerator::new(),
             active_scene_uid: None,
             perf_meas_samples: None,
+            event_manager: ScrEventManagerHandle::new(),
         }
     }
 
     pub fn create_scene(&mut self, name: impl Into<String>) -> Uid {
-        let uid = Uid::new(self.next_scene_uid);
-        self.next_scene_uid += 1;
-        self.scenes.insert(uid, Scene::new(uid, name));
+        let uid = self.uid_generator.next_uid();
+        let mut scene = Scene::with_uid_generator(uid, name, self.uid_generator.clone());
+        scene.attach_event_manager(self.event_manager.clone());
+        self.scenes.insert(uid, scene);
         if self.active_scene_uid.is_none() {
             self.active_scene_uid = Some(uid);
         }
@@ -617,6 +1051,10 @@ impl<T> SceneManager<T> {
 
     pub fn scene(&self, uid: Uid) -> Option<&Scene<T>> {
         self.scenes.get(&uid)
+    }
+
+    pub fn event_manager(&self) -> ScrEventManagerHandle {
+        self.event_manager.clone()
     }
 
     pub fn get_scene(&self, uid: Uid) -> Option<&Scene<T>> {
@@ -628,6 +1066,11 @@ impl<T> SceneManager<T> {
     }
 
     pub fn destroy_scene(&mut self, uid: Uid) -> bool {
+        let Some(scene) = self.scenes.get_mut(&uid) else {
+            return false;
+        };
+        scene.unloading();
+        scene.destroy_all_objects();
         let removed = self.scenes.remove(&uid).is_some();
         if removed && self.active_scene_uid == Some(uid) {
             self.active_scene_uid = self.scenes.keys().next().copied();
@@ -636,8 +1079,9 @@ impl<T> SceneManager<T> {
     }
 
     pub fn destroy_all_scenes(&mut self) {
-        self.scenes.clear();
-        self.active_scene_uid = None;
+        for uid in self.scene_uids() {
+            self.destroy_scene(uid);
+        }
     }
 
     pub fn scene_count(&self) -> usize {
@@ -654,6 +1098,20 @@ impl<T> SceneManager<T> {
 
     pub fn scene_by_name_mut(&mut self, name: &str) -> Option<&mut Scene<T>> {
         self.scenes.values_mut().find(|scene| scene.name() == name)
+    }
+
+    pub fn get_object(&self, uid: Uid) -> Option<&SceneObject<T>> {
+        self.scenes.values().find_map(|scene| scene.object(uid))
+    }
+
+    pub fn get_view(&self, uid: Uid) -> Option<&View> {
+        self.scenes.values().find_map(|scene| scene.view(uid))
+    }
+
+    pub fn get_renderer(&self, uid: Uid) -> Option<&crate::Renderer> {
+        self.scenes
+            .values()
+            .find_map(|scene| scene.get_renderer(uid))
     }
 
     pub fn scene_uids(&self) -> Vec<Uid> {
@@ -677,6 +1135,10 @@ impl<T> SceneManager<T> {
     }
 
     pub fn active_scene_id(&self) -> Option<Uid> {
+        self.active_scene_uid()
+    }
+
+    pub fn get_active_scene_id(&self) -> Option<Uid> {
         self.active_scene_uid()
     }
 
@@ -709,6 +1171,10 @@ impl<T> SceneManager<T> {
         self.perf_meas_samples = None;
     }
 
+    pub fn dump(&self) {
+        eprintln!("SceneManager(count={})", self.scenes.len());
+    }
+
     pub fn get_uid_obj(&self, uid: Uid) -> Option<Uid> {
         if self.scenes.contains_key(&uid) {
             return Some(uid);
@@ -731,12 +1197,24 @@ impl<T> SceneManager<T> {
         env!("CARGO_PKG_VERSION").to_string()
     }
 
+    pub fn get_version(&self) -> String {
+        self.version()
+    }
+
     pub fn build(&self) -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }
 
+    pub fn get_build_id(&self) -> String {
+        self.build()
+    }
+
     pub fn ver_arch(&self) -> String {
         std::env::consts::ARCH.to_string()
+    }
+
+    pub fn get_ver_arch_name(&self) -> String {
+        self.ver_arch()
     }
 }
 
@@ -757,6 +1235,111 @@ fn escape_json(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuemol_core::{shared_event_listener, LScrCallBack, LScrObject, LVarArgs, Result};
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeSet;
+    use std::rc::Rc;
+    use std::sync::Mutex;
+
+    type ScriptCall = (String, i32, i32, i32);
+
+    struct ScriptRecorder {
+        calls: Rc<RefCell<Vec<ScriptCall>>>,
+    }
+
+    impl LScrObject for ScriptRecorder {}
+
+    impl LScrCallBack for ScriptRecorder {
+        fn invoke(&self, args: &mut LVarArgs) -> Result<bool> {
+            self.calls.borrow_mut().push((
+                args.get(1).get_string_value()?.as_str().to_string(),
+                args.get(2).get_int_value()?,
+                args.get(3).get_int_value()?,
+                args.get(4).get_int_value()?,
+            ));
+            Ok(true)
+        }
+    }
+
+    struct SceneEdit {
+        value: Rc<Cell<i32>>,
+    }
+
+    impl crate::EditInfo for SceneEdit {
+        fn undo(&mut self) -> bool {
+            self.value.set(self.value.get() - 1);
+            true
+        }
+
+        fn redo(&mut self) -> bool {
+            self.value.set(self.value.get() + 1);
+            true
+        }
+    }
+
+    #[test]
+    fn scene_render_options_match_reference_defaults_and_invalidate_views() {
+        let mut scene = Scene::<()>::new(Uid::new(1), "scene");
+        assert!(!scene.is_ao_enabled());
+        assert_eq!(scene.ao_radius(), 4.0);
+        assert_eq!(scene.ao_intensity(), 2.2);
+        assert_eq!(scene.ao_slices(), 9);
+        assert_eq!(scene.ao_steps(), 3);
+        assert!(!scene.is_ao_half_res());
+        assert_eq!(scene.aa_method(), AAMethod::Fxaa);
+        assert_eq!(scene.aa_jitter_level(), 0);
+
+        let view_uid = scene.create_view();
+        scene.view_mut(view_uid).unwrap().reset_projection_changed();
+        scene.set_ao_enabled(true);
+        scene.set_ao_radius(7.5);
+        scene.set_ao_intensity(1.4);
+        scene.set_ao_slices(12);
+        scene.set_ao_steps(5);
+        scene.set_ao_half_res(true);
+        scene.set_aa_method(AAMethod::Smaa);
+        scene.set_aa_jitter_level(4);
+
+        assert!(scene.is_ao_enabled());
+        assert_eq!(scene.get_ao_radius(), 7.5);
+        assert_eq!(scene.get_ao_intensity(), 1.4);
+        assert_eq!(scene.get_ao_slices(), 12);
+        assert_eq!(scene.get_ao_steps(), 5);
+        assert!(scene.is_ao_half_res());
+        assert_eq!(scene.get_aa_method(), AAMethod::Smaa);
+        assert_eq!(scene.get_aa_jitter_level(), 4);
+        assert!(scene.view(view_uid).unwrap().is_projection_changed());
+        assert!(scene.is_modified());
+    }
+
+    #[test]
+    fn scene_tree_json_matches_reference_hierarchy() {
+        let mut scene = Scene::<()>::new(Uid::new(1), "scene\"");
+        let later_uid = scene.add_object("later", ());
+        let first_uid = scene.add_object("first", ());
+        {
+            let later = scene.object_mut(later_uid).unwrap();
+            later.set_ui_order(20);
+            later.set_class_name("MolCoord");
+        }
+        {
+            let first = scene.object_mut(first_uid).unwrap();
+            first.set_ui_order(10);
+            first.set_class_name("DensityMap");
+            let renderer_uid = first.create_renderer("mapmesh");
+            let renderer = first.renderer_mut(renderer_uid).unwrap();
+            renderer.set_name("mesh");
+        }
+
+        let flat = scene.get_object_tree_json();
+        assert!(flat.starts_with("[{\"name\":\"scene\\\"\",\"parent\":-1"));
+        assert!(flat.find("first").unwrap() < flat.find("later").unwrap());
+        assert!(flat.contains("\"type\":\"DensityMap\""));
+        assert!(flat.contains("\"rends\":[{\"name\":\"mesh\""));
+        assert_eq!(scene.object_uids(), vec![first_uid, later_uid]);
+        let grouped = scene.get_scene_data_json();
+        assert!(grouped.contains("\"ID\":1"));
+    }
 
     #[test]
     fn scene_manages_objects_and_cameras() {
@@ -787,14 +1370,23 @@ mod tests {
 
         let mut camera = Camera::default();
         camera.set_zoom(75.0);
+        camera.set_source("linked.cam");
         scene.set_camera("cam1", camera);
         assert!(scene.has_camera("cam1"));
         assert_eq!(scene.camera("cam1").unwrap().zoom(), 75.0);
         assert_eq!(scene.camera_count(), 1);
         assert!(scene.load_view_from_camera(view_uid, "cam1"));
         assert_eq!(scene.view(view_uid).unwrap().zoom(), 75.0);
+        scene.view_mut(view_uid).unwrap().set_zoom(80.0);
+        assert!(scene.save_view_to_camera(view_uid, "cam1"));
+        assert_eq!(scene.camera("cam1").unwrap().zoom(), 80.0);
+        assert_eq!(scene.camera("cam1").unwrap().source(), "linked.cam");
         assert!(scene.save_view_to_camera(view_uid, "cam2"));
         assert_eq!(scene.camera_count(), 2);
+        assert_eq!(
+            scene.get_camera_info_json(),
+            "[{\"name\":\"cam1\",\"vis_size\":0,\"src\":\"linked.cam\"},{\"name\":\"cam2\",\"vis_size\":0,\"src\":\"\"}]"
+        );
         assert!(scene.destroy_camera("cam1"));
         assert_eq!(scene.camera_count(), 1);
         assert_eq!(scene.get_anim_mgr().scene_uid(), scene_uid);
@@ -818,13 +1410,21 @@ mod tests {
         ));
 
         assert!(scene.save_camera_to("cam1", &path));
+        assert_eq!(
+            scene.camera("cam1").unwrap().source(),
+            path.to_string_lossy()
+        );
         let loaded = scene.load_camera(&path).unwrap();
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&path);
 
-        assert_eq!(loaded.name(), "cam\tone");
+        assert_eq!(loaded.name(), "cam1");
         assert_eq!(loaded.zoom(), 88.0);
         assert_eq!(loaded.center(), cuemol_core::Vector4::new3(1.0, 2.0, 3.0));
-        assert_eq!(loaded.visibility_json(), "{\"obj:10\":false}");
+        assert_eq!(
+            loaded.visibility_json(),
+            "{\"10\":{\"uid\":10,\"type\":\"object\",\"include\":true,\"visible\":false}}"
+        );
+        assert_eq!(loaded.source(), path.to_string_lossy());
     }
 
     #[test]
@@ -871,5 +1471,291 @@ mod tests {
 
         assert_eq!(scene.onload(), "scene.name = 'x';");
         assert!(scene.is_modified());
+    }
+
+    #[test]
+    fn scene_fires_reference_lifecycle_events_with_scene_source() {
+        let scene_uid = Uid::new(10);
+        let mut scene = Scene::<()>::new(scene_uid, "scene");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        let listener = shared_event_listener(move |event: &mut SceneEvent| {
+            listener_events.lock().unwrap().push(event.clone());
+        });
+        let listener_id = scene.add_listener(listener);
+        assert_eq!(listener_id, 0);
+
+        scene.set_name("renamed");
+        let object_uid = scene.add_object("object", ());
+        assert!(scene.destroy_object(object_uid));
+        let view_uid = scene.create_view();
+        assert!(scene.destroy_view(view_uid));
+        scene.clear_all_data_script();
+        scene.notify_loaded();
+        scene.unloading();
+
+        let recorded = events.lock().unwrap();
+        let types = recorded
+            .iter()
+            .map(SceneEvent::event_type)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            types,
+            vec![
+                SceneEvent::SCE_SCENE_PROPCHG,
+                SceneEvent::SCE_OBJ_ADDED,
+                SceneEvent::SCE_OBJ_REMOVING,
+                SceneEvent::SCE_VIEW_ADDED,
+                SceneEvent::SCE_VIEW_REMOVING,
+                SceneEvent::SCE_SCENE_CLEARALL,
+                SceneEvent::SCE_SCENE_ONLOADED,
+                SceneEvent::SCE_SCENE_REMOVING,
+            ]
+        );
+        assert!(recorded
+            .iter()
+            .all(|event| event.source() == scene_uid.get()));
+        assert_eq!(recorded[0].target(), scene_uid.get());
+        assert_eq!(recorded[0].descr(), "name");
+        assert_eq!(recorded[1].target(), object_uid.get());
+        assert_eq!(recorded[2].target(), object_uid.get());
+        assert_eq!(recorded[3].target(), view_uid.get());
+        assert_eq!(recorded[4].target(), view_uid.get());
+        drop(recorded);
+
+        assert!(scene.remove_listener(listener_id));
+        assert_eq!(scene.listener_count(), 0);
+        scene.set_name("silent");
+        assert_eq!(events.lock().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn scene_manager_notifies_unloading_before_removing_objects() {
+        let mut manager = SceneManager::new();
+        let scene_uid = manager.create_scene("scene");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        let listener = shared_event_listener(move |event: &mut SceneEvent| {
+            listener_events.lock().unwrap().push(event.event_type());
+        });
+        let scene = manager.scene_mut(scene_uid).unwrap();
+        scene.add_listener(listener);
+        scene.add_object("object", ());
+        events.lock().unwrap().clear();
+
+        assert!(manager.destroy_scene(scene_uid));
+        assert_eq!(manager.scene_count(), 0);
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[SceneEvent::SCE_SCENE_REMOVING, SceneEvent::SCE_OBJ_REMOVING]
+        );
+    }
+
+    #[test]
+    fn object_renderer_lifecycle_is_forwarded_to_scene_listeners() {
+        let mut scene = Scene::new(Uid::new(5), "scene");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        scene.add_listener(shared_event_listener(move |event: &mut SceneEvent| {
+            if matches!(
+                event.event_type(),
+                SceneEvent::SCE_REND_ADDED | SceneEvent::SCE_REND_REMOVING
+            ) {
+                listener_events.lock().unwrap().push(event.clone());
+            }
+        }));
+        let object_uid = scene.add_object("object", ());
+        let renderer_uid = scene
+            .object_mut(object_uid)
+            .unwrap()
+            .create_renderer("simple");
+        assert!(scene
+            .object_mut(object_uid)
+            .unwrap()
+            .destroy_renderer(renderer_uid));
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type(), SceneEvent::SCE_REND_ADDED);
+        assert_eq!(events[1].event_type(), SceneEvent::SCE_REND_REMOVING);
+        assert!(events.iter().all(|event| event.source() == 5));
+        assert!(events
+            .iter()
+            .all(|event| event.target() == renderer_uid.get()));
+    }
+
+    #[test]
+    fn scene_and_view_events_reach_the_shared_script_event_manager() {
+        let mut manager = SceneManager::new();
+        let scene_uid = manager.create_scene("scene");
+        let handle = manager.event_manager();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let callback = Rc::new(ScriptRecorder {
+            calls: Rc::clone(&calls),
+        });
+        handle.with_mut(|events| {
+            events.add_listener(callback);
+            events.append(
+                "objectAdded",
+                crate::ScrEventManager::SEM_OBJECT,
+                crate::ScrEventManager::SEM_ADDED,
+                scene_uid.get() as i64,
+            );
+            events.append(
+                "viewPropChanged",
+                crate::ScrEventManager::SEM_VIEW,
+                crate::ScrEventManager::SEM_PROPCHG,
+                scene_uid.get() as i64,
+            );
+            events.append(
+                "visible",
+                crate::ScrEventManager::SEM_OBJECT,
+                crate::ScrEventManager::SEM_PROPCHG,
+                scene_uid.get() as i64,
+            );
+            events.append(
+                "name",
+                crate::ScrEventManager::SEM_RENDERER,
+                crate::ScrEventManager::SEM_PROPCHG,
+                scene_uid.get() as i64,
+            );
+        });
+
+        let scene = manager.scene_mut(scene_uid).unwrap();
+        let object_uid = scene.add_object("object", ());
+        let object = scene.object_mut(object_uid).unwrap();
+        object.set_visible(false);
+        let renderer_uid = object.create_renderer("simple");
+        object
+            .renderer_mut(renderer_uid)
+            .unwrap()
+            .set_name("renderer");
+        let view_uid = scene.create_view();
+        scene.view_mut(view_uid).unwrap().set_zoom(80.0);
+
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(
+            calls[0],
+            (
+                "objectAdded".to_string(),
+                crate::ScrEventManager::SEM_OBJECT,
+                crate::ScrEventManager::SEM_ADDED,
+                scene_uid.get() as i32,
+            )
+        );
+        assert_eq!(
+            calls[1],
+            (
+                "visible".to_string(),
+                crate::ScrEventManager::SEM_OBJECT,
+                crate::ScrEventManager::SEM_PROPCHG,
+                scene_uid.get() as i32,
+            )
+        );
+        assert_eq!(
+            calls[2],
+            (
+                "name".to_string(),
+                crate::ScrEventManager::SEM_RENDERER,
+                crate::ScrEventManager::SEM_PROPCHG,
+                scene_uid.get() as i32,
+            )
+        );
+        assert_eq!(
+            calls[3],
+            (
+                "viewPropChanged".to_string(),
+                crate::ScrEventManager::SEM_VIEW,
+                crate::ScrEventManager::SEM_PROPCHG,
+                scene_uid.get() as i32,
+            )
+        );
+    }
+
+    #[test]
+    fn manager_allocates_unique_uids_across_all_qsys_object_kinds() {
+        let mut manager = SceneManager::new();
+        let first_scene = manager.create_scene("first");
+        let second_scene = manager.create_scene("second");
+
+        let first = manager.scene_mut(first_scene).unwrap();
+        let first_object = first.add_object("object1", ());
+        let first_renderer = first
+            .object_mut(first_object)
+            .unwrap()
+            .create_renderer("simple");
+        let first_view = first.create_view();
+
+        let second = manager.scene_mut(second_scene).unwrap();
+        let second_object = second.add_object("object2", ());
+        let second_renderer = second
+            .object_mut(second_object)
+            .unwrap()
+            .create_renderer("simple");
+        let second_view = second.create_view();
+
+        let ids = BTreeSet::from([
+            first_scene,
+            second_scene,
+            first_object,
+            first_renderer,
+            first_view,
+            second_object,
+            second_renderer,
+            second_view,
+        ]);
+        assert_eq!(ids.len(), 8);
+        assert!(ids
+            .iter()
+            .all(|uid| manager.get_uid_obj(*uid) == Some(*uid)));
+        assert_eq!(manager.get_object(first_object).unwrap().name(), "object1");
+        assert_eq!(manager.get_view(second_view).unwrap().uid(), second_view);
+        assert_eq!(
+            manager.get_renderer(first_renderer).unwrap().uid(),
+            first_renderer
+        );
+
+        let explicit = Uid::new(1000);
+        assert!(manager
+            .scene_mut(first_scene)
+            .unwrap()
+            .insert_object(SceneObject::new(explicit, ())));
+        let after_explicit = manager.scene_mut(first_scene).unwrap().create_view();
+        assert!(after_explicit.get() > explicit.get());
+    }
+
+    #[test]
+    fn scene_exposes_undo_api_and_fires_undo_info_events() {
+        let scene = Scene::<()>::new(Uid::new(1), "scene");
+        let event_types = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&event_types);
+        scene.add_listener(shared_event_listener(move |event: &mut SceneEvent| {
+            if event.event_type() == SceneEvent::SCE_SCENE_UNDOINFO {
+                listener_events.lock().unwrap().push(event.event_type());
+            }
+        }));
+        let value = Rc::new(Cell::new(1));
+        scene.start_undo_txn("change");
+        scene.undo_manager().with_mut(|manager| {
+            manager.add_edit_info(Box::new(SceneEdit {
+                value: Rc::clone(&value),
+            }));
+        });
+        assert!(scene.commit_undo_txn());
+        assert!(scene.is_undoable());
+        assert_eq!(scene.undo_size(), 1);
+        assert_eq!(scene.undo_desc(0).as_deref(), Some("change"));
+
+        assert!(scene.undo(0));
+        assert_eq!(value.get(), 0);
+        assert!(scene.is_redoable());
+        assert_eq!(scene.redo_desc(0).as_deref(), Some("change"));
+        assert!(scene.redo(0));
+        assert_eq!(value.get(), 1);
+        scene.clear_undo_data();
+        assert_eq!(scene.undo_size(), 0);
+        assert_eq!(scene.redo_size(), 0);
+        assert_eq!(event_types.lock().unwrap().len(), 2);
     }
 }

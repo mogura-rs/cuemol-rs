@@ -13,6 +13,7 @@ license.workspace = true
 
 [dependencies]
 cuemol-core.workspace = true
+cuemol-importers.workspace = true
 cuemol-gfx.workspace = true
 cuemol-qsys.workspace = true
 cuemol-molstr.workspace = true

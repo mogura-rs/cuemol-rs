@@ -86,6 +86,8 @@ fn bytearray_matches_reference_operations() {
     target.init_code(ByteArray::INT32, 2).unwrap();
     assert_eq!(target.elem_type(), ElementType::Int32);
     assert_eq!(target.byte_len(), 8);
+    assert_eq!(target.length(), 8);
+    assert_eq!(target.elem_count(), 2);
 
     target.init(ElementType::Int32, 100);
     for index in 0..100 {
@@ -322,6 +324,14 @@ fn lregexp_matches_reference_basic_and_capture_cases() {
 
     re.set_pattern("(unclosed");
     assert!(re.match_text("hello").is_err());
+
+    re.setup(r"^(foo|bar)-(\d*)?$");
+    assert!(re.r#match("bar-123").unwrap());
+    assert!(re.subject().equals("bar-123"));
+    assert_eq!(re.size(), 3);
+    assert!(re.at(1).unwrap().equals("bar"));
+    assert_eq!(re.to_string(), r"^(foo|bar)-(\d*)?$");
+    assert!(!re.r#match("prefix-bar-123").unwrap());
 }
 
 #[test]
@@ -445,7 +455,10 @@ fn process_manager_matches_reference_queue_flow() {
     assert_eq!(manager.task_status(first).unwrap(), TaskStatus::Ended);
     manager.wait_for_exit(second).unwrap();
     assert_eq!(manager.task_status(second).unwrap(), TaskStatus::Ended);
-    assert!(manager.done_task_list_json().contains("\"status\":2"));
+    assert_eq!(
+        manager.done_task_list_json(),
+        format!("[{},{}]", first.get(), second.get())
+    );
 }
 
 #[test]

@@ -1,19 +1,17 @@
 //! Python pickle virtual machine — the opcode interpreter underneath a PyMOL
 //! `.pse` session reader. Ports the role of C++ `importers::PickleInStream`.
 //!
-//! This parses a pickle byte stream (protocols 0-2, the binary opcode subset
-//! PyMOL emits, plus the common protocol-0 text opcodes) into a [`PickleValue`]
+//! This parses a pickle byte stream (protocols 0-5, including the binary opcode
+//! subset PyMOL emits, plus the common protocol-0 text opcodes) into a [`PickleValue`]
 //! tree. It is verifiable in isolation: Python's own `pickle` module is the
 //! oracle (a known object pickled by Python must parse back to the matching
 //! tree).
 //!
-//! SCOPE / honesty: this is the VALUE-TREE layer only. Reconstructing PyMOL's
-//! version-specific object graph (the `GLOBAL`/`OBJ`/`BUILD`/`NEWOBJ` opcodes
-//! that rebuild ChemPy/molecule objects) into a `MolCoord` is NOT done — that
-//! needs a real `.pse` fixture, which the repo lacks. Object opcodes are parsed
-//! to a transparent [`PickleValue::Object`] placeholder so the surrounding tree
-//! still loads. Memoised values use value (clone) semantics, so shared-then-
-//! mutated references and cycles are not preserved (acyclic session headers are).
+//! This module is the VALUE-TREE layer. [`crate::pse_extract`] consumes that tree
+//! and reconstructs ChemPy molecule objects, verified against real PyMOL session
+//! fixtures. Generic Python class instances remain structural
+//! [`PickleValue::Object`] values. Memoised values use value (clone) semantics,
+//! so shared-then-mutated references and cycles are not preserved.
 
 use cuemol_core::{CueMolError, Result};
 
@@ -30,6 +28,7 @@ pub enum PickleValue {
     Bytes(Vec<u8>),
     List(Vec<PickleValue>),
     Tuple(Vec<PickleValue>),
+    Set(Vec<PickleValue>),
     /// Ordered key/value pairs (pickle preserves insertion order).
     Dict(Vec<(PickleValue, PickleValue)>),
     /// A `GLOBAL` reference `module.name`.
@@ -81,7 +80,7 @@ impl PickleValue {
     /// The elements of a `List` or `Tuple`.
     pub fn as_list(&self) -> Option<&[PickleValue]> {
         match self {
-            PickleValue::List(v) | PickleValue::Tuple(v) => Some(v),
+            PickleValue::List(v) | PickleValue::Tuple(v) | PickleValue::Set(v) => Some(v),
             _ => None,
         }
     }
@@ -154,6 +153,18 @@ impl<'a> PickleMachine<'a> {
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
+    fn u64_le(&mut self) -> Result<u64> {
+        let b = self.take(8)?;
+        Ok(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
+    }
+
+    fn length64(&mut self) -> Result<usize> {
+        usize::try_from(self.u64_le()?)
+            .map_err(|_| CueMolError::parse("pickle length does not fit usize"))
+    }
+
     fn push(&mut self, value: PickleValue) {
         self.stack.push(Slot::Value(value));
     }
@@ -221,6 +232,16 @@ impl<'a> PickleMachine<'a> {
         }
     }
 
+    fn top_set_extend(&mut self, items: Vec<PickleValue>) -> Result<()> {
+        match self.stack.last_mut() {
+            Some(Slot::Value(PickleValue::Set(set))) => {
+                set.extend(items);
+                Ok(())
+            }
+            _ => Err(CueMolError::parse("pickle ADDITEMS target is not a set")),
+        }
+    }
+
     fn run(&mut self) -> Result<PickleValue> {
         loop {
             let op = self.byte()?;
@@ -231,9 +252,14 @@ impl<'a> PickleMachine<'a> {
                 0x95 => {
                     self.take(8)?; // FRAME: 8-byte frame length (ignored)
                 }
+                0x94 => {
+                    let index = self.memo.len(); // MEMOIZE
+                    self.memo_put(index)?;
+                }
                 b'}' => self.push(PickleValue::Dict(Vec::new())), // EMPTY_DICT
                 b']' => self.push(PickleValue::List(Vec::new())), // EMPTY_LIST
                 b')' => self.push(PickleValue::Tuple(Vec::new())), // EMPTY_TUPLE
+                0x8f => self.push(PickleValue::Set(Vec::new())),  // EMPTY_SET
                 b'(' => self.stack.push(Slot::Mark),              // MARK
                 b'd' => {
                     // DICT: build from mark (k1,v1,...)
@@ -262,6 +288,10 @@ impl<'a> PickleMachine<'a> {
                     let b = self.pop()?;
                     let a = self.pop()?;
                     self.push(PickleValue::Tuple(vec![a, b, c]));
+                }
+                0x91 => {
+                    let items = self.pop_to_mark()?; // FROZENSET
+                    self.push(PickleValue::Set(items));
                 }
                 b'N' => self.push(PickleValue::None), // NONE
                 0x88 => self.push(PickleValue::Bool(true)), // NEWTRUE
@@ -295,6 +325,11 @@ impl<'a> PickleMachine<'a> {
                 }
                 0x8a => {
                     let n = self.byte()? as usize; // LONG1: short signed long
+                    let raw = self.take(n)?;
+                    self.push(PickleValue::Int(decode_long(raw)));
+                }
+                0x8b => {
+                    let n = self.u32_le()? as usize; // LONG4
                     let raw = self.take(n)?;
                     self.push(PickleValue::Int(decode_long(raw)));
                 }
@@ -338,6 +373,35 @@ impl<'a> PickleMachine<'a> {
                             .map_err(|_| CueMolError::parse("SHORT_BINUNICODE not UTF-8"))?
                             .to_string(),
                     ));
+                }
+                0x8d => {
+                    let n = self.length64()?; // BINUNICODE8
+                    let raw = self.take(n)?;
+                    self.push(PickleValue::Str(
+                        std::str::from_utf8(raw)
+                            .map_err(|_| CueMolError::parse("BINUNICODE8 not UTF-8"))?
+                            .to_string(),
+                    ));
+                }
+                b'C' => {
+                    let n = self.byte()? as usize; // SHORT_BINBYTES
+                    let raw = self.take(n)?.to_vec();
+                    self.push(PickleValue::Bytes(raw));
+                }
+                b'B' => {
+                    let n = self.u32_le()? as usize; // BINBYTES
+                    let raw = self.take(n)?.to_vec();
+                    self.push(PickleValue::Bytes(raw));
+                }
+                0x8e => {
+                    let n = self.length64()?; // BINBYTES8
+                    let raw = self.take(n)?.to_vec();
+                    self.push(PickleValue::Bytes(raw));
+                }
+                0x96 => {
+                    let n = self.length64()?; // BYTEARRAY8
+                    let raw = self.take(n)?.to_vec();
+                    self.push(PickleValue::Bytes(raw));
                 }
                 b'U' => {
                     let n = self.byte()? as usize; // SHORT_BINSTRING
@@ -405,6 +469,19 @@ impl<'a> PickleMachine<'a> {
                     let name = self.read_line()?;
                     self.push(PickleValue::Global(module, name));
                 }
+                0x93 => {
+                    let name = self
+                        .pop()?
+                        .as_str()
+                        .ok_or_else(|| CueMolError::parse("STACK_GLOBAL name is not text"))?
+                        .to_string();
+                    let module = self
+                        .pop()?
+                        .as_str()
+                        .ok_or_else(|| CueMolError::parse("STACK_GLOBAL module is not text"))?
+                        .to_string();
+                    self.push(PickleValue::Global(module, name));
+                }
                 b'o' => {
                     let items = self.pop_to_mark()?; // OBJ (deferred: opaque)
                     self.push(PickleValue::Object(items));
@@ -413,6 +490,12 @@ impl<'a> PickleMachine<'a> {
                     let args = self.pop()?; // NEWOBJ (deferred: opaque)
                     let class = self.pop()?;
                     self.push(PickleValue::Object(vec![class, args]));
+                }
+                0x92 => {
+                    let kwargs = self.pop()?; // NEWOBJ_EX
+                    let args = self.pop()?;
+                    let class = self.pop()?;
+                    self.push(PickleValue::Object(vec![class, args, kwargs]));
                 }
                 b'b' => {
                     // BUILD (deferred): attach state to the object below it.
@@ -429,6 +512,20 @@ impl<'a> PickleMachine<'a> {
                 }
                 b'0' => {
                     self.pop()?; // POP
+                }
+                b'1' => {
+                    self.pop_to_mark()?; // POP_MARK
+                }
+                b'2' => {
+                    let value = match self.stack.last() {
+                        Some(Slot::Value(value)) => value.clone(),
+                        _ => return Err(CueMolError::parse("pickle DUP on empty stack")),
+                    };
+                    self.push(value);
+                }
+                0x90 => {
+                    let items = self.pop_to_mark()?; // ADDITEMS
+                    self.top_set_extend(items)?;
                 }
                 b'.' => return self.pop(), // STOP
                 other => {
@@ -457,6 +554,15 @@ fn into_pairs(items: Vec<PickleValue>) -> Result<Vec<(PickleValue, PickleValue)>
 fn decode_long(raw: &[u8]) -> i64 {
     if raw.is_empty() {
         return 0;
+    }
+    if raw.len() > 8 {
+        let negative = raw.last().is_some_and(|byte| byte & 0x80 != 0);
+        let sign_extension = if negative { 0xff } else { 0x00 };
+        if raw[8..].iter().all(|byte| *byte == sign_extension) && ((raw[7] & 0x80) != 0) == negative
+        {
+            return i64::from_le_bytes(raw[..8].try_into().expect("eight-byte slice"));
+        }
+        return if negative { i64::MIN } else { i64::MAX };
     }
     let mut value: i64 = 0;
     for (i, &b) in raw.iter().enumerate() {
@@ -577,6 +683,30 @@ mod tests {
         // ...yet the string accessors resolve them (Python-2 .pse compatibility).
         assert_eq!(value.get("count").unwrap().as_i64(), Some(2));
         assert_eq!(value.get("name").unwrap().as_str(), Some("x"));
+    }
+
+    #[test]
+    fn parses_protocol4_memoized_unicode_and_bytes() {
+        let pickle = [
+            0x80, 4, b'}', 0x94, 0x8c, 1, b'x', 0x94, b'C', 3, b'a', b'b', b'c', 0x94, b's', b'.',
+        ];
+        let value = parse_pickle(&pickle).unwrap();
+        assert_eq!(value.get("x"), Some(&PickleValue::Bytes(b"abc".to_vec())));
+    }
+
+    #[test]
+    fn parses_protocol4_stack_global_and_sets() {
+        let global = [0x80, 4, 0x8c, 1, b'm', 0x8c, 1, b'C', 0x93, b'.'];
+        assert_eq!(
+            parse_pickle(&global).unwrap(),
+            PickleValue::Global("m".to_string(), "C".to_string())
+        );
+
+        let set = [0x80, 4, 0x8f, 0x94, b'(', b'K', 1, b'K', 2, 0x90, b'.'];
+        assert_eq!(
+            parse_pickle(&set).unwrap(),
+            PickleValue::Set(vec![PickleValue::Int(1), PickleValue::Int(2)])
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ pub fn pdb_array_metadata(path: &str, array_name: &str) -> Result<String, String
     Ok(format!(
         "{{\"type\":{},\"length\":{},\"bytes\":{}}}",
         array.elem_type_code(),
-        array.length(),
+        array.elem_count(),
         array.byte_len()
     ))
 }

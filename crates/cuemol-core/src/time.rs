@@ -1,5 +1,30 @@
 use crate::{CueMolError, Result};
 
+pub type TimeValue = i64;
+
+pub const NANOS_PER_SECOND: TimeValue = 1_000_000_000;
+pub const NANOS_PER_MILLISECOND: TimeValue = 1_000_000;
+
+pub fn time_to_seconds(value: TimeValue) -> f64 {
+    value as f64 / NANOS_PER_SECOND as f64
+}
+
+pub fn time_to_milliseconds(value: TimeValue) -> f64 {
+    value as f64 / NANOS_PER_MILLISECOND as f64
+}
+
+pub fn time_from_seconds(value: f64) -> TimeValue {
+    (value * NANOS_PER_SECOND as f64) as TimeValue
+}
+
+pub fn time_from_milliseconds(value: f64) -> TimeValue {
+    (value * NANOS_PER_MILLISECOND as f64) as TimeValue
+}
+
+pub const fn time_from_nanoseconds(value: TimeValue) -> TimeValue {
+    value
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LScrTime {
     millis: f64,
@@ -20,12 +45,20 @@ impl LScrTime {
         self.millis
     }
 
+    pub fn get_milli_sec_real(&self) -> f64 {
+        self.milli_sec_real()
+    }
+
     pub fn set_milli_sec_real(&mut self, value: f64) {
         self.millis = value;
     }
 
     pub fn sec_real(&self) -> f64 {
         self.millis / 1000.0
+    }
+
+    pub fn get_sec_real(&self) -> f64 {
+        self.sec_real()
     }
 
     pub fn set_sec_real(&mut self, value: f64) {
@@ -60,6 +93,10 @@ impl LScrTime {
     }
 
     pub fn strval(&self) -> String {
+        self.script_string()
+    }
+
+    pub fn get_str_value(&self) -> String {
         self.script_string()
     }
 
@@ -139,6 +176,12 @@ impl LScrTime {
     }
 }
 
+impl std::fmt::Display for LScrTime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.script_string())
+    }
+}
+
 fn parse_time_part(value: &str) -> Result<f64> {
     if value.is_empty() || value.matches('.').count() > 1 {
         return Err(CueMolError::invalid_argument("invalid time format"));
@@ -186,5 +229,14 @@ mod tests {
         assert!(time.equals(&other));
         assert!(LScrTime::new().set_str_value("1:2:3:4").is_err());
         assert!(LScrTime::new().set_str_value("1.2.3").is_err());
+    }
+
+    #[test]
+    fn time_value_conversions_use_nanosecond_internal_units() {
+        assert_eq!(time_from_seconds(1.5), 1_500_000_000);
+        assert_eq!(time_from_milliseconds(2.5), 2_500_000);
+        assert_eq!(time_from_nanoseconds(-3), -3);
+        assert_eq!(time_to_seconds(1_500_000_000), 1.5);
+        assert_eq!(time_to_milliseconds(-2_500_000), -2.5);
     }
 }

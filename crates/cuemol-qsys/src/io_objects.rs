@@ -94,6 +94,10 @@ impl ObjReader {
         self.target_object.take()
     }
 
+    pub fn detach(&mut self) -> Option<Uid> {
+        self.detach_object()
+    }
+
     pub fn target_object(&self) -> Option<Uid> {
         self.target_object
     }
@@ -249,6 +253,10 @@ impl ObjWriter {
         self.target_object.take()
     }
 
+    pub fn detach(&mut self) -> Option<Uid> {
+        self.detach_object()
+    }
+
     pub fn target_object(&self) -> Option<Uid> {
         self.target_object
     }
@@ -285,6 +293,7 @@ pub struct SceneExporter {
     camera_name: String,
     width: i32,
     height: i32,
+    write_count: usize,
 }
 
 impl SceneExporter {
@@ -304,6 +313,7 @@ impl SceneExporter {
             camera_name: String::new(),
             width: 0,
             height: 0,
+            write_count: 0,
         }
     }
 
@@ -343,12 +353,20 @@ impl SceneExporter {
         self.client_scene.take()
     }
 
+    pub fn detach(&mut self) -> Option<Uid> {
+        self.detach_scene()
+    }
+
     pub fn client_scene(&self) -> Option<Uid> {
         self.client_scene
     }
 
     pub fn camera_name(&self) -> &str {
         &self.camera_name
+    }
+
+    pub fn get_camera_name(&self) -> &str {
+        self.camera_name()
     }
 
     pub fn set_camera_name(&mut self, value: impl Into<String>) {
@@ -359,12 +377,20 @@ impl SceneExporter {
         self.width
     }
 
+    pub fn get_width(&self) -> i32 {
+        self.width()
+    }
+
     pub fn set_width(&mut self, value: i32) {
         self.width = value;
     }
 
     pub fn height(&self) -> i32 {
         self.height
+    }
+
+    pub fn get_height(&self) -> i32 {
+        self.height()
     }
 
     pub fn set_height(&mut self, value: i32) {
@@ -397,6 +423,14 @@ impl SceneExporter {
 
     pub fn category(&self) -> i32 {
         InOutHandler::IOH_CAT_RENDTOFILE
+    }
+
+    pub fn write(&mut self) {
+        self.write_count += 1;
+    }
+
+    pub fn write_count(&self) -> usize {
+        self.write_count
     }
 }
 
@@ -503,8 +537,16 @@ impl SceneXMLReader {
         self.buffer_size
     }
 
+    pub fn get_buf_size(&self) -> usize {
+        self.buffer_size()
+    }
+
     pub fn set_buffer_size(&mut self, value: usize) {
         self.buffer_size = value;
+    }
+
+    pub fn set_buf_size(&mut self, value: usize) {
+        self.set_buffer_size(value);
     }
 
     pub fn attach_scene(&mut self, scene_uid: Uid) {
@@ -519,12 +561,20 @@ impl SceneXMLReader {
         self.client_scene.take()
     }
 
+    pub fn detach(&mut self) -> Option<Uid> {
+        self.detach_scene()
+    }
+
     pub fn client_scene(&self) -> Option<Uid> {
         self.client_scene
     }
 
     pub fn error_message(&self) -> &str {
         &self.error_message
+    }
+
+    pub fn get_err_msg(&self) -> &str {
+        self.error_message()
     }
 
     pub fn error(&self) -> &str {
@@ -561,6 +611,10 @@ impl SceneXMLReader {
         }
     }
 
+    pub fn read(&mut self) -> Result<String> {
+        self.read_string()
+    }
+
     pub fn read_byte_array(&mut self) -> Result<ByteArray> {
         match self.handler.read_byte_array() {
             Ok(value) => {
@@ -581,6 +635,7 @@ pub struct SceneXMLWriter {
     client_scene: Option<Uid>,
     embed_all: bool,
     num_version: i32,
+    document: String,
 }
 
 impl Default for SceneXMLWriter {
@@ -601,6 +656,7 @@ impl SceneXMLWriter {
             client_scene: None,
             embed_all: false,
             num_version: 0,
+            document: String::new(),
         }
     }
 
@@ -680,6 +736,10 @@ impl SceneXMLWriter {
         self.embed_all
     }
 
+    pub fn get_embed_all(&self) -> bool {
+        self.embed_all()
+    }
+
     pub fn set_embed_all(&mut self, value: bool) {
         self.embed_all = value;
     }
@@ -694,6 +754,10 @@ impl SceneXMLWriter {
 
     pub fn str_version(&self) -> String {
         format!("QDF{}", self.num_version)
+    }
+
+    pub fn get_str_version(&self) -> String {
+        self.str_version()
     }
 
     pub fn set_str_version(&mut self, value: &str) {
@@ -727,12 +791,28 @@ impl SceneXMLWriter {
         self.client_scene.take()
     }
 
+    pub fn detach(&mut self) -> Option<Uid> {
+        self.detach_scene()
+    }
+
     pub fn client_scene(&self) -> Option<Uid> {
         self.client_scene
     }
 
     pub fn write_string(&self, text: &str) -> Result<()> {
         self.handler.write_string(text)
+    }
+
+    pub fn document(&self) -> &str {
+        &self.document
+    }
+
+    pub fn set_document(&mut self, value: impl Into<String>) {
+        self.document = value.into();
+    }
+
+    pub fn write(&self) -> Result<()> {
+        self.handler.write_string(&self.document)
     }
 
     pub fn write_byte_array(&self, data: &ByteArray) -> Result<()> {

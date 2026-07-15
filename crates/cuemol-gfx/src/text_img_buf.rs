@@ -27,12 +27,20 @@ impl TextImgBuf {
         &self.text
     }
 
+    pub fn get_text(&self) -> &str {
+        self.text()
+    }
+
     pub fn set_text(&mut self, value: impl Into<String>) {
         self.text = value.into();
     }
 
     pub fn font(&self) -> &str {
         &self.font
+    }
+
+    pub fn get_font(&self) -> &str {
+        self.font()
     }
 
     pub fn set_font(&mut self, value: impl Into<String>) {
@@ -43,12 +51,20 @@ impl TextImgBuf {
         self.buffer.width() as i32
     }
 
+    pub fn get_width(&self) -> i32 {
+        self.width()
+    }
+
     pub fn set_width(&mut self, value: i32) {
         self.buffer.set_width(value.max(0) as usize);
     }
 
     pub fn height(&self) -> i32 {
         self.buffer.height() as i32
+    }
+
+    pub fn get_height(&self) -> i32 {
+        self.height()
     }
 
     pub fn set_height(&mut self, value: i32) {
@@ -145,6 +161,10 @@ impl TextImgBuf {
             *dst = rgba[3];
         }
         Ok(())
+    }
+
+    pub fn set_data_from_r_g_b_a(&mut self, src: &ByteArray) -> Result<()> {
+        self.set_data_from_rgba(src)
     }
 
     pub fn alpha_from_rgba(src: &ByteArray) -> Result<Vec<u8>> {

@@ -186,7 +186,7 @@ fn mmcif_map_reader_reports_lfs_pointer_fixture() {
             );
             assert_eq!(size, 124063);
         }
-        MmcifMapStatus::ParsedPlaceholder => panic!("expected Git LFS pointer"),
+        MmcifMapStatus::Parsed { .. } => panic!("expected Git LFS pointer"),
     }
 }
 

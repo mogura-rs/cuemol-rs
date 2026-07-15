@@ -1,6 +1,9 @@
-use cuemol_core::{LString, Matrix4, Uid, Vector4};
-use cuemol_gfx::{Rgba8, SolidColor};
+use crate::{RendererEvent, SceneEvent, ScrEventManagerHandle};
+use cuemol_core::{EventCaster, LString, Matrix4, SharedEventListener, Uid, Vector4};
+use cuemol_gfx::{RawHitData, Rgba8, SolidColor};
 use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::Arc;
 
 pub const INVALID_UID: u64 = 0;
 
@@ -36,6 +39,10 @@ impl MultiGradient {
 
     pub fn size(&self) -> usize {
         self.nodes.len()
+    }
+
+    pub fn get_size(&self) -> usize {
+        self.size()
     }
 
     pub fn insert(&mut self, value: f64, color: Rgba8) -> isize {
@@ -77,6 +84,25 @@ impl MultiGradient {
         }
         self.nodes.remove(index);
         true
+    }
+
+    pub fn change_at(&mut self, index: usize, value: f64, color: Rgba8) -> bool {
+        if index >= self.nodes.len()
+            || self
+                .nodes
+                .iter()
+                .enumerate()
+                .any(|(i, (existing, _))| i != index && *existing == value)
+        {
+            return false;
+        }
+        self.nodes[index] = (value, color);
+        self.nodes.sort_by(|lhs, rhs| lhs.0.total_cmp(&rhs.0));
+        true
+    }
+
+    pub fn copy_from(&mut self, source: &MultiGradient) {
+        self.nodes.clone_from(&source.nodes);
     }
 
     pub fn clear(&mut self) {
@@ -134,6 +160,9 @@ pub struct Renderer {
     edge_line_type: i32,
     edge_line_width: f64,
     edge_line_color: SolidColor,
+    event_caster: Arc<EventCaster<RendererEvent>>,
+    _scene_event_caster: Option<Arc<EventCaster<SceneEvent>>>,
+    event_manager: Option<ScrEventManagerHandle>,
 }
 
 impl Renderer {
@@ -162,6 +191,9 @@ impl Renderer {
             edge_line_type: Self::ELT_NONE,
             edge_line_width: 0.01,
             edge_line_color: SolidColor::from_rgb(0.0, 0.0, 0.0),
+            event_caster: Arc::new(EventCaster::new()),
+            _scene_event_caster: None,
+            event_manager: None,
         }
     }
 
@@ -192,8 +224,20 @@ impl Renderer {
         self.scene_uid()
     }
 
+    pub fn get_scene(&self) -> Option<Uid> {
+        (self.scene_uid.get() != INVALID_UID).then_some(self.scene_uid)
+    }
+
     pub fn set_scene_uid(&mut self, value: Uid) {
         self.scene_uid = value;
+    }
+
+    pub(crate) fn attach_scene_event_caster(&mut self, caster: Arc<EventCaster<SceneEvent>>) {
+        self._scene_event_caster = Some(caster);
+    }
+
+    pub(crate) fn attach_event_manager(&mut self, manager: ScrEventManagerHandle) {
+        self.event_manager = Some(manager);
     }
 
     pub fn client_obj_uid(&self) -> Uid {
@@ -228,6 +272,10 @@ impl Renderer {
         self.center
     }
 
+    pub fn get_center_scr(&self) -> Vector4 {
+        self.center()
+    }
+
     pub fn get_center(&self) -> Vector4 {
         self.center()
     }
@@ -235,11 +283,13 @@ impl Renderer {
     pub fn set_center(&mut self, value: Vector4) {
         self.center = value;
         self.has_center = true;
+        self.fire_property_changed("center");
     }
 
     pub fn clear_center(&mut self) {
         self.center = Vector4::new3(0.0, 0.0, 0.0);
         self.has_center = false;
+        self.fire_property_changed("center");
     }
 
     pub fn has_center(&self) -> bool {
@@ -250,8 +300,13 @@ impl Renderer {
         &self.name
     }
 
+    pub fn get_name(&self) -> &str {
+        self.name()
+    }
+
     pub fn set_name(&mut self, value: impl Into<String>) {
         self.name = value.into();
+        self.fire_property_changed("name");
     }
 
     pub fn is_visible(&self) -> bool {
@@ -264,6 +319,7 @@ impl Renderer {
 
     pub fn set_visible(&mut self, value: bool) {
         self.visible = value;
+        self.fire_property_changed("visible");
     }
 
     pub fn is_ui_locked(&self) -> bool {
@@ -276,6 +332,7 @@ impl Renderer {
 
     pub fn set_ui_locked(&mut self, value: bool) {
         self.ui_locked = value;
+        self.fire_property_changed("locked");
     }
 
     pub fn style_names(&self) -> &str {
@@ -288,26 +345,41 @@ impl Renderer {
 
     pub fn set_style_names(&mut self, value: impl Into<String>) {
         self.style_names = value.into();
+        self.fire_property_changed("styles");
     }
 
     pub fn default_material(&self) -> &str {
         &self.default_material
     }
 
+    pub fn get_default_material(&self) -> &str {
+        self.default_material()
+    }
+
     pub fn set_default_material(&mut self, value: impl Into<String>) {
         self.default_material = value.into();
+        self.fire_property_changed("default_material");
     }
 
     pub fn default_alpha(&self) -> f64 {
         self.default_alpha
     }
 
+    pub fn get_default_alpha(&self) -> f64 {
+        self.default_alpha()
+    }
+
     pub fn set_default_alpha(&mut self, value: f64) {
         self.default_alpha = value;
+        self.fire_property_changed("default_alpha");
     }
 
     pub fn xform_matrix(&self) -> Matrix4 {
         self.xform_matrix
+    }
+
+    pub fn get_xform_matrix(&self) -> Matrix4 {
+        self.xform_matrix()
     }
 
     pub fn xform_mat(&self) -> Matrix4 {
@@ -316,6 +388,7 @@ impl Renderer {
 
     pub fn set_xform_matrix(&mut self, value: Matrix4) {
         self.xform_matrix = value;
+        self.fire_property_changed("xformMat");
     }
 
     pub fn set_xform_mat(&mut self, value: Matrix4) {
@@ -326,12 +399,21 @@ impl Renderer {
         self.ui_order
     }
 
+    pub fn get_ui_order(&self) -> i32 {
+        self.ui_order()
+    }
+
     pub fn set_ui_order(&mut self, value: i32) {
         self.ui_order = value;
+        self.fire_property_changed("ui_order");
     }
 
     pub fn group_name(&self) -> &str {
         &self.group_name
+    }
+
+    pub fn get_group_name(&self) -> &str {
+        self.group_name()
     }
 
     pub fn group(&self) -> &str {
@@ -340,10 +422,15 @@ impl Renderer {
 
     pub fn set_group_name(&mut self, value: impl Into<String>) {
         self.group_name = value.into();
+        self.fire_property_changed("group");
     }
 
     pub fn edge_line_type(&self) -> i32 {
         self.edge_line_type
+    }
+
+    pub fn get_edge_line_type(&self) -> i32 {
+        self.edge_line_type()
     }
 
     pub fn egtype(&self) -> i32 {
@@ -352,10 +439,15 @@ impl Renderer {
 
     pub fn set_edge_line_type(&mut self, value: i32) {
         self.edge_line_type = value;
+        self.fire_property_changed("egtype");
     }
 
     pub fn edge_line_width(&self) -> f64 {
         self.edge_line_width
+    }
+
+    pub fn get_edge_line_width(&self) -> f64 {
+        self.edge_line_width()
     }
 
     pub fn eglinew(&self) -> f64 {
@@ -364,10 +456,15 @@ impl Renderer {
 
     pub fn set_edge_line_width(&mut self, value: f64) {
         self.edge_line_width = value;
+        self.fire_property_changed("eglinew");
     }
 
     pub fn edge_line_color(&self) -> &SolidColor {
         &self.edge_line_color
+    }
+
+    pub fn get_edge_line_color(&self) -> &SolidColor {
+        self.edge_line_color()
     }
 
     pub fn egcolor(&self) -> &SolidColor {
@@ -376,6 +473,7 @@ impl Renderer {
 
     pub fn set_edge_line_color(&mut self, value: SolidColor) {
         self.edge_line_color = value;
+        self.fire_property_changed("egcolor");
     }
 
     pub fn script_string(&self) -> LString {
@@ -389,6 +487,7 @@ impl Renderer {
     pub fn apply_styles(&mut self, names: impl Into<String>) {
         self.style_names = names.into();
         self.reapply_style();
+        self.fire_property_changed("styles");
     }
 
     pub fn reapply_style(&mut self) {
@@ -407,11 +506,53 @@ impl Renderer {
             .filter(|name| !name.contains(regex))
             .collect::<Vec<_>>()
             .join(",");
-        before != self.style_names
+        let changed = before != self.style_names;
+        if changed {
+            self.fire_property_changed("styles");
+        }
+        changed
     }
 
     pub fn is_compatible_obj<T>(&self, _object: &crate::SceneObject<T>) -> bool {
         true
+    }
+
+    pub fn is_hit_test_supported(&self) -> bool {
+        false
+    }
+
+    pub fn interp_hit(&self, _hit_data: &dyn RawHitData) -> String {
+        String::new()
+    }
+
+    pub fn add_listener(&self, listener: SharedEventListener<RendererEvent>) -> i32 {
+        self.event_caster.add(listener).map_or(-1, |id| id as i32)
+    }
+
+    pub fn remove_listener(&self, id: i32) -> bool {
+        id >= 0 && self.event_caster.remove(id as u64).is_some()
+    }
+
+    pub fn fire_renderer_event(&self, event: &mut RendererEvent) {
+        event.set_source(self.scene_uid.get());
+        self.event_caster.replica_fire(event);
+        if let Some(manager) = self.event_manager.as_ref() {
+            let _ = manager.with(|manager| manager.fire_renderer_event(event));
+        }
+    }
+
+    fn fire_property_changed(&self, property_name: &str) {
+        let mut event = RendererEvent::new();
+        event.set_event_type(RendererEvent::RNE_PROPCHG);
+        event.set_target(self.uid.get());
+        event.set_descr(property_name);
+        self.fire_renderer_event(&mut event);
+    }
+}
+
+impl fmt::Display for Renderer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Renderer(name={}, UID={})", self.name, self.uid.get())
     }
 }
 
@@ -431,6 +572,13 @@ impl TestRenderer {
     pub fn new() -> Self {
         Self {
             renderer: Renderer::new("test"),
+            color1: SolidColor::from_rgb(0.0, 1.0, 1.0),
+        }
+    }
+
+    pub fn with_uid(uid: Uid) -> Self {
+        Self {
+            renderer: Renderer::with_uid("test", uid),
             color1: SolidColor::from_rgb(0.0, 1.0, 1.0),
         }
     }
@@ -461,6 +609,18 @@ impl TestRenderer {
 
     pub fn set_color_1(&mut self, value: SolidColor) {
         self.set_color1(value);
+    }
+
+    pub fn is_hit_test_supported(&self) -> bool {
+        true
+    }
+
+    pub fn interp_hit(&self, hit_data: &dyn RawHitData) -> String {
+        let face_id = hit_data.data_at(self.renderer.uid(), 0, 0);
+        match face_id {
+            Some(face_id) => format!("\"faceid\":{face_id},\"objtype\":\"Test\","),
+            None => "\"objtype\":\"Test\",".to_string(),
+        }
     }
 }
 
@@ -620,15 +780,30 @@ impl PropEditInfo {
 pub struct ViewInputConfig {
     tb_rad: f64,
     hit_prec: f64,
+    style_name: String,
     bindings: BTreeMap<i32, String>,
 }
 
 impl Default for ViewInputConfig {
     fn default() -> Self {
+        let bindings = BTreeMap::from([
+            (Self::VIEW_ROTX, "LBUTTON|MOUSE_X".to_string()),
+            (Self::VIEW_ROTY, "LBUTTON|MOUSE_Y".to_string()),
+            (Self::VIEW_ROTZ, "LBUTTON|RBUTTON|MOUSE_Y".to_string()),
+            (Self::VIEW_TRAX, "RBUTTON|MOUSE_X".to_string()),
+            (Self::VIEW_TRAY, "RBUTTON|MOUSE_Y".to_string()),
+            (Self::VIEW_TRAZ, "LBUTTON|RBUTTON|MOUSE_X".to_string()),
+            (
+                Self::VIEW_ZOOM,
+                "LBUTTON|SHIFT|MOUSE_Y,WHEEL1,WHEEL2".to_string(),
+            ),
+            (Self::VIEW_SLAB, "LBUTTON|SHIFT|MOUSE_X".to_string()),
+        ]);
         Self {
             tb_rad: 0.8,
-            hit_prec: 0.01,
-            bindings: BTreeMap::new(),
+            hit_prec: 10.0,
+            style_name: String::new(),
+            bindings,
         }
     }
 }
@@ -652,6 +827,10 @@ impl ViewInputConfig {
         self.tb_rad
     }
 
+    pub fn get_tb_rad(&self) -> f64 {
+        self.tb_rad()
+    }
+
     pub fn tbrad(&self) -> f64 {
         self.tb_rad()
     }
@@ -666,6 +845,22 @@ impl ViewInputConfig {
 
     pub fn hit_prec(&self) -> f64 {
         self.hit_prec
+    }
+
+    pub fn get_hit_prec(&self) -> f64 {
+        self.hit_prec()
+    }
+
+    pub fn style_name(&self) -> &str {
+        &self.style_name
+    }
+
+    pub fn get_style_name(&self) -> &str {
+        self.style_name()
+    }
+
+    pub fn apply_style(&mut self, value: impl Into<String>) {
+        self.style_name = value.into();
     }
 
     pub fn hitprec(&self) -> f64 {
@@ -709,6 +904,10 @@ impl ViewInputConfig {
         self.binding(Self::VIEW_ROTX)
     }
 
+    pub fn get_conf_rot_x(&self) -> LString {
+        self.conf_rot_x()
+    }
+
     pub fn set_conf_rotx(&mut self, value: impl Into<String>) {
         self.set_conf_rot_x(value);
     }
@@ -725,12 +924,28 @@ impl ViewInputConfig {
         self.binding(Self::VIEW_ROTY)
     }
 
+    pub fn get_conf_rot_y(&self) -> LString {
+        self.conf_roty()
+    }
+
+    pub fn set_conf_rot_y(&mut self, value: impl Into<String>) {
+        self.set_conf_roty(value);
+    }
+
     pub fn set_conf_rotz(&mut self, value: impl Into<String>) {
         self.set_binding(Self::VIEW_ROTZ, value);
     }
 
     pub fn conf_rotz(&self) -> LString {
         self.binding(Self::VIEW_ROTZ)
+    }
+
+    pub fn get_conf_rot_z(&self) -> LString {
+        self.conf_rotz()
+    }
+
+    pub fn set_conf_rot_z(&mut self, value: impl Into<String>) {
+        self.set_conf_rotz(value);
     }
 
     pub fn set_conf_trax(&mut self, value: impl Into<String>) {
@@ -741,12 +956,28 @@ impl ViewInputConfig {
         self.binding(Self::VIEW_TRAX)
     }
 
+    pub fn get_conf_tra_x(&self) -> LString {
+        self.conf_trax()
+    }
+
+    pub fn set_conf_tra_x(&mut self, value: impl Into<String>) {
+        self.set_conf_trax(value);
+    }
+
     pub fn set_conf_tray(&mut self, value: impl Into<String>) {
         self.set_binding(Self::VIEW_TRAY, value);
     }
 
     pub fn conf_tray(&self) -> LString {
         self.binding(Self::VIEW_TRAY)
+    }
+
+    pub fn get_conf_tra_y(&self) -> LString {
+        self.conf_tray()
+    }
+
+    pub fn set_conf_tra_y(&mut self, value: impl Into<String>) {
+        self.set_conf_tray(value);
     }
 
     pub fn set_conf_traz(&mut self, value: impl Into<String>) {
@@ -757,12 +988,24 @@ impl ViewInputConfig {
         self.binding(Self::VIEW_TRAZ)
     }
 
+    pub fn get_conf_tra_z(&self) -> LString {
+        self.conf_traz()
+    }
+
+    pub fn set_conf_tra_z(&mut self, value: impl Into<String>) {
+        self.set_conf_traz(value);
+    }
+
     pub fn set_conf_zoom(&mut self, value: impl Into<String>) {
         self.set_binding(Self::VIEW_ZOOM, value);
     }
 
     pub fn conf_zoom(&self) -> LString {
         self.binding(Self::VIEW_ZOOM)
+    }
+
+    pub fn get_conf_zoom(&self) -> LString {
+        self.conf_zoom()
     }
 
     pub fn set_conf_slab(&mut self, value: impl Into<String>) {
@@ -773,12 +1016,20 @@ impl ViewInputConfig {
         self.binding(Self::VIEW_SLAB)
     }
 
+    pub fn get_conf_slab(&self) -> LString {
+        self.conf_slab()
+    }
+
     pub fn set_conf_dist(&mut self, value: impl Into<String>) {
         self.set_binding(Self::VIEW_DIST, value);
     }
 
     pub fn conf_dist(&self) -> LString {
         self.binding(Self::VIEW_DIST)
+    }
+
+    pub fn get_conf_dist(&self) -> LString {
+        self.conf_dist()
     }
 }
 
@@ -795,6 +1046,8 @@ fn lerp_color(lhs: Rgba8, rhs: Rgba8, t: f32) -> Rgba8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuemol_core::shared_event_listener;
+    use std::sync::Mutex;
 
     fn color(r: u8, g: u8, b: u8) -> Rgba8 {
         Rgba8 { r, g, b, a: 255 }
@@ -857,6 +1110,43 @@ mod tests {
             test.color1().rgba8(),
             SolidColor::from_rgb(0.0, 1.0, 1.0).rgba8()
         );
+        assert!(!renderer.is_hit_test_supported());
+
+        let test = TestRenderer::with_uid(Uid::new(9));
+        let mut context = cuemol_gfx::HittestContext::new();
+        context.add_hit(Uid::new(9), 0.5, vec![4]);
+        let mut hit_data = cuemol_gfx::HitData::new();
+        hit_data.create_nearest(&context);
+        assert!(test.is_hit_test_supported());
+        assert_eq!(
+            test.interp_hit(&hit_data),
+            "\"faceid\":4,\"objtype\":\"Test\","
+        );
+    }
+
+    #[test]
+    fn renderer_property_events_include_renderer_target_and_scene_source() {
+        let mut renderer = Renderer::with_uid("simple", Uid::new(9));
+        renderer.set_scene_uid(Uid::new(4));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        let id = renderer.add_listener(shared_event_listener(move |event: &mut RendererEvent| {
+            listener_events.lock().unwrap().push(event.clone());
+        }));
+
+        renderer.set_name("renderer");
+        renderer.set_default_alpha(0.5);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|event| event.event_type() == RendererEvent::RNE_PROPCHG));
+        assert!(events.iter().all(|event| event.target() == 9));
+        assert!(events.iter().all(|event| event.source() == 4));
+        assert_eq!(events[0].descr(), "name");
+        assert_eq!(events[1].descr(), "default_alpha");
+        drop(events);
+        assert!(renderer.remove_listener(id));
     }
 
     #[test]
@@ -888,6 +1178,17 @@ mod tests {
     #[test]
     fn view_input_config_roundtrips_bindings_like_reference() {
         let mut config = ViewInputConfig::new();
+        assert_eq!(config.hit_prec(), 10.0);
+        assert_eq!(config.get_tb_rad(), 0.8);
+        assert_eq!(config.get_conf_rot_x().as_str(), "LBUTTON|MOUSE_X");
+        assert_eq!(config.get_conf_rot_y().as_str(), "LBUTTON|MOUSE_Y");
+        assert_eq!(config.get_conf_tra_x().as_str(), "RBUTTON|MOUSE_X");
+        assert_eq!(
+            config.get_conf_zoom().as_str(),
+            "LBUTTON|SHIFT|MOUSE_Y,WHEEL1,WHEEL2"
+        );
+        assert_eq!(config.get_conf_slab().as_str(), "LBUTTON|SHIFT|MOUSE_X");
+        assert!(config.get_conf_dist().is_empty());
         config.set_tb_rad(1.5);
         config.set_hit_prec(0.05);
         assert_eq!(config.tb_rad(), 1.5);

@@ -69,8 +69,7 @@ impl ResiToppar {
     /// group-less) residues do not.  Mirrors `TopoBuilder::applyTopology` line
     /// "avoid to search linker data when ptop is not a polymer".
     pub fn is_polymer(&self) -> bool {
-        !self.group.is_empty()
-            && !matches!(self.group.as_str(), "water" | "ion" | "non-polymer")
+        !self.group.is_empty() && !matches!(self.group.as_str(), "water" | "ion" | "non-polymer")
     }
 
     /// Look up a template atom by its `id` (atom name), case-insensitive on the
@@ -111,7 +110,8 @@ impl ParamDB {
         for el in TagIter::new(xml) {
             if el.name == "atom" && !el.closing {
                 if let Some(id) = el.attr("id") {
-                    let num = |name: &str| el.attr(name).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                    let num =
+                        |name: &str| el.attr(name).and_then(|v| v.parse().ok()).unwrap_or(0.0);
                     atoms.insert(
                         id,
                         AtomParam {
@@ -498,7 +498,11 @@ impl Iterator for TagIter<'_> {
             }
             if self.rest.starts_with('?') || self.rest.starts_with('!') {
                 // Declaration / DOCTYPE: skip to '>'.
-                let end = self.rest.find('>').map(|e| e + 1).unwrap_or(self.rest.len());
+                let end = self
+                    .rest
+                    .find('>')
+                    .map(|e| e + 1)
+                    .unwrap_or(self.rest.len());
                 self.rest = &self.rest[end..];
                 continue;
             }
@@ -688,7 +692,12 @@ fn bond_unbonded_atoms(
 }
 
 /// Does residue `name`/`group` satisfy one side of a link target?
-fn side_matches(group: Option<&String>, resid: Option<&String>, res_name: &str, res_group: &str) -> bool {
+fn side_matches(
+    group: Option<&String>,
+    resid: Option<&String>,
+    res_name: &str,
+    res_group: &str,
+) -> bool {
     if let Some(want) = resid {
         if !res_name.eq_ignore_ascii_case(want) {
             return false;
@@ -726,7 +735,8 @@ pub fn build_topology_bonds(mol: &mut MolCoord) {
         let group = match db.residue(&summary.res_name) {
             Some(top) => {
                 for bond in &top.bonds {
-                    for (i, j) in bond_named(mol, &map, &bond.a1, &map, &bond.a2, bond.order, None) {
+                    for (i, j) in bond_named(mol, &map, &bond.a1, &map, &bond.a2, bond.order, None)
+                    {
                         templated.insert(i);
                         templated.insert(j);
                     }
@@ -760,8 +770,17 @@ pub fn build_topology_bonds(mol: &mut MolCoord) {
         }
         for link in db.links().iter().filter(|l| l.poly) {
             if !link.targets.iter().any(|t| {
-                side_matches(t.group1.as_ref(), t.resid1.as_ref(), &prev.res_name, &prev.group)
-                    && side_matches(t.group2.as_ref(), t.resid2.as_ref(), &cur.res_name, &cur.group)
+                side_matches(
+                    t.group1.as_ref(),
+                    t.resid1.as_ref(),
+                    &prev.res_name,
+                    &prev.group,
+                ) && side_matches(
+                    t.group2.as_ref(),
+                    t.resid2.as_ref(),
+                    &cur.res_name,
+                    &cur.group,
+                )
             }) {
                 continue;
             }
@@ -816,7 +835,15 @@ pub fn build_topology_bonds(mol: &mut MolCoord) {
                         let lo = (bond.value - LINK_DIST_TOL).max(0.4);
                         let hi = bond.value + LINK_DIST_TOL;
                         let (m1, m2) = (contexts[i].map.clone(), contexts[j].map.clone());
-                        bond_named(mol, &m1, &bond.a1, &m2, &bond.a2, bond.order, Some((lo, hi)));
+                        bond_named(
+                            mol,
+                            &m1,
+                            &bond.a1,
+                            &m2,
+                            &bond.a2,
+                            bond.order,
+                            Some((lo, hi)),
+                        );
                     }
                 }
             }
@@ -863,7 +890,7 @@ mod tests {
         assert_eq!(db.canonical_name("CYX"), Some("CYS")); // disulfide cysteine
         assert_eq!(db.canonical_name("HID"), Some("HIS")); // Amber histidine
         assert_eq!(db.canonical_name("HSE"), Some("HIS")); // CHARMM histidine
-        // residue() returns the canonical template for a synonym name.
+                                                           // residue() returns the canonical template for a synonym name.
         assert!(std::ptr::eq(
             db.residue("CYX").unwrap(),
             db.residue("CYS").unwrap()

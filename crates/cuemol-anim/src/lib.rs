@@ -68,6 +68,10 @@ impl AnimObj {
         self.uid
     }
 
+    pub fn get_uid(&self) -> Uid {
+        self.uid()
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -80,6 +84,10 @@ impl AnimObj {
         self.disabled
     }
 
+    pub fn is_disabled(&self) -> bool {
+        self.disabled()
+    }
+
     pub fn set_disabled(&mut self, value: bool) {
         self.disabled = value;
     }
@@ -88,12 +96,24 @@ impl AnimObj {
         &self.time_ref_name
     }
 
+    pub fn get_time_ref_name(&self) -> &str {
+        self.time_ref_name()
+    }
+
     pub fn set_time_ref_name(&mut self, value: impl Into<String>) {
         self.time_ref_name = value.into();
     }
 
     pub fn rel_start(&self) -> TimeValue {
         self.rel_start
+    }
+
+    pub fn get_scr_rel_start(&self) -> TimeValue {
+        self.rel_start()
+    }
+
+    pub fn set_scr_rel_start(&mut self, value: TimeValue) {
+        self.set_rel_start(value);
     }
 
     pub fn set_rel_start(&mut self, value: TimeValue) {
@@ -107,6 +127,14 @@ impl AnimObj {
         self.rel_end
     }
 
+    pub fn get_scr_rel_end(&self) -> TimeValue {
+        self.rel_end()
+    }
+
+    pub fn set_scr_rel_end(&mut self, value: TimeValue) {
+        self.set_rel_end(value);
+    }
+
     pub fn set_rel_end(&mut self, value: TimeValue) {
         self.rel_end = value;
         if self.rel_start > self.rel_end {
@@ -118,6 +146,10 @@ impl AnimObj {
         self.abs_start
     }
 
+    pub fn get_scr_abs_start(&self) -> TimeValue {
+        self.abs_start()
+    }
+
     pub fn set_abs_start(&mut self, value: TimeValue) {
         self.abs_start = value;
     }
@@ -126,12 +158,20 @@ impl AnimObj {
         self.abs_end
     }
 
+    pub fn get_scr_abs_end(&self) -> TimeValue {
+        self.abs_end()
+    }
+
     pub fn set_abs_end(&mut self, value: TimeValue) {
         self.abs_end = value;
     }
 
     pub fn quadric(&self) -> f64 {
         self.quadric
+    }
+
+    pub fn get_quadric(&self) -> f64 {
+        self.quadric()
     }
 
     pub fn set_quadric(&mut self, value: f64) {
@@ -196,6 +236,10 @@ impl NoopAnimObj {
     pub fn base(&self) -> &AnimObj {
         &self.base
     }
+
+    pub fn base_mut(&mut self) -> &mut AnimObj {
+        &mut self.base
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -240,8 +284,16 @@ impl CamMotion {
         &self.endcam
     }
 
+    pub fn get_dest_cam_name(&self) -> &str {
+        self.endcam()
+    }
+
     pub fn set_endcam(&mut self, value: impl Into<String>) {
         self.endcam = value.into();
+    }
+
+    pub fn set_dest_cam_name(&mut self, value: impl Into<String>) {
+        self.set_endcam(value);
     }
 
     pub fn ignorecenter(&self) -> bool {
@@ -315,8 +367,16 @@ impl RealPropAnim {
         &self.base
     }
 
+    pub fn base_mut(&mut self) -> &mut AnimObj {
+        &mut self.base
+    }
+
     pub fn start_value(&self) -> f64 {
         self.start_value
+    }
+
+    pub fn get_start_value(&self) -> f64 {
+        self.start_value()
     }
 
     pub fn set_start_value(&mut self, value: f64) {
@@ -327,6 +387,10 @@ impl RealPropAnim {
         self.end_value
     }
 
+    pub fn get_end_value(&self) -> f64 {
+        self.end_value()
+    }
+
     pub fn set_end_value(&mut self, value: f64) {
         self.end_value = value;
     }
@@ -335,16 +399,32 @@ impl RealPropAnim {
         &self.prop
     }
 
+    pub fn get_prop_name(&self) -> &str {
+        self.prop()
+    }
+
     pub fn set_prop(&mut self, value: impl Into<String>) {
         self.prop = value.into();
+    }
+
+    pub fn set_prop_name(&mut self, value: impl Into<String>) {
+        self.set_prop(value);
     }
 
     pub fn rend(&self) -> &str {
         &self.rend
     }
 
+    pub fn get_rend_names(&self) -> &str {
+        self.rend()
+    }
+
     pub fn set_rend(&mut self, value: impl Into<String>) {
         self.rend = value.into();
+    }
+
+    pub fn set_rend_names(&mut self, value: impl Into<String>) {
+        self.set_rend(value);
     }
 
     pub fn value_at_rho(&self, rho: f64) -> f64 {
@@ -455,8 +535,16 @@ impl MolAnim {
         &self.base
     }
 
+    pub fn base_mut(&mut self) -> &mut AnimObj {
+        &mut self.base
+    }
+
     pub fn start_value(&self) -> f64 {
         self.start_value
+    }
+
+    pub fn get_start_value(&self) -> f64 {
+        self.start_value()
     }
 
     pub fn set_start_value(&mut self, value: f64) {
@@ -467,6 +555,10 @@ impl MolAnim {
         self.end_value
     }
 
+    pub fn get_end_value(&self) -> f64 {
+        self.end_value()
+    }
+
     pub fn set_end_value(&mut self, value: f64) {
         self.end_value = value;
     }
@@ -475,16 +567,32 @@ impl MolAnim {
         &self.prop
     }
 
+    pub fn get_prop_name(&self) -> &str {
+        self.prop()
+    }
+
     pub fn set_prop(&mut self, value: impl Into<String>) {
         self.prop = value.into();
+    }
+
+    pub fn set_prop_name(&mut self, value: impl Into<String>) {
+        self.set_prop(value);
     }
 
     pub fn mol(&self) -> &str {
         &self.mol
     }
 
+    pub fn get_mol_name(&self) -> &str {
+        self.mol()
+    }
+
     pub fn set_mol(&mut self, value: impl Into<String>) {
         self.mol = value.into();
+    }
+
+    pub fn set_mol_name(&mut self, value: impl Into<String>) {
+        self.set_mol(value);
     }
 
     pub fn value_at_rho(&self, rho: f64) -> f64 {
@@ -522,36 +630,72 @@ impl RendXformAnim {
         &self.base
     }
 
+    pub fn base_mut(&mut self) -> &mut AnimObj {
+        &mut self.base
+    }
+
     pub fn prop(&self) -> &str {
         &self.prop
+    }
+
+    pub fn get_prop_name(&self) -> &str {
+        self.prop()
     }
 
     pub fn set_prop(&mut self, _value: impl Into<String>) {
         self.prop = "xformMat".to_string();
     }
 
+    pub fn set_prop_name(&mut self, value: impl Into<String>) {
+        self.set_prop(value);
+    }
+
     pub fn rend(&self) -> &str {
         &self.rend
+    }
+
+    pub fn get_rend_names(&self) -> &str {
+        self.rend()
     }
 
     pub fn set_rend(&mut self, value: impl Into<String>) {
         self.rend = value.into();
     }
 
+    pub fn set_rend_names(&mut self, value: impl Into<String>) {
+        self.set_rend(value);
+    }
+
     pub fn start_tran(&self) -> Vector4 {
         self.start_tran
+    }
+
+    pub fn get_start_d_pos(&self) -> Vector4 {
+        self.start_tran()
     }
 
     pub fn set_start_tran(&mut self, value: Vector4) {
         self.start_tran = value;
     }
 
+    pub fn set_start_d_pos(&mut self, value: Vector4) {
+        self.set_start_tran(value);
+    }
+
     pub fn end_tran(&self) -> Vector4 {
         self.end_tran
     }
 
+    pub fn get_end_d_pos(&self) -> Vector4 {
+        self.end_tran()
+    }
+
     pub fn set_end_tran(&mut self, value: Vector4) {
         self.end_tran = value;
+    }
+
+    pub fn set_end_d_pos(&mut self, value: Vector4) {
+        self.set_end_tran(value);
     }
 
     pub fn translation_at_rho(&self, rho: f64) -> Vector4 {
@@ -593,12 +737,20 @@ impl ShowHideAnim {
         &self.base
     }
 
+    pub fn base_mut(&mut self) -> &mut AnimObj {
+        &mut self.base
+    }
+
     pub fn prop(&self) -> &'static str {
         "visible"
     }
 
     pub fn hide(&self) -> bool {
         self.hide
+    }
+
+    pub fn is_hide(&self) -> bool {
+        self.hide()
     }
 
     pub fn set_hide(&mut self, value: bool) {
@@ -609,6 +761,10 @@ impl ShowHideAnim {
         self.fade
     }
 
+    pub fn is_fade(&self) -> bool {
+        self.fade()
+    }
+
     pub fn set_fade(&mut self, value: bool) {
         self.fade = value;
     }
@@ -617,12 +773,24 @@ impl ShowHideAnim {
         &self.rend
     }
 
+    pub fn get_rend_names(&self) -> &str {
+        self.rend()
+    }
+
     pub fn set_rend(&mut self, value: impl Into<String>) {
         self.rend = value.into();
     }
 
+    pub fn set_rend_names(&mut self, value: impl Into<String>) {
+        self.set_rend(value);
+    }
+
     pub fn tgt_alpha(&self) -> f64 {
         self.tgt_alpha
+    }
+
+    pub fn get_tgt_alpha(&self) -> f64 {
+        self.tgt_alpha()
     }
 
     pub fn set_tgt_alpha(&mut self, value: f64) {
@@ -670,8 +838,16 @@ impl SimpleSpin {
         &self.base
     }
 
+    pub fn base_mut(&mut self) -> &mut AnimObj {
+        &mut self.base
+    }
+
     pub fn angle(&self) -> f64 {
         self.angle
+    }
+
+    pub fn get_angle(&self) -> f64 {
+        self.angle()
     }
 
     pub fn set_angle(&mut self, value: f64) {
@@ -682,6 +858,10 @@ impl SimpleSpin {
         self.axis
     }
 
+    pub fn get_scr_axis(&self) -> Vector4 {
+        self.axis()
+    }
+
     pub fn set_axis(&mut self, value: Vector4) -> bool {
         let len = value.length();
         if len.abs() < 1.0e-8 {
@@ -689,6 +869,10 @@ impl SimpleSpin {
         }
         self.axis = value / len;
         true
+    }
+
+    pub fn set_scr_axis(&mut self, value: Vector4) -> bool {
+        self.set_axis(value)
     }
 
     pub fn angle_at_rho(&self, rho: f64) -> f64 {
@@ -728,6 +912,10 @@ impl SlideInOutAnim {
         self.xform.base()
     }
 
+    pub fn base_mut(&mut self) -> &mut AnimObj {
+        self.xform.base_mut()
+    }
+
     pub fn prop(&self) -> &'static str {
         "visible"
     }
@@ -736,12 +924,24 @@ impl SlideInOutAnim {
         &self.rend
     }
 
+    pub fn get_rend_names(&self) -> &str {
+        self.rend()
+    }
+
     pub fn set_rend(&mut self, value: impl Into<String>) {
         self.rend = value.into();
     }
 
+    pub fn set_rend_names(&mut self, value: impl Into<String>) {
+        self.set_rend(value);
+    }
+
     pub fn hide(&self) -> bool {
         self.hide
+    }
+
+    pub fn is_hide(&self) -> bool {
+        self.hide()
     }
 
     pub fn set_hide(&mut self, value: bool) {
@@ -752,12 +952,20 @@ impl SlideInOutAnim {
         self.direction
     }
 
+    pub fn get_direction(&self) -> f64 {
+        self.direction()
+    }
+
     pub fn set_direction(&mut self, value: f64) {
         self.direction = value;
     }
 
     pub fn distance(&self) -> f64 {
         self.distance
+    }
+
+    pub fn get_distance(&self) -> f64 {
+        self.distance()
     }
 
     pub fn set_distance(&mut self, value: f64) {
@@ -780,6 +988,38 @@ impl SlideInOutAnim {
         start * (1.0 - rho) + end * rho
     }
 }
+
+macro_rules! impl_anim_obj_deref {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl std::ops::Deref for $ty {
+                type Target = AnimObj;
+
+                fn deref(&self) -> &Self::Target {
+                    self.base()
+                }
+            }
+
+            impl std::ops::DerefMut for $ty {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    self.base_mut()
+                }
+            }
+        )+
+    };
+}
+
+impl_anim_obj_deref!(
+    NoopAnimObj,
+    CamMotion,
+    RealPropAnim,
+    RendPropAnim,
+    MolAnim,
+    RendXformAnim,
+    ShowHideAnim,
+    SimpleSpin,
+    SlideInOutAnim,
+);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MorphFrame {
@@ -815,6 +1055,7 @@ impl MorphFrame {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MorphMol {
+    molecule: MolCoord,
     frame: f64,
     scale_frame: bool,
     frames: Vec<MorphFrame>,
@@ -823,6 +1064,7 @@ pub struct MorphMol {
 impl Default for MorphMol {
     fn default() -> Self {
         Self {
+            molecule: MolCoord::new(),
             frame: 0.0,
             scale_frame: false,
             frames: Vec::new(),
@@ -835,8 +1077,20 @@ impl MorphMol {
         Self::default()
     }
 
+    pub fn molecule(&self) -> &MolCoord {
+        &self.molecule
+    }
+
+    pub fn molecule_mut(&mut self) -> &mut MolCoord {
+        &mut self.molecule
+    }
+
     pub fn frame(&self) -> f64 {
         self.frame
+    }
+
+    pub fn get_frame(&self) -> f64 {
+        self.frame()
     }
 
     pub fn set_frame(&mut self, value: f64) {
@@ -847,12 +1101,20 @@ impl MorphMol {
         self.scale_frame
     }
 
+    pub fn is_scale_frame(&self) -> bool {
+        self.scale_frame()
+    }
+
     pub fn set_scale_frame(&mut self, value: bool) {
         self.scale_frame = value;
     }
 
     pub fn frame_size(&self) -> usize {
         self.frames.len()
+    }
+
+    pub fn get_frame_size(&self) -> usize {
+        self.frame_size()
     }
 
     pub fn nframe(&self) -> usize {
@@ -886,11 +1148,16 @@ impl MorphMol {
         self.frames.push(frame);
     }
 
-    pub fn append_this_frame(&mut self, molecule: &MolCoord) -> bool {
+    pub fn append_this_frame(&mut self) -> bool {
         if !self.frames.is_empty() {
             return false;
         }
-        let positions = molecule.atoms().iter().map(|atom| atom.position).collect();
+        let positions = self
+            .molecule
+            .atoms()
+            .iter()
+            .map(|atom| atom.position)
+            .collect();
         self.frames
             .push(MorphFrame::new("(this)", "<this>", "<this>", positions));
         true
@@ -946,6 +1213,20 @@ impl MorphMol {
             .zip(rhs)
             .map(|(l, r)| *l * (1.0 - rho) + *r * rho)
             .collect()
+    }
+}
+
+impl std::ops::Deref for MorphMol {
+    type Target = MolCoord;
+
+    fn deref(&self) -> &Self::Target {
+        &self.molecule
+    }
+}
+
+impl std::ops::DerefMut for MorphMol {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.molecule
     }
 }
 
@@ -1006,8 +1287,20 @@ impl AnimMgr {
         self.uid
     }
 
+    pub fn get_uid(&self) -> Uid {
+        self.uid()
+    }
+
     pub fn length(&self) -> TimeValue {
         self.length
+    }
+
+    pub fn get_scr_length(&self) -> TimeValue {
+        self.length()
+    }
+
+    pub fn set_scr_length(&mut self, value: TimeValue) {
+        self.set_length(value);
     }
 
     pub fn set_length(&mut self, value: TimeValue) {
@@ -1018,12 +1311,24 @@ impl AnimMgr {
         &self.startcam
     }
 
+    pub fn get_start_cam_name(&self) -> &str {
+        self.startcam()
+    }
+
+    pub fn set_start_cam_name(&mut self, value: impl Into<String>) {
+        self.set_startcam(value);
+    }
+
     pub fn set_startcam(&mut self, value: impl Into<String>) {
         self.startcam = value.into();
     }
 
     pub fn loop_enabled(&self) -> bool {
         self.loop_enabled
+    }
+
+    pub fn is_loop(&self) -> bool {
+        self.loop_enabled()
     }
 
     pub fn set_loop_enabled(&mut self, value: bool) {
@@ -1042,6 +1347,10 @@ impl AnimMgr {
         self.elapsed
     }
 
+    pub fn get_scr_elapsed(&self) -> TimeValue {
+        self.elapsed()
+    }
+
     pub fn play_state(&self) -> AnimPlayState {
         self.play_state
     }
@@ -1050,12 +1359,24 @@ impl AnimMgr {
         self.play_state.code()
     }
 
+    pub fn get_play_state(&self) -> i32 {
+        self.play_state_code()
+    }
+
     pub fn size(&self) -> usize {
         self.objects.len()
     }
 
+    pub fn get_size(&self) -> usize {
+        self.size()
+    }
+
     pub fn frame_no(&self) -> i32 {
         self.frame_no
+    }
+
+    pub fn get_frame_no(&self) -> i32 {
+        self.frame_no()
     }
 
     pub fn frameno(&self) -> i32 {
@@ -1289,10 +1610,11 @@ mod tests {
         mol.push_atom(atom(2, 10.0));
 
         let mut morph = MorphMol::new();
+        *morph.molecule_mut() = mol;
         assert_eq!(morph.frame(), 0.0);
         assert!(!morph.scale_frame());
-        assert!(morph.append_this_frame(&mol));
-        assert!(!morph.append_this_frame(&mol));
+        assert!(morph.append_this_frame());
+        assert!(!morph.append_this_frame());
         assert_eq!(morph.frame_size(), 1);
         assert!(morph.frame_info_json().contains("(this)"));
 

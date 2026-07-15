@@ -1,5 +1,6 @@
 use cuemol_anim::{MorphFrame, MorphMol};
 use cuemol_core::{CueMolError, Matrix4, Result, Uid};
+use cuemol_importers::PseFileReader;
 use cuemol_mdtools::{read_amber_prmtop_file, read_gro_file, read_psf_file};
 use cuemol_molanl::MolAnlManager;
 use cuemol_molstr::{
@@ -13,12 +14,13 @@ use cuemol_molvis::{
     DEFAULT_STYLE_SCOPE,
 };
 use cuemol_qsys::{ScalarObject, StyleManager};
-use cuemol_render::PovSceneExporter;
-use cuemol_render::RenderSceneSnapshot;
+#[cfg(feature = "offscreen")]
+use cuemol_render::PngSceneExporter;
+use cuemol_render::{PovSceneExporter, RenderSceneSnapshot};
 use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter};
 use cuemol_xtal::{
-    read_brix_map_file, read_ccp4_map_file, read_opendx_file, read_xplor_map_file, MapMeshRenderer,
-    MapSurfRenderer,
+    read_brix_map_file, read_ccp4_map_file, read_mmcif_map_file, read_opendx_file,
+    read_xplor_map_file, MapMeshRenderer, MapSurfRenderer,
 };
 // Re-exported so consumers (and tests) can name the scalar-field types the surface
 // potential API takes — e.g. `set_surface_potential_map(DensityMap)`.
@@ -26,6 +28,7 @@ pub use cuemol_xtal::{DensityMap, GridMap};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 // Offscreen wgpu mesh renderer (verifiable headless; the wgpu 3D component every
 // front end composites). Behind the `offscreen` feature so the default build is
@@ -146,11 +149,12 @@ pub struct GuiStructObject {
     pub chains: Vec<GuiStructChain>,
 }
 
-/// Animation-object kind (a desktop-side subset of CueMol2's anim objects): a
-/// `SimpleSpin`, a back-and-forth rock, or a hold. Shared across all three front ends.
+/// Desktop timeline quick-add presets. Full QIF animation object models live in
+/// `cuemol_anim`; these presets provide the common interactive camera/object actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimKind {
     Spin,
+    CameraMotion,
     Rock,
     Pause,
     SlideIn,
@@ -164,8 +168,9 @@ impl AnimKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Spin => "Spin",
+            Self::CameraMotion => "Camera motion",
             Self::Rock => "Rock",
-            Self::Pause => "Pause",
+            Self::Pause => "No operation",
             Self::SlideIn => "SlideIn",
             Self::SlideOut => "SlideOut",
             Self::ShowAnim => "Show",
@@ -225,6 +230,7 @@ pub fn anim_step(objects: &[AnimObject], elapsed: f64, dt: f64) -> AnimFrame {
             let progress = (next - acc) / d; // 0..1 within this segment
             let (rotate_dir, slide_dir, set_visible, frame_fraction) = match object.kind {
                 AnimKind::Spin => (1.0, 0.0, None, None),
+                AnimKind::CameraMotion => (0.0, 0.0, None, None),
                 AnimKind::Rock => (if progress < 0.5 { 1.0 } else { -1.0 }, 0.0, None, None),
                 AnimKind::Pause => (0.0, 0.0, None, None),
                 AnimKind::SlideIn => (0.0, -1.0, None, None),
@@ -412,6 +418,37 @@ impl DesktopAppState {
         self.config.put(key, value);
     }
 
+    /// Apply the configured ICC soft-proof profile to a snapshot. Returns `true`
+    /// when LittleCMS and an external profile were used, or `false` when the
+    /// profile-independent Generic CMYK fallback was used.
+    pub fn apply_color_proof(&self, snapshot: &mut RenderSceneSnapshot) -> Result<bool> {
+        let profile = self.config_value("color:icc_profile");
+        if profile.trim().is_empty() {
+            cuemol_render::apply_generic_color_proof(snapshot);
+            return Ok(false);
+        }
+        let intent = self
+            .config_value("color:icc_intent")
+            .parse::<i32>()
+            .unwrap_or(0)
+            .clamp(0, 3);
+        type ProfileCache = BTreeMap<(String, i32), cuemol_gfx::CmsXform>;
+        static CACHE: OnceLock<Mutex<ProfileCache>> = OnceLock::new();
+        let mut cache = CACHE
+            .get_or_init(|| Mutex::new(BTreeMap::new()))
+            .lock()
+            .map_err(|_| CueMolError::Io("ICC profile cache is poisoned".to_string()))?;
+        let key = (profile.clone(), intent);
+        if !cache.contains_key(&key) {
+            let mut transform = cuemol_gfx::CmsXform::new();
+            transform.set_icc_intent(intent);
+            transform.load_icc_file(&profile)?;
+            cache.insert(key.clone(), transform);
+        }
+        cuemol_render::apply_icc_color_proof(snapshot, &cache[&key]);
+        Ok(true)
+    }
+
     pub fn config_entries(&self) -> Vec<GuiConfigEntry> {
         let mut entries = Vec::new();
         collect_config_entries("", self.config.root(), &mut entries);
@@ -475,8 +512,8 @@ impl DesktopAppState {
             .unwrap_or_default()
     }
 
-    /// Convert the active scene's `.qsc`-loaded surface objects (OBJ/PLY mesh text
-    /// captured by the loader) into flat-coloured render meshes — so a `.qsc` that
+    /// Convert the active scene's `.qsc`-loaded surface objects (OBJ/PLY or QDFSurf
+    /// data captured by the loader) into flat-coloured render meshes — so a `.qsc` that
     /// carries a surface can DISPLAY it, reusing the molecule-independent surface path
     /// (`build_density_surface_mesh` / `load_mesh_surface_file`). Empty for a scene
     /// with no loadable surface objects. A front end appends these to its surface slot.
@@ -494,7 +531,12 @@ impl DesktopAppState {
             .filter_map(|surface| {
                 let mesh = match surface.srctype.as_str() {
                     "ply" => cuemol_surface::read_ply_str(&surface.data).ok()?,
-                    _ => cuemol_surface::read_obj_str(&surface.data).ok()?,
+                    "qdfsurf" => cuemol_surface::qdf::read_qdf_surface_bytes(&surface.raw_data)
+                        .ok()?
+                        .mesh()
+                        .clone(),
+                    "obj" => cuemol_surface::read_obj_str(&surface.data).ok()?,
+                    _ => return None,
                 };
                 let vertices = mesh
                     .vertices()
@@ -797,11 +839,15 @@ impl DesktopAppState {
             let surface = renderer.generate_surf_obj(&map_object.map);
             let mesh = surface.mesh();
             let base = vertices.len() as u32;
-            vertices.extend(mesh.vertices().iter().map(|vertex| cuemol_render::MeshVertex {
-                position: vertex.position,
-                normal: vertex.normal,
-                color,
-            }));
+            vertices.extend(
+                mesh.vertices()
+                    .iter()
+                    .map(|vertex| cuemol_render::MeshVertex {
+                        position: vertex.position,
+                        normal: vertex.normal,
+                        color,
+                    }),
+            );
             indices.extend(
                 mesh.triangles()
                     .iter()
@@ -1147,6 +1193,28 @@ impl DesktopAppState {
         let result = self.command_manager.load_scene_command(path, None)?;
         self.last_qsc_status = Some(result.status.clone());
         self.active_scene = result.result_scene;
+        if let Some(scene_uid) = result.result_scene {
+            let maps = self
+                .scene_manager()
+                .scene(scene_uid)
+                .map(|scene| scene.loaded_density_maps().to_vec())
+                .unwrap_or_default();
+            for loaded in maps {
+                let map = cuemol_xtal::qdf_map::read_qdf_denmap_bytes(&loaded.raw_data)?;
+                let uid = Uid::new(self.next_density_map_uid);
+                self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
+                self.density_maps.insert(
+                    uid,
+                    GuiDensityMapObject {
+                        uid,
+                        scene_uid,
+                        name: loaded.name,
+                        format: loaded.srctype,
+                        map,
+                    },
+                );
+            }
+        }
         Ok(result.result_scene)
     }
 
@@ -1162,6 +1230,17 @@ impl DesktopAppState {
 
         let scene_uid = self.ensure_active_scene();
         let object_name = default_object_name(path);
+        if format == "pse" {
+            let object_uids = self.load_pse_objects(scene_uid, path, &object_name)?;
+            let object_uid = object_uids
+                .first()
+                .copied()
+                .ok_or_else(|| CueMolError::parse("PSE contains no molecule objects"))?;
+            return Ok(GuiLoadedPath::Object {
+                scene_uid,
+                object_uid,
+            });
+        }
         if is_density_map_format(format) {
             let map_uid = self.load_density_map(scene_uid, path, object_name, format)?;
             return Ok(GuiLoadedPath::Map { scene_uid, map_uid });
@@ -1223,6 +1302,33 @@ impl DesktopAppState {
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))
             .map(|scene| scene.add_molecule(object_name, mol))
+    }
+
+    fn load_pse_objects(
+        &mut self,
+        scene_uid: Uid,
+        path: &Path,
+        fallback_name: &str,
+    ) -> Result<Vec<Uid>> {
+        let mut reader = PseFileReader::new();
+        reader.set_path(path.to_string_lossy());
+        let molecules = reader.read_named_molecules()?;
+        let mut object_uids = Vec::with_capacity(molecules.len());
+        for (index, (name, molecule)) in molecules.into_iter().enumerate() {
+            let name = if name.trim().is_empty() {
+                format!("{fallback_name}_{}", index + 1)
+            } else {
+                name
+            };
+            let object_uid = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?
+                .add_molecule(name, molecule);
+            self.new_renderer(scene_uid, object_uid, "simple", "simple")?;
+            object_uids.push(object_uid);
+        }
+        Ok(object_uids)
     }
 
     pub fn save_active_scene_qsc(&self, path: impl AsRef<Path>) -> Result<()> {
@@ -1479,7 +1585,12 @@ impl DesktopAppState {
                 out.push(GuiAtomLabel {
                     x: sx,
                     y: sy,
-                    text: format!("{}{}:{}", info.residue_name.trim(), info.residue_id, info.name),
+                    text: format!(
+                        "{}{}:{}",
+                        info.residue_name.trim(),
+                        info.residue_id,
+                        info.name
+                    ),
                 });
             }
         }
@@ -1537,39 +1648,87 @@ impl DesktopAppState {
         height: u32,
         selection_text: &str,
     ) -> Result<()> {
-        let snapshot = self.active_render_snapshot(selection_text)?;
-        let camera = match self.active_scene_saved_camera() {
-            Some(saved) => saved,
-            None => {
-                let mut camera = cuemol_qsys::Camera::new();
-                if let Some((min, max)) = snapshot.bounds {
-                    let dx = max.x - min.x;
-                    let dy = max.y - min.y;
-                    let dz = max.z - min.z;
-                    let size = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
-                    camera.set_center(cuemol_core::Vector4::new3(
-                        (min.x + max.x) / 2.0,
-                        (min.y + max.y) / 2.0,
-                        (min.z + max.z) / 2.0,
-                    ));
-                    camera.set_zoom(size * 1.2);
-                    camera.set_cam_dist(size * 3.0);
-                    camera.set_slab_depth(size * 2.5);
-                }
-                camera
-            }
-        };
+        let scene_uid = self
+            .active_scene
+            .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
+        let mut exporter = PngSceneExporter::new();
+        exporter.scene_mut().attach(scene_uid);
+        exporter
+            .handler_mut()
+            .set_path(path.as_ref().to_string_lossy());
+        exporter.set_width(width.min(i32::MAX as u32) as i32);
+        exporter.set_height(height.min(i32::MAX as u32) as i32);
+        self.write_png_exporter(&mut exporter, selection_text)
+    }
+
+    /// Execute a configured CueMol PNG scene exporter. The attached scene,
+    /// camera, dimensions, alpha, depth, resolution, and output path are all
+    /// honored by the actual offscreen render and PNG writer.
+    #[cfg(feature = "offscreen")]
+    pub fn write_png_exporter(
+        &self,
+        exporter: &mut PngSceneExporter,
+        selection_text: &str,
+    ) -> Result<()> {
+        let scene_uid = exporter
+            .scene()
+            .client_scene()
+            .ok_or_else(|| CueMolError::invalid_argument("PNG exporter is not attached"))?;
+        let width = u32::try_from(exporter.width())
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| CueMolError::invalid_argument("PNG width must be positive"))?;
+        let height = u32::try_from(exporter.height())
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| CueMolError::invalid_argument("PNG height must be positive"))?;
+        let path = exporter.handler().path();
+        if path.is_empty() {
+            return Err(CueMolError::invalid_argument("PNG output path is empty"));
+        }
+        let snapshot = self.render_snapshot(scene_uid, selection_text)?;
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let named_camera = exporter.scene().camera_name();
+        let camera = if named_camera.is_empty() {
+            scene
+                .camera_by_name("__current")
+                .or_else(|| scene.cameras().first())
+                .cloned()
+        } else {
+            Some(
+                scene
+                    .camera_by_name(named_camera)
+                    .cloned()
+                    .ok_or_else(|| CueMolError::NotFound(format!("camera {named_camera}")))?,
+            )
+        }
+        .unwrap_or_else(|| auto_frame_camera(&snapshot));
         let aspect = width.max(1) as f64 / height.max(1) as f64;
-        let mvp = crate::offscreen::camera_mvp(&camera, aspect);
-        let png = crate::offscreen::render_snapshot_png(
-            &snapshot,
-            mvp,
+        let rgba = if exporter.use_depth() {
+            crate::offscreen::render_snapshot_depth_offscreen(&snapshot, &camera, width, height)
+        } else {
+            let mvp = crate::offscreen::camera_mvp(&camera, aspect);
+            crate::offscreen::render_snapshot_offscreen(
+                &snapshot,
+                mvp,
+                width,
+                height,
+                [0.1, 0.1, 0.12, if exporter.use_alpha() { 0.0 } else { 1.0 }],
+            )
+        }
+        .ok_or_else(|| CueMolError::invalid_argument("no GPU adapter for offscreen render"))?;
+        let png = crate::offscreen::encode_png(
+            &rgba,
             width,
             height,
-            [0.1, 0.1, 0.12, 1.0],
-        )
-        .ok_or_else(|| CueMolError::invalid_argument("no GPU adapter for offscreen render"))?;
+            exporter.use_alpha(),
+            exporter.resolution_dpi(),
+        );
         fs::write(path, png)?;
+        exporter.write();
         Ok(())
     }
 
@@ -1929,8 +2088,14 @@ impl DesktopAppState {
         };
         for object in scene.objects() {
             let atoms = object.mol().atoms();
-            for donor in atoms.iter().filter(|atom| atom.element.eq_ignore_ascii_case("N")) {
-                for acceptor in atoms.iter().filter(|atom| atom.element.eq_ignore_ascii_case("O")) {
+            for donor in atoms
+                .iter()
+                .filter(|atom| atom.element.eq_ignore_ascii_case("N"))
+            {
+                for acceptor in atoms
+                    .iter()
+                    .filter(|atom| atom.element.eq_ignore_ascii_case("O"))
+                {
                     if donor.chain_id == acceptor.chain_id
                         && donor.res_id == acceptor.res_id
                         && donor.ins_code == acceptor.ins_code
@@ -2117,25 +2282,25 @@ impl DesktopAppState {
     ///   the front end).
     /// - Colour: `makeColor(spec)` resolves a colour spec/name to `{r,g,b,a}` bytes;
     ///   `color(scheme)` applies rainbow/bfactor/element colouring to every object.
-    /// - Scene mutations (buffered by name, resolved to Uids at apply time):
+    /// - Flat scene mutations (buffered by name, resolved to Uids at apply time):
     ///   `setColoring(objName, scheme)`, `setRendererVisible(objName, rendName, bool)`,
     ///   `setRendererProp(objName, rendName, key, value)` — flat calls onto the existing
-    ///   desktop-core setters (no live proxies).
+    ///   desktop-core setters.
     /// - Live computed query: `measure(sel)` returns the distance/angle/torsion of a
     ///   selection (2/3/4 atoms) computed against the scene's molecules DURING eval —
     ///   the same math as the Measure ribbon.
-    /// - Structural queries over the active scene: `getScene()`, `getObjectNames()`,
+    /// - Structural queries and live mutation proxies over the active scene: `getScene()`, `getObjectNames()`,
     ///   `getObject(name)`, `getClassName(name)`, `getRenderer(objName, rendName)`,
     ///   `getRendererNames(objName)`. These read a read-only snapshot built before eval
-    ///   (boa's native closures can't borrow `&mut self`), so they return FROZEN data
-    ///   objects (`{uid, name, type, rendererNames}`), NOT live objects — method chaining
-    ///   like `getObject(n).setProp(...)` is deliberately out of scope (see below).
+    ///   `getObject(name).setColoring/createRenderer` and
+    ///   `getRenderer(...).setVisible/setProp` enqueue changes on the live scene.
+    /// - Object creation: `createObj("MolCoord")` returns a pending proxy accepted by
+    ///   `getScene().addObject(obj)`; its `name` property or `setName()` controls the
+    ///   inserted object name.
     ///
     /// Returns the printed log + the last `select(...)` expression. A real engine (not the
-    /// load+preview fallback). SCOPE: this is the top-frequency subset of CueMol2's script
-    /// API — structural queries, a live computed `measure`, and flat by-name mutations.
-    /// The deeper live-object model (chained property setters via JS proxies reflected in
-    /// the real scene, `createObj`) is not yet bridged.
+    /// load+preview fallback). Native objects are command-backed proxies, so mutations are
+    /// applied in source order after successful evaluation.
     #[cfg(feature = "scripting")]
     pub fn run_script_js(&mut self, source: &str) -> Result<(String, Option<String>)> {
         use boa_engine::object::builtins::JsArray;
@@ -2152,6 +2317,19 @@ impl DesktopAppState {
         }
         fn arg0(args: &[JsValue], context: &mut Context) -> String {
             argn(args, 0, context)
+        }
+
+        fn object_string_prop(value: &JsValue, name: &str, context: &mut Context) -> String {
+            value
+                .as_object()
+                .and_then(|object| object.get(js_string!(name), context).ok())
+                .and_then(|value| value.to_string(context).ok())
+                .map(|value| value.to_std_string_escaped())
+                .unwrap_or_default()
+        }
+
+        fn this_string_prop(this: &JsValue, name: &str, context: &mut Context) -> String {
+            object_string_prop(this, name, context)
         }
 
         // --- log/print commands (buffered, drained after eval) ---
@@ -2198,6 +2376,108 @@ impl DesktopAppState {
                 renderer: argn(args, 1, ctx),
                 key: argn(args, 2, ctx),
                 value: argn(args, 3, ctx),
+            });
+            Ok(JsValue::undefined())
+        }
+        fn js_object_set_coloring(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            script_cmds::push(ScriptCmd::SetColoring {
+                object: this_string_prop(this, "name", ctx),
+                scheme: arg0(args, ctx),
+            });
+            Ok(JsValue::undefined())
+        }
+        fn js_object_create_renderer(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            script_cmds::push(ScriptCmd::CreateRenderer {
+                object: this_string_prop(this, "name", ctx),
+                renderer_type: arg0(args, ctx),
+                name: argn(args, 1, ctx),
+            });
+            Ok(JsValue::undefined())
+        }
+        fn js_renderer_set_visible(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            script_cmds::push(ScriptCmd::SetRendererVisible {
+                object: this_string_prop(this, "objectName", ctx),
+                renderer: this_string_prop(this, "name", ctx),
+                visible: args.first().map(JsValue::to_boolean).unwrap_or(true),
+            });
+            Ok(JsValue::undefined())
+        }
+        fn js_renderer_set_prop(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            script_cmds::push(ScriptCmd::SetRendererProp {
+                object: this_string_prop(this, "objectName", ctx),
+                renderer: this_string_prop(this, "name", ctx),
+                key: arg0(args, ctx),
+                value: argn(args, 1, ctx),
+            });
+            Ok(JsValue::undefined())
+        }
+        fn js_object_set_name(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if let Some(object) = this.as_object() {
+                let name = arg0(args, ctx);
+                object.set(js_string!("name"), JsString::from(name.as_str()), true, ctx)?;
+            }
+            Ok(JsValue::undefined())
+        }
+        fn js_create_obj(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let class_name = arg0(args, ctx);
+            let object = ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("type"),
+                    JsString::from(class_name.as_str()),
+                    Attribute::all(),
+                )
+                .property(js_string!("name"), js_string!(""), Attribute::all())
+                .function(
+                    NativeFunction::from_fn_ptr(js_object_set_name),
+                    js_string!("setName"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_object_set_coloring),
+                    js_string!("setColoring"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_object_create_renderer),
+                    js_string!("createRenderer"),
+                    2,
+                )
+                .build();
+            Ok(object.into())
+        }
+        fn js_scene_add_object(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let value = args.first().cloned().unwrap_or(JsValue::undefined());
+            script_cmds::push(ScriptCmd::CreateObject {
+                class_name: object_string_prop(&value, "type", ctx),
+                name: object_string_prop(&value, "name", ctx),
             });
             Ok(JsValue::undefined())
         }
@@ -2257,7 +2537,10 @@ impl DesktopAppState {
         fn js_get_object(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             let name = arg0(args, ctx);
             let found = script_env::with(|env| {
-                env.objects.iter().find(|object| object.name == name).cloned()
+                env.objects
+                    .iter()
+                    .find(|object| object.name == name)
+                    .cloned()
             });
             let Some(object) = found else {
                 return Ok(JsValue::null());
@@ -2280,7 +2563,21 @@ impl DesktopAppState {
                     JsString::from(object.class.as_str()),
                     Attribute::all(),
                 )
-                .property(js_string!("rendererNames"), renderer_array, Attribute::all())
+                .property(
+                    js_string!("rendererNames"),
+                    renderer_array,
+                    Attribute::all(),
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_object_set_coloring),
+                    js_string!("setColoring"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_object_create_renderer),
+                    js_string!("createRenderer"),
+                    2,
+                )
                 .build();
             Ok(obj.into())
         }
@@ -2325,6 +2622,11 @@ impl DesktopAppState {
             };
             let obj = ObjectInitializer::new(ctx)
                 .property(
+                    js_string!("objectName"),
+                    JsString::from(object_name.as_str()),
+                    Attribute::all(),
+                )
+                .property(
                     js_string!("name"),
                     JsString::from(renderer.name.as_str()),
                     Attribute::all(),
@@ -2333,6 +2635,16 @@ impl DesktopAppState {
                     js_string!("type"),
                     JsString::from(renderer.rtype.as_str()),
                     Attribute::all(),
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_renderer_set_visible),
+                    js_string!("setVisible"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_renderer_set_prop),
+                    js_string!("setProp"),
+                    2,
                 )
                 .build();
             Ok(obj.into())
@@ -2357,6 +2669,11 @@ impl DesktopAppState {
                     Attribute::all(),
                 )
                 .property(js_string!("objectNames"), names_array, Attribute::all())
+                .function(
+                    NativeFunction::from_fn_ptr(js_scene_add_object),
+                    js_string!("addObject"),
+                    1,
+                )
                 .build();
             Ok(obj.into())
         }
@@ -2388,11 +2705,31 @@ impl DesktopAppState {
         script_env::set(self.build_script_env());
         let mut context = Context::default();
         let cuemol = ObjectInitializer::new(&mut context)
-            .function(NativeFunction::from_fn_ptr(js_print), js_string!("print"), 1)
-            .function(NativeFunction::from_fn_ptr(js_print), js_string!("putLogMsg"), 1)
-            .function(NativeFunction::from_fn_ptr(js_print), js_string!("println"), 1)
-            .function(NativeFunction::from_fn_ptr(js_select), js_string!("select"), 1)
-            .function(NativeFunction::from_fn_ptr(js_color), js_string!("color"), 1)
+            .function(
+                NativeFunction::from_fn_ptr(js_print),
+                js_string!("print"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_print),
+                js_string!("putLogMsg"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_print),
+                js_string!("println"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_select),
+                js_string!("select"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_color),
+                js_string!("color"),
+                1,
+            )
             .function(
                 NativeFunction::from_fn_ptr(js_set_coloring),
                 js_string!("setColoring"),
@@ -2408,10 +2745,31 @@ impl DesktopAppState {
                 js_string!("setRendererProp"),
                 4,
             )
-            .function(NativeFunction::from_fn_ptr(js_make_sel), js_string!("makeSel"), 1)
-            .function(NativeFunction::from_fn_ptr(js_make_color), js_string!("makeColor"), 1)
-            .function(NativeFunction::from_fn_ptr(js_get_scene), js_string!("getScene"), 0)
-            .function(NativeFunction::from_fn_ptr(js_get_object), js_string!("getObject"), 1)
+            .function(
+                NativeFunction::from_fn_ptr(js_make_sel),
+                js_string!("makeSel"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_make_color),
+                js_string!("makeColor"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_create_obj),
+                js_string!("createObj"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_get_scene),
+                js_string!("getScene"),
+                0,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(js_get_object),
+                js_string!("getObject"),
+                1,
+            )
             .function(
                 NativeFunction::from_fn_ptr(js_get_object_names),
                 js_string!("getObjectNames"),
@@ -2432,7 +2790,11 @@ impl DesktopAppState {
                 js_string!("getRendererNames"),
                 1,
             )
-            .function(NativeFunction::from_fn_ptr(js_measure), js_string!("measure"), 1)
+            .function(
+                NativeFunction::from_fn_ptr(js_measure),
+                js_string!("measure"),
+                1,
+            )
             .build();
         let outcome = context
             .register_global_property(js_string!("cuemol"), cuemol, Attribute::all())
@@ -2475,6 +2837,33 @@ impl DesktopAppState {
                     if let Some((obj_uid, rend_uid)) = self.renderer_uid_by_name(&object, &renderer)
                     {
                         let _ = self.set_renderer_property(obj_uid, rend_uid, key, value);
+                    }
+                }
+                ScriptCmd::CreateObject { class_name, name } => {
+                    if class_name.eq_ignore_ascii_case("MolCoord") {
+                        let scene_uid = self.ensure_active_scene();
+                        let name = if name.trim().is_empty() {
+                            format!("object{}", self.active_object_summaries().len() + 1)
+                        } else {
+                            name
+                        };
+                        if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
+                            scene.add_molecule(name, MolCoord::new());
+                        }
+                    }
+                }
+                ScriptCmd::CreateRenderer {
+                    object,
+                    renderer_type,
+                    name,
+                } => {
+                    if let Some(uid) = self.object_uid_by_name(&object) {
+                        let name = if name.trim().is_empty() {
+                            renderer_type.clone()
+                        } else {
+                            name
+                        };
+                        let _ = self.new_renderer_in_active_scene(uid, renderer_type, name);
                     }
                 }
             }
@@ -2522,7 +2911,13 @@ impl DesktopAppState {
         let molecules = self
             .active_scene()
             .and_then(|uid| self.scene_manager().scene(uid))
-            .map(|scene| scene.objects().iter().map(|object| object.mol().clone()).collect())
+            .map(|scene| {
+                scene
+                    .objects()
+                    .iter()
+                    .map(|object| object.mol().clone())
+                    .collect()
+            })
             .unwrap_or_default();
         ScriptEnv {
             scene_uid,
@@ -2570,6 +2965,26 @@ impl DesktopAppState {
     }
 }
 
+#[cfg(feature = "offscreen")]
+fn auto_frame_camera(snapshot: &RenderSceneSnapshot) -> cuemol_qsys::Camera {
+    let mut camera = cuemol_qsys::Camera::new();
+    if let Some((min, max)) = snapshot.bounds {
+        let dx = max.x - min.x;
+        let dy = max.y - min.y;
+        let dz = max.z - min.z;
+        let size = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
+        camera.set_center(cuemol_core::Vector4::new3(
+            (min.x + max.x) / 2.0,
+            (min.y + max.y) / 2.0,
+            (min.z + max.z) / 2.0,
+        ));
+        camera.set_zoom(size * 1.2);
+        camera.set_cam_dist(size * 3.0);
+        camera.set_slab_depth(size * 2.5);
+    }
+    camera
+}
+
 /// Map a `color`/`setColoring` scheme keyword to a (coloring-type, attrs) pair — the
 /// shared translation used by both `cuemol.color(scheme)` (all objects) and
 /// `cuemol.setColoring(objName, scheme)` (one object). Unknown → element/CPK default.
@@ -2615,6 +3030,15 @@ enum ScriptCmd {
         key: String,
         value: String,
     },
+    CreateObject {
+        class_name: String,
+        name: String,
+    },
+    CreateRenderer {
+        object: String,
+        renderer_type: String,
+        name: String,
+    },
 }
 
 #[cfg(feature = "scripting")]
@@ -2646,7 +3070,11 @@ fn resolve_script_color(spec: &str) -> Option<cuemol_gfx::Rgba8> {
             return Some(rgba);
         }
     }
-    Some(cuemol_gfx::NamedColor::from_name(trimmed).resolved_color().rgba8())
+    Some(
+        cuemol_gfx::NamedColor::from_name(trimmed)
+            .resolved_color()
+            .rgba8(),
+    )
 }
 
 /// Read-only snapshot of the active scene handed to the `cuemol` script queries
@@ -2831,10 +3259,18 @@ fn potential_color(value: f64, lo: f64, mid: f64, hi: f64) -> [f32; 4] {
         return [BLUE[0], BLUE[1], BLUE[2], 1.0];
     }
     if value <= mid {
-        let t = if mid > lo { (value - lo) / (mid - lo) } else { 1.0 };
+        let t = if mid > lo {
+            (value - lo) / (mid - lo)
+        } else {
+            1.0
+        };
         lerp(RED, WHITE, t as f32)
     } else {
-        let t = if hi > mid { (value - mid) / (hi - mid) } else { 1.0 };
+        let t = if hi > mid {
+            (value - mid) / (hi - mid)
+        } else {
+            1.0
+        };
         lerp(WHITE, BLUE, t as f32)
     }
 }
@@ -2900,9 +3336,10 @@ fn append_object_renderer_snapshot(
     // coloring scheme (renderer concrete coloring, set in apply_renderer_styles,
     // takes precedence over the object's, per the C++ cascade).
     if options.rainbow.is_none() {
-        options.rainbow = cuemol_molvis::rainbow_coloring_from_attrs(object.coloring_type(), |name| {
-            object.coloring_attr(name)
-        });
+        options.rainbow =
+            cuemol_molvis::rainbow_coloring_from_attrs(object.coloring_type(), |name| {
+                object.coloring_attr(name)
+            });
     }
     if options.bfac.is_none() {
         options.bfac = cuemol_molvis::bfac_coloring_from_attrs(object.coloring_type(), |name| {
@@ -2923,13 +3360,47 @@ fn append_object_renderer_snapshot(
         // where the backbone breaks — NOT a sphere per atom. Params are the C++
         // DisoRenderer defaults (dotsep 1.0 / loopsize 2.0 / loopsize2 -1.0; a thin
         // dot radius). On a fully-bonded molecule this correctly draws nothing.
-        ("disorder", _) => disorder_lines_snapshot(object.mol(), 1.0, 0.15, 2.0, -1.0),
+        ("disorder", renderer) => {
+            let resolved = |name: &str, default: f64| {
+                renderer
+                    .and_then(|renderer| renderer.resolved_attr(name, styles, DEFAULT_STYLE_SCOPE))
+                    .and_then(|value| value.trim().parse::<f64>().ok())
+                    .unwrap_or(default)
+            };
+            disorder_lines_snapshot(
+                object.mol(),
+                resolved("dotsep", 1.0),
+                resolved("width", 0.3) / 2.0,
+                resolved("loopsize", 2.0),
+                resolved("loopsize2", -1.0),
+            )
+        }
         // Nucleic-acid renderer = the backbone ribbon PLUS each nucleotide's base
         // stick (and base-pair rungs), matching C++ NARenderer (which the plain
         // mainchain ribbon alone omits).
-        ("nucl", _) => {
-            let mut snapshot = ribbon_mesh_snapshot(object.mol(), &options);
-            let bases = na_base_sticks_snapshot(object.mol(), 0.25, true);
+        ("nucl", renderer) => {
+            let resolved = |name: &str| {
+                renderer
+                    .and_then(|renderer| renderer.resolved_attr(name, styles, DEFAULT_STYLE_SCOPE))
+            };
+            let show_tube = resolved("show_tube")
+                .as_deref()
+                .map(qsc_bool)
+                .unwrap_or(true);
+            let show_basepair = resolved("show_basepair")
+                .as_deref()
+                .map(qsc_bool)
+                .unwrap_or(true);
+            let base_radius = resolved("base_size")
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(0.5)
+                / 2.0;
+            let mut snapshot = if show_tube {
+                ribbon_mesh_snapshot(object.mol(), &options)
+            } else {
+                RenderSceneSnapshot::empty()
+            };
+            let bases = na_base_sticks_snapshot(object.mol(), base_radius, show_basepair);
             merge_bounds(&mut snapshot.bounds, bases.bounds);
             snapshot.atoms.extend(bases.atoms);
             snapshot.bonds.extend(bases.bonds);
@@ -2947,7 +3418,9 @@ fn append_object_renderer_snapshot(
     // this renderer's geometry so a superposed/positioned object renders where the
     // scene saved it. Skipped when both are identity (the common case).
     let object_xform = object.xform_matrix();
-    let renderer_xform = renderer.map(MolRenderer::xform_matrix).unwrap_or(Matrix4::IDENTITY);
+    let renderer_xform = renderer
+        .map(MolRenderer::xform_matrix)
+        .unwrap_or(Matrix4::IDENTITY);
     let xform = renderer_xform.mul_mat(object_xform);
     if xform != Matrix4::IDENTITY {
         snapshot.apply_xform(&xform);
@@ -2956,6 +3429,13 @@ fn append_object_renderer_snapshot(
     target.atoms.extend(snapshot.atoms);
     target.bonds.extend(snapshot.bonds);
     target.meshes.extend(snapshot.meshes);
+}
+
+fn qsc_bool(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "false" | "0" | "no" | "off"
+    )
 }
 
 /// Renderer types drawn as a smoothed main-chain trace instead of all-atom geometry.
@@ -3007,8 +3487,8 @@ fn renderer_render_options(
     // ribbon cross-section dims/shape, axial detail) on top of the per-type
     // defaults — the same cascade the CLI `render-qsc` applies. A renderer with no
     // style attr resolves every attr to None and keeps the defaults above, so only
-    // styled scenes change. `sphere_detail` is resolved here too but the GUI's
-    // `tessellate_snapshot` step does not yet honour it (cosmetic smoothness only).
+    // styled scenes change. `sphere_detail` is carried on each atom and honoured
+    // by `tessellate_snapshot`.
     if let Some(renderer) = renderer {
         apply_renderer_styles(&mut options, renderer, styles, DEFAULT_STYLE_SCOPE);
     }
@@ -3176,12 +3656,13 @@ fn guess_path_format(path: &Path, stream_manager: &StreamManager) -> Result<&'st
         "qsc" | "qsl" => Ok("qsc_xml"),
         "pdb" | "ent" => Ok("pdb"),
         "qdfpdb" => Ok("qdfpdb"),
-        "cif" | "mmcif" => Ok("mmcif"),
+        "cif" | "mmcif" => guess_cif_format(path),
         "sdf" | "mol" => Ok("sdf"),
         "mol2" => Ok("mol2"),
         "gro" => Ok("gro"),
         "psf" => Ok("psf"),
         "prmtop" | "parm7" | "top" => Ok("amberprm"),
+        "pse" => Ok("pse"),
         "dx" => Ok("apbs"),
         "ccp4" | "mrc" => Ok("ccp4map"),
         "cns" => Ok("xplormap"),
@@ -3205,6 +3686,19 @@ fn guess_ambiguous_map_format(path: &Path, stream_manager: &StreamManager) -> Re
         "ccp4map" => Ok("ccp4map"),
         "xplormap" => Ok("xplormap"),
         _ => Ok("ccp4map"),
+    }
+}
+
+fn guess_cif_format(path: &Path) -> Result<&'static str> {
+    let input = cuemol_molstr::read_text_maybe_compressed(path)?;
+    if input.contains("_refln.pdbx_FWT")
+        || input.contains("_refln.pdbx_DELFWT")
+        || input.contains("_refln.pdbx_PHWT")
+        || input.contains("_refln.pdbx_DELPHWT")
+    {
+        Ok("mmcifmap")
+    } else {
+        Ok("mmcif")
     }
 }
 
@@ -3234,7 +3728,10 @@ fn is_desktop_extension_format(format: &str) -> bool {
 }
 
 fn is_density_map_format(format: &str) -> bool {
-    matches!(format, "apbs" | "ccp4map" | "xplormap" | "brix")
+    matches!(
+        format,
+        "apbs" | "ccp4map" | "xplormap" | "brix" | "mmcifmap"
+    )
 }
 
 fn read_density_map(path: &Path, format: &str) -> Result<DensityMap> {
@@ -3243,6 +3740,7 @@ fn read_density_map(path: &Path, format: &str) -> Result<DensityMap> {
         "ccp4map" => read_ccp4_map_file(path)?,
         "xplormap" => read_xplor_map_file(path)?,
         "brix" => read_brix_map_file(path)?,
+        "mmcifmap" => return read_mmcif_map_file(path),
         other => {
             return Err(CueMolError::invalid_argument(format!(
                 "unknown density map format {other}"
@@ -3450,8 +3948,14 @@ mod tests {
             .expect("script runs");
         assert!(log.contains("red=255,0,0,255"), "named red → RGBA: {log:?}");
         assert!(log.contains("green=0,255,0"), "hex #00ff00 → RGB: {log:?}");
-        assert!(log.contains("sel=resid 3"), "valid selector round-trips: {log:?}");
-        assert!(log.contains("bad=null"), "malformed selector → null: {log:?}");
+        assert!(
+            log.contains("sel=resid 3"),
+            "valid selector round-trips: {log:?}"
+        );
+        assert!(
+            log.contains("bad=null"),
+            "malformed selector → null: {log:?}"
+        );
     }
 
     #[cfg(feature = "scripting")]
@@ -3487,13 +3991,22 @@ mod tests {
             )
             .expect("script runs");
         assert!(log.contains("cls=MolCoord"), "loaded PDB class: {log:?}");
-        assert!(log.contains("crambin"), "object enumerated by name: {log:?}");
+        assert!(
+            log.contains("crambin"),
+            "object enumerated by name: {log:?}"
+        );
         assert!(log.contains("objtype=MolCoord"), "getObject type: {log:?}");
         assert!(log.contains("rends="), "renderer list present: {log:?}");
         assert!(log.contains("r1"), "renderer r1 enumerated: {log:?}");
         assert!(log.contains("rend=r1:"), "getRenderer name: {log:?}");
-        assert!(log.contains("missing=null"), "unknown object → null: {log:?}");
-        assert!(log.contains("scene=work nobj=1"), "scene name + object count: {log:?}");
+        assert!(
+            log.contains("missing=null"),
+            "unknown object → null: {log:?}"
+        );
+        assert!(
+            log.contains("scene=work nobj=1"),
+            "scene name + object count: {log:?}"
+        );
     }
 
     #[cfg(feature = "scripting")]
@@ -3534,7 +4047,8 @@ mod tests {
             .expect("r1 exists");
         assert!(!renderer.visible, "setRendererVisible hid r1");
         assert_eq!(
-            app.renderer_property(object, renderer.uid, "bondw").as_deref(),
+            app.renderer_property(object, renderer.uid, "bondw")
+                .as_deref(),
             Some("0.5"),
             "setRendererProp set bondw"
         );
@@ -3542,6 +4056,56 @@ mod tests {
         // An unknown object name is a silent no-op — not a panic, not an Err.
         app.run_script_js("cuemol.setColoring('nope', 'bfactor');")
             .expect("no-op on unknown object");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn run_script_js_create_obj_and_live_proxies_mutate_the_scene() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        app.run_script_js(
+            "var o = cuemol.createObj('MolCoord'); \
+             o.setName('made'); \
+             cuemol.getScene().addObject(o); \
+             o.setColoring('rainbow'); \
+             o.createRenderer('simple', 'r1');",
+        )
+        .expect("createObj proxy runs");
+
+        let object = app
+            .object_uid_by_name("made")
+            .expect("created object exists");
+        assert_eq!(
+            app.object_coloring_type(object).as_deref(),
+            Some("RainbowColoring")
+        );
+        let renderer = app
+            .renderer_summaries(object)
+            .into_iter()
+            .find(|renderer| renderer.name == "r1")
+            .expect("proxy-created renderer exists");
+
+        app.run_script_js(
+            "var o = cuemol.getObject('made'); o.setColoring('bfactor'); \
+             var r = cuemol.getRenderer('made', 'r1'); \
+             r.setVisible(false); r.setProp('linew', '2.5');",
+        )
+        .expect("live proxies run");
+        assert_eq!(
+            app.object_coloring_type(object).as_deref(),
+            Some("BfacColoring")
+        );
+        let updated = app
+            .renderer_summaries(object)
+            .into_iter()
+            .find(|summary| summary.uid == renderer.uid)
+            .unwrap();
+        assert!(!updated.visible);
+        assert_eq!(
+            app.renderer_property(object, renderer.uid, "linew")
+                .as_deref(),
+            Some("2.5")
+        );
     }
 
     #[cfg(feature = "scripting")]
@@ -3562,7 +4126,10 @@ mod tests {
         let oracle = app
             .active_measure(sel)
             .expect("active_measure yields a distance for two atoms");
-        assert!(oracle.starts_with("Distance:"), "two atoms → distance: {oracle}");
+        assert!(
+            oracle.starts_with("Distance:"),
+            "two atoms → distance: {oracle}"
+        );
 
         let (log, _selection) = app
             .run_script_js(&format!("cuemol.print(cuemol.measure('{sel}'));"))
@@ -3577,7 +4144,10 @@ mod tests {
         let (log_all, _) = app
             .run_script_js("cuemol.print('m=' + cuemol.measure('all'));")
             .expect("script runs");
-        assert!(log_all.contains("m=null"), "non-measurable selection → null: {log_all:?}");
+        assert!(
+            log_all.contains("m=null"),
+            "non-measurable selection → null: {log_all:?}"
+        );
     }
 
     #[test]
@@ -3680,7 +4250,10 @@ mod tests {
         );
         // (0.5, -0.5) → (0.75·w, 0.75·h) — y flips (image origin top-left).
         let (x, y) = project_to_image(id, [0.5, -0.5, 0.0], 800.0, 600.0).unwrap();
-        assert!((x - 600.0).abs() < 0.1 && (y - 450.0).abs() < 0.1, "got ({x}, {y})");
+        assert!(
+            (x - 600.0).abs() < 0.1 && (y - 450.0).abs() < 0.1,
+            "got ({x}, {y})"
+        );
         // Off-screen → None.
         assert!(project_to_image(id, [5.0, 0.0, 0.0], 800.0, 600.0).is_none());
     }
@@ -3688,8 +4261,14 @@ mod tests {
     #[test]
     fn anim_spin_direction_sequences_objects() {
         let objects = vec![
-            AnimObject { kind: AnimKind::Spin, duration: 1.0 },
-            AnimObject { kind: AnimKind::Pause, duration: 1.0 },
+            AnimObject {
+                kind: AnimKind::Spin,
+                duration: 1.0,
+            },
+            AnimObject {
+                kind: AnimKind::Pause,
+                duration: 1.0,
+            },
         ];
         // In the Spin segment (0..1) → rotate +1.
         let frame = anim_step(&objects, 0.0, 0.1);
@@ -3699,7 +4278,10 @@ mod tests {
         // Empty list → fallback spin (+1).
         assert_eq!(anim_step(&[], 0.0, 0.1).rotate_dir, 1.0);
         // SlideIn → slide_dir -1 (zoom in); SlideOut → +1.
-        let slide = vec![AnimObject { kind: AnimKind::SlideIn, duration: 1.0 }];
+        let slide = vec![AnimObject {
+            kind: AnimKind::SlideIn,
+            duration: 1.0,
+        }];
         assert_eq!(anim_step(&slide, 0.0, 0.1).slide_dir, -1.0);
     }
 
@@ -3715,7 +4297,11 @@ mod tests {
         if app.open_path(root.join("1CRN.pdb")).is_err() {
             return;
         }
-        let object_uid = app.active_object_summaries().first().map(|o| o.uid).unwrap();
+        let object_uid = app
+            .active_object_summaries()
+            .first()
+            .map(|o| o.uid)
+            .unwrap();
         let natom = app
             .scene_manager()
             .object(object_uid)
@@ -3737,7 +4323,11 @@ mod tests {
             .mol()
             .atoms()[0]
             .position;
-        assert!((pos.x - 5.0).abs() < 1.0e-6, "frame 1 moved atoms to x=5, got {}", pos.x);
+        assert!(
+            (pos.x - 5.0).abs() < 1.0e-6,
+            "frame 1 moved atoms to x=5, got {}",
+            pos.x
+        );
     }
 
     #[test]
@@ -3750,7 +4340,10 @@ mod tests {
         if app.open_path(root.join("1CRN.pdb")).is_err() {
             return;
         }
-        assert!(app.active_measure("aid 1 or aid 5").unwrap().starts_with("Distance:"));
+        assert!(app
+            .active_measure("aid 1 or aid 5")
+            .unwrap()
+            .starts_with("Distance:"));
         assert!(app
             .active_measure("aid 1 or aid 5 or aid 9")
             .unwrap()
@@ -3759,7 +4352,10 @@ mod tests {
             .active_measure("aid 1 or aid 5 or aid 9 or aid 13")
             .unwrap()
             .starts_with("Torsion:"));
-        assert!(app.active_measure("aid 1").is_none(), "one atom → no measure");
+        assert!(
+            app.active_measure("aid 1").is_none(),
+            "one atom → no measure"
+        );
     }
 
     #[test]
@@ -3790,7 +4386,8 @@ mod tests {
     fn renders_1crn_molecule_to_a_png_for_visual_check() {
         // Produce the ACTUAL molecular view the GUI viewport renders, as a PNG, so
         // it can be eyeballed (self-skips without the reference PDB or a GPU).
-        let pdb = std::path::Path::new("/Users/thmini/works/tools/cuemol2/tests/test_data/1CRN.pdb");
+        let pdb =
+            std::path::Path::new("/Users/thmini/works/tools/cuemol2/tests/test_data/1CRN.pdb");
         if !pdb.exists() {
             return;
         }
@@ -3943,7 +4540,9 @@ mod tests {
             .result_object;
         // A small selection (residues 1-3 = THR/THR/CYS, exposing C/N/O/S) keeps the
         // SES build cheap while still surfacing several element colours.
-        let mesh = app.build_surface_mesh(object, "resid 1:3", 1.0, 1.4).unwrap();
+        let mesh = app
+            .build_surface_mesh(object, "resid 1:3", 1.0, 1.4)
+            .unwrap();
         assert!(
             !mesh.indices.is_empty() && !mesh.vertices.is_empty(),
             "the SES must be a real triangle mesh"
@@ -3963,12 +4562,18 @@ mod tests {
         // The specific CPK colours of exposed oxygen and carbon must appear, and the
         // former uniform grey (0.76,0.79,0.84) must be gone.
         let has = |target: [f32; 3]| {
-            mesh.vertices.iter().any(|v| {
-                (0..3).all(|k| (v.color[k] - target[k]).abs() < 0.02)
-            })
+            mesh.vertices
+                .iter()
+                .any(|v| (0..3).all(|k| (v.color[k] - target[k]).abs() < 0.02))
         };
-        assert!(has([0.92, 0.12, 0.12]), "oxygen-red vertices expected on the SES");
-        assert!(has([0.38, 0.38, 0.38]), "carbon-grey vertices expected on the SES");
+        assert!(
+            has([0.92, 0.12, 0.12]),
+            "oxygen-red vertices expected on the SES"
+        );
+        assert!(
+            has([0.38, 0.38, 0.38]),
+            "carbon-grey vertices expected on the SES"
+        );
         assert!(
             !has([0.76, 0.79, 0.84]),
             "no vertex should keep the old flat-grey surface colour"
@@ -4020,7 +4625,11 @@ mod tests {
         let mut app = DesktopAppState::new();
         app.load_qsc_file(&path).unwrap();
         let meshes = app.active_scene_surface_meshes();
-        assert_eq!(meshes.len(), 1, "the OBJ surface object becomes one render mesh");
+        assert_eq!(
+            meshes.len(),
+            1,
+            "the OBJ surface object becomes one render mesh"
+        );
         assert_eq!(meshes[0].vertices.len(), 3);
         assert_eq!(meshes[0].indices.len(), 3, "one triangle -> three indices");
         assert_eq!(meshes[0].vertices[0].color, [0.45, 0.65, 0.95, 1.0]);
@@ -4028,20 +4637,121 @@ mod tests {
     }
 
     #[test]
+    fn qsc_with_native_qdfsurf_loads_as_a_display_mesh() {
+        let mut surface = cuemol_surface::MolSurfObj::new();
+        for position in [
+            cuemol_core::Vector4::new3(0.0, 0.0, 0.0),
+            cuemol_core::Vector4::new3(1.0, 0.0, 0.0),
+            cuemol_core::Vector4::new3(0.0, 1.0, 0.0),
+        ] {
+            surface
+                .mesh_mut()
+                .push_vertex(cuemol_surface::SurfaceVertex {
+                    position,
+                    normal: cuemol_core::Vector4::new3(0.0, 0.0, 1.0),
+                });
+        }
+        surface.mesh_mut().push_triangle([0, 1, 2]);
+        let qdf0 = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
+        let encoded = cuemol_qsys::encode_qdf0_bytes(&qdf0, 1, "13").unwrap();
+        let encoded = String::from_utf8(encoded).unwrap();
+        let qsc = format!(
+            "<scene>\n\
+             <object type=\"MolSurf\" name=\"native-surface\" src=\"datachunk:00000\" srctype=\"qdfsurf\">\n\
+             </object>\n\
+             </scene>\n\
+             ========== End of XML ==========\n\
+             ==========START datachunk:00000==========\n\
+             {encoded}\
+             ==========END datachunk:00000==========\n"
+        );
+        let path = std::env::temp_dir().join("cuemol_core_qsc_qdfsurf_test.qsc");
+        std::fs::write(&path, qsc).unwrap();
+
+        let mut app = DesktopAppState::new();
+        app.load_qsc_file(&path).unwrap();
+        let meshes = app.active_scene_surface_meshes();
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(meshes[0].vertices.len(), 3);
+        assert_eq!(meshes[0].indices, vec![0, 1, 2]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn qsc_with_native_qdfmap_loads_into_density_scene_state() {
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(
+            &[0, 32, 64, 96, 128, 160, 192, 255],
+            [2, 2, 2],
+            -1.0,
+            1.0,
+            0.0,
+            0.5,
+        );
+        map.set_map_params([0, 0, 0], [2, 2, 2]);
+        map.set_xtal_params(10.0, 11.0, 12.0, 90.0, 90.0, 90.0);
+        let qdf0 = cuemol_xtal::qdf_map::write_qdf_denmap_bytes(&map);
+        let encoded = cuemol_qsys::encode_qdf0_bytes(&qdf0, 1, "13").unwrap();
+        let encoded = String::from_utf8(encoded).unwrap();
+        let qsc = format!(
+            "<scene>\n\
+             <object type=\"DensityMap\" name=\"native-map\" src=\"datachunk:00000\" srctype=\"qdfmap\">\n\
+             </object>\n\
+             </scene>\n\
+             ========== End of XML ==========\n\
+             ==========START datachunk:00000==========\n\
+             {encoded}\
+             ==========END datachunk:00000==========\n"
+        );
+        let path = std::env::temp_dir().join("cuemol_core_qsc_qdfmap_test.qsc");
+        std::fs::write(&path, qsc).unwrap();
+
+        let mut app = DesktopAppState::new();
+        app.load_qsc_file(&path).unwrap();
+        let maps = app.active_density_map_summaries();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].name, "native-map");
+        assert_eq!(maps[0].format, "qdfmap");
+        assert_eq!(maps[0].counts, [2, 2, 2]);
+        assert_eq!(maps[0].value_count, 8);
+        assert!(app.active_scene_skipped_objects().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn potential_color_is_a_red_white_blue_gradient() {
         // C++ getColorSca 3-stop gradient: low → red, mid → white, high → blue.
-        let approx = |a: [f32; 4], b: [f32; 4]| {
-            (0..4).all(|k| (a[k] - b[k]).abs() < 1.0e-6)
-        };
-        assert!(approx(potential_color(-1.0, -1.0, 0.0, 1.0), [1.0, 0.0, 0.0, 1.0]));
-        assert!(approx(potential_color(1.0, -1.0, 0.0, 1.0), [0.0, 0.0, 1.0, 1.0]));
-        assert!(approx(potential_color(0.0, -1.0, 0.0, 1.0), [1.0, 1.0, 1.0, 1.0]));
+        let approx = |a: [f32; 4], b: [f32; 4]| (0..4).all(|k| (a[k] - b[k]).abs() < 1.0e-6);
+        assert!(approx(
+            potential_color(-1.0, -1.0, 0.0, 1.0),
+            [1.0, 0.0, 0.0, 1.0]
+        ));
+        assert!(approx(
+            potential_color(1.0, -1.0, 0.0, 1.0),
+            [0.0, 0.0, 1.0, 1.0]
+        ));
+        assert!(approx(
+            potential_color(0.0, -1.0, 0.0, 1.0),
+            [1.0, 1.0, 1.0, 1.0]
+        ));
         // Halfway on each half.
-        assert!(approx(potential_color(-0.5, -1.0, 0.0, 1.0), [1.0, 0.5, 0.5, 1.0]));
-        assert!(approx(potential_color(0.5, -1.0, 0.0, 1.0), [0.5, 0.5, 1.0, 1.0]));
+        assert!(approx(
+            potential_color(-0.5, -1.0, 0.0, 1.0),
+            [1.0, 0.5, 0.5, 1.0]
+        ));
+        assert!(approx(
+            potential_color(0.5, -1.0, 0.0, 1.0),
+            [0.5, 0.5, 1.0, 1.0]
+        ));
         // Beyond the ends clamps to the endpoint colour.
-        assert!(approx(potential_color(-9.0, -1.0, 0.0, 1.0), [1.0, 0.0, 0.0, 1.0]));
-        assert!(approx(potential_color(9.0, -1.0, 0.0, 1.0), [0.0, 0.0, 1.0, 1.0]));
+        assert!(approx(
+            potential_color(-9.0, -1.0, 0.0, 1.0),
+            [1.0, 0.0, 0.0, 1.0]
+        ));
+        assert!(approx(
+            potential_color(9.0, -1.0, 0.0, 1.0),
+            [0.0, 0.0, 1.0, 1.0]
+        ));
     }
 
     #[test]
@@ -4069,23 +4779,38 @@ mod tests {
             values,
         }));
         let (min, max) = app.surface_potential_range().unwrap();
-        assert!(min <= -99.0 && max >= 99.0, "field range is spike-dominated (±100)");
+        assert!(
+            min <= -99.0 && max >= 99.0,
+            "field range is spike-dominated (±100)"
+        );
         // Auto thresholds (2·rmsd around 0) ignore the spikes — FAR inside ±100.
         let (lo, mid, hi) = app.surface_potential_thresholds().unwrap();
         assert_eq!(mid, 0.0, "neutral mid at 0 for a straddling map");
-        assert!(hi < 90.0 && lo > -90.0, "auto thresholds ignore the ±100 spikes: ({lo},{hi})");
+        assert!(
+            hi < 90.0 && lo > -90.0,
+            "auto thresholds ignore the ±100 spikes: ({lo},{hi})"
+        );
         assert!((hi + lo).abs() < 1.0e-6, "symmetric around the neutral mid");
         // A user scale clamps the gradient explicitly (C++ m_dParLow/High).
         app.set_potential_scale(Some(1.0));
         let (lo2, _m, hi2) = app.surface_potential_thresholds().unwrap();
-        assert!((hi2 - 1.0).abs() < 1.0e-9 && (lo2 + 1.0).abs() < 1.0e-9, "user scale ±1");
+        assert!(
+            (hi2 - 1.0).abs() < 1.0e-9 && (lo2 + 1.0).abs() < 1.0e-9,
+            "user scale ±1"
+        );
         // At ±1 scale a potential of 1.0 is now FULLY blue; under the field range it
         // would wash to near-white — the low-contrast bug this fix closes.
         assert_eq!(potential_color(1.0, lo2, 0.0, hi2), [0.0, 0.0, 1.0, 1.0]);
         let washed = potential_color(1.0, min, 0.0, max);
-        assert!(washed[0] > 0.9 && washed[2] > 0.9, "field-range scaling washes to near-white");
+        assert!(
+            washed[0] > 0.9 && washed[2] > 0.9,
+            "field-range scaling washes to near-white"
+        );
         app.set_potential_scale(Some(-5.0));
-        assert!(app.potential_scale().is_none(), "a non-positive scale restores auto");
+        assert!(
+            app.potential_scale().is_none(),
+            "a non-positive scale restores auto"
+        );
     }
 
     #[test]
@@ -4123,11 +4848,8 @@ mod tests {
         // An 80 Å cube of 1 Å voxels around the centroid; value = x − centroid.x, so
         // the field straddles 0 (min ≈ −40, max ≈ +40) → mid pins to 0.
         let n = 80usize;
-        let origin = cuemol_core::Vector4::new3(
-            centroid.x - 40.0,
-            centroid.y - 40.0,
-            centroid.z - 40.0,
-        );
+        let origin =
+            cuemol_core::Vector4::new3(centroid.x - 40.0, centroid.y - 40.0, centroid.z - 40.0);
         let mut values = vec![0.0_f64; n * n * n];
         for sec in 0..n {
             for row in 0..n {
@@ -4150,7 +4872,10 @@ mod tests {
         app.set_surface_potential_map(DensityMap::from_grid_map(grid));
         assert!(app.has_surface_potential());
         let (lo, hi) = app.surface_potential_range().unwrap();
-        assert!(lo < 0.0 && hi > 0.0, "potential range must straddle 0: ({lo},{hi})");
+        assert!(
+            lo < 0.0 && hi > 0.0,
+            "potential range must straddle 0: ({lo},{hi})"
+        );
 
         let mesh = app
             .build_surface_potential_mesh(object, "resid 1:3", 1.0, 1.4)
@@ -4160,16 +4885,16 @@ mod tests {
         // side, more red than blue) and some lean blue (positive side). Tested by the
         // colour's SIGN tint, not saturation — the auto-scaled range is dominated by
         // the grid corners, so a small local surface is tinted, not saturated.
-        let red = mesh
-            .vertices
-            .iter()
-            .any(|v| v.color[0] > v.color[2] + 0.02);
-        let blue = mesh
-            .vertices
-            .iter()
-            .any(|v| v.color[2] > v.color[0] + 0.02);
-        assert!(red, "surface must have red-leaning (negative-potential) vertices");
-        assert!(blue, "surface must have blue-leaning (positive-potential) vertices");
+        let red = mesh.vertices.iter().any(|v| v.color[0] > v.color[2] + 0.02);
+        let blue = mesh.vertices.iter().any(|v| v.color[2] > v.color[0] + 0.02);
+        assert!(
+            red,
+            "surface must have red-leaning (negative-potential) vertices"
+        );
+        assert!(
+            blue,
+            "surface must have blue-leaning (positive-potential) vertices"
+        );
 
         // With no potential loaded the call is a clean error, not a panic.
         let mut empty = DesktopAppState::new();
@@ -4225,12 +4950,18 @@ mod tests {
         // to the absolute sphr=0.3 (atom_radius_abs overrides the vdW-scaled radius).
         let after = app.active_render_snapshot("").unwrap();
         assert!(
-            after.bonds.iter().all(|bond| (bond.radius - 0.2).abs() < 1e-6),
+            after
+                .bonds
+                .iter()
+                .all(|bond| (bond.radius - 0.2).abs() < 1e-6),
             "styled bonds should all be bondw=0.2, first was {}",
             after.bonds[0].radius
         );
         assert!(
-            after.atoms.iter().all(|atom| (atom.radius - 0.3).abs() < 1e-6),
+            after
+                .atoms
+                .iter()
+                .all(|atom| (atom.radius - 0.3).abs() < 1e-6),
             "styled atoms should all be the absolute sphr=0.3, first was {}",
             after.atoms[0].radius
         );
@@ -4277,7 +5008,10 @@ mod tests {
         // Endpoint oracle: `measure2` is <line aid1="43" aid2="88"/>, so one
         // measurement bond must connect the resolved positions of atoms 43 and 88.
         let scene = app.scene_manager().scene(scene_uid).unwrap();
-        let object = scene.objects().first().expect("scene has a molecule object");
+        let object = scene
+            .objects()
+            .first()
+            .expect("scene has a molecule object");
         let atoms = object.mol().atoms();
         let p43 = atoms[43].position;
         let p88 = atoms[88].position;
@@ -4313,10 +5047,7 @@ mod tests {
         // Routes to the disorder geometry (matches the molvis function), which is
         // far below the 327-atom generic dump.
         let direct = disorder_lines_snapshot(
-            app.scene_manager()
-                .object(object)
-                .unwrap()
-                .mol(),
+            app.scene_manager().object(object).unwrap().mol(),
             1.0,
             0.15,
             2.0,
@@ -4372,11 +5103,7 @@ mod tests {
             .result_object;
         // Sanity: the ANISOU records actually parsed onto the atoms.
         assert!(
-            app.scene_manager()
-                .object(object)
-                .unwrap()
-                .mol()
-                .atoms()[0]
+            app.scene_manager().object(object).unwrap().mol().atoms()[0]
                 .int_prop("anisou_u11")
                 .is_some(),
             "ANISOU U values must have parsed (else the test verifies nothing)"
@@ -4470,7 +5197,10 @@ mod tests {
             .iter()
             .map(|mesh| mesh.vertices.len())
             .sum();
-        assert!(full > 0, "the full backbone trace should produce a ribbon mesh");
+        assert!(
+            full > 0,
+            "the full backbone trace should produce a ribbon mesh"
+        );
 
         app.scene_manager_mut()
             .object_mut(object)
@@ -4585,7 +5315,15 @@ mod tests {
         // A nucleic-acid renderer draws the backbone ribbon PLUS each nucleotide's
         // base stick (C++ NARenderer), which the plain mainchain ribbon omits.
         // Build two purine nucleotides (C1'/N9/N1) by exact PDB columns.
-        fn pdb_atom(serial: i32, name: &str, res: &str, resid: i32, x: f64, y: f64, z: f64) -> String {
+        fn pdb_atom(
+            serial: i32,
+            name: &str,
+            res: &str,
+            resid: i32,
+            x: f64,
+            y: f64,
+            z: f64,
+        ) -> String {
             let mut line = vec![b' '; 80];
             let put = |line: &mut [u8], text: &str, start: usize| {
                 for (i, byte) in text.bytes().enumerate() {
@@ -4608,9 +5346,25 @@ mod tests {
             let serial = (resid - 1) * 3;
             pdb.push_str(&pdb_atom(serial + 1, "C1'", "G", resid, base_x, 0.0, 0.0));
             pdb.push('\n');
-            pdb.push_str(&pdb_atom(serial + 2, "N9", "G", resid, base_x + 1.0, 0.0, 0.0));
+            pdb.push_str(&pdb_atom(
+                serial + 2,
+                "N9",
+                "G",
+                resid,
+                base_x + 1.0,
+                0.0,
+                0.0,
+            ));
             pdb.push('\n');
-            pdb.push_str(&pdb_atom(serial + 3, "N1", "G", resid, base_x + 2.0, 0.0, 0.0));
+            pdb.push_str(&pdb_atom(
+                serial + 3,
+                "N1",
+                "G",
+                resid,
+                base_x + 2.0,
+                0.0,
+                0.0,
+            ));
             pdb.push('\n');
         }
         pdb.push_str("END\n");
@@ -4636,7 +5390,8 @@ mod tests {
         );
 
         // A plain trace draws the ribbon backbone only (no base-stick bonds).
-        app.new_renderer_in_active_scene(object, "trace", "tr").unwrap();
+        app.new_renderer_in_active_scene(object, "trace", "tr")
+            .unwrap();
         let trace = app.active_render_snapshot("").unwrap();
         assert_eq!(trace.bond_count(), 0, "a plain trace has no base sticks");
 
@@ -4646,7 +5401,10 @@ mod tests {
             .load_object_into_active_scene(&path, "na", "pdb")
             .unwrap()
             .result_object;
-        app.new_renderer_in_active_scene(object, "nucl", "na").unwrap();
+        let renderer = app
+            .new_renderer_in_active_scene(object, "nucl", "na")
+            .unwrap()
+            .result_renderer;
         let nucl = app.active_render_snapshot("").unwrap();
         assert!(
             nucl.mesh_count() >= 1,
@@ -4657,6 +5415,30 @@ mod tests {
             "nucl adds two base sticks per nucleotide, got {}",
             nucl.bond_count()
         );
+
+        let renderer = app
+            .scene_manager_mut()
+            .object_mut(object)
+            .expect("nucl object")
+            .renderer_mut(renderer)
+            .expect("nucl renderer");
+        renderer.set_qsc_attr("show_tube", "false");
+        renderer.set_qsc_attr("base_size", "0.8");
+        let renderers = app.scene_manager().object(object).unwrap().renderers();
+        assert_eq!(renderers.len(), 1);
+        assert_eq!(renderers[0].renderer_type(), "nucl");
+        assert_eq!(renderers[0].qsc_attr("show_tube"), Some("false"));
+        assert_eq!(
+            renderers[0].resolved_attr("show_tube", &default_style_manager(), DEFAULT_STYLE_SCOPE),
+            Some("false".to_string())
+        );
+        assert!(!qsc_bool("false"));
+        let bases_only = app.active_render_snapshot("").unwrap();
+        assert!(bases_only.mesh_count() < nucl.mesh_count());
+        assert!(bases_only
+            .bonds
+            .iter()
+            .all(|bond| (bond.radius - 0.4).abs() < 1.0e-6));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -4697,11 +5479,15 @@ mod tests {
         );
 
         let has_floral = |snapshot: &RenderSceneSnapshot| {
-            snapshot.meshes.iter().flat_map(|mesh| mesh.vertices.iter()).any(|vertex| {
-                (vertex.color[0] - 1.0).abs() < 0.005
-                    && (vertex.color[1] - 250.0 / 255.0).abs() < 0.005
-                    && (vertex.color[2] - 240.0 / 255.0).abs() < 0.005
-            })
+            snapshot
+                .meshes
+                .iter()
+                .flat_map(|mesh| mesh.vertices.iter())
+                .any(|vertex| {
+                    (vertex.color[0] - 1.0).abs() < 0.005
+                        && (vertex.color[1] - 250.0 / 255.0).abs() < 0.005
+                        && (vertex.color[2] - 240.0 / 255.0).abs() < 0.005
+                })
         };
         assert!(
             has_floral(&app.render_snapshot(scene_uid, "").unwrap()),
@@ -4744,7 +5530,11 @@ mod tests {
         assert!((center.x - 7.2782).abs() < 1e-3, "center.x = {}", center.x);
         assert!((center.y - 10.1857).abs() < 1e-3, "center.y = {}", center.y);
         assert!((center.z - 6.8747).abs() < 1e-3, "center.z = {}", center.z);
-        assert!((camera.zoom() - 50.0).abs() < 1e-6, "zoom = {}", camera.zoom());
+        assert!(
+            (camera.zoom() - 50.0).abs() < 1e-6,
+            "zoom = {}",
+            camera.zoom()
+        );
         assert!(!camera.is_perspective(), "fixture camera is orthographic");
 
         // A plain PDB load has no saved camera (export auto-frames it).
@@ -4804,13 +5594,25 @@ mod tests {
         };
         let render_atom_count = |visible_attr: &str| {
             let qsc = build(visible_attr);
-            let path = std::env::temp_dir()
-                .join(format!("cuemol2-rs-objvis-{}-{visible_attr:?}.qsc", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "cuemol2-rs-objvis-{}-{visible_attr:?}.qsc",
+                std::process::id()
+            ));
             std::fs::write(&path, &qsc).unwrap();
             let mut app = DesktopAppState::new();
-            let scene_uid = app.load_qsc_file(&path).ok().flatten().expect("synthetic .qsc loads");
+            let scene_uid = app
+                .load_qsc_file(&path)
+                .ok()
+                .flatten()
+                .expect("synthetic .qsc loads");
             let _ = std::fs::remove_file(&path);
-            let object = app.scene_manager().scene(scene_uid).unwrap().objects().first().unwrap();
+            let object = app
+                .scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .objects()
+                .first()
+                .unwrap();
             let parsed_visible = object.is_visible();
             let atoms = app.render_snapshot(scene_uid, "").unwrap().atom_count();
             (parsed_visible, atoms)
@@ -4824,7 +5626,10 @@ mod tests {
         // The gap: `visible="false"` hides the whole object -> no geometry.
         let (hidden_flag, hidden_atoms) = render_atom_count(" visible=\"false\"");
         assert!(!hidden_flag, "visible=\"false\" parses as not visible");
-        assert_eq!(hidden_atoms, 0, "a hidden object contributes no atoms (Scene.cpp:635)");
+        assert_eq!(
+            hidden_atoms, 0,
+            "a hidden object contributes no atoms (Scene.cpp:635)"
+        );
     }
 
     #[test]
@@ -4865,7 +5670,8 @@ mod tests {
              \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
              ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
         );
-        let path = std::env::temp_dir().join(format!("cuemol2-rs-rainbow-{}.qsc", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("cuemol2-rs-rainbow-{}.qsc", std::process::id()));
         std::fs::write(&path, &qsc).unwrap();
 
         let mut app = DesktopAppState::new();
@@ -4950,7 +5756,11 @@ mod tests {
             let _ = std::fs::remove_file(&path);
             let scene_uid = loaded.expect("synthetic xform .qsc failed to load");
             let snapshot = app.render_snapshot(scene_uid, "").unwrap();
-            assert_eq!(snapshot.atoms.len(), 1, "cpk lone atom -> exactly one sphere");
+            assert_eq!(
+                snapshot.atoms.len(),
+                1,
+                "cpk lone atom -> exactly one sphere"
+            );
             snapshot.atoms[0].center
         };
 
@@ -4965,8 +5775,7 @@ mod tests {
         );
 
         // After: R_z(+90) [ (x,y,z)->(-y,x,z) ] + translate(0,0,5) -> (0,1,5).
-        let after =
-            render_atom_center(" xformMat=\"(0,1,0,0,-1,0,0,0,0,0,1,0,0,0,5,1)\"", "rot");
+        let after = render_atom_center(" xformMat=\"(0,1,0,0,-1,0,0,0,0,0,1,0,0,0,5,1)\"", "rot");
         assert!(
             after.x.abs() < 1e-6 && (after.y - 1.0).abs() < 1e-6 && (after.z - 5.0).abs() < 1e-6,
             "object xformMat should rotate+translate the atom to (0,1,5), got ({},{},{})",
@@ -5094,7 +5903,8 @@ mod tests {
              \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
              ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
         );
-        let path = std::env::temp_dir().join(format!("cuemol2-rs-atompaint-{}.qsc", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("cuemol2-rs-atompaint-{}.qsc", std::process::id()));
         std::fs::write(&path, &qsc).unwrap();
         let mut app = DesktopAppState::new();
         let loaded = app.load_qsc_file(&path).ok().flatten();
@@ -5119,9 +5929,17 @@ mod tests {
             [c.r, c.g, c.b]
         };
         // Carbon defers to the paint `*` fallback FloralWhite (#FFFAF0).
-        assert_eq!(color_of("C"), [255, 250, 240], "carbon should be paint FloralWhite");
+        assert_eq!(
+            color_of("C"),
+            [255, 250, 240],
+            "carbon should be paint FloralWhite"
+        );
         // Nitrogen keeps its CPK element colour (not FloralWhite).
-        assert_ne!(color_of("N"), [255, 250, 240], "nitrogen keeps its CPK colour");
+        assert_ne!(
+            color_of("N"),
+            [255, 250, 240],
+            "nitrogen keeps its CPK colour"
+        );
     }
 
     #[test]
@@ -5160,7 +5978,8 @@ mod tests {
              \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
              ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
         );
-        let path = std::env::temp_dir().join(format!("cuemol2-rs-rbatom-{}.qsc", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("cuemol2-rs-rbatom-{}.qsc", std::process::id()));
         std::fs::write(&path, &qsc).unwrap();
         let mut app = DesktopAppState::new();
         let loaded = app.load_qsc_file(&path).ok().flatten();
@@ -5169,7 +5988,25 @@ mod tests {
             panic!("synthetic rainbow-atom .qsc failed to load");
         };
         let snapshot = app.render_snapshot(scene_uid, "").unwrap();
-        let colors: Vec<[f32; 4]> = snapshot.atoms.iter().map(|a| a.color.as_ref().unwrap().rgba8().map(|c| [c.r as f32/255.0, c.g as f32/255.0, c.b as f32/255.0, 1.0]).unwrap()).collect();
+        let colors: Vec<[f32; 4]> = snapshot
+            .atoms
+            .iter()
+            .map(|a| {
+                a.color
+                    .as_ref()
+                    .unwrap()
+                    .rgba8()
+                    .map(|c| {
+                        [
+                            c.r as f32 / 255.0,
+                            c.g as f32 / 255.0,
+                            c.b as f32 / 255.0,
+                            1.0,
+                        ]
+                    })
+                    .unwrap()
+            })
+            .collect();
         assert!(!colors.is_empty(), "ballstick should draw atom spheres");
         let has_blue = colors.iter().any(|c| c[2] > 0.8 && c[0] < 0.2);
         let has_red = colors.iter().any(|c| c[0] > 0.8 && c[2] < 0.2);
@@ -5387,6 +6224,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dx_path = dir.join("small.dx");
         let xplor_path = dir.join("xplor.map");
+        let cif_path = dir.join("coefficients.cif");
         std::fs::write(
             &dx_path,
             "\
@@ -5403,6 +6241,25 @@ attribute \"dep\" string \"positions\"
         )
         .unwrap();
         std::fs::write(&xplor_path, xplor_map([2, 1, 1], [0, 0, 0], [1.0, 2.0])).unwrap();
+        std::fs::write(
+            &cif_path,
+            "data_map\n\
+             _cell.length_a 10.0\n\
+             _cell.length_b 10.0\n\
+             _cell.length_c 10.0\n\
+             _cell.angle_alpha 90.0\n\
+             _cell.angle_beta 90.0\n\
+             _cell.angle_gamma 90.0\n\
+             _symmetry.Int_Tables_number 1\n\
+             loop_\n\
+             _refln.index_h\n\
+             _refln.index_k\n\
+             _refln.index_l\n\
+             _refln.pdbx_FWT\n\
+             _refln.pdbx_PHWT\n\
+             1 0 0 1000.0 0.0\n#\n",
+        )
+        .unwrap();
 
         let mut app = DesktopAppState::new();
         let GuiLoadedPath::Map { scene_uid, map_uid } = app.open_path(&dx_path).unwrap() else {
@@ -5425,12 +6282,40 @@ attribute \"dep\" string \"positions\"
         assert_eq!(summary.counts, [2, 1, 1]);
         assert_eq!(app.active_density_map_summaries().len(), 2);
 
+        let GuiLoadedPath::Map { map_uid, .. } = app.open_path(&cif_path).unwrap() else {
+            panic!("expected mmCIF density map load");
+        };
+        let summary = app.density_map_summary(map_uid).unwrap();
+        assert_eq!(summary.format, "mmcifmap");
+        assert!(summary.value_count > 0);
+        assert_eq!(app.active_density_map_summaries().len(), 3);
+
         app.close_active_scene().unwrap();
         assert!(app.density_map_summary(map_uid).is_none());
 
         let _ = std::fs::remove_file(dx_path);
         let _ = std::fs::remove_file(xplor_path);
+        let _ = std::fs::remove_file(cif_path);
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn desktop_app_state_opens_real_pse_session_molecules() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../cuemol-importers/tests/fixtures/mol3.pse");
+        let mut app = DesktopAppState::new();
+        let GuiLoadedPath::Object {
+            scene_uid: _,
+            object_uid,
+        } = app.open_path(path).unwrap()
+        else {
+            panic!("expected PSE molecule load");
+        };
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.name(), "mol1");
+        assert_eq!(object.mol().atom_count(), 3);
+        assert_eq!(object.mol().bonds().len(), 1);
+        assert_eq!(object.renderers().len(), 1);
     }
 
     #[test]

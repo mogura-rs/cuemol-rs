@@ -1,5 +1,5 @@
-use cuemol_core::{Matrix4, Vector4};
-use cuemol_gfx::ColorSpec;
+use cuemol_core::{Matrix4, Uid, Vector4};
+use cuemol_gfx::{CmsXform, ColorSpec, Rgba8};
 use cuemol_qsys::{InOutHandler, SceneExporter as QsysSceneExporter};
 use std::fmt::Write as _;
 
@@ -93,7 +93,14 @@ impl RenderMesh {
             .unwrap();
         }
         for [i, j, k] in self.triangles() {
-            writeln!(&mut out, "f {0}//{0} {1}//{1} {2}//{2}", i + 1, j + 1, k + 1).unwrap();
+            writeln!(
+                &mut out,
+                "f {0}//{0} {1}//{1} {2}//{2}",
+                i + 1,
+                j + 1,
+                k + 1
+            )
+            .unwrap();
         }
         out
     }
@@ -105,6 +112,92 @@ pub struct RenderSceneSnapshot {
     pub bonds: Vec<RenderBond>,
     pub meshes: Vec<RenderMesh>,
     pub bounds: Option<(Vector4, Vector4)>,
+}
+
+/// Apply CueMol's generic CMYK soft-proof transform to every resolved scene
+/// colour. This is the profile-independent fallback used when color proofing
+/// is enabled without an external ICC engine.
+pub fn apply_generic_color_proof(snapshot: &mut RenderSceneSnapshot) {
+    apply_color_transform(snapshot, |rgba| {
+        let spec = ColorSpec {
+            base: cuemol_gfx::ColorBase::Html {
+                r: rgba.r,
+                g: rgba.g,
+                b: rgba.b,
+                a: rgba.a,
+            },
+            modifiers: Vec::new(),
+        };
+        let code = spec
+            .device_code_generic_cmyk()
+            .unwrap_or_else(|| cuemol_gfx::rgba_code(rgba.r, rgba.g, rgba.b, rgba.a));
+        Rgba8 {
+            r: ((code >> 16) & 0xff) as u8,
+            g: ((code >> 8) & 0xff) as u8,
+            b: (code & 0xff) as u8,
+            a: rgba.a,
+        }
+    });
+}
+
+/// Apply an ICC soft-proof transform created by LittleCMS to every resolved
+/// scene colour. Alpha is preserved exactly.
+pub fn apply_icc_color_proof(snapshot: &mut RenderSceneSnapshot, transform: &CmsXform) {
+    apply_color_transform(snapshot, |rgba| {
+        let code = transform.do_xform(cuemol_gfx::rgba_code(rgba.r, rgba.g, rgba.b, rgba.a));
+        Rgba8 {
+            r: ((code >> 16) & 0xff) as u8,
+            g: ((code >> 8) & 0xff) as u8,
+            b: (code & 0xff) as u8,
+            a: rgba.a,
+        }
+    });
+}
+
+fn apply_color_transform(snapshot: &mut RenderSceneSnapshot, transform: impl Fn(Rgba8) -> Rgba8) {
+    let proof_spec = |color: &mut Option<ColorSpec>| {
+        let Some(rgba) = color.as_ref().and_then(ColorSpec::rgba8) else {
+            return;
+        };
+        let rgba = transform(rgba);
+        *color = Some(ColorSpec {
+            base: cuemol_gfx::ColorBase::Html {
+                r: rgba.r,
+                g: rgba.g,
+                b: rgba.b,
+                a: rgba.a,
+            },
+            modifiers: Vec::new(),
+        });
+    };
+    for atom in &mut snapshot.atoms {
+        proof_spec(&mut atom.color);
+    }
+    for bond in &mut snapshot.bonds {
+        proof_spec(&mut bond.color);
+    }
+    for mesh in &mut snapshot.meshes {
+        for vertex in &mut mesh.vertices {
+            let mut spec = Some(ColorSpec {
+                base: cuemol_gfx::ColorBase::Rgb {
+                    r: vertex.color[0],
+                    g: vertex.color[1],
+                    b: vertex.color[2],
+                    a: vertex.color[3],
+                },
+                modifiers: Vec::new(),
+            });
+            proof_spec(&mut spec);
+            if let Some(rgba) = spec.and_then(|value| value.rgba8()) {
+                vertex.color = [
+                    f32::from(rgba.r) / 255.0,
+                    f32::from(rgba.g) / 255.0,
+                    f32::from(rgba.b) / 255.0,
+                    f32::from(rgba.a) / 255.0,
+                ];
+            }
+        }
+    }
 }
 
 pub trait RenderBackend {
@@ -248,11 +341,17 @@ impl RenderSceneSnapshot {
             for vertex in &mut mesh.vertices {
                 m.xform3d(&mut vertex.position);
                 // Rotation-only (w=0 drops the translation column).
-                let rotated =
-                    m.transform_point(Vector4::new4(vertex.normal.x, vertex.normal.y, vertex.normal.z, 0.0));
-                let len = (rotated.x * rotated.x + rotated.y * rotated.y + rotated.z * rotated.z).sqrt();
+                let rotated = m.transform_point(Vector4::new4(
+                    vertex.normal.x,
+                    vertex.normal.y,
+                    vertex.normal.z,
+                    0.0,
+                ));
+                let len =
+                    (rotated.x * rotated.x + rotated.y * rotated.y + rotated.z * rotated.z).sqrt();
                 if len > 1.0e-12 {
-                    vertex.normal = Vector4::new3(rotated.x / len, rotated.y / len, rotated.z / len);
+                    vertex.normal =
+                        Vector4::new3(rotated.x / len, rotated.y / len, rotated.z / len);
                 }
             }
         }
@@ -264,26 +363,32 @@ impl RenderSceneSnapshot {
     pub fn recompute_bounds(&mut self) {
         let mut min: Option<Vector4> = None;
         let mut max: Option<Vector4> = None;
-        let mut include = |p: Vector4| {
-            match (&mut min, &mut max) {
-                (Some(lo), Some(hi)) => {
-                    lo.x = lo.x.min(p.x);
-                    lo.y = lo.y.min(p.y);
-                    lo.z = lo.z.min(p.z);
-                    hi.x = hi.x.max(p.x);
-                    hi.y = hi.y.max(p.y);
-                    hi.z = hi.z.max(p.z);
-                }
-                _ => {
-                    min = Some(p);
-                    max = Some(p);
-                }
+        let mut include = |p: Vector4| match (&mut min, &mut max) {
+            (Some(lo), Some(hi)) => {
+                lo.x = lo.x.min(p.x);
+                lo.y = lo.y.min(p.y);
+                lo.z = lo.z.min(p.z);
+                hi.x = hi.x.max(p.x);
+                hi.y = hi.y.max(p.y);
+                hi.z = hi.z.max(p.z);
+            }
+            _ => {
+                min = Some(p);
+                max = Some(p);
             }
         };
         for atom in &self.atoms {
             let r = atom.radius as f64;
-            include(Vector4::new3(atom.center.x - r, atom.center.y - r, atom.center.z - r));
-            include(Vector4::new3(atom.center.x + r, atom.center.y + r, atom.center.z + r));
+            include(Vector4::new3(
+                atom.center.x - r,
+                atom.center.y - r,
+                atom.center.z - r,
+            ));
+            include(Vector4::new3(
+                atom.center.x + r,
+                atom.center.y + r,
+                atom.center.z + r,
+            ));
         }
         for bond in &self.bonds {
             include(bond.from);
@@ -356,6 +461,20 @@ impl ExportState {
     }
 }
 
+impl std::ops::Deref for ExportState {
+    type Target = QsysSceneExporter;
+
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
+impl std::ops::DerefMut for ExportState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.base
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImgSceneExporter {
     state: ExportState,
@@ -363,6 +482,7 @@ pub struct ImgSceneExporter {
     height: i32,
     resolution_dpi: f64,
     use_alpha: bool,
+    use_depth: bool,
     aa_opt: i32,
 }
 
@@ -378,6 +498,7 @@ impl ImgSceneExporter {
             height: 500,
             resolution_dpi: 72.0,
             use_alpha: false,
+            use_depth: false,
             aa_opt: 0,
         }
     }
@@ -410,12 +531,20 @@ impl ImgSceneExporter {
         self.width
     }
 
+    pub fn get_width(&self) -> i32 {
+        self.width()
+    }
+
     pub fn set_width(&mut self, value: i32) {
         self.width = value;
     }
 
     pub fn height(&self) -> i32 {
         self.height
+    }
+
+    pub fn get_height(&self) -> i32 {
+        self.height()
     }
 
     pub fn set_height(&mut self, value: i32) {
@@ -426,16 +555,40 @@ impl ImgSceneExporter {
         self.resolution_dpi
     }
 
+    pub fn get_res_dpi(&self) -> f64 {
+        self.resolution_dpi()
+    }
+
     pub fn set_resolution_dpi(&mut self, value: f64) {
         self.resolution_dpi = value;
+    }
+
+    pub fn set_res_dpi(&mut self, value: f64) {
+        self.set_resolution_dpi(value);
     }
 
     pub fn use_alpha(&self) -> bool {
         self.use_alpha
     }
 
+    pub fn get_use_alpha(&self) -> bool {
+        self.use_alpha()
+    }
+
     pub fn set_use_alpha(&mut self, value: bool) {
         self.use_alpha = value;
+    }
+
+    pub fn use_depth(&self) -> bool {
+        self.use_depth
+    }
+
+    pub fn get_use_depth(&self) -> bool {
+        self.use_depth()
+    }
+
+    pub fn set_use_depth(&mut self, value: bool) {
+        self.use_depth = value;
     }
 
     pub fn aa_opt(&self) -> i32 {
@@ -448,6 +601,14 @@ impl ImgSceneExporter {
 
     pub fn write(&mut self) {
         self.state.write();
+    }
+
+    pub fn attach(&mut self, scene_uid: Uid) {
+        self.scene_mut().attach(scene_uid);
+    }
+
+    pub fn detach(&mut self) -> Option<Uid> {
+        self.scene_mut().detach()
     }
 
     pub fn write_count(&self) -> usize {
@@ -521,6 +682,20 @@ impl PngSceneExporter {
 impl Default for PngSceneExporter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::ops::Deref for PngSceneExporter {
+    type Target = ImgSceneExporter;
+
+    fn deref(&self) -> &Self::Target {
+        &self.image
+    }
+}
+
+impl std::ops::DerefMut for PngSceneExporter {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.image
     }
 }
 
@@ -793,10 +968,14 @@ impl PovSceneExporter {
         out.push_str("camera {\n");
         out.push_str(" #if (_perspective)\n perspective\n direction <0,0,-1>\n");
         out.push_str(" up <0,1,0> * image_height/image_width\n right <1,0,0>\n angle _fovx\n");
-        out.push_str(" location _center + <_stereo*_distance*_iod,0,_distance>\n look_at _center\n");
+        out.push_str(
+            " location _center + <_stereo*_distance*_iod,0,_distance>\n look_at _center\n",
+        );
         out.push_str(" #else\n orthographic\n direction <0,0,-1>\n");
         out.push_str(" up <0, _zoomy, 0>\n right <_zoomx, 0, 0>\n");
-        out.push_str(" location _center + <_stereo*_distance*_iod,0,_distance>\n look_at _center\n");
+        out.push_str(
+            " location _center + <_stereo*_distance*_iod,0,_distance>\n look_at _center\n",
+        );
         out.push_str(" #end\n}\n");
         out.push_str("global_settings {\n  assumed_gamma 1.0\n}\n");
         out.push_str(POV_LIGHTING);
@@ -1730,6 +1909,36 @@ impl Default for LuxCoreSceneExporter {
     }
 }
 
+macro_rules! impl_export_state_deref {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl std::ops::Deref for $ty {
+                type Target = ExportState;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.state
+                }
+            }
+
+            impl std::ops::DerefMut for $ty {
+                fn deref_mut(&mut self) -> &mut Self::Target {
+                    &mut self.state
+                }
+            }
+        )+
+    };
+}
+
+impl_export_state_deref!(
+    ImgSceneExporter,
+    PovSceneExporter,
+    MqoSceneExporter,
+    WbpSceneExporter,
+    StlSceneExporter,
+    LuxRendSceneExporter,
+    LuxCoreSceneExporter,
+);
+
 /// Build a per-face material table from a mesh: the face colour is the mean of
 /// its three vertex colours (C++ `mixColor`), quantised to 8-bit RGBA and
 /// deduplicated in first-seen order. Returns `(unique_colours, face -> index)`.
@@ -1961,12 +2170,12 @@ pub fn extract_edge_lines(mesh: &RenderMesh, cam: Vector4, crease_limit: f64) ->
         let emit = match (acc.n[0], acc.n[1]) {
             (Some(_), None) => true, // boundary / ridge edge
             (Some(n1), Some(n2)) => {
-                let crease = crease_limit > 0.0
-                    && dot3(n1, n2).clamp(-1.0, 1.0).acos() > crease_limit;
+                let crease =
+                    crease_limit > 0.0 && dot3(n1, n2).clamp(-1.0, 1.0).acos() > crease_limit;
                 let va = acc.a - cam;
                 let vb = acc.b - cam;
-                let silhouette = dot3(va, n1) * dot3(va, n2) < 0.0
-                    || dot3(vb, n1) * dot3(vb, n2) < 0.0;
+                let silhouette =
+                    dot3(va, n1) * dot3(va, n2) < 0.0 || dot3(vb, n1) * dot3(vb, n2) < 0.0;
                 crease || silhouette
             }
             _ => false,
@@ -2292,7 +2501,9 @@ mod tests {
         // Column-major (m1..m16) for R_z(+90) [ (x,y,z)->(-y,x,z) ] with translate
         // (0,0,5): cols [0,1,0,0][-1,0,0,0][0,0,1,0][0,0,5,1]. set_ai uses the C++
         // linear (column-major) index, so this is the exact LScrMatrix4D layout.
-        let cm = [0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 5.0, 1.0];
+        let cm = [
+            0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 5.0, 1.0,
+        ];
         let mut m = Matrix4::IDENTITY;
         for (i, value) in cm.iter().enumerate() {
             m.set_ai(i + 1, *value).unwrap();
@@ -2350,7 +2561,10 @@ mod tests {
         );
         // bounds were recomputed around the transformed geometry.
         let (lo, hi) = snapshot.bounds.expect("bounds recomputed");
-        assert!(lo.z <= 5.0 && hi.z >= 5.0, "bounds should track the +5 z shift");
+        assert!(
+            lo.z <= 5.0 && hi.z >= 5.0,
+            "bounds should track the +5 z shift"
+        );
     }
 
     #[test]
@@ -2361,6 +2575,7 @@ mod tests {
         assert_eq!(img.height(), 500);
         assert_eq!(img.resolution_dpi(), 72.0);
         assert!(!img.use_alpha());
+        assert!(!img.use_depth());
         assert_eq!(img.aa_opt(), 0);
         img.write();
         assert_eq!(img.write_count(), 1);
@@ -2368,8 +2583,53 @@ mod tests {
         let png = PngSceneExporter::new();
         assert_eq!(png.handler().name(), "png");
         assert_eq!(png.image().width(), 500);
+        assert_eq!(png.width(), 500);
+        assert!(!png.use_depth());
         assert!(!png.interlace());
         assert_eq!(png.compress(), 6);
+    }
+
+    #[test]
+    fn generic_color_proof_transforms_all_snapshot_primitive_colors() {
+        let blue = Some(ColorSpec {
+            base: cuemol_gfx::ColorBase::Html {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 128,
+            },
+            modifiers: Vec::new(),
+        });
+        let mut snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom::new(Vector4::ZERO, 1.0, blue.clone())],
+            bonds: vec![RenderBond::new(
+                Vector4::ZERO,
+                Vector4::new3(1.0, 0.0, 0.0),
+                0.1,
+                blue,
+            )],
+            meshes: vec![RenderMesh {
+                vertices: vec![MeshVertex {
+                    position: Vector4::ZERO,
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [0.0, 0.0, 1.0, 0.5],
+                }],
+                indices: Vec::new(),
+            }],
+            bounds: None,
+        };
+        apply_generic_color_proof(&mut snapshot);
+        for color in [
+            snapshot.atoms[0].color.as_ref().unwrap(),
+            snapshot.bonds[0].color.as_ref().unwrap(),
+        ] {
+            let rgba = color.rgba8().unwrap();
+            assert_eq!((rgba.r, rgba.g, rgba.b, rgba.a), (0x34, 0x5b, 0xa0, 128));
+        }
+        let color = snapshot.meshes[0].vertices[0].color;
+        assert!((color[0] - 0x34 as f32 / 255.0).abs() < 1.0e-6);
+        assert!((color[1] - 0x5b as f32 / 255.0).abs() < 1.0e-6);
+        assert!((color[2] - 0xa0 as f32 / 255.0).abs() < 1.0e-6);
     }
 
     #[test]
@@ -2730,7 +2990,10 @@ mod tests {
         // and a grey bond -> at least 3 materials, each referenced by an M(idx).
         let mat_count: usize = mqo
             .lines()
-            .find_map(|l| l.strip_prefix("Material ").and_then(|r| r.split(' ').next()))
+            .find_map(|l| {
+                l.strip_prefix("Material ")
+                    .and_then(|r| r.split(' ').next())
+            })
             .and_then(|n| n.parse().ok())
             .expect("Material count line");
         assert!(mat_count >= 3, "expected >=3 face colours, got {mat_count}");
@@ -2739,7 +3002,9 @@ mod tests {
         // Face lines are 0-based V(...) M(...).
         let face_lines = mqo.lines().filter(|l| l.starts_with("3 V(")).count();
         assert_eq!(face_lines, mesh.triangle_count());
-        assert!(mqo.lines().all(|l| !l.starts_with("3 V(") || l.contains(") M(")));
+        assert!(mqo
+            .lines()
+            .all(|l| !l.starts_with("3 V(") || l.contains(") M(")));
     }
 
     #[test]

@@ -79,7 +79,9 @@ pub fn read_obj_str(input: &str) -> Result<SurfaceMesh> {
 /// Parse the three floats after a `v` / `vn` tag; missing components default to 0.
 fn parse_vec3<'a>(mut toks: impl Iterator<Item = &'a str>) -> Result<Vector4> {
     let mut next = || -> f64 {
-        toks.next().and_then(|value| value.parse::<f64>().ok()).unwrap_or(0.0)
+        toks.next()
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0)
     };
     Ok(Vector4::new3(next(), next(), next()))
 }
@@ -165,7 +167,10 @@ f -3 -2 -1
         // -3,-2,-1 against the 7 vertices seen so far -> 4,5,6.
         assert_eq!(mesh.triangles()[2], [4, 5, 6]);
         // No usable per-vertex normals (vn count 0 != 7) -> computed, all ±z.
-        assert!(mesh.vertices().iter().all(|vertex| vertex.normal.z.abs() > 0.99));
+        assert!(mesh
+            .vertices()
+            .iter()
+            .all(|vertex| vertex.normal.z.abs() > 0.99));
     }
 
     #[test]

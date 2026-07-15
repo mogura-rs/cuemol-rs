@@ -7,3 +7,9 @@ license.workspace = true
 [lib]
 name = "cuemol_core"
 path = "src/lib.rs"
+
+[dependencies]
+flate2 = "1.1"
+lzma-rs = "0.3"
+regex.workspace = true
+shlex.workspace = true

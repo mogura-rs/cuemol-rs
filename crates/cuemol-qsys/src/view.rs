@@ -1,8 +1,36 @@
-use crate::{Camera, CenterMark, DrawObj, StereoMode};
-use cuemol_core::{Quat, Uid, Vector4};
+use crate::{
+    Camera, CenterMark, DragState, DrawObj, InDevEvent, MouseEventHandler, ScrEventManagerHandle,
+    StereoMode, ViewEvent,
+};
+use cuemol_core::{EventCaster, LRegExpr, Matrix4, Quat, SharedEventListener, Uid, Vector4};
+use cuemol_gfx::{HitData, HittestContext, RawHitData};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::fmt;
+use std::sync::Arc;
 
 const F_EPS4: f64 = 1.0e-4;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewHitCandidate {
+    pub x: f64,
+    pub y: f64,
+    pub depth: f64,
+    pub renderer_id: Uid,
+    pub renderer_type: String,
+    pub renderer_name: String,
+    pub object_id: Uid,
+    pub object_name: String,
+    pub names: Vec<i32>,
+    pub hit_fragment: String,
+}
+
+impl ViewHitCandidate {
+    pub fn with_hit_fragment(mut self, fragment: impl Into<String>) -> Self {
+        self.hit_fragment = fragment.into();
+        self
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct View {
@@ -28,6 +56,12 @@ pub struct View {
     projection_changed: bool,
     style_names: String,
     draw_objs: BTreeMap<String, DrawObj>,
+    event_caster: Arc<EventCaster<ViewEvent>>,
+    input_caster: Arc<EventCaster<InDevEvent>>,
+    mouse_handler: MouseEventHandler,
+    event_manager: Option<ScrEventManagerHandle>,
+    hit_precision: f64,
+    hit_candidates: Vec<ViewHitCandidate>,
 }
 
 impl View {
@@ -55,6 +89,12 @@ impl View {
             projection_changed: false,
             style_names: String::new(),
             draw_objs: BTreeMap::new(),
+            event_caster: Arc::new(EventCaster::new()),
+            input_caster: Arc::new(EventCaster::new()),
+            mouse_handler: MouseEventHandler::new(),
+            event_manager: None,
+            hit_precision: 10.0,
+            hit_candidates: Vec::new(),
         }
     }
 
@@ -70,12 +110,25 @@ impl View {
         self.scene_uid
     }
 
+    pub fn get_scene(&self) -> Uid {
+        self.scene_uid()
+    }
+
+    pub fn attach_event_manager(&mut self, manager: ScrEventManagerHandle) {
+        self.event_manager = Some(manager);
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    pub fn get_name(&self) -> &str {
+        self.name()
+    }
+
     pub fn set_name(&mut self, value: impl Into<String>) {
         self.name = value.into();
+        self.fire_property_changed("name", false);
     }
 
     pub fn is_active(&self) -> bool {
@@ -87,7 +140,13 @@ impl View {
     }
 
     pub fn set_active(&mut self, value: bool) {
+        if self.active == value {
+            return;
+        }
         self.active = value;
+        let mut event = ViewEvent::new();
+        event.set_event_type(ViewEvent::VWE_ACTIVATED);
+        self.fire_view_event(&mut event);
     }
 
     pub fn zoom(&self) -> f64 {
@@ -99,16 +158,32 @@ impl View {
     }
 
     pub fn set_zoom(&mut self, zoom: f64) {
-        self.zoom = zoom.max(F_EPS4);
+        let zoom = zoom.max(F_EPS4);
+        if (self.zoom - zoom).abs() < F_EPS4 {
+            return;
+        }
+        self.zoom = zoom;
+        self.set_projection_changed();
+        self.fire_property_changed("zoom", false);
     }
 
     pub fn view_dist(&self) -> f64 {
         self.view_dist
     }
 
+    pub fn get_view_dist(&self) -> f64 {
+        self.view_dist()
+    }
+
     pub fn set_view_dist(&mut self, view_dist: f64) {
-        self.view_dist = view_dist.clamp(0.1, 10000.0);
+        let view_dist = view_dist.clamp(0.1, 10000.0);
+        if (self.view_dist - view_dist).abs() < F_EPS4 {
+            return;
+        }
+        self.view_dist = view_dist;
         self.slab_depth = self.slab_depth.min(self.view_dist * 2.0).max(0.1);
+        self.set_projection_changed();
+        self.fire_property_changed("distance", false);
     }
 
     pub fn slab_depth(&self) -> f64 {
@@ -124,7 +199,13 @@ impl View {
     }
 
     pub fn set_slab_depth(&mut self, slab_depth: f64) {
-        self.slab_depth = slab_depth.clamp(0.1, self.view_dist * 2.0);
+        let slab_depth = slab_depth.clamp(0.1, self.view_dist * 2.0);
+        if (self.slab_depth - slab_depth).abs() < F_EPS4 {
+            return;
+        }
+        self.slab_depth = slab_depth;
+        self.set_projection_changed();
+        self.fire_property_changed("slab", false);
     }
 
     pub fn rot_quat(&self) -> Quat {
@@ -135,8 +216,13 @@ impl View {
         self.rot_quat()
     }
 
+    pub fn get_rot_quat_scr(&self) -> Quat {
+        self.rot_quat()
+    }
+
     pub fn set_rot_quat(&mut self, rot_quat: Quat) {
         self.rot_quat = rot_quat.normalize().unwrap_or(rot_quat);
+        self.fire_property_changed("rotation", false);
     }
 
     pub fn rotate_view(&mut self, x_deg: f64, y_deg: f64, z_deg: f64) {
@@ -161,8 +247,13 @@ impl View {
         self.center()
     }
 
+    pub fn get_view_center_scr(&self) -> Vector4 {
+        self.center()
+    }
+
     pub fn set_center(&mut self, center: Vector4) {
         self.center = center;
+        self.fire_property_changed("center", false);
     }
 
     pub fn set_view_center(&mut self, center: Vector4) {
@@ -170,12 +261,7 @@ impl View {
     }
 
     pub fn translate_view(&mut self, dx: f64, dy: f64, dz: f64) {
-        let delta = self
-            .right_vector()
-            .scale(dx)
-            .add_vec(self.up_vector().scale(dy))
-            .add_vec(self.forward_vector().scale(dz));
-        self.center = self.center.add_vec(delta);
+        self.set_center(self.translated_center(dx, dy, dz));
     }
 
     pub fn is_perspective(&self) -> bool {
@@ -192,6 +278,8 @@ impl View {
 
     pub fn set_perspective(&mut self, value: bool) {
         self.perspective = value;
+        self.set_projection_changed();
+        self.fire_property_changed("perspec", false);
     }
 
     pub fn set_perspec(&mut self, value: bool) {
@@ -208,6 +296,7 @@ impl View {
 
     pub fn set_trans_mms(&mut self, value: bool) {
         self.trans_mms = value;
+        self.fire_property_changed("trans_mms", false);
     }
 
     pub fn is_rot_mms(&self) -> bool {
@@ -220,14 +309,21 @@ impl View {
 
     pub fn set_rot_mms(&mut self, value: bool) {
         self.rot_mms = value;
+        self.fire_property_changed("rot_mms", false);
     }
 
     pub fn stereo_mode(&self) -> StereoMode {
         self.stereo_mode
     }
 
+    pub fn get_stereo_mode(&self) -> StereoMode {
+        self.stereo_mode()
+    }
+
     pub fn set_stereo_mode(&mut self, value: StereoMode) {
         self.stereo_mode = value;
+        self.set_projection_changed();
+        self.fire_property_changed("stereo_mode", false);
     }
 
     pub fn has_hw_stereo(&self) -> bool {
@@ -246,12 +342,18 @@ impl View {
         self.stereo_distance()
     }
 
+    pub fn get_stereo_dist(&self) -> f64 {
+        self.stereo_distance()
+    }
+
     pub fn set_stereo_dist(&mut self, value: f64) {
         self.set_stereo_distance(value);
     }
 
     pub fn set_stereo_distance(&mut self, value: f64) {
         self.stereo_distance = value;
+        self.set_projection_changed();
+        self.fire_property_changed("stereo_dist", false);
     }
 
     pub fn is_swap_stereo_eyes(&self) -> bool {
@@ -264,14 +366,21 @@ impl View {
 
     pub fn set_swap_stereo_eyes(&mut self, value: bool) {
         self.swap_stereo_eyes = value;
+        self.set_projection_changed();
+        self.fire_property_changed("swap_stereo_eyes", false);
     }
 
     pub fn center_mark(&self) -> CenterMark {
         self.center_mark
     }
 
+    pub fn get_center_mark(&self) -> CenterMark {
+        self.center_mark()
+    }
+
     pub fn set_center_mark(&mut self, value: CenterMark) {
         self.center_mark = value;
+        self.fire_property_changed("center_mark", false);
     }
 
     pub fn camera(&self) -> Camera {
@@ -305,10 +414,15 @@ impl View {
         self.stereo_distance = camera.stereo_distance();
         self.center_mark = camera.center_mark();
         self.set_projection_changed();
+        self.fire_property_changed("setCamera", false);
     }
 
     pub fn up_vector(&self) -> Vector4 {
         rotate_vector(self.rot_quat, Vector4::new3(0.0, 1.0, 0.0))
+    }
+
+    pub fn get_up_vector(&self) -> Vector4 {
+        self.up_vector()
     }
 
     pub fn up_vec(&self) -> Vector4 {
@@ -319,6 +433,10 @@ impl View {
         rotate_vector(self.rot_quat, Vector4::new3(1.0, 0.0, 0.0))
     }
 
+    pub fn get_right_vector(&self) -> Vector4 {
+        self.right_vector()
+    }
+
     pub fn right_vec(&self) -> Vector4 {
         self.right_vector()
     }
@@ -327,8 +445,53 @@ impl View {
         rotate_vector(self.rot_quat, Vector4::new3(0.0, 0.0, -1.0))
     }
 
+    pub fn get_forward_vector(&self) -> Vector4 {
+        self.forward_vector()
+    }
+
     pub fn forward_vec(&self) -> Vector4 {
         self.forward_vector()
+    }
+
+    pub fn proj_to_screen(&self, world_position: Vector4) -> Vector4 {
+        let slab_depth = self.slab_depth.max(0.1);
+        let distance = self.view_dist;
+        let slab_near = distance - slab_depth / 2.0;
+        let slab_far = distance + slab_depth;
+        let view_width = self.zoom / 2.0;
+        let width = f64::from(self.width);
+        let height = f64::from(self.height);
+        let aspect = if height > 0.0 { width / height } else { 1.0 };
+
+        let projection = if self.perspective {
+            perspective_projection(view_width, aspect, slab_near, slab_far, distance)
+        } else {
+            orthographic_projection(view_width, aspect, slab_near, slab_far)
+        };
+        let mut model_view = Matrix4::IDENTITY;
+        model_view.translate(Vector4::new3(0.0, 0.0, -distance));
+        model_view.rotate(self.rot_quat);
+        model_view.translate(self.center.negate());
+
+        let point = Vector4::new4(world_position.x, world_position.y, world_position.z, 1.0);
+        let clip = projection.mul_vec(model_view.mul_vec(point));
+        let clip_w = if clip.w.abs() < 1.0e-8 {
+            if clip.w < 0.0 {
+                -1.0e-8
+            } else {
+                1.0e-8
+            }
+        } else {
+            clip.w
+        };
+        let ndc_x = clip.x / clip_w;
+        let ndc_y = clip.y / clip_w;
+        let ndc_z = clip.z / clip_w;
+        Vector4::new3(
+            (ndc_x * 0.5 + 0.5) * width,
+            (0.5 - ndc_y * 0.5) * height,
+            ndc_z,
+        )
     }
 
     pub fn width(&self) -> u32 {
@@ -355,6 +518,9 @@ impl View {
 
     pub fn size_changed(&mut self, width: u32, height: u32) {
         self.set_view_size(width, height);
+        let mut event = ViewEvent::new();
+        event.set_event_type(ViewEvent::VWE_SIZECHG);
+        self.fire_view_event(&mut event);
     }
 
     pub fn set_scl_fac(&mut self, x: f64, y: f64) {
@@ -399,43 +565,204 @@ impl View {
     }
 
     pub fn apply_styles(&mut self, names: impl Into<String>) {
-        self.style_names = names.into();
+        self.style_names = names
+            .into()
+            .split(',')
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(",");
     }
 
-    pub fn push_style(&mut self, names: &str) -> bool {
-        if names.trim().is_empty() {
+    pub fn push_style(&mut self, name: &str) -> bool {
+        let mut styles = if self.style_names.is_empty() {
+            Vec::new()
+        } else {
+            self.style_names.split(',').collect::<Vec<_>>()
+        };
+        if styles.last().copied() == Some(name) {
             return false;
         }
-        if self.style_names.is_empty() {
-            self.style_names = names.to_string();
-        } else {
-            self.style_names.push(',');
-            self.style_names.push_str(names);
-        }
+        styles.retain(|style| *style != name);
+        styles.push(name);
+        self.style_names = styles.join(",");
         true
     }
 
     pub fn remove_style_regex(&mut self, regex: &str) -> bool {
         let before = self.style_names.clone();
+        let mut expression = LRegExpr::with_pattern(regex);
         self.style_names = self
             .style_names
             .split(',')
-            .filter(|name| !name.contains(regex))
+            .filter(|name| !expression.match_text(*name).unwrap_or(false))
             .collect::<Vec<_>>()
             .join(",");
         before != self.style_names
     }
 
     pub fn translate_view_drag(&mut self, dx: f64, dy: f64, dz: f64) {
-        self.translate_view(dx, dy, dz);
+        self.center = self.translated_center(dx, dy, dz);
+        self.fire_property_changed("center", true);
     }
 
-    pub fn hit_test(&self, _x: i32, _y: i32) -> String {
-        String::new()
+    fn translated_center(&self, dx: f64, dy: f64, dz: f64) -> Vector4 {
+        let height = f64::from(self.height).max(1.0);
+        let pixel_scale = self.zoom / height;
+        let xy_translation = self
+            .right_vector()
+            .scale(dx * pixel_scale)
+            .add_vec(self.up_vector().scale(-dy * pixel_scale));
+        let z_translation = self.forward_vector().scale(dz / 4.0);
+        self.center - xy_translation - z_translation
     }
 
-    pub fn hit_test_rect(&self, _x: i32, _y: i32, _w: i32, _h: i32, _nearest: bool) -> String {
-        String::new()
+    pub fn hit_precision(&self) -> f64 {
+        self.hit_precision
+    }
+
+    pub fn set_hit_precision(&mut self, value: f64) {
+        self.hit_precision = value.max(0.0);
+    }
+
+    pub fn set_hit_candidates(&mut self, candidates: Vec<ViewHitCandidate>) {
+        self.hit_candidates = candidates;
+    }
+
+    pub fn add_hit_candidate(&mut self, candidate: ViewHitCandidate) {
+        self.hit_candidates.push(candidate);
+    }
+
+    pub fn clear_hit_candidates(&mut self) {
+        self.hit_candidates.clear();
+    }
+
+    pub fn hit_candidate_count(&self) -> usize {
+        self.hit_candidates.len()
+    }
+
+    pub fn hit_test(&self, x: i32, y: i32) -> String {
+        let half = self.hit_precision * 0.5;
+        let selected = self
+            .hit_candidates
+            .iter()
+            .filter(|candidate| {
+                (candidate.x - x as f64).abs() <= half
+                    && (candidate.y - y as f64).abs() <= half
+                    && candidate.depth.is_finite()
+            })
+            .collect::<Vec<_>>();
+        let Some(candidate) = nearest_candidate(&selected) else {
+            return String::new();
+        };
+        self.single_hit_json(candidate)
+    }
+
+    pub fn hit_test_rect(&self, x: i32, y: i32, width: i32, height: i32, nearest: bool) -> String {
+        let x2 = x.saturating_add(width);
+        let y2 = y.saturating_add(height);
+        let min_x = x.min(x2) as f64;
+        let max_x = x.max(x2) as f64;
+        let min_y = y.min(y2) as f64;
+        let max_y = y.max(y2) as f64;
+        let selected = self
+            .hit_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.x >= min_x
+                    && candidate.x <= max_x
+                    && candidate.y >= min_y
+                    && candidate.y <= max_y
+                    && candidate.depth.is_finite()
+            })
+            .collect::<Vec<_>>();
+        self.multiple_hit_json(selected, nearest)
+    }
+
+    pub fn hit_test_polygon(&self, points: &[(f64, f64)], nearest: bool) -> String {
+        if points.len() < 3 {
+            return String::new();
+        }
+        let selected = self
+            .hit_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.depth.is_finite() && point_in_polygon(candidate.x, candidate.y, points)
+            })
+            .collect::<Vec<_>>();
+        self.multiple_hit_json(selected, nearest)
+    }
+
+    fn single_hit_json(&self, candidate: &ViewHitCandidate) -> String {
+        format!(
+            "{{{}\"data\":{},\"scene_id\":{},\"rend_id\":{},\"rendtype\":\"{}\",\"rend_name\":\"{}\",\"obj_id\":{},\"obj_name\":\"{}\"}}",
+            normalized_hit_fragment(&candidate.hit_fragment),
+            json_int_array(&candidate.names),
+            self.scene_uid.get(),
+            candidate.renderer_id.get(),
+            escape_json(&candidate.renderer_type),
+            escape_json(&candidate.renderer_name),
+            candidate.object_id.get(),
+            escape_json(&candidate.object_name),
+        )
+    }
+
+    fn multiple_hit_json(&self, selected: Vec<&ViewHitCandidate>, nearest: bool) -> String {
+        if selected.is_empty() {
+            return String::new();
+        }
+        let selected = if nearest {
+            nearest_candidate(&selected).into_iter().collect::<Vec<_>>()
+        } else {
+            selected
+        };
+        let mut context = HittestContext::new();
+        for candidate in &selected {
+            context.add_hit(
+                candidate.renderer_id,
+                candidate.depth,
+                candidate.names.clone(),
+            );
+        }
+        let mut data = HitData::new();
+        data.create_all(&context);
+
+        let mut seen_objects = BTreeSet::new();
+        let mut output = Vec::new();
+        for renderer_id in data.renderer_ids() {
+            let Some(candidate) = selected
+                .iter()
+                .find(|candidate| candidate.renderer_id == renderer_id)
+            else {
+                continue;
+            };
+            if !seen_objects.insert(candidate.object_id) {
+                continue;
+            }
+            let hits = (0..data.data_size(renderer_id))
+                .map(|index| {
+                    let mut names = Vec::new();
+                    let mut sub_index = 0;
+                    while let Some(value) = data.data_at(renderer_id, index, sub_index) {
+                        names.push(value);
+                        sub_index += 1;
+                    }
+                    json_int_array(&names)
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            output.push(format!(
+                "{{\"rend_id\":{},{}\"data\":[{}],\"obj_id\":{}}}",
+                renderer_id.get(),
+                normalized_hit_fragment(&candidate.hit_fragment),
+                hits,
+                candidate.object_id.get()
+            ));
+        }
+        if output.is_empty() {
+            String::new()
+        } else {
+            format!("[{}]", output.join(","))
+        }
     }
 
     pub fn get_draw_obj(&mut self, class_name: &str) -> Option<&mut DrawObj> {
@@ -452,60 +779,304 @@ impl View {
     #[allow(clippy::too_many_arguments)]
     pub fn on_mouse_down(
         &mut self,
-        _client_x: f64,
-        _client_y: f64,
-        _screen_x: f64,
-        _screen_y: f64,
-        _modifier: i32,
+        client_x: f64,
+        client_y: f64,
+        screen_x: f64,
+        screen_y: f64,
+        modifier: i32,
     ) {
+        self.mouse_handler
+            .button_down(current_time_millis(), client_x, client_y);
+        let mut event = Self::input_event(client_x, client_y, screen_x, screen_y, modifier);
+        event.set_event_type(InDevEvent::INDEV_MOUSE_DOWN);
+        self.fire_input_event(&mut event);
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn on_mouse_up(
         &mut self,
-        _client_x: f64,
-        _client_y: f64,
-        _screen_x: f64,
-        _screen_y: f64,
-        _modifier: i32,
+        client_x: f64,
+        client_y: f64,
+        screen_x: f64,
+        screen_y: f64,
+        modifier: i32,
     ) {
+        let release_state = self.mouse_handler.state();
+        let velocity = self.mouse_handler.velocity(current_time_millis());
+        self.mouse_handler.button_up();
+        let mut event = Self::input_event(client_x, client_y, screen_x, screen_y, modifier);
+        match release_state {
+            DragState::None => return,
+            DragState::Down => {
+                event.set_event_type(click_event_type(event.modifier()));
+            }
+            DragState::Drag => {
+                event.set_event_type(InDevEvent::INDEV_DRAG_END);
+                if let Some((x, y)) = velocity {
+                    event.set_velo_x(x);
+                    event.set_velo_y(y);
+                }
+            }
+        }
+        self.fire_input_event(&mut event);
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn on_mouse_move(
         &mut self,
-        _client_x: f64,
-        _client_y: f64,
-        _screen_x: f64,
-        _screen_y: f64,
-        _modifier: i32,
+        client_x: f64,
+        client_y: f64,
+        screen_x: f64,
+        screen_y: f64,
+        modifier: i32,
     ) {
+        let previous_state = self.mouse_handler.state();
+        if previous_state == DragState::None {
+            return;
+        }
+        let delta = self
+            .mouse_handler
+            .move_to(current_time_millis(), client_x, client_y);
+        let state = self.mouse_handler.state();
+        if state == DragState::Down {
+            return;
+        }
+        let mut event = Self::input_event(client_x, client_y, screen_x, screen_y, modifier);
+        event.set_event_type(if previous_state == DragState::Down {
+            InDevEvent::INDEV_DRAG_START
+        } else {
+            InDevEvent::INDEV_DRAG_MOVE
+        });
+        event.set_move_x(delta.0.round() as i32);
+        event.set_move_y(delta.1.round() as i32);
+        self.fire_input_event(&mut event);
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn on_wheel(
         &mut self,
-        _client_x: f64,
-        _client_y: f64,
-        _screen_x: f64,
-        _screen_y: f64,
-        _modifier: i32,
-        _delta_x: f64,
-        _delta_y: f64,
+        client_x: f64,
+        client_y: f64,
+        screen_x: f64,
+        screen_y: f64,
+        modifier: i32,
+        delta_x: f64,
+        delta_y: f64,
     ) {
+        let mut event = Self::input_event(client_x, client_y, screen_x, screen_y, modifier);
+        event.set_event_type(InDevEvent::INDEV_WHEEL);
+        event.set_delta_x(delta_x.round() as i32);
+        event.set_delta_y(delta_y.round() as i32);
+        self.fire_input_event(&mut event);
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn on_gesture(
         &mut self,
-        _client_x: f64,
-        _client_y: f64,
-        _screen_x: f64,
-        _screen_y: f64,
-        _modifier: i32,
-        _axis_id: i32,
-        _delta: f64,
+        client_x: f64,
+        client_y: f64,
+        screen_x: f64,
+        screen_y: f64,
+        modifier: i32,
+        axis_id: i32,
+        delta: f64,
     ) {
+        let mut event = Self::input_event(client_x, client_y, screen_x, screen_y, modifier);
+        event.set_event_type(InDevEvent::INDEV_GESTURE);
+        event.set_gesture_axis(axis_id);
+        event.set_delta_y(delta.round() as i32);
+        self.fire_input_event(&mut event);
+    }
+
+    pub fn add_view_listener(&self, listener: SharedEventListener<ViewEvent>) -> i32 {
+        self.event_caster.add(listener).map_or(-1, |id| id as i32)
+    }
+
+    pub fn remove_view_listener(&self, id: i32) -> bool {
+        id >= 0 && self.event_caster.remove(id as u64).is_some()
+    }
+
+    pub fn add_input_listener(&self, listener: SharedEventListener<InDevEvent>) -> i32 {
+        self.input_caster.add(listener).map_or(-1, |id| id as i32)
+    }
+
+    pub fn remove_input_listener(&self, id: i32) -> bool {
+        id >= 0 && self.input_caster.remove(id as u64).is_some()
+    }
+
+    pub fn fire_view_event(&self, event: &mut ViewEvent) {
+        event.set_target(self.uid.get());
+        event.set_source(self.scene_uid.get());
+        self.event_caster.replica_fire(event);
+        if let Some(manager) = self.event_manager.as_ref() {
+            let _ = manager.with_mut(|manager| manager.fire_view_event(event));
+        }
+    }
+
+    pub fn fire_input_event(&self, event: &mut InDevEvent) {
+        self.input_caster.fire(event);
+    }
+
+    fn fire_property_changed(&self, property_name: &str, dragging: bool) {
+        let mut event = ViewEvent::new();
+        event.set_event_type(if dragging {
+            ViewEvent::VWE_PROPCHG_DRG
+        } else {
+            ViewEvent::VWE_PROPCHG
+        });
+        event.set_descr(property_name);
+        self.fire_view_event(&mut event);
+    }
+
+    fn input_event(
+        client_x: f64,
+        client_y: f64,
+        screen_x: f64,
+        screen_y: f64,
+        modifier: i32,
+    ) -> InDevEvent {
+        let mut event = InDevEvent::new();
+        event.set_x(client_x as i32);
+        event.set_y(client_y as i32);
+        event.set_root_x(screen_x as i32);
+        event.set_root_y(screen_y as i32);
+        event.set_modifier(translate_browser_modifier(modifier));
+        event
+    }
+}
+
+impl fmt::Display for View {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "View(name={}, UID={})", self.name, self.uid.get())
+    }
+}
+
+fn current_time_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as i64)
+}
+
+fn orthographic_projection(view_width: f64, aspect: f64, slab_near: f64, slab_far: f64) -> Matrix4 {
+    let left = -view_width * aspect;
+    let right = view_width * aspect;
+    let bottom = -view_width;
+    let top = view_width;
+    let mut matrix = Matrix4::IDENTITY;
+    matrix.values[0][0] = 2.0 / (right - left);
+    matrix.values[1][1] = 2.0 / (top - bottom);
+    matrix.values[2][2] = -2.0 / (slab_far - slab_near);
+    matrix.values[0][3] = -(right + left) / (right - left);
+    matrix.values[1][3] = -(top + bottom) / (top - bottom);
+    matrix.values[2][3] = -(slab_far + slab_near) / (slab_far - slab_near);
+    matrix
+}
+
+fn perspective_projection(
+    view_width: f64,
+    aspect: f64,
+    slab_near: f64,
+    slab_far: f64,
+    distance: f64,
+) -> Matrix4 {
+    let scale = distance / view_width;
+    let mut matrix = Matrix4::ZERO;
+    matrix.values[0][0] = scale / aspect;
+    matrix.values[1][1] = scale;
+    matrix.values[2][2] = (slab_far + slab_near) / (slab_near - slab_far);
+    matrix.values[2][3] = (2.0 * slab_far * slab_near) / (slab_near - slab_far);
+    matrix.values[3][2] = -1.0;
+    matrix
+}
+
+fn nearest_candidate<'a>(candidates: &[&'a ViewHitCandidate]) -> Option<&'a ViewHitCandidate> {
+    candidates
+        .iter()
+        .copied()
+        .min_by(|left, right| left.depth.total_cmp(&right.depth))
+}
+
+fn point_in_polygon(x: f64, y: f64, points: &[(f64, f64)]) -> bool {
+    let mut inside = false;
+    let mut previous = points.len() - 1;
+    for current in 0..points.len() {
+        let (current_x, current_y) = points[current];
+        let (previous_x, previous_y) = points[previous];
+        if (current_y > y) != (previous_y > y)
+            && x < (previous_x - current_x) * (y - current_y) / (previous_y - current_y) + current_x
+        {
+            inside = !inside;
+        }
+        previous = current;
+    }
+    inside
+}
+
+fn json_int_array(values: &[i32]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn normalized_hit_fragment(value: &str) -> String {
+    let value = value
+        .trim()
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim();
+    if value.is_empty() {
+        String::new()
+    } else if value.ends_with(',') {
+        value.to_string()
+    } else {
+        format!("{value},")
+    }
+}
+
+fn escape_json(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+fn translate_browser_modifier(value: i32) -> i32 {
+    let mut result = 0;
+    if value & 1 != 0 {
+        result |= InDevEvent::INDEV_LBTN;
+    }
+    if value & 2 != 0 {
+        result |= InDevEvent::INDEV_RBTN;
+    }
+    if value & 4 != 0 {
+        result |= InDevEvent::INDEV_MBTN;
+    }
+    if value & 32 != 0 {
+        result |= InDevEvent::INDEV_CTRL;
+    }
+    if value & 64 != 0 {
+        result |= InDevEvent::INDEV_SHIFT;
+    }
+    if value & 128 != 0 {
+        result |= InDevEvent::INDEV_ALT;
+    }
+    result
+}
+
+fn click_event_type(modifier: i32) -> i32 {
+    if modifier & InDevEvent::INDEV_LBTN != 0 {
+        InDevEvent::INDEV_LBTN_CLICK
+    } else if modifier & InDevEvent::INDEV_RBTN != 0 {
+        InDevEvent::INDEV_RBTN_CLICK
+    } else {
+        InDevEvent::INDEV_MBTN_CLICK
     }
 }
 
@@ -542,9 +1113,33 @@ fn rotate_vector(rotation: Quat, value: Vector4) -> Vector4 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuemol_core::shared_event_listener;
+    use std::sync::Mutex;
 
     fn sqlen(quat: Quat) -> f64 {
         quat.x * quat.x + quat.y * quat.y + quat.z * quat.z + quat.w * quat.w
+    }
+
+    fn hit_candidate(
+        x: f64,
+        y: f64,
+        depth: f64,
+        renderer_id: u64,
+        object_id: u64,
+        names: &[i32],
+    ) -> ViewHitCandidate {
+        ViewHitCandidate {
+            x,
+            y,
+            depth,
+            renderer_id: Uid::new(renderer_id),
+            renderer_type: format!("type{renderer_id}"),
+            renderer_name: format!("renderer\"{renderer_id}"),
+            object_id: Uid::new(object_id),
+            object_name: format!("object{object_id}"),
+            names: names.to_vec(),
+            hit_fragment: String::new(),
+        }
     }
 
     #[test]
@@ -602,6 +1197,54 @@ mod tests {
     }
 
     #[test]
+    fn view_translation_converts_pixels_to_world_coordinates() {
+        let mut view = View::new(Uid::new(1), Uid::new(2));
+        view.set_view_size(200, 100);
+        view.translate_view(10.0, 20.0, 8.0);
+        assert_eq!(view.center(), Vector4::new3(-5.0, 10.0, 2.0));
+
+        view.set_center(Vector4::ZERO);
+        view.translate_view_drag(10.0, 20.0, 8.0);
+        assert_eq!(view.center(), Vector4::new3(-5.0, 10.0, 2.0));
+    }
+
+    #[test]
+    fn view_style_stack_matches_reference_order_and_regex_removal() {
+        let mut view = View::new(Uid::new(1), Uid::new(2));
+        view.apply_styles(" base, ribbon ,labels ");
+        assert_eq!(view.style_names(), "base,ribbon,labels");
+        assert!(!view.push_style("labels"));
+        assert!(view.push_style("base"));
+        assert_eq!(view.style_names(), "ribbon,labels,base");
+        assert!(view.remove_style_regex("^(ribbon|base)$"));
+        assert_eq!(view.style_names(), "labels");
+        assert!(!view.remove_style_regex("^missing$"));
+    }
+
+    #[test]
+    fn view_projects_world_positions_to_logical_screen_pixels() {
+        let mut view = View::new(Uid::new(1), Uid::new(2));
+        view.set_view_size(800, 600);
+
+        let center = view.proj_to_screen(Vector4::ZERO);
+        assert!((center.x - 400.0).abs() < 1.0e-9);
+        assert!((center.y - 300.0).abs() < 1.0e-9);
+        assert!(center.z.is_finite());
+
+        let right = view.proj_to_screen(Vector4::new3(100.0 / 3.0, 0.0, 0.0));
+        let top = view.proj_to_screen(Vector4::new3(0.0, 25.0, 0.0));
+        assert!((right.x - 800.0).abs() < 1.0e-9);
+        assert!(top.y.abs() < 1.0e-9);
+
+        view.set_center(Vector4::new3(10.0, 20.0, 30.0));
+        view.set_perspective(true);
+        let perspective_center = view.proj_to_screen(view.center());
+        assert!((perspective_center.x - 400.0).abs() < 1.0e-9);
+        assert!((perspective_center.y - 300.0).abs() < 1.0e-9);
+        assert!(perspective_center.z.is_finite());
+    }
+
+    #[test]
     fn view_round_trips_camera_state() {
         let mut camera = Camera::new();
         camera.set_name("__current");
@@ -638,5 +1281,127 @@ mod tests {
         assert_eq!(view.draw_obj_count(), 1);
         assert!(view.get_draw_obj("").is_none());
         assert!(view.get_draw_obj("CenterMarkDrawObj").unwrap().is_enabled());
+    }
+
+    #[test]
+    fn view_property_and_size_events_match_reference_categories() {
+        let mut view = View::new(Uid::new(7), Uid::new(3));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        view.add_view_listener(shared_event_listener(move |event: &mut ViewEvent| {
+            listener_events.lock().unwrap().push(event.clone());
+        }));
+
+        view.set_zoom(75.0);
+        view.set_center(Vector4::new3(1.0, 2.0, 3.0));
+        view.translate_view_drag(1.0, 0.0, 0.0);
+        view.size_changed(640, 480);
+        view.set_active(true);
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 5);
+        assert_eq!(events[0].event_type(), ViewEvent::VWE_PROPCHG);
+        assert_eq!(events[0].descr(), "zoom");
+        assert_eq!(events[1].descr(), "center");
+        assert_eq!(events[2].event_type(), ViewEvent::VWE_PROPCHG_DRG);
+        assert_eq!(events[2].descr(), "center");
+        assert_eq!(events[3].event_type(), ViewEvent::VWE_SIZECHG);
+        assert_eq!(events[4].event_type(), ViewEvent::VWE_ACTIVATED);
+        assert!(events.iter().all(|event| event.target() == 7));
+        assert!(events.iter().all(|event| event.source() == 3));
+    }
+
+    #[test]
+    fn raw_input_methods_emit_mouse_drag_wheel_gesture_and_click_events() {
+        let mut view = View::new(Uid::new(1), Uid::new(2));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        view.add_input_listener(shared_event_listener(move |event: &mut InDevEvent| {
+            listener_events.lock().unwrap().push(event.clone());
+        }));
+
+        view.on_mouse_down(10.0, 20.0, 100.0, 200.0, 1 | 32 | 64);
+        view.on_mouse_move(20.0, 25.0, 110.0, 205.0, 1);
+        view.on_mouse_move(24.0, 30.0, 114.0, 210.0, 1);
+        view.on_mouse_up(24.0, 30.0, 114.0, 210.0, 0);
+        view.on_wheel(4.0, 5.0, 40.0, 50.0, 0, 1.4, -2.6);
+        view.on_gesture(6.0, 7.0, 60.0, 70.0, 128, 2, 3.6);
+        view.on_mouse_down(1.0, 2.0, 3.0, 4.0, 1);
+        view.on_mouse_up(1.0, 2.0, 3.0, 4.0, 1);
+
+        let events = events.lock().unwrap();
+        let types = events
+            .iter()
+            .map(InDevEvent::event_type)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            types,
+            vec![
+                InDevEvent::INDEV_MOUSE_DOWN,
+                InDevEvent::INDEV_DRAG_START,
+                InDevEvent::INDEV_DRAG_MOVE,
+                InDevEvent::INDEV_DRAG_END,
+                InDevEvent::INDEV_WHEEL,
+                InDevEvent::INDEV_GESTURE,
+                InDevEvent::INDEV_MOUSE_DOWN,
+                InDevEvent::INDEV_LBTN_CLICK,
+            ]
+        );
+        assert!(events[0].is_lbutton_on());
+        assert!(events[0].is_ctrl_on());
+        assert!(events[0].is_shift_on());
+        assert_eq!(events[1].move_x(), 10);
+        assert_eq!(events[1].move_y(), 5);
+        assert_eq!(events[4].delta_x(), 1);
+        assert_eq!(events[4].delta_y(), -3);
+        assert_eq!(events[5].gesture_axis(), 2);
+        assert_eq!(events[5].delta_y(), 4);
+        assert!(events[5].is_alt_on());
+    }
+
+    #[test]
+    fn point_hit_test_returns_nearest_candidate_with_reference_metadata() {
+        let mut view = View::new(Uid::new(1), Uid::new(2));
+        view.set_hit_candidates(vec![
+            hit_candidate(10.0, 10.0, 0.8, 8, 80, &[2]),
+            hit_candidate(12.0, 11.0, 0.2, 3, 30, &[7, 9])
+                .with_hit_fragment("\"atom_id\":7,\"sel\":\"aid 7\""),
+        ]);
+        assert_eq!(view.hit_precision(), 10.0);
+        assert_eq!(view.hit_candidate_count(), 2);
+        assert_eq!(
+            view.hit_test(10, 10),
+            "{\"atom_id\":7,\"sel\":\"aid 7\",\"data\":[7,9],\"scene_id\":2,\"rend_id\":3,\"rendtype\":\"type3\",\"rend_name\":\"renderer\\\"3\",\"obj_id\":30,\"obj_name\":\"object30\"}"
+        );
+        assert!(view.hit_test(100, 100).is_empty());
+    }
+
+    #[test]
+    fn rectangle_and_polygon_hit_tests_group_renderers_and_deduplicate_objects() {
+        let mut view = View::new(Uid::new(1), Uid::new(2));
+        view.set_hit_candidates(vec![
+            hit_candidate(10.0, 10.0, 0.2, 1, 10, &[1]),
+            hit_candidate(15.0, 15.0, 0.3, 1, 10, &[3]),
+            hit_candidate(30.0, 30.0, 0.4, 2, 20, &[2]),
+            hit_candidate(20.0, 20.0, 0.1, 3, 10, &[4]),
+        ]);
+
+        assert_eq!(
+            view.hit_test_rect(0, 0, 40, 40, false),
+            "[{\"rend_id\":1,\"data\":[[1],[3]],\"obj_id\":10},{\"rend_id\":2,\"data\":[[2]],\"obj_id\":20}]"
+        );
+        assert_eq!(
+            view.hit_test_rect(0, 0, 40, 40, true),
+            "[{\"rend_id\":3,\"data\":[[4]],\"obj_id\":10}]"
+        );
+        assert_eq!(
+            view.hit_test_polygon(&[(5.0, 5.0), (25.0, 5.0), (25.0, 25.0), (5.0, 25.0)], false,),
+            "[{\"rend_id\":1,\"data\":[[1],[3]],\"obj_id\":10}]"
+        );
+        assert!(view
+            .hit_test_polygon(&[(0.0, 0.0), (1.0, 1.0)], false)
+            .is_empty());
+        view.clear_hit_candidates();
+        assert_eq!(view.hit_candidate_count(), 0);
     }
 }

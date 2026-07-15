@@ -1,12 +1,19 @@
 use crate::{
-    read_mmcif_file, read_mol2_file, read_pdb_file, read_pdb_str, read_qdfpdb_file, read_sdf_file,
-    write_pdb_string, Atom, MolCoord,
+    read_mmcif_file, read_mol2_file, read_pdb_file, read_pdb_str, read_qdf_mol_bytes,
+    read_qdfpdb_file, read_sdf_file, write_pdb_string, Atom, MolCoord, Selector, SolidColoring,
 };
-use cuemol_core::{CueMolError, Matrix4, Quat, Result, Uid, Vector4};
+use cuemol_core::{CueMolError, LDom2InStream, Matrix4, Quat, RangeSet, Result, Uid, Vector4};
+use cuemol_gfx::{RawHitData, SolidColor};
 use cuemol_qsys::{Camera, CenterMark, StereoMode, StyleManager, View};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+
+const OBJECT_UID_BASE: u64 = 1_000_000_000;
+const RENDERER_UID_BASE: u64 = 2_000_000_000;
+const VIEW_UID_BASE: u64 = 3_000_000_000;
+const UID_SCENE_STRIDE: u64 = 1_000_000;
+const UID_OBJECT_STRIDE: u64 = 1_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MolRenderer {
@@ -15,6 +22,9 @@ pub struct MolRenderer {
     renderer_type: String,
     qsc_attrs: BTreeMap<String, String>,
     atom_intr_lines: Vec<AtomIntrLine>,
+    selection: Selector,
+    coloring: SolidColoring,
+    default_color: SolidColor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +54,42 @@ impl MolRenderer {
 
     pub fn renderer_type(&self) -> &str {
         &self.renderer_type
+    }
+
+    pub fn selection(&self) -> &Selector {
+        &self.selection
+    }
+
+    pub fn get_selection(&self) -> &Selector {
+        self.selection()
+    }
+
+    pub fn set_selection(&mut self, value: Selector) {
+        self.selection = value;
+    }
+
+    pub fn coloring(&self) -> &SolidColoring {
+        &self.coloring
+    }
+
+    pub fn get_col_schm(&self) -> &SolidColoring {
+        self.coloring()
+    }
+
+    pub fn set_col_schm(&mut self, value: SolidColoring) {
+        self.coloring = value;
+    }
+
+    pub fn default_color(&self) -> &SolidColor {
+        &self.default_color
+    }
+
+    pub fn get_default_color(&self) -> &SolidColor {
+        self.default_color()
+    }
+
+    pub fn set_default_color(&mut self, value: SolidColor) {
+        self.default_color = value;
     }
 
     pub fn qsc_attr(&self, name: &str) -> Option<&str> {
@@ -150,6 +196,61 @@ impl MolRenderer {
             .collect::<Vec<_>>();
         format!("[{}]", entries.join(","))
     }
+
+    pub fn is_hit_test_supported(&self) -> bool {
+        !matches!(
+            self.renderer_type.as_str(),
+            "selection" | "sel" | "*group" | "unitcell"
+        )
+    }
+
+    pub fn interp_hit(&self, hit_data: &dyn RawHitData, molecule: &MolCoord) -> String {
+        let size = hit_data.data_size(self.uid);
+        if size == 0 {
+            return String::new();
+        }
+        let atom_ids = (0..size)
+            .filter_map(|index| hit_data.data_at(self.uid, index, 0))
+            .collect::<Vec<_>>();
+        if atom_ids.is_empty() {
+            return String::new();
+        }
+
+        if atom_ids.len() > 1 {
+            let mut ranges = RangeSet::new();
+            for atom_id in atom_ids {
+                ranges.insert_value(atom_id);
+            }
+            return format!(
+                "\"objtype\":\"MolCoord\",\"size\":{},\"sel\":\"aid {}\",",
+                size, ranges
+            );
+        }
+
+        let atom_id = atom_ids[0];
+        let Some(atom) = molecule.get_atom_by_id(atom_id) else {
+            return String::new();
+        };
+        format!(
+            "\"objtype\":\"MolCoord\",\"size\":1,\"sel\":\"aid {atom_id}\",\"atom_id\":{atom_id},\"message\":\"{}\",\"occ\":{:.2},\"bfac\":{:.2},\"x\":{:.2},\"y\":{:.2},\"z\":{:.2},",
+            escape_json(&format_atom_message(atom)),
+            atom.occupancy,
+            atom.b_factor,
+            atom.position.x,
+            atom.position.y,
+            atom.position.z,
+        )
+    }
+}
+
+fn format_atom_message(atom: &Atom) -> String {
+    let insertion = atom
+        .ins_code
+        .map_or_else(String::new, |value| value.to_string());
+    format!(
+        "{} {} {}{} {}",
+        atom.chain_id, atom.res_name, atom.res_id, insertion, atom.name
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -299,6 +400,9 @@ impl MolObject {
             renderer_type: renderer_type.into(),
             qsc_attrs,
             atom_intr_lines: Vec::new(),
+            selection: Selector::All,
+            coloring: SolidColoring::new(),
+            default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
         });
         uid
     }
@@ -334,6 +438,9 @@ impl MolObject {
             renderer_type: "atomintr".to_string(),
             qsc_attrs,
             atom_intr_lines: lines,
+            selection: Selector::All,
+            coloring: SolidColoring::new(),
+            default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
         });
         Ok(uid)
     }
@@ -426,16 +533,26 @@ impl MolObject {
     }
 }
 
-/// A surface object captured from a `.qsc` load. The Rust `.qsc` format stores
-/// datachunks as text (molecules as PDB text; surfaces as OBJ/PLY mesh text), so a
-/// surface object's mesh travels as `data` and a front end converts it to geometry
-/// via the OBJ/PLY readers keyed on `srctype`. (C++ CueMol2 uses a base64 QdfSurf
-/// binary chunk; reading that is a separate follow-up.)
+/// A surface object captured from a `.qsc` load. The data is either OBJ/PLY text
+/// or CueMol's textual QDF1 envelope (`qdfsurf`); a front end converts it to
+/// geometry through the reader selected by `srctype`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedSurface {
     pub name: String,
     pub srctype: String,
     pub data: String,
+    pub raw_data: Vec<u8>,
+}
+
+/// A native density-map object captured from a `.qsc` QDF data chunk. Parsing
+/// is deferred to the desktop layer to keep the molecule crate independent of
+/// the crystallography crate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedDensityMap {
+    pub name: String,
+    pub srctype: String,
+    pub data: String,
+    pub raw_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -445,15 +562,15 @@ pub struct MolScene {
     objects: Vec<MolObject>,
     cameras: Vec<Camera>,
     next_object_uid: u64,
-    /// `(name, type)` of `.qsc` objects skipped on load because their class is not a
-    /// molecule this port can model yet (e.g. `MolSurf`/`DensityMap` — a surface or map
-    /// object whose datachunk is not PDB). Recorded so the load is graceful (the
-    /// molecules still load) but NOT silent — a front end can surface it.
+    /// `(name, type)` of `.qsc` objects skipped on load because their class or source
+    /// format is unsupported. Supported surface and density-map objects are captured
+    /// separately. Recorded so a partial load is graceful but not silent.
     skipped_qsc_objects: Vec<(String, String)>,
     /// Surface objects captured from the last `.qsc` load (mesh text + srctype). A
     /// front end turns these into displayable meshes; distinct from `skipped` because
     /// these ARE representable (an OBJ/PLY mesh), just not molecules.
     loaded_surfaces: Vec<LoadedSurface>,
+    loaded_density_maps: Vec<LoadedDensityMap>,
 }
 
 impl MolScene {
@@ -470,8 +587,7 @@ impl MolScene {
     }
 
     /// `(name, type)` of objects skipped during the last `.qsc` load because their
-    /// class is not a molecule this port can render yet (surface/map objects). Empty
-    /// for an all-molecule scene. Lets a front end report "N objects not loaded".
+    /// class or source format is unsupported. Lets a front end report partial loads.
     pub fn skipped_qsc_objects(&self) -> &[(String, String)] {
         &self.skipped_qsc_objects
     }
@@ -481,6 +597,10 @@ impl MolScene {
     /// for a scene with no surface objects.
     pub fn loaded_surfaces(&self) -> &[LoadedSurface] {
         &self.loaded_surfaces
+    }
+
+    pub fn loaded_density_maps(&self) -> &[LoadedDensityMap] {
+        &self.loaded_density_maps
     }
 
     pub fn cameras(&self) -> &[Camera] {
@@ -539,12 +659,18 @@ impl MolScene {
     pub fn add_molecule(&mut self, name: impl Into<String>, mol: MolCoord) -> Uid {
         let uid = Uid::new(self.next_object_uid);
         self.next_object_uid += 1;
+        let object_local = uid
+            .get()
+            .saturating_sub(OBJECT_UID_BASE + self.uid.get() * UID_SCENE_STRIDE);
         self.objects.push(MolObject {
             uid,
             name: name.into(),
             mol,
             renderers: Vec::new(),
-            next_renderer_uid: 1,
+            next_renderer_uid: RENDERER_UID_BASE
+                + self.uid.get() * UID_SCENE_STRIDE
+                + object_local * UID_OBJECT_STRIDE
+                + 1,
             paint_coloring: Vec::new(),
             coloring_type: None,
             coloring_attrs: BTreeMap::new(),
@@ -555,22 +681,31 @@ impl MolScene {
     }
 
     pub fn load_qsc_str(&mut self, input: &str) -> Result<()> {
-        let xml = input
-            .split("========== End of XML ==========")
-            .next()
-            .unwrap_or(input);
-        let object_blocks = extract_qsc_object_blocks(xml);
-        if object_blocks.is_empty() && extract_qsc_camera_lines(xml).is_empty() {
+        self.load_qsc_bytes(input.as_bytes())
+    }
+
+    pub fn load_qsc_bytes(&mut self, input: &[u8]) -> Result<()> {
+        let stream = LDom2InStream::from_bytes(input)?;
+        let object_blocks = extract_qsc_object_blocks(stream.xml_source());
+        if object_blocks.is_empty() && extract_qsc_camera_lines(stream.xml_source()).is_empty() {
             return Err(CueMolError::parse("QSC scene content not found"));
         }
 
         if !object_blocks.is_empty() {
-            let chunks = extract_datachunks(input)?;
+            let chunks = stream
+                .chunk_ids()
+                .iter()
+                .map(|chunk_id| {
+                    stream
+                        .chunk(chunk_id.as_str())
+                        .map(|data| (chunk_id.to_string(), data.to_vec()))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
             for block in object_blocks {
                 self.load_qsc_object_block(&block, &chunks)?;
             }
         }
-        for line in extract_qsc_camera_lines(xml) {
+        for line in extract_qsc_camera_lines(stream.xml_source()) {
             self.set_camera(parse_qsc_camera(&line)?);
         }
         Ok(())
@@ -579,36 +714,45 @@ impl MolScene {
     fn load_qsc_object_block(
         &mut self,
         block: &[String],
-        chunks: &BTreeMap<String, String>,
+        chunks: &BTreeMap<String, Vec<u8>>,
     ) -> Result<()> {
         let object_line = block
             .first()
             .ok_or_else(|| CueMolError::parse("QSC object element not found"))?;
         let object_name = attr_value(object_line, "name")
             .ok_or_else(|| CueMolError::parse("QSC object name not found"))?;
-        // Object class dispatch: this port loads MolCoord (molecule) objects, whose
-        // datachunk is PDB text. A `.qsc` saved by C++ CueMol2 can also hold non-molecule
-        // objects (MolSurf surface / DensityMap map), whose datachunk is a QDF binary —
-        // feeding that to `read_pdb_str` used to error and fail the WHOLE scene load.
-        // Skip such objects gracefully (the molecules still load) and record them.
+        // Object class dispatch: MolCoord chunks can be PDB text or native QDF.
+        // A `.qsc` saved by C++ CueMol2 can also hold non-molecule objects such as
+        // MolSurf and DensityMap. Capture supported representations and record only
+        // unsupported classes or source formats as skipped.
         // A missing `type` means MolCoord (the Rust writer always emits `type="MolCoord"`).
         let object_type = attr_value(object_line, "type").unwrap_or_else(|| "MolCoord".to_string());
         if object_type != "MolCoord" {
-            // A MolSurf surface whose datachunk is OBJ/PLY mesh TEXT (the Rust `.qsc`
-            // convention) carries a mesh this port CAN display: capture it + its srctype
-            // for a front end to convert into geometry. A C++ `qdfsurf` binary chunk (or
-            // any other non-molecule class: DensityMap, …) is still skipped + recorded so
-            // the load stays graceful.
+            // Capture every supported surface representation. QDF1 is an ASCII
+            // envelope, so it remains safe in the text datachunk map.
             let srctype = attr_value(object_line, "srctype").unwrap_or_default();
-            if object_type == "MolSurf" && matches!(srctype.as_str(), "obj" | "ply") {
-                if let Some(data) = attr_value(object_line, "src")
-                    .and_then(|src| src.strip_prefix("datachunk:").map(str::to_string))
-                    .and_then(|chunk_id| chunks.get(&chunk_id).cloned())
+            if object_type == "MolSurf" && matches!(srctype.as_str(), "obj" | "ply" | "qdfsurf") {
+                if let Some(data) =
+                    attr_value(object_line, "src").and_then(|src| chunks.get(&src).cloned())
                 {
                     self.loaded_surfaces.push(LoadedSurface {
                         name: object_name,
                         srctype,
-                        data,
+                        data: String::from_utf8_lossy(&data).into_owned(),
+                        raw_data: data,
+                    });
+                    return Ok(());
+                }
+            }
+            if object_type == "DensityMap" && srctype == "qdfmap" {
+                if let Some(data) =
+                    attr_value(object_line, "src").and_then(|src| chunks.get(&src).cloned())
+                {
+                    self.loaded_density_maps.push(LoadedDensityMap {
+                        name: object_name,
+                        srctype,
+                        data: String::from_utf8_lossy(&data).into_owned(),
+                        raw_data: data,
                     });
                     return Ok(());
                 }
@@ -617,11 +761,31 @@ impl MolScene {
             return Ok(());
         }
         let data = attr_value(object_line, "src")
-            .and_then(|src| src.strip_prefix("datachunk:").map(str::to_string))
-            .and_then(|chunk_id| chunks.get(&chunk_id).cloned())
+            .and_then(|src| chunks.get(&src).cloned())
             .or_else(|| chunks.values().next().cloned())
             .ok_or_else(|| CueMolError::parse("QSC datachunk not found"))?;
-        let object_uid = self.add_molecule(object_name, read_pdb_str(&data)?);
+        let srctype = attr_value(object_line, "srctype").unwrap_or_else(|| "qdfpdb".to_string());
+        let molecule = match srctype.as_str() {
+            "qdfmol" => {
+                let qdf_data = if data.starts_with(b"QDF0") {
+                    data.as_slice()
+                } else {
+                    trim_ascii_bytes(&data)
+                };
+                read_qdf_mol_bytes(qdf_data)?
+            }
+            "qdfpdb" | "pdb" | "" => {
+                read_pdb_str(std::str::from_utf8(&data).map_err(|error| {
+                    CueMolError::parse(format!("QSC PDB chunk is not UTF-8: {error}"))
+                })?)?
+            }
+            other => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unsupported QSC molecule source type {other}"
+                )))
+            }
+        };
+        let object_uid = self.add_molecule(object_name, molecule);
         let object = self
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound("loaded QSC object".to_string()))?;
@@ -640,10 +804,7 @@ impl MolScene {
         // hidden object carries the attribute. Mirror `MolRenderer::is_visible`'s
         // tolerance of `false`/`0`/`no`/`off` so the same false-spellings parse.
         if let Some(value) = attr_value(object_line, "visible") {
-            object.set_visible(!matches!(
-                value.as_str(),
-                "false" | "0" | "no" | "off"
-            ));
+            object.set_visible(!matches!(value.as_str(), "false" | "0" | "no" | "off"));
         }
 
         let mut current_atomintr: Option<(String, Vec<(String, String)>)> = None;
@@ -814,9 +975,10 @@ impl MolSceneManager {
             name: name.into(),
             objects: Vec::new(),
             cameras: Vec::new(),
-            next_object_uid: 1,
+            next_object_uid: OBJECT_UID_BASE + uid.get() * UID_SCENE_STRIDE + 1,
             skipped_qsc_objects: Vec::new(),
             loaded_surfaces: Vec::new(),
+            loaded_density_maps: Vec::new(),
         });
         uid
     }
@@ -878,14 +1040,16 @@ impl MolSceneManager {
     }
 
     pub fn load_qsc_file_checked(&mut self, path: impl AsRef<Path>) -> Result<QscLoadStatus> {
-        let input = fs::read_to_string(path)?;
-        if let Some((oid, size)) = parse_git_lfs_pointer(&input) {
-            return Ok(QscLoadStatus::GitLfsPointer { oid, size });
+        let input = fs::read(path)?;
+        if let Ok(text) = std::str::from_utf8(&input) {
+            if let Some((oid, size)) = parse_git_lfs_pointer(text) {
+                return Ok(QscLoadStatus::GitLfsPointer { oid, size });
+            }
         }
         let uid = self.new_scene("loaded scene");
         self.scene_mut(uid)
             .ok_or_else(|| CueMolError::NotFound("loaded scene".to_string()))?
-            .load_qsc_str(&input)?;
+            .load_qsc_bytes(&input)?;
         Ok(QscLoadStatus::Loaded { scene_uid: uid })
     }
 
@@ -938,7 +1102,7 @@ impl MolCommandManager {
         Self {
             scene_manager: MolSceneManager::new(),
             views: Vec::new(),
-            next_view_uid: 1,
+            next_view_uid: VIEW_UID_BASE + 1,
         }
     }
 
@@ -1103,33 +1267,14 @@ fn format_renderer_attrs(renderer: &MolRenderer, default_style: Option<&str>) ->
     format!(" {}", parts.join(" "))
 }
 
-fn extract_datachunks(input: &str) -> Result<BTreeMap<String, String>> {
-    let mut chunks = BTreeMap::new();
-    let start_marker = "==========START datachunk:";
-    let end_marker = "==========END datachunk:";
-    let mut search_from = 0;
-    while let Some(relative_start) = input[search_from..].find(start_marker) {
-        let start = search_from + relative_start;
-        let header_start = start + start_marker.len();
-        let data_start = input[start..]
-            .find('\n')
-            .map(|offset| start + offset + 1)
-            .ok_or_else(|| CueMolError::parse("QSC datachunk body not found"))?;
-        let chunk_id = input[header_start..data_start]
-            .trim()
-            .trim_end_matches('=')
-            .to_string();
-        let data_end = input[data_start..]
-            .find(end_marker)
-            .map(|offset| data_start + offset)
-            .ok_or_else(|| CueMolError::parse("QSC datachunk end not found"))?;
-        chunks.insert(chunk_id, input[data_start..data_end].to_string());
-        search_from = data_end + end_marker.len();
+fn trim_ascii_bytes(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[1..];
     }
-    if chunks.is_empty() {
-        return Err(CueMolError::parse("QSC datachunk not found"));
+    while value.last().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[..value.len() - 1];
     }
-    Ok(chunks)
+    value
 }
 
 fn extract_qsc_object_blocks(xml: &str) -> Vec<Vec<String>> {
@@ -1304,6 +1449,7 @@ fn format_float(value: f64) -> String {
 fn center_mark_from_qsc(value: &str) -> CenterMark {
     match value {
         "none" => CenterMark::None,
+        "axis" => CenterMark::Axis,
         _ => CenterMark::Cross,
     }
 }
@@ -1312,6 +1458,7 @@ fn center_mark_to_qsc(value: CenterMark) -> &'static str {
     match value {
         CenterMark::None => "none",
         CenterMark::Cross => "crosshair",
+        CenterMark::Axis => "axis",
     }
 }
 
@@ -1319,6 +1466,7 @@ fn stereo_mode_from_qsc(value: &str) -> StereoMode {
     match value {
         "parallel" | "para" => StereoMode::Parallel,
         "cross" => StereoMode::Cross,
+        "hardware" => StereoMode::Hardware,
         _ => StereoMode::None,
     }
 }
@@ -1326,8 +1474,9 @@ fn stereo_mode_from_qsc(value: &str) -> StereoMode {
 fn stereo_mode_to_qsc(value: StereoMode) -> &'static str {
     match value {
         StereoMode::None => "none",
-        StereoMode::Parallel => "parallel",
+        StereoMode::Parallel => "para",
         StereoMode::Cross => "cross",
+        StereoMode::Hardware => "hardware",
     }
 }
 
@@ -1363,6 +1512,91 @@ fn escape_xml(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qsc_camera_display_modes_match_script_enums() {
+        assert_eq!(center_mark_from_qsc("crosshair"), CenterMark::Cross);
+        assert_eq!(center_mark_from_qsc("axis"), CenterMark::Axis);
+        assert_eq!(center_mark_to_qsc(CenterMark::Axis), "axis");
+        assert_eq!(stereo_mode_from_qsc("para"), StereoMode::Parallel);
+        assert_eq!(stereo_mode_from_qsc("hardware"), StereoMode::Hardware);
+        assert_eq!(stereo_mode_to_qsc(StereoMode::Parallel), "para");
+        assert_eq!(stereo_mode_to_qsc(StereoMode::Hardware), "hardware");
+    }
+
+    #[test]
+    fn scene_object_and_renderer_uids_are_globally_unique() {
+        let mut manager = MolSceneManager::new();
+        let scene1 = manager.new_scene("one");
+        let scene2 = manager.new_scene("two");
+        let object1 = manager
+            .scene_mut(scene1)
+            .unwrap()
+            .add_molecule("a", MolCoord::new());
+        let object2 = manager
+            .scene_mut(scene2)
+            .unwrap()
+            .add_molecule("b", MolCoord::new());
+        let renderer1 = manager
+            .scene_mut(scene1)
+            .unwrap()
+            .object_mut(object1)
+            .unwrap()
+            .add_renderer("simple", "r1");
+        let renderer2 = manager
+            .scene_mut(scene2)
+            .unwrap()
+            .object_mut(object2)
+            .unwrap()
+            .add_renderer("simple", "r2");
+
+        let ids = [scene1, scene2, object1, object2, renderer1, renderer2]
+            .into_iter()
+            .map(Uid::get)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids.len(), 6);
+        assert_eq!(manager.object(object1).unwrap().name(), "a");
+        assert_eq!(manager.object(object2).unwrap().name(), "b");
+    }
+
+    #[test]
+    fn molecule_renderer_interprets_single_and_multiple_atom_hits() {
+        let molecule = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  0.50 12.00\nATOM      2  CB  ALA A   1       4.000   5.000   6.000  1.00 20.00\n",
+        )
+        .unwrap();
+        let renderer = MolRenderer {
+            uid: Uid::new(7),
+            name: "simple".to_string(),
+            renderer_type: "simple".to_string(),
+            qsc_attrs: BTreeMap::new(),
+            atom_intr_lines: Vec::new(),
+            selection: Selector::All,
+            coloring: SolidColoring::new(),
+            default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
+        };
+        let mut context = cuemol_gfx::HittestContext::new();
+        context.add_hit(renderer.uid(), 0.2, vec![1]);
+        let mut hit_data = cuemol_gfx::HitData::new();
+        hit_data.create_nearest(&context);
+        let single = renderer.interp_hit(&hit_data, &molecule);
+        assert!(renderer.is_hit_test_supported());
+        assert!(single.contains("\"objtype\":\"MolCoord\""));
+        assert!(single.contains("\"sel\":\"aid 1\""));
+        assert!(single.contains("\"atom_id\":1"));
+        assert!(single.contains("\"occ\":0.50"));
+        assert!(single.contains("\"x\":1.00"));
+
+        context.add_hit(renderer.uid(), 0.3, vec![2]);
+        hit_data.create_all(&context);
+        let multiple = renderer.interp_hit(&hit_data, &molecule);
+        assert!(multiple.contains("\"size\":2"));
+        assert!(multiple.contains("\"sel\":\"aid 1:2\""));
+
+        let mut unsupported = renderer.clone();
+        unsupported.renderer_type = "selection".to_string();
+        assert!(!unsupported.is_hit_test_supported());
+    }
 
     #[test]
     fn parse_xform_mat_reads_column_major_rotation() {
@@ -1402,10 +1636,9 @@ mod tests {
         // object writes `visible="false"`; a visible one omits the attribute.
         let mut manager = MolSceneManager::new();
         let scene = manager.new_scene("s");
-        let mol = read_pdb_str(
-            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n",
-        )
-        .unwrap();
+        let mol =
+            read_pdb_str("ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n")
+                .unwrap();
         let scene_ref = manager.scene_mut(scene).unwrap();
         let _visible_uid = scene_ref.add_molecule("shown", mol.clone());
         let hidden_uid = scene_ref.add_molecule("hidden", mol);
@@ -1414,7 +1647,9 @@ mod tests {
         let xml = manager.scene(scene).unwrap().write_qsc_string();
         // The hidden object carries the attribute; the visible one does not.
         assert!(
-            xml.contains("name=\"hidden\" src=\"datachunk:00001\" srctype=\"qdfpdb\" visible=\"false\""),
+            xml.contains(
+                "name=\"hidden\" src=\"datachunk:00001\" srctype=\"qdfpdb\" visible=\"false\""
+            ),
             "hidden object must serialize visible=\"false\":\n{xml}"
         );
         assert!(
@@ -1425,7 +1660,11 @@ mod tests {
         // Round-trip: re-loading preserves both visibilities.
         let mut reloaded = MolSceneManager::new();
         let scene2 = reloaded.new_scene("reloaded");
-        reloaded.scene_mut(scene2).unwrap().load_qsc_str(&xml).unwrap();
+        reloaded
+            .scene_mut(scene2)
+            .unwrap()
+            .load_qsc_str(&xml)
+            .unwrap();
         let objects: Vec<bool> = reloaded
             .scene(scene2)
             .unwrap()
@@ -1433,7 +1672,11 @@ mod tests {
             .iter()
             .map(|object| object.is_visible())
             .collect();
-        assert_eq!(objects, vec![true, false], "visibility survives the round-trip");
+        assert_eq!(
+            objects,
+            vec![true, false],
+            "visibility survives the round-trip"
+        );
     }
 
     #[test]
@@ -1445,10 +1688,9 @@ mod tests {
         // gracefully — the molecules still load, and the skip is recorded (not silent).
         let mut manager = MolSceneManager::new();
         let scene = manager.new_scene("s");
-        let mol = read_pdb_str(
-            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n",
-        )
-        .unwrap();
+        let mol =
+            read_pdb_str("ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n")
+                .unwrap();
         manager.scene_mut(scene).unwrap().add_molecule("mol1", mol);
         let xml = manager.scene(scene).unwrap().write_qsc_string();
         // Splice in a surface object (its datachunk is deliberately absent — the loader
@@ -1459,10 +1701,18 @@ mod tests {
         let mut reloaded = MolSceneManager::new();
         let scene2 = reloaded.new_scene("reloaded");
         // The load must SUCCEED (not error on the surface object)...
-        reloaded.scene_mut(scene2).unwrap().load_qsc_str(&xml).unwrap();
+        reloaded
+            .scene_mut(scene2)
+            .unwrap()
+            .load_qsc_str(&xml)
+            .unwrap();
         let scene_ref = reloaded.scene(scene2).unwrap();
         // ...load only the molecule...
-        assert_eq!(scene_ref.objects().len(), 1, "only the MolCoord object loads");
+        assert_eq!(
+            scene_ref.objects().len(),
+            1,
+            "only the MolCoord object loads"
+        );
         assert_eq!(scene_ref.objects()[0].name(), "mol1");
         assert!(scene_ref.objects()[0].mol().atom_count() >= 1);
         // ...and record the skipped surface (not silently dropped).
@@ -1476,15 +1726,12 @@ mod tests {
     #[test]
     fn qsc_load_captures_obj_text_surface_object() {
         // A MolSurf object whose datachunk is OBJ mesh TEXT (the Rust `.qsc` convention)
-        // is CAPTURED into loaded_surfaces so a front end can display it — unlike a
-        // `qdfsurf` binary chunk, which is still skipped. Hand-authored .qsc = the
-        // independent oracle.
+        // is captured into loaded_surfaces so a front end can display it.
         let mut manager = MolSceneManager::new();
         let scene = manager.new_scene("s");
-        let mol = read_pdb_str(
-            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n",
-        )
-        .unwrap();
+        let mol =
+            read_pdb_str("ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n")
+                .unwrap();
         manager.scene_mut(scene).unwrap().add_molecule("mol1", mol);
         let mut xml = manager.scene(scene).unwrap().write_qsc_string();
         // Splice in an OBJ-text surface object + its datachunk block (a single triangle).
@@ -1496,11 +1743,19 @@ mod tests {
 
         let mut reloaded = MolSceneManager::new();
         let scene2 = reloaded.new_scene("reloaded");
-        reloaded.scene_mut(scene2).unwrap().load_qsc_str(&xml).unwrap();
+        reloaded
+            .scene_mut(scene2)
+            .unwrap()
+            .load_qsc_str(&xml)
+            .unwrap();
         let scene_ref = reloaded.scene(scene2).unwrap();
         // The molecule still loads, and the OBJ surface is captured (not skipped).
         assert_eq!(scene_ref.objects().len(), 1, "the MolCoord object loads");
-        assert_eq!(scene_ref.loaded_surfaces().len(), 1, "the OBJ surface is captured");
+        assert_eq!(
+            scene_ref.loaded_surfaces().len(),
+            1,
+            "the OBJ surface is captured"
+        );
         assert_eq!(scene_ref.loaded_surfaces()[0].name, "surf1");
         assert_eq!(scene_ref.loaded_surfaces()[0].srctype, "obj");
         assert!(scene_ref.loaded_surfaces()[0].data.contains("v 0 0 0"));
@@ -1508,5 +1763,76 @@ mod tests {
             scene_ref.skipped_qsc_objects().is_empty(),
             "an OBJ-text surface is displayable, not a skip"
         );
+    }
+
+    #[test]
+    fn qsc_loads_native_qdfmol_datachunk() {
+        let source = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00\n\
+             ATOM      2  C   ALA A   1       2.000   2.000   3.000  1.00 11.00\n",
+        )
+        .unwrap();
+        let qdf0 = crate::write_qdf_mol_bytes(&source);
+        let encoded = cuemol_qsys::encode_qdf0_bytes(&qdf0, 1, "13").unwrap();
+        let encoded = String::from_utf8(encoded).unwrap();
+        let qsc = format!(
+            "<scene>\n\
+             <object type=\"MolCoord\" name=\"native\" src=\"datachunk:00000\" srctype=\"qdfmol\">\n\
+             </object>\n\
+             </scene>\n\
+             ========== End of XML ==========\n\
+             ==========START datachunk:00000==========\n\
+             {encoded}\
+             ==========END datachunk:00000==========\n"
+        );
+
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("qdf");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .load_qsc_str(&qsc)
+            .unwrap();
+        let loaded = manager
+            .scene(scene_uid)
+            .unwrap()
+            .object_by_name("native")
+            .unwrap();
+        assert_eq!(loaded.mol().atom_count(), 2);
+        assert_eq!(loaded.mol().atoms()[0].position, source.atoms()[0].position);
+    }
+
+    #[test]
+    fn qsc_loads_non_utf8_qdf0_datachunk() {
+        let source =
+            read_pdb_str("ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00\n")
+                .unwrap();
+        let qdf0 = crate::write_qdf_mol_bytes(&source);
+        assert!(std::str::from_utf8(&qdf0).is_err());
+        let mut qsc = br#"<scene>
+<object type="MolCoord" name="native-raw" src="datachunk:00000" srctype="qdfmol">
+</object>
+</scene>
+========== End of XML ==========
+==========START datachunk:00000==========
+"#
+        .to_vec();
+        qsc.extend_from_slice(&qdf0);
+        qsc.extend_from_slice(b"\n==========END datachunk:00000==========\n");
+
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("qdf0");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .load_qsc_bytes(&qsc)
+            .unwrap();
+        let loaded = manager
+            .scene(scene_uid)
+            .unwrap()
+            .object_by_name("native-raw")
+            .unwrap();
+        assert_eq!(loaded.mol().atom_count(), 1);
+        assert_eq!(loaded.mol().atoms()[0].position, source.atoms()[0].position);
     }
 }

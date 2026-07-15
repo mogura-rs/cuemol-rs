@@ -153,8 +153,10 @@ pub fn read_cns_par_str(text: &str) -> ParamDB {
         // CNS keywords are case-insensitive and abbreviated to their first letters.
         if kind.starts_with("bond") {
             if let (Some(kf), Some(r0)) = (parse_f64(tok.get(3)), parse_f64(tok.get(4))) {
-                db.bonds
-                    .insert((tok[1].to_string(), tok[2].to_string()), BondParam { kf, r0 });
+                db.bonds.insert(
+                    (tok[1].to_string(), tok[2].to_string()),
+                    BondParam { kf, r0 },
+                );
             }
         } else if kind.starts_with("angl") {
             if let (Some(kf), Some(theta0)) = (parse_f64(tok.get(4)), parse_f64(tok.get(5))) {
