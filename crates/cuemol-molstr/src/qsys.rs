@@ -1,8 +1,12 @@
 use crate::{
-    read_mmcif_file, read_mol2_file, read_pdb_file, read_pdb_str, read_qdf_mol_bytes,
-    read_qdfpdb_file, read_sdf_file, write_pdb_string, Atom, MolCoord, Selector, SolidColoring,
+    read_mmcif_file, read_mmcif_str, read_mol2_file, read_mol2_str, read_pdb_file, read_pdb_str,
+    read_qdf_mol_bytes, read_qdfpdb_file, read_sdf_file, read_sdf_str, write_pdb_string, Atom,
+    MolCoord, Selector, SolidColoring,
 };
-use cuemol_core::{CueMolError, LDom2InStream, Matrix4, Quat, RangeSet, Result, Uid, Vector4};
+use cuemol_core::{
+    parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2InStream, LDom2Node, LDom2Tree, Matrix4,
+    Quat, RangeSet, Result, Uid, Vector4,
+};
 use cuemol_gfx::{RawHitData, SolidColor};
 use cuemol_qsys::{Camera, CenterMark, StereoMode, StyleManager, View};
 use std::collections::BTreeMap;
@@ -15,12 +19,15 @@ const VIEW_UID_BASE: u64 = 3_000_000_000;
 const UID_SCENE_STRIDE: u64 = 1_000_000;
 const UID_OBJECT_STRIDE: u64 = 1_000;
 
+type PendingAtomIntrRenderer = (String, Vec<(AtomIntrKind, Vec<String>)>);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MolRenderer {
     uid: Uid,
     name: String,
     renderer_type: String,
     qsc_attrs: BTreeMap<String, String>,
+    qsc_children: Vec<LDom2Node>,
     atom_intr_lines: Vec<AtomIntrLine>,
     selection: Selector,
     coloring: SolidColoring,
@@ -31,8 +38,49 @@ pub struct MolRenderer {
 pub struct AtomIntrLine {
     pub a0: String,
     pub a1: String,
-    aid1: String,
-    aid2: String,
+    pub a2: Option<String>,
+    pub a3: Option<String>,
+    kind: AtomIntrKind,
+    aids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomIntrKind {
+    Distance,
+    Angle,
+    Torsion,
+}
+
+impl AtomIntrKind {
+    fn mode(self) -> u8 {
+        match self {
+            Self::Distance => 1,
+            Self::Angle => 2,
+            Self::Torsion => 3,
+        }
+    }
+
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Distance => "line",
+            Self::Angle => "angle",
+            Self::Torsion => "torsion",
+        }
+    }
+
+    fn atom_count(self) -> usize {
+        usize::from(self.mode()) + 1
+    }
+}
+
+impl AtomIntrLine {
+    pub fn kind(&self) -> AtomIntrKind {
+        self.kind
+    }
+
+    pub fn aids(&self) -> &[String] {
+        &self.aids
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +144,22 @@ impl MolRenderer {
         self.qsc_attrs.get(name).map(String::as_str)
     }
 
+    pub fn qsc_attrs(&self) -> &BTreeMap<String, String> {
+        &self.qsc_attrs
+    }
+
+    pub fn qsc_children(&self) -> &[LDom2Node] {
+        &self.qsc_children
+    }
+
+    pub fn set_qsc_children(&mut self, children: Vec<LDom2Node>) {
+        self.qsc_children = children;
+    }
+
+    pub fn atom_intr_lines(&self) -> &[AtomIntrLine] {
+        &self.atom_intr_lines
+    }
+
     pub fn group(&self) -> Option<&str> {
         self.qsc_attr("group")
     }
@@ -139,6 +203,16 @@ impl MolRenderer {
         styles: &StyleManager,
         scope_id: u64,
     ) -> Option<String> {
+        if let Some(node) = self
+            .qsc_children
+            .iter()
+            .find(|node| node.tag_name() == child_tag)
+        {
+            let value = node.str_attr(attr).to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
         let style_list = self.style()?;
         styles.resolve_style_child_attr(scope_id, style_list, child_tag, attr)
     }
@@ -152,6 +226,20 @@ impl MolRenderer {
         styles: &StyleManager,
         scope_id: u64,
     ) -> Option<String> {
+        if let Some(node) = self
+            .qsc_children
+            .iter()
+            .find(|node| node.tag_name() == child_tag)
+        {
+            let value = if node.type_name().is_empty() {
+                node.str_attr("type").to_string()
+            } else {
+                node.type_name().to_string()
+            };
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
         let style_list = self.style()?;
         styles.resolve_style_child_type(scope_id, style_list, child_tag)
     }
@@ -186,12 +274,20 @@ impl MolRenderer {
         let entries = self
             .atom_intr_lines
             .iter()
-            .map(|line| {
-                format!(
-                    "{{\"a0\":\"{}\",\"a1\":\"{}\"}}",
-                    escape_json(&line.a0),
-                    escape_json(&line.a1)
-                )
+            .enumerate()
+            .map(|(id, line)| {
+                let labels = [&line.a0, &line.a1]
+                    .into_iter()
+                    .map(Some)
+                    .chain([line.a2.as_ref(), line.a3.as_ref()])
+                    .take(line.kind.atom_count())
+                    .enumerate()
+                    .filter_map(|(index, label)| {
+                        label.map(|label| format!("\"a{index}\":\"{}\"", escape_json(label)))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{{\"id\":{id},\"mode\":{},{labels}}}", line.kind.mode())
             })
             .collect::<Vec<_>>();
         format!("[{}]", entries.join(","))
@@ -257,6 +353,7 @@ fn format_atom_message(atom: &Atom) -> String {
 pub struct MolObject {
     uid: Uid,
     name: String,
+    source_type: String,
     mol: MolCoord,
     renderers: Vec<MolRenderer>,
     next_renderer_uid: u64,
@@ -271,6 +368,7 @@ pub struct MolObject {
     /// `end_hue`/`sat`/`bri`). `None` when no object coloring is declared.
     coloring_type: Option<String>,
     coloring_attrs: BTreeMap<String, String>,
+    qsc_coloring_node: Option<LDom2Node>,
     /// The object's `xformMat` transform (C++ `Object::getXformMatrix`). In C++
     /// it is propagated onto every atom (`MolAtom::getPos` applies it), so the
     /// rendered structure sits at its transformed position — e.g. a structure
@@ -299,6 +397,10 @@ impl MolObject {
 
     pub fn mol(&self) -> &MolCoord {
         &self.mol
+    }
+
+    pub fn source_type(&self) -> &str {
+        &self.source_type
     }
 
     pub fn mol_mut(&mut self) -> &mut MolCoord {
@@ -331,6 +433,11 @@ impl MolObject {
     pub fn set_coloring(&mut self, coloring_type: Option<String>, attrs: BTreeMap<String, String>) {
         self.coloring_type = coloring_type;
         self.coloring_attrs = attrs;
+        self.qsc_coloring_node = None;
+    }
+
+    pub fn qsc_coloring_node(&self) -> Option<&LDom2Node> {
+        self.qsc_coloring_node.as_ref()
     }
 
     /// The object's `xformMat` transform, identity when unset. Applied to the
@@ -399,6 +506,7 @@ impl MolObject {
             name: name.into(),
             renderer_type: renderer_type.into(),
             qsc_attrs,
+            qsc_children: Vec::new(),
             atom_intr_lines: Vec::new(),
             selection: Selector::All,
             coloring: SolidColoring::new(),
@@ -412,22 +520,47 @@ impl MolObject {
         name: impl Into<String>,
         aids: &[(String, String)],
     ) -> Result<Uid> {
-        self.add_atom_intr_renderer_with_attrs(name, aids, BTreeMap::new())
+        let defs = aids
+            .iter()
+            .map(|(aid1, aid2)| (AtomIntrKind::Distance, vec![aid1.clone(), aid2.clone()]))
+            .collect::<Vec<_>>();
+        self.add_atom_intr_renderer_defs_with_attrs(name, &defs, BTreeMap::new())
     }
 
-    fn add_atom_intr_renderer_with_attrs(
+    pub fn add_atom_intr_renderer_defs(
         &mut self,
         name: impl Into<String>,
-        aids: &[(String, String)],
+        defs: &[(AtomIntrKind, Vec<String>)],
+    ) -> Result<Uid> {
+        self.add_atom_intr_renderer_defs_with_attrs(name, defs, BTreeMap::new())
+    }
+
+    fn add_atom_intr_renderer_defs_with_attrs(
+        &mut self,
+        name: impl Into<String>,
+        defs: &[(AtomIntrKind, Vec<String>)],
         qsc_attrs: BTreeMap<String, String>,
     ) -> Result<Uid> {
         let mut lines = Vec::new();
-        for (aid1, aid2) in aids {
+        for (kind, aids) in defs {
+            if aids.len() != kind.atom_count() {
+                return Err(CueMolError::invalid_argument(format!(
+                    "AtomIntr {} requires {} atoms",
+                    kind.tag(),
+                    kind.atom_count()
+                )));
+            }
+            let labels = aids
+                .iter()
+                .map(|aid| self.resolve_atom_label(aid))
+                .collect::<Result<Vec<_>>>()?;
             lines.push(AtomIntrLine {
-                a0: self.resolve_atom_label(aid1)?,
-                a1: self.resolve_atom_label(aid2)?,
-                aid1: aid1.clone(),
-                aid2: aid2.clone(),
+                a0: labels[0].clone(),
+                a1: labels[1].clone(),
+                a2: labels.get(2).cloned(),
+                a3: labels.get(3).cloned(),
+                kind: *kind,
+                aids: aids.clone(),
             });
         }
         let uid = Uid::new(self.next_renderer_uid);
@@ -437,6 +570,7 @@ impl MolObject {
             name: name.into(),
             renderer_type: "atomintr".to_string(),
             qsc_attrs,
+            qsc_children: Vec::new(),
             atom_intr_lines: lines,
             selection: Selector::All,
             coloring: SolidColoring::new(),
@@ -472,38 +606,118 @@ impl MolObject {
             .ok_or_else(|| CueMolError::NotFound(format!("atom id {aid}")))
     }
 
-    /// Distance (Å) measured by each line of an atom-interaction `renderer`, in
-    /// line order; `None` for a line whose atoms cannot be resolved. The `.qsc`
-    /// scene facade models only 2-atom distance measurements (angle/torsion live in
-    /// the molvis `AtomIntrRenderer`); this is the value C++ `AtomIntrRenderer`
-    /// shows for a distance interaction.
+    /// Distance (Å) measured by each distance definition, in declaration order.
+    /// Angle and torsion definitions return `None`; use [`Self::atom_intr_values`]
+    /// to evaluate all three CueMol measurement modes.
     pub fn atom_intr_distances(&self, renderer: &MolRenderer) -> Vec<Option<f64>> {
         renderer
             .atom_intr_lines
             .iter()
             .map(|line| {
-                let p0 = self.resolve_atom(&line.aid1)?.position;
-                let p1 = self.resolve_atom(&line.aid2)?.position;
+                if line.kind != AtomIntrKind::Distance {
+                    return None;
+                }
+                let p0 = self.resolve_atom(&line.aids[0])?.position;
+                let p1 = self.resolve_atom(&line.aids[1])?.position;
                 Some((p0 - p1).length3d())
             })
             .collect()
     }
 
+    /// Distance (Å), angle (degrees), or signed torsion (degrees) for every
+    /// AtomIntr definition. Invalid atom references or degenerate geometry return
+    /// `None`, matching the fallible geometry operations used by CueMol.
+    pub fn atom_intr_values(&self, renderer: &MolRenderer) -> Vec<Option<f64>> {
+        renderer
+            .atom_intr_lines
+            .iter()
+            .map(|line| {
+                let points = line
+                    .aids
+                    .iter()
+                    .map(|aid| self.resolve_atom(aid).map(|atom| atom.position))
+                    .collect::<Option<Vec<_>>>()?;
+                match line.kind {
+                    AtomIntrKind::Distance => Some((points[0] - points[1]).length3d()),
+                    AtomIntrKind::Angle => points[0]
+                        .sub_vec(points[1])
+                        .angle(points[2].sub_vec(points[1]))
+                        .ok()
+                        .map(f64::to_degrees),
+                    AtomIntrKind::Torsion => {
+                        Vector4::torsion(points[0], points[1], points[2], points[3])
+                            .ok()
+                            .map(f64::to_degrees)
+                    }
+                }
+            })
+            .collect()
+    }
+
     /// Resolved 3D endpoints of each atom-interaction line (in line order),
-    /// skipping any line whose atoms cannot be resolved. The geometric
-    /// counterpart of [`MolObject::atom_intr_distances`]: the measurement-line
-    /// segments a C++ `AtomIntrRenderer` draws between its atom pairs (the
-    /// numeric label is GPU text, not modelled here). This is the single source
-    /// of truth both the desktop GUIs and the CLI use to render measurements, so
-    /// an `atomintr` renderer draws its lines — not the whole molecule.
+    /// skipping any line whose atoms cannot be resolved. This is the single
+    /// source of truth both the desktop GUIs and the CLI use for measurement
+    /// geometry, so an `atomintr` renderer draws its lines rather than the whole
+    /// molecule.
     pub fn atom_intr_segments(&self, renderer: &MolRenderer) -> Vec<(Vector4, Vector4)> {
         renderer
             .atom_intr_lines
             .iter()
+            .flat_map(|line| {
+                let points = line
+                    .aids
+                    .iter()
+                    .map(|aid| self.resolve_atom(aid).map(|atom| atom.position))
+                    .collect::<Option<Vec<_>>>();
+                points
+                    .map(|points| {
+                        points
+                            .windows(2)
+                            .map(|pair| (pair[0], pair[1]))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// Screen-label anchors and formatted values for each AtomIntr definition.
+    /// Positions match C++ `renderDistLabel`, `renderAngleLabel`, and
+    /// `renderTorsionLabel`; the GUI projects these anchors after object and
+    /// renderer transforms.
+    pub fn atom_intr_labels(&self, renderer: &MolRenderer) -> Vec<(Vector4, String)> {
+        renderer
+            .atom_intr_lines
+            .iter()
             .filter_map(|line| {
-                let p0 = self.resolve_atom(&line.aid1)?.position;
-                let p1 = self.resolve_atom(&line.aid2)?.position;
-                Some((p0, p1))
+                let points = line
+                    .aids
+                    .iter()
+                    .map(|aid| self.resolve_atom(aid).map(|atom| atom.position))
+                    .collect::<Option<Vec<_>>>()?;
+                match line.kind {
+                    AtomIntrKind::Distance => {
+                        let value = (points[0] - points[1]).length3d();
+                        Some(((points[0] + points[1]) * 0.5, format!("{value:.2}")))
+                    }
+                    AtomIntrKind::Angle => {
+                        let lhs = points[0] - points[1];
+                        let rhs = points[2] - points[1];
+                        let value = lhs.angle(rhs).ok()?.to_degrees();
+                        let separation = (lhs.length3d() + rhs.length3d()) * 0.5;
+                        let direction = ((points[0] + points[2]) * 0.5 - points[1])
+                            .normalize3d()
+                            .ok()?;
+                        let position = points[1] + direction * (separation * 0.2);
+                        Some((position, format!("{value:.2}")))
+                    }
+                    AtomIntrKind::Torsion => {
+                        let value = Vector4::torsion(points[0], points[1], points[2], points[3])
+                            .ok()?
+                            .to_degrees();
+                        Some(((points[1] + points[2]) * 0.5, format!("{value:.2}")))
+                    }
+                }
             })
             .collect()
     }
@@ -511,22 +725,33 @@ impl MolObject {
     /// JSON array of `{a0, a1, distance}` for an atom-interaction renderer, where
     /// `distance` is the measured value (or `null` when unresolved).
     pub fn atom_intr_measurements_json(&self, renderer: &MolRenderer) -> String {
-        let distances = self.atom_intr_distances(renderer);
+        let values = self.atom_intr_values(renderer);
         let entries = renderer
             .atom_intr_lines
             .iter()
-            .zip(distances)
-            .map(|(line, dist)| {
-                let dist = match dist {
+            .zip(values)
+            .map(|(line, value)| {
+                let value = match value {
                     Some(value) => format!("{value:.3}"),
                     None => "null".to_string(),
                 };
-                format!(
-                    "{{\"a0\":\"{}\",\"a1\":\"{}\",\"distance\":{}}}",
-                    escape_json(&line.a0),
-                    escape_json(&line.a1),
-                    dist
-                )
+                let labels = [&line.a0, &line.a1]
+                    .into_iter()
+                    .map(Some)
+                    .chain([line.a2.as_ref(), line.a3.as_ref()])
+                    .take(line.kind.atom_count())
+                    .enumerate()
+                    .filter_map(|(index, label)| {
+                        label.map(|label| format!("\"a{index}\":\"{}\"", escape_json(label)))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let value_name = match line.kind {
+                    AtomIntrKind::Distance => "distance",
+                    AtomIntrKind::Angle => "angle",
+                    AtomIntrKind::Torsion => "torsion",
+                };
+                format!("{{{labels},\"{value_name}\":{value}}}")
             })
             .collect::<Vec<_>>();
         format!("[{}]", entries.join(","))
@@ -539,9 +764,11 @@ impl MolObject {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedSurface {
     pub name: String,
+    pub object_type: String,
     pub srctype: String,
     pub data: String,
     pub raw_data: Vec<u8>,
+    pub qsc_node: Option<LDom2Node>,
 }
 
 /// A native density-map object captured from a `.qsc` QDF data chunk. Parsing
@@ -550,9 +777,50 @@ pub struct LoadedSurface {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedDensityMap {
     pub name: String,
+    pub object_type: String,
     pub srctype: String,
     pub data: String,
     pub raw_data: Vec<u8>,
+    pub qsc_node: Option<LDom2Node>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedLWRenderer {
+    pub name: String,
+    pub data_id: i32,
+    pub visible: bool,
+    pub xform: Matrix4,
+}
+
+/// A lightweight object captured from a `.qsc` QDF data chunk. The typed LWO
+/// payload is parsed by `cuemol-lwview`, outside this molecule-only crate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedLWObject {
+    pub name: String,
+    pub srctype: String,
+    pub raw_data: Vec<u8>,
+    pub visible: bool,
+    pub xform: Matrix4,
+    pub renderers: Vec<LoadedLWRenderer>,
+    pub qsc_node: Option<LDom2Node>,
+}
+
+/// An object class not yet interpreted by this crate. The original DOM and its
+/// resolved source bytes are retained so a QSC load/save cycle is lossless.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedQscObject {
+    pub name: String,
+    pub object_type: String,
+    pub node: LDom2Node,
+    pub raw_data: Option<Vec<u8>>,
+}
+
+/// A scene-local CueMol style sheet captured from a QSC `<styles>` element.
+/// `node` preserves source metadata while `data` contains the resolved XML.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedStyle {
+    pub node: LDom2Node,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -571,6 +839,16 @@ pub struct MolScene {
     /// these ARE representable (an OBJ/PLY mesh), just not molecules.
     loaded_surfaces: Vec<LoadedSurface>,
     loaded_density_maps: Vec<LoadedDensityMap>,
+    loaded_lw_objects: Vec<LoadedLWObject>,
+    loaded_qsc_objects: Vec<LoadedQscObject>,
+    loaded_styles: Vec<LoadedStyle>,
+    scene_attributes: BTreeMap<String, String>,
+    scene_extension_nodes: Vec<LDom2Node>,
+    /// Persistent SceneXMLWriter options from `<qsc_opts>`.
+    qsc_options: Option<LDom2Node>,
+    /// The persistent CueMol `<animation>` subtree. It is kept as LDOM2 so motion
+    /// classes unknown to this crate survive a load/save cycle.
+    animation_node: Option<LDom2Node>,
 }
 
 impl MolScene {
@@ -601,6 +879,84 @@ impl MolScene {
 
     pub fn loaded_density_maps(&self) -> &[LoadedDensityMap] {
         &self.loaded_density_maps
+    }
+
+    pub fn loaded_lw_objects(&self) -> &[LoadedLWObject] {
+        &self.loaded_lw_objects
+    }
+
+    pub fn loaded_qsc_objects(&self) -> &[LoadedQscObject] {
+        &self.loaded_qsc_objects
+    }
+
+    pub fn loaded_styles(&self) -> &[LoadedStyle] {
+        &self.loaded_styles
+    }
+
+    pub fn scene_attributes(&self) -> &BTreeMap<String, String> {
+        &self.scene_attributes
+    }
+
+    pub fn scene_attribute(&self, name: &str) -> Option<&str> {
+        self.scene_attributes.get(name).map(String::as_str)
+    }
+
+    pub fn set_scene_attribute(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.scene_attributes.insert(name.into(), value.into());
+    }
+
+    pub fn remove_scene_attribute(&mut self, name: &str) -> bool {
+        self.scene_attributes.remove(name).is_some()
+    }
+
+    pub fn scene_extension_nodes(&self) -> &[LDom2Node] {
+        &self.scene_extension_nodes
+    }
+
+    pub fn animation_node(&self) -> Option<&LDom2Node> {
+        self.animation_node.as_ref()
+    }
+
+    pub fn qsc_options(&self) -> Option<&LDom2Node> {
+        self.qsc_options.as_ref()
+    }
+
+    pub fn set_qsc_options(&mut self, node: Option<LDom2Node>) -> Result<()> {
+        if let Some(node) = node.as_ref() {
+            if node.tag_name() != "qsc_opts" {
+                return Err(CueMolError::invalid_argument(format!(
+                    "expected qsc_opts node, got {}",
+                    node.tag_name()
+                )));
+            }
+        }
+        self.qsc_options = node;
+        Ok(())
+    }
+
+    pub fn set_animation_node(&mut self, node: Option<LDom2Node>) -> Result<()> {
+        if let Some(node) = node.as_ref() {
+            if node.tag_name() != "animation" {
+                return Err(CueMolError::invalid_argument(format!(
+                    "expected animation node, got {}",
+                    node.tag_name()
+                )));
+            }
+        }
+        self.animation_node = node;
+        Ok(())
+    }
+
+    pub fn add_loaded_surface(&mut self, surface: LoadedSurface) {
+        self.loaded_surfaces.push(surface);
+    }
+
+    pub fn add_loaded_density_map(&mut self, map: LoadedDensityMap) {
+        self.loaded_density_maps.push(map);
+    }
+
+    pub fn add_loaded_lw_object(&mut self, object: LoadedLWObject) {
+        self.loaded_lw_objects.push(object);
     }
 
     pub fn cameras(&self) -> &[Camera] {
@@ -644,6 +1000,7 @@ impl MolScene {
         let mol = match file_format {
             "pdb" => read_pdb_file(file_path)?,
             "qdfpdb" => read_qdfpdb_file(file_path)?,
+            "qdfmol" => crate::QdfMolFileReader::new().read_file(file_path)?,
             "mmcif" | "cif" => read_mmcif_file(file_path)?,
             "sdf" | "mol" => read_sdf_file(file_path)?,
             "mol2" => read_mol2_file(file_path)?,
@@ -653,10 +1010,19 @@ impl MolScene {
                 )))
             }
         };
-        Ok(self.add_molecule(object_name, mol))
+        Ok(self.add_molecule_with_source_type(object_name, mol, file_format))
     }
 
     pub fn add_molecule(&mut self, name: impl Into<String>, mol: MolCoord) -> Uid {
+        self.add_molecule_with_source_type(name, mol, "qdfpdb")
+    }
+
+    pub fn add_molecule_with_source_type(
+        &mut self,
+        name: impl Into<String>,
+        mol: MolCoord,
+        source_type: impl Into<String>,
+    ) -> Uid {
         let uid = Uid::new(self.next_object_uid);
         self.next_object_uid += 1;
         let object_local = uid
@@ -665,6 +1031,7 @@ impl MolScene {
         self.objects.push(MolObject {
             uid,
             name: name.into(),
+            source_type: source_type.into(),
             mol,
             renderers: Vec::new(),
             next_renderer_uid: RENDERER_UID_BASE
@@ -674,6 +1041,7 @@ impl MolScene {
             paint_coloring: Vec::new(),
             coloring_type: None,
             coloring_attrs: BTreeMap::new(),
+            qsc_coloring_node: None,
             xform: None,
             visible: true,
         });
@@ -681,17 +1049,113 @@ impl MolScene {
     }
 
     pub fn load_qsc_str(&mut self, input: &str) -> Result<()> {
-        self.load_qsc_bytes(input.as_bytes())
+        self.load_qsc_bytes_with_base_path(input.as_bytes(), None)
     }
 
     pub fn load_qsc_bytes(&mut self, input: &[u8]) -> Result<()> {
-        let stream = LDom2InStream::from_bytes(input)?;
-        let object_blocks = extract_qsc_object_blocks(stream.xml_source());
-        if object_blocks.is_empty() && extract_qsc_camera_lines(stream.xml_source()).is_empty() {
-            return Err(CueMolError::parse("QSC scene content not found"));
-        }
+        self.load_qsc_bytes_with_base_path(input, None)
+    }
 
-        if !object_blocks.is_empty() {
+    pub fn load_qsc_bytes_with_base_path(
+        &mut self,
+        input: &[u8],
+        base_path: Option<&Path>,
+    ) -> Result<()> {
+        let stream = LDom2InStream::from_bytes(input)?;
+        if stream.tree().top().tag_name() != "scene" {
+            return Err(CueMolError::parse("QSC root element is not scene"));
+        }
+        let declared_base = stream.tree().top().str_attr("base_path").to_string();
+        let resolved_base = (!declared_base.is_empty()).then(|| {
+            let path = Path::new(&declared_base);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                base_path.unwrap_or_else(|| Path::new(".")).join(path)
+            }
+        });
+        let effective_base = resolved_base.as_deref().or(base_path);
+        let object_nodes = stream
+            .tree()
+            .top()
+            .children()
+            .iter()
+            .filter(|node| node.tag_name() == "object")
+            .cloned()
+            .collect::<Vec<_>>();
+        let camera_nodes = stream
+            .tree()
+            .top()
+            .children()
+            .iter()
+            .filter(|node| node.tag_name() == "camera")
+            .cloned()
+            .collect::<Vec<_>>();
+        let animation_node = stream
+            .tree()
+            .top()
+            .children()
+            .iter()
+            .find(|node| node.tag_name() == "animation")
+            .cloned();
+        let qsc_options = stream
+            .tree()
+            .top()
+            .children()
+            .iter()
+            .find(|node| node.tag_name() == "qsc_opts")
+            .cloned();
+        let loaded_styles = stream
+            .tree()
+            .top()
+            .children()
+            .iter()
+            .filter(|node| node.tag_name() == "styles")
+            .map(|node| {
+                let data = if node.str_attr("src").is_empty() {
+                    write_ldom2_xml(&LDom2Tree::from(node.clone()))
+                } else {
+                    let source_line = qsc_node_lines(node)
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| CueMolError::parse("QSC styles element not found"))?;
+                    String::from_utf8_lossy(&load_qsc_source_data(
+                        &source_line,
+                        &BTreeMap::new(),
+                        effective_base,
+                    )?)
+                    .into_owned()
+                };
+                Ok(LoadedStyle {
+                    node: node.clone(),
+                    data,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let scene_attributes = stream
+            .tree()
+            .top()
+            .children()
+            .iter()
+            .filter(|node| node.is_attr())
+            .map(|node| (node.tag_name().to_string(), node.value().to_string()))
+            .collect::<BTreeMap<_, _>>();
+        let scene_extension_nodes = stream
+            .tree()
+            .top()
+            .children()
+            .iter()
+            .filter(|node| {
+                !node.is_attr()
+                    && !matches!(
+                        node.tag_name(),
+                        "qsc_opts" | "styles" | "object" | "camera" | "animation"
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if !object_nodes.is_empty() {
             let chunks = stream
                 .chunk_ids()
                 .iter()
@@ -701,20 +1165,27 @@ impl MolScene {
                         .map(|data| (chunk_id.to_string(), data.to_vec()))
                 })
                 .collect::<Result<BTreeMap<_, _>>>()?;
-            for block in object_blocks {
-                self.load_qsc_object_block(&block, &chunks)?;
+            for node in object_nodes {
+                self.load_qsc_object_block(&qsc_node_lines(&node), &node, &chunks, effective_base)?;
             }
         }
-        for line in extract_qsc_camera_lines(stream.xml_source()) {
-            self.set_camera(parse_qsc_camera(&line)?);
+        for node in camera_nodes {
+            self.set_camera(parse_qsc_camera_node(&node, self, effective_base)?);
         }
+        self.qsc_options = qsc_options;
+        self.animation_node = animation_node;
+        self.loaded_styles = loaded_styles;
+        self.scene_attributes = scene_attributes;
+        self.scene_extension_nodes = scene_extension_nodes;
         Ok(())
     }
 
     fn load_qsc_object_block(
         &mut self,
         block: &[String],
+        object_node: &LDom2Node,
         chunks: &BTreeMap<String, Vec<u8>>,
+        base_path: Option<&Path>,
     ) -> Result<()> {
         let object_line = block
             .first()
@@ -731,39 +1202,101 @@ impl MolScene {
             // Capture every supported surface representation. QDF1 is an ASCII
             // envelope, so it remains safe in the text datachunk map.
             let srctype = attr_value(object_line, "srctype").unwrap_or_default();
-            if object_type == "MolSurf" && matches!(srctype.as_str(), "obj" | "ply" | "qdfsurf") {
-                if let Some(data) =
-                    attr_value(object_line, "src").and_then(|src| chunks.get(&src).cloned())
-                {
+            if matches!(object_type.as_str(), "MolSurf" | "MolSurfObj")
+                && matches!(srctype.as_str(), "obj" | "ply" | "qdfsurf")
+            {
+                if let Ok(data) = load_qsc_source_data(object_line, chunks, base_path) {
                     self.loaded_surfaces.push(LoadedSurface {
-                        name: object_name,
+                        name: object_name.clone(),
+                        object_type: object_type.clone(),
                         srctype,
                         data: String::from_utf8_lossy(&data).into_owned(),
                         raw_data: data,
+                        qsc_node: Some(object_node.clone()),
                     });
                     return Ok(());
                 }
             }
-            if object_type == "DensityMap" && srctype == "qdfmap" {
-                if let Some(data) =
-                    attr_value(object_line, "src").and_then(|src| chunks.get(&src).cloned())
-                {
+            if matches!(object_type.as_str(), "DensityMap" | "ElePotMap")
+                && matches!(
+                    srctype.as_str(),
+                    "qdfmap"
+                        | "ccp4map"
+                        | "xplormap"
+                        | "brix"
+                        | "mmcifmap"
+                        | "mtzmap"
+                        | "apbs"
+                        | "qdfpot"
+                )
+            {
+                if let Ok(data) = load_qsc_source_data(object_line, chunks, base_path) {
                     self.loaded_density_maps.push(LoadedDensityMap {
-                        name: object_name,
+                        name: object_name.clone(),
+                        object_type: object_type.clone(),
                         srctype,
                         data: String::from_utf8_lossy(&data).into_owned(),
                         raw_data: data,
+                        qsc_node: Some(object_node.clone()),
                     });
                     return Ok(());
                 }
             }
+            if object_type == "LWObject" && matches!(srctype.as_str(), "qdflwobj" | "qdf_lwobj") {
+                if let Ok(data) = load_qsc_source_data(object_line, chunks, base_path) {
+                    let visible = attr_value(object_line, "visible").is_none_or(|value| {
+                        !matches!(value.as_str(), "false" | "0" | "no" | "off")
+                    });
+                    let renderers = block
+                        .iter()
+                        .map(|line| line.trim())
+                        .filter(|line| line.starts_with("<renderer "))
+                        .filter(|line| attr_value(line, "type").as_deref() == Some("lwrend"))
+                        .map(|line| LoadedLWRenderer {
+                            name: attr_value(line, "name").unwrap_or_else(|| "lwrend".to_string()),
+                            data_id: attr_value(line, "data_id")
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(0),
+                            visible: attr_value(line, "visible").is_none_or(|value| {
+                                !matches!(value.as_str(), "false" | "0" | "no" | "off")
+                            }),
+                            xform: attr_value(line, "xformMat")
+                                .as_deref()
+                                .and_then(parse_xform_mat)
+                                .unwrap_or(Matrix4::IDENTITY),
+                        })
+                        .collect();
+                    self.loaded_lw_objects.push(LoadedLWObject {
+                        name: object_name.clone(),
+                        srctype,
+                        raw_data: data,
+                        visible,
+                        xform: attr_value(object_line, "xformMat")
+                            .as_deref()
+                            .and_then(parse_xform_mat)
+                            .unwrap_or(Matrix4::IDENTITY),
+                        renderers,
+                        qsc_node: Some(object_node.clone()),
+                    });
+                    return Ok(());
+                }
+            }
+            let source = attr_value(object_line, "src").unwrap_or_default();
+            let raw_data = if source.is_empty() {
+                None
+            } else {
+                load_qsc_source_data(object_line, chunks, base_path).ok()
+            };
+            self.loaded_qsc_objects.push(LoadedQscObject {
+                name: object_name.clone(),
+                object_type: object_type.clone(),
+                node: object_node.clone(),
+                raw_data,
+            });
             self.skipped_qsc_objects.push((object_name, object_type));
             return Ok(());
         }
-        let data = attr_value(object_line, "src")
-            .and_then(|src| chunks.get(&src).cloned())
-            .or_else(|| chunks.values().next().cloned())
-            .ok_or_else(|| CueMolError::parse("QSC datachunk not found"))?;
+        let data = load_qsc_source_data(object_line, chunks, base_path)?;
         let srctype = attr_value(object_line, "srctype").unwrap_or_else(|| "qdfpdb".to_string());
         let molecule = match srctype.as_str() {
             "qdfmol" => {
@@ -779,13 +1312,22 @@ impl MolScene {
                     CueMolError::parse(format!("QSC PDB chunk is not UTF-8: {error}"))
                 })?)?
             }
+            "mmcif" | "cif" => read_mmcif_str(std::str::from_utf8(&data).map_err(|error| {
+                CueMolError::parse(format!("QSC mmCIF source is not UTF-8: {error}"))
+            })?)?,
+            "sdf" | "mol" => read_sdf_str(std::str::from_utf8(&data).map_err(|error| {
+                CueMolError::parse(format!("QSC SDF source is not UTF-8: {error}"))
+            })?)?,
+            "mol2" => read_mol2_str(std::str::from_utf8(&data).map_err(|error| {
+                CueMolError::parse(format!("QSC MOL2 source is not UTF-8: {error}"))
+            })?)?,
             other => {
                 return Err(CueMolError::invalid_argument(format!(
                     "unsupported QSC molecule source type {other}"
                 )))
             }
         };
-        let object_uid = self.add_molecule(object_name, molecule);
+        let object_uid = self.add_molecule_with_source_type(object_name, molecule, srctype);
         let object = self
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound("loaded QSC object".to_string()))?;
@@ -807,29 +1349,10 @@ impl MolScene {
             object.set_visible(!matches!(value.as_str(), "false" | "0" | "no" | "off"));
         }
 
-        let mut current_atomintr: Option<(String, Vec<(String, String)>)> = None;
+        let mut current_atomintr: Option<PendingAtomIntrRenderer> = None;
         let mut current_atomintr_attrs = BTreeMap::new();
-        // Object-level `<coloring type="...">` — its scheme name + tag attributes
-        // (rainbow start_hue/…), plus any `<paint sel color>` children. Collected
-        // here and applied to the object after the block walk.
-        let mut paint_entries: Vec<(String, String)> = Vec::new();
-        let mut coloring_type: Option<String> = None;
-        let mut coloring_attrs: BTreeMap<String, String> = BTreeMap::new();
-        let mut in_paint_coloring = false;
         for line in block.iter().map(|line| line.trim()) {
-            if line.starts_with("<coloring ") {
-                coloring_type = attr_value(line, "type");
-                coloring_attrs = attr_map(line);
-                in_paint_coloring = coloring_type.as_deref() == Some("PaintColoring");
-            } else if line.starts_with("</coloring>") {
-                in_paint_coloring = false;
-            } else if in_paint_coloring && line.starts_with("<paint ") {
-                if let (Some(sel), Some(color)) =
-                    (attr_value(line, "sel"), attr_value(line, "color"))
-                {
-                    paint_entries.push((sel, color));
-                }
-            } else if line.starts_with("<renderer ") {
+            if line.starts_with("<renderer ") {
                 let attrs = attr_map(line);
                 let renderer_type = attr_value(line, "type").unwrap_or_default();
                 let renderer_name =
@@ -838,37 +1361,81 @@ impl MolScene {
                     current_atomintr_attrs = attrs;
                     current_atomintr = Some((renderer_name, Vec::new()));
                 } else if renderer_type == "atomintr" {
-                    object.add_atom_intr_renderer_with_attrs(renderer_name, &[], attrs)?;
+                    object.add_atom_intr_renderer_defs_with_attrs(renderer_name, &[], attrs)?;
                 } else if !renderer_name.is_empty() {
                     object.add_renderer_with_attrs(renderer_type, renderer_name, attrs);
                 }
-            } else if line.starts_with("<line ") {
-                if let Some((_, lines)) = current_atomintr.as_mut() {
-                    let aid1 = attr_value(line, "aid1")
-                        .ok_or_else(|| CueMolError::parse("AtomIntr aid1 not found"))?;
-                    let aid2 = attr_value(line, "aid2")
-                        .ok_or_else(|| CueMolError::parse("AtomIntr aid2 not found"))?;
-                    lines.push((aid1, aid2));
+            } else if let Some(kind) = atom_intr_kind_from_line(line) {
+                if let Some((_, defs)) = current_atomintr.as_mut() {
+                    let aids = (1..=kind.atom_count())
+                        .map(|index| {
+                            attr_value(line, &format!("aid{index}")).ok_or_else(|| {
+                                CueMolError::parse(format!("AtomIntr aid{index} not found"))
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    defs.push((kind, aids));
                 }
             } else if line.starts_with("</renderer>") {
-                if let Some((name, lines)) = current_atomintr.take() {
-                    object.add_atom_intr_renderer_with_attrs(
+                if let Some((name, defs)) = current_atomintr.take() {
+                    object.add_atom_intr_renderer_defs_with_attrs(
                         name,
-                        &lines,
+                        &defs,
                         std::mem::take(&mut current_atomintr_attrs),
                     )?;
                 }
             }
         }
 
-        if let Some((name, lines)) = current_atomintr.take() {
-            object.add_atom_intr_renderer_with_attrs(name, &lines, current_atomintr_attrs)?;
+        if let Some((name, defs)) = current_atomintr.take() {
+            object.add_atom_intr_renderer_defs_with_attrs(name, &defs, current_atomintr_attrs)?;
         }
-        if !paint_entries.is_empty() {
-            object.set_paint_coloring(paint_entries);
-        }
-        if coloring_type.is_some() {
+
+        if let Some(coloring) = object_node
+            .children()
+            .iter()
+            .find(|node| !node.is_attr() && node.tag_name() == "coloring")
+        {
+            let coloring_type = if coloring.type_name().is_empty() {
+                let value = coloring.str_attr("type").to_string();
+                (!value.is_empty()).then_some(value)
+            } else {
+                Some(coloring.type_name().to_string())
+            };
+            let coloring_attrs = coloring
+                .children()
+                .iter()
+                .filter(|node| node.is_attr() && node.tag_name() != "type")
+                .map(|node| (node.tag_name().to_string(), node.value().to_string()))
+                .collect::<BTreeMap<_, _>>();
+            let paint_entries = coloring
+                .children()
+                .iter()
+                .filter(|node| !node.is_attr() && node.tag_name() == "paint")
+                .filter_map(|node| {
+                    let selection = node.str_attr("sel").to_string();
+                    let color = node.str_attr("color").to_string();
+                    (!selection.is_empty() && !color.is_empty()).then_some((selection, color))
+                })
+                .collect::<Vec<_>>();
             object.set_coloring(coloring_type, coloring_attrs);
+            object.set_paint_coloring(paint_entries);
+            object.qsc_coloring_node = Some(coloring.clone());
+        }
+
+        let renderer_nodes = object_node
+            .children()
+            .iter()
+            .filter(|node| !node.is_attr() && node.tag_name() == "renderer");
+        for (renderer, node) in object.renderers.iter_mut().zip(renderer_nodes) {
+            renderer.qsc_children = node
+                .children()
+                .iter()
+                .filter(|child| {
+                    !child.is_attr() && !matches!(child.tag_name(), "line" | "angle" | "torsion")
+                })
+                .cloned()
+                .collect();
         }
         Ok(())
     }
@@ -876,8 +1443,34 @@ impl MolScene {
     pub fn write_qsc_string(&self) -> String {
         let mut output = String::new();
         output.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\n");
-        output.push_str("<scene>\n");
-        output.push_str("\t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n");
+        output.push_str("<scene");
+        for (name, value) in &self.scene_attributes {
+            output.push_str(&format!(" {name}=\"{}\"", escape_xml(value)));
+        }
+        output.push_str(">\n");
+        for node in &self.scene_extension_nodes {
+            for line in qsc_node_lines(node) {
+                output.push('\t');
+                output.push_str(&line);
+                output.push('\n');
+            }
+        }
+        if let Some(options) = &self.qsc_options {
+            for line in qsc_node_lines(options) {
+                output.push('\t');
+                output.push_str(&line);
+                output.push('\n');
+            }
+        } else {
+            output.push_str("\t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n");
+        }
+        for style in &self.loaded_styles {
+            for line in qsc_node_lines(&style.node) {
+                output.push('\t');
+                output.push_str(&line);
+                output.push('\n');
+            }
+        }
         for (index, object) in self.objects.iter().enumerate() {
             let chunk_id = format!("{index:05}");
             // Emit `xformMat` only for a transformed object (C++ omits the identity
@@ -897,12 +1490,45 @@ impl MolScene {
                 " visible=\"false\"".to_string()
             };
             output.push_str(&format!(
-                "\t<object type=\"MolCoord\" name=\"{}\" src=\"datachunk:{}\" srctype=\"qdfpdb\"{}{}>\n",
+                "\t<object type=\"MolCoord\" name=\"{}\" src=\"datachunk:{}\" srctype=\"{}\"{}{}>\n",
                 escape_xml(object.name()),
                 chunk_id,
+                escape_xml(object.source_type()),
                 xform_attr,
                 visible_attr
             ));
+            if let Some(coloring) = object.qsc_coloring_node() {
+                for line in qsc_node_lines(coloring) {
+                    output.push_str("\t\t");
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+            } else if let Some(coloring_type) = object.coloring_type() {
+                let attrs = object
+                    .coloring_attrs
+                    .iter()
+                    .map(|(name, value)| format!(" {name}=\"{}\"", escape_xml(value)))
+                    .collect::<String>();
+                if object.paint_coloring().is_empty() {
+                    output.push_str(&format!(
+                        "\t\t<coloring type=\"{}\"{attrs}/>\n",
+                        escape_xml(coloring_type)
+                    ));
+                } else {
+                    output.push_str(&format!(
+                        "\t\t<coloring type=\"{}\"{attrs}>\n",
+                        escape_xml(coloring_type)
+                    ));
+                    for (selection, color) in object.paint_coloring() {
+                        output.push_str(&format!(
+                            "\t\t\t<paint sel=\"{}\" color=\"{}\"/>\n",
+                            escape_xml(selection),
+                            escape_xml(color)
+                        ));
+                    }
+                    output.push_str("\t\t</coloring>\n");
+                }
+            }
             for renderer in object.renderers() {
                 if renderer.renderer_type() == "atomintr" {
                     output.push_str(&format!(
@@ -910,25 +1536,187 @@ impl MolScene {
                         format_renderer_attrs(renderer, Some("DefaultLabel,DefaultAtomIntr"))
                     ));
                     for line in &renderer.atom_intr_lines {
-                        output.push_str(&format!(
-                            "\t\t\t<line aid1=\"{}\" aid2=\"{}\"/>\n",
-                            escape_xml(&line.aid1),
-                            escape_xml(&line.aid2)
-                        ));
+                        let attrs = line
+                            .aids
+                            .iter()
+                            .enumerate()
+                            .map(|(index, aid)| {
+                                format!(" aid{}=\"{}\"", index + 1, escape_xml(aid))
+                            })
+                            .collect::<String>();
+                        output.push_str(&format!("\t\t\t<{}{attrs}/>\n", line.kind.tag()));
+                    }
+                    for child in renderer.qsc_children() {
+                        for line in qsc_node_lines(child) {
+                            output.push_str("\t\t\t");
+                            output.push_str(&line);
+                            output.push('\n');
+                        }
                     }
                     output.push_str("\t\t</renderer>\n");
-                } else {
+                } else if renderer.qsc_children().is_empty() {
                     output.push_str(&format!(
                         "\t\t<renderer{}/>\n",
                         format_renderer_attrs(renderer, None)
                     ));
+                } else {
+                    output.push_str(&format!(
+                        "\t\t<renderer{}>\n",
+                        format_renderer_attrs(renderer, None)
+                    ));
+                    for child in renderer.qsc_children() {
+                        for line in qsc_node_lines(child) {
+                            output.push_str("\t\t\t");
+                            output.push_str(&line);
+                            output.push('\n');
+                        }
+                    }
+                    output.push_str("\t\t</renderer>\n");
                 }
             }
             output.push_str("\t</object>\n");
         }
-        for camera in &self.cameras {
+        let surface_base = self.objects.len();
+        for (index, surface) in self.loaded_surfaces.iter().enumerate() {
+            let chunk_id = format!("{:05}", surface_base + index);
+            if let Some(source_node) = &surface.qsc_node {
+                let mut node = source_node.clone();
+                if node.str_attr("src").as_str().starts_with("datachunk:") {
+                    node.set_str_attr("src", format!("datachunk:{chunk_id}"));
+                }
+                append_qsc_node(&mut output, &node, 1);
+            } else {
+                output.push_str(&format!(
+                    "\t<object type=\"{}\" name=\"{}\" src=\"datachunk:{}\" srctype=\"{}\">\n\t</object>\n",
+                    escape_xml(&surface.object_type),
+                    escape_xml(&surface.name),
+                    chunk_id,
+                    escape_xml(&surface.srctype),
+                ));
+            }
+        }
+        let map_base = surface_base + self.loaded_surfaces.len();
+        for (index, map) in self.loaded_density_maps.iter().enumerate() {
+            let chunk_id = format!("{:05}", map_base + index);
+            if let Some(source_node) = &map.qsc_node {
+                let mut node = source_node.clone();
+                if node.str_attr("src").as_str().starts_with("datachunk:") {
+                    node.set_str_attr("src", format!("datachunk:{chunk_id}"));
+                }
+                append_qsc_node(&mut output, &node, 1);
+            } else {
+                output.push_str(&format!(
+                    "\t<object type=\"{}\" name=\"{}\" src=\"datachunk:{}\" srctype=\"{}\">\n\t</object>\n",
+                    escape_xml(&map.object_type),
+                    escape_xml(&map.name),
+                    chunk_id,
+                    escape_xml(&map.srctype),
+                ));
+            }
+        }
+        let lw_base = map_base + self.loaded_density_maps.len();
+        for (index, object) in self.loaded_lw_objects.iter().enumerate() {
+            let chunk_id = format!("{:05}", lw_base + index);
+            if let Some(source_node) = &object.qsc_node {
+                let mut node = source_node.clone();
+                if node.str_attr("src").as_str().starts_with("datachunk:") {
+                    node.set_str_attr("src", format!("datachunk:{chunk_id}"));
+                }
+                append_qsc_node(&mut output, &node, 1);
+                continue;
+            }
+            let visible = if object.visible {
+                String::new()
+            } else {
+                " visible=\"false\"".to_string()
+            };
+            let xform = if object.xform == Matrix4::IDENTITY {
+                String::new()
+            } else {
+                format!(" xformMat=\"{}\"", format_xform_mat(object.xform))
+            };
             output.push_str(&format!(
-                "\t<camera center=\"{}\" centerMark=\"{}\" distance=\"{}\" name=\"{}\" perspec=\"{}\" rotation=\"{}\" slab=\"{}\" stereoDist=\"{}\" stereoMode=\"{}\" zoom=\"{}\"/>\n",
+                "\t<object type=\"LWObject\" name=\"{}\" src=\"datachunk:{}\" srctype=\"{}\"{}{}>\n",
+                escape_xml(&object.name),
+                chunk_id,
+                escape_xml(&object.srctype),
+                visible,
+                xform,
+            ));
+            for renderer in &object.renderers {
+                let visible = if renderer.visible {
+                    String::new()
+                } else {
+                    " visible=\"false\"".to_string()
+                };
+                let xform = if renderer.xform == Matrix4::IDENTITY {
+                    String::new()
+                } else {
+                    format!(" xformMat=\"{}\"", format_xform_mat(renderer.xform))
+                };
+                output.push_str(&format!(
+                    "\t\t<renderer type=\"lwrend\" name=\"{}\" data_id=\"{}\"{}{} />\n",
+                    escape_xml(&renderer.name),
+                    renderer.data_id,
+                    visible,
+                    xform,
+                ));
+            }
+            output.push_str("\t</object>\n");
+        }
+        let unknown_base = lw_base + self.loaded_lw_objects.len();
+        for (index, object) in self.loaded_qsc_objects.iter().enumerate() {
+            let mut node = object.node.clone();
+            if object.raw_data.is_some() && node.str_attr("src").as_str().starts_with("datachunk:")
+            {
+                node.set_str_attr("src", format!("datachunk:{:05}", unknown_base + index));
+            }
+            append_qsc_node(&mut output, &node, 1);
+        }
+        for camera in &self.cameras {
+            let source = if camera.source().is_empty() {
+                String::new()
+            } else {
+                format!(" src=\"{}\"", escape_xml(camera.source()))
+            };
+            let alt_source = if camera.alt_source().is_empty() {
+                String::new()
+            } else {
+                format!(" alt_src=\"{}\"", escape_xml(camera.alt_source()))
+            };
+            let visibility_nodes = camera
+                .visibility_settings()
+                .filter_map(|(uid, visible, is_object)| {
+                    if is_object {
+                        let object = self
+                            .objects
+                            .iter()
+                            .find(|object| object.uid().get() == uid)?;
+                        Some(format!(
+                            "\t\t\t<object target=\"{}\" value=\"{}\"/>",
+                            escape_xml(object.name()),
+                            visible
+                        ))
+                    } else {
+                        let (object, renderer) = self.objects.iter().find_map(|object| {
+                            object
+                                .renderers()
+                                .iter()
+                                .find(|renderer| renderer.uid().get() == uid)
+                                .map(|renderer| (object, renderer))
+                        })?;
+                        Some(format!(
+                            "\t\t\t<renderer target=\"{}\" type=\"{}\" client=\"{}\" value=\"{}\"/>",
+                            escape_xml(renderer.name()),
+                            escape_xml(renderer.renderer_type()),
+                            escape_xml(object.name()),
+                            visible
+                        ))
+                    }
+                })
+                .collect::<Vec<_>>();
+            output.push_str(&format!(
+                "\t<camera center=\"{}\" centerMark=\"{}\" distance=\"{}\" name=\"{}\" perspec=\"{}\" rotation=\"{}\" slab=\"{}\" stereoDist=\"{}\" stereoMode=\"{}\" zoom=\"{}\"{}{}",
                 format_vector3(camera.center()),
                 center_mark_to_qsc(camera.center_mark()),
                 format_float(camera.cam_dist()),
@@ -939,15 +1727,93 @@ impl MolScene {
                 format_float(camera.stereo_distance()),
                 stereo_mode_to_qsc(camera.stereo_mode()),
                 format_float(camera.zoom()),
+                source,
+                alt_source,
             ));
+            if visibility_nodes.is_empty() {
+                output.push_str("/>\n");
+            } else {
+                output.push_str(">\n\t\t<visibilities>\n");
+                for node in visibility_nodes {
+                    output.push_str(&node);
+                    output.push('\n');
+                }
+                output.push_str("\t\t</visibilities>\n\t</camera>\n");
+            }
+        }
+        if let Some(animation) = &self.animation_node {
+            for line in qsc_node_lines(animation) {
+                output.push('\t');
+                output.push_str(&line);
+                output.push('\n');
+            }
         }
         output.push_str("</scene>\n\n");
         output.push_str("========== End of XML ==========\n\n");
         for (index, object) in self.objects.iter().enumerate() {
             let chunk_id = format!("{index:05}");
-            output.push_str(&format!("==========START datachunk:{chunk_id}==========\n"));
-            output.push_str(&write_pdb_string(object.mol()));
-            output.push_str(&format!("\n==========END datachunk:{chunk_id}==========\n"));
+            if object.source_type() == "qdfmol" {
+                append_qsc_data_chunk(
+                    &mut output,
+                    &chunk_id,
+                    &crate::write_qdf_mol_bytes(object.mol()),
+                );
+            } else {
+                output.push_str(&format!("==========START datachunk:{chunk_id}==========\n"));
+                output.push_str(&write_pdb_string(object.mol()));
+                output.push_str(&format!("\n==========END datachunk:{chunk_id}==========\n"));
+            }
+        }
+        for (index, surface) in self.loaded_surfaces.iter().enumerate() {
+            let chunk_id = format!("{:05}", surface_base + index);
+            if surface
+                .qsc_node
+                .as_ref()
+                .is_some_and(|node| !node.str_attr("src").as_str().starts_with("datachunk:"))
+            {
+                continue;
+            }
+            let data = if surface.raw_data.is_empty() {
+                surface.data.as_bytes()
+            } else {
+                &surface.raw_data
+            };
+            append_qsc_data_chunk(&mut output, &chunk_id, data);
+        }
+        for (index, map) in self.loaded_density_maps.iter().enumerate() {
+            let chunk_id = format!("{:05}", map_base + index);
+            if map
+                .qsc_node
+                .as_ref()
+                .is_some_and(|node| !node.str_attr("src").as_str().starts_with("datachunk:"))
+            {
+                continue;
+            }
+            append_qsc_data_chunk(&mut output, &chunk_id, &map.raw_data);
+        }
+        for (index, object) in self.loaded_lw_objects.iter().enumerate() {
+            let chunk_id = format!("{:05}", lw_base + index);
+            if object
+                .qsc_node
+                .as_ref()
+                .is_some_and(|node| !node.str_attr("src").as_str().starts_with("datachunk:"))
+            {
+                continue;
+            }
+            append_qsc_data_chunk(&mut output, &chunk_id, &object.raw_data);
+        }
+        for (index, object) in self.loaded_qsc_objects.iter().enumerate() {
+            if !object
+                .node
+                .str_attr("src")
+                .as_str()
+                .starts_with("datachunk:")
+            {
+                continue;
+            }
+            if let Some(data) = &object.raw_data {
+                append_qsc_data_chunk(&mut output, &format!("{:05}", unknown_base + index), data);
+            }
         }
         output
     }
@@ -979,6 +1845,13 @@ impl MolSceneManager {
             skipped_qsc_objects: Vec::new(),
             loaded_surfaces: Vec::new(),
             loaded_density_maps: Vec::new(),
+            loaded_lw_objects: Vec::new(),
+            loaded_qsc_objects: Vec::new(),
+            loaded_styles: Vec::new(),
+            scene_attributes: BTreeMap::new(),
+            scene_extension_nodes: Vec::new(),
+            qsc_options: None,
+            animation_node: None,
         });
         uid
     }
@@ -1040,6 +1913,7 @@ impl MolSceneManager {
     }
 
     pub fn load_qsc_file_checked(&mut self, path: impl AsRef<Path>) -> Result<QscLoadStatus> {
+        let path = path.as_ref();
         let input = fs::read(path)?;
         if let Ok(text) = std::str::from_utf8(&input) {
             if let Some((oid, size)) = parse_git_lfs_pointer(text) {
@@ -1049,7 +1923,7 @@ impl MolSceneManager {
         let uid = self.new_scene("loaded scene");
         self.scene_mut(uid)
             .ok_or_else(|| CueMolError::NotFound("loaded scene".to_string()))?
-            .load_qsc_bytes(&input)?;
+            .load_qsc_bytes_with_base_path(&input, path.parent())?;
         Ok(QscLoadStatus::Loaded { scene_uid: uid })
     }
 
@@ -1158,12 +2032,15 @@ impl MolCommandManager {
         file_path: impl AsRef<Path>,
         target_scene: Option<Uid>,
     ) -> Result<LoadSceneResult> {
-        let input = fs::read_to_string(file_path)?;
-        if let Some((oid, size)) = parse_git_lfs_pointer(&input) {
-            return Ok(LoadSceneResult {
-                result_scene: None,
-                status: QscLoadStatus::GitLfsPointer { oid, size },
-            });
+        let file_path = file_path.as_ref();
+        let input = fs::read(file_path)?;
+        if let Ok(text) = std::str::from_utf8(&input) {
+            if let Some((oid, size)) = parse_git_lfs_pointer(text) {
+                return Ok(LoadSceneResult {
+                    result_scene: None,
+                    status: QscLoadStatus::GitLfsPointer { oid, size },
+                });
+            }
         }
 
         let scene_uid = match target_scene {
@@ -1173,7 +2050,7 @@ impl MolCommandManager {
         self.scene_manager
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?
-            .load_qsc_str(&input)?;
+            .load_qsc_bytes_with_base_path(&input, file_path.parent())?;
         Ok(LoadSceneResult {
             result_scene: Some(scene_uid),
             status: QscLoadStatus::Loaded { scene_uid },
@@ -1210,11 +2087,99 @@ fn atom_display_name(atom: &Atom) -> String {
     )
 }
 
+fn load_qsc_source_data(
+    object_line: &str,
+    chunks: &BTreeMap<String, Vec<u8>>,
+    base_path: Option<&Path>,
+) -> Result<Vec<u8>> {
+    let src = attr_value(object_line, "src").unwrap_or_default();
+    if src.starts_with("datachunk:") {
+        return chunks
+            .get(&src)
+            .cloned()
+            .ok_or_else(|| CueMolError::parse(format!("QSC datachunk not found: {src}")));
+    }
+    if src.is_empty() {
+        return chunks
+            .values()
+            .next()
+            .cloned()
+            .ok_or_else(|| CueMolError::parse("QSC object source not found"));
+    }
+
+    let alt_src = attr_value(object_line, "alt_src").unwrap_or_default();
+    let mut errors = Vec::new();
+    for source in [src.as_str(), alt_src.as_str()]
+        .into_iter()
+        .filter(|source| !source.is_empty())
+    {
+        let path = Path::new(source);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            base_path.unwrap_or_else(|| Path::new(".")).join(path)
+        };
+        match crate::read_bytes_maybe_compressed(&path) {
+            Ok(data) => return Ok(data),
+            Err(error) => errors.push(format!("{}: {error}", path.display())),
+        }
+    }
+    Err(CueMolError::Io(format!(
+        "failed to load QSC object source: {}",
+        errors.join("; ")
+    )))
+}
+
 fn attr_value(line: &str, name: &str) -> Option<String> {
-    let marker = format!("{name}=\"");
-    let start = line.find(&marker)? + marker.len();
-    let end = line[start..].find('"')? + start;
-    Some(line[start..end].to_string())
+    for quote in ['"', '\''] {
+        let marker = format!("{name}={quote}");
+        if let Some(marker_start) = line.find(&marker) {
+            let start = marker_start + marker.len();
+            let end = line[start..].find(quote)? + start;
+            return unescape_xml_value(&line[start..end]);
+        }
+    }
+    None
+}
+
+fn unescape_xml_value(input: &str) -> Option<String> {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(index) = rest.find('&') {
+        output.push_str(&rest[..index]);
+        rest = &rest[index + 1..];
+        let end = rest.find(';')?;
+        let entity = &rest[..end];
+        match entity {
+            "amp" => output.push('&'),
+            "lt" => output.push('<'),
+            "gt" => output.push('>'),
+            "quot" => output.push('"'),
+            "apos" => output.push('\''),
+            value if value.starts_with("#x") => {
+                output.push(char::from_u32(u32::from_str_radix(&value[2..], 16).ok()?)?);
+            }
+            value if value.starts_with('#') => {
+                output.push(char::from_u32(value[1..].parse().ok()?)?);
+            }
+            _ => return None,
+        }
+        rest = &rest[end + 1..];
+    }
+    output.push_str(rest);
+    Some(output)
+}
+
+fn atom_intr_kind_from_line(line: &str) -> Option<AtomIntrKind> {
+    if line.starts_with("<line ") {
+        Some(AtomIntrKind::Distance)
+    } else if line.starts_with("<angle ") {
+        Some(AtomIntrKind::Angle)
+    } else if line.starts_with("<torsion ") {
+        Some(AtomIntrKind::Torsion)
+    } else {
+        None
+    }
 }
 
 fn attr_map(line: &str) -> BTreeMap<String, String> {
@@ -1233,13 +2198,21 @@ fn attr_map(line: &str) -> BTreeMap<String, String> {
         };
         let name = rest[..eq_pos].trim();
         let after_eq = rest[eq_pos + 1..].trim_start();
-        let Some(after_quote) = after_eq.strip_prefix('"') else {
+        let Some(quote) = after_eq
+            .chars()
+            .next()
+            .filter(|quote| matches!(quote, '"' | '\''))
+        else {
             return attrs;
         };
-        let Some(end_quote) = after_quote.find('"') else {
+        let after_quote = &after_eq[quote.len_utf8()..];
+        let Some(end_quote) = after_quote.find(quote) else {
             return attrs;
         };
-        attrs.insert(name.to_string(), after_quote[..end_quote].to_string());
+        let Some(value) = unescape_xml_value(&after_quote[..end_quote]) else {
+            return attrs;
+        };
+        attrs.insert(name.to_string(), value);
         rest = &after_quote[end_quote + 1..];
     }
 }
@@ -1277,73 +2250,123 @@ fn trim_ascii_bytes(mut value: &[u8]) -> &[u8] {
     value
 }
 
-fn extract_qsc_object_blocks(xml: &str) -> Vec<Vec<String>> {
-    let mut blocks = Vec::new();
-    let mut current: Option<Vec<String>> = None;
-    for line in xml.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("<object ") {
-            current = Some(vec![trimmed.to_string()]);
-            if trimmed.ends_with("/>") {
-                if let Some(block) = current.take() {
-                    blocks.push(block);
-                }
-            }
-        } else if let Some(block) = current.as_mut() {
-            block.push(trimmed.to_string());
-            if trimmed.starts_with("</object>") {
-                if let Some(block) = current.take() {
-                    blocks.push(block);
-                }
-            }
-        }
-    }
-    blocks
-}
-
-fn extract_qsc_camera_lines(xml: &str) -> Vec<String> {
-    xml.lines()
+fn qsc_node_lines(node: &LDom2Node) -> Vec<String> {
+    write_ldom2_xml(&LDom2Tree::from(node.clone()))
+        .lines()
         .map(str::trim)
-        .filter(|line| line.starts_with("<camera "))
+        .filter(|line| !line.is_empty() && !line.starts_with("<?xml"))
         .map(str::to_string)
         .collect()
 }
 
-fn parse_qsc_camera(line: &str) -> Result<Camera> {
+fn append_qsc_node(output: &mut String, node: &LDom2Node, indent: usize) {
+    let pad = "\t".repeat(indent);
+    for line in qsc_node_lines(node) {
+        output.push_str(&pad);
+        output.push_str(&line);
+        output.push('\n');
+    }
+}
+
+fn parse_qsc_camera_node(
+    node: &LDom2Node,
+    scene: &MolScene,
+    base_path: Option<&Path>,
+) -> Result<Camera> {
+    let source = node.str_attr("src").to_string();
+    let alt_source = node.str_attr("alt_src").to_string();
     let mut camera = Camera::default();
-    if let Some(name) = attr_value(line, "name") {
+    if !source.is_empty() {
+        let source_line = qsc_node_lines(node)
+            .into_iter()
+            .next()
+            .ok_or_else(|| CueMolError::parse("QSC camera element not found"))?;
+        let data = load_qsc_source_data(&source_line, &BTreeMap::new(), base_path)?;
+        let external = parse_ldom2_xml(&String::from_utf8_lossy(&data))?;
+        if external.top().tag_name() != "camera" {
+            return Err(CueMolError::parse(format!(
+                "external camera root is not camera: {}",
+                external.top().tag_name()
+            )));
+        }
+        apply_qsc_camera_node(&mut camera, external.top(), scene)?;
+    }
+    apply_qsc_camera_node(&mut camera, node, scene)?;
+    camera.set_source(source);
+    camera.set_alt_source(alt_source);
+    Ok(camera)
+}
+
+fn apply_qsc_camera_node(camera: &mut Camera, node: &LDom2Node, scene: &MolScene) -> Result<()> {
+    let attr = |name: &str| {
+        let value = node.str_attr(name).to_string();
+        (!value.is_empty()).then_some(value)
+    };
+    if let Some(name) = attr("name") {
         camera.set_name(name);
     }
-    if let Some(center) = attr_value(line, "center") {
+    if let Some(center) = attr("center") {
         camera.set_center(parse_vector3(&center)?);
     }
-    if let Some(rotation) = attr_value(line, "rotation") {
+    if let Some(rotation) = attr("rotation") {
         camera.set_rotation(parse_quat(&rotation)?);
     }
-    if let Some(distance) = attr_value(line, "distance").and_then(|value| value.parse().ok()) {
+    if let Some(distance) = attr("distance").and_then(|value| value.parse().ok()) {
         camera.set_cam_dist(distance);
     }
-    if let Some(slab) = attr_value(line, "slab").and_then(|value| value.parse().ok()) {
+    if let Some(slab) = attr("slab").and_then(|value| value.parse().ok()) {
         camera.set_slab_depth(slab);
     }
-    if let Some(zoom) = attr_value(line, "zoom").and_then(|value| value.parse().ok()) {
+    if let Some(zoom) = attr("zoom").and_then(|value| value.parse().ok()) {
         camera.set_zoom(zoom);
     }
-    if let Some(stereo_distance) =
-        attr_value(line, "stereoDist").and_then(|value| value.parse().ok())
-    {
+    if let Some(stereo_distance) = attr("stereoDist").and_then(|value| value.parse().ok()) {
         camera.set_stereo_distance(stereo_distance);
     }
-    if let Some(perspective) = attr_value(line, "perspec") {
+    if let Some(perspective) = attr("perspec") {
         camera.set_perspective(perspective.eq_ignore_ascii_case("true"));
     }
-    if let Some(center_mark) = attr_value(line, "centerMark") {
+    if let Some(center_mark) = attr("centerMark") {
         camera.set_center_mark(center_mark_from_qsc(&center_mark));
     }
-    if let Some(stereo_mode) = attr_value(line, "stereoMode") {
+    if let Some(stereo_mode) = attr("stereoMode") {
         camera.set_stereo_mode(stereo_mode_from_qsc(&stereo_mode));
     }
-    Ok(camera)
+
+    let Some(visibilities) = node.find_child("visibilities") else {
+        return Ok(());
+    };
+    camera.clear_visibility_settings();
+    for setting in visibilities
+        .children()
+        .iter()
+        .filter(|child| !child.is_attr())
+    {
+        let visible = setting.value().eq_ignore_ascii_case("true");
+        match setting.tag_name() {
+            "object" => {
+                let target = setting.str_attr("target").to_string();
+                if let Some(object) = scene.object_by_name(&target) {
+                    camera.vis_append(object.uid().get(), visible, true);
+                }
+            }
+            "renderer" => {
+                let client = setting.str_attr("client").to_string();
+                let target = setting.str_attr("target").to_string();
+                let renderer_type = setting.str_attr("type").to_string();
+                let renderer = scene.object_by_name(&client).and_then(|object| {
+                    object.renderer_by_name(&target).filter(|renderer| {
+                        renderer_type.is_empty() || renderer.renderer_type() == renderer_type
+                    })
+                });
+                if let Some(renderer) = renderer {
+                    camera.vis_append(renderer.uid().get(), visible, false);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn parse_vector3(input: &str) -> Result<Vector4> {
@@ -1509,6 +2532,21 @@ fn escape_xml(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn append_qsc_data_chunk(output: &mut String, chunk_id: &str, data: &[u8]) {
+    output.push_str(&format!("==========START datachunk:{chunk_id}==========\n"));
+    let encoded = if data.starts_with(b"QDF0") {
+        cuemol_qsys::encode_qdf0_bytes(data, 1, "10").ok()
+    } else {
+        None
+    };
+    let text = encoded.as_deref().unwrap_or(data);
+    output.push_str(&String::from_utf8_lossy(text));
+    if !text.ends_with(b"\n") {
+        output.push('\n');
+    }
+    output.push_str(&format!("==========END datachunk:{chunk_id}==========\n"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1570,6 +2608,7 @@ mod tests {
             name: "simple".to_string(),
             renderer_type: "simple".to_string(),
             qsc_attrs: BTreeMap::new(),
+            qsc_children: Vec::new(),
             atom_intr_lines: Vec::new(),
             selection: Selector::All,
             coloring: SolidColoring::new(),
@@ -1680,6 +2719,122 @@ mod tests {
     }
 
     #[test]
+    fn qsc_xml_entities_round_trip_in_names_and_renderer_properties() {
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("entities");
+        let object_uid = manager.scene_mut(scene_uid).unwrap().add_molecule(
+            "A&B <object>",
+            read_pdb_str("ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n")
+                .unwrap(),
+        );
+        let renderer_uid = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "R&1");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap()
+            .set_qsc_attr("style", "one&two");
+
+        let qsc = manager.scene(scene_uid).unwrap().write_qsc_string();
+        assert!(qsc.contains("name=\"A&amp;B &lt;object&gt;\""));
+        let mut reloaded = MolSceneManager::new();
+        let reloaded_uid = reloaded.new_scene("reloaded");
+        reloaded
+            .scene_mut(reloaded_uid)
+            .unwrap()
+            .load_qsc_str(&qsc)
+            .unwrap();
+        let object = reloaded
+            .scene(reloaded_uid)
+            .unwrap()
+            .object_by_name("A&B <object>")
+            .unwrap();
+        let renderer = object.renderer_by_name("R&1").unwrap();
+        assert_eq!(renderer.qsc_attr("style"), Some("one&two"));
+    }
+
+    #[test]
+    fn atom_intr_angle_and_torsion_round_trip_through_qsc() {
+        let molecule = read_pdb_str(
+            "ATOM      1  A1  GLY A   1       1.000   0.000   0.000  1.00 10.00\n\
+             ATOM      2  A2  GLY A   1       0.000   0.000   0.000  1.00 10.00\n\
+             ATOM      3  A3  GLY A   1       0.000   1.000   0.000  1.00 10.00\n\
+             ATOM      4  A4  GLY A   1       0.000   1.000   1.000  1.00 10.00\n",
+        )
+        .unwrap();
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("measurements");
+        let scene = manager.scene_mut(scene_uid).unwrap();
+        let object_uid = scene.add_molecule("mol", molecule);
+        let object = scene.object_mut(object_uid).unwrap();
+        object
+            .add_atom_intr_renderer_defs(
+                "measure",
+                &[
+                    (
+                        AtomIntrKind::Distance,
+                        vec!["0".to_string(), "1".to_string()],
+                    ),
+                    (
+                        AtomIntrKind::Angle,
+                        vec!["0".to_string(), "1".to_string(), "2".to_string()],
+                    ),
+                    (
+                        AtomIntrKind::Torsion,
+                        vec![
+                            "0".to_string(),
+                            "1".to_string(),
+                            "2".to_string(),
+                            "3".to_string(),
+                        ],
+                    ),
+                ],
+            )
+            .unwrap();
+
+        let renderer = object.renderer_by_name("measure").unwrap();
+        let values = object.atom_intr_values(renderer);
+        assert!((values[0].unwrap() - 1.0).abs() < 1.0e-9);
+        assert!((values[1].unwrap() - 90.0).abs() < 1.0e-9);
+        assert!(values[2].unwrap().abs() > 89.9);
+        assert_eq!(object.atom_intr_segments(renderer).len(), 6);
+        let labels = object.atom_intr_labels(renderer);
+        assert_eq!(labels.len(), 3);
+        assert_eq!(labels[0].1, "1.00");
+        assert_eq!(labels[1].1, "90.00");
+        assert_eq!(labels[0].0, Vector4::new3(0.5, 0.0, 0.0));
+        assert_eq!(labels[2].0, Vector4::new3(0.0, 0.5, 0.0));
+
+        let qsc = manager.scene(scene_uid).unwrap().write_qsc_string();
+        assert!(qsc.contains("<angle aid1=\"0\" aid2=\"1\" aid3=\"2\"/>"));
+        assert!(qsc.contains("<torsion aid1=\"0\" aid2=\"1\" aid3=\"2\" aid4=\"3\"/>"));
+
+        let mut reloaded = MolSceneManager::new();
+        let reloaded_uid = reloaded.new_scene("reloaded");
+        reloaded
+            .scene_mut(reloaded_uid)
+            .unwrap()
+            .load_qsc_str(&qsc)
+            .unwrap();
+        let object = reloaded
+            .scene(reloaded_uid)
+            .unwrap()
+            .object_by_name("mol")
+            .unwrap();
+        let renderer = object.renderer_by_name("measure").unwrap();
+        assert!(renderer.get_defs_json().contains("\"mode\":2"));
+        assert!(renderer.get_defs_json().contains("\"mode\":3"));
+        assert_eq!(object.atom_intr_segments(renderer).len(), 6);
+    }
+
+    #[test]
     fn qsc_load_skips_non_molecule_objects_gracefully() {
         // A `.qsc` saved by C++ CueMol2 can hold non-molecule objects (a MolSurf surface
         // or DensityMap map) whose datachunk is a QDF binary, not PDB. The loader used to
@@ -1767,11 +2922,12 @@ mod tests {
 
     #[test]
     fn qsc_loads_native_qdfmol_datachunk() {
-        let source = read_pdb_str(
+        let mut source = read_pdb_str(
             "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00\n\
              ATOM      2  C   ALA A   1       2.000   2.000   3.000  1.00 11.00\n",
         )
         .unwrap();
+        source.atoms_mut()[0].set_int_prop("custom", 42);
         let qdf0 = crate::write_qdf_mol_bytes(&source);
         let encoded = cuemol_qsys::encode_qdf0_bytes(&qdf0, 1, "13").unwrap();
         let encoded = String::from_utf8(encoded).unwrap();
@@ -1800,6 +2956,74 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.mol().atom_count(), 2);
         assert_eq!(loaded.mol().atoms()[0].position, source.atoms()[0].position);
+        assert_eq!(loaded.source_type(), "qdfmol");
+        assert_eq!(loaded.mol().atoms()[0].int_prop("custom"), Some(42));
+
+        let rewritten = manager.scene(scene_uid).unwrap().write_qsc_string();
+        assert!(rewritten.contains("srctype=\"qdfmol\""));
+        let mut reloaded = MolSceneManager::new();
+        let reloaded_uid = reloaded.new_scene("rewritten");
+        reloaded
+            .scene_mut(reloaded_uid)
+            .unwrap()
+            .load_qsc_str(&rewritten)
+            .unwrap();
+        let reloaded_object = reloaded
+            .scene(reloaded_uid)
+            .unwrap()
+            .object_by_name("native")
+            .unwrap();
+        assert_eq!(reloaded_object.source_type(), "qdfmol");
+        assert_eq!(
+            reloaded_object.mol().atoms()[0].int_prop("custom"),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn qsc_file_loads_relative_external_source_and_alt_source() {
+        let directory = std::env::temp_dir().join(format!(
+            "cuemol-qsc-linked-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let molecule_path = directory.join("linked.pdb");
+        fs::write(
+            &molecule_path,
+            "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00\n",
+        )
+        .unwrap();
+        let qsc_path = directory.join("linked.qsc");
+        fs::write(
+            &qsc_path,
+            "<scene>\n\
+             <object\n\
+               type='MolCoord'\n\
+               name='linked'\n\
+               src='missing.pdb'\n\
+               alt_src='linked.pdb'\n\
+               srctype='pdb'>\n\
+             </object>\n\
+             </scene>\n",
+        )
+        .unwrap();
+
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.load_qsc_file(&qsc_path).unwrap();
+        let object = manager
+            .scene(scene_uid)
+            .unwrap()
+            .object_by_name("linked")
+            .unwrap();
+        assert_eq!(object.source_type(), "pdb");
+        assert_eq!(object.mol().atom_count(), 1);
+        assert_eq!(
+            object.mol().atoms()[0].position,
+            Vector4::new3(1.0, 2.0, 3.0)
+        );
+
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -1834,5 +3058,342 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.mol().atom_count(), 1);
         assert_eq!(loaded.mol().atoms()[0].position, source.atoms()[0].position);
+    }
+
+    #[test]
+    fn qsc_animation_only_scene_preserves_unknown_motions() {
+        let qsc = r#"<scene>
+          <qsc_opts base64="true" compress="xzip" version="QDF1"/>
+          <animation length="1200" startcam="cam&amp;one" loop="true">
+            <motion type="SimpleSpin" name="spin" start="0" end="1200" angle="90"/>
+            <motion type="PluginMotion" name="extra" payload="x&lt;y"/>
+          </animation>
+        </scene>"#;
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("animation");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .load_qsc_str(qsc)
+            .unwrap();
+        let animation = manager.scene(scene_uid).unwrap().animation_node().unwrap();
+        assert_eq!(animation.str_attr("startcam").as_str(), "cam&one");
+        assert_eq!(
+            manager
+                .scene(scene_uid)
+                .unwrap()
+                .qsc_options()
+                .unwrap()
+                .str_attr("compress")
+                .as_str(),
+            "xzip"
+        );
+        assert_eq!(
+            animation
+                .children()
+                .iter()
+                .filter(|child| child.tag_name() == "motion")
+                .count(),
+            2
+        );
+
+        let rewritten = manager.scene(scene_uid).unwrap().write_qsc_string();
+        assert!(rewritten.contains("type=\"PluginMotion\""));
+        assert!(rewritten.contains("payload=\"x&lt;y\""));
+        assert!(
+            rewritten.contains("<qsc_opts base64=\"true\" compress=\"xzip\" version=\"QDF1\"/>")
+        );
+        let mut reloaded = MolSceneManager::new();
+        let reloaded_uid = reloaded.new_scene("reloaded");
+        reloaded
+            .scene_mut(reloaded_uid)
+            .unwrap()
+            .load_qsc_str(&rewritten)
+            .unwrap();
+        assert_eq!(
+            reloaded
+                .scene(reloaded_uid)
+                .unwrap()
+                .animation_node()
+                .unwrap()
+                .children()
+                .iter()
+                .filter(|child| child.tag_name() == "motion")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn qsc_scene_styles_round_trip_without_losing_order_or_metadata() {
+        let qsc = r#"<scene>
+          <styles id="low">
+            <style id="LocalBall" bondw="0.31"/>
+          </styles>
+          <styles id="high" readonly="true">
+            <style id="LocalBall" bondw="0.47"/>
+          </styles>
+        </scene>"#;
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("styles");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .load_qsc_str(qsc)
+            .unwrap();
+
+        let scene = manager.scene(scene_uid).unwrap();
+        assert_eq!(scene.loaded_styles().len(), 2);
+        assert_eq!(scene.loaded_styles()[0].node.str_attr("id").as_str(), "low");
+        assert_eq!(
+            scene.loaded_styles()[1].node.str_attr("readonly").as_str(),
+            "true"
+        );
+        assert!(scene.loaded_styles()[1].data.contains("bondw=\"0.47\""));
+
+        let rewritten = scene.write_qsc_string();
+        assert!(rewritten.find("id=\"low\"").unwrap() < rewritten.find("id=\"high\"").unwrap());
+        let mut reloaded = MolSceneManager::new();
+        let reloaded_uid = reloaded.new_scene("styles-reloaded");
+        reloaded
+            .scene_mut(reloaded_uid)
+            .unwrap()
+            .load_qsc_str(&rewritten)
+            .unwrap();
+        assert_eq!(
+            reloaded.scene(reloaded_uid).unwrap().loaded_styles().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn qsc_scene_metadata_extensions_and_camera_visibilities_round_trip() {
+        let qsc = r#"<scene aoEnabled="true" aa_method="fxaa">
+          <plugin-state id="extension" enabled="yes"><entry key="x"/></plugin-state>
+          <object type="MolCoord" name="mol" src="datachunk:00000" srctype="qdfpdb">
+            <renderer type="simple" name="main"/>
+          </object>
+          <camera name="saved" zoom="40">
+            <visibilities>
+              <object target="mol" value="false"/>
+              <renderer target="main" type="simple" client="mol" value="true"/>
+            </visibilities>
+          </camera>
+        </scene>
+========== End of XML ==========
+==========START datachunk:00000==========
+ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00
+==========END datachunk:00000==========
+"#;
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("metadata");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .load_qsc_str(qsc)
+            .unwrap();
+
+        let scene = manager.scene(scene_uid).unwrap();
+        assert_eq!(scene.scene_attribute("aoEnabled"), Some("true"));
+        assert_eq!(scene.scene_attribute("aa_method"), Some("fxaa"));
+        assert_eq!(scene.scene_extension_nodes().len(), 1);
+        assert_eq!(
+            scene.scene_extension_nodes()[0].str_attr("id").as_str(),
+            "extension"
+        );
+        let camera = scene.camera_by_name("saved").unwrap();
+        assert_eq!(camera.visibility_size(), 2);
+        let object = scene.object_by_name("mol").unwrap();
+        let renderer = object.renderer_by_name("main").unwrap();
+        let settings = camera.visibility_settings().collect::<Vec<_>>();
+        assert!(settings.contains(&(object.uid().get(), false, true)));
+        assert!(settings.contains(&(renderer.uid().get(), true, false)));
+
+        let rewritten = scene.write_qsc_string();
+        assert!(rewritten.contains("<scene aa_method=\"fxaa\" aoEnabled=\"true\">"));
+        assert!(rewritten.contains("<plugin-state id=\"extension\" enabled=\"yes\">"));
+        assert!(rewritten.contains("<visibilities>"));
+        let mut reloaded = MolSceneManager::new();
+        let reloaded_uid = reloaded.new_scene("metadata-reloaded");
+        reloaded
+            .scene_mut(reloaded_uid)
+            .unwrap()
+            .load_qsc_str(&rewritten)
+            .unwrap();
+        let reloaded_scene = reloaded.scene(reloaded_uid).unwrap();
+        assert_eq!(
+            reloaded_scene
+                .camera_by_name("saved")
+                .unwrap()
+                .visibility_size(),
+            2
+        );
+        assert_eq!(reloaded_scene.scene_extension_nodes().len(), 1);
+    }
+
+    #[test]
+    fn qsc_camera_loads_relative_external_file_then_applies_inline_overrides() {
+        let directory = std::env::temp_dir().join(format!(
+            "cuemol-qsc-camera-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("saved.xml"),
+            r#"<camera name="external" zoom="12" slab="25" center="(1,2,3)"/>"#,
+        )
+        .unwrap();
+        let qsc_path = directory.join("scene.qsc");
+        fs::write(
+            &qsc_path,
+            r#"<scene><camera src="saved.xml" name="inline" zoom="18"/></scene>"#,
+        )
+        .unwrap();
+
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.load_qsc_file(&qsc_path).unwrap();
+        let camera = manager
+            .scene(scene_uid)
+            .unwrap()
+            .camera_by_name("inline")
+            .unwrap();
+        assert_eq!(camera.source(), "saved.xml");
+        assert_eq!(camera.zoom(), 18.0);
+        assert_eq!(camera.slab_depth(), 25.0);
+        assert_eq!(camera.center(), Vector4::new3(1.0, 2.0, 3.0));
+        assert!(manager
+            .scene(scene_uid)
+            .unwrap()
+            .write_qsc_string()
+            .contains("src=\"saved.xml\""));
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn qsc_object_and_renderer_coloring_children_round_trip() {
+        let qsc = r#"<scene>
+          <object type="MolCoord" name="mol" src="datachunk:00000" srctype="qdfpdb">
+            <coloring type="PaintColoring"><paint sel="*" color="red"/></coloring>
+            <renderer type="trace" name="main">
+              <coloring type="RainbowColoring" start_hue="120" end_hue="30"/>
+              <plugin-option id="keep" value="yes"/>
+            </renderer>
+          </object>
+        </scene>
+========== End of XML ==========
+==========START datachunk:00000==========
+ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00
+==========END datachunk:00000==========
+"#;
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("renderer-children");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .load_qsc_str(qsc)
+            .unwrap();
+        let object = manager
+            .scene(scene_uid)
+            .unwrap()
+            .object_by_name("mol")
+            .unwrap();
+        assert_eq!(object.coloring_type(), Some("PaintColoring"));
+        assert_eq!(
+            object.paint_coloring(),
+            &[("*".to_string(), "red".to_string())]
+        );
+        let renderer = object.renderer_by_name("main").unwrap();
+        let styles = StyleManager::new();
+        assert_eq!(
+            renderer
+                .resolved_child_type("coloring", &styles, 0)
+                .as_deref(),
+            Some("RainbowColoring")
+        );
+        assert_eq!(
+            renderer
+                .resolved_child_attr("coloring", "start_hue", &styles, 0)
+                .as_deref(),
+            Some("120")
+        );
+        assert_eq!(renderer.qsc_children().len(), 2);
+
+        let rewritten = manager.scene(scene_uid).unwrap().write_qsc_string();
+        assert!(rewritten.contains("<coloring type=\"PaintColoring\">"));
+        assert!(rewritten.contains("<coloring type=\"RainbowColoring\" start_hue=\"120\""));
+        assert!(rewritten.contains("<plugin-option id=\"keep\" value=\"yes\"/>"));
+        let mut reloaded = MolSceneManager::new();
+        let reloaded_uid = reloaded.new_scene("renderer-children-reloaded");
+        reloaded
+            .scene_mut(reloaded_uid)
+            .unwrap()
+            .load_qsc_str(&rewritten)
+            .unwrap();
+        assert_eq!(
+            reloaded
+                .scene(reloaded_uid)
+                .unwrap()
+                .object_by_name("mol")
+                .unwrap()
+                .renderer_by_name("main")
+                .unwrap()
+                .qsc_children()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn unsupported_qsc_object_preserves_dom_and_datachunk() {
+        let qsc = r#"<scene>
+          <object type="PluginObject" name="opaque" src="datachunk:00000" srctype="plugin-data">
+            <renderer type="PluginRenderer" name="custom"><option id="mode" value="x"/></renderer>
+          </object>
+        </scene>
+========== End of XML ==========
+==========START datachunk:00000==========
+opaque payload
+==========END datachunk:00000==========
+"#;
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("unknown");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .load_qsc_str(qsc)
+            .unwrap();
+        let scene = manager.scene(scene_uid).unwrap();
+        assert_eq!(
+            scene.skipped_qsc_objects(),
+            &[("opaque".into(), "PluginObject".into())]
+        );
+        assert_eq!(scene.loaded_qsc_objects().len(), 1);
+        assert!(scene.loaded_qsc_objects()[0]
+            .raw_data
+            .as_deref()
+            .unwrap()
+            .starts_with(b"opaque payload"));
+
+        let rewritten = scene.write_qsc_string();
+        assert!(rewritten.contains("type=\"PluginObject\""));
+        assert!(rewritten.contains("<option id=\"mode\" value=\"x\"/>"));
+        assert!(rewritten.contains("opaque payload"));
+        let mut reloaded = MolSceneManager::new();
+        let reloaded_uid = reloaded.new_scene("unknown-reloaded");
+        reloaded
+            .scene_mut(reloaded_uid)
+            .unwrap()
+            .load_qsc_str(&rewritten)
+            .unwrap();
+        assert_eq!(
+            reloaded
+                .scene(reloaded_uid)
+                .unwrap()
+                .loaded_qsc_objects()
+                .len(),
+            1
+        );
     }
 }

@@ -9,6 +9,7 @@ cuemol-core.workspace = true
 cuemol-gfx.workspace = true
 cuemol-molstr.workspace = true
 cuemol-qsys.workspace = true
+lyon.workspace = true
 
 [lib]
 name = "cuemol_surface"

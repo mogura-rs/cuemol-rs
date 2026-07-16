@@ -1,31 +1,36 @@
-use cuemol_anim::{MorphFrame, MorphMol};
-use cuemol_core::{CueMolError, Matrix4, Result, Uid};
+use cuemol_anim::{AnimMgr, MorphFrame, MorphMol};
+use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
 use cuemol_importers::PseFileReader;
 use cuemol_mdtools::{read_amber_prmtop_file, read_gro_file, read_psf_file};
 use cuemol_molanl::MolAnlManager;
 use cuemol_molstr::{
     parse_selector, read_mol2_file, write_pdb_string, write_sdf_string, LoadObjectResult,
-    MolCommandManager, MolCoord, MolObject, MolRenderer, MolSceneManager, NewRendererResult,
-    NewSceneResult, QscLoadStatus, Selector, StreamManager,
+    LoadedDensityMap, LoadedLWObject, LoadedLWRenderer, LoadedSurface, MolCommandManager, MolCoord,
+    MolObject, MolRenderer, MolSceneManager, NewRendererResult, NewSceneResult, QdfMolFileReader,
+    QdfMolFileWriter, QscLoadStatus, Selector, StreamManager,
 };
+#[cfg(test)]
+use cuemol_molvis::default_style_manager;
 use cuemol_molvis::{
-    anisou_mesh_snapshot, apply_renderer_styles, default_style_manager, disorder_lines_snapshot,
-    molecule_render_snapshot, na_base_sticks_snapshot, ribbon_mesh_snapshot, MoleculeRenderOptions,
-    DEFAULT_STYLE_SCOPE,
+    anisou_mesh_snapshot, apply_renderer_styles, disorder_lines_snapshot, molecule_render_snapshot,
+    na_renderer_snapshot, ribbon_mesh_snapshot, scene_style_manager, MoleculeRenderOptions,
+    NARenderOptions, NARenderer, ValenceBondMode, DEFAULT_STYLE_SCOPE,
 };
-use cuemol_qsys::{ScalarObject, StyleManager};
+use cuemol_qsys::{MultiGradient, ScalarObject, StyleManager};
 #[cfg(feature = "offscreen")]
 use cuemol_render::PngSceneExporter;
 use cuemol_render::{PovSceneExporter, RenderSceneSnapshot};
 use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter};
 use cuemol_xtal::{
-    read_brix_map_file, read_ccp4_map_file, read_mmcif_map_file, read_opendx_file,
-    read_xplor_map_file, MapMeshRenderer, MapSurfRenderer,
+    density_map_from_cif, read_brix_map_bytes, read_brix_map_file, read_ccp4_map_bytes,
+    read_ccp4_map_file, read_mmcif_map_file, read_opendx_file, read_opendx_str,
+    read_xplor_map_file, read_xplor_map_str, MapColorMode, MapMeshRenderer, MapSurfRenderer,
+    MapSurfaceDrawMode, Mtz2MapReader, QdfDenMapReader,
 };
 // Re-exported so consumers (and tests) can name the scalar-field types the surface
 // potential API takes — e.g. `set_surface_potential_map(DensityMap)`.
 pub use cuemol_xtal::{DensityMap, GridMap};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -352,6 +357,34 @@ struct GuiDensityMapObject {
     name: String,
     format: String,
     map: DensityMap,
+    renderers: Vec<GuiDensityRenderer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuiDensityRendererKind {
+    Contour,
+    IsoSurface,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GuiDensityRenderer {
+    kind: GuiDensityRendererKind,
+    visible: bool,
+    siglevel: f64,
+    extent: f64,
+    center: Vector4,
+    use_pbc: bool,
+    width: f64,
+    binning: i32,
+    max_grids: i32,
+    drawmode: MapSurfaceDrawMode,
+    bndry_molname: String,
+    bndry_sel: Selector,
+    bndry_rng: f64,
+    color_mode: MapColorMode,
+    color_mapname: String,
+    multi_grad: MultiGradient,
+    color: cuemol_gfx::ColorSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,6 +429,29 @@ impl DesktopAppState {
 
     pub fn scene_manager_mut(&mut self) -> &mut MolSceneManager {
         self.command_manager.scene_manager_mut()
+    }
+
+    pub fn scene_animation(&self, scene_uid: Uid) -> Result<Option<AnimMgr>> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        scene
+            .animation_node()
+            .map(AnimMgr::from_ldom2_node)
+            .transpose()
+    }
+
+    pub fn set_scene_animation(
+        &mut self,
+        scene_uid: Uid,
+        animation: Option<&AnimMgr>,
+    ) -> Result<()> {
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        scene.set_animation_node(animation.map(AnimMgr::to_ldom2_node))
     }
 
     pub fn command_manager(&self) -> &MolCommandManager {
@@ -530,7 +586,7 @@ impl DesktopAppState {
             .iter()
             .filter_map(|surface| {
                 let mesh = match surface.srctype.as_str() {
-                    "ply" => cuemol_surface::read_ply_str(&surface.data).ok()?,
+                    "ply" => cuemol_surface::read_ply_bytes(&surface.raw_data).ok()?,
                     "qdfsurf" => cuemol_surface::qdf::read_qdf_surface_bytes(&surface.raw_data)
                         .ok()?
                         .mesh()
@@ -818,6 +874,206 @@ impl DesktopAppState {
         }
     }
 
+    fn append_saved_density_geometry(&self, snapshot: &mut RenderSceneSnapshot, scene_uid: Uid) {
+        for map_object in self
+            .density_maps
+            .values()
+            .filter(|object| object.scene_uid == scene_uid)
+        {
+            for config in map_object.renderers.iter().filter(|config| config.visible) {
+                let boundary_points = if config.bndry_molname.is_empty() {
+                    None
+                } else {
+                    self.scene_manager()
+                        .scene(scene_uid)
+                        .and_then(|scene| {
+                            scene
+                                .objects()
+                                .iter()
+                                .find(|object| object.name() == config.bndry_molname)
+                        })
+                        .map(|object| {
+                            object
+                                .mol()
+                                .select_indices(&config.bndry_sel)
+                                .into_iter()
+                                .map(|index| object.mol().atoms()[index].position)
+                                .collect::<Vec<_>>()
+                        })
+                };
+                match config.kind {
+                    GuiDensityRendererKind::Contour => {
+                        let mut renderer = MapMeshRenderer::new();
+                        renderer.map_mut().set_siglevel(config.siglevel);
+                        renderer.map_mut().set_extent(config.extent);
+                        renderer.map_mut().set_center(config.center);
+                        renderer.map_mut().set_use_pbc(config.use_pbc);
+                        renderer.map_mut().set_bndry_rng(config.bndry_rng);
+                        renderer
+                            .map_mut()
+                            .set_bndry_molname(config.bndry_molname.clone());
+                        renderer
+                            .map_mut()
+                            .set_bndry_sel(Some(config.bndry_sel.clone()));
+                        renderer.map_mut().set_color_mode(config.color_mode);
+                        renderer
+                            .map_mut()
+                            .set_color_mapname(config.color_mapname.clone());
+                        renderer
+                            .map_mut()
+                            .multi_grad_mut()
+                            .copy_from(&config.multi_grad);
+                        renderer.set_width(config.width);
+                        for segment in renderer.generate_contour_lines_with_boundary(
+                            &map_object.map,
+                            boundary_points.as_deref(),
+                        ) {
+                            merge_bounds(&mut snapshot.bounds, Some((segment[0], segment[0])));
+                            merge_bounds(&mut snapshot.bounds, Some((segment[1], segment[1])));
+                            snapshot.bonds.push(cuemol_render::RenderBond {
+                                from: segment[0],
+                                to: segment[1],
+                                radius: (0.04 * config.width.max(0.1)) as f32,
+                                color: Some(config.color.clone()),
+                                object_uid: None,
+                                atom_indices: None,
+                                selected: false,
+                            });
+                        }
+                    }
+                    GuiDensityRendererKind::IsoSurface => {
+                        let mut renderer = MapSurfRenderer::new();
+                        renderer.map_mut().set_siglevel(config.siglevel);
+                        renderer.map_mut().set_extent(config.extent);
+                        renderer.map_mut().set_center(config.center);
+                        renderer.map_mut().set_use_pbc(config.use_pbc);
+                        renderer.map_mut().set_bndry_rng(config.bndry_rng);
+                        renderer
+                            .map_mut()
+                            .set_bndry_molname(config.bndry_molname.clone());
+                        renderer
+                            .map_mut()
+                            .set_bndry_sel(Some(config.bndry_sel.clone()));
+                        renderer.map_mut().set_color_mode(config.color_mode);
+                        renderer
+                            .map_mut()
+                            .set_color_mapname(config.color_mapname.clone());
+                        renderer
+                            .map_mut()
+                            .multi_grad_mut()
+                            .copy_from(&config.multi_grad);
+                        renderer.set_width(config.width);
+                        renderer.set_binning(config.binning);
+                        renderer.set_max_grids(config.max_grids);
+                        renderer.set_drawmode(config.drawmode);
+                        let mesh = renderer.generate_surf_obj_with_boundary(
+                            &map_object.map,
+                            boundary_points.as_deref(),
+                        );
+                        let rgba = config.color.rgba8().unwrap_or(cuemol_gfx::Rgba8 {
+                            r: 0,
+                            g: 0,
+                            b: 255,
+                            a: 255,
+                        });
+                        let color = [rgba.r, rgba.g, rgba.b, rgba.a]
+                            .map(|component| f32::from(component) / 255.0);
+                        let color_map = (config.color_mode == MapColorMode::MultiGradient)
+                            .then(|| {
+                                self.density_maps.values().find(|candidate| {
+                                    candidate.scene_uid == scene_uid
+                                        && candidate.name == config.color_mapname
+                                })
+                            })
+                            .flatten();
+                        let vertices = mesh
+                            .mesh()
+                            .vertices()
+                            .iter()
+                            .map(|vertex| cuemol_render::MeshVertex {
+                                position: vertex.position,
+                                normal: vertex.normal,
+                                color: color_map
+                                    .map(|color_map| {
+                                        let rgba = config
+                                            .multi_grad
+                                            .color(color_map.map.value_at(vertex.position));
+                                        [rgba.r, rgba.g, rgba.b, rgba.a]
+                                            .map(|component| f32::from(component) / 255.0)
+                                    })
+                                    .unwrap_or(color),
+                            })
+                            .collect::<Vec<_>>();
+                        let indices = mesh
+                            .mesh()
+                            .triangles()
+                            .iter()
+                            .flat_map(|triangle| triangle.iter().copied())
+                            .collect::<Vec<_>>();
+                        let color_spec = |color: [f32; 4]| {
+                            Some(cuemol_gfx::ColorSpec {
+                                base: cuemol_gfx::ColorBase::Html {
+                                    r: (color[0] * 255.0).round() as u8,
+                                    g: (color[1] * 255.0).round() as u8,
+                                    b: (color[2] * 255.0).round() as u8,
+                                    a: (color[3] * 255.0).round() as u8,
+                                },
+                                modifiers: Vec::new(),
+                            })
+                        };
+                        match config.drawmode {
+                            MapSurfaceDrawMode::Fill => {
+                                if !indices.is_empty() {
+                                    snapshot
+                                        .meshes
+                                        .push(cuemol_render::RenderMesh { vertices, indices });
+                                }
+                            }
+                            MapSurfaceDrawMode::Line => {
+                                let mut edges = BTreeSet::new();
+                                for triangle in indices.chunks_exact(3) {
+                                    for (lhs, rhs) in [
+                                        (triangle[0], triangle[1]),
+                                        (triangle[1], triangle[2]),
+                                        (triangle[2], triangle[0]),
+                                    ] {
+                                        edges.insert((lhs.min(rhs), lhs.max(rhs)));
+                                    }
+                                }
+                                for (lhs, rhs) in edges {
+                                    let lhs = &vertices[lhs as usize];
+                                    let rhs = &vertices[rhs as usize];
+                                    snapshot.bonds.push(cuemol_render::RenderBond {
+                                        from: lhs.position,
+                                        to: rhs.position,
+                                        radius: (0.04 * config.width.max(0.1)) as f32,
+                                        color: color_spec(lhs.color),
+                                        object_uid: None,
+                                        atom_indices: None,
+                                        selected: false,
+                                    });
+                                }
+                            }
+                            MapSurfaceDrawMode::Point => {
+                                for vertex in vertices {
+                                    snapshot.atoms.push(cuemol_render::RenderAtom {
+                                        center: vertex.position,
+                                        radius: (0.06 * config.width.max(0.1)) as f32,
+                                        color: color_spec(vertex.color),
+                                        object_uid: None,
+                                        atom_index: None,
+                                        selected: false,
+                                        detail: Some(1),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Build the FILLED density isosurface mesh for every map in the active scene at the
     /// given sigma level (CueMol2 `MapSurfRenderer` — the solid-surface density display,
     /// the second mode alongside the chickenwire contour). Wires the orphaned
@@ -899,6 +1155,18 @@ impl DesktopAppState {
         name: impl Into<String>,
         map: DensityMap,
     ) -> Uid {
+        let name = name.into();
+        if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
+            let raw_data = cuemol_xtal::write_qdf_denmap_bytes(&map);
+            scene.add_loaded_density_map(LoadedDensityMap {
+                name: name.clone(),
+                object_type: "DensityMap".to_string(),
+                srctype: "qdfmap".to_string(),
+                data: String::from_utf8_lossy(&raw_data).into_owned(),
+                raw_data,
+                qsc_node: None,
+            });
+        }
         let uid = Uid::new(self.next_density_map_uid);
         self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
         self.density_maps.insert(
@@ -906,9 +1174,10 @@ impl DesktopAppState {
             GuiDensityMapObject {
                 uid,
                 scene_uid,
-                name: name.into(),
+                name,
                 format: "synthetic".to_string(),
                 map,
+                renderers: Vec::new(),
             },
         );
         uid
@@ -1194,13 +1463,21 @@ impl DesktopAppState {
         self.last_qsc_status = Some(result.status.clone());
         self.active_scene = result.result_scene;
         if let Some(scene_uid) = result.result_scene {
+            let styles = self
+                .scene_manager()
+                .scene(scene_uid)
+                .map(scene_style_manager)
+                .unwrap_or_default();
             let maps = self
                 .scene_manager()
                 .scene(scene_uid)
                 .map(|scene| scene.loaded_density_maps().to_vec())
                 .unwrap_or_default();
             for loaded in maps {
-                let map = cuemol_xtal::qdf_map::read_qdf_denmap_bytes(&loaded.raw_data)?;
+                let map = read_density_map_bytes(&loaded.raw_data, &loaded.srctype)?;
+                if loaded.srctype == "qdfpot" {
+                    self.surface_potential = Some(map.clone());
+                }
                 let uid = Uid::new(self.next_density_map_uid);
                 self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
                 self.density_maps.insert(
@@ -1211,6 +1488,7 @@ impl DesktopAppState {
                         name: loaded.name,
                         format: loaded.srctype,
                         map,
+                        renderers: density_renderer_configs(loaded.qsc_node.as_ref(), &styles),
                     },
                 );
             }
@@ -1245,6 +1523,14 @@ impl DesktopAppState {
             let map_uid = self.load_density_map(scene_uid, path, object_name, format)?;
             return Ok(GuiLoadedPath::Map { scene_uid, map_uid });
         }
+        if is_surface_format(format) {
+            self.load_surface_object(scene_uid, path, object_name, format)?;
+            return Ok(GuiLoadedPath::Scene { scene_uid });
+        }
+        if format == "qdflwobj" {
+            self.load_lw_object(scene_uid, path, object_name)?;
+            return Ok(GuiLoadedPath::Scene { scene_uid });
+        }
         let object_uid = if is_desktop_extension_format(format) {
             self.load_extension_object(scene_uid, path, object_name, format)?
         } else {
@@ -1275,6 +1561,21 @@ impl DesktopAppState {
             return Err(CueMolError::NotFound(format!("scene {}", scene_uid.get())));
         }
         let map = read_density_map(path, format)?;
+        let raw_data = cuemol_xtal::write_qdf_denmap_bytes(&map);
+        self.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .expect("scene was checked above")
+            .add_loaded_density_map(LoadedDensityMap {
+                name: map_name.clone(),
+                object_type: "DensityMap".to_string(),
+                srctype: "qdfmap".to_string(),
+                data: String::from_utf8_lossy(&raw_data).into_owned(),
+                raw_data,
+                qsc_node: None,
+            });
+        if format == "qdfpot" {
+            self.surface_potential = Some(map.clone());
+        }
         let uid = Uid::new(self.next_density_map_uid);
         self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
         self.density_maps.insert(
@@ -1285,9 +1586,98 @@ impl DesktopAppState {
                 name: map_name,
                 format: format.to_string(),
                 map,
+                renderers: Vec::new(),
             },
         );
         Ok(uid)
+    }
+
+    fn load_surface_object(
+        &mut self,
+        scene_uid: Uid,
+        path: &Path,
+        object_name: String,
+        format: &str,
+    ) -> Result<()> {
+        let (srctype, raw_data) = match format {
+            "obj" => {
+                let data = fs::read(path)?;
+                cuemol_surface::read_obj_str(&String::from_utf8_lossy(&data))?;
+                ("obj", data)
+            }
+            "ply" => {
+                let data = fs::read(path)?;
+                cuemol_surface::read_ply_bytes(&data)?;
+                ("ply", data)
+            }
+            "qdfsurf" => {
+                let data = fs::read(path)?;
+                cuemol_surface::qdf::read_qdf_surface_bytes(&data)?;
+                ("qdfsurf", data)
+            }
+            "msms" => {
+                let ext = effective_extension(path);
+                let (face_path, vertex_path) = if ext == "face" {
+                    (path.to_path_buf(), path.with_extension("vert"))
+                } else {
+                    (path.with_extension("face"), path.to_path_buf())
+                };
+                let mesh = cuemol_surface::read_msms_surface_files(face_path, vertex_path)?;
+                ("obj", mesh.to_obj_string(&object_name).into_bytes())
+            }
+            other => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unknown surface format {other}"
+                )))
+            }
+        };
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        scene.add_loaded_surface(LoadedSurface {
+            name: object_name,
+            object_type: "MolSurfObj".to_string(),
+            srctype: srctype.to_string(),
+            data: String::from_utf8_lossy(&raw_data).into_owned(),
+            raw_data,
+            qsc_node: None,
+        });
+        Ok(())
+    }
+
+    fn load_lw_object(&mut self, scene_uid: Uid, path: &Path, object_name: String) -> Result<()> {
+        let raw_data = fs::read(path)?;
+        let object = cuemol_lwview::read_qdf_lwobj_bytes(&raw_data)?;
+        let data_ids = object
+            .draw_elements()
+            .iter()
+            .map(cuemol_lwview::LWDrawElement::data_id)
+            .filter(|data_id| *data_id != 0)
+            .collect::<BTreeSet<_>>();
+        let renderers = data_ids
+            .into_iter()
+            .map(|data_id| LoadedLWRenderer {
+                name: format!("lwrend_{data_id}"),
+                data_id,
+                visible: true,
+                xform: Matrix4::IDENTITY,
+            })
+            .collect();
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        scene.add_loaded_lw_object(LoadedLWObject {
+            name: object_name,
+            srctype: "qdflwobj".to_string(),
+            raw_data,
+            visible: true,
+            xform: Matrix4::IDENTITY,
+            renderers,
+            qsc_node: None,
+        });
+        Ok(())
     }
 
     fn load_extension_object(
@@ -1301,7 +1691,13 @@ impl DesktopAppState {
         self.scene_manager_mut()
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))
-            .map(|scene| scene.add_molecule(object_name, mol))
+            .map(|scene| {
+                if format == "qdfmol" {
+                    scene.add_molecule_with_source_type(object_name, mol, "qdfmol")
+                } else {
+                    scene.add_molecule(object_name, mol)
+                }
+            })
     }
 
     fn load_pse_objects(
@@ -1361,6 +1757,9 @@ impl DesktopAppState {
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
+        if ext == "qdf" {
+            return QdfMolFileWriter::new().write_file(object.mol(), path);
+        }
         let output = match ext.as_str() {
             "pdb" | "ent" | "" => write_pdb_string(object.mol()),
             "sdf" | "mol" => write_sdf_string(object.mol()),
@@ -1597,6 +1996,61 @@ impl DesktopAppState {
         out
     }
 
+    /// Project enabled AtomIntr value labels into viewport pixel coordinates.
+    /// Unlike selection labels, these follow each renderer's `showlabel` property
+    /// and are therefore returned independently of the GUI's label toggle.
+    pub fn active_atom_intr_labels(
+        &self,
+        mvp: [[f32; 4]; 4],
+        width: f32,
+        height: f32,
+        max: usize,
+    ) -> Vec<GuiAtomLabel> {
+        let Some(scene_uid) = self.active_scene else {
+            return Vec::new();
+        };
+        let Some(scene) = self.scene_manager().scene(scene_uid) else {
+            return Vec::new();
+        };
+        let styles = scene_style_manager(scene);
+        let mut out = Vec::new();
+        for object in scene.objects().iter().filter(|object| object.is_visible()) {
+            for renderer in object
+                .renderers()
+                .iter()
+                .filter(|renderer| renderer.is_visible() && renderer.renderer_type() == "atomintr")
+            {
+                let show_label = renderer
+                    .resolved_attr("showlabel", &styles, DEFAULT_STYLE_SCOPE)
+                    .as_deref()
+                    .map(qsc_bool)
+                    .unwrap_or(false);
+                if !show_label {
+                    continue;
+                }
+                let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
+                for (mut position, text) in object.atom_intr_labels(renderer) {
+                    if out.len() >= max {
+                        return out;
+                    }
+                    if xform != Matrix4::IDENTITY {
+                        xform.xform3d(&mut position);
+                    }
+                    let Some((x, y)) = project_to_image(
+                        mvp,
+                        [position.x as f32, position.y as f32, position.z as f32],
+                        width,
+                        height,
+                    ) else {
+                        continue;
+                    };
+                    out.push(GuiAtomLabel { x, y, text });
+                }
+            }
+        }
+        out
+    }
+
     /// Distance / angle / torsion of the selected atoms (CueMol2 AtomIntr): 2 selected
     /// atoms → distance, 3 → angle, 4 → torsion, in atom-index order. Shared by all
     /// three front ends. `None` for any other count.
@@ -1742,11 +2196,7 @@ impl DesktopAppState {
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
         let selector = parse_gui_selector(selection_text)?;
-        // Resolve renderer `style="..."` presets against the bundled system style
-        // sheet (the same source the CLI `render-qsc`/`qsc-info` consume), built
-        // once per snapshot. Without this the GUI viewer ignored every scene
-        // style and drew the hardcoded per-type look — the gap this closes.
-        let styles = default_style_manager();
+        let styles = scene_style_manager(scene);
         let mut snapshot = RenderSceneSnapshot::empty();
         for object in scene.objects() {
             // C++ `Scene::displayRendImpl` skips an invisible object before its
@@ -1755,8 +2205,23 @@ impl DesktopAppState {
             if !object.is_visible() {
                 continue;
             }
-            append_object_snapshot(&mut snapshot, object, selector.as_ref(), &styles);
+            append_object_snapshot(
+                &mut snapshot,
+                object,
+                selector.as_ref(),
+                &styles,
+                self.surface_potential.as_ref(),
+            );
         }
+        for object in scene
+            .loaded_lw_objects()
+            .iter()
+            .filter(|object| object.visible)
+        {
+            append_lw_object_snapshot(&mut snapshot, object)?;
+        }
+        self.append_saved_density_geometry(&mut snapshot, scene_uid);
+        snapshot.recompute_bounds();
         Ok(snapshot)
     }
 
@@ -3141,6 +3606,14 @@ fn surface_render_mesh(
     selector: &Selector,
     surface: &MolSurfObj,
 ) -> cuemol_render::RenderMesh {
+    surface_mesh_render_mesh(object, selector, surface.mesh())
+}
+
+fn surface_mesh_render_mesh(
+    object: &MolObject,
+    selector: &Selector,
+    mesh: &cuemol_surface::SurfaceMesh,
+) -> cuemol_render::RenderMesh {
     // Fallback when no atom is available to colour a vertex (the former flat grey).
     const GREY: [f32; 4] = [0.76, 0.79, 0.84, 1.0];
     let options = MoleculeRenderOptions {
@@ -3176,7 +3649,6 @@ fn surface_render_mesh(
             Some((atom.position, rgba))
         })
         .collect();
-    let mesh = surface.mesh();
     let vertices = mesh
         .vertices()
         .iter()
@@ -3218,7 +3690,16 @@ fn surface_scalar_mesh(
     mid: f64,
     hi: f64,
 ) -> cuemol_render::RenderMesh {
-    let mesh = surface.mesh();
+    surface_scalar_mesh_from_mesh(surface.mesh(), scalar, lo, mid, hi)
+}
+
+fn surface_scalar_mesh_from_mesh(
+    mesh: &cuemol_surface::SurfaceMesh,
+    scalar: &DensityMap,
+    lo: f64,
+    mid: f64,
+    hi: f64,
+) -> cuemol_render::RenderMesh {
     let vertices = mesh
         .vertices()
         .iter()
@@ -3280,6 +3761,7 @@ fn append_object_snapshot(
     object: &MolObject,
     selector: Option<&cuemol_molstr::Selector>,
     styles: &StyleManager,
+    surface_potential: Option<&DensityMap>,
 ) {
     let selected_indices = selector
         .map(|selector| object.mol().select_indices(selector))
@@ -3298,11 +3780,25 @@ fn append_object_snapshot(
         return;
     }
     if visible_renderers.is_empty() {
-        append_object_renderer_snapshot(target, object, None, &selected_indices, styles);
+        append_object_renderer_snapshot(
+            target,
+            object,
+            None,
+            &selected_indices,
+            styles,
+            surface_potential,
+        );
         return;
     }
     for renderer in visible_renderers {
-        append_object_renderer_snapshot(target, object, Some(renderer), &selected_indices, styles);
+        append_object_renderer_snapshot(
+            target,
+            object,
+            Some(renderer),
+            &selected_indices,
+            styles,
+            surface_potential,
+        );
     }
 }
 
@@ -3312,6 +3808,7 @@ fn append_object_renderer_snapshot(
     renderer: Option<&MolRenderer>,
     selected_indices: &[usize],
     styles: &StyleManager,
+    surface_potential: Option<&DensityMap>,
 ) {
     let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
     let mut options = renderer_render_options(object.uid(), renderer, selected_indices, styles);
@@ -3391,21 +3888,47 @@ fn append_object_renderer_snapshot(
                 .as_deref()
                 .map(qsc_bool)
                 .unwrap_or(true);
-            let base_radius = resolved("base_size")
+            let base_size = resolved("base_size")
                 .and_then(|value| value.trim().parse::<f64>().ok())
-                .unwrap_or(0.5)
-                / 2.0;
+                .unwrap_or(0.5);
+            let base_thick = resolved("base_thick")
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(0.5);
+            let base_detail = resolved("base_detail")
+                .and_then(|value| value.trim().parse::<i32>().ok())
+                .unwrap_or(3);
+            let base_type = resolved("base_type")
+                .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+                    "basepair" => NARenderer::NAREND_BP,
+                    "simple1" => NARenderer::NAREND_SIMPLE1,
+                    "detail1" => NARenderer::NAREND_DETAIL1,
+                    "detail2" => NARenderer::NAREND_DETAIL2,
+                    _ => value.trim().parse::<i32>().unwrap_or(NARenderer::NAREND_BP),
+                })
+                .unwrap_or(NARenderer::NAREND_BP);
             let mut snapshot = if show_tube {
                 ribbon_mesh_snapshot(object.mol(), &options)
             } else {
                 RenderSceneSnapshot::empty()
             };
-            let bases = na_base_sticks_snapshot(object.mol(), base_radius, show_basepair);
+            let bases = na_renderer_snapshot(
+                object.mol(),
+                &NARenderOptions {
+                    base_size,
+                    base_thick,
+                    base_detail,
+                    base_type,
+                    show_basepair,
+                },
+            );
             merge_bounds(&mut snapshot.bounds, bases.bounds);
             snapshot.atoms.extend(bases.atoms);
             snapshot.bonds.extend(bases.bonds);
             snapshot.meshes.extend(bases.meshes);
             snapshot
+        }
+        ("dsurface" | "directsurf" | "dsurf2", Some(renderer)) => {
+            direct_surface_snapshot(object, renderer, styles, surface_potential)
         }
         (rtype, _) if is_mainchain_trace_renderer(rtype) => {
             ribbon_mesh_snapshot(object.mol(), &options)
@@ -3429,6 +3952,513 @@ fn append_object_renderer_snapshot(
     target.atoms.extend(snapshot.atoms);
     target.bonds.extend(snapshot.bonds);
     target.meshes.extend(snapshot.meshes);
+}
+
+fn direct_surface_snapshot(
+    object: &MolObject,
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    surface_potential: Option<&DensityMap>,
+) -> RenderSceneSnapshot {
+    let resolved = |name: &str| {
+        renderer
+            .resolved_attr(name, styles, DEFAULT_STYLE_SCOPE)
+            .map(|value| value.trim().to_string())
+    };
+    let selector = resolved("sel")
+        .filter(|value| !value.is_empty() && value != "*")
+        .and_then(|value| parse_selector(&value).ok())
+        .unwrap_or(Selector::All);
+    let mut surface_renderer = cuemol_surface::DirectSurfRenderer::new();
+    surface_renderer.set_selection(selector.clone());
+    if let Some(value) = resolved("detail").and_then(|value| value.parse().ok()) {
+        surface_renderer.set_detail(value);
+    }
+    if let Some(value) = resolved("proberad").and_then(|value| value.parse().ok()) {
+        surface_renderer.set_probe_radius(value);
+    }
+    if let Some(value) = resolved("surftype") {
+        let surface_type = match value.as_str() {
+            "vdw" | "0" => Some(cuemol_surface::DirectSurfRenderer::DS_VDW),
+            "sas" | "1" => Some(cuemol_surface::DirectSurfRenderer::DS_SAS),
+            "ses" | "2" => Some(cuemol_surface::DirectSurfRenderer::DS_SES),
+            _ => None,
+        };
+        if let Some(surface_type) = surface_type {
+            surface_renderer.set_surface_type(surface_type);
+        }
+    }
+    for (element, attr) in [
+        ("H", "vdwr_H"),
+        ("C", "vdwr_C"),
+        ("N", "vdwr_N"),
+        ("O", "vdwr_O"),
+        ("S", "vdwr_S"),
+        ("P", "vdwr_P"),
+        ("X", "vdwr_X"),
+    ] {
+        if let Some(value) = resolved(attr).and_then(|value| value.parse().ok()) {
+            surface_renderer.set_vdw_radius(element, value);
+        }
+    }
+
+    let mesh = surface_renderer.render_mesh(object.mol());
+    let use_potential =
+        resolved("colormode").is_some_and(|value| matches!(value.as_str(), "potential" | "1"));
+    let render_mesh = if use_potential {
+        surface_potential.map(|potential| {
+            let low = resolved("lowpar")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(-10.0);
+            let mid = resolved("midpar")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0.0);
+            let high = resolved("highpar")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(10.0);
+            surface_scalar_mesh_from_mesh(&mesh, potential, low, mid, high)
+        })
+    } else {
+        None
+    }
+    .unwrap_or_else(|| surface_mesh_render_mesh(object, &selector, &mesh));
+
+    let mut snapshot = RenderSceneSnapshot::empty();
+    if !render_mesh.indices.is_empty() {
+        snapshot.meshes.push(render_mesh);
+        snapshot.recompute_bounds();
+    }
+    snapshot
+}
+
+fn append_lw_object_snapshot(
+    target: &mut RenderSceneSnapshot,
+    loaded: &cuemol_molstr::LoadedLWObject,
+) -> Result<()> {
+    let object = cuemol_lwview::read_qdf_lwobj_bytes(&loaded.raw_data)?;
+    for renderer in loaded
+        .renderers
+        .iter()
+        .filter(|renderer| renderer.visible && renderer.data_id != 0)
+    {
+        let mut snapshot = RenderSceneSnapshot::empty();
+        for element in object.draw_elements_for(renderer.data_id) {
+            append_lw_draw_element(&mut snapshot, element);
+        }
+        let xform = renderer.xform.mul_mat(loaded.xform);
+        if xform != Matrix4::IDENTITY {
+            snapshot.apply_xform(&xform);
+        } else {
+            snapshot.recompute_bounds();
+        }
+        merge_bounds(&mut target.bounds, snapshot.bounds);
+        target.atoms.extend(snapshot.atoms);
+        target.bonds.extend(snapshot.bonds);
+        target.meshes.extend(snapshot.meshes);
+    }
+    Ok(())
+}
+
+fn append_lw_draw_element(
+    target: &mut RenderSceneSnapshot,
+    element: &cuemol_lwview::LWDrawElement,
+) {
+    use cuemol_lwview::LWDrawData;
+
+    let default_color = element.default_color();
+    let (positions, normals, colors, order) = match element.data() {
+        LWDrawData::Vertices(vertices) => (
+            vertices.as_slice(),
+            None,
+            vec![default_color; vertices.len()],
+            (0..vertices.len()).collect::<Vec<_>>(),
+        ),
+        LWDrawData::VertexColors(vertices) => {
+            let positions = vertices
+                .iter()
+                .map(|vertex| vertex.position)
+                .collect::<Vec<_>>();
+            let colors = vertices
+                .iter()
+                .map(|vertex| vertex.color)
+                .collect::<Vec<_>>();
+            append_lw_arrays(
+                target,
+                &positions,
+                None,
+                &colors,
+                &(0..positions.len()).collect::<Vec<_>>(),
+                element.draw_mode(),
+                element.line_width(),
+            );
+            return;
+        }
+        LWDrawData::VertexNormalColorIndices { vertices, indices } => {
+            let positions = vertices
+                .iter()
+                .map(|vertex| vertex.position)
+                .collect::<Vec<_>>();
+            let normals = vertices
+                .iter()
+                .map(|vertex| vertex.normal)
+                .collect::<Vec<_>>();
+            let colors = vertices
+                .iter()
+                .map(|vertex| vertex.color)
+                .collect::<Vec<_>>();
+            let order = indices
+                .iter()
+                .filter_map(|&index| usize::try_from(index).ok())
+                .collect::<Vec<_>>();
+            append_lw_arrays(
+                target,
+                &positions,
+                Some(&normals),
+                &colors,
+                &order,
+                element.draw_mode(),
+                element.line_width(),
+            );
+            return;
+        }
+        LWDrawData::Pixel(pixel) => {
+            let position = pixel.position();
+            target.atoms.push(cuemol_render::RenderAtom {
+                center: f32_position(position),
+                radius: (element.line_width() * 0.03).max(0.03),
+                color: Some(lw_color_spec(pixel.color())),
+                object_uid: None,
+                atom_index: None,
+                selected: false,
+                detail: Some(4),
+            });
+            return;
+        }
+    };
+    append_lw_arrays(
+        target,
+        positions,
+        normals,
+        &colors,
+        &order,
+        element.draw_mode(),
+        element.line_width(),
+    );
+}
+
+fn append_lw_arrays(
+    target: &mut RenderSceneSnapshot,
+    positions: &[[f32; 3]],
+    normals: Option<&[[f32; 3]]>,
+    colors: &[[u8; 4]],
+    order: &[usize],
+    draw_mode: i8,
+    line_width: f32,
+) {
+    use cuemol_gfx::AbstDrawElem;
+
+    match i32::from(draw_mode) {
+        AbstDrawElem::DRAW_POINTS => {
+            for &index in order {
+                let (Some(position), Some(color)) = (positions.get(index), colors.get(index))
+                else {
+                    continue;
+                };
+                target.atoms.push(cuemol_render::RenderAtom {
+                    center: f32_position(*position),
+                    radius: (line_width * 0.03).max(0.03),
+                    color: Some(lw_color_spec(*color)),
+                    object_uid: None,
+                    atom_index: None,
+                    selected: false,
+                    detail: Some(4),
+                });
+            }
+        }
+        AbstDrawElem::DRAW_LINE_STRIP | AbstDrawElem::DRAW_LINE_LOOP | AbstDrawElem::DRAW_LINES => {
+            for [start, end] in lw_line_indices(order, i32::from(draw_mode)) {
+                let (Some(from), Some(to), Some(color)) =
+                    (positions.get(start), positions.get(end), colors.get(start))
+                else {
+                    continue;
+                };
+                target.bonds.push(cuemol_render::RenderBond {
+                    from: f32_position(*from),
+                    to: f32_position(*to),
+                    radius: (line_width * 0.02).max(0.01),
+                    color: Some(lw_color_spec(*color)),
+                    object_uid: None,
+                    atom_indices: None,
+                    selected: false,
+                });
+            }
+        }
+        _ => {
+            let triangles = lw_triangle_indices(order, i32::from(draw_mode));
+            let mut mesh = cuemol_render::RenderMesh::new();
+            for triangle in triangles {
+                let Some(points) = triangle
+                    .map(|index| positions.get(index).copied())
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                let p = [
+                    f32_position(points[0]),
+                    f32_position(points[1]),
+                    f32_position(points[2]),
+                ];
+                let face_normal = (p[1] - p[0])
+                    .cross(p[2] - p[0])
+                    .normalize3d()
+                    .unwrap_or(Vector4::new3(0.0, 0.0, 1.0));
+                for &index in &triangle {
+                    let normal = normals
+                        .and_then(|normals| normals.get(index))
+                        .map_or(face_normal, |normal| f32_position(*normal));
+                    let color = colors.get(index).copied().unwrap_or([255; 4]);
+                    mesh.vertices.push(cuemol_render::MeshVertex {
+                        position: f32_position(positions[index]),
+                        normal,
+                        color: lw_color_f32(color),
+                    });
+                    mesh.indices.push(mesh.indices.len() as u32);
+                }
+            }
+            if !mesh.indices.is_empty() {
+                target.meshes.push(mesh);
+            }
+        }
+    }
+}
+
+fn lw_line_indices(order: &[usize], draw_mode: i32) -> Vec<[usize; 2]> {
+    use cuemol_gfx::AbstDrawElem;
+
+    match draw_mode {
+        AbstDrawElem::DRAW_LINES => order
+            .chunks_exact(2)
+            .map(|pair| [pair[0], pair[1]])
+            .collect(),
+        AbstDrawElem::DRAW_LINE_STRIP => order.windows(2).map(|pair| [pair[0], pair[1]]).collect(),
+        AbstDrawElem::DRAW_LINE_LOOP => {
+            let mut pairs = order
+                .windows(2)
+                .map(|pair| [pair[0], pair[1]])
+                .collect::<Vec<_>>();
+            if order.len() > 2 {
+                pairs.push([order[order.len() - 1], order[0]]);
+            }
+            pairs
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn lw_triangle_indices(order: &[usize], draw_mode: i32) -> Vec<[usize; 3]> {
+    use cuemol_gfx::AbstDrawElem;
+
+    match draw_mode {
+        AbstDrawElem::DRAW_TRIANGLES => order
+            .chunks_exact(3)
+            .map(|triangle| [triangle[0], triangle[1], triangle[2]])
+            .collect(),
+        AbstDrawElem::DRAW_TRIANGLE_STRIP => order
+            .windows(3)
+            .enumerate()
+            .map(|(index, triangle)| {
+                if index % 2 == 0 {
+                    [triangle[0], triangle[1], triangle[2]]
+                } else {
+                    [triangle[1], triangle[0], triangle[2]]
+                }
+            })
+            .collect(),
+        AbstDrawElem::DRAW_TRIANGLE_FAN | AbstDrawElem::DRAW_POLYGON => order
+            .get(1..)
+            .unwrap_or_default()
+            .windows(2)
+            .map(|pair| [order[0], pair[0], pair[1]])
+            .collect(),
+        AbstDrawElem::DRAW_QUADS => order
+            .chunks_exact(4)
+            .flat_map(|quad| [[quad[0], quad[1], quad[2]], [quad[0], quad[2], quad[3]]])
+            .collect(),
+        AbstDrawElem::DRAW_QUAD_STRIP => order
+            .windows(4)
+            .step_by(2)
+            .flat_map(|quad| [[quad[0], quad[1], quad[3]], [quad[0], quad[3], quad[2]]])
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn f32_position(position: [f32; 3]) -> cuemol_core::Vector4 {
+    cuemol_core::Vector4::new3(
+        f64::from(position[0]),
+        f64::from(position[1]),
+        f64::from(position[2]),
+    )
+}
+
+fn lw_color_spec(color: [u8; 4]) -> cuemol_gfx::ColorSpec {
+    cuemol_gfx::ColorSpec {
+        base: cuemol_gfx::ColorBase::Html {
+            r: color[0],
+            g: color[1],
+            b: color[2],
+            a: color[3],
+        },
+        modifiers: Vec::new(),
+    }
+}
+
+fn lw_color_f32(color: [u8; 4]) -> [f32; 4] {
+    color.map(|component| f32::from(component) / 255.0)
+}
+
+fn density_renderer_configs(
+    object_node: Option<&cuemol_core::LDom2Node>,
+    styles: &StyleManager,
+) -> Vec<GuiDensityRenderer> {
+    let Some(object_node) = object_node else {
+        return Vec::new();
+    };
+    object_node
+        .children()
+        .iter()
+        .filter(|node| !node.is_attr() && node.tag_name() == "renderer")
+        .filter_map(|node| {
+            let renderer_type = if node.type_name().is_empty() {
+                node.str_attr("type").to_string()
+            } else {
+                node.type_name().to_string()
+            };
+            let kind = match renderer_type.as_str() {
+                "contour" | "gpu_mapmesh" => GuiDensityRendererKind::Contour,
+                "isosurf" => GuiDensityRendererKind::IsoSurface,
+                _ => return None,
+            };
+            let style_list = node.str_attr("style").to_string();
+            let attr = |name: &str| {
+                let inline = node.str_attr(name).to_string();
+                if inline.is_empty() {
+                    styles.resolve_style_attr(DEFAULT_STYLE_SCOPE, &style_list, name)
+                } else {
+                    Some(inline)
+                }
+            };
+            let parse_number = |name: &str, default: f64| {
+                attr(name)
+                    .and_then(|value| value.trim().parse::<f64>().ok())
+                    .unwrap_or(default)
+            };
+            let center = attr("center")
+                .as_deref()
+                .and_then(parse_qsc_vector3)
+                .unwrap_or(Vector4::ZERO);
+            let bndry_molname = attr("bndry_molname").unwrap_or_default();
+            let bndry_sel = attr("bndry_sel")
+                .filter(|value| !value.trim().is_empty())
+                .and_then(|value| parse_selector(&value).ok())
+                .unwrap_or(Selector::All);
+            let color_mode = match attr("colormode").as_deref().unwrap_or("solid") {
+                "multigrad" | "4" => MapColorMode::MultiGradient,
+                "molecule" | "3" => MapColorMode::Molecule,
+                _ => MapColorMode::Solid,
+            };
+            let color_mapname = attr("color_mapname").unwrap_or_default();
+            let multi_grad = density_multi_gradient(node, styles);
+            let drawmode = match attr("drawmode").as_deref().unwrap_or("fill") {
+                "line" | "1" => MapSurfaceDrawMode::Line,
+                "point" | "2" => MapSurfaceDrawMode::Point,
+                _ => MapSurfaceDrawMode::Fill,
+            };
+            let color_value = attr("color").unwrap_or_else(|| "Blue".to_string());
+            let color = styles
+                .get_color(&color_value, DEFAULT_STYLE_SCOPE)
+                .map(|color| {
+                    let rgba = color.rgba8();
+                    cuemol_gfx::ColorSpec {
+                        base: cuemol_gfx::ColorBase::Html {
+                            r: rgba.r,
+                            g: rgba.g,
+                            b: rgba.b,
+                            a: rgba.a,
+                        },
+                        modifiers: Vec::new(),
+                    }
+                })
+                .or_else(|| cuemol_gfx::parse_color(&color_value).ok())
+                .unwrap_or_else(|| cuemol_gfx::parse_color("#0000ff").unwrap());
+            Some(GuiDensityRenderer {
+                kind,
+                visible: attr("visible").as_deref().is_none_or(qsc_bool),
+                siglevel: parse_number("siglevel", 1.1),
+                extent: parse_number("extent", 15.0),
+                center,
+                use_pbc: attr("use_pbc").as_deref().is_none_or(qsc_bool),
+                width: parse_number(
+                    "width",
+                    if kind == GuiDensityRendererKind::Contour {
+                        1.0
+                    } else {
+                        1.2
+                    },
+                ),
+                binning: parse_number("binning", 1.0).round() as i32,
+                max_grids: parse_number("max_grids", 100.0).round() as i32,
+                drawmode,
+                bndry_molname,
+                bndry_sel,
+                bndry_rng: parse_number("bndry_rng", 5.0),
+                color_mode,
+                color_mapname,
+                multi_grad,
+                color,
+            })
+        })
+        .collect()
+}
+
+fn density_multi_gradient(
+    renderer_node: &cuemol_core::LDom2Node,
+    styles: &StyleManager,
+) -> MultiGradient {
+    let inline = renderer_node
+        .find_child("multi_grad")
+        .filter(|node| !node.is_attr());
+    let style_list = renderer_node.str_attr("style").to_string();
+    let node = inline.or_else(|| {
+        styles.resolve_style_child_node(DEFAULT_STYLE_SCOPE, &style_list, "multi_grad")
+    });
+    let mut gradient = MultiGradient::new();
+    if let Some(node) = node {
+        gradient.read_from_ldom2_node(node, |value| {
+            styles
+                .get_color(value, DEFAULT_STYLE_SCOPE)
+                .map(|color| color.rgba8())
+                .or_else(|| cuemol_gfx::parse_color(value).ok()?.rgba8())
+                .or_else(|| {
+                    Some(
+                        cuemol_gfx::NamedColor::from_name(value)
+                            .resolved_color()
+                            .rgba8(),
+                    )
+                })
+        });
+    }
+    gradient
+}
+
+fn parse_qsc_vector3(value: &str) -> Option<Vector4> {
+    let value = value.trim().trim_start_matches('(').trim_end_matches(')');
+    let values = value
+        .split(',')
+        .map(|part| part.trim().parse::<f64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (values.len() == 3).then(|| Vector4::new3(values[0], values[1], values[2]))
 }
 
 fn qsc_bool(value: &str) -> bool {
@@ -3461,6 +4491,9 @@ fn renderer_render_options(
     };
     let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
     match renderer_type {
+        "simple" => {
+            options.valence_bond_mode = ValenceBondMode::Simple;
+        }
         "cpk" => {
             options.vdw_scale = 0.55;
             options.bond_radius = 0.0;
@@ -3474,7 +4507,7 @@ fn renderer_render_options(
             options.vdw_scale = 0.12;
             options.bond_radius = 0.12;
         }
-        "molsurf" | "directsurf" => {
+        "molsurf" | "dsurface" | "directsurf" | "dsurf2" => {
             options.vdw_scale = 0.32;
             options.bond_radius = 0.04;
         }
@@ -3491,6 +4524,30 @@ fn renderer_render_options(
     // by `tessellate_snapshot`.
     if let Some(renderer) = renderer {
         apply_renderer_styles(&mut options, renderer, styles, DEFAULT_STYLE_SCOPE);
+        if renderer_type == "simple" {
+            if renderer
+                .resolved_attr("valbond", styles, DEFAULT_STYLE_SCOPE)
+                .as_deref()
+                .is_some_and(|value| !qsc_bool(value))
+            {
+                options.valence_bond_mode = ValenceBondMode::Off;
+            }
+            for (index, name) in ["vb_scl1", "vb_scl2"].into_iter().enumerate() {
+                if let Some(value) = renderer
+                    .resolved_attr(name, styles, DEFAULT_STYLE_SCOPE)
+                    .and_then(|value| value.trim().parse().ok())
+                {
+                    options.simple_bond_offsets[index] = value;
+                }
+            }
+        } else if renderer_type == "ballstick"
+            && renderer
+                .resolved_attr("valbond_mode", styles, DEFAULT_STYLE_SCOPE)
+                .as_deref()
+                .is_some_and(|value| matches!(value.trim(), "type1" | "1"))
+        {
+            options.valence_bond_mode = ValenceBondMode::BallStickType1;
+        }
     }
     options
 }
@@ -3663,6 +4720,11 @@ fn guess_path_format(path: &Path, stream_manager: &StreamManager) -> Result<&'st
         "psf" => Ok("psf"),
         "prmtop" | "parm7" | "top" => Ok("amberprm"),
         "pse" => Ok("pse"),
+        "qdf" => guess_qdf_format(path, stream_manager),
+        "mtz" => Ok("mtzmap"),
+        "obj" => Ok("obj"),
+        "ply" => Ok("ply"),
+        "face" | "vert" => Ok("msms"),
         "dx" => Ok("apbs"),
         "ccp4" | "mrc" => Ok("ccp4map"),
         "cns" => Ok("xplormap"),
@@ -3671,6 +4733,24 @@ fn guess_path_format(path: &Path, stream_manager: &StreamManager) -> Result<&'st
         other => Err(CueMolError::invalid_argument(format!(
             "unsupported file extension: {other}"
         ))),
+    }
+}
+
+fn guess_qdf_format(path: &Path, stream_manager: &StreamManager) -> Result<&'static str> {
+    let hit = stream_manager.search_reader_by_content(
+        path,
+        "qdfmol,qdfmap,qdfsurf,qdfpot,qdflwobj",
+        cuemol_molstr::HandlerCategory::ObjReader,
+        false,
+        0,
+    );
+    match hit.as_str() {
+        "qdfmol" => Ok("qdfmol"),
+        "qdfmap" => Ok("qdfmap"),
+        "qdfsurf" => Ok("qdfsurf"),
+        "qdfpot" => Ok("qdfpot"),
+        "qdflwobj" => Ok("qdflwobj"),
+        _ => Err(CueMolError::parse("unknown or invalid QDF object type")),
     }
 }
 
@@ -3724,17 +4804,49 @@ fn is_scene_format(format: &str) -> bool {
 }
 
 fn is_desktop_extension_format(format: &str) -> bool {
-    matches!(format, "mol2" | "gro" | "psf" | "amberprm")
+    matches!(format, "mol2" | "gro" | "psf" | "amberprm" | "qdfmol")
+}
+
+fn is_surface_format(format: &str) -> bool {
+    matches!(format, "obj" | "ply" | "msms" | "qdfsurf")
 }
 
 fn is_density_map_format(format: &str) -> bool {
     matches!(
         format,
-        "apbs" | "ccp4map" | "xplormap" | "brix" | "mmcifmap"
+        "apbs" | "ccp4map" | "xplormap" | "brix" | "mmcifmap" | "mtzmap" | "qdfmap" | "qdfpot"
     )
 }
 
 fn read_density_map(path: &Path, format: &str) -> Result<DensityMap> {
+    if format == "qdfmap" {
+        return QdfDenMapReader::new().read_file(path);
+    }
+    if format == "mtzmap" {
+        let mut reader = Mtz2MapReader::new();
+        reader.read_bytes(&fs::read(path)?)?;
+        return reader.build_density_map();
+    }
+    if format == "qdfpot" {
+        let potential = cuemol_surface::qdf::read_qdf_potential_bytes(&fs::read(path)?)?;
+        let counts = [potential.col_no(), potential.row_no(), potential.sec_no()];
+        let intervals = counts.map(|count| count.max(1));
+        let delta = [
+            Vector4::new3(potential.col_grid_size(), 0.0, 0.0),
+            Vector4::new3(0.0, potential.row_grid_size(), 0.0),
+            Vector4::new3(0.0, 0.0, potential.sec_grid_size()),
+        ];
+        let mut map = DensityMap::new();
+        map.set_map_float_array(
+            potential.values(),
+            counts,
+            [0, 0, 0],
+            intervals,
+            potential.origin(),
+            delta,
+        );
+        return Ok(map);
+    }
     let grid = match format {
         "apbs" => read_opendx_file(path)?,
         "ccp4map" => read_ccp4_map_file(path)?,
@@ -3750,12 +4862,67 @@ fn read_density_map(path: &Path, format: &str) -> Result<DensityMap> {
     Ok(DensityMap::from_grid_map(grid))
 }
 
+fn read_density_map_bytes(bytes: &[u8], format: &str) -> Result<DensityMap> {
+    if format == "qdfmap" {
+        return cuemol_xtal::read_qdf_denmap_bytes(bytes);
+    }
+    if format == "mtzmap" {
+        let mut reader = Mtz2MapReader::new();
+        reader.read_bytes(bytes)?;
+        return reader.build_density_map();
+    }
+    if format == "qdfpot" {
+        let potential = cuemol_surface::qdf::read_qdf_potential_bytes(bytes)?;
+        let counts = [potential.col_no(), potential.row_no(), potential.sec_no()];
+        let intervals = counts.map(|count| count.max(1));
+        let delta = [
+            Vector4::new3(potential.col_grid_size(), 0.0, 0.0),
+            Vector4::new3(0.0, potential.row_grid_size(), 0.0),
+            Vector4::new3(0.0, 0.0, potential.sec_grid_size()),
+        ];
+        let mut map = DensityMap::new();
+        map.set_map_float_array(
+            potential.values(),
+            counts,
+            [0, 0, 0],
+            intervals,
+            potential.origin(),
+            delta,
+        );
+        return Ok(map);
+    }
+    let grid =
+        match format {
+            "apbs" => read_opendx_str(std::str::from_utf8(bytes).map_err(|error| {
+                CueMolError::parse(format!("OpenDX map is not UTF-8: {error}"))
+            })?)?,
+            "ccp4map" => read_ccp4_map_bytes(bytes)?,
+            "xplormap" => read_xplor_map_str(std::str::from_utf8(bytes).map_err(|error| {
+                CueMolError::parse(format!("XPLOR map is not UTF-8: {error}"))
+            })?)?,
+            "brix" => read_brix_map_bytes(bytes)?,
+            "mmcifmap" => {
+                let input = std::str::from_utf8(bytes).map_err(|error| {
+                    CueMolError::parse(format!("mmCIF map is not UTF-8: {error}"))
+                })?;
+                return density_map_from_cif(input, -1.0, 0.33);
+            }
+            other => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unknown density map format {other}"
+                )))
+            }
+        };
+    Ok(DensityMap::from_grid_map(grid))
+}
+
 fn read_extension_molecule(path: &Path, format: &str) -> Result<MolCoord> {
     match format {
         "mol2" => read_mol2_file(path),
         "gro" => read_gro_file(path),
         "psf" => read_psf_file(path),
         "amberprm" => read_amber_prmtop_file(path),
+        "qdfmol" => QdfMolFileReader::new().read_file(path),
         other => Err(CueMolError::invalid_argument(format!(
             "unknown desktop extension format {other}"
         ))),
@@ -4678,6 +5845,71 @@ mod tests {
     }
 
     #[test]
+    fn qsc_with_native_lwo3_renders_lightweight_triangle() {
+        let mut object = cuemol_lwview::LWObject::new();
+        object.add_draw_element(cuemol_lwview::LWDrawElement::new(
+            7,
+            cuemol_gfx::AbstDrawElem::DRAW_TRIANGLES as i8,
+            1.0,
+            [32, 64, 128, 255],
+            cuemol_lwview::LWDrawData::Vertices(vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]),
+        ));
+        let qdf0 = cuemol_lwview::write_qdf_lwobj_bytes(&object);
+        let encoded = cuemol_qsys::encode_qdf0_bytes(&qdf0, 1, "13").unwrap();
+        let encoded = String::from_utf8(encoded).unwrap();
+        let qsc = format!(
+            "<scene>\n\
+             <object type=\"LWObject\" name=\"lw\" src=\"datachunk:00000\" srctype=\"qdflwobj\">\n\
+             <renderer type=\"lwrend\" name=\"mesh\" data_id=\"7\"/>\n\
+             </object>\n\
+             </scene>\n\
+             ========== End of XML ==========\n\
+             ==========START datachunk:00000==========\n\
+             {encoded}\
+             ==========END datachunk:00000==========\n"
+        );
+        let path = std::env::temp_dir().join("cuemol_core_qsc_lwo3_test.qsc");
+        std::fs::write(&path, qsc).unwrap();
+
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.load_qsc_file(&path).unwrap().unwrap();
+        assert!(app.active_scene_skipped_objects().is_empty());
+        let snapshot = app.active_render_snapshot("").unwrap();
+        assert_eq!(snapshot.mesh_triangle_count(), 1);
+        assert_eq!(snapshot.meshes[0].vertices.len(), 3);
+        assert_eq!(
+            snapshot.meshes[0].vertices[0].color,
+            [32.0 / 255.0, 64.0 / 255.0, 128.0 / 255.0, 1.0]
+        );
+        assert!(snapshot.bounds.is_some());
+
+        let rewritten = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .write_qsc_string();
+        assert!(rewritten.contains("type=\"LWObject\""));
+        assert!(rewritten.contains("data_id=\"7\""));
+        let rewritten_path = std::env::temp_dir().join("cuemol_core_qsc_lwo3_rewritten.qsc");
+        std::fs::write(&rewritten_path, rewritten).unwrap();
+        let mut reloaded = DesktopAppState::new();
+        reloaded.load_qsc_file(&rewritten_path).unwrap();
+        assert_eq!(
+            reloaded
+                .active_render_snapshot("")
+                .unwrap()
+                .mesh_triangle_count(),
+            1
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rewritten_path);
+    }
+
+    #[test]
     fn qsc_with_native_qdfmap_loads_into_density_scene_state() {
         let mut map = DensityMap::new();
         map.set_map_byte_array(
@@ -4693,15 +5925,45 @@ mod tests {
         let qdf0 = cuemol_xtal::qdf_map::write_qdf_denmap_bytes(&map);
         let encoded = cuemol_qsys::encode_qdf0_bytes(&qdf0, 1, "13").unwrap();
         let encoded = String::from_utf8(encoded).unwrap();
+        let mut clip_mol = MolCoord::new();
+        clip_mol.push_atom(cuemol_molstr::Atom {
+            serial: 1,
+            name: "CA".to_string(),
+            alt_loc: None,
+            res_name: "GLY".to_string(),
+            chain_id: "A".to_string(),
+            res_id: 1,
+            ins_code: None,
+            position: Vector4::ZERO,
+            occupancy: 1.0,
+            b_factor: 0.0,
+            element: "C".to_string(),
+            formal_charge: None,
+            int_props: BTreeMap::new(),
+        });
+        let encoded_mol =
+            cuemol_qsys::encode_qdf0_bytes(&cuemol_molstr::write_qdf_mol_bytes(&clip_mol), 1, "13")
+                .unwrap();
+        let encoded_mol = String::from_utf8(encoded_mol).unwrap();
         let qsc = format!(
             "<scene>\n\
+             <object type=\"MolCoord\" name=\"clip-mol\" src=\"datachunk:00001\" srctype=\"qdfmol\"/>\n\
              <object type=\"DensityMap\" name=\"native-map\" src=\"datachunk:00000\" srctype=\"qdfmap\">\n\
+             <renderer type=\"contour\" name=\"wire\" siglevel=\"0\" color=\"Red\" width=\"2\" bndry_molname=\"clip-mol\" bndry_sel=\"name CA\" bndry_rng=\"100\"/>\n\
+             <renderer type=\"isosurf\" name=\"solid\" siglevel=\"0\" color=\"#0000ff\" binning=\"2\" max_grids=\"77\" use_pbc=\"false\" bndry_molname=\"clip-mol\" bndry_sel=\"name CA\" bndry_rng=\"100\" colormode=\"multigrad\" color_mapname=\"native-map\">\n\
+             <multi_grad><gradnode par=\"-1\"><col value=\"#ff0000\"/></gradnode><gradnode par=\"1\"><col value=\"#00ff00\"/></gradnode></multi_grad>\n\
+             </renderer>\n\
+             <renderer type=\"isosurf\" name=\"lines\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"line\"/>\n\
+             <renderer type=\"isosurf\" name=\"points\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"point\"/>\n\
              </object>\n\
              </scene>\n\
              ========== End of XML ==========\n\
              ==========START datachunk:00000==========\n\
              {encoded}\
-             ==========END datachunk:00000==========\n"
+             ==========END datachunk:00000==========\n\
+             ==========START datachunk:00001==========\n\
+             {encoded_mol}\
+             ==========END datachunk:00001==========\n"
         );
         let path = std::env::temp_dir().join("cuemol_core_qsc_qdfmap_test.qsc");
         std::fs::write(&path, qsc).unwrap();
@@ -4715,7 +5977,82 @@ mod tests {
         assert_eq!(maps[0].counts, [2, 2, 2]);
         assert_eq!(maps[0].value_count, 8);
         assert!(app.active_scene_skipped_objects().is_empty());
+        let map_object = app.density_maps.values().next().unwrap();
+        assert_eq!(map_object.renderers[1].binning, 2);
+        assert_eq!(map_object.renderers[1].max_grids, 77);
+        assert!(!map_object.renderers[1].use_pbc);
+        assert_eq!(map_object.renderers[1].bndry_molname, "clip-mol");
+        assert_eq!(map_object.renderers[1].bndry_rng, 100.0);
+        assert_eq!(
+            map_object.renderers[1].color_mode,
+            MapColorMode::MultiGradient
+        );
+        assert_eq!(map_object.renderers[1].color_mapname, "native-map");
+        assert_eq!(map_object.renderers[1].multi_grad.size(), 2);
+        assert_eq!(map_object.renderers[2].drawmode, MapSurfaceDrawMode::Line);
+        assert_eq!(map_object.renderers[3].drawmode, MapSurfaceDrawMode::Point);
+        let snapshot = app.active_render_snapshot("").unwrap();
+        assert!(
+            snapshot.bond_count() > 0,
+            "saved contour renderer must draw"
+        );
+        assert!(
+            snapshot.mesh_triangle_count() > 0,
+            "saved isosurface renderer must draw"
+        );
+        assert!(snapshot.meshes[0]
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color[2] == 0.0));
+        assert!(snapshot.atom_count() > 0, "point-mode isosurface must draw");
+        assert!(snapshot.bond_count() > 1, "line-mode isosurface must draw");
+        assert_eq!(
+            snapshot.bonds[0].color.as_ref().unwrap().rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn qsc_with_external_opendx_map_loads_into_density_scene_state() {
+        let directory =
+            std::env::temp_dir().join(format!("cuemol-qsc-opendx-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("field.dx"),
+            "object 1 class gridpositions counts 1 1 2\n\
+             origin 1 2 3\n\
+             delta 1 0 0\n\
+             delta 0 1 0\n\
+             delta 0 0 0.5\n\
+             object 2 class gridconnections counts 1 1 2\n\
+             object 3 class array type double rank 0 items 2 data follows\n\
+             -1 2\n",
+        )
+        .unwrap();
+        let qsc_path = directory.join("map.qsc");
+        std::fs::write(
+            &qsc_path,
+            "<scene><object type=\"DensityMap\" name=\"linked-map\" \
+             src=\"field.dx\" srctype=\"apbs\"/></scene>",
+        )
+        .unwrap();
+
+        let mut app = DesktopAppState::new();
+        app.load_qsc_file(&qsc_path).unwrap();
+        let maps = app.active_density_map_summaries();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].name, "linked-map");
+        assert_eq!(maps[0].format, "apbs");
+        assert_eq!(maps[0].counts, [1, 1, 2]);
+        assert_eq!(maps[0].value_count, 2);
+        assert!(app.active_scene_skipped_objects().is_empty());
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -5023,6 +6360,72 @@ mod tests {
             }),
             "a measurement line must connect the resolved atoms 43 and 88"
         );
+
+        let (object_uid, renderer_uid, anchor, expected_text) = {
+            let renderer = object
+                .renderers()
+                .iter()
+                .find(|renderer| renderer.renderer_type() == "atomintr")
+                .unwrap();
+            let (anchor, text) = object.atom_intr_labels(renderer)[0].clone();
+            (object.uid(), renderer.uid(), anchor, text)
+        };
+        app.scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap()
+            .set_qsc_attr("showlabel", "true");
+        let scale = 0.01_f32;
+        let mvp = [
+            [scale, 0.0, 0.0, 0.0],
+            [0.0, scale, 0.0, 0.0],
+            [0.0, 0.0, scale, 0.0],
+            [
+                -(anchor.x as f32) * scale,
+                -(anchor.y as f32) * scale,
+                -(anchor.z as f32) * scale,
+                1.0,
+            ],
+        ];
+        let labels = app.active_atom_intr_labels(mvp, 100.0, 100.0, 10);
+        assert!(labels.iter().any(|label| {
+            label.text == expected_text
+                && (label.x - 50.0).abs() < 1.0e-4
+                && (label.y - 50.0).abs() < 1.0e-4
+        }));
+    }
+
+    #[test]
+    fn direct_surface_renderer_draws_surface_mesh_instead_of_atoms() {
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("surface", false);
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        let renderer = app
+            .new_renderer_in_active_scene(object, "dsurface", "surface")
+            .unwrap()
+            .result_renderer;
+        let renderer = app
+            .scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer)
+            .unwrap();
+        renderer.set_qsc_attr("sel", "resid 1 and name CA");
+        renderer.set_qsc_attr("surftype", "vdw");
+        renderer.set_qsc_attr("detail", "2");
+
+        let snapshot = app.active_render_snapshot("").unwrap();
+        assert_eq!(snapshot.atom_count(), 0);
+        assert_eq!(snapshot.bond_count(), 0);
+        assert_eq!(snapshot.mesh_count(), 1);
+        assert!(snapshot.mesh_triangle_count() > 100);
     }
 
     #[test]
@@ -5411,8 +6814,8 @@ mod tests {
             "nucl still draws the backbone ribbon mesh"
         );
         assert!(
-            nucl.bond_count() >= 4,
-            "nucl adds two base sticks per nucleotide, got {}",
+            nucl.bond_count() >= 2,
+            "default basepair mode draws each unpaired base, got {}",
             nucl.bond_count()
         );
 
@@ -5438,7 +6841,7 @@ mod tests {
         assert!(bases_only
             .bonds
             .iter()
-            .all(|bond| (bond.radius - 0.4).abs() < 1.0e-6));
+            .all(|bond| (bond.radius - 0.8).abs() < 1.0e-6));
         let _ = std::fs::remove_file(&path);
     }
 
@@ -6297,6 +7700,197 @@ attribute \"dep\" string \"positions\"
         let _ = std::fs::remove_file(xplor_path);
         let _ = std::fs::remove_file(cif_path);
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn desktop_qdf_molecule_load_save_and_map_qsc_round_trip() {
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-desktop-qdf-roundtrip-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mol_path = dir.join("one_atom.qdf");
+        let saved_mol_path = dir.join("saved.qdf");
+        let map_path = dir.join("map.qdf");
+        let scene_path = dir.join("map.qsc");
+
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  N   GLY A   1       1.000   2.000   3.000  1.00 10.00           N\nEND\n",
+        )
+        .unwrap();
+        QdfMolFileWriter::new()
+            .write_file(&molecule, &mol_path)
+            .unwrap();
+
+        let mut app = DesktopAppState::new();
+        let GuiLoadedPath::Object { object_uid, .. } = app.open_path(&mol_path).unwrap() else {
+            panic!("expected QDF molecule load");
+        };
+        assert_eq!(
+            app.scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .mol()
+                .atom_count(),
+            1
+        );
+        app.save_object_as(object_uid, &saved_mol_path).unwrap();
+        assert_eq!(
+            QdfMolFileReader::new()
+                .read_file(&saved_mol_path)
+                .unwrap()
+                .atom_count(),
+            1
+        );
+
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(&[0, 127, 255], [3, 1, 1], -1.0, 1.0, 0.0, 0.8);
+        cuemol_xtal::QdfDenMapWriter::new()
+            .write_file(&map, &map_path)
+            .unwrap();
+        let GuiLoadedPath::Map { map_uid, .. } = app.open_path(&map_path).unwrap() else {
+            panic!("expected QDF map load");
+        };
+        assert_eq!(app.density_map_summary(map_uid).unwrap().counts, [3, 1, 1]);
+        app.save_active_scene_qsc(&scene_path).unwrap();
+
+        let mut reloaded = DesktopAppState::new();
+        reloaded.load_qsc_file(&scene_path).unwrap();
+        assert_eq!(reloaded.active_density_map_summaries().len(), 1);
+        assert_eq!(reloaded.active_density_map_summaries()[0].counts, [3, 1, 1]);
+
+        for path in [mol_path, saved_mol_path, map_path, scene_path] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn desktop_opens_surface_and_lightweight_object_formats() {
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-desktop-surface-lwo-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ply_path = dir.join("triangle.ply");
+        let face_path = dir.join("msms.face");
+        let vert_path = dir.join("msms.vert");
+        let qdf_surface_path = dir.join("surface.qdf");
+        let qdf_lw_path = dir.join("lightweight.qdf");
+
+        std::fs::write(
+            &ply_path,
+            "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &vert_path,
+            "# MSMS\n# vertices\n3\n0 0 0 0 0 1\n1 0 0 0 0 1\n0 1 0 0 0 1\n",
+        )
+        .unwrap();
+        std::fs::write(&face_path, "# MSMS\n# faces\n1\n1 2 3\n").unwrap();
+
+        let mut surface = MolSurfObj::new();
+        for position in [
+            Vector4::new3(0.0, 0.0, 0.0),
+            Vector4::new3(1.0, 0.0, 0.0),
+            Vector4::new3(0.0, 1.0, 0.0),
+        ] {
+            surface
+                .mesh_mut()
+                .push_vertex(cuemol_surface::SurfaceVertex {
+                    position,
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                });
+        }
+        surface.mesh_mut().push_triangle([0, 1, 2]);
+        std::fs::write(
+            &qdf_surface_path,
+            cuemol_surface::qdf::write_qdf_surface_bytes(&surface),
+        )
+        .unwrap();
+
+        let mut lw = cuemol_lwview::LWObject::new();
+        lw.add_draw_element(cuemol_lwview::LWDrawElement::new(
+            9,
+            cuemol_gfx::AbstDrawElem::DRAW_TRIANGLES as i8,
+            1.0,
+            [255, 0, 0, 255],
+            cuemol_lwview::LWDrawData::Vertices(vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]),
+        ));
+        std::fs::write(&qdf_lw_path, cuemol_lwview::write_qdf_lwobj_bytes(&lw)).unwrap();
+
+        let mut app = DesktopAppState::new();
+        assert!(matches!(
+            app.open_path(&ply_path).unwrap(),
+            GuiLoadedPath::Scene { .. }
+        ));
+        assert!(matches!(
+            app.open_path(&face_path).unwrap(),
+            GuiLoadedPath::Scene { .. }
+        ));
+        assert!(matches!(
+            app.open_path(&qdf_surface_path).unwrap(),
+            GuiLoadedPath::Scene { .. }
+        ));
+        assert_eq!(app.active_scene_surface_meshes().len(), 3);
+
+        assert!(matches!(
+            app.open_path(&qdf_lw_path).unwrap(),
+            GuiLoadedPath::Scene { .. }
+        ));
+        assert_eq!(
+            app.active_render_snapshot("")
+                .unwrap()
+                .mesh_triangle_count(),
+            1
+        );
+
+        for path in [
+            ply_path,
+            face_path,
+            vert_path,
+            qdf_surface_path,
+            qdf_lw_path,
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn desktop_opens_qdf_potential_as_surface_potential() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-desktop-potential-test-{}.qdf",
+            std::process::id()
+        ));
+        let mut potential = cuemol_surface::ElePotMap::new();
+        potential.set_map_float_array(
+            &[-2.0, 0.0, 3.0],
+            [3, 1, 1],
+            [0.5, 1.0, 1.0],
+            Vector4::new3(1.0, 2.0, 3.0),
+        );
+        std::fs::write(
+            &path,
+            cuemol_surface::qdf::write_qdf_potential_bytes(&potential),
+        )
+        .unwrap();
+
+        let mut app = DesktopAppState::new();
+        let GuiLoadedPath::Map { map_uid, .. } = app.open_path(&path).unwrap() else {
+            panic!("expected QDF potential map load");
+        };
+        assert!(app.has_surface_potential());
+        assert_eq!(app.density_map_summary(map_uid).unwrap().counts, [3, 1, 1]);
+        let (min, max) = app.surface_potential_range().unwrap();
+        assert!((min + 2.0).abs() < 0.05);
+        assert!((max - 3.0).abs() < 0.05);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -39,7 +39,7 @@ const RENDERER_TYPES: &[(&str, &str)] = &[
     ("anisou", "Anisotropic U"),
     ("atomintr", "Atom Interaction"),
     ("molsurf", "Molecular Surface"),
-    ("directsurf", "Direct Surface"),
+    ("dsurface", "Direct Surface"),
     ("contour", "Map Mesh"),
     ("isosurf", "Map Surface"),
     ("gpu_mapmesh", "GPU Map Mesh"),

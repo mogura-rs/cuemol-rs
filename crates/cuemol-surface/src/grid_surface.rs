@@ -203,6 +203,33 @@ pub fn build_grid_isosurface<F, V, P>(
     V: Fn(usize, usize, usize) -> f64,
     P: Fn(usize, usize, usize) -> Vector4,
 {
+    build_grid_isosurface_masked(
+        mesh,
+        field,
+        dims,
+        value,
+        position,
+        |_, _, _| true,
+        weld_scale,
+    );
+}
+
+/// Extract a grid isosurface while allowing callers to suppress crossings whose
+/// two edge nodes are not both valid.
+pub fn build_grid_isosurface_masked<F, V, P, M>(
+    mesh: &mut SurfaceMesh,
+    field: &F,
+    dims: [usize; 3],
+    value: V,
+    position: P,
+    valid: M,
+    weld_scale: f64,
+) where
+    F: ScalarField,
+    V: Fn(usize, usize, usize) -> f64,
+    P: Fn(usize, usize, usize) -> Vector4,
+    M: Fn(usize, usize, usize) -> bool,
+{
     if dims[0] < 2 || dims[1] < 2 || dims[2] < 2 {
         return;
     }
@@ -212,10 +239,13 @@ pub fn build_grid_isosurface<F, V, P>(
     let stride_y = dims[0];
     let stride_z = dims[0] * dims[1];
     let mut vals = vec![0.0_f64; dims[0] * dims[1] * dims[2]];
+    let mut valid_nodes = vec![true; dims[0] * dims[1] * dims[2]];
     for iz in 0..dims[2] {
         for iy in 0..dims[1] {
             for ix in 0..dims[0] {
-                vals[ix + iy * stride_y + iz * stride_z] = value(ix, iy, iz);
+                let index = ix + iy * stride_y + iz * stride_z;
+                vals[index] = value(ix, iy, iz);
+                valid_nodes[index] = valid(ix, iy, iz);
             }
         }
     }
@@ -227,10 +257,13 @@ pub fn build_grid_isosurface<F, V, P>(
             for ix in 0..dims[0] - 1 {
                 let mut corner_pos = [Vector4::ZERO; 8];
                 let mut corner_val = [0.0_f64; 8];
+                let mut corner_valid = [true; 8];
                 for (c, off) in CUBE_CORNERS.iter().enumerate() {
                     let (cx, cy, cz) = (ix + off[0], iy + off[1], iz + off[2]);
+                    let index = cx + cy * stride_y + cz * stride_z;
                     corner_pos[c] = position(cx, cy, cz);
-                    corner_val[c] = vals[cx + cy * stride_y + cz * stride_z];
+                    corner_val[c] = vals[index];
+                    corner_valid[c] = valid_nodes[index];
                 }
                 for tet in &CUBE_TETS {
                     march_tetra(
@@ -245,6 +278,12 @@ pub fn build_grid_isosurface<F, V, P>(
                             corner_val[tet[1]],
                             corner_val[tet[2]],
                             corner_val[tet[3]],
+                        ],
+                        [
+                            corner_valid[tet[0]],
+                            corner_valid[tet[1]],
+                            corner_valid[tet[2]],
+                            corner_valid[tet[3]],
                         ],
                         field,
                         &mut welder,
@@ -262,13 +301,14 @@ pub fn build_grid_isosurface<F, V, P>(
 fn march_tetra<F: ScalarField>(
     pos: [Vector4; 4],
     val: [f64; 4],
+    valid: [bool; 4],
     field: &F,
     welder: &mut VertexWelder,
     mesh: &mut SurfaceMesh,
 ) {
     let inside: Vec<usize> = (0..4).filter(|&i| val[i] < 0.0).collect();
     let outside: Vec<usize> = (0..4).filter(|&i| val[i] >= 0.0).collect();
-    let crossings: Vec<Vector4> = match (inside.len(), outside.len()) {
+    let crossings: Vec<(Vector4, bool)> = match (inside.len(), outside.len()) {
         (1, 3) | (3, 1) => {
             let (lone, others) = if inside.len() == 1 {
                 (inside[0], outside.clone())
@@ -277,61 +317,77 @@ fn march_tetra<F: ScalarField>(
             };
             others
                 .iter()
-                .map(|&o| edge_point(pos[lone], val[lone], pos[o], val[o]))
+                .map(|&o| {
+                    (
+                        edge_point(pos[lone], val[lone], pos[o], val[o]),
+                        valid[lone] && valid[o],
+                    )
+                })
                 .collect()
         }
         (2, 2) => {
             // Quad in cyclic order so consecutive points share a tet vertex.
             vec![
-                edge_point(
-                    pos[inside[0]],
-                    val[inside[0]],
-                    pos[outside[0]],
-                    val[outside[0]],
+                (
+                    edge_point(
+                        pos[inside[0]],
+                        val[inside[0]],
+                        pos[outside[0]],
+                        val[outside[0]],
+                    ),
+                    valid[inside[0]] && valid[outside[0]],
                 ),
-                edge_point(
-                    pos[inside[0]],
-                    val[inside[0]],
-                    pos[outside[1]],
-                    val[outside[1]],
+                (
+                    edge_point(
+                        pos[inside[0]],
+                        val[inside[0]],
+                        pos[outside[1]],
+                        val[outside[1]],
+                    ),
+                    valid[inside[0]] && valid[outside[1]],
                 ),
-                edge_point(
-                    pos[inside[1]],
-                    val[inside[1]],
-                    pos[outside[1]],
-                    val[outside[1]],
+                (
+                    edge_point(
+                        pos[inside[1]],
+                        val[inside[1]],
+                        pos[outside[1]],
+                        val[outside[1]],
+                    ),
+                    valid[inside[1]] && valid[outside[1]],
                 ),
-                edge_point(
-                    pos[inside[1]],
-                    val[inside[1]],
-                    pos[outside[0]],
-                    val[outside[0]],
+                (
+                    edge_point(
+                        pos[inside[1]],
+                        val[inside[1]],
+                        pos[outside[0]],
+                        val[outside[0]],
+                    ),
+                    valid[inside[1]] && valid[outside[0]],
                 ),
             ]
         }
         _ => return, // all inside or all outside: no surface
     };
 
+    let emit = |indices: [usize; 3], welder: &mut VertexWelder, mesh: &mut SurfaceMesh| {
+        if indices.iter().all(|index| crossings[*index].1) {
+            emit_triangle(
+                [
+                    crossings[indices[0]].0,
+                    crossings[indices[1]].0,
+                    crossings[indices[2]].0,
+                ],
+                field,
+                welder,
+                mesh,
+            );
+        }
+    };
     if crossings.len() == 3 {
-        emit_triangle(
-            [crossings[0], crossings[1], crossings[2]],
-            field,
-            welder,
-            mesh,
-        );
+        emit([0, 1, 2], welder, mesh);
     } else if crossings.len() == 4 {
-        emit_triangle(
-            [crossings[0], crossings[1], crossings[2]],
-            field,
-            welder,
-            mesh,
-        );
-        emit_triangle(
-            [crossings[0], crossings[2], crossings[3]],
-            field,
-            welder,
-            mesh,
-        );
+        emit([0, 1, 2], welder, mesh);
+        emit([0, 2, 3], welder, mesh);
     }
 }
 

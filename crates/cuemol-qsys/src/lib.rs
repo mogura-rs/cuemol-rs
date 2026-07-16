@@ -29,17 +29,20 @@ pub use events::{
     SharedViewEventListener, ViewEvent,
 };
 pub use io_handler::InOutHandler;
-pub use io_objects::{ObjReader, ObjWriter, SceneExporter, SceneXMLReader, SceneXMLWriter};
+pub use io_objects::{
+    ObjReader, ObjWriter, SceneExporter, SceneWriterOptions, SceneXMLReader, SceneXMLWriter,
+};
 pub use misc::{
     MultiGradient, PropEditInfo, RendGroup, Renderer, TestRenderer, ViewInputConfig, INVALID_UID,
 };
 pub use momentum::{momentum_ease, momentum_spin_angle, momentum_translation};
 pub use mouse::{calc_velocity, DragSample, DragState, MouseEventHandler};
-pub use object::SceneObject;
+pub use object::{ObjExtData, SceneObject};
 pub use qdf_stream::{
     encode_qdf0_bytes, qdf_file_type, qdf_version_string, QdfFieldDef, QdfReader, QdfWriter,
-    QDF_TYPE_BOOL, QDF_TYPE_FIXSTR8, QDF_TYPE_FLOAT32, QDF_TYPE_INT32, QDF_TYPE_INT8, QDF_TYPE_UID,
-    QDF_TYPE_UINT32, QDF_TYPE_UINT8, QDF_TYPE_UTF8STR,
+    QDF_TYPE_BOOL, QDF_TYPE_FIXSTR16, QDF_TYPE_FIXSTR32, QDF_TYPE_FIXSTR8, QDF_TYPE_FLOAT32,
+    QDF_TYPE_INT32, QDF_TYPE_INT8, QDF_TYPE_RGBA, QDF_TYPE_UID, QDF_TYPE_UINT32, QDF_TYPE_UINT8,
+    QDF_TYPE_UTF8STR, QDF_TYPE_VEC3,
 };
 pub use render_base::{DispListRenderer, DrawObj, ShaderObjMgr};
 pub use renderer_factory::{RendererFactory, RendererInstance};

@@ -205,7 +205,7 @@ const RENDERER_TYPES: &[(&str, &str)] = &[
     ("anisou", "Anisotropic U"),
     ("atomintr", "Atom Interaction"),
     ("molsurf", "Molecular Surface"),
-    ("directsurf", "Direct Surface"),
+    ("dsurface", "Direct Surface"),
 ];
 
 /// Top-level menus: (title, dropdown left-offset px, title width px). The offsets
@@ -863,18 +863,26 @@ impl CueMolGpuiApp {
         }
     }
 
-    /// Absolute-positioned atom labels overlaid on the viewport image (CueMol2 atom
-    /// labels). The projected positions are image (physical) pixels; gpui lays out in
-    /// logical px, so divide by the scale factor.
+    /// Absolute-positioned selection and AtomIntr labels over the viewport image.
+    /// Projected positions are physical pixels; gpui uses logical pixels, so divide
+    /// by the scale factor.
     fn label_overlay(&self) -> Vec<gpui::AnyElement> {
-        if !self.show_labels {
-            return Vec::new();
-        }
         let (w, h) = self.view_size;
         let mvp = crate::offscreen::camera_mvp(&self.camera, w as f64 / h as f64);
         let scale = self.scale_factor.max(0.01);
-        self.state
-            .active_atom_labels(&self.applied_selection, mvp, w as f32, h as f32, 80)
+        let mut labels = if self.show_labels {
+            self.state
+                .active_atom_labels(&self.applied_selection, mvp, w as f32, h as f32, 80)
+        } else {
+            Vec::new()
+        };
+        labels.extend(self.state.active_atom_intr_labels(
+            mvp,
+            w as f32,
+            h as f32,
+            80_usize.saturating_sub(labels.len()),
+        ));
+        labels
             .into_iter()
             .map(|label| {
                 div()

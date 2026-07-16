@@ -1,8 +1,8 @@
-use cuemol_core::{Matrix4, Vector4};
+use cuemol_core::{Matrix3, Matrix4, Vector4};
 use cuemol_gfx::SolidColor;
 use cuemol_molstr::{GridMap, Selector};
 use cuemol_qsys::{DispListRenderer, MultiGradient, ScalarObject, View};
-use cuemol_surface::{build_grid_isosurface, MolSurfObj, ScalarField, SurfaceMesh};
+use cuemol_surface::{build_grid_isosurface_masked, MolSurfObj, ScalarField, SurfaceMesh};
 use cuemol_symm::CrystalInfo;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -496,6 +496,10 @@ impl ScalarObject for DensityMap {
             + self.delta[1] * (index.y + self.start[1] as f64)
             + self.delta[2] * (index.z + self.start[2] as f64)
     }
+
+    fn is_periodic_grid(&self) -> bool {
+        self.counts == self.intervals && self.counts.iter().all(|count| *count > 0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -669,6 +673,10 @@ impl MapRenderer {
 
     pub fn set_use_abs_lev(&mut self, value: bool) {
         self.set_use_abslevel(value);
+    }
+
+    fn grid_range(&self, scalar: &impl ScalarObject) -> Option<GridRange> {
+        GridRange::from_center_extent(scalar, self.center, self.extent, self.use_pbc)
     }
 
     pub fn bndry_rng(&self) -> f64 {
@@ -914,8 +922,20 @@ impl MapMeshRenderer {
     /// result is `[start, end]` Cartesian segments (consumed by line drawing /
     /// OBJ `l` export), the wireframe analogue of `MapSurfRenderer`'s filled mesh.
     pub fn generate_contour_lines(&self, scalar: &impl ScalarObject) -> Vec<[Vector4; 2]> {
+        self.generate_contour_lines_with_boundary(scalar, None)
+    }
+
+    pub fn generate_contour_lines_with_boundary(
+        &self,
+        scalar: &impl ScalarObject,
+        boundary_points: Option<&[Vector4]>,
+    ) -> Vec<[Vector4; 2]> {
         let level = self.map.level(scalar);
-        let (nc, nr, ns) = (scalar.col_no(), scalar.row_no(), scalar.sec_no());
+        let Some(mut range) = self.map.grid_range(scalar) else {
+            return Vec::new();
+        };
+        range.limit_node_counts([self.bufsize as usize; 3]);
+        let [nc, nr, ns] = range.node_counts();
         let (sc, sr, ss) = (scalar.start_col(), scalar.start_row(), scalar.start_sec());
         if nc < 2 || nr < 2 || ns < 2 {
             return Vec::new();
@@ -923,10 +943,18 @@ impl MapMeshRenderer {
 
         // Signed field at relative node (i,j,k): negative where density exceeds
         // the level (so the f=0 isoline is the contour).
-        let node = |i: usize, j: usize, k: usize| -> (f64, Vector4) {
-            let value = level - scalar.at_float(i as isize + sc, j as isize + sr, k as isize + ss);
+        let boundary = BoundaryFilter::new(boundary_points, self.map.bndry_rng());
+        let node = |i: usize, j: usize, k: usize| -> (f64, Vector4, bool) {
+            let logical = [
+                i as isize + range.start[0],
+                j as isize + range.start[1],
+                k as isize + range.start[2],
+            ];
+            let [i, j, k] = range.map_indices(scalar, logical);
+            let value = level - scalar.at_float(i + sc, j + sr, k + ss);
+            let [i, j, k] = logical;
             let pos = scalar.conv_to_orth(Vector4::new3(i as f64, j as f64, k as f64));
-            (value, pos)
+            (value, pos, boundary.contains(pos))
         };
 
         let mut out = Vec::new();
@@ -1000,10 +1028,11 @@ pub fn contour_lines_to_obj(segments: &[[Vector4; 2]]) -> String {
 }
 
 /// Emit the marching-squares isoline segments (`f = 0`) for one quad cell.
-/// Corners are in quad order c00, c10, c11, c01; each is `(signed value, pos)`
+/// Corners are in quad order c00, c10, c11, c01; each is
+/// `(signed value, pos, boundary-valid)`
 /// with `value < 0` inside. Edges: 0 = c00-c10, 1 = c10-c11, 2 = c11-c01,
 /// 3 = c01-c00.
-fn march_squares_cell(corners: [(f64, Vector4); 4], out: &mut Vec<[Vector4; 2]>) {
+fn march_squares_cell(corners: [(f64, Vector4, bool); 4], out: &mut Vec<[Vector4; 2]>) {
     // Segment table: for each of the 16 inside/outside cases, the pairs of edges
     // the isoline connects (saddle cases 5 and 10 emit two segments).
     const EDGE_PAIRS: [&[(u8, u8)]; 16] = [
@@ -1037,25 +1066,30 @@ fn march_squares_cell(corners: [(f64, Vector4); 4], out: &mut Vec<[Vector4; 2]>)
         return;
     }
 
-    let crossing = |edge: u8| -> Vector4 {
+    let crossing = |edge: u8| -> Option<Vector4> {
         let (a, b) = EDGE_CORNERS[edge as usize];
-        let (va, pa) = corners[a];
-        let (vb, pb) = corners[b];
+        let (va, pa, valid_a) = corners[a];
+        let (vb, pb, valid_b) = corners[b];
+        if !valid_a || !valid_b {
+            return None;
+        }
         let denom = va - vb;
         let t = if denom.abs() < 1.0e-12 {
             0.5
         } else {
             (va / denom).clamp(0.0, 1.0)
         };
-        Vector4::new3(
+        Some(Vector4::new3(
             pa.x + (pb.x - pa.x) * t,
             pa.y + (pb.y - pa.y) * t,
             pa.z + (pb.z - pa.z) * t,
-        )
+        ))
     };
 
     for &(ea, eb) in pairs {
-        out.push([crossing(ea), crossing(eb)]);
+        if let (Some(a), Some(b)) = (crossing(ea), crossing(eb)) {
+            out.push([a, b]);
+        }
     }
 }
 
@@ -1215,7 +1249,7 @@ impl MapSurfRenderer {
     }
 
     pub fn set_binning(&mut self, value: i32) {
-        self.binning = value;
+        self.binning = value.max(1);
         self.map.invalidate_display_cache();
     }
 
@@ -1232,7 +1266,8 @@ impl MapSurfRenderer {
     }
 
     pub fn set_max_grids(&mut self, value: i32) {
-        self.max_grids = value;
+        self.max_grids = value.max(1);
+        self.map.invalidate_display_cache();
     }
 
     pub fn max_extent(&self, scalar: &impl ScalarObject) -> f64 {
@@ -1252,9 +1287,30 @@ impl MapSurfRenderer {
     /// the shared marching-tetrahedra core in `cuemol-surface`. This is the
     /// visual consumer of the MTZ/mmCIF -> density pipeline.
     pub fn generate_surf_obj(&self, scalar: &impl ScalarObject) -> MolSurfObj {
+        self.generate_surf_obj_with_boundary(scalar, None)
+    }
+
+    pub fn generate_surf_obj_with_boundary(
+        &self,
+        scalar: &impl ScalarObject,
+        boundary_points: Option<&[Vector4]>,
+    ) -> MolSurfObj {
         let mut object = MolSurfObj::new();
         let level = self.map.level(scalar);
-        build_density_isosurface(object.mesh_mut(), scalar, level);
+        let extent = self.map.extent().min(self.max_extent(scalar));
+        let Some(range) =
+            GridRange::from_center_extent(scalar, self.map.center(), extent, self.map.use_pbc())
+        else {
+            return object;
+        };
+        build_density_isosurface(
+            object.mesh_mut(),
+            scalar,
+            level,
+            range,
+            self.binning as usize,
+            BoundaryFilter::new(boundary_points, self.map.bndry_rng()),
+        );
         object
     }
 
@@ -1303,10 +1359,11 @@ struct DensityField<'a, S: ScalarObject> {
     axes: [Vector4; 3],
     inv_len2: [f64; 3],
     start: [isize; 3],
+    periodic: bool,
 }
 
 impl<'a, S: ScalarObject> DensityField<'a, S> {
-    fn new(map: &'a S) -> Self {
+    fn new(map: &'a S, periodic: bool) -> Self {
         let origin = map.conv_to_orth(Vector4::ZERO);
         let axes = [
             map.conv_to_orth(Vector4::new3(1.0, 0.0, 0.0)) - origin,
@@ -1324,6 +1381,7 @@ impl<'a, S: ScalarObject> DensityField<'a, S> {
             axes,
             inv_len2,
             start: [map.start_col(), map.start_row(), map.start_sec()],
+            periodic,
         }
     }
 
@@ -1339,8 +1397,18 @@ impl<'a, S: ScalarObject> DensityField<'a, S> {
     }
 
     fn node_density(&self, i: isize, j: isize, k: isize) -> f64 {
-        self.map
-            .at_float(i + self.start[0], j + self.start[1], k + self.start[2])
+        let mut index = [i, j, k];
+        if self.periodic {
+            let counts = [self.map.col_no(), self.map.row_no(), self.map.sec_no()];
+            for axis in 0..3 {
+                index[axis] = index[axis].rem_euclid(counts[axis] as isize);
+            }
+        }
+        self.map.at_float(
+            index[0] + self.start[0],
+            index[1] + self.start[1],
+            index[2] + self.start[2],
+        )
     }
 
     /// Trilinear density at a continuous (relative) grid index.
@@ -1391,40 +1459,218 @@ fn inv_sq_len(v: Vector4) -> f64 {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BoundaryFilter<'a> {
+    points: Option<&'a [Vector4]>,
+    range_sq: f64,
+}
+
+impl<'a> BoundaryFilter<'a> {
+    fn new(points: Option<&'a [Vector4]>, range: f64) -> Self {
+        Self {
+            points,
+            range_sq: range.max(0.0).powi(2),
+        }
+    }
+
+    fn contains(self, position: Vector4) -> bool {
+        self.points.is_none_or(|points| {
+            points.iter().any(|point| {
+                let delta = position - *point;
+                delta.dot3d(delta) <= self.range_sq
+            })
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GridRange {
+    /// Relative grid-node index, inclusive.
+    start: [isize; 3],
+    /// Relative grid-node index, exclusive.
+    end: [isize; 3],
+    periodic: bool,
+}
+
+impl GridRange {
+    fn from_center_extent(
+        map: &impl ScalarObject,
+        center: Vector4,
+        extent: f64,
+        use_pbc: bool,
+    ) -> Option<Self> {
+        if !extent.is_finite() || extent <= 0.0 {
+            return None;
+        }
+
+        let grid_origin = map.origin();
+        let relative_origin = map.conv_to_orth(Vector4::ZERO);
+        let axes = [
+            map.conv_to_orth(Vector4::new3(1.0, 0.0, 0.0)) - relative_origin,
+            map.conv_to_orth(Vector4::new3(0.0, 1.0, 0.0)) - relative_origin,
+            map.conv_to_orth(Vector4::new3(0.0, 0.0, 1.0)) - relative_origin,
+        ];
+        let orth_to_grid = Matrix3::new([
+            [axes[0].x, axes[1].x, axes[2].x],
+            [axes[0].y, axes[1].y, axes[2].y],
+            [axes[0].z, axes[1].z, axes[2].z],
+        ])
+        .invert()
+        .ok()?;
+        let lower_orth = center - Vector4::new3(extent, extent, extent);
+        let upper_orth = center + Vector4::new3(extent, extent, extent);
+        let first = orth_to_grid.mul_vec(lower_orth - grid_origin);
+        let second = orth_to_grid.mul_vec(upper_orth - grid_origin);
+        let grid_lower = [
+            first.x.min(second.x),
+            first.y.min(second.y),
+            first.z.min(second.z),
+        ];
+        let grid_upper = [
+            first.x.max(second.x),
+            first.y.max(second.y),
+            first.z.max(second.z),
+        ];
+        let map_start = [map.start_col(), map.start_row(), map.start_sec()];
+        let map_counts = [map.col_no(), map.row_no(), map.sec_no()];
+        let periodic = use_pbc && map.is_periodic_grid();
+        let mut start = [0; 3];
+        let mut end = [0; 3];
+        for axis in 0..3 {
+            let available_end = map_start[axis].saturating_add_unsigned(map_counts[axis]);
+            let (lower, upper) = if periodic {
+                (
+                    grid_lower[axis].floor() as isize,
+                    grid_upper[axis].floor() as isize,
+                )
+            } else {
+                (
+                    (grid_lower[axis].max(map_start[axis] as f64).floor() as isize)
+                        .clamp(map_start[axis], available_end),
+                    (grid_upper[axis].min(available_end as f64).floor() as isize)
+                        .clamp(map_start[axis], available_end),
+                )
+            };
+            start[axis] = lower.saturating_sub(map_start[axis]);
+            end[axis] = upper.saturating_sub(map_start[axis]);
+            if end[axis] <= start[axis] {
+                return None;
+            }
+        }
+        Some(Self {
+            start,
+            end,
+            periodic,
+        })
+    }
+
+    fn node_counts(self) -> [usize; 3] {
+        [
+            self.end[0].saturating_sub(self.start[0]) as usize,
+            self.end[1].saturating_sub(self.start[1]) as usize,
+            self.end[2].saturating_sub(self.start[2]) as usize,
+        ]
+    }
+
+    fn limit_node_counts(&mut self, limits: [usize; 3]) {
+        for (axis, limit) in limits.into_iter().enumerate() {
+            let count = self.end[axis].saturating_sub(self.start[axis]) as usize;
+            if count <= limit {
+                continue;
+            }
+            let remove = count - limit;
+            self.start[axis] += (remove / 2) as isize;
+            self.end[axis] -= (remove - remove / 2) as isize;
+        }
+    }
+
+    fn with_upper_boundary_nodes(mut self, map: &impl ScalarObject) -> Self {
+        let counts = [map.col_no(), map.row_no(), map.sec_no()];
+        for (end, count) in self.end.iter_mut().zip(counts) {
+            *end = end.saturating_add(1);
+            if !self.periodic {
+                *end = (*end).min(count as isize);
+            }
+        }
+        self
+    }
+
+    fn map_indices(self, map: &impl ScalarObject, mut indices: [isize; 3]) -> [isize; 3] {
+        if self.periodic {
+            let counts = [map.col_no(), map.row_no(), map.sec_no()];
+            for axis in 0..3 {
+                indices[axis] = indices[axis].rem_euclid(counts[axis] as isize);
+            }
+        }
+        indices
+    }
+}
+
 /// Extract the `density == level` isosurface of `map` into `mesh` by marching
-/// the map's grid. Cube corners are grid nodes (values taken exactly from
-/// `at_float`, no resampling), crossings are mapped to Cartesian via
-/// `conv_to_orth`, and the whole grid is contoured (sub-box extent clipping is
-/// deferred). Ports the geometry half of C++ `MapSurfRenderer::marchCube`.
-fn build_density_isosurface<S: ScalarObject>(mesh: &mut SurfaceMesh, map: &S, level: f64) {
-    let dims = [map.col_no(), map.row_no(), map.sec_no()];
+/// the selected map grid. Cube corners are grid nodes (values taken exactly
+/// from `at_float`, no resampling), and crossings are mapped to Cartesian via
+/// `conv_to_orth`. Ports the geometry half of C++ `MapSurfRenderer::marchCube`.
+fn build_density_isosurface<S: ScalarObject>(
+    mesh: &mut SurfaceMesh,
+    map: &S,
+    level: f64,
+    range: GridRange,
+    binning: usize,
+    boundary: BoundaryFilter<'_>,
+) {
+    let range = range.with_upper_boundary_nodes(map);
+    let sample_axis = |axis: usize| {
+        let mut indices = Vec::new();
+        let last = range.end[axis] - 1;
+        let mut index = range.start[axis];
+        loop {
+            indices.push(index);
+            if index == last {
+                break;
+            }
+            index = index.saturating_add_unsigned(binning).min(last);
+        }
+        indices
+    };
+    let indices = [sample_axis(0), sample_axis(1), sample_axis(2)];
+    let dims = [indices[0].len(), indices[1].len(), indices[2].len()];
     if dims[0] < 2 || dims[1] < 2 || dims[2] < 2 {
         return;
     }
     let start = [map.start_col(), map.start_row(), map.start_sec()];
-    let field = DensityField::new(map);
+    let field = DensityField::new(map, range.periodic);
     let spacing = map
         .col_grid_size()
         .min(map.row_grid_size())
         .min(map.sec_grid_size())
         .max(1.0e-6);
 
-    build_grid_isosurface(
+    build_grid_isosurface_masked(
         mesh,
         &field,
         dims,
         // Signed field at node (i,j,k): negative where density exceeds the level.
         |i, j, k| {
-            level
-                - map.at_float(
-                    i as isize + start[0],
-                    j as isize + start[1],
-                    k as isize + start[2],
-                )
+            let logical = [indices[0][i], indices[1][j], indices[2][k]];
+            let [i, j, k] = range.map_indices(map, logical);
+            level - map.at_float(i + start[0], j + start[1], k + start[2])
         },
         // Grid node -> Cartesian (relative index; conv_to_orth adds the start).
-        |i, j, k| map.conv_to_orth(Vector4::new3(i as f64, j as f64, k as f64)),
-        spacing,
+        |i, j, k| {
+            map.conv_to_orth(Vector4::new3(
+                indices[0][i] as f64,
+                indices[1][j] as f64,
+                indices[2][k] as f64,
+            ))
+        },
+        |i, j, k| {
+            boundary.contains(map.conv_to_orth(Vector4::new3(
+                indices[0][i] as f64,
+                indices[1][j] as f64,
+                indices[2][k] as f64,
+            )))
+        },
+        spacing * binning as f64,
     );
 }
 
@@ -1890,6 +2136,8 @@ attribute \"dep\" string \"positions\"
         assert_eq!(surf.omp_thr(), -1);
         surf.set_drawmode(MapSurfaceDrawMode::Line);
         assert_eq!(surf.drawmode_code(), MapSurfRenderer::MSRDRAW_LINE);
+        surf.set_binning(0);
+        assert_eq!(surf.binning(), 1);
         surf.map_mut().set_color_mapname("map1");
         let obj = surf.generate_surf_obj(&map);
         // The contour now triangulates the density grid itself (the level cuts
@@ -1931,6 +2179,8 @@ attribute \"dep\" string \"positions\"
         // Contour at density == 19 => sphere of radius R0 - 19 = 6.
         let mut surf = MapSurfRenderer::new();
         surf.map_mut().set_level(&map, 19.0);
+        surf.map_mut().set_center(center);
+        surf.map_mut().set_extent(8.0);
         assert!((surf.map().level(&map) - 19.0).abs() < 1.0e-3);
 
         let obj = surf.generate_surf_obj(&map);
@@ -1973,6 +2223,15 @@ attribute \"dep\" string \"positions\"
             (area - analytic).abs() / analytic < 0.15,
             "area {area} vs analytic {analytic}"
         );
+
+        surf.set_binning(2);
+        let coarse = surf.generate_surf_obj(&map);
+        assert!(coarse.mesh().triangle_count() > 0);
+        assert!(coarse.mesh().triangle_count() < mesh.triangle_count());
+
+        surf.map_mut().set_center(Vector4::ZERO);
+        surf.map_mut().set_extent(2.0);
+        assert_eq!(surf.generate_surf_obj(&map).mesh().triangle_count(), 0);
     }
 
     #[test]
@@ -2015,6 +2274,8 @@ attribute \"dep\" string \"positions\"
         let radius = 6.0_f64;
         let mut surf = MapSurfRenderer::new();
         surf.map_mut().set_level(&map, r0 - radius); // density == 19 => |p - cc| == 6
+        surf.map_mut().set_center(cc);
+        surf.map_mut().set_extent(8.0);
         let obj = surf.generate_surf_obj(&map);
         let mesh = obj.mesh();
         assert!(
@@ -2067,6 +2328,8 @@ attribute \"dep\" string \"positions\"
         let radius = 6.0_f64;
         let mut mesh = MapMeshRenderer::new();
         mesh.map_mut().set_level(&map, r0 - radius);
+        mesh.map_mut().set_center(center);
+        mesh.map_mut().set_extent(8.0);
         let segments = mesh.generate_contour_lines(&map);
 
         assert!(
@@ -2085,6 +2348,10 @@ attribute \"dep\" string \"positions\"
                 assert!((r - radius).abs() < 0.7, "contour vertex off sphere: r={r}");
             }
         }
+
+        mesh.map_mut().set_center(Vector4::ZERO);
+        mesh.map_mut().set_extent(2.0);
+        assert!(mesh.generate_contour_lines(&map).is_empty());
     }
 
     #[test]
@@ -2093,6 +2360,73 @@ attribute \"dep\" string \"positions\"
         let mut mesh = MapMeshRenderer::new();
         mesh.map_mut().set_level(&map, 100.0);
         assert!(mesh.generate_contour_lines(&map).is_empty());
+    }
+
+    #[test]
+    fn map_renderers_wrap_full_cell_density_at_periodic_boundary() {
+        const N: usize = 4;
+        let mut values = vec![0.0; N * N * N];
+        for k in 0..N {
+            for j in 0..N {
+                values[N * (j + N * k)] = 10.0;
+            }
+        }
+        let map = DensityMap::from_grid_map(GridMap {
+            counts: [N, N, N],
+            origin: Vector4::ZERO,
+            delta: [
+                Vector4::new3(1.0, 0.0, 0.0),
+                Vector4::new3(0.0, 1.0, 0.0),
+                Vector4::new3(0.0, 0.0, 1.0),
+            ],
+            values,
+        });
+        assert!(map.is_periodic_grid());
+
+        let center = Vector4::new3(4.0, 1.5, 1.5);
+        let mut wire = MapMeshRenderer::new();
+        wire.map_mut().set_level(&map, 5.0);
+        wire.map_mut().set_center(center);
+        wire.map_mut().set_extent(1.5);
+        wire.map_mut().set_use_pbc(false);
+        assert!(wire.generate_contour_lines(&map).is_empty());
+        wire.map_mut().set_use_pbc(true);
+        let wire_count = wire.generate_contour_lines(&map).len();
+        assert!(wire_count > 0);
+        wire.map_mut().set_bndry_rng(100.0);
+        assert_eq!(
+            wire.generate_contour_lines_with_boundary(&map, Some(&[center]))
+                .len(),
+            wire_count
+        );
+        assert!(wire
+            .generate_contour_lines_with_boundary(&map, Some(&[]))
+            .is_empty());
+
+        let mut surface = MapSurfRenderer::new();
+        surface.map_mut().set_level(&map, 5.0);
+        surface.map_mut().set_center(center);
+        surface.map_mut().set_extent(1.5);
+        surface.map_mut().set_use_pbc(false);
+        assert_eq!(surface.generate_surf_obj(&map).mesh().triangle_count(), 0);
+        surface.map_mut().set_use_pbc(true);
+        let surface_count = surface.generate_surf_obj(&map).mesh().triangle_count();
+        assert!(surface_count > 0);
+        surface.map_mut().set_bndry_rng(100.0);
+        assert_eq!(
+            surface
+                .generate_surf_obj_with_boundary(&map, Some(&[center]))
+                .mesh()
+                .triangle_count(),
+            surface_count
+        );
+        assert_eq!(
+            surface
+                .generate_surf_obj_with_boundary(&map, Some(&[]))
+                .mesh()
+                .triangle_count(),
+            0
+        );
     }
 
     #[test]

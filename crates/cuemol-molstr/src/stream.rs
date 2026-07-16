@@ -1,5 +1,11 @@
-use cuemol_core::{ByteArray, CueMolError, Result};
-use cuemol_qsys::InOutHandler;
+use crate::qsys::{AtomIntrKind, MolRenderer};
+use cuemol_core::{
+    parse_ldom2_xml, write_ldom2_xml, ByteArray, CueMolError, LDom2Node, LDom2Tree, Result,
+};
+use cuemol_qsys::{
+    Camera, InOutHandler, ObjReader, Renderer as QsysRenderer, SceneXMLReader, SceneXMLWriter,
+};
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
@@ -94,8 +100,12 @@ pub enum HandlerSniffer {
     BrixMap,
     MtzMap,
     MsmsSurface,
+    PlySurface,
+    QdfMol,
+    QdfMap,
     QdfSurf,
     QdfPot,
+    QdfLwObj,
     QscXml,
     Pse,
 }
@@ -135,6 +145,19 @@ pub struct AsyncLoadTask {
     reader_type: String,
     data: Vec<u8>,
     eos: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AsyncLoadedObject {
+    Molecule(crate::MolCoord),
+    GridMap(crate::GridMap),
+    /// Fully buffered input for readers implemented by a higher-level crate.
+    /// This preserves asynchronous transport without introducing dependency
+    /// cycles from molstr to xtal, surface, mdtools, importers, or lwview.
+    Buffered {
+        reader_type: String,
+        data: ByteArray,
+    },
 }
 
 impl AsyncLoadTask {
@@ -302,11 +325,15 @@ impl StreamManager {
             .join(",")
     }
 
-    pub fn load_object_async<R>(&mut self, _reader: &R) -> i32 {
+    pub fn load_object_async<R: 'static>(&mut self, reader: &R) -> i32 {
         let id = self.next_async_load_id;
         self.next_async_load_id = self.next_async_load_id.saturating_add(1).max(1);
-        self.async_loads
-            .insert(id, AsyncLoadTask::new(std::any::type_name::<R>()));
+        self.async_loads.insert(
+            id,
+            AsyncLoadTask::new(
+                async_reader_name(reader).unwrap_or_else(|| std::any::type_name::<R>().to_string()),
+            ),
+        );
         id
     }
 
@@ -321,17 +348,41 @@ impl StreamManager {
         true
     }
 
-    pub fn wait_load_async(&mut self, load_id: i32) -> Option<ByteArray> {
+    pub fn wait_load_bytes_async(&mut self, load_id: i32) -> Option<ByteArray> {
         let mut task = self.async_loads.remove(&load_id)?;
         task.eos = true;
         Some(ByteArray::copy_from_u8(&task.data))
+    }
+
+    pub fn wait_load_async(&mut self, load_id: i32) -> Option<AsyncLoadedObject> {
+        self.wait_load_object_async(load_id).ok().flatten()
+    }
+
+    pub fn wait_load_object_async(&mut self, load_id: i32) -> Result<Option<AsyncLoadedObject>> {
+        let Some(mut task) = self.async_loads.remove(&load_id) else {
+            return Ok(None);
+        };
+        task.eos = true;
+        parse_async_object(&task.reader_type, &task.data).map(Some)
     }
 
     pub fn async_load(&self, load_id: i32) -> Option<&AsyncLoadTask> {
         self.async_loads.get(&load_id)
     }
 
-    pub fn to_xml<T>(&self, _object: &T) -> ByteArray {
+    pub fn to_xml<T: 'static>(&self, object: &T) -> ByteArray {
+        if let Some(camera) = (object as &dyn Any).downcast_ref::<Camera>() {
+            return SceneXMLWriter::new().camera_to_byte_array(camera);
+        }
+        if let Some(renderer) = (object as &dyn Any).downcast_ref::<MolRenderer>() {
+            return node_to_byte_array(renderer_node_from_mol(renderer, None));
+        }
+        if let Some(renderer) = (object as &dyn Any).downcast_ref::<QsysRenderer>() {
+            return node_to_byte_array(renderer_node_from_qsys(renderer, None));
+        }
+        if let Some(node) = (object as &dyn Any).downcast_ref::<LDom2Node>() {
+            return node_to_byte_array(node.clone());
+        }
         ByteArray::copy_from_u8(
             format!(
                 "<object type=\"{}\"/>",
@@ -341,8 +392,17 @@ impl StreamManager {
         )
     }
 
-    pub fn to_xml_2<T>(&self, object: &T, type_override: &str) -> ByteArray {
+    pub fn to_xml_2<T: 'static>(&self, object: &T, type_override: &str) -> ByteArray {
         if type_override.trim().is_empty() {
+            return self.to_xml(object);
+        }
+        if let Some(renderer) = (object as &dyn Any).downcast_ref::<MolRenderer>() {
+            return node_to_byte_array(renderer_node_from_mol(renderer, Some(type_override)));
+        }
+        if let Some(renderer) = (object as &dyn Any).downcast_ref::<QsysRenderer>() {
+            return node_to_byte_array(renderer_node_from_qsys(renderer, Some(type_override)));
+        }
+        if (object as &dyn Any).is::<Camera>() {
             return self.to_xml(object);
         }
         ByteArray::copy_from_u8(
@@ -350,11 +410,14 @@ impl StreamManager {
         )
     }
 
-    pub fn to_xml2<T>(&self, object: &T, type_override: &str) -> ByteArray {
+    pub fn to_xml2<T: 'static>(&self, object: &T, type_override: &str) -> ByteArray {
         self.to_xml_2(object, type_override)
     }
 
-    pub fn array_to_xml<T>(&self, array: &[T]) -> ByteArray {
+    pub fn array_to_xml<T: 'static>(&self, array: &[T]) -> ByteArray {
+        if let Some(nodes) = renderer_nodes(array, "") {
+            return renderer_nodes_to_byte_array(nodes, "");
+        }
         ByteArray::copy_from_u8(
             format!(
                 "<array type=\"{}\" size=\"{}\"/>",
@@ -365,7 +428,10 @@ impl StreamManager {
         )
     }
 
-    pub fn rend_grp_to_xml<T>(&self, array: &[T], group_name: &str) -> ByteArray {
+    pub fn rend_grp_to_xml<T: 'static>(&self, array: &[T], group_name: &str) -> ByteArray {
+        if let Some(nodes) = renderer_nodes(array, group_name) {
+            return renderer_nodes_to_byte_array(nodes, group_name);
+        }
         ByteArray::copy_from_u8(
             format!(
                 "<rendgrp name=\"{}\" size=\"{}\"/>",
@@ -380,7 +446,45 @@ impl StreamManager {
         String::from_utf8(data.as_bytes().to_vec()).ok()
     }
 
+    pub fn camera_from_xml(&self, data: &ByteArray, _scene_id: i32) -> Result<Camera> {
+        SceneXMLReader::new().camera_from_byte_array(data)
+    }
+
+    pub fn renderer_from_xml(&self, data: &ByteArray, _scene_id: i32) -> Result<QsysRenderer> {
+        let tree = parse_xml_byte_array(data)?;
+        renderer_from_node(tree.top())
+    }
+
+    pub fn renderer_array_from_xml(
+        &self,
+        data: &ByteArray,
+        _scene_id: i32,
+    ) -> Result<(String, Vec<QsysRenderer>)> {
+        let tree = parse_xml_byte_array(data)?;
+        if tree.top().tag_name() != "renderers" {
+            return Err(CueMolError::parse("renderer array root is not renderers"));
+        }
+        let group = tree.top().str_attr("group").to_string();
+        let renderers = tree
+            .top()
+            .children()
+            .iter()
+            .filter(|node| !node.is_attr() && node.tag_name() == "renderer")
+            .map(renderer_from_node)
+            .collect::<Result<Vec<_>>>()?;
+        Ok((group, renderers))
+    }
+
     pub fn rend_array_from_xml(&self, data: &ByteArray, _flags: i32) -> Vec<String> {
+        if let Ok((group, renderers)) = self.renderer_array_from_xml(data, _flags) {
+            return std::iter::once(group)
+                .chain(
+                    renderers
+                        .into_iter()
+                        .map(|renderer| renderer.name().to_string()),
+                )
+                .collect();
+        }
         let Ok(xml) = String::from_utf8(data.as_bytes().to_vec()) else {
             return Vec::new();
         };
@@ -475,6 +579,10 @@ impl StreamManager {
 
     pub fn cat_scewriter(&self) -> i32 {
         HandlerCategory::SCENE_WRITER
+    }
+
+    pub fn scene_writer(&self) -> i32 {
+        self.cat_scewriter()
     }
 
     pub fn comp_none(&self) -> i32 {
@@ -592,6 +700,14 @@ fn default_handlers() -> Vec<StreamHandlerInfo> {
             Some(HandlerSniffer::Pdb),
         ),
         StreamHandlerInfo::new(
+            "cuemol_rs::QdfMolReader",
+            "qdfmol",
+            "CueMol coordinates file (*.qdf)",
+            "*.qdf",
+            HandlerCategory::ObjReader,
+            Some(HandlerSniffer::QdfMol),
+        ),
+        StreamHandlerInfo::new(
             "cuemol_rs::MmcifMolReader",
             "mmcif",
             "mmCIF Coordinates (*.cif;*.cif.gz)",
@@ -696,12 +812,28 @@ fn default_handlers() -> Vec<StreamHandlerInfo> {
             Some(HandlerSniffer::MtzMap),
         ),
         StreamHandlerInfo::new(
+            "cuemol_rs::QdfDenMapReader",
+            "qdfmap",
+            "CueMol density map file (*.qdf)",
+            "*.qdf",
+            HandlerCategory::ObjReader,
+            Some(HandlerSniffer::QdfMap),
+        ),
+        StreamHandlerInfo::new(
             "cuemol_rs::MSMSFileReader",
             "msms",
             "MSMS Surface (*.vert;*.face)",
             "*.vert; *.face",
             HandlerCategory::ObjReader,
             Some(HandlerSniffer::MsmsSurface),
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::PLYFileReader",
+            "ply",
+            "PLY polygon file (*.ply)",
+            "*.ply",
+            HandlerCategory::ObjReader,
+            Some(HandlerSniffer::PlySurface),
         ),
         StreamHandlerInfo::new(
             "cuemol_rs::QdfSurfReader",
@@ -718,6 +850,14 @@ fn default_handlers() -> Vec<StreamHandlerInfo> {
             "*.qdf",
             HandlerCategory::ObjReader,
             Some(HandlerSniffer::QdfPot),
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::QdfLWObjReader",
+            "qdflwobj",
+            "CueMol light-weight obj file (*.qdf)",
+            "*.qdf",
+            HandlerCategory::ObjReader,
+            Some(HandlerSniffer::QdfLwObj),
         ),
         StreamHandlerInfo::new(
             "cuemol_rs::SceneXMLReader",
@@ -748,6 +888,14 @@ fn default_handlers() -> Vec<StreamHandlerInfo> {
             "sdf",
             "MOL/SDF Coordinates (*.mol;*.sdf)",
             "*.mol; *.sdf",
+            HandlerCategory::ObjWriter,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::QdfMolWriter",
+            "qdfmol",
+            "CueMol coordinates file (*.qdf)",
+            "*.qdf",
             HandlerCategory::ObjWriter,
             None,
         ),
@@ -784,11 +932,83 @@ fn default_handlers() -> Vec<StreamHandlerInfo> {
             None,
         ),
         StreamHandlerInfo::new(
+            "cuemol_rs::QdfDenMapWriter",
+            "qdfmap",
+            "CueMol density map file (*.qdf)",
+            "*.qdf",
+            HandlerCategory::ObjWriter,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::QdfLWObjWriter",
+            "qdflwobj",
+            "CueMol light-weight obj file (*.qdf)",
+            "*.qdf",
+            HandlerCategory::ObjWriter,
+            None,
+        ),
+        StreamHandlerInfo::new(
             "cuemol_rs::SceneXMLWriter",
             "qsc_xml",
             "CueMol Scene (*.qsc)",
             "*.qsc",
             HandlerCategory::SceneWriter,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::MqoSceneExporter",
+            "mqo",
+            "Metasequoia object file (*.mqo)",
+            "*.mqo",
+            HandlerCategory::RendToFile,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::PngSceneExporter",
+            "png",
+            "Portable Network Graphics image (*.png)",
+            "*.png",
+            HandlerCategory::RendToFile,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::PovSceneExporter",
+            "pov",
+            "POV-Ray SDL (*.pov)",
+            "*.pov",
+            HandlerCategory::RendToFile,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::WbpSceneExporter",
+            "wbp",
+            "Warabi project file (*.wbp)",
+            "*.wbp",
+            HandlerCategory::RendToFile,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::StlSceneExporter",
+            "stl",
+            "StereoLithography (*.stl)",
+            "*.stl",
+            HandlerCategory::RendToFile,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::LuxRendSceneExporter",
+            "luxrend",
+            "LuxRender Scene (*.lxs)",
+            "*.lxs",
+            HandlerCategory::RendToFile,
+            None,
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::LuxCoreSceneExporter",
+            "luxcore",
+            "LuxCore Scene CFG (*.cfg)",
+            "*.cfg",
+            HandlerCategory::RendToFile,
             None,
         ),
     ]
@@ -811,8 +1031,14 @@ fn sniff_text(input: &str, sniffer: HandlerSniffer) -> ContentVerdict {
         HandlerSniffer::BrixMap => sniff_brix_map(input),
         HandlerSniffer::MtzMap => sniff_mtz_map(input.as_bytes()),
         HandlerSniffer::MsmsSurface => sniff_msms_surface(input),
-        HandlerSniffer::QdfSurf => sniff_qdf_file_type(input.as_bytes(), b"SRF1"),
-        HandlerSniffer::QdfPot => sniff_qdf_file_type(input.as_bytes(), b"POT1"),
+        HandlerSniffer::PlySurface => sniff_ply_surface(input),
+        HandlerSniffer::QdfMol => sniff_qdf_file_types(input.as_bytes(), &[b"MOL2"]),
+        HandlerSniffer::QdfMap => sniff_qdf_file_types(input.as_bytes(), &[b"MAP1"]),
+        HandlerSniffer::QdfSurf => sniff_qdf_file_types(input.as_bytes(), &[b"SRF1"]),
+        HandlerSniffer::QdfPot => sniff_qdf_file_types(input.as_bytes(), &[b"POT1"]),
+        HandlerSniffer::QdfLwObj => {
+            sniff_qdf_file_types(input.as_bytes(), &[b"LWO1", b"LWO2", b"LWO3"])
+        }
         HandlerSniffer::QscXml => sniff_qsc_xml(input),
         HandlerSniffer::Pse => sniff_pse(input.as_bytes()),
     }
@@ -824,8 +1050,11 @@ fn sniff_bytes(bytes: &[u8], sniffer: HandlerSniffer) -> ContentVerdict {
         HandlerSniffer::NamdCoor => sniff_namd_coor(bytes),
         HandlerSniffer::Ccp4Map => sniff_ccp4_map(bytes),
         HandlerSniffer::MtzMap => sniff_mtz_map(bytes),
-        HandlerSniffer::QdfSurf => sniff_qdf_file_type(bytes, b"SRF1"),
-        HandlerSniffer::QdfPot => sniff_qdf_file_type(bytes, b"POT1"),
+        HandlerSniffer::QdfMol => sniff_qdf_file_types(bytes, &[b"MOL2"]),
+        HandlerSniffer::QdfMap => sniff_qdf_file_types(bytes, &[b"MAP1"]),
+        HandlerSniffer::QdfSurf => sniff_qdf_file_types(bytes, &[b"SRF1"]),
+        HandlerSniffer::QdfPot => sniff_qdf_file_types(bytes, &[b"POT1"]),
+        HandlerSniffer::QdfLwObj => sniff_qdf_file_types(bytes, &[b"LWO1", b"LWO2", b"LWO3"]),
         HandlerSniffer::Pse => sniff_pse(bytes),
         _ => {
             let input = String::from_utf8_lossy(bytes);
@@ -1094,59 +1323,65 @@ fn sniff_msms_surface(input: &str) -> ContentVerdict {
     ContentVerdict::Unknown
 }
 
-fn sniff_qdf_file_type(bytes: &[u8], expected_type: &[u8; 4]) -> ContentVerdict {
-    if bytes.len() < 26 {
-        return ContentVerdict::Unknown;
+fn sniff_ply_surface(input: &str) -> ContentVerdict {
+    match input.lines().map(str::trim).find(|line| !line.is_empty()) {
+        Some("ply") => ContentVerdict::Yes,
+        _ => ContentVerdict::Unknown,
     }
-    let version = match parse_qdf_version(bytes.get(0..4).unwrap_or_default()) {
-        Some(version) => version,
-        None => return ContentVerdict::Unknown,
+}
+
+fn sniff_qdf_file_types(bytes: &[u8], expected_types: &[&[u8; 4]]) -> ContentVerdict {
+    let Some(found) = qdf_file_type_bytes(bytes) else {
+        return ContentVerdict::Unknown;
     };
+    if expected_types
+        .iter()
+        .any(|expected| found == expected.as_slice())
+    {
+        ContentVerdict::Yes
+    } else {
+        ContentVerdict::No
+    }
+}
+
+fn qdf_file_type_bytes(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() < 26 {
+        return None;
+    }
+    let version = parse_qdf_version(bytes.get(0..4).unwrap_or_default())?;
     let mut offset = if version == 0 {
         4
     } else {
         if bytes.len() < 28 {
-            return ContentVerdict::Unknown;
+            return None;
         }
         if bytes.get(4..6) != Some(b"00".as_slice()) {
-            return ContentVerdict::Unknown;
+            return None;
         }
         6
     };
 
-    let Some(&int_bo) = bytes.get(offset) else {
-        return ContentVerdict::Unknown;
-    };
+    let &int_bo = bytes.get(offset)?;
     offset += 1;
-    let Some(marker) = read_qdf_i32(bytes, offset, int_bo) else {
-        return ContentVerdict::Unknown;
-    };
+    let marker = read_qdf_i32(bytes, offset, int_bo)?;
     if marker != 12_345_678 {
-        return ContentVerdict::Unknown;
+        return None;
     }
     offset += 4;
-    let Some(&float_bo) = bytes.get(offset) else {
-        return ContentVerdict::Unknown;
-    };
+    let &float_bo = bytes.get(offset)?;
     if float_bo != int_bo {
-        return ContentVerdict::Unknown;
+        return None;
     }
     offset += 1;
     offset += 4; // float byte-order marker
     offset += 4; // dummy marker
 
-    let Some(type_len) = read_qdf_i32(bytes, offset, int_bo) else {
-        return ContentVerdict::Unknown;
-    };
+    let type_len = read_qdf_i32(bytes, offset, int_bo)?;
     offset += 4;
     if type_len != 4 {
-        return ContentVerdict::Unknown;
+        return None;
     }
-    match bytes.get(offset..offset + 4) {
-        Some(found) if found == expected_type => ContentVerdict::Yes,
-        Some(b"SRF1") | Some(b"POT1") => ContentVerdict::No,
-        _ => ContentVerdict::Unknown,
-    }
+    bytes.get(offset..offset + 4)
 }
 
 fn parse_qdf_version(header: &[u8]) -> Option<u16> {
@@ -1307,6 +1542,170 @@ fn escape_xml(input: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn node_to_byte_array(node: LDom2Node) -> ByteArray {
+    ByteArray::copy_from_u8(write_ldom2_xml(&LDom2Tree::from(node)).as_bytes())
+}
+
+fn async_reader_name<R: 'static>(reader: &R) -> Option<String> {
+    let any = reader as &dyn Any;
+    if let Some(reader) = any.downcast_ref::<ObjReader>() {
+        return Some(reader.handler().name().to_string());
+    }
+    if let Some(value) = any.downcast_ref::<String>() {
+        return Some(value.clone());
+    }
+    if let Some(value) = any.downcast_ref::<&str>() {
+        return Some((*value).to_string());
+    }
+    None
+}
+
+fn parse_async_object(reader_name: &str, data: &[u8]) -> Result<AsyncLoadedObject> {
+    let name = reader_name.to_ascii_lowercase();
+    let utf8 = || {
+        std::str::from_utf8(data).map_err(|error| {
+            CueMolError::parse(format!("asynchronous input is not UTF-8: {error}"))
+        })
+    };
+    if name == "qdfmol" || name.contains("qdfmol") {
+        return Ok(AsyncLoadedObject::Molecule(crate::read_qdf_mol_bytes(
+            data,
+        )?));
+    }
+    if name == "qdfpdb" || name.contains("qdfpdb") {
+        return Ok(AsyncLoadedObject::Molecule(
+            crate::read_qdfpdb_str(utf8()?)?,
+        ));
+    }
+    if name == "pdb" || name.contains("pdbreader") {
+        return Ok(AsyncLoadedObject::Molecule(crate::read_pdb_str(utf8()?)?));
+    }
+    if matches!(name.as_str(), "mmcif" | "cif") || name.contains("mmcifmol") {
+        return Ok(AsyncLoadedObject::Molecule(crate::read_mmcif_str(utf8()?)?));
+    }
+    if matches!(name.as_str(), "sdf" | "mol") || name.contains("sdfreader") {
+        return Ok(AsyncLoadedObject::Molecule(crate::read_sdf_str(utf8()?)?));
+    }
+    if name == "mol2" || name.contains("mol2reader") {
+        return Ok(AsyncLoadedObject::Molecule(crate::read_mol2_str(utf8()?)?));
+    }
+    if name == "apbs" || name.contains("opendx") {
+        return Ok(AsyncLoadedObject::GridMap(crate::read_opendx_str(utf8()?)?));
+    }
+    if name == "ccp4map" || name.contains("ccp4map") {
+        return Ok(AsyncLoadedObject::GridMap(crate::read_ccp4_map_bytes(
+            data,
+        )?));
+    }
+    if name == "xplormap" || name.contains("xplormap") {
+        return Ok(AsyncLoadedObject::GridMap(crate::read_xplor_map_str(
+            utf8()?,
+        )?));
+    }
+    if name == "brix" || name.contains("brixmap") {
+        return Ok(AsyncLoadedObject::GridMap(crate::read_brix_map_bytes(
+            data,
+        )?));
+    }
+    Ok(AsyncLoadedObject::Buffered {
+        reader_type: reader_name.to_string(),
+        data: ByteArray::copy_from_u8(data),
+    })
+}
+
+fn renderer_node_from_mol(renderer: &MolRenderer, type_override: Option<&str>) -> LDom2Node {
+    let mut node = LDom2Node::new();
+    node.set_tag_name("renderer");
+    node.set_type_name(type_override.unwrap_or_else(|| renderer.renderer_type()));
+    for (name, value) in renderer.qsc_attrs() {
+        if name != "type" {
+            node.set_str_attr(name, value);
+        }
+    }
+    node.set_str_attr("name", renderer.name());
+    if renderer.renderer_type() == "atomintr" {
+        for definition in renderer.atom_intr_lines() {
+            let tag = match definition.kind() {
+                AtomIntrKind::Distance => "line",
+                AtomIntrKind::Angle => "angle",
+                AtomIntrKind::Torsion => "torsion",
+            };
+            let child = node.append_child(tag);
+            for (index, aid) in definition.aids().iter().enumerate() {
+                child.set_str_attr(format!("aid{}", index + 1), aid);
+            }
+        }
+    }
+    node
+}
+
+fn renderer_node_from_qsys(renderer: &QsysRenderer, type_override: Option<&str>) -> LDom2Node {
+    let mut node = LDom2Node::new();
+    node.set_tag_name("renderer");
+    node.set_type_name(type_override.unwrap_or_else(|| renderer.type_name()));
+    node.set_str_attr("name", renderer.name());
+    node.set_str_attr("group", renderer.group_name());
+    node.set_str_attr("style", renderer.style_names());
+    node.set_str_attr("visible", renderer.visible().to_string());
+    node.set_str_attr("locked", renderer.is_ui_locked().to_string());
+    node.set_str_attr("default_material", renderer.default_material());
+    node.set_str_attr("default_alpha", renderer.default_alpha().to_string());
+    node.set_str_attr("xformMat", renderer.xform_matrix().to_script_string());
+    node.set_str_attr("ui_order", renderer.ui_order().to_string());
+    for (name, value) in renderer.properties() {
+        node.set_str_attr(name, value);
+    }
+    node
+}
+
+fn renderer_nodes<T: 'static>(array: &[T], group_name: &str) -> Option<Vec<LDom2Node>> {
+    let mut nodes = Vec::with_capacity(array.len());
+    for value in array {
+        let any = value as &dyn Any;
+        let mut node = if let Some(renderer) = any.downcast_ref::<MolRenderer>() {
+            renderer_node_from_mol(renderer, None)
+        } else if let Some(renderer) = any.downcast_ref::<QsysRenderer>() {
+            renderer_node_from_qsys(renderer, None)
+        } else {
+            return None;
+        };
+        if group_name.is_empty() {
+            node.remove_child("group");
+        } else {
+            node.set_str_attr("group", group_name);
+        }
+        nodes.push(node);
+    }
+    Some(nodes)
+}
+
+fn renderer_nodes_to_byte_array(nodes: Vec<LDom2Node>, group_name: &str) -> ByteArray {
+    let mut root = LDom2Node::new();
+    root.set_tag_name("renderers");
+    if !group_name.is_empty() {
+        root.set_str_attr("group", group_name);
+    }
+    for node in nodes {
+        root.append_child_node(node);
+    }
+    node_to_byte_array(root)
+}
+
+fn parse_xml_byte_array(data: &ByteArray) -> Result<LDom2Tree> {
+    let xml = std::str::from_utf8(data.as_bytes())
+        .map_err(|error| CueMolError::parse(format!("XML is not UTF-8: {error}")))?;
+    parse_ldom2_xml(xml)
+}
+
+fn renderer_from_node(node: &LDom2Node) -> Result<QsysRenderer> {
+    if node.tag_name() != "renderer" || node.type_name().is_empty() {
+        return Err(CueMolError::parse("renderer XML has no renderer type"));
+    }
+    let mut renderer = QsysRenderer::new(node.type_name());
+    renderer.read_properties_from_node(node);
+    Ok(renderer)
 }
 
 fn unescape_xml(input: &str) -> String {

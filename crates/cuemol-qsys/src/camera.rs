@@ -1,4 +1,6 @@
-use cuemol_core::{Quat, Vector4};
+use cuemol_core::{
+    parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Tree, Quat, Result, Vector4,
+};
 use std::collections::BTreeMap;
 
 const F_EPS4: f64 = 1.0e-4;
@@ -55,7 +57,7 @@ impl Default for Camera {
             perspective: false,
             center_mark: CenterMark::Cross,
             center: Vector4::ZERO,
-            rotation: Quat::new(1.0, 0.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
             visibility: BTreeMap::new(),
         }
     }
@@ -244,6 +246,12 @@ impl Camera {
         self.visibility_json()
     }
 
+    pub fn visibility_settings(&self) -> impl Iterator<Item = (u64, bool, bool)> + '_ {
+        self.visibility
+            .iter()
+            .map(|(uid, setting)| (*uid, setting.visible, setting.is_object))
+    }
+
     pub fn clear_visibility_settings(&mut self) {
         self.visibility.clear();
     }
@@ -371,6 +379,140 @@ impl Camera {
         }
         Some(camera)
     }
+
+    /// Serialize this camera in the LDOM2 XML shape used by SceneXMLWriter.
+    pub fn to_xml_string(&self) -> String {
+        let mut tree = LDom2Tree::new("camera");
+        let node = tree.top_mut();
+        node.set_str_attr("name", &self.name);
+        if !self.source.is_empty() {
+            node.set_str_attr("src", &self.source);
+        }
+        node.set_str_attr("zoom", self.zoom.to_string());
+        node.set_str_attr("slab", self.slab_depth.to_string());
+        node.set_str_attr("center", format_vector3(self.center));
+        node.set_str_attr("rotation", format_quat_tuple(self.rotation));
+        node.set_str_attr("distance", self.cam_dist.to_string());
+        node.set_str_attr("stereoDist", self.stereo_distance.to_string());
+        node.set_str_attr("stereoMode", stereo_mode_name(self.stereo_mode));
+        node.set_str_attr("perspec", self.perspective.to_string());
+        node.set_str_attr("centerMark", center_mark_name(self.center_mark));
+        write_ldom2_xml(&tree)
+    }
+
+    /// Deserialize a standalone camera document produced by SceneXMLWriter.
+    pub fn from_xml_string(input: &str) -> Result<Self> {
+        let tree = parse_ldom2_xml(input)?;
+        let node = tree.top();
+        if node.tag_name() != "camera" {
+            return Err(CueMolError::parse(format!(
+                "expected camera XML, found {}",
+                node.tag_name()
+            )));
+        }
+
+        let mut camera = Self::new();
+        if let Some(value) = xml_attr(node, "name") {
+            camera.set_name(value);
+        }
+        if let Some(value) = xml_attr(node, "src") {
+            camera.set_source(value);
+        }
+        if let Some(value) = xml_attr(node, "zoom") {
+            camera.set_zoom(parse_xml_number(value, "zoom")?);
+        }
+        if let Some(value) = xml_attr(node, "slab") {
+            camera.set_slab_depth(parse_xml_number(value, "slab")?);
+        }
+        if let Some(value) = xml_attr(node, "center") {
+            camera.set_center(parse_vector3_tuple(value)?);
+        }
+        if let Some(value) = xml_attr(node, "rotation") {
+            camera.set_rotation(parse_quat_tuple(value)?);
+        }
+        if let Some(value) = xml_attr(node, "distance") {
+            camera.set_cam_dist(parse_xml_number(value, "distance")?);
+        }
+        if let Some(value) = xml_attr(node, "stereoDist") {
+            camera.set_stereo_distance(parse_xml_number(value, "stereoDist")?);
+        }
+        if let Some(value) = xml_attr(node, "stereoMode") {
+            camera.set_stereo_mode(parse_stereo_mode(value).ok_or_else(|| {
+                CueMolError::parse(format!("invalid camera stereoMode: {value}"))
+            })?);
+        }
+        if let Some(value) = xml_attr(node, "perspec") {
+            camera.set_perspective(parse_xml_bool(value, "perspec")?);
+        }
+        if let Some(value) = xml_attr(node, "centerMark") {
+            camera.set_center_mark(parse_center_mark(value).ok_or_else(|| {
+                CueMolError::parse(format!("invalid camera centerMark: {value}"))
+            })?);
+        }
+        Ok(camera)
+    }
+}
+
+fn xml_attr<'a>(node: &'a cuemol_core::LDom2Node, name: &str) -> Option<&'a str> {
+    node.find_child(name)
+        .filter(|child| child.is_attr())
+        .map(cuemol_core::LDom2Node::value)
+}
+
+fn parse_xml_number(value: &str, name: &str) -> Result<f64> {
+    value
+        .parse()
+        .map_err(|_| CueMolError::parse(format!("invalid camera {name}: {value}")))
+}
+
+fn parse_xml_bool(value: &str, name: &str) -> Result<bool> {
+    match value {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(CueMolError::parse(format!(
+            "invalid camera {name}: {value}"
+        ))),
+    }
+}
+
+fn parse_tuple(value: &str, expected: usize, name: &str) -> Result<Vec<f64>> {
+    let value = value
+        .trim()
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or(value.trim());
+    let values = value
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<f64>()
+                .map_err(|_| CueMolError::parse(format!("invalid camera {name}: {value}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if values.len() != expected {
+        return Err(CueMolError::parse(format!(
+            "invalid camera {name}: expected {expected} components"
+        )));
+    }
+    Ok(values)
+}
+
+fn format_vector3(value: Vector4) -> String {
+    format!("({},{},{})", value.x, value.y, value.z)
+}
+
+fn parse_vector3_tuple(value: &str) -> Result<Vector4> {
+    let values = parse_tuple(value, 3, "center")?;
+    Ok(Vector4::new3(values[0], values[1], values[2]))
+}
+
+fn format_quat_tuple(value: Quat) -> String {
+    format!("({},{},{},{})", value.x, value.y, value.z, value.w)
+}
+
+fn parse_quat_tuple(value: &str) -> Result<Quat> {
+    let values = parse_tuple(value, 4, "rotation")?;
+    Ok(Quat::new(values[0], values[1], values[2], values[3]))
 }
 
 fn push_field(output: &mut String, key: &str, value: &str) {
@@ -496,7 +638,7 @@ mod tests {
         assert!(!camera.is_perspective());
         assert_eq!(camera.center_mark(), CenterMark::Cross);
         assert_eq!(camera.center(), Vector4::ZERO);
-        assert_eq!(camera.rotation(), Quat::new(1.0, 0.0, 0.0, 0.0));
+        assert_eq!(camera.rotation(), Quat::IDENTITY);
         assert_eq!(camera.visibility_size(), 0);
         assert_eq!(camera.visibility_json(), "{}");
     }
@@ -596,5 +738,30 @@ mod tests {
         );
         assert!(camera.vis_remove(10));
         assert!(!camera.vis_remove(10));
+    }
+
+    #[test]
+    fn camera_xml_round_trip_matches_scene_xml_shape() {
+        let mut camera = Camera::new();
+        camera.set_name("cam & one");
+        camera.set_source("source.cam");
+        camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
+        camera.set_rotation(Quat::new(0.1, 0.2, 0.3, 0.9));
+        camera.set_zoom(80.0);
+        camera.set_slab_depth(35.0);
+        camera.set_cam_dist(125.0);
+        camera.set_stereo_distance(1.25);
+        camera.set_stereo_mode(StereoMode::Parallel);
+        camera.set_perspective(true);
+        camera.set_center_mark(CenterMark::Axis);
+
+        let xml = camera.to_xml_string();
+        assert!(xml.contains("<camera"));
+        assert!(xml.contains("name=\"cam &amp; one\""));
+        assert!(xml.contains("center=\"(1,2,3)\""));
+        assert!(xml.contains("rotation=\"(0.1,0.2,0.3,0.9)\""));
+
+        let restored = Camera::from_xml_string(&xml).unwrap();
+        assert_eq!(restored, camera);
     }
 }

@@ -196,10 +196,19 @@ impl MolAnlManager {
         moving_selector: &Selector,
         _show_log: bool,
     ) -> Result<f64> {
-        let pairs =
-            selected_position_pairs(reference, reference_selector, moving, moving_selector)?;
-        let matrix = rigid_fit_matrix(&pairs)?;
-        Ok(rmsd_for_pairs(&pairs, matrix))
+        match ssm::superpose_ssm_native(reference, reference_selector, moving, moving_selector) {
+            Ok((_matrix, rmsd, _nfit)) => Ok(rmsd),
+            Err(_) => {
+                let pairs = selected_position_pairs(
+                    reference,
+                    reference_selector,
+                    moving,
+                    moving_selector,
+                )?;
+                let matrix = rigid_fit_matrix(&pairs)?;
+                Ok(rmsd_for_pairs(&pairs, matrix))
+            }
+        }
     }
 
     pub fn copy_atoms(

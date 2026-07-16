@@ -36,6 +36,7 @@ fn stream_manager_default_registry_matches_reference_handlers() {
     let info_json = manager.get_info_json2();
     assert!(info_json.contains("\"name\":\"pdb\""));
     assert!(info_json.contains("\"name\":\"qdfpdb\""));
+    assert!(info_json.contains("\"name\":\"qdfmol\""));
     assert!(info_json.contains("\"name\":\"mmcif\""));
     assert!(info_json.contains("\"name\":\"mol2\""));
     assert!(info_json.contains("\"name\":\"gro\""));
@@ -47,14 +48,24 @@ fn stream_manager_default_registry_matches_reference_handlers() {
     assert!(info_json.contains("\"name\":\"brix\""));
     assert!(info_json.contains("\"name\":\"mtzmap\""));
     assert!(info_json.contains("\"name\":\"msms\""));
+    assert!(info_json.contains("\"name\":\"ply\""));
+    assert!(info_json.contains("\"name\":\"qdfmap\""));
     assert!(info_json.contains("\"name\":\"qdfsurf\""));
     assert!(info_json.contains("\"name\":\"qdfpot\""));
+    assert!(info_json.contains("\"name\":\"qdflwobj\""));
     assert!(info_json.contains("\"name\":\"qsc_xml\""));
     assert!(info_json.contains("\"name\":\"psefile\""));
+    for exporter in ["mqo", "png", "pov", "wbp", "stl", "luxrend", "luxcore"] {
+        assert!(info_json.contains(&format!("\"name\":\"{exporter}\"")));
+    }
     assert!(info_json.contains("\"category\":3"));
+    assert!(info_json.contains("\"category\":2"));
+    assert!(manager
+        .handler_by_nickname("pov", HandlerCategory::RendToFile)
+        .is_some());
 
     let reader_info = manager.get_reader_info_json();
-    assert!(reader_info.contains("size: 18"));
+    assert!(reader_info.contains("size: 22"));
     assert!(reader_info.contains("\"PDB Coordinates (*.pdb;*.ent;*.pdb.gz)\""));
     assert!(reader_info.contains("\"QDF-PDB (*.qdfpdb)\""));
     assert!(reader_info.contains("\"mmcifmap\""));
@@ -72,16 +83,23 @@ fn stream_manager_default_registry_matches_reference_handlers() {
     assert!(reader_info.contains("\"mtzmap\""));
     assert!(reader_info.contains("\"MTZ Structure Factor (*.mtz)\""));
     assert!(reader_info.contains("\"msms\""));
+    assert!(reader_info.contains("\"PLY polygon file (*.ply)\""));
+    assert!(reader_info.contains("\"CueMol coordinates file (*.qdf)\""));
+    assert!(reader_info.contains("\"CueMol density map file (*.qdf)\""));
+    assert!(reader_info.contains("\"CueMol light-weight obj file (*.qdf)\""));
     assert!(reader_info.contains("\"CueMol molsurf file (*.qdf)\""));
     assert!(reader_info.contains("\"CueMol elepot file (*.qdf)\""));
 
     let writer_info = manager.get_writer_info_json();
-    assert!(writer_info.contains("size: 6"));
+    assert!(writer_info.contains("size: 9"));
     assert!(writer_info.contains("\"PDB coordinates (*.pdb)\""));
     assert!(writer_info.contains("\"XYZR coordinates(*.xyzr)\""));
     assert!(writer_info.contains("\"PQR coordinates(*.pqr)\""));
     assert!(writer_info.contains("\"qdfsurf\""));
     assert!(writer_info.contains("\"qdfpot\""));
+    assert!(writer_info.contains("\"qdfmol\""));
+    assert!(writer_info.contains("\"qdfmap\""));
+    assert!(writer_info.contains("\"qdflwobj\""));
 }
 
 #[test]
@@ -447,6 +465,32 @@ fn stream_manager_searches_reference_importer_sniffers() {
     );
     let _ = fs::remove_file(msms);
 
+    let ply = temp_file("stream-surface.ply");
+    fs::write(&ply, "ply\nformat ascii 1.0\nend_header\n").unwrap();
+    assert_eq!(
+        manager.search_reader_by_content(&ply, "", HandlerCategory::ObjReader, false, 0),
+        "ply"
+    );
+    let _ = fs::remove_file(ply);
+
+    for (file_type, nickname, sniffer) in [
+        ("MOL2", "qdfmol", HandlerSniffer::QdfMol),
+        ("MAP1", "qdfmap", HandlerSniffer::QdfMap),
+        ("LWO3", "qdflwobj", HandlerSniffer::QdfLwObj),
+    ] {
+        let path = temp_file(&format!("stream-{nickname}.qdf"));
+        fs::write(&path, qdf_header(file_type)).unwrap();
+        assert_eq!(
+            manager.search_reader_by_content(&path, "", HandlerCategory::ObjReader, false, 0),
+            nickname
+        );
+        assert_eq!(
+            manager.sniff_content(&path, sniffer, 0),
+            cuemol_molstr::ContentVerdict::Yes
+        );
+        let _ = fs::remove_file(path);
+    }
+
     let qdfsurf = temp_file("stream-surface.qdf");
     fs::write(&qdfsurf, qdf_header("SRF1")).unwrap();
     assert_eq!(
@@ -503,17 +547,40 @@ fn stream_manager_async_load_buffers_supplied_chunks() {
     let id2 = manager.load_object_async(&reader);
     assert!(id1 > 0);
     assert!(id2 > id1);
-    assert!(manager.supply_data_async(id1, b"ATOM"));
-    assert!(manager.supply_data_async(id1, b" END"));
-    assert_eq!(manager.async_load(id1).unwrap().byte_len(), 8);
+    let pdb = b"ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00\n";
+    assert!(manager.supply_data_async(id1, &pdb[..20]));
+    assert!(manager.supply_data_async(id1, &pdb[20..]));
+    assert_eq!(manager.async_load(id1).unwrap().byte_len(), pdb.len());
 
-    let data = manager.wait_load_async(id1).unwrap();
-
-    assert_eq!(data.as_bytes(), b"ATOM END");
+    let loaded = manager.wait_load_async(id1).unwrap();
+    let cuemol_molstr::AsyncLoadedObject::Molecule(molecule) = loaded else {
+        panic!("expected molecule")
+    };
+    assert_eq!(molecule.atom_count(), 1);
+    assert_eq!(
+        molecule.atoms()[0].position,
+        cuemol_core::Vector4::new3(1.0, 2.0, 3.0)
+    );
     assert!(manager.async_load(id1).is_none());
     assert!(manager.wait_load_async(99999).is_none());
     assert!(!manager.supply_data_async(99999, b"ignored"));
-    assert!(manager.wait_load_async(id2).is_some());
+    assert!(manager.supply_data_async(id2, pdb));
+    assert!(manager.wait_load_object_async(id2).unwrap().is_some());
+}
+
+#[test]
+fn stream_manager_async_load_preserves_extension_crate_inputs() {
+    let mut manager = StreamManager::new();
+    let reader = "gro";
+    let id = manager.load_object_async(&reader);
+    let input = b"sample\n1\n    1WAT     OW    1   0.000   0.000   0.000\n1 1 1\n";
+    assert!(manager.supply_data_async(id, input));
+    let loaded = manager.wait_load_object_async(id).unwrap().unwrap();
+    let cuemol_molstr::AsyncLoadedObject::Buffered { reader_type, data } = loaded else {
+        panic!("expected buffered extension input")
+    };
+    assert_eq!(reader_type, "gro");
+    assert_eq!(data.as_bytes(), input);
 }
 
 #[test]
@@ -536,6 +603,41 @@ fn stream_manager_xml_helpers_preserve_basic_metadata() {
     );
     let group_xml = manager.rend_grp_to_xml(&[1_i32], "grp&1");
     assert_eq!(manager.rend_array_from_xml(&group_xml, 0), vec!["grp&1"]);
+
+    let mut camera = cuemol_qsys::Camera::new();
+    camera.set_name("testcam");
+    camera.set_center(cuemol_core::Vector4::new3(1.0, 2.0, 3.0));
+    let camera_xml = manager.to_xml(&camera);
+    assert!(std::str::from_utf8(camera_xml.as_bytes())
+        .unwrap()
+        .contains("<camera"));
+    let restored = manager.camera_from_xml(&camera_xml, 0).unwrap();
+    assert_eq!(restored.name(), "testcam");
+    assert_eq!(restored.center(), cuemol_core::Vector4::new3(1.0, 2.0, 3.0));
+
+    let mut renderer = cuemol_qsys::Renderer::new("trace");
+    renderer.set_name("trace&one");
+    renderer.set_group_name("old-group");
+    renderer.set_style_names("DefaultCPKColoring");
+    renderer.set_property_str("width", "0.75");
+    let renderer_xml = manager.to_xml_2(&renderer, "spline");
+    let restored_renderer = manager.renderer_from_xml(&renderer_xml, 0).unwrap();
+    assert_eq!(restored_renderer.type_name(), "spline");
+    assert_eq!(restored_renderer.name(), "trace&one");
+    assert_eq!(restored_renderer.style_names(), "DefaultCPKColoring");
+    assert_eq!(restored_renderer.property_str("width"), Some("0.75"));
+
+    let renderer_group_xml = manager.rend_grp_to_xml(&[renderer], "new&group");
+    let (group, restored_renderers) = manager
+        .renderer_array_from_xml(&renderer_group_xml, 0)
+        .unwrap();
+    assert_eq!(group, "new&group");
+    assert_eq!(restored_renderers.len(), 1);
+    assert_eq!(restored_renderers[0].group_name(), "new&group");
+    assert_eq!(
+        manager.rend_array_from_xml(&renderer_group_xml, 0),
+        vec!["new&group", "trace&one"]
+    );
 }
 
 fn reference_test_data_root() -> Option<PathBuf> {

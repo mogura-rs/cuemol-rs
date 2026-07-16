@@ -1654,6 +1654,7 @@ dependencies = [
  "cuemol-mdtools",
  "cuemol-molstr",
  "cuemol-molvis",
+ "cuemol-qsys",
  "cuemol-render",
  "cuemol-surface",
  "cuemol-xtal",
@@ -1708,6 +1709,7 @@ dependencies = [
  "cuemol-core",
  "cuemol-gfx",
  "cuemol-importers",
+ "cuemol-lwview",
  "cuemol-mdtools",
  "cuemol-molanl",
  "cuemol-molstr",
@@ -1749,6 +1751,7 @@ dependencies = [
  "cuemol-core",
  "cuemol-gfx",
  "cuemol-qsys",
+ "cuemol-render",
 ]
 
 [[package]]
@@ -1843,6 +1846,7 @@ dependencies = [
  "cuemol-gfx",
  "cuemol-molstr",
  "cuemol-qsys",
+ "lyon",
 ]
 
 [[package]]

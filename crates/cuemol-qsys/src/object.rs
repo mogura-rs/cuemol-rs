@@ -1,8 +1,47 @@
-use crate::{ObjectEvent, Renderer, SceneEvent, ScrEventManagerHandle};
-use cuemol_core::{EventCaster, SharedEventListener, Uid, UidGenerator};
+use crate::{ObjectEvent, Renderer, SceneEvent, ScrEventManagerHandle, StyleManager};
+use cuemol_core::{CueMolError, EventCaster, Result, SharedEventListener, Uid, UidGenerator};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObjExtData {
+    class_name: String,
+    values: BTreeMap<String, String>,
+}
+
+impl ObjExtData {
+    pub fn new(class_name: impl Into<String>) -> Self {
+        Self {
+            class_name: class_name.into(),
+            values: BTreeMap::new(),
+        }
+    }
+
+    pub fn class_name(&self) -> &str {
+        &self.class_name
+    }
+
+    pub fn values(&self) -> &BTreeMap<String, String> {
+        &self.values
+    }
+
+    pub fn value(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(String::as_str)
+    }
+
+    pub fn set_value(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.values.insert(name.into(), value.into());
+    }
+
+    pub fn write_qdf_data(&self) -> BTreeMap<String, String> {
+        self.values.clone()
+    }
+
+    pub fn read_qdf_data(&mut self, values: &BTreeMap<String, String>) {
+        self.values.clone_from(values);
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SceneObject<T> {
@@ -20,6 +59,7 @@ pub struct SceneObject<T> {
     xform_matrix: cuemol_core::Matrix4,
     ui_order: i32,
     renderers: BTreeMap<Uid, Renderer>,
+    ext_data: BTreeMap<String, ObjExtData>,
     uid_generator: UidGenerator,
     event_caster: Arc<EventCaster<ObjectEvent>>,
     scene_event_caster: Option<Arc<EventCaster<SceneEvent>>>,
@@ -44,6 +84,7 @@ impl<T> SceneObject<T> {
             xform_matrix: cuemol_core::Matrix4::IDENTITY,
             ui_order: uid.get() as i32,
             renderers: BTreeMap::new(),
+            ext_data: BTreeMap::new(),
             uid_generator: UidGenerator::starting_after(uid.get()),
             event_caster: Arc::new(EventCaster::new()),
             scene_event_caster: None,
@@ -276,13 +317,58 @@ impl<T> SceneObject<T> {
         preset_name: impl Into<String>,
         grp_name: impl Into<String>,
         name_prefix: impl Into<String>,
-    ) -> Uid {
-        let uid = self.create_renderer(preset_name);
-        if let Some(renderer) = self.renderers.get_mut(&uid) {
-            renderer.set_group_name(grp_name);
-            renderer.set_name(name_prefix);
+    ) -> Result<Uid> {
+        let mut styles = StyleManager::new();
+        styles.load_builtin_default_styles(0);
+        self.create_preset_renderer_with_style(&styles, 0, preset_name, grp_name, name_prefix)
+    }
+
+    pub fn create_preset_renderer_with_style(
+        &mut self,
+        styles: &StyleManager,
+        scope_id: u64,
+        preset_name: impl Into<String>,
+        grp_name: impl Into<String>,
+        name_prefix: impl Into<String>,
+    ) -> Result<Uid> {
+        let preset_name = preset_name.into();
+        let group_name = grp_name.into();
+        let name_prefix = name_prefix.into();
+        let node = styles
+            .style_node(scope_id, &preset_name)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer preset {preset_name}")))?;
+        if !node.type_name().ends_with("-rendpreset") {
+            return Err(CueMolError::invalid_argument(format!(
+                "{preset_name} is not a renderer preset ({})",
+                node.type_name()
+            )));
         }
-        uid
+
+        let group_uid = self.uid_generator.next_uid();
+        let mut group = Renderer::with_uid("*group", group_uid);
+        group.set_name(group_name.clone());
+        for child in node
+            .children()
+            .iter()
+            .filter(|child| child.tag_name() == "renderer")
+        {
+            let type_name = child.type_name();
+            if type_name.is_empty() {
+                continue;
+            }
+            let uid = self.create_renderer(type_name);
+            if let Some(renderer) = self.renderers.get_mut(&uid) {
+                renderer.set_name(format!("{name_prefix}{type_name}"));
+                renderer.set_group_name(group_name.clone());
+                renderer.read_properties_from_node(child);
+            }
+        }
+        if !self.attach_renderer(group) {
+            return Err(CueMolError::invalid_argument(
+                "renderer preset group UID collision",
+            ));
+        }
+        Ok(group_uid)
     }
 
     pub fn attach_renderer(&mut self, mut renderer: Renderer) -> bool {
@@ -444,6 +530,21 @@ impl<T> SceneObject<T> {
         self.grouped_renderer_list_json()
     }
 
+    pub fn filtered_renderer_list_json(&self, group_filter: &str) -> String {
+        let entries = self
+            .sorted_renderers()
+            .into_iter()
+            .filter(|renderer| renderer.group_name() == group_filter)
+            .map(renderer_data_json)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{entries}]")
+    }
+
+    pub fn get_filtered_rend_list_json(&self, group_filter: &str) -> String {
+        self.filtered_renderer_list_json(group_filter)
+    }
+
     fn sorted_renderers(&self) -> Vec<&Renderer> {
         let mut renderers = self.renderers.values().collect::<Vec<_>>();
         renderers.sort_by_key(|renderer| (renderer.ui_order(), renderer.uid()));
@@ -454,17 +555,47 @@ impl<T> SceneObject<T> {
         "simple,cpk,ballstick,ribbon,tube".to_string()
     }
 
-    pub fn ext_data(&self, _name: &str) -> Option<&T> {
-        None
+    pub fn ext_data_names(&self) -> String {
+        self.ext_data.keys().cloned().collect::<Vec<_>>().join(",")
     }
 
-    pub fn get_ext_data(&self, name: &str) -> Option<&T> {
+    pub fn get_ext_data_names(&self) -> String {
+        self.ext_data_names()
+    }
+
+    pub fn ext_data(&self, name: &str) -> Option<&ObjExtData> {
+        self.ext_data.get(name)
+    }
+
+    pub fn ext_data_mut(&mut self, name: &str) -> Option<&mut ObjExtData> {
+        self.ext_data.get_mut(name)
+    }
+
+    pub fn get_ext_data(&self, name: &str) -> Option<&ObjExtData> {
         self.ext_data(name)
     }
 
+    pub fn get_create_ext_data(&mut self, name: impl Into<String>) -> &mut ObjExtData {
+        let name = name.into();
+        self.ext_data
+            .entry(name.clone())
+            .or_insert_with(|| ObjExtData::new(name))
+    }
+
+    pub fn set_ext_data(&mut self, data: ObjExtData) {
+        self.ext_data.insert(data.class_name.clone(), data);
+    }
+
+    pub fn remove_ext_data(&mut self, name: &str) -> bool {
+        self.ext_data.remove(name).is_some()
+    }
+
     pub fn force_embed(&mut self) {
-        self.source = format!("datachunk:{}", self.uid.get());
-        self.alt_source.clear();
+        if !self.source.starts_with("datachunk:") {
+            self.source = "datachunk:".to_string();
+            self.alt_source.clear();
+        }
+        self.source_type.clear();
         self.fire_property_changed("src");
     }
 
@@ -570,9 +701,12 @@ mod tests {
     fn force_embed_sets_datachunk_source() {
         let mut object = SceneObject::new(Uid::new(1), ());
         object.set_source("/path/to/file.pdb");
+        object.set_source_type("pdb");
+        object.set_alt_source("fallback.pdb");
         object.force_embed();
-        assert!(object.source().starts_with("datachunk:"));
+        assert_eq!(object.source(), "datachunk:");
         assert_eq!(object.alt_source(), "");
+        assert_eq!(object.source_type(), "");
     }
 
     #[test]
@@ -625,7 +759,49 @@ mod tests {
         let grouped = object.get_grouped_rend_list_json();
         assert!(grouped.contains("\"type\":\"*group\""));
         assert!(grouped.contains("\"childNodes\":[{\"name\":\"child\""));
+        let filtered = object.get_filtered_rend_list_json("grp");
+        assert!(filtered.contains("\"name\":\"child\""));
+        assert!(!filtered.contains("solo"));
         assert_eq!(object.rend_uids(), "4,2,3");
         assert_eq!(object.get_renderer_by_index(0).unwrap().name(), "solo");
+    }
+
+    #[test]
+    fn object_extension_data_round_trips_named_values() {
+        let mut object = SceneObject::new(Uid::new(1), ());
+        let crystal = object.get_create_ext_data("CrystalInfo");
+        crystal.set_value("a", "40.96");
+        crystal.set_value("nsg", "4");
+        assert_eq!(object.get_ext_data_names(), "CrystalInfo");
+        assert_eq!(
+            object.get_ext_data("CrystalInfo").unwrap().value("a"),
+            Some("40.96")
+        );
+        assert!(object.remove_ext_data("CrystalInfo"));
+        assert!(object.get_ext_data("CrystalInfo").is_none());
+    }
+
+    #[test]
+    fn preset_renderer_builds_group_and_all_children_from_builtin_style() {
+        let mut object = SceneObject::new(Uid::new(1), ());
+        let group_uid = object
+            .create_preset_renderer("Default1RendPreset", "default", "preset_")
+            .unwrap();
+        let group = object.renderer(group_uid).unwrap();
+        assert_eq!(group.type_name(), "*group");
+        assert_eq!(group.name(), "default");
+
+        let children = object
+            .get_rend_array()
+            .into_iter()
+            .filter(|renderer| renderer.group_name() == "default")
+            .collect::<Vec<_>>();
+        assert_eq!(children.len(), 3);
+        assert_eq!(children[0].type_name(), "ribbon");
+        assert_eq!(children[0].name(), "preset_ribbon");
+        assert_eq!(children[0].style_names(), "DefaultRibbon,DefaultHSCPaint");
+        assert_eq!(children[0].property_str("sel"), Some("protein"));
+        assert_eq!(children[1].type_name(), "nucl");
+        assert_eq!(children[2].type_name(), "ballstick");
     }
 }

@@ -1,6 +1,22 @@
-use cuemol_core::{ByteArray, Result, Uid};
+use cuemol_core::{ByteArray, LDom2Node, Result, Uid};
 
-use crate::InOutHandler;
+use crate::{Camera, InOutHandler, Scene};
+
+pub trait SceneWriterOptions {
+    fn qsc_options_node(&self) -> Option<&LDom2Node>;
+}
+
+impl SceneWriterOptions for LDom2Node {
+    fn qsc_options_node(&self) -> Option<&LDom2Node> {
+        Some(self)
+    }
+}
+
+impl<T> SceneWriterOptions for Scene<T> {
+    fn qsc_options_node(&self) -> Option<&LDom2Node> {
+        self.qsc_options()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjReader {
@@ -598,6 +614,22 @@ impl SceneXMLReader {
         }
     }
 
+    pub fn camera_from_byte_array(&mut self, data: &ByteArray) -> Result<Camera> {
+        let text = std::str::from_utf8(data.as_bytes()).map_err(|error| {
+            cuemol_core::CueMolError::parse(format!("camera XML is not UTF-8: {error}"))
+        })?;
+        match Camera::from_xml_string(text) {
+            Ok(camera) => {
+                self.error_message.clear();
+                Ok(camera)
+            }
+            Err(error) => {
+                self.error_message = error.to_string();
+                Err(error)
+            }
+        }
+    }
+
     pub fn read_string(&mut self) -> Result<String> {
         match self.handler.read_string() {
             Ok(value) => {
@@ -775,8 +807,31 @@ impl SceneXMLWriter {
         self.set_str_version(value);
     }
 
-    pub fn set_default_opts<T>(&mut self, _scene: &T) {
-        self.embed_all = true;
+    pub fn set_default_opts<T: SceneWriterOptions>(&mut self, scene: &T) {
+        let Some(options) = scene.qsc_options_node() else {
+            return;
+        };
+        let version = options.str_attr("version").to_string();
+        if !version.is_empty() {
+            self.set_str_version(&version);
+        }
+        let compression = options.str_attr("compress").to_string();
+        if !compression.is_empty() {
+            self.set_compress_mode(match compression.as_str() {
+                "gzip" => InOutHandler::COMP_GZIP,
+                "bzip2" => InOutHandler::COMP_BZIP2,
+                "xzip" | "xz" => InOutHandler::COMP_XZIP,
+                _ => InOutHandler::COMP_NONE,
+            });
+        }
+        let base64 = options.str_attr("base64").to_string();
+        if !base64.is_empty() {
+            self.set_base64_flag(
+                base64.eq_ignore_ascii_case("true")
+                    || base64.eq_ignore_ascii_case("yes")
+                    || base64 == "1",
+            );
+        }
     }
 
     pub fn attach_scene(&mut self, scene_uid: Uid) {
@@ -817,6 +872,10 @@ impl SceneXMLWriter {
 
     pub fn write_byte_array(&self, data: &ByteArray) -> Result<()> {
         self.handler.write_bytes(data.as_bytes())
+    }
+
+    pub fn camera_to_byte_array(&self, camera: &Camera) -> ByteArray {
+        ByteArray::copy_from_u8(camera.to_xml_string().as_bytes())
     }
 }
 
@@ -912,6 +971,17 @@ mod tests {
         assert_eq!(writer.str_version(), "QDF2");
         writer.set_str_version("QDF3");
         assert_eq!(writer.num_version(), 3);
+        let mut options = LDom2Node::new();
+        options.set_tag_name("qsc_opts");
+        options.set_str_attr("version", "QDF1");
+        options.set_str_attr("compress", "xzip");
+        options.set_str_attr("base64", "true");
+        writer.set_embed_all(false);
+        writer.set_default_opts(&options);
+        assert_eq!(writer.num_version(), 1);
+        assert_eq!(writer.compress_mode(), InOutHandler::COMP_XZIP);
+        assert!(writer.base64_flag());
+        assert!(!writer.embed_all());
         writer.attach_scene(uid);
         assert_eq!(writer.detach_scene(), Some(uid));
 

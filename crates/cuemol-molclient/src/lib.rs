@@ -1,6 +1,10 @@
-use cuemol_core::{CueMolError, Result, Vector4};
-use cuemol_molstr::{Atom, BondOrder, MolCoord};
+use cuemol_core::{parse_ldom2_xml, CueMolError, LDom2Node, Result, Vector4};
+use cuemol_molstr::{read_sdf_str, Atom, BondOrder, MolCoord};
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MolClientManager {
@@ -74,8 +78,255 @@ impl XmlRpcConn {
             ));
         }
         self.request_count += 1;
+        if self.endpoint == "offline" {
+            return self.mol_from_smiles_local(smiles);
+        }
+        let request = xml_rpc_smiles_request(smiles);
+        let response = http_xml_rpc_post(&self.endpoint, request.as_bytes())?;
+        let sdf = xml_rpc_string_result(&response)?;
+        read_sdf_str(&sdf)
+    }
+
+    /// Parse SMILES without contacting the XML-RPC service.
+    pub fn mol_from_smiles_local(&self, smiles: &str) -> Result<MolCoord> {
         SmilesParser::new(smiles).parse()
     }
+}
+
+fn xml_rpc_smiles_request(smiles: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\"?>\n<methodCall><methodName>mol_from_smiles</methodName><params><param><value><string>{}</string></value></param></params></methodCall>\n",
+        escape_xml(smiles)
+    )
+}
+
+fn http_xml_rpc_post(endpoint: &str, body: &[u8]) -> Result<String> {
+    let target = HttpTarget::parse(endpoint)?;
+    if target.secure {
+        return curl_xml_rpc_post(endpoint, body);
+    }
+    let mut stream = TcpStream::connect((target.host.as_str(), target.port))?;
+    let timeout = Some(Duration::from_secs(30));
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
+    let request = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\nUser-Agent: cuemol2-rs/0.1\r\n\r\n",
+        target.path,
+        target.host_header,
+        body.len()
+    );
+    stream.write_all(request.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    parse_http_response(&response)
+}
+
+fn curl_xml_rpc_post(endpoint: &str, body: &[u8]) -> Result<String> {
+    let mut child = Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--max-time",
+            "30",
+            "--header",
+            "Content-Type: text/xml",
+            "--data-binary",
+            "@-",
+            endpoint,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| CueMolError::Io(format!("failed to start curl: {error}")))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| CueMolError::Io("curl stdin is unavailable".to_string()))?
+        .write_all(body)?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(CueMolError::Io(format!(
+            "XML-RPC HTTPS request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| CueMolError::parse(format!("XML-RPC response is not UTF-8: {error}")))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HttpTarget {
+    secure: bool,
+    host: String,
+    host_header: String,
+    port: u16,
+    path: String,
+}
+
+impl HttpTarget {
+    fn parse(endpoint: &str) -> Result<Self> {
+        let endpoint = endpoint.trim();
+        let (secure, rest) = if let Some(rest) = endpoint.strip_prefix("http://") {
+            (false, rest)
+        } else if let Some(rest) = endpoint.strip_prefix("https://") {
+            (true, rest)
+        } else {
+            return Err(CueMolError::invalid_argument(
+                "XML-RPC endpoint must use http:// or https://",
+            ));
+        };
+        let (authority, path) = rest
+            .split_once('/')
+            .map_or((rest, "/".to_string()), |(authority, path)| {
+                (authority, format!("/{path}"))
+            });
+        if authority.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "XML-RPC endpoint host is empty",
+            ));
+        }
+
+        let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+            let (host, suffix) = bracketed
+                .split_once(']')
+                .ok_or_else(|| CueMolError::invalid_argument("invalid bracketed XML-RPC host"))?;
+            let port = suffix
+                .strip_prefix(':')
+                .map(str::parse)
+                .transpose()
+                .map_err(|_| CueMolError::invalid_argument("invalid XML-RPC port"))?
+                .unwrap_or(if secure { 443 } else { 80 });
+            (host.to_string(), port)
+        } else if let Some((host, port)) = authority.rsplit_once(':') {
+            let port = port
+                .parse()
+                .map_err(|_| CueMolError::invalid_argument("invalid XML-RPC port"))?;
+            (host.to_string(), port)
+        } else {
+            (authority.to_string(), if secure { 443 } else { 80 })
+        };
+        if host.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "XML-RPC endpoint host is empty",
+            ));
+        }
+        Ok(Self {
+            secure,
+            host,
+            host_header: authority.to_string(),
+            port,
+            path,
+        })
+    }
+}
+
+fn parse_http_response(response: &[u8]) -> Result<String> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| CueMolError::parse("invalid HTTP response"))?;
+    let headers = std::str::from_utf8(&response[..header_end])
+        .map_err(|error| CueMolError::parse(format!("HTTP headers are not UTF-8: {error}")))?;
+    let mut lines = headers.split("\r\n");
+    let status_line = lines
+        .next()
+        .ok_or_else(|| CueMolError::parse("HTTP status line is missing"))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| CueMolError::parse("invalid HTTP status line"))?;
+    if !(200..300).contains(&status) {
+        return Err(CueMolError::Io(format!(
+            "XML-RPC server returned HTTP {status}"
+        )));
+    }
+
+    let chunked = lines.clone().any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        })
+    });
+    let body = &response[header_end + 4..];
+    let body = if chunked {
+        decode_chunked_body(body)?
+    } else {
+        body.to_vec()
+    };
+    String::from_utf8(body)
+        .map_err(|error| CueMolError::parse(format!("XML-RPC response is not UTF-8: {error}")))
+}
+
+fn decode_chunked_body(input: &[u8]) -> Result<Vec<u8>> {
+    let mut position = 0;
+    let mut output = Vec::new();
+    loop {
+        let line_end = input[position..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .map(|offset| position + offset)
+            .ok_or_else(|| CueMolError::parse("invalid chunked HTTP body"))?;
+        let size_text = std::str::from_utf8(&input[position..line_end])
+            .map_err(|_| CueMolError::parse("invalid HTTP chunk size"))?;
+        let size = usize::from_str_radix(size_text.split(';').next().unwrap_or_default(), 16)
+            .map_err(|_| CueMolError::parse("invalid HTTP chunk size"))?;
+        position = line_end + 2;
+        if size == 0 {
+            return Ok(output);
+        }
+        let end = position
+            .checked_add(size)
+            .filter(|end| *end + 2 <= input.len())
+            .ok_or_else(|| CueMolError::parse("truncated HTTP chunk"))?;
+        output.extend_from_slice(&input[position..end]);
+        if &input[end..end + 2] != b"\r\n" {
+            return Err(CueMolError::parse("invalid HTTP chunk terminator"));
+        }
+        position = end + 2;
+    }
+}
+
+fn xml_rpc_string_result(response: &str) -> Result<String> {
+    let tree = parse_ldom2_xml(response)?;
+    if tree.top().tag_name() != "methodResponse" {
+        return Err(CueMolError::parse("XML-RPC methodResponse is missing"));
+    }
+    if let Some(fault) = descendant(tree.top(), "fault") {
+        let message = descendant(fault, "string")
+            .map(LDom2Node::contents)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("XML-RPC fault");
+        return Err(CueMolError::invalid_argument(message.trim()));
+    }
+    descendant(tree.top(), "string")
+        .map(|node| node.contents().to_string())
+        .ok_or_else(|| CueMolError::parse("XML-RPC string result is missing"))
+}
+
+fn descendant<'a>(node: &'a LDom2Node, tag: &str) -> Option<&'a LDom2Node> {
+    if node.tag_name() == tag {
+        return Some(node);
+    }
+    node.children()
+        .iter()
+        .find_map(|child| descendant(child, tag))
+}
+
+fn escape_xml(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 struct SmilesParser<'a> {
@@ -363,6 +614,8 @@ fn parse_charge(input: &str) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn manager_connect_records_endpoint() {
@@ -372,6 +625,20 @@ mod tests {
         assert_eq!(conn.endpoint(), "http://localhost:8080/RPC2");
         assert_eq!(manager.connection_count(), 1);
         assert_eq!(manager.connections()[0].endpoint(), conn.endpoint());
+    }
+
+    #[test]
+    fn http_target_accepts_https_and_ipv6_defaults() {
+        let secure = HttpTarget::parse("https://example.org/RPC2").unwrap();
+        assert!(secure.secure);
+        assert_eq!(secure.host, "example.org");
+        assert_eq!(secure.port, 443);
+        assert_eq!(secure.path, "/RPC2");
+
+        let ipv6 = HttpTarget::parse("http://[::1]:8080/rpc").unwrap();
+        assert!(!ipv6.secure);
+        assert_eq!(ipv6.host, "::1");
+        assert_eq!(ipv6.port, 8080);
     }
 
     #[test]
@@ -419,5 +686,71 @@ mod tests {
 
         assert!(conn.mol_from_smiles("C").is_err());
         assert_eq!(conn.request_count(), 0);
+    }
+
+    #[test]
+    fn mol_from_smiles_calls_xml_rpc_and_reads_sdf_result() {
+        let source = XmlRpcConn::new("offline")
+            .mol_from_smiles_local("CCO")
+            .unwrap();
+        let sdf = cuemol_molstr::write_sdf_string(&source);
+        let response_xml = format!(
+            "<?xml version=\"1.0\"?><methodResponse><params><param><value><string>{}</string></value></param></params></methodResponse>",
+            escape_xml(&sdf)
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let request = read_http_request(&mut socket);
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("POST /RPC2 HTTP/1.1\r\n"));
+            assert!(request.contains("<methodName>mol_from_smiles</methodName>"));
+            assert!(request.contains("<string>CCO</string>"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_xml.len(),
+                response_xml
+            );
+            socket.write_all(response.as_bytes()).unwrap();
+        });
+
+        let mut connection = XmlRpcConn::new(format!("http://{address}/RPC2"));
+        let molecule = connection.mol_from_smiles("CCO").unwrap();
+        assert_eq!(molecule.atom_count(), 3);
+        assert_eq!(molecule.bond_count(), 2);
+        assert_eq!(molecule.atoms()[2].element, "O");
+        assert_eq!(connection.request_count(), 1);
+        server.join().unwrap();
+    }
+
+    fn read_http_request(socket: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let count = socket.read(&mut buffer).unwrap();
+            assert!(count != 0, "client closed before completing HTTP request");
+            request.extend_from_slice(&buffer[..count]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .split("\r\n")
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                })
+                .unwrap();
+            if request.len() >= header_end + 4 + content_length {
+                return request;
+            }
+        }
     }
 }

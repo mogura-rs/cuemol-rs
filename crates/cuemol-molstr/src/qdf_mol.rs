@@ -7,7 +7,7 @@
 //! reconstructs the chain/residue hierarchy from the flat atoms (grouping by
 //! chain id, then by residue index + insertion code) and the reader flattens it
 //! back. Data blocks:
-//! - `mol`: object ext-data (NOT ported — always written empty, count 0).
+//! - `mol`: crystallographic `CrystalInfo` ext-data (cell and space group).
 //! - `chai`: `id`(uid), `name`(fixstr).
 //! - `resi`: `id`(uid), `pid`(parent chain uid), `name`(fixstr), `idx`(i32), and
 //!   `ins`(i8 insertion code) only when some residue has one.
@@ -15,19 +15,21 @@
 //!   alt-loc), `elem`(u8 atomic number), `posx/posy/posz`, `bfac`, `occ`(f32).
 //! - `bond`: `id`, `aid1`, `aid2`(atom uids), `type`(u8 valence), `udef`(u8).
 //!
-//! SCOPE: standard fields only. Per-residue / per-atom dynamic user properties
-//! and anisotropic U (the C++ `PROP_PFX` columns / `u00..u22`) are NOT written.
-//! Atoms are emitted in flat order so an atom's uid equals its index, which keeps
-//! the bond references valid after the flatten round-trip. The element string is
-//! reduced to an atomic number, so its case is normalised on round-trip
-//! (`FE` -> `Fe`); only the atomic number is preserved, matching C++ `ElemID`.
+//! Per-residue string properties, per-atom integer properties, and anisotropic U
+//! are preserved through the C++ `PROP_PFX` and `u00..u22` columns. Atoms are
+//! emitted in flat order so an atom's uid equals its index, which keeps the bond
+//! references valid after the flatten round-trip. The element string is reduced
+//! to an atomic number, so its case is normalised on round-trip (`FE` -> `Fe`);
+//! only the atomic number is preserved, matching C++ `ElemID`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
-use cuemol_core::{CueMolError, Result, Vector4};
+use cuemol_core::{CellParams, CueMolError, Result, Vector4};
 use cuemol_qsys::{
-    InOutHandler, ObjReader, ObjWriter, QdfFieldDef, QdfReader, QdfWriter, QDF_TYPE_FIXSTR8,
-    QDF_TYPE_FLOAT32, QDF_TYPE_INT32, QDF_TYPE_INT8, QDF_TYPE_UID, QDF_TYPE_UINT8,
+    InOutHandler, ObjReader, ObjWriter, QdfFieldDef, QdfReader, QdfWriter, QDF_TYPE_BOOL,
+    QDF_TYPE_FIXSTR16, QDF_TYPE_FIXSTR32, QDF_TYPE_FIXSTR8, QDF_TYPE_FLOAT32, QDF_TYPE_INT32,
+    QDF_TYPE_INT8, QDF_TYPE_UID, QDF_TYPE_UINT8,
 };
 
 use crate::molecule::{Atom, BondOrder, MolCoord, ResidueKey};
@@ -161,8 +163,7 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
 
     let mut w = QdfWriter::new("MOL2");
 
-    // mol block: object ext-data not ported -> empty.
-    w.data_def("mol", 0);
+    write_mol_ext_data(&mut w, mol.cell_params());
 
     // chai block
     w.data_def("chai", chain_uid.len());
@@ -247,6 +248,20 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
         .atoms()
         .iter()
         .any(|atom| atom.int_prop("anisou_u11").is_some());
+    let anisou_props: BTreeSet<_> = ANISO_COLUMNS.iter().map(|(_, name)| *name).collect();
+    let atom_prop_names: Vec<String> = mol
+        .atoms()
+        .iter()
+        .flat_map(|atom| atom.int_props.keys())
+        .filter(|name| !anisou_props.contains(name.as_str()))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let atom_prop_columns: Vec<_> = atom_prop_names
+        .iter()
+        .map(|name| format!("{PROP_PFX}{name}"))
+        .collect();
     let mut atom_schema: Vec<(&str, i8, usize)> = vec![
         ("id", QDF_TYPE_UID, 0),
         ("pid", QDF_TYPE_UID, 0),
@@ -264,6 +279,9 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
         for (col, _) in ANISO_COLUMNS {
             atom_schema.push((col, QDF_TYPE_FLOAT32, 0));
         }
+    }
+    for column in &atom_prop_columns {
+        atom_schema.push((column, QDF_TYPE_INT32, 0));
     }
     w.data_def("atom", mol.atom_count());
     w.record_def_ext(&atom_schema);
@@ -286,6 +304,9 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
             for (_, prop) in ANISO_COLUMNS {
                 w.f32(atom.int_prop(prop).map(|v| v as f32 / 1.0e4).unwrap_or(0.0));
             }
+        }
+        for name in &atom_prop_names {
+            w.i32(atom.int_prop(name).unwrap_or(0));
         }
     }
 
@@ -317,14 +338,8 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
     let mut r = QdfReader::from_bytes(input)?;
     r.expect_file_type("MOL2")?;
 
-    // mol block: skip any object ext-data (not ported).
     let nmol = r.read_data_def("mol")?;
-    if nmol > 0 {
-        let defs = r.read_record_def()?;
-        for _ in 0..nmol {
-            skip_record(&mut r, &defs)?;
-        }
-    }
+    let cell_params = read_mol_ext_data(&mut r, nmol)?;
 
     // chai block -> chain uid -> name
     let nchain = r.read_data_def("chai")?;
@@ -394,8 +409,15 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
     // ANISOU columns are present only when the writer block had any (C++
     // `QdfMolReader` `in.isDefined("u00")`).
     let has_anisou = QdfFieldDef::is_defined(&atom_defs, "u00");
+    let atom_prop_fields: Vec<_> = atom_defs
+        .iter()
+        .filter(|definition| definition.name.starts_with(PROP_PFX))
+        .collect();
 
     let mut mol = MolCoord::new();
+    if let Some(cell) = cell_params {
+        mol.set_cell_params(cell);
+    }
     // Atom UID -> flat index, so bonds stay correct even if ids are not the
     // sequential order this writer emits (cross-compat robustness).
     let mut atom_index: BTreeMap<u32, usize> = BTreeMap::new();
@@ -452,6 +474,26 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
                 atom.set_int_prop(*prop, value);
             }
         }
+        for definition in &atom_prop_fields {
+            let name = &definition.name[1..];
+            match definition.type_tag {
+                QDF_TYPE_INT32 => atom.set_int_prop(name, r.read_i32()?),
+                QDF_TYPE_BOOL => {
+                    r.read_bool()?;
+                }
+                QDF_TYPE_FLOAT32 => {
+                    r.read_f32()?;
+                }
+                QDF_TYPE_FIXSTR8 | QDF_TYPE_FIXSTR16 | QDF_TYPE_FIXSTR32 => {
+                    r.read_fixed_str(definition.fixed_len)?;
+                }
+                _ => {
+                    return Err(CueMolError::parse(
+                        "QDF mol: unsupported atom property type",
+                    ))
+                }
+            }
+        }
         mol.append_atom1(atom, chain, res_id, res_name);
         atom_index.insert(id, mol.atom_count() - 1);
     }
@@ -487,31 +529,83 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
     Ok(mol)
 }
 
-/// Skip a single record given its parsed schema (used for the unported `mol`
-/// ext-data block).
-fn skip_record(r: &mut QdfReader, defs: &[QdfFieldDef]) -> Result<()> {
-    for d in defs {
-        match d.type_tag {
-            QDF_TYPE_FIXSTR8 => {
-                r.read_fixed_str(d.fixed_len)?;
+fn write_mol_ext_data(writer: &mut QdfWriter, cell: Option<&CellParams>) {
+    let Some(cell) = cell else {
+        writer.data_def("mol", 0);
+        return;
+    };
+    let mut values = vec![
+        ("CrystalInfo.lena", cell.a.to_string()),
+        ("CrystalInfo.lenb", cell.b.to_string()),
+        ("CrystalInfo.lenc", cell.c.to_string()),
+        ("CrystalInfo.anga", cell.alpha.to_string()),
+        ("CrystalInfo.angb", cell.beta.to_string()),
+        ("CrystalInfo.angg", cell.gamma.to_string()),
+    ];
+    if let Some(space_group) = cell.space_group_number {
+        values.push(("CrystalInfo.sgid", space_group.to_string()));
+    }
+    if !cell.space_group_name.is_empty() {
+        // Retain the original H-M name when no numeric space-group table is
+        // available in this dependency layer. C++ safely ignores this field.
+        values.push(("CrystalInfo.sgname", cell.space_group_name.clone()));
+    }
+    writer.data_def("mol", 1);
+    let schema: Vec<_> = values
+        .iter()
+        .map(|(name, value)| (*name, QDF_TYPE_FIXSTR8, value.len().max(1)))
+        .collect();
+    writer.record_def_ext(&schema);
+    for (_, value) in values {
+        writer.fixed_str(&value, value.len().max(1));
+    }
+}
+
+fn read_mol_ext_data(reader: &mut QdfReader, count: usize) -> Result<Option<CellParams>> {
+    if count == 0 {
+        return Ok(None);
+    }
+    if count > 1 {
+        return Err(CueMolError::parse("QDF mol: invalid moldata size"));
+    }
+    let defs = reader.read_record_def()?;
+    let mut values = BTreeMap::new();
+    for definition in &defs {
+        match definition.type_tag {
+            QDF_TYPE_FIXSTR8 | QDF_TYPE_FIXSTR16 | QDF_TYPE_FIXSTR32 => {
+                values.insert(
+                    definition.name.clone(),
+                    reader.read_fixed_str(definition.fixed_len)?,
+                );
             }
-            QDF_TYPE_INT8 | QDF_TYPE_UINT8 => {
-                r.read_u8()?;
-            }
-            QDF_TYPE_INT32 | QDF_TYPE_UID => {
-                r.read_i32()?;
-            }
-            QDF_TYPE_FLOAT32 => {
-                r.read_f32()?;
-            }
-            _ => {
-                return Err(CueMolError::parse(
-                    "QDF mol: unsupported field type in mol block",
-                ))
-            }
+            _ => return Err(CueMolError::parse("QDF mol: invalid moldata value type")),
         }
     }
-    Ok(())
+    if !values.keys().any(|name| name.starts_with("CrystalInfo.")) {
+        return Ok(None);
+    }
+    let number = |name: &str, default: f64| {
+        values
+            .get(name)
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(default)
+    };
+    let mut cell = CellParams::new(
+        number("CrystalInfo.lena", 100.0),
+        number("CrystalInfo.lenb", 100.0),
+        number("CrystalInfo.lenc", 100.0),
+        number("CrystalInfo.anga", 90.0),
+        number("CrystalInfo.angb", 90.0),
+        number("CrystalInfo.angg", 90.0),
+    );
+    cell.space_group_number = values
+        .get("CrystalInfo.sgid")
+        .and_then(|value| value.parse().ok());
+    cell.space_group_name = values
+        .get("CrystalInfo.sgname")
+        .cloned()
+        .unwrap_or_default();
+    Ok(Some(cell))
 }
 
 /// `ObjReader` facade for QDF molecules (handler name `qdfmol`).
@@ -537,6 +631,10 @@ impl QdfMolFileReader {
 
     pub fn read_bytes(&self, input: &[u8]) -> Result<MolCoord> {
         read_qdf_mol_bytes(input)
+    }
+
+    pub fn read_file(&self, path: impl AsRef<Path>) -> Result<MolCoord> {
+        self.read_bytes(&std::fs::read(path)?)
     }
 }
 
@@ -583,6 +681,11 @@ impl QdfMolFileWriter {
 
     pub fn write_bytes(&self, object: &MolCoord) -> Vec<u8> {
         write_qdf_mol_bytes(object)
+    }
+
+    pub fn write_file(&self, object: &MolCoord, path: impl AsRef<Path>) -> Result<()> {
+        std::fs::write(path, self.write_bytes(object))?;
+        Ok(())
     }
 }
 
@@ -722,6 +825,34 @@ mod tests {
         }
         // The 2-letter element survived as iron (Z=26).
         assert_eq!(dst.atoms()[6].element, "Fe");
+    }
+
+    #[test]
+    fn qdf_mol_roundtrip_preserves_crystal_info_ext_data() {
+        let mut src = sample_mol();
+        let mut cell = CellParams::new(40.1, 51.2, 62.3, 90.0, 101.5, 90.0);
+        cell.space_group_name = "P 1 21 1".to_string();
+        cell.space_group_number = Some(4);
+        src.set_cell_params(cell.clone());
+
+        let bytes = write_qdf_mol_bytes(&src);
+        let dst = read_qdf_mol_bytes(&bytes).expect("read back QDF crystal info");
+        assert_eq!(dst.cell_params(), Some(&cell));
+    }
+
+    #[test]
+    fn qdf_mol_roundtrip_preserves_atom_integer_properties() {
+        let mut src = sample_mol();
+        src.atoms_mut()[0].set_int_prop("custom_id", 1234);
+        src.atoms_mut()[1].set_int_prop("custom_id", -7);
+        src.atoms_mut()[2].set_int_prop("secondary_code", 8);
+
+        let bytes = write_qdf_mol_bytes(&src);
+        let dst = read_qdf_mol_bytes(&bytes).expect("read back QDF atom properties");
+        assert_eq!(dst.atoms()[0].int_prop("custom_id"), Some(1234));
+        assert_eq!(dst.atoms()[1].int_prop("custom_id"), Some(-7));
+        assert_eq!(dst.atoms()[2].int_prop("custom_id"), Some(0));
+        assert_eq!(dst.atoms()[2].int_prop("secondary_code"), Some(8));
     }
 
     #[test]

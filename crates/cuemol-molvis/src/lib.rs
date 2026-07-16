@@ -1,7 +1,8 @@
 use cuemol_core::Vector4;
 use cuemol_gfx::{ColorSpec, SolidColor};
 use cuemol_molstr::{
-    parse_selector, Atom, BfacColoring, MolCoord, MolRenderer, ResidIterator, ResidueView,
+    parse_selector, Atom, BfacColoring, Bond, BondOrder, MolCoord, MolRenderer, MolScene,
+    ResidIterator, ResidueView,
 };
 use cuemol_qsys::{DrawObj, StyleManager};
 use cuemol_render::{MeshVertex, RenderAtom, RenderBond, RenderMesh, RenderSceneSnapshot};
@@ -3253,6 +3254,12 @@ pub struct MoleculeRenderOptions {
     /// occupancy lerped low_color→high_color (C++ BfacColoring, auto-scaled to the
     /// molecule range by default). Another object coloring scheme. `None` = off.
     pub bfac: Option<BfacColoring>,
+    /// Multiple-bond geometry used by the source renderer. `Simple` emits two
+    /// or three parallel lines; `BallStickType1` emits the original full bond
+    /// plus one shortened, offset cylinder with spherical end caps.
+    pub valence_bond_mode: ValenceBondMode,
+    /// SimpleRenderer offsets along `MolBond::getDblBondDir`.
+    pub simple_bond_offsets: [f64; 2],
     /// Backbone sampled as a PIECEWISE-LINEAR path through the raw Cα pivots
     /// (straight between residues) instead of a smoothed cubic spline — the C++
     /// `TraceRenderer` (a Cα line strip, `TraceRenderer.cpp:102`), as distinct from
@@ -3337,6 +3344,14 @@ pub enum SectionShape {
 pub enum MoleculeColorMode {
     Element,
     Uniform,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ValenceBondMode {
+    #[default]
+    Off,
+    Simple,
+    BallStickType1,
 }
 
 /// Tube/trace "putty" mode (C++ `TubeRenderer`): modulate the backbone tube
@@ -3436,6 +3451,8 @@ impl Default for MoleculeRenderOptions {
             object_paint: Vec::new(),
             rainbow: None,
             bfac: None,
+            valence_bond_mode: ValenceBondMode::Off,
+            simple_bond_offsets: [0.1, 0.0],
             linear_backbone: false,
         }
     }
@@ -3464,6 +3481,23 @@ pub const DEFAULT_STYLE_SCOPE: u64 = 0;
 pub fn default_style_manager() -> StyleManager {
     let mut styles = StyleManager::new();
     styles.load_builtin_default_styles(DEFAULT_STYLE_SCOPE);
+    styles
+}
+
+/// Build the style cascade for a scene. QSC style sets are stored in low-to-high
+/// priority order, so inserting each at the front makes later nodes win.
+pub fn scene_style_manager(scene: &MolScene) -> StyleManager {
+    let mut styles = default_style_manager();
+    for (index, loaded) in scene.loaded_styles().iter().enumerate() {
+        let id = loaded.node.str_attr("id");
+        let name = if id.is_empty() {
+            format!("scene-style-{index}")
+        } else {
+            id.to_string()
+        };
+        let read_only = loaded.node.str_attr("readonly").equals_ignore_case("true");
+        styles.load_style_set_from_xml(DEFAULT_STYLE_SCOPE, name, &loaded.data, read_only);
+    }
     styles
 }
 
@@ -3782,7 +3816,7 @@ pub fn molecule_render_snapshot(
     // surface renderer via `resolve_atom_colors` so a nearest-atom-coloured
     // surface matches these atoms exactly.
     let atom_colors = resolve_atom_colors(molecule, options);
-    let atoms = if options.draw_atoms {
+    let mut atoms = if options.draw_atoms {
         molecule
             .atoms()
             .iter()
@@ -3802,42 +3836,18 @@ pub fn molecule_render_snapshot(
     } else {
         Vec::new()
     };
-    let bonds = if options.draw_bonds {
-        molecule
+    let mut bonds = Vec::new();
+    if options.draw_bonds {
+        for bond in molecule
             .bonds()
             .iter()
             .filter(|bond| drawn(bond.atom1) && drawn(bond.atom2))
-            .filter_map(|bond| {
-                let atom1 = molecule.atoms().get(bond.atom1)?;
-                let atom2 = molecule.atoms().get(bond.atom2)?;
-                let selected_bond =
-                    selected.contains(&bond.atom1) || selected.contains(&bond.atom2);
-                Some(
-                    RenderBond::new(
-                        Vector4::new3(atom1.position.x, atom1.position.y, atom1.position.z),
-                        Vector4::new3(atom2.position.x, atom2.position.y, atom2.position.z),
-                        options.bond_radius,
-                        Some(ColorSpec {
-                            base: cuemol_gfx::ColorBase::Rgb {
-                                r: 0.72,
-                                g: 0.72,
-                                b: 0.72,
-                                a: 1.0,
-                            },
-                            modifiers: Vec::new(),
-                        }),
-                    )
-                    .with_picking(
-                        options.object_uid,
-                        Some((bond.atom1, bond.atom2)),
-                        selected_bond,
-                    ),
-                )
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+        {
+            append_valence_bond_geometry(
+                molecule, bond, options, &selected, &mut atoms, &mut bonds,
+            );
+        }
+    }
     // Frame the drawn subset: with a sel restriction the bbox comes from the drawn
     // atoms, else the whole molecule.
     let bounds = match &draw {
@@ -3849,6 +3859,142 @@ pub fn molecule_render_snapshot(
         bonds,
         meshes: Vec::new(),
         bounds,
+    }
+}
+
+fn append_valence_bond_geometry(
+    molecule: &MolCoord,
+    bond: &Bond,
+    options: &MoleculeRenderOptions,
+    selected: &std::collections::BTreeSet<usize>,
+    atoms: &mut Vec<RenderAtom>,
+    bonds: &mut Vec<RenderBond>,
+) {
+    let (Some(atom1), Some(atom2)) = (
+        molecule.atoms().get(bond.atom1),
+        molecule.atoms().get(bond.atom2),
+    ) else {
+        return;
+    };
+    let pos1 = atom1.position;
+    let pos2 = atom2.position;
+    let selected_bond = selected.contains(&bond.atom1) || selected.contains(&bond.atom2);
+    let add_bond = |bonds: &mut Vec<RenderBond>, from: Vector4, to: Vector4| {
+        bonds.push(
+            RenderBond::new(from, to, options.bond_radius, Some(default_bond_color()))
+                .with_picking(
+                    options.object_uid,
+                    Some((bond.atom1, bond.atom2)),
+                    selected_bond,
+                ),
+        );
+    };
+    let multiple = matches!(bond.order, BondOrder::Double | BondOrder::Triple);
+    if !multiple || options.valence_bond_mode == ValenceBondMode::Off {
+        add_bond(bonds, pos1, pos2);
+        return;
+    }
+
+    let direction = double_bond_direction(molecule, bond);
+    match options.valence_bond_mode {
+        ValenceBondMode::Off => unreachable!(),
+        ValenceBondMode::Simple => match bond.order {
+            BondOrder::Double => {
+                for offset in options.simple_bond_offsets {
+                    let delta = direction.scale(offset);
+                    add_bond(bonds, pos1 + delta, pos2 + delta);
+                }
+            }
+            BondOrder::Triple => {
+                add_bond(bonds, pos1, pos2);
+                let offset = options.simple_bond_offsets[0];
+                for offset in [offset, -offset] {
+                    let delta = direction.scale(offset);
+                    add_bond(bonds, pos1 + delta, pos2 + delta);
+                }
+            }
+            _ => unreachable!(),
+        },
+        ValenceBondMode::BallStickType1 => {
+            add_bond(bonds, pos1, pos2);
+            let axis = (pos2 - pos1)
+                .normalize3d()
+                .unwrap_or(Vector4::new3(1.0, 0.0, 0.0));
+            let side = direction.scale(f64::from(options.bond_radius) * 2.5);
+            let shorten = f64::from(options.atom_radius_abs.unwrap_or(0.3)) * 2.0;
+            let end1 = pos1 + axis.scale(shorten) + side;
+            let end2 = pos2 - axis.scale(shorten) + side;
+            add_bond(bonds, end1, end2);
+            for (position, atom_index) in [(end1, bond.atom1), (end2, bond.atom2)] {
+                atoms.push(
+                    RenderAtom::new(position, options.bond_radius, Some(default_bond_color()))
+                        .with_picking(
+                            options.object_uid,
+                            Some(atom_index),
+                            selected.contains(&atom_index),
+                        )
+                        .with_detail(options.sphere_detail),
+                );
+            }
+        }
+    }
+}
+
+fn default_bond_color() -> ColorSpec {
+    ColorSpec {
+        base: cuemol_gfx::ColorBase::Rgb {
+            r: 0.72,
+            g: 0.72,
+            b: 0.72,
+            a: 1.0,
+        },
+        modifiers: Vec::new(),
+    }
+}
+
+fn double_bond_direction(molecule: &MolCoord, bond: &Bond) -> Vector4 {
+    let side = |center: usize, other: usize| -> Option<(Vector4, usize)> {
+        let center_atom = molecule.atoms().get(center)?;
+        let other_atom = molecule.atoms().get(other)?;
+        let neighbors = molecule
+            .bonds()
+            .iter()
+            .filter_map(|candidate| {
+                let neighbor = if candidate.atom1 == center && candidate.atom2 != other {
+                    candidate.atom2
+                } else if candidate.atom2 == center && candidate.atom1 != other {
+                    candidate.atom1
+                } else {
+                    return None;
+                };
+                let atom = molecule.atoms().get(neighbor)?;
+                (!atom.element.eq_ignore_ascii_case("H")).then_some(neighbor)
+            })
+            .collect::<Vec<_>>();
+        let &distal = neighbors.last()?;
+        let distal_atom = molecule.atoms().get(distal)?;
+        let axis = (other_atom.position - center_atom.position)
+            .normalize3d()
+            .ok()?;
+        let relative = distal_atom.position - center_atom.position;
+        let normal = (relative - axis.scale(axis.dot3d(relative)))
+            .normalize3d()
+            .ok()?;
+        Some((normal, neighbors.len()))
+    };
+
+    match (side(bond.atom1, bond.atom2), side(bond.atom2, bond.atom1)) {
+        (Some((normal, _)), None) | (None, Some((normal, _))) => normal,
+        (None, None) => Vector4::new3(1.0, 0.0, 0.0),
+        (Some((normal1, count1)), Some((normal2, count2))) => {
+            if count1 == 1 && count2 > 1 {
+                normal1
+            } else if count1 > 1 && count2 == 1 {
+                normal2
+            } else {
+                normal1
+            }
+        }
     }
 }
 
@@ -4936,13 +5082,10 @@ pub fn ring_meshes_snapshot(molecule: &MolCoord) -> RenderSceneSnapshot {
     }
 }
 
-/// Valence-bond wedge fills (C++ `BallStickRenderer` VBMODE_TYPE1): draw each
-/// stereo-flagged bond as a flat triangle — apex at atom1 (the stereo origin),
-/// widening to `width` at atom2. Reads the MDL/SDF bond `stereo` flag (1 = up
-/// wedge, 6 = down/hash), the FAITHFUL source for which bonds are stereo bonds
-/// (no chirality perception needed). HONEST SCOPE: the solid-vs-hashed fill
-/// distinction (up vs down) is a texture detail not represented here — both
-/// produce the same wedge triangle geometry; only the presence/shape is modeled.
+/// Optional MDL/SDF stereobond wedge geometry. This helper is independent of
+/// CueMol's `BallStickRenderer::VBMODE_TYPE1`, which renders multiple bonds as
+/// parallel cylinders. Stereo flag 1 emits a solid wedge and flag 6 emits a
+/// sequence of widening hash bars.
 pub fn valence_wedge_meshes_snapshot(molecule: &MolCoord, width: f64) -> RenderSceneSnapshot {
     let atoms = molecule.atoms();
     let mut meshes = Vec::new();
@@ -4960,14 +5103,45 @@ pub fn valence_wedge_meshes_snapshot(molecule: &MolCoord, width: f64) -> RenderS
         let normal = normalize_or(axis.cross(perp), Vector4::new3(0.0, 0.0, 1.0));
         let color = [0.45_f32, 0.45, 0.45, 1.0];
         let mut mesh = RenderMesh::new();
-        for position in [apex, wide + half, wide - half] {
-            mesh.vertices.push(MeshVertex {
-                position,
-                normal,
-                color,
-            });
+        if bond.stereo == 1 {
+            for position in [apex, wide + half, wide - half] {
+                mesh.vertices.push(MeshVertex {
+                    position,
+                    normal,
+                    color,
+                });
+            }
+            mesh.indices.extend_from_slice(&[0, 1, 2]);
+        } else {
+            let axis_unit = normalize_or(axis, Vector4::new3(1.0, 0.0, 0.0));
+            let half_thickness = axis_unit.scale(width * 0.025);
+            for index in 0..6 {
+                let fraction = (index as f64 + 1.0) / 7.0;
+                let center = apex + axis.scale(fraction);
+                let bar_half = perp.scale(width * fraction * 0.5);
+                let base = mesh.vertices.len() as u32;
+                for position in [
+                    center - bar_half - half_thickness,
+                    center + bar_half - half_thickness,
+                    center + bar_half + half_thickness,
+                    center - bar_half + half_thickness,
+                ] {
+                    mesh.vertices.push(MeshVertex {
+                        position,
+                        normal,
+                        color,
+                    });
+                }
+                mesh.indices.extend_from_slice(&[
+                    base,
+                    base + 1,
+                    base + 2,
+                    base,
+                    base + 2,
+                    base + 3,
+                ]);
+            }
         }
-        mesh.indices.extend_from_slice(&[0, 1, 2]);
         meshes.push(mesh);
     }
     RenderSceneSnapshot {
@@ -5097,76 +5271,390 @@ pub fn disorder_lines_snapshot(
     }
 }
 
-/// Nucleic-acid base representation (C++ `NARenderer`, the `rendResidSimple1`
-/// core): each nucleotide's base is shown as an oriented stick along its base axis
-/// — from the sugar `C1'` to the glycosidic nitrogen (`N9` for purines, `N1` for
-/// pyrimidines), then on to the far ring atom (`N1`/`N3`). Purine vs pyrimidine is
-/// detected by the presence of `N9`. (The base-pair *ladder* rungs and the filled
-/// base block are deferred — they need base-pair partners / per-base polygons.)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NARenderOptions {
+    pub base_size: f64,
+    pub base_thick: f64,
+    pub base_detail: i32,
+    pub base_type: i32,
+    pub show_basepair: bool,
+}
+
+impl Default for NARenderOptions {
+    fn default() -> Self {
+        Self {
+            base_size: 0.5,
+            base_thick: 0.5,
+            base_detail: 3,
+            base_type: NARenderer::NAREND_BP,
+            show_basepair: true,
+        }
+    }
+}
+
+/// Compatibility entry point for the C++ `NAREND_SIMPLE1` representation.
 pub fn na_base_sticks_snapshot(
     molecule: &MolCoord,
     radius: f64,
     show_basepair: bool,
 ) -> RenderSceneSnapshot {
+    na_renderer_snapshot(
+        molecule,
+        &NARenderOptions {
+            base_size: radius,
+            base_type: NARenderer::NAREND_SIMPLE1,
+            show_basepair,
+            ..NARenderOptions::default()
+        },
+    )
+}
+
+/// Nucleic-acid representation matching all four C++ `NARenderer` modes.
+pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> RenderSceneSnapshot {
     use std::collections::{HashMap, HashSet};
+
     let summaries = molecule.residue_summaries();
-    let pos_in = |indices: &[usize], name: &str| -> Option<Vector4> {
+    let atom_in = |indices: &[usize], name: &str| -> Option<(usize, Vector4)> {
         indices
             .iter()
             .find(|&&ai| molecule.atoms()[ai].name.trim().eq_ignore_ascii_case(name))
-            .map(|&ai| molecule.atoms()[ai].position)
+            .map(|&ai| (ai, molecule.atoms()[ai].position))
     };
-    let mut bonds = Vec::new();
-    // Glycosidic-N position per residue id, for the base-pair ladder rungs.
-    let mut glyco_by_resid: HashMap<i32, Vector4> = HashMap::new();
-    for s in &summaries {
-        let Some(sugar) = pos_in(&s.atom_indices, "C1'").or_else(|| pos_in(&s.atom_indices, "C1*"))
-        else {
-            continue;
-        };
-        let (glyco, far) = match pos_in(&s.atom_indices, "N9") {
-            Some(n9) => (n9, pos_in(&s.atom_indices, "N1")), // purine
-            None => match pos_in(&s.atom_indices, "N1") {
-                Some(n1) => (n1, pos_in(&s.atom_indices, "N3")), // pyrimidine
-                None => continue,
-            },
-        };
-        bonds.push(RenderBond::new(sugar, glyco, radius as f32, None));
-        if let Some(far) = far {
-            bonds.push(RenderBond::new(glyco, far, radius as f32, None));
+    let base_kind = |summary: &cuemol_molstr::ResidueSummary| -> Option<&'static str> {
+        let dynamic = molecule
+            .get_residue_prop_str(
+                &summary.key.chain_id,
+                &summary.key.script_index(),
+                "basetype",
+            )
+            .ok()
+            .flatten();
+        let value = dynamic.or_else(|| {
+            cuemol_molstr::toppar::TopoDB::global().residue_property(&summary.res_name, "basetype")
+        });
+        match value {
+            Some("pur") => Some("pur"),
+            Some("pyr") => Some("pyr"),
+            _ if atom_in(&summary.atom_indices, "N9").is_some() => Some("pur"),
+            _ if atom_in(&summary.atom_indices, "N1").is_some() => Some("pyr"),
+            _ => None,
         }
-        glyco_by_resid.insert(s.key.res_id, glyco);
-    }
+    };
+    let pivot_in = |summary: &cuemol_molstr::ResidueSummary| -> Option<(usize, Vector4)> {
+        let configured = cuemol_molstr::toppar::TopoDB::global()
+            .pivot_atom(&summary.res_name)
+            .and_then(|name| atom_in(&summary.atom_indices, name));
+        configured
+            .or_else(|| atom_in(&summary.atom_indices, "P"))
+            .or_else(|| atom_in(&summary.atom_indices, "C1'"))
+            .or_else(|| atom_in(&summary.atom_indices, "C1*"))
+    };
 
-    // Base-pair ladder rungs: connect the glycosidic N of base-paired residues
-    // (the `base_pair` atom int-prop set by MolCoord::calc_base_pair). C++
-    // NARenderer draws these connectors only when show_basepair is on.
-    if show_basepair {
-        let mut drawn: HashSet<(i32, i32)> = HashSet::new();
-        for s in &summaries {
-            let resid = s.key.res_id;
-            let partner = s
-                .atom_indices
-                .iter()
-                .find_map(|&ai| molecule.atoms()[ai].int_prop("base_pair"));
-            if let Some(partner) = partner {
-                let key = (resid.min(partner), resid.max(partner));
-                if drawn.insert(key) {
-                    if let (Some(&a), Some(&b)) =
-                        (glyco_by_resid.get(&resid), glyco_by_resid.get(&partner))
-                    {
-                        bonds.push(RenderBond::new(a, b, radius as f32, None));
-                    }
-                }
+    let mut residue_lookup = HashMap::new();
+    for (index, summary) in summaries.iter().enumerate() {
+        residue_lookup.insert(
+            (summary.key.chain_id.clone(), summary.key.script_index()),
+            index,
+        );
+    }
+    let partner_of = |index: usize| -> Option<usize> {
+        let summary = &summaries[index];
+        if let Some(value) = molecule
+            .get_residue_prop_str(
+                &summary.key.chain_id,
+                &summary.key.script_index(),
+                "basepair",
+            )
+            .ok()
+            .flatten()
+        {
+            let (chain, residue) = value.split_once('.')?;
+            if let Some(&partner) = residue_lookup.get(&(chain.to_string(), residue.to_string())) {
+                return Some(partner);
             }
         }
+        let partner_resid = summary
+            .atom_indices
+            .iter()
+            .find_map(|&ai| molecule.atoms()[ai].int_prop("base_pair"))?;
+        summaries.iter().enumerate().find_map(|(candidate, other)| {
+            (candidate != index && other.key.res_id == partner_resid).then_some(candidate)
+        })
+    };
+
+    let mut bonds = Vec::new();
+    let mut atoms = Vec::new();
+    let mut meshes = Vec::new();
+    let radius = options.base_size.max(0.0) as f32;
+    let detail = Some(options.base_detail.max(0) as u32);
+    let mut rendered = HashSet::new();
+
+    for (index, summary) in summaries.iter().enumerate() {
+        if rendered.contains(&index) {
+            continue;
+        }
+        let Some(kind) = base_kind(summary) else {
+            continue;
+        };
+        let Some((pivot_index, pivot)) = pivot_in(summary) else {
+            continue;
+        };
+        let glyco_name = if kind == "pur" { "N9" } else { "N1" };
+        let far_name = if kind == "pur" { "N1" } else { "N3" };
+
+        match options.base_type {
+            NARenderer::NAREND_BP => {
+                if options.show_basepair {
+                    if let Some(partner_index) = partner_of(index) {
+                        if !rendered.contains(&partner_index) {
+                            if let Some((_, partner_pivot)) = pivot_in(&summaries[partner_index]) {
+                                bonds.push(RenderBond::new(pivot, partner_pivot, radius, None));
+                                rendered.insert(partner_index);
+                                rendered.insert(index);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                if let Some((far_index, far)) = atom_in(&summary.atom_indices, far_name) {
+                    bonds.push(RenderBond::new(pivot, far, radius, None).with_picking(
+                        None,
+                        Some((pivot_index, far_index)),
+                        false,
+                    ));
+                    atoms.push(
+                        RenderAtom::new(far, radius, None)
+                            .with_picking(None, Some(far_index), false)
+                            .with_detail(detail),
+                    );
+                }
+            }
+            NARenderer::NAREND_SIMPLE1 => {
+                let Some((glyco_index, glyco)) = atom_in(&summary.atom_indices, glyco_name) else {
+                    continue;
+                };
+                if options.show_basepair {
+                    if let Some(partner_index) = partner_of(index) {
+                        if !rendered.contains(&partner_index) {
+                            let partner = &summaries[partner_index];
+                            let partner_glyco_name = if base_kind(partner) == Some("pur") {
+                                "N9"
+                            } else {
+                                "N1"
+                            };
+                            if let (
+                                Some((partner_pivot_index, partner_pivot)),
+                                Some((partner_glyco_index, partner_glyco)),
+                            ) = (
+                                pivot_in(partner),
+                                atom_in(&partner.atom_indices, partner_glyco_name),
+                            ) {
+                                bonds.push(
+                                    RenderBond::new(pivot, glyco, radius, None).with_picking(
+                                        None,
+                                        Some((pivot_index, glyco_index)),
+                                        false,
+                                    ),
+                                );
+                                bonds.push(RenderBond::new(glyco, partner_glyco, radius, None));
+                                bonds.push(
+                                    RenderBond::new(partner_glyco, partner_pivot, radius, None)
+                                        .with_picking(
+                                            None,
+                                            Some((partner_glyco_index, partner_pivot_index)),
+                                            false,
+                                        ),
+                                );
+                                for (atom_index, position) in
+                                    [(glyco_index, glyco), (partner_glyco_index, partner_glyco)]
+                                {
+                                    atoms.push(
+                                        RenderAtom::new(position, radius, None)
+                                            .with_picking(None, Some(atom_index), false)
+                                            .with_detail(detail),
+                                    );
+                                }
+                                rendered.insert(partner_index);
+                                rendered.insert(index);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                let Some((far_index, far)) = atom_in(&summary.atom_indices, far_name) else {
+                    continue;
+                };
+                bonds.push(RenderBond::new(pivot, glyco, radius, None).with_picking(
+                    None,
+                    Some((pivot_index, glyco_index)),
+                    false,
+                ));
+                bonds.push(RenderBond::new(glyco, far, radius, None).with_picking(
+                    None,
+                    Some((glyco_index, far_index)),
+                    false,
+                ));
+                for (atom_index, position) in [(glyco_index, glyco), (far_index, far)] {
+                    atoms.push(
+                        RenderAtom::new(position, radius, None)
+                            .with_picking(None, Some(atom_index), false)
+                            .with_detail(detail),
+                    );
+                }
+            }
+            NARenderer::NAREND_DETAIL1 | NARenderer::NAREND_DETAIL2 => {
+                let mut included: HashMap<String, (usize, Vector4)> = HashMap::new();
+                let mut names = vec!["C1'", "C4", "C5", "N7", "C8", "N9", "N1", "C2", "N3", "C6"];
+                if options.base_type == NARenderer::NAREND_DETAIL2 {
+                    names.extend(["C2'", "C3'", "C4'", "O4'"]);
+                }
+                for name in names {
+                    if let Some((atom_index, position)) = atom_in(&summary.atom_indices, name) {
+                        included.insert(name.to_string(), (atom_index, position));
+                        atoms.push(
+                            RenderAtom::new(position, radius, None)
+                                .with_picking(None, Some(atom_index), false)
+                                .with_detail(detail),
+                        );
+                    }
+                }
+                let mut add_named_bond = |lhs: &str, rhs: &str| {
+                    let (Some(&(lhs_index, lhs_pos)), Some(&(rhs_index, rhs_pos))) =
+                        (included.get(lhs), included.get(rhs))
+                    else {
+                        return;
+                    };
+                    if lhs_index != rhs_index {
+                        bonds.push(
+                            RenderBond::new(lhs_pos, rhs_pos, radius, None).with_picking(
+                                None,
+                                Some((lhs_index, rhs_index)),
+                                false,
+                            ),
+                        );
+                    }
+                };
+                if kind == "pur" {
+                    for (lhs, rhs) in [
+                        ("C1'", "N9"),
+                        ("N9", "C8"),
+                        ("C8", "N7"),
+                        ("N7", "C5"),
+                        ("C4", "N9"),
+                        ("N1", "C2"),
+                        ("C2", "N3"),
+                        ("N3", "C4"),
+                        ("C4", "C5"),
+                        ("C5", "C6"),
+                        ("C6", "N1"),
+                    ] {
+                        add_named_bond(lhs, rhs);
+                    }
+                } else {
+                    for (lhs, rhs) in [
+                        ("C1'", "N1"),
+                        ("N1", "C2"),
+                        ("C2", "N3"),
+                        ("N3", "C4"),
+                        ("C4", "C5"),
+                        ("C5", "C6"),
+                        ("C6", "N1"),
+                    ] {
+                        add_named_bond(lhs, rhs);
+                    }
+                }
+                if options.base_type == NARenderer::NAREND_DETAIL1 {
+                    if let Some(&(c1_index, c1)) = included.get("C1'") {
+                        bonds.push(RenderBond::new(pivot, c1, radius, None).with_picking(
+                            None,
+                            Some((pivot_index, c1_index)),
+                            false,
+                        ));
+                    }
+                } else {
+                    for (lhs, rhs) in [
+                        ("C1'", "C2'"),
+                        ("C2'", "C3'"),
+                        ("C3'", "C4'"),
+                        ("C4'", "O4'"),
+                        ("O4'", "C1'"),
+                    ] {
+                        add_named_bond(lhs, rhs);
+                    }
+                    if let Some(&(c4_index, c4)) = included.get("C4'") {
+                        bonds.push(RenderBond::new(pivot, c4, radius, None).with_picking(
+                            None,
+                            Some((pivot_index, c4_index)),
+                            false,
+                        ));
+                    }
+                }
+                append_na_ring_meshes(summary, &included, options.base_thick, &mut meshes);
+            }
+            _ => {}
+        }
+        rendered.insert(index);
     }
 
     RenderSceneSnapshot {
-        atoms: Vec::new(),
+        atoms,
         bonds,
-        meshes: Vec::new(),
+        meshes,
         bounds: molecule.bounding_box_for(None),
+    }
+}
+
+fn append_na_ring_meshes(
+    summary: &cuemol_molstr::ResidueSummary,
+    included: &std::collections::HashMap<String, (usize, Vector4)>,
+    thickness: f64,
+    meshes: &mut Vec<RenderMesh>,
+) {
+    let rings = cuemol_molstr::toppar::TopoDB::global().rings(&summary.res_name);
+    for ring in rings {
+        let Some(points) = ring
+            .iter()
+            .map(|name| included.get(name).map(|(_, position)| *position))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        if points.len() < 3 {
+            continue;
+        }
+        let normal = normalize_or(
+            (points[1] - points[0]).cross(points[2] - points[0]),
+            Vector4::new3(0.0, 0.0, 1.0),
+        );
+        let offset = normal * (thickness.max(0.0) * 0.5);
+        let color = [0.75_f32, 0.75, 0.75, 1.0];
+        let mut mesh = RenderMesh::new();
+        for point in &points {
+            mesh.vertices.push(MeshVertex {
+                position: *point + offset,
+                normal,
+                color,
+            });
+        }
+        for point in &points {
+            mesh.vertices.push(MeshVertex {
+                position: *point - offset,
+                normal: normal * -1.0,
+                color,
+            });
+        }
+        let n = points.len() as u32;
+        for index in 1..n - 1 {
+            mesh.indices.extend_from_slice(&[0, index, index + 1]);
+            mesh.indices
+                .extend_from_slice(&[n, n + index + 1, n + index]);
+        }
+        for index in 0..n {
+            let next = (index + 1) % n;
+            mesh.indices
+                .extend_from_slice(&[index, next, n + index, next, n + next, n + index]);
+        }
+        meshes.push(mesh);
     }
 }
 
@@ -5379,6 +5867,28 @@ mod tests {
 
     fn assert_f64_eq(lhs: f64, rhs: f64) {
         assert!((lhs - rhs).abs() < 1.0e-12, "{lhs} != {rhs}");
+    }
+
+    #[test]
+    fn scene_styles_override_system_styles_and_later_sets_win() {
+        let qsc = r#"<scene>
+          <styles id="low"><style id="DefaultBallStick" bondw="0.31"/></styles>
+          <styles id="high"><style id="DefaultBallStick" bondw="0.47"/></styles>
+        </scene>"#;
+        let mut manager = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = manager.new_scene("styles");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .load_qsc_str(qsc)
+            .unwrap();
+        let styles = scene_style_manager(manager.scene(scene_uid).unwrap());
+        assert_eq!(
+            styles
+                .style_attr(DEFAULT_STYLE_SCOPE, "DefaultBallStick", "bondw")
+                .as_deref(),
+            Some("0.47")
+        );
     }
 
     #[test]
@@ -6104,14 +6614,22 @@ mod tests {
             a.res_id = res_id;
             a
         }
-        // Adenine (res 1) and Uracil (res 2) bases ~2 A apart -> base-paired.
+        // Adenine and uracil with two in-plane Watson-Crick contacts.
         let mut mol = MolCoord::with_atoms(vec![
-            nt("C1'", "A", 1, 0.0, 0.0),
-            nt("N9", "A", 1, 1.0, 0.0),
-            nt("N1", "A", 1, 2.0, 0.0),
-            nt("C1'", "U", 2, 0.0, 2.0),
-            nt("N1", "U", 2, 1.0, 2.0),
-            nt("N3", "U", 2, 2.0, 2.0),
+            nt("C1'", "A", 1, -1.0, -1.0),
+            nt("N9", "A", 1, 0.0, -1.0),
+            nt("N1", "A", 1, 0.0, 1.0),
+            nt("N6", "A", 1, 0.0, 0.0),
+            nt("C4", "A", 1, 0.0, 0.0),
+            nt("C5", "A", 1, 1.0, 0.0),
+            nt("C8", "A", 1, 0.0, 1.0),
+            nt("C1'", "U", 2, 4.0, -1.0),
+            nt("N1", "U", 2, 3.0, -1.0),
+            nt("N3", "U", 2, 3.0, 1.0),
+            nt("O4", "U", 2, 3.0, 0.0),
+            nt("C2", "U", 2, 3.0, 0.0),
+            nt("C4", "U", 2, 4.0, 0.0),
+            nt("C6", "U", 2, 3.0, 1.0),
         ]);
         // Before computing base pairs, show_basepair adds no rungs (just the
         // per-base sticks: 2 per residue).
@@ -6120,16 +6638,12 @@ mod tests {
 
         assert_eq!(mol.calc_base_pair(5.0, 30.0), 1);
         let on = na_base_sticks_snapshot(&mol, 0.3, true);
-        assert_eq!(
-            on.bonds.len(),
-            base_only + 1,
-            "one ladder rung for the pair"
-        );
-        // The rung connects the glycosidic N atoms: A.N9 (1,0) <-> U.N1 (1,2).
+        // The paired form is pivot->glyco, glyco->glyco, glyco->pivot.
+        assert_eq!(on.bonds.len(), 3);
         assert!(
             on.bonds.iter().any(|b| {
                 let (f, t) = ((b.from.x, b.from.y), (b.to.x, b.to.y));
-                (f == (1.0, 0.0) && t == (1.0, 2.0)) || (f == (1.0, 2.0) && t == (1.0, 0.0))
+                (f == (0.0, -1.0) && t == (3.0, -1.0)) || (f == (3.0, -1.0) && t == (0.0, -1.0))
             }),
             "rung connects the paired bases' glycosidic N atoms"
         );
@@ -6138,6 +6652,72 @@ mod tests {
             na_base_sticks_snapshot(&mol, 0.3, false).bonds.len(),
             base_only
         );
+    }
+
+    #[test]
+    fn na_renderer_supports_basepair_and_detailed_modes() {
+        let names = [
+            ("P", -2.0, 0.0),
+            ("C1'", -1.0, 0.0),
+            ("C2'", -1.0, -1.0),
+            ("C3'", -2.0, -1.5),
+            ("C4'", -2.5, -0.5),
+            ("O4'", -2.0, 0.5),
+            ("N9", 0.0, 0.0),
+            ("C8", 0.5, 1.0),
+            ("N7", 1.5, 1.0),
+            ("C5", 2.0, 0.0),
+            ("C4", 1.0, -0.5),
+            ("N3", 1.0, -1.5),
+            ("C2", 2.0, -2.0),
+            ("N1", 3.0, -1.5),
+            ("C6", 3.0, -0.5),
+        ];
+        let mol = MolCoord::with_atoms(
+            names
+                .iter()
+                .map(|(name, x, y)| {
+                    let mut atom = sample_atom(name, "C", *x, *y, 0.0);
+                    atom.res_name = "A".to_string();
+                    atom
+                })
+                .collect(),
+        );
+
+        let basepair = na_renderer_snapshot(
+            &mol,
+            &NARenderOptions {
+                base_type: NARenderer::NAREND_BP,
+                show_basepair: false,
+                ..NARenderOptions::default()
+            },
+        );
+        assert_eq!(basepair.bonds.len(), 1);
+        assert_eq!(basepair.atoms.len(), 1);
+
+        let detail1 = na_renderer_snapshot(
+            &mol,
+            &NARenderOptions {
+                base_type: NARenderer::NAREND_DETAIL1,
+                ..NARenderOptions::default()
+            },
+        );
+        assert_eq!(detail1.meshes.len(), 2, "purine base has two rings");
+        assert!(detail1.atoms.iter().all(|atom| atom.detail == Some(3)));
+
+        let detail2 = na_renderer_snapshot(
+            &mol,
+            &NARenderOptions {
+                base_type: NARenderer::NAREND_DETAIL2,
+                ..NARenderOptions::default()
+            },
+        );
+        assert_eq!(
+            detail2.meshes.len(),
+            3,
+            "detail2 also draws the ribose ring"
+        );
+        assert!(detail2.atoms.len() > detail1.atoms.len());
     }
 
     #[test]
@@ -6196,6 +6776,77 @@ mod tests {
         ]);
         plain.add_bond(0, 1, cuemol_molstr::BondOrder::Single);
         assert!(valence_wedge_meshes_snapshot(&plain, 0.4).meshes.is_empty());
+
+        let mut hashed = MolCoord::with_atoms(vec![
+            sample_atom("C", "C", 0.0, 0.0, 0.0),
+            sample_atom("C", "C", 1.0, 0.0, 0.0),
+        ]);
+        hashed.add_bond_stereo(0, 1, cuemol_molstr::BondOrder::Single, 6);
+        let hashed = valence_wedge_meshes_snapshot(&hashed, 0.4);
+        assert_eq!(hashed.meshes.len(), 1);
+        assert_eq!(hashed.meshes[0].triangle_count(), 12);
+        assert_eq!(hashed.meshes[0].vertices.len(), 24);
+    }
+
+    #[test]
+    fn simple_valence_bonds_match_reference_offsets() {
+        let mut double = MolCoord::with_atoms(vec![
+            sample_atom("C1", "C", 0.0, 0.0, 0.0),
+            sample_atom("C2", "C", 2.0, 0.0, 0.0),
+            sample_atom("C3", "C", 0.0, 1.0, 0.0),
+        ]);
+        double.add_bond(0, 1, BondOrder::Double);
+        double.add_bond(0, 2, BondOrder::Single);
+        let options = MoleculeRenderOptions {
+            draw_atoms: false,
+            valence_bond_mode: ValenceBondMode::Simple,
+            ..MoleculeRenderOptions::default()
+        };
+        let snapshot = molecule_render_snapshot(&double, &options);
+        assert_eq!(snapshot.bonds.len(), 3);
+        let multiple = &snapshot.bonds[..2];
+        assert!((multiple[0].from.y - 0.1).abs() < 1.0e-12);
+        assert!((multiple[0].to.y - 0.1).abs() < 1.0e-12);
+        assert!(multiple[1].from.y.abs() < 1.0e-12);
+        assert!(multiple[1].to.y.abs() < 1.0e-12);
+
+        let mut triple = MolCoord::with_atoms(double.atoms().to_vec());
+        triple.add_bond(0, 1, BondOrder::Triple);
+        triple.add_bond(0, 2, BondOrder::Single);
+        let snapshot = molecule_render_snapshot(&triple, &options);
+        assert_eq!(snapshot.bonds.len(), 4);
+        let mut offsets = snapshot.bonds[..3]
+            .iter()
+            .map(|bond| bond.from.y)
+            .collect::<Vec<_>>();
+        offsets.sort_by(f64::total_cmp);
+        assert_eq!(offsets, vec![-0.1, 0.0, 0.1]);
+    }
+
+    #[test]
+    fn ballstick_type1_matches_reference_secondary_cylinder() {
+        let mut molecule = MolCoord::with_atoms(vec![
+            sample_atom("C1", "C", 0.0, 0.0, 0.0),
+            sample_atom("C2", "C", 2.0, 0.0, 0.0),
+            sample_atom("C3", "C", 0.0, 1.0, 0.0),
+        ]);
+        molecule.add_bond(0, 1, BondOrder::Double);
+        molecule.add_bond(0, 2, BondOrder::Single);
+        let options = MoleculeRenderOptions {
+            draw_atoms: false,
+            bond_radius: 0.2,
+            atom_radius_abs: Some(0.3),
+            valence_bond_mode: ValenceBondMode::BallStickType1,
+            ..MoleculeRenderOptions::default()
+        };
+        let snapshot = molecule_render_snapshot(&molecule, &options);
+        assert_eq!(snapshot.bonds.len(), 3);
+        assert_eq!(snapshot.atoms.len(), 2);
+        let secondary = &snapshot.bonds[1];
+        assert!((secondary.from - Vector4::new3(0.6, 0.5, 0.0)).length3d() < 1.0e-6);
+        assert!((secondary.to - Vector4::new3(1.4, 0.5, 0.0)).length3d() < 1.0e-6);
+        assert_eq!(snapshot.atoms[0].center, secondary.from);
+        assert_eq!(snapshot.atoms[1].center, secondary.to);
     }
 
     #[test]

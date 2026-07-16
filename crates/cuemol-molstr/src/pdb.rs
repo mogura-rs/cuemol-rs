@@ -431,6 +431,7 @@ pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result
     } else {
         apply_secondary_ranges(&mut mol, &secondary_ranges);
     }
+    mol.calc_base_pair(3.7, 30.0);
     Ok(mol)
 }
 

@@ -1,4 +1,4 @@
-use crate::misc::INVALID_UID;
+use crate::{misc::INVALID_UID, SysConfig};
 use cuemol_core::{parse_ldom2_xml, LDom2Node};
 use cuemol_gfx::{parse_color, SolidColor};
 use std::collections::BTreeMap;
@@ -8,7 +8,68 @@ use std::collections::BTreeMap;
 /// table. Vendored verbatim and parsed once via [`parse_ldom2_xml`].
 const DEFAULT_STYLE_XML: &str = include_str!("../data/default_style.xml");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub const MATERIAL_AMBIENT: usize = 0;
+pub const MATERIAL_DIFFUSE: usize = 1;
+pub const MATERIAL_SPECULAR: usize = 2;
+pub const MATERIAL_SHININESS: usize = 3;
+pub const MATERIAL_EMISSION: usize = 4;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyleMaterial {
+    system_values: [f64; 5],
+    has_system_values: bool,
+    dependent_values: BTreeMap<String, String>,
+}
+
+impl Default for StyleMaterial {
+    fn default() -> Self {
+        Self {
+            system_values: [0.2, 0.8, 0.0, 0.0, 0.0],
+            has_system_values: false,
+            dependent_values: BTreeMap::new(),
+        }
+    }
+}
+
+impl StyleMaterial {
+    pub fn set_system_value(&mut self, parameter: usize, value: f64) -> bool {
+        let Some(slot) = self.system_values.get_mut(parameter) else {
+            return false;
+        };
+        *slot = value;
+        self.has_system_values = true;
+        true
+    }
+
+    pub fn system_value(&self, parameter: usize) -> Option<f64> {
+        self.has_system_values
+            .then(|| self.system_values.get(parameter).copied())
+            .flatten()
+    }
+
+    pub fn has_system_values(&self) -> bool {
+        self.has_system_values
+    }
+
+    pub fn set_dependent_value(
+        &mut self,
+        renderer_type: impl Into<String>,
+        value: impl Into<String>,
+    ) {
+        self.dependent_values
+            .insert(renderer_type.into(), value.into());
+    }
+
+    pub fn dependent_value(&self, renderer_type: &str) -> Option<&str> {
+        self.dependent_values.get(renderer_type).map(String::as_str)
+    }
+
+    pub fn dependent_values(&self) -> &BTreeMap<String, String> {
+        &self.dependent_values
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct StyleSet {
     uid: u64,
     source: String,
@@ -18,6 +79,7 @@ pub struct StyleSet {
     colors: BTreeMap<String, SolidColor>,
     strings: BTreeMap<String, String>,
     styles: BTreeMap<String, LDom2Node>,
+    materials: BTreeMap<String, StyleMaterial>,
 }
 
 impl StyleSet {
@@ -31,6 +93,7 @@ impl StyleSet {
             colors: BTreeMap::new(),
             strings: BTreeMap::new(),
             styles: BTreeMap::new(),
+            materials: BTreeMap::new(),
         }
     }
 
@@ -115,9 +178,12 @@ impl StyleSet {
         if self.read_only {
             return false;
         }
-        self.colors.insert(canonical_key(name.as_ref()), color);
+        let inserted = self
+            .colors
+            .insert(canonical_key(name.as_ref()), color)
+            .is_none();
         self.modified = true;
-        true
+        inserted
     }
 
     pub fn remove_color(&mut self, name: &str) -> bool {
@@ -172,12 +238,15 @@ impl StyleSet {
         if self.read_only {
             return false;
         }
-        self.strings.insert(
-            str_data_key("string", category.as_ref(), key.as_ref()),
-            value.into(),
-        );
+        let inserted = self
+            .strings
+            .insert(
+                str_data_key("string", category.as_ref(), key.as_ref()),
+                value.into(),
+            )
+            .is_none();
         self.modified = true;
-        true
+        inserted
     }
 
     pub fn remove_str_data(&mut self, category: &str, key: &str) -> bool {
@@ -207,6 +276,17 @@ impl StyleSet {
         self.str_data_names_json(category)
     }
 
+    pub fn get_path(&self, key: &str) -> String {
+        let value = self.get_str_data("path", key);
+        if value.is_empty() {
+            return value;
+        }
+        SysConfig::global()
+            .lock()
+            .expect("SysConfig lock poisoned")
+            .conv_path_name(&value)
+    }
+
     pub fn has_style(&self, name: &str) -> bool {
         self.styles.contains_key(&style_key(name))
     }
@@ -219,7 +299,11 @@ impl StyleSet {
         if self.read_only {
             return false;
         }
-        self.styles.insert(style_key(name.as_ref()), node);
+        let key = style_key(name.as_ref());
+        if self.styles.contains_key(&key) {
+            return false;
+        }
+        self.styles.insert(key, node);
         self.modified = true;
         true
     }
@@ -236,19 +320,54 @@ impl StyleSet {
     }
 
     pub fn style_names_json(&self) -> String {
-        json_names(
-            self.styles
-                .keys()
-                .filter_map(|key| key.strip_suffix("\tstyle")),
-        )
+        format!("[{}]", style_info_entries(self).join(","))
     }
 
     pub fn get_style_names_json(&self) -> String {
         self.style_names_json()
     }
 
+    pub fn put_material_string(
+        &mut self,
+        id: impl Into<String>,
+        renderer_type: impl Into<String>,
+        value: impl Into<String>,
+    ) -> bool {
+        if self.read_only {
+            return false;
+        }
+        self.materials
+            .entry(id.into())
+            .or_default()
+            .set_dependent_value(renderer_type, value);
+        self.modified = true;
+        true
+    }
+
+    pub fn put_material_number(
+        &mut self,
+        id: impl Into<String>,
+        parameter: usize,
+        value: f64,
+    ) -> bool {
+        if self.read_only {
+            return false;
+        }
+        let changed = self
+            .materials
+            .entry(id.into())
+            .or_default()
+            .set_system_value(parameter, value);
+        self.modified |= changed;
+        changed
+    }
+
+    pub fn get_material(&self, id: &str) -> Option<&StyleMaterial> {
+        self.materials.get(id)
+    }
+
     pub fn get_material_names_json(&self) -> String {
-        "[]".to_string()
+        json_names(self.materials.keys().map(String::as_str))
     }
 
     pub fn get_material_names_json_2(&self) -> String {
@@ -264,7 +383,7 @@ impl StyleSet {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StyleManager {
     default_dir: String,
     next_uid: u64,
@@ -444,12 +563,15 @@ impl StyleManager {
         self.color_defs_json(scope_id)
     }
 
-    pub fn get_color_defs_json2(&self, scope_id: u64) -> String {
-        self.color_defs_json(scope_id)
+    pub fn get_color_defs_json2(&self, scope_id: u64, style_set_id: u64) -> String {
+        self.scopes
+            .get(&scope_id)
+            .and_then(|sets| sets.iter().find(|set| set.uid() == style_set_id))
+            .map_or_else(|| "[]".to_string(), StyleSet::color_defs_json)
     }
 
-    pub fn get_color_defs_json_2(&self, scope_id: u64) -> String {
-        self.color_defs_json(scope_id)
+    pub fn get_color_defs_json_2(&self, scope_id: u64, style_set_id: u64) -> String {
+        self.get_color_defs_json2(scope_id, style_set_id)
     }
 
     pub fn get_str_data(&self, category: &str, key: &str, scope_id: u64) -> String {
@@ -465,9 +587,13 @@ impl StyleManager {
         category: &str,
         key: &str,
         scope_id: u64,
-        _style_set_id: u64,
+        style_set_id: u64,
     ) -> String {
-        self.get_str_data(category, key, scope_id)
+        self.scopes
+            .get(&scope_id)
+            .and_then(|sets| sets.iter().find(|set| set.uid() == style_set_id))
+            .map(|set| set.get_str_data(category, key))
+            .unwrap_or_default()
     }
 
     pub fn set_str_data(
@@ -509,42 +635,133 @@ impl StyleManager {
         self.str_data_defs_json(category, scope_id)
     }
 
-    pub fn get_str_data_defs_json2(&self, category: &str, scope_id: u64) -> String {
-        self.str_data_defs_json(category, scope_id)
+    pub fn get_str_data_defs_json2(
+        &self,
+        category: &str,
+        scope_id: u64,
+        style_set_id: u64,
+    ) -> String {
+        self.scopes
+            .get(&scope_id)
+            .and_then(|sets| sets.iter().find(|set| set.uid() == style_set_id))
+            .map_or_else(|| "[]".to_string(), |set| set.str_data_names_json(category))
     }
 
-    pub fn get_str_data_defs_json_2(&self, category: &str, scope_id: u64) -> String {
-        self.str_data_defs_json(category, scope_id)
+    pub fn get_str_data_defs_json_2(
+        &self,
+        category: &str,
+        scope_id: u64,
+        style_set_id: u64,
+    ) -> String {
+        self.get_str_data_defs_json2(category, scope_id, style_set_id)
     }
 
     pub fn style_names_json(&self, scope_id: u64) -> String {
-        let names = self
+        let entries = self
             .scopes
             .get(&scope_id)
             .into_iter()
             .flatten()
-            .flat_map(|set| {
-                set.styles
-                    .keys()
-                    .filter_map(|key| key.strip_suffix("\tstyle"))
-            });
-        json_names(names)
+            .flat_map(style_info_entries)
+            .collect::<Vec<_>>();
+        format!("[{}]", entries.join(","))
     }
 
     pub fn get_style_names_json(&self, scope_id: u64) -> String {
         self.style_names_json(scope_id)
     }
 
-    pub fn get_material_names_json(&self, _scope_id: u64) -> String {
-        "[]".to_string()
+    pub fn style_node(&self, scope_id: u64, style_id: &str) -> Option<&LDom2Node> {
+        let lookup = |scope: u64| {
+            self.scopes
+                .get(&scope)?
+                .iter()
+                .find_map(|set| set.get_style(style_id))
+        };
+        lookup(scope_id).or_else(|| (scope_id != 0).then(|| lookup(0)).flatten())
     }
 
-    pub fn get_material_names_json2(&self, scope_id: u64) -> String {
-        self.get_material_names_json(scope_id)
+    pub fn get_material_string(
+        &self,
+        material_id: &str,
+        renderer_type: &str,
+        scope_id: u64,
+    ) -> String {
+        self.find_in_scope(scope_id, |set| {
+            set.get_material(material_id)?
+                .dependent_value(renderer_type)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            (scope_id != 0).then(|| {
+                self.find_in_scope(0, |set| {
+                    set.get_material(material_id)?
+                        .dependent_value(renderer_type)
+                        .map(str::to_string)
+                })
+            })?
+        })
+        .unwrap_or_default()
     }
 
-    pub fn get_material_names_json_2(&self, scope_id: u64) -> String {
-        self.get_material_names_json(scope_id)
+    pub fn get_material_number(&self, material_id: &str, parameter: usize, scope_id: u64) -> f64 {
+        self.find_in_scope(scope_id, |set| {
+            set.get_material(material_id)?.system_value(parameter)
+        })
+        .or_else(|| {
+            (scope_id != 0).then(|| {
+                self.find_in_scope(0, |set| {
+                    set.get_material(material_id)?.system_value(parameter)
+                })
+            })?
+        })
+        .unwrap_or(-1.0)
+    }
+
+    pub fn get_config(&self, renderer_type: &str, setting_name: &str, scope_id: u64) -> String {
+        let key = str_data_key("cfg", setting_name, renderer_type);
+        self.find_in_scope(scope_id, |set| set.strings.get(&key).cloned())
+            .or_else(|| {
+                (scope_id != 0)
+                    .then(|| self.find_in_scope(0, |set| set.strings.get(&key).cloned()))?
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn get_multi_path(&self, key: &str, scope_id: u64) -> Vec<String> {
+        let mut paths = self
+            .scopes
+            .get(&scope_id)
+            .into_iter()
+            .flatten()
+            .map(|set| set.get_path(key))
+            .filter(|path| !path.is_empty())
+            .collect::<Vec<_>>();
+        if scope_id != 0 {
+            paths.extend(self.get_multi_path(key, 0));
+        }
+        paths
+    }
+
+    pub fn get_material_names_json(&self, scope_id: u64) -> String {
+        let names = self
+            .scopes
+            .get(&scope_id)
+            .into_iter()
+            .flatten()
+            .flat_map(|set| set.materials.keys().map(String::as_str));
+        json_names(names)
+    }
+
+    pub fn get_material_names_json2(&self, scope_id: u64, style_set_id: u64) -> String {
+        self.scopes
+            .get(&scope_id)
+            .and_then(|sets| sets.iter().find(|set| set.uid() == style_set_id))
+            .map_or_else(|| "[]".to_string(), StyleSet::get_material_names_json)
+    }
+
+    pub fn get_material_names_json_2(&self, scope_id: u64, style_set_id: u64) -> String {
+        self.get_material_names_json2(scope_id, style_set_id)
     }
 
     pub fn create_style_from_obj(&mut self, name: impl Into<String>, scope_id: u64) -> u64 {
@@ -568,7 +785,7 @@ impl StyleManager {
         let Some(set) = self.get_style_set(style_set_id) else {
             return false;
         };
-        std::fs::write(path_name, set.color_defs_json()).is_ok()
+        std::fs::write(path_name, style_set_to_xml(set)).is_ok()
     }
 
     pub fn load_style_set_from_file(
@@ -593,6 +810,25 @@ impl StyleManager {
             set.set_read_only(read_only);
             set.set_modified(false);
         }
+        uid
+    }
+
+    pub fn load_style_set_from_xml(
+        &mut self,
+        scope_id: u64,
+        name: impl Into<String>,
+        xml: &str,
+        read_only: bool,
+    ) -> u64 {
+        if !parse_ldom2_xml(xml).is_ok_and(|tree| tree.top().tag_name() == "styles") {
+            return INVALID_UID;
+        }
+        let uid = self.alloc_uid();
+        let mut set = StyleSet::new(uid, name);
+        populate_style_set_from_xml(&mut set, xml);
+        set.set_read_only(read_only);
+        set.set_modified(false);
+        self.scopes.entry(scope_id).or_default().insert(0, set);
         uid
     }
 
@@ -670,6 +906,34 @@ impl StyleManager {
             })
         };
         lookup(scope_id).or_else(|| (scope_id != 0).then(|| lookup(0)).flatten())
+    }
+
+    pub fn style_child_node(
+        &self,
+        scope_id: u64,
+        style_id: &str,
+        child_tag: &str,
+    ) -> Option<&LDom2Node> {
+        self.style_node(scope_id, style_id)?.find_child(child_tag)
+    }
+
+    pub fn resolve_style_child_node(
+        &self,
+        scope_id: u64,
+        style_list: &str,
+        child_tag: &str,
+    ) -> Option<&LDom2Node> {
+        let mut result = None;
+        for name in style_list
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            if let Some(node) = self.style_child_node(scope_id, name, child_tag) {
+                result = Some(node);
+            }
+        }
+        result
     }
 
     /// Resolve a `style="A,B"` list for a nested child-element attribute (later
@@ -839,19 +1103,190 @@ fn find_style_value(node: &LDom2Node, prop_name: &str) -> Option<String> {
     Some(current.value().to_string())
 }
 
+fn style_set_to_xml(set: &StyleSet) -> String {
+    let mut output = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    output.push_str("<styles id=\"");
+    output.push_str(&escape_xml_attr(set.name()));
+    output.push_str("\">\n");
+
+    for (id, material) in &set.materials {
+        output.push_str("  <material id=\"");
+        output.push_str(&escape_xml_attr(id));
+        output.push_str("\">\n");
+        if material.has_system_values() {
+            output.push_str("    <def");
+            for (name, parameter) in [
+                ("ambient", MATERIAL_AMBIENT),
+                ("diffuse", MATERIAL_DIFFUSE),
+                ("specular", MATERIAL_SPECULAR),
+                ("shininess", MATERIAL_SHININESS),
+                ("emission", MATERIAL_EMISSION),
+            ] {
+                let value = material.system_values[parameter];
+                output.push(' ');
+                output.push_str(name);
+                output.push_str("=\"");
+                output.push_str(&value.to_string());
+                output.push('"');
+            }
+            output.push_str("/>\n");
+        }
+        for (renderer_type, value) in material.dependent_values() {
+            output.push_str("    <def type=\"");
+            output.push_str(&escape_xml_attr(renderer_type));
+            output.push_str("\">");
+            output.push_str(&escape_xml_text(value));
+            output.push_str("</def>\n");
+        }
+        output.push_str("  </material>\n");
+    }
+
+    for (name, color) in &set.colors {
+        output.push_str("  <color id=\"");
+        output.push_str(&escape_xml_attr(name));
+        output.push_str("\" value=\"");
+        output.push_str(&escape_xml_attr(&color.script_string()));
+        if color.material().is_empty() {
+            output.push_str("\"/>\n");
+        } else {
+            output.push_str("\" material=\"");
+            output.push_str(&escape_xml_attr(color.material()));
+            output.push_str("\"/>\n");
+        }
+    }
+
+    for (key, value) in &set.strings {
+        let Some((database, category, id)) = decode_str_data_key(key) else {
+            continue;
+        };
+        if database == "string" {
+            output.push_str("  <");
+            output.push_str(category);
+            output.push_str(" id=\"");
+            output.push_str(&escape_xml_attr(id));
+            output.push_str("\" value=\"");
+            output.push_str(&escape_xml_attr(value));
+            output.push_str("\"/>\n");
+        } else if database == "cfg" {
+            output.push_str("  <setting type=\"");
+            output.push_str(&escape_xml_attr(id));
+            output.push_str("\"><");
+            output.push_str(category);
+            output.push('>');
+            output.push_str(&escape_xml_text(value));
+            output.push_str("</");
+            output.push_str(category);
+            output.push_str("></setting>\n");
+        }
+    }
+
+    for (key, node) in &set.styles {
+        let Some(id) = key.strip_suffix("\tstyle") else {
+            continue;
+        };
+        write_style_xml_node(&mut output, node, 1, Some(id));
+        output.push('\n');
+    }
+    output.push_str("</styles>\n");
+    output
+}
+
+fn write_style_xml_node(
+    output: &mut String,
+    node: &LDom2Node,
+    indent: usize,
+    forced_id: Option<&str>,
+) {
+    output.push_str(&"  ".repeat(indent));
+    output.push('<');
+    output.push_str(node.tag_name());
+    if let Some(id) = forced_id {
+        output.push_str(" id=\"");
+        output.push_str(&escape_xml_attr(id));
+        output.push('"');
+    }
+    let type_name = if node.type_name().is_empty() {
+        node.str_attr("type").to_string()
+    } else {
+        node.type_name().to_string()
+    };
+    if !type_name.is_empty() {
+        output.push_str(" type=\"");
+        output.push_str(&escape_xml_attr(&type_name));
+        output.push('"');
+    }
+    if !node.value().is_empty() {
+        output.push_str(" value=\"");
+        output.push_str(&escape_xml_attr(node.value()));
+        output.push('"');
+    }
+    for child in node.children().iter().filter(|child| child.is_attr()) {
+        if child.tag_name() == "type" || (child.tag_name() == "id" && forced_id.is_some()) {
+            continue;
+        }
+        output.push(' ');
+        output.push_str(child.tag_name());
+        output.push_str("=\"");
+        output.push_str(&escape_xml_attr(child.value()));
+        output.push('"');
+    }
+    let children = node
+        .children()
+        .iter()
+        .filter(|child| !child.is_attr())
+        .collect::<Vec<_>>();
+    if children.is_empty() && node.contents().is_empty() {
+        output.push_str("/>");
+        return;
+    }
+    output.push('>');
+    if !node.contents().is_empty() {
+        output.push_str(&escape_xml_text(node.contents()));
+    }
+    if !children.is_empty() {
+        output.push('\n');
+        for child in children {
+            write_style_xml_node(output, child, indent + 1, None);
+            output.push('\n');
+        }
+        output.push_str(&"  ".repeat(indent));
+    }
+    output.push_str("</");
+    output.push_str(node.tag_name());
+    output.push('>');
+}
+
+fn escape_xml_attr(value: &str) -> String {
+    escape_xml_text(value)
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn escape_xml_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn decode_str_data_key(key: &str) -> Option<(&str, &str, &str)> {
+    let (database, rest) = key.split_once('\t')?;
+    let (category, id) = rest.split_once('\t')?;
+    Some((database, category, id))
+}
+
 /// Parse an LDom2 style XML document (`<styles>`) into a [`StyleSet`], mirroring
-/// C++ `StyleSet::readStyleSetFromStream`: each `<style id=...>` preset is stored
-/// by id (keeping its full attribute/child node for later resolution) and each
-/// `<color id=... value=...>` entry populates the named-colour table.
-///
-/// Intentionally NOT parsed (categorical sinks deferred elsewhere): `<material>`
-/// and `<path>` feed ICC colour-management / external-renderer preamble config,
-/// and `<sel>`/`<setting>` are scene preferences — none affect rendered geometry.
-/// Returns the number of styles registered (0 if the document fails to parse).
+/// C++ `StyleFile::loadNodes`: styles, palette entries, material definitions,
+/// renderer settings, selection aliases, paths, and generic string data are all
+/// retained. Returns the number of styles registered, or zero for invalid XML.
 fn populate_style_set_from_xml(set: &mut StyleSet, xml: &str) -> usize {
     let Ok(tree) = parse_ldom2_xml(xml) else {
         return 0;
     };
+    let root_id = tree.top().str_attr("id").to_string();
+    if !root_id.is_empty() {
+        set.set_name(root_id);
+    }
     let mut style_count = 0;
     for child in tree.top().children() {
         if child.is_attr() {
@@ -873,13 +1308,84 @@ fn populate_style_set_from_xml(set: &mut StyleSet, xml: &str) -> usize {
                     continue;
                 }
                 if let Some(rgba) = parse_color(&value).ok().and_then(|spec| spec.rgba8()) {
-                    set.set_color(id, SolidColor::from(rgba));
+                    let mut color = SolidColor::from(rgba);
+                    let material = child.str_attr("material").to_string();
+                    if !material.is_empty() {
+                        color.set_material(material);
+                    }
+                    set.set_color(id, color);
                 }
             }
-            _ => {}
+            "material" => load_material_node(set, child),
+            "setting" => load_setting_node(set, child),
+            _ => load_string_node(set, child),
         }
     }
     style_count
+}
+
+fn load_material_node(set: &mut StyleSet, node: &LDom2Node) {
+    let id = node.str_attr("id").to_string();
+    if id.is_empty() {
+        return;
+    }
+    for definition in node
+        .children()
+        .iter()
+        .filter(|child| !child.is_attr() && child.tag_name() == "def")
+    {
+        let renderer_type = definition.type_name().to_string();
+        if !renderer_type.is_empty() {
+            let value = node_text(definition);
+            set.put_material_string(id.clone(), renderer_type, value);
+            continue;
+        }
+        for (name, parameter) in [
+            ("ambient", MATERIAL_AMBIENT),
+            ("diffuse", MATERIAL_DIFFUSE),
+            ("specular", MATERIAL_SPECULAR),
+            ("shininess", MATERIAL_SHININESS),
+            ("emission", MATERIAL_EMISSION),
+        ] {
+            if let Ok(value) = definition.str_attr(name).to_string().trim().parse::<f64>() {
+                set.put_material_number(id.clone(), parameter, value);
+            }
+        }
+    }
+}
+
+fn load_setting_node(set: &mut StyleSet, node: &LDom2Node) {
+    let renderer_type = node.type_name();
+    if renderer_type.is_empty() {
+        return;
+    }
+    for child in node.children().iter().filter(|child| !child.is_attr()) {
+        set.strings.insert(
+            str_data_key("cfg", child.tag_name(), renderer_type),
+            node_text(child),
+        );
+        set.modified = true;
+    }
+}
+
+fn load_string_node(set: &mut StyleSet, node: &LDom2Node) {
+    let id = node.str_attr("id").to_string();
+    if id.is_empty() {
+        return;
+    }
+    set.strings.insert(
+        str_data_key("string", node.tag_name(), &id),
+        node_text(node),
+    );
+    set.modified = true;
+}
+
+fn node_text(node: &LDom2Node) -> String {
+    if node.value().is_empty() {
+        node.contents().trim().to_string()
+    } else {
+        node.value().to_string()
+    }
 }
 
 fn set_style_value_node(node: &mut LDom2Node, prop_name: &str, value: String) {
@@ -895,6 +1401,27 @@ fn set_style_value_node(node: &mut LDom2Node, prop_name: &str, value: String) {
         current = current.find_child_mut(part).unwrap();
     }
     current.set_value(value);
+}
+
+fn style_info_entries(set: &StyleSet) -> Vec<String> {
+    set.styles
+        .iter()
+        .filter_map(|(key, node)| {
+            let name = key.strip_suffix("\tstyle")?;
+            let description = node.str_attr("desc").to_string();
+            let style_type = if node.type_name().is_empty() {
+                node.str_attr("type").to_string()
+            } else {
+                node.type_name().to_string()
+            };
+            Some(format!(
+                "{{\"name\":\"{}\",\"desc\":\"{}\",\"type\":\"{}\"}}",
+                escape_json(name),
+                escape_json(&description),
+                escape_json(&style_type)
+            ))
+        })
+        .collect()
 }
 
 fn json_names<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
@@ -947,7 +1474,10 @@ mod tests {
         node.set_value("root");
         assert!(set.set_style("Ribbon", node));
         assert!(set.has_style("Ribbon"));
-        assert_eq!(set.style_names_json(), "[\"Ribbon\"]");
+        assert_eq!(
+            set.style_names_json(),
+            r#"[{"name":"Ribbon","desc":"","type":""}]"#
+        );
         assert!(set.remove_style("Ribbon"));
         assert!(!set.has_style("Ribbon"));
     }
@@ -988,7 +1518,10 @@ mod tests {
             manager.get_style_value(10, "Default", "Ribbon.line_width"),
             "1.5"
         );
-        assert_eq!(manager.style_names_json(10), "[\"Ribbon\"]");
+        assert_eq!(
+            manager.style_names_json(10),
+            r#"[{"name":"Ribbon","desc":"","type":""}]"#
+        );
         manager.fire_pending_events();
         assert_eq!(manager.pending_event_count(), 0);
 
@@ -1049,6 +1582,90 @@ mod tests {
         // The X11 named-colour table is populated (`<color id=.. value=..>`).
         assert!(set.has_color("Yellow"));
         assert!(set.has_color("SlateBlue"));
+
+        // Non-style sections are part of the same StyleSet contract.
+        assert_eq!(set.get_str_data("sel", "protein"), "rprop type=prot");
+        assert_eq!(
+            set.get_str_data("path", "icc_profile_dir"),
+            "%%CONFDIR%%/icc_profiles"
+        );
+        assert!(manager
+            .get_config("pov", "preamble", 0)
+            .contains("colors.inc"));
+        assert_eq!(
+            manager.get_material_number("default", MATERIAL_AMBIENT, 0),
+            0.2
+        );
+        assert_eq!(
+            manager.get_material_number("default", MATERIAL_DIFFUSE, 0),
+            0.8
+        );
+        assert!(manager
+            .get_material_string("default", "pov", 0)
+            .contains("pigment"));
+        assert!(manager
+            .get_material_names_json(0)
+            .contains("\"nolighting\""));
+    }
+
+    #[test]
+    fn style_file_roundtrips_all_database_sections() {
+        let input = r##"<?xml version="1.0"?>
+<styles id="roundtrip">
+  <material id="custom">
+    <def ambient="0.3" diffuse="0.6" specular="0.2" shininess="12" emission="0.1"/>
+    <def type="pov">texture { pigment { color rgb @COLOR@ } }</def>
+  </material>
+  <setting type="pov"><preamble>#include "colors.inc"</preamble></setting>
+  <path id="assets" value="%%CONFDIR%%/assets"/>
+  <sel id="backbone" value="bymainch *"/>
+  <color id="Accent" value="#123456" material="custom"/>
+  <style id="MyStyle" type="renderer" desc="Custom" bondw="0.42">
+    <coloring type="CPKColoring" col_C="#abcdef"/>
+  </style>
+</styles>"##;
+        let dir = std::env::temp_dir().join("cuemol_style_roundtrip_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.xml");
+        let saved = dir.join("saved.xml");
+        std::fs::write(&source, input).unwrap();
+
+        let mut manager = StyleManager::new();
+        let uid = manager.load_style_set_from_file(4, &source, false);
+        assert!(manager.save_style_set_to_file(4, uid, &saved));
+
+        let mut reloaded = StyleManager::new();
+        let reloaded_uid = reloaded.load_style_set_from_file(9, &saved, false);
+        let set = reloaded.get_style_set(reloaded_uid).unwrap();
+        assert_eq!(set.name(), "roundtrip");
+        assert_eq!(set.get_str_data("sel", "backbone"), "bymainch *");
+        assert_eq!(set.get_str_data("path", "assets"), "%%CONFDIR%%/assets");
+        assert_eq!(
+            reloaded.get_config("pov", "preamble", 9),
+            "#include \"colors.inc\""
+        );
+        assert_eq!(
+            reloaded.get_material_number("custom", MATERIAL_EMISSION, 9),
+            0.1
+        );
+        assert!(reloaded
+            .get_material_string("custom", "pov", 9)
+            .contains("@COLOR@"));
+        assert_eq!(set.get_color("accent").unwrap().material(), "custom");
+        assert_eq!(
+            reloaded.style_attr(9, "MyStyle", "bondw").as_deref(),
+            Some("0.42")
+        );
+        assert_eq!(
+            reloaded
+                .style_child_type(9, "MyStyle", "coloring")
+                .as_deref(),
+            Some("CPKColoring")
+        );
+        assert!(reloaded.style_names_json(9).contains(r#""desc":"Custom""#));
+
+        std::fs::remove_file(&source).ok();
+        std::fs::remove_file(&saved).ok();
     }
 
     #[test]

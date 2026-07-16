@@ -60,6 +60,8 @@ pub struct TopBond {
 pub struct ResiToppar {
     pub name: String,
     pub group: String,
+    pub pivot_atom: String,
+    pub properties: HashMap<String, String>,
     pub atoms: Vec<TopAtom>,
     pub bonds: Vec<TopBond>,
 }
@@ -79,6 +81,10 @@ impl ResiToppar {
         self.atoms
             .iter()
             .find(|atom| atom.name.trim().eq_ignore_ascii_case(key))
+    }
+
+    pub fn property(&self, name: &str) -> Option<&str> {
+        self.properties.get(name).map(String::as_str)
     }
 }
 
@@ -312,9 +318,24 @@ impl TopoDB {
         for el in TagIter::new(xml) {
             match (el.name.as_str(), el.closing) {
                 ("resid", false) => {
+                    let name = el.attr("id").unwrap_or_default().to_ascii_uppercase();
+                    let group = el.attr("group").unwrap_or_default();
+                    let mut properties = HashMap::new();
+                    for property in ["three", "desc", "group", "single"] {
+                        if let Some(value) = el.attr(property) {
+                            properties.insert(property.to_string(), value);
+                        }
+                    }
+                    for alias in [el.attr("three"), el.attr("single")].into_iter().flatten() {
+                        let alias = alias.trim().to_ascii_uppercase();
+                        if !alias.is_empty() && alias != name {
+                            self.synonyms.entry(alias).or_insert_with(|| name.clone());
+                        }
+                    }
                     cur_resid = Some(ResiToppar {
-                        name: el.attr("id").unwrap_or_default().to_ascii_uppercase(),
-                        group: el.attr("group").unwrap_or_default(),
+                        name,
+                        group,
+                        properties,
                         ..Default::default()
                     });
                 }
@@ -381,31 +402,54 @@ impl TopoDB {
 }
 
 impl TopoDB {
-    /// Parse a residue-property XML, recording per `<resid id=..>`: its
-    /// `<synonym value>` alternate names and its `<rings><ring value=".."/>`
-    /// ring-atom-name lists.
+    /// Parse a residue-property XML, including aliases, pivot atoms, rings, and
+    /// arbitrary string properties such as the nucleic-acid `basetype`.
     fn parse_props(&mut self, xml: &str) {
         let mut cur_id: Option<String> = None;
         let mut cur_rings: Vec<Vec<String>> = Vec::new();
+        let mut cur_pivot = String::new();
+        let mut cur_properties: HashMap<String, String> = HashMap::new();
         for el in TagIter::new(xml) {
             match (el.name.as_str(), el.closing) {
                 ("resid", false) => {
                     cur_id = el.attr("id").map(|s| s.to_ascii_uppercase());
                     cur_rings = Vec::new();
+                    cur_pivot = el.attr("pivot").unwrap_or_default();
+                    cur_properties = HashMap::new();
+                    for property in ["single"] {
+                        if let Some(value) = el.attr(property) {
+                            cur_properties.insert(property.to_string(), value.clone());
+                            if let Some(id) = cur_id.as_ref() {
+                                let alias = value.trim().to_ascii_uppercase();
+                                if !alias.is_empty() && alias != *id {
+                                    self.synonyms.entry(alias).or_insert_with(|| id.clone());
+                                }
+                            }
+                        }
+                    }
                 }
                 ("resid", true) => {
                     if let Some(id) = cur_id.take() {
                         if !cur_rings.is_empty() {
-                            self.rings.insert(id, std::mem::take(&mut cur_rings));
+                            self.rings
+                                .insert(id.clone(), std::mem::take(&mut cur_rings));
+                        }
+                        if let Some(residue) = self.residues.get_mut(&id) {
+                            residue.pivot_atom = std::mem::take(&mut cur_pivot);
+                            residue
+                                .properties
+                                .extend(std::mem::take(&mut cur_properties));
                         }
                     }
                     cur_rings = Vec::new();
+                    cur_pivot.clear();
+                    cur_properties.clear();
                 }
                 ("synonym", _) => {
                     if let (Some(id), Some(alt)) = (cur_id.as_ref(), el.attr("value")) {
                         let alt = alt.trim().to_ascii_uppercase();
                         if !alt.is_empty() {
-                            self.synonyms.insert(alt, id.clone());
+                            self.synonyms.entry(alt).or_insert_with(|| id.clone());
                         }
                     }
                 }
@@ -416,6 +460,11 @@ impl TopoDB {
                         if members.len() >= 3 {
                             cur_rings.push(members);
                         }
+                    }
+                }
+                ("prop", _) if cur_id.is_some() => {
+                    if let (Some(name), Some(value)) = (el.attr("name"), el.attr("value")) {
+                        cur_properties.insert(name, value);
                     }
                 }
                 _ => {}
@@ -436,6 +485,16 @@ impl TopoDB {
             }
         }
         &[]
+    }
+
+    pub fn pivot_atom(&self, name: &str) -> Option<&str> {
+        self.residue(name)
+            .map(|residue| residue.pivot_atom.as_str())
+            .filter(|value| !value.is_empty())
+    }
+
+    pub fn residue_property(&self, residue_name: &str, property: &str) -> Option<&str> {
+        self.residue(residue_name)?.property(property)
     }
 }
 
@@ -1024,6 +1083,17 @@ mod tests {
         // A non-ring residue (or unknown) has none.
         assert!(db.rings("ALA").is_empty());
         assert!(db.rings("ZZZ").is_empty());
+    }
+
+    #[test]
+    fn nucleotide_properties_and_single_letter_aliases_are_parsed() {
+        let db = TopoDB::global();
+        assert_eq!(db.canonical_name("A"), Some("AR"));
+        let adenine = db.residue("A").expect("single-letter nucleotide alias");
+        assert_eq!(adenine.name, "AR");
+        assert_eq!(db.pivot_atom("DA"), Some("P"));
+        assert_eq!(db.residue_property("ADE", "basetype"), Some("pur"));
+        assert_eq!(db.residue_property("DT", "basetype"), Some("pyr"));
     }
 
     #[test]

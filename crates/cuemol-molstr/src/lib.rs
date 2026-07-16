@@ -47,8 +47,10 @@ pub use pdb::{
 pub use prot2ndry::{calc_prot_2ndry, calc_prot_2ndry2, Prot2ndrySet};
 pub use qdf_mol::{read_qdf_mol_bytes, write_qdf_mol_bytes, QdfMolFileReader, QdfMolFileWriter};
 pub use qsys::{
-    LoadObjectResult, LoadSceneResult, MolCommandManager, MolObject, MolRenderer, MolScene,
-    MolSceneManager, MolView, NewRendererResult, NewSceneResult, QscLoadStatus,
+    AtomIntrKind, LoadObjectResult, LoadSceneResult, LoadedDensityMap, LoadedLWObject,
+    LoadedLWRenderer, LoadedQscObject, LoadedStyle, LoadedSurface, MolCommandManager, MolObject,
+    MolRenderer, MolScene, MolSceneManager, MolView, NewRendererResult, NewSceneResult,
+    QscLoadStatus,
 };
 pub use renderers::{
     BfacColoring, CpkColoring, NameLabel, NameLabelRenderer, RectSelDrawObj, SelectionRenderMode,
@@ -60,8 +62,8 @@ pub use sdf::{
 };
 pub use selection::{parse_selector, SelCommand, Selector};
 pub use stream::{
-    CompressionMode, ContentVerdict, HandlerCategory, HandlerSniffer, StreamHandlerInfo,
-    StreamManager,
+    AsyncLoadedObject, CompressionMode, ContentVerdict, HandlerCategory, HandlerSniffer,
+    StreamHandlerInfo, StreamManager,
 };
 
 pub type ColoringScheme = SolidColoring;

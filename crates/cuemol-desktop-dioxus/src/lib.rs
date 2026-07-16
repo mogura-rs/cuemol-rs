@@ -1292,16 +1292,24 @@ impl Model {
         }
     }
 
-    /// Projected atom labels for the selected atoms at the current camera, in image
-    /// pixels (== this viewport's CSS px, so they overlay 1:1). Empty unless shown.
+    /// Projected selection and AtomIntr labels at the current camera, in image
+    /// pixels (equal to this viewport's CSS pixels, so they overlay one-to-one).
     fn atom_labels(&self) -> Vec<cuemol_desktop_core::GuiAtomLabel> {
-        if !self.show_labels {
-            return Vec::new();
-        }
         let (w, h) = self.view_size;
         let mvp = camera_mvp(&self.camera, w as f64 / h as f64);
-        self.state
-            .active_atom_labels(&self.selection_text, mvp, w as f32, h as f32, 80)
+        let mut labels = if self.show_labels {
+            self.state
+                .active_atom_labels(&self.selection_text, mvp, w as f32, h as f32, 80)
+        } else {
+            Vec::new()
+        };
+        labels.extend(self.state.active_atom_intr_labels(
+            mvp,
+            w as f32,
+            h as f32,
+            80_usize.saturating_sub(labels.len()),
+        ));
+        labels
     }
 
     /// Filled density isosurface (solid mode) toggle. Marches the map once on enable.

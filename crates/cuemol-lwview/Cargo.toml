@@ -8,6 +8,7 @@ license.workspace = true
 cuemol-core.workspace = true
 cuemol-gfx.workspace = true
 cuemol-qsys.workspace = true
+cuemol-render.workspace = true
 
 [lib]
 name = "cuemol_lwview"

@@ -1,17 +1,23 @@
 use cuemol_core::Vector4;
 use cuemol_gfx::SolidColor;
 use cuemol_molstr::{parse_selector, Atom, MolCoord, Selector, SolidColoring};
-use cuemol_qsys::{InOutHandler, MultiGradient, ObjReader, ObjWriter};
-use std::collections::BTreeMap;
+use cuemol_qsys::{EditInfo, InOutHandler, MultiGradient, ObjReader, ObjWriter, UndoManagerHandle};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::{Rc, Weak};
 
 pub mod analytic_ses;
 pub mod grid_surface;
+pub mod hole_surface;
 pub mod msms;
 pub mod obj;
 pub mod ply;
 pub mod qdf;
 
-pub use grid_surface::{build_grid_isosurface, ScalarField, SurfSphere};
+pub use grid_surface::{
+    build_grid_isosurface, build_grid_isosurface_masked, ScalarField, SurfSphere,
+};
+pub use hole_surface::HolePathPoint;
 pub use msms::{read_msms_surface_files, read_msms_surface_str, sniff_msms_content, MsmsReader};
 pub use obj::{read_obj_file, read_obj_str};
 pub use ply::{read_ply_bytes, read_ply_file, read_ply_str};
@@ -46,6 +52,18 @@ impl PlyFileReader {
 
     pub fn handler(&self) -> &InOutHandler {
         self.reader.handler()
+    }
+
+    pub fn create_default_obj(&self) -> MolSurfObj {
+        MolSurfObj::new()
+    }
+
+    pub fn can_handle_content(&self, input: &[u8]) -> cuemol_molstr::ContentVerdict {
+        let text = String::from_utf8_lossy(input);
+        match text.lines().map(str::trim).find(|line| !line.is_empty()) {
+            Some("ply") => cuemol_molstr::ContentVerdict::Yes,
+            _ => cuemol_molstr::ContentVerdict::Unknown,
+        }
     }
 
     pub fn read_file(&self, path: impl AsRef<std::path::Path>) -> cuemol_core::Result<SurfaceMesh> {
@@ -89,12 +107,48 @@ impl MsmsFileReader {
         self.reader.handler()
     }
 
+    pub fn create_default_obj(&self) -> MolSurfObj {
+        MolSurfObj::new()
+    }
+
+    pub fn can_handle_content(&self, input: &str) -> cuemol_molstr::ContentVerdict {
+        sniff_msms_content(input)
+    }
+
     pub fn vertex_file(&self) -> &str {
         &self.vertex_file
     }
 
     pub fn set_vertex_file(&mut self, value: impl Into<String>) {
         self.vertex_file = value.into();
+    }
+
+    pub fn read_file(
+        &self,
+        face_path: impl AsRef<std::path::Path>,
+    ) -> cuemol_core::Result<SurfaceMesh> {
+        if self.vertex_file.is_empty() {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "MSMS vertex file name is not configured",
+            ));
+        }
+        read_msms_surface_files(face_path, &self.vertex_file)
+    }
+
+    pub fn read_files(
+        &self,
+        face_path: impl AsRef<std::path::Path>,
+        vertex_path: impl AsRef<std::path::Path>,
+    ) -> cuemol_core::Result<SurfaceMesh> {
+        read_msms_surface_files(face_path, vertex_path)
+    }
+
+    pub fn read_strings(
+        &self,
+        face_input: &str,
+        vertex_input: &str,
+    ) -> cuemol_core::Result<SurfaceMesh> {
+        read_msms_surface_str(vertex_input, face_input)
     }
 }
 
@@ -136,6 +190,72 @@ impl OpenDxPotReader {
 
     pub fn set_smooth(&mut self, value: f64) {
         self.smooth = value;
+    }
+
+    pub fn create_default_obj(&self) -> ElePotMap {
+        ElePotMap::new()
+    }
+
+    pub fn can_handle_content(&self, input: &str) -> cuemol_molstr::ContentVerdict {
+        if input
+            .lines()
+            .any(|line| line.starts_with("object 1 class gridpositions"))
+        {
+            cuemol_molstr::ContentVerdict::Yes
+        } else {
+            cuemol_molstr::ContentVerdict::Unknown
+        }
+    }
+
+    pub fn read_str(&self, input: &str) -> cuemol_core::Result<ElePotMap> {
+        let grid = cuemol_molstr::read_opendx_str(input)?;
+        let spacing = axis_aligned_grid_spacing(grid.delta)?;
+        let mut map = ElePotMap::new();
+        map.set_map_float_array(&grid.values, grid.counts, spacing, grid.origin);
+        if self.smooth > 0.0 {
+            map.smooth2(self.smooth);
+        }
+        Ok(map)
+    }
+
+    pub fn read_file(&self, path: impl AsRef<std::path::Path>) -> cuemol_core::Result<ElePotMap> {
+        let grid = cuemol_molstr::read_opendx_file(path)?;
+        let spacing = axis_aligned_grid_spacing(grid.delta)?;
+        let mut map = ElePotMap::new();
+        map.set_map_float_array(&grid.values, grid.counts, spacing, grid.origin);
+        if self.smooth > 0.0 {
+            map.smooth2(self.smooth);
+        }
+        Ok(map)
+    }
+}
+
+fn axis_aligned_grid_spacing(delta: [Vector4; 3]) -> cuemol_core::Result<[f64; 3]> {
+    let mut spacing = [None; 3];
+    for vector in delta {
+        let components = [vector.x, vector.y, vector.z];
+        let nonzero: Vec<_> = components
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| value.abs() > 1.0e-12)
+            .collect();
+        if nonzero.len() != 1 || !nonzero[0].1.is_finite() {
+            return Err(cuemol_core::CueMolError::parse(
+                "OpenDX grid delta vectors must be axis-aligned",
+            ));
+        }
+        let (axis, value) = nonzero[0];
+        if spacing[axis].replace(*value).is_some() {
+            return Err(cuemol_core::CueMolError::parse(
+                "OpenDX grid has duplicate delta axes",
+            ));
+        }
+    }
+    match spacing {
+        [Some(x), Some(y), Some(z)] => Ok([x, y, z]),
+        _ => Err(cuemol_core::CueMolError::parse(
+            "OpenDX grid is missing a delta axis",
+        )),
     }
 }
 
@@ -449,6 +569,10 @@ impl SurfaceMesh {
         self.triangles.clear();
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.vertices.is_empty() || self.triangles.is_empty()
+    }
+
     pub fn vertices(&self) -> &[SurfaceVertex] {
         &self.vertices
     }
@@ -506,43 +630,323 @@ impl SurfaceMesh {
         position: Vector4,
         keep_positive: bool,
     ) -> usize {
+        self.cut_by_plane_detailed(normal, position, keep_positive, true, false)
+    }
+
+    /// Clip triangles against a plane and optionally create the planar section.
+    ///
+    /// This is the mesh-level counterpart of C++ `CutByPlane2::doit`. Intersected
+    /// triangles are split at the plane, normals are interpolated at new vertices,
+    /// and all closed cut contours are tessellated together with the even-odd rule
+    /// so nested contours become holes.
+    pub fn cut_by_plane_detailed(
+        &mut self,
+        normal: Vector4,
+        position: Vector4,
+        keep_positive: bool,
+        keep_body: bool,
+        make_section: bool,
+    ) -> usize {
+        const CUT_EPS: f64 = 1.0e-3;
+
         let normal = normalize_or_z(normal);
-        let mut vertex_map = BTreeMap::<u32, u32>::new();
-        let mut vertices = Vec::new();
-        let mut triangles = Vec::new();
+        let keep_normal = if keep_positive { normal } else { normal * -1.0 };
         let before = self.triangles.len();
+        let old_vertices = &self.vertices;
+        let mut vertices = Vec::<SurfaceVertex>::new();
+        let mut triangles = Vec::<[u32; 3]>::new();
+        let mut copied = BTreeMap::<u32, u32>::new();
+        let mut intersections = BTreeMap::<(u32, u32), u32>::new();
+        let mut plane_edges = BTreeMap::<(u32, u32), usize>::new();
 
         for triangle in &self.triangles {
-            let Some(points) = triangle_points(self, *triangle) else {
-                continue;
-            };
-            let centroid = (points[0] + points[1] + points[2]).scale(1.0 / 3.0);
-            let signed = (centroid - position).dot(normal);
-            let keep = if keep_positive {
-                signed >= 0.0
-            } else {
-                signed <= 0.0
-            };
-            if !keep {
+            if triangle.iter().any(|&id| id as usize >= old_vertices.len()) {
                 continue;
             }
-            let mut next = [0_u32; 3];
-            for (index, old_uid) in triangle.iter().copied().enumerate() {
-                let new_uid = *vertex_map.entry(old_uid).or_insert_with(|| {
-                    let vertex = self.vertices[old_uid as usize].clone();
-                    let uid = vertices.len() as u32;
-                    vertices.push(vertex);
-                    uid
-                });
-                next[index] = new_uid;
+
+            let mut polygon = Vec::<u32>::with_capacity(4);
+            let mut previous = triangle[2];
+            let mut previous_distance =
+                keep_normal.dot3d(old_vertices[previous as usize].position - position);
+            let mut previous_inside = previous_distance >= -CUT_EPS;
+
+            for &current in triangle {
+                let current_distance =
+                    keep_normal.dot3d(old_vertices[current as usize].position - position);
+                let current_inside = current_distance >= -CUT_EPS;
+
+                if current_inside != previous_inside {
+                    let id = cut_intersection_vertex(
+                        old_vertices,
+                        &mut vertices,
+                        &mut copied,
+                        &mut intersections,
+                        previous,
+                        current,
+                        previous_distance,
+                        current_distance,
+                        CUT_EPS,
+                    );
+                    push_distinct(&mut polygon, id);
+                }
+                if current_inside {
+                    let id = copy_cut_vertex(old_vertices, &mut vertices, &mut copied, current);
+                    push_distinct(&mut polygon, id);
+                }
+
+                previous = current;
+                previous_distance = current_distance;
+                previous_inside = current_inside;
             }
-            triangles.push(next);
+
+            if polygon.len() > 1 && polygon.first() == polygon.last() {
+                polygon.pop();
+            }
+            if polygon.len() < 3 {
+                continue;
+            }
+
+            for edge_index in 0..polygon.len() {
+                let a = polygon[edge_index];
+                let b = polygon[(edge_index + 1) % polygon.len()];
+                if a == b {
+                    continue;
+                }
+                let da = keep_normal.dot3d(vertices[a as usize].position - position);
+                let db = keep_normal.dot3d(vertices[b as usize].position - position);
+                if da.abs() <= CUT_EPS * 2.0 && db.abs() <= CUT_EPS * 2.0 {
+                    let edge = ordered_edge(a, b);
+                    *plane_edges.entry(edge).or_default() += 1;
+                }
+            }
+
+            if keep_body {
+                for index in 1..polygon.len() - 1 {
+                    triangles.push([polygon[0], polygon[index], polygon[index + 1]]);
+                }
+            }
         }
 
+        let body_triangle_count = triangles.len();
+        if make_section {
+            let boundary_edges = plane_edges
+                .into_iter()
+                .filter_map(|(edge, count)| (count % 2 == 1).then_some(edge))
+                .collect::<BTreeSet<_>>();
+            let contours = closed_cut_contours(&boundary_edges);
+            append_cut_section(
+                &mut vertices,
+                &mut triangles,
+                &contours,
+                position,
+                keep_normal,
+            );
+        }
+
+        compact_surface_mesh(&mut vertices, &mut triangles);
         self.vertices = vertices;
         self.triangles = triangles;
-        before.saturating_sub(self.triangles.len())
+        before.saturating_sub(body_triangle_count)
     }
+}
+
+fn copy_cut_vertex(
+    old_vertices: &[SurfaceVertex],
+    vertices: &mut Vec<SurfaceVertex>,
+    copied: &mut BTreeMap<u32, u32>,
+    old_id: u32,
+) -> u32 {
+    *copied.entry(old_id).or_insert_with(|| {
+        let id = vertices.len() as u32;
+        vertices.push(old_vertices[old_id as usize].clone());
+        id
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cut_intersection_vertex(
+    old_vertices: &[SurfaceVertex],
+    vertices: &mut Vec<SurfaceVertex>,
+    copied: &mut BTreeMap<u32, u32>,
+    intersections: &mut BTreeMap<(u32, u32), u32>,
+    a: u32,
+    b: u32,
+    distance_a: f64,
+    distance_b: f64,
+    epsilon: f64,
+) -> u32 {
+    if distance_a.abs() <= epsilon {
+        return copy_cut_vertex(old_vertices, vertices, copied, a);
+    }
+    if distance_b.abs() <= epsilon {
+        return copy_cut_vertex(old_vertices, vertices, copied, b);
+    }
+
+    let edge = ordered_edge(a, b);
+    *intersections.entry(edge).or_insert_with(|| {
+        let denominator = distance_a - distance_b;
+        let t = if denominator.abs() <= f64::EPSILON {
+            0.5
+        } else {
+            (distance_a / denominator).clamp(0.0, 1.0)
+        };
+        let va = &old_vertices[a as usize];
+        let vb = &old_vertices[b as usize];
+        let position = va.position * (1.0 - t) + vb.position * t;
+        let normal = normalize_or_z(va.normal * (1.0 - t) + vb.normal * t);
+        let id = vertices.len() as u32;
+        vertices.push(SurfaceVertex { position, normal });
+        id
+    })
+}
+
+fn ordered_edge(a: u32, b: u32) -> (u32, u32) {
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn push_distinct(values: &mut Vec<u32>, value: u32) {
+    if values.last().copied() != Some(value) {
+        values.push(value);
+    }
+}
+
+fn closed_cut_contours(edges: &BTreeSet<(u32, u32)>) -> Vec<Vec<u32>> {
+    let mut adjacency = BTreeMap::<u32, Vec<u32>>::new();
+    for &(a, b) in edges {
+        adjacency.entry(a).or_default().push(b);
+        adjacency.entry(b).or_default().push(a);
+    }
+    for neighbours in adjacency.values_mut() {
+        neighbours.sort_unstable();
+        neighbours.dedup();
+    }
+
+    let mut unused = edges.clone();
+    let mut contours = Vec::new();
+    while let Some(&(start, next)) = unused.iter().next() {
+        unused.remove(&ordered_edge(start, next));
+        let mut contour = vec![start];
+        let mut previous = start;
+        let mut current = next;
+        let mut closed = false;
+
+        for _ in 0..=edges.len() {
+            if current == start {
+                closed = true;
+                break;
+            }
+            contour.push(current);
+            let Some(candidate) = adjacency.get(&current).and_then(|neighbours| {
+                neighbours
+                    .iter()
+                    .copied()
+                    .find(|&id| id != previous && unused.contains(&ordered_edge(current, id)))
+            }) else {
+                break;
+            };
+            unused.remove(&ordered_edge(current, candidate));
+            previous = current;
+            current = candidate;
+        }
+
+        if closed && contour.len() >= 3 {
+            contours.push(contour);
+        }
+    }
+    contours
+}
+
+fn append_cut_section(
+    vertices: &mut Vec<SurfaceVertex>,
+    triangles: &mut Vec<[u32; 3]>,
+    contours: &[Vec<u32>],
+    plane_position: Vector4,
+    keep_normal: Vector4,
+) {
+    use lyon::math::point;
+    use lyon::path::Path;
+    use lyon::tessellation::{
+        BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers,
+    };
+
+    if contours.is_empty() {
+        return;
+    }
+
+    let seed = if keep_normal.x.abs() < 0.9 {
+        Vector4::new3(1.0, 0.0, 0.0)
+    } else {
+        Vector4::new3(0.0, 1.0, 0.0)
+    };
+    let axis_u = normalize_or_z(keep_normal.cross(seed));
+    let axis_v = normalize_or_z(keep_normal.cross(axis_u));
+    let project = |value: Vector4| {
+        let relative = value - plane_position;
+        point(relative.dot3d(axis_u) as f32, relative.dot3d(axis_v) as f32)
+    };
+
+    let mut path_builder = Path::builder();
+    for contour in contours {
+        let Some((&first, rest)) = contour.split_first() else {
+            continue;
+        };
+        path_builder.begin(project(vertices[first as usize].position));
+        for &id in rest {
+            path_builder.line_to(project(vertices[id as usize].position));
+        }
+        path_builder.close();
+    }
+    let path = path_builder.build();
+    let mut geometry = VertexBuffers::<[f32; 2], u32>::new();
+    let result = FillTessellator::new().tessellate_path(
+        &path,
+        &FillOptions::even_odd().with_tolerance(1.0e-4),
+        &mut BuffersBuilder::new(&mut geometry, |vertex: FillVertex| {
+            vertex.position().to_array()
+        }),
+    );
+    if result.is_err() {
+        return;
+    }
+
+    let cap_normal = keep_normal * -1.0;
+    let base = vertices.len() as u32;
+    for [x, y] in geometry.vertices {
+        vertices.push(SurfaceVertex {
+            position: plane_position + axis_u * x as f64 + axis_v * y as f64,
+            normal: cap_normal,
+        });
+    }
+    for indices in geometry.indices.chunks_exact(3) {
+        let mut triangle = [base + indices[0], base + indices[1], base + indices[2]];
+        let a = vertices[triangle[0] as usize].position;
+        let b = vertices[triangle[1] as usize].position;
+        let c = vertices[triangle[2] as usize].position;
+        if (b - a).cross(c - a).dot3d(cap_normal) < 0.0 {
+            triangle.swap(1, 2);
+        }
+        triangles.push(triangle);
+    }
+}
+
+fn compact_surface_mesh(vertices: &mut Vec<SurfaceVertex>, triangles: &mut [[u32; 3]]) {
+    let mut mapping = BTreeMap::<u32, u32>::new();
+    let mut compacted = Vec::new();
+    for triangle in triangles.iter_mut() {
+        for id in triangle.iter_mut() {
+            let new_id = *mapping.entry(*id).or_insert_with(|| {
+                let new_id = compacted.len() as u32;
+                compacted.push(vertices[*id as usize].clone());
+                new_id
+            });
+            *id = new_id;
+        }
+    }
+    *vertices = compacted;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -731,6 +1135,7 @@ pub struct MolSurfObj {
     orig_den: f64,
     orig_prad: f64,
     cut_planes: Vec<CutPlane>,
+    source_molecule: Option<MolCoord>,
 }
 
 pub enum SurfaceMoleculeSource<'a> {
@@ -830,6 +1235,7 @@ impl Default for MolSurfObj {
             orig_den: 0.0,
             orig_prad: 0.0,
             cut_planes: Vec::new(),
+            source_molecule: None,
         }
     }
 }
@@ -839,12 +1245,118 @@ impl MolSurfObj {
         Self::default()
     }
 
+    pub fn clean(&mut self) {
+        self.mesh.clear();
+        self.cut_planes.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.mesh.vertices.is_empty() && self.mesh.triangles.is_empty()
+    }
+
+    pub fn delete_selected(&mut self) {
+        self.clean();
+    }
+
     pub fn mesh(&self) -> &SurfaceMesh {
         &self.mesh
     }
 
     pub fn mesh_mut(&mut self) -> &mut SurfaceMesh {
         &mut self.mesh
+    }
+
+    pub fn vert_size(&self) -> usize {
+        self.mesh.vertex_count()
+    }
+
+    pub fn get_vert_size(&self) -> usize {
+        self.vert_size()
+    }
+
+    pub fn set_vert_size(&mut self, size: usize) -> cuemol_core::Result<()> {
+        if size == 0 {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "surface vertex array size must be positive",
+            ));
+        }
+        self.mesh.vertices = vec![
+            SurfaceVertex {
+                position: Vector4::ZERO,
+                normal: Vector4::ZERO,
+            };
+            size
+        ];
+        Ok(())
+    }
+
+    pub fn vertex_at(&self, index: usize) -> Option<&SurfaceVertex> {
+        self.mesh.vertices.get(index)
+    }
+
+    pub fn get_vert_at(&self, index: usize) -> Option<&SurfaceVertex> {
+        self.vertex_at(index)
+    }
+
+    pub fn set_vertex(
+        &mut self,
+        index: usize,
+        position: Vector4,
+        normal: Vector4,
+    ) -> cuemol_core::Result<()> {
+        let vertex = self.mesh.vertices.get_mut(index).ok_or_else(|| {
+            cuemol_core::CueMolError::invalid_argument("surface vertex index out of range")
+        })?;
+        *vertex = SurfaceVertex { position, normal };
+        Ok(())
+    }
+
+    pub fn face_size(&self) -> usize {
+        self.mesh.triangle_count()
+    }
+
+    pub fn get_face_size(&self) -> usize {
+        self.face_size()
+    }
+
+    pub fn set_face_size(&mut self, size: usize) -> cuemol_core::Result<()> {
+        if size == 0 {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "surface face array size must be positive",
+            ));
+        }
+        self.mesh.triangles = vec![[0; 3]; size];
+        Ok(())
+    }
+
+    pub fn face_at(&self, index: usize) -> Option<&[u32; 3]> {
+        self.mesh.triangles.get(index)
+    }
+
+    pub fn get_face_at(&self, index: usize) -> Option<&[u32; 3]> {
+        self.face_at(index)
+    }
+
+    pub fn set_face(
+        &mut self,
+        index: usize,
+        vertex1: u32,
+        vertex2: u32,
+        vertex3: u32,
+    ) -> cuemol_core::Result<()> {
+        if [vertex1, vertex2, vertex3]
+            .iter()
+            .any(|vertex| *vertex as usize >= self.mesh.vertex_count())
+        {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "surface face vertex index out of range",
+            ));
+        }
+        let face = self.mesh.triangles.get_mut(index).ok_or_else(|| {
+            cuemol_core::CueMolError::invalid_argument("surface face index out of range")
+        })?;
+        *face = [vertex1, vertex2, vertex3];
+        Ok(())
     }
 
     pub fn orig_mol(&self) -> &str {
@@ -919,9 +1431,8 @@ impl MolSurfObj {
         body: bool,
         section: bool,
     ) {
-        if body {
-            self.mesh.cut_by_plane(normal, position, true);
-        }
+        self.mesh
+            .cut_by_plane_detailed(normal, position, true, body, section);
         self.cut_planes.push(CutPlane {
             cdiv,
             normal,
@@ -962,7 +1473,47 @@ impl MolSurfObj {
         if let SurfaceMoleculeSource::Molecule(molecule) = molecule {
             let selector = selection.selector().unwrap_or(Selector::All);
             build_mol_surface(&mut self.mesh, molecule, &selector, density, probe_radius);
+            self.source_molecule = Some(molecule.clone());
+        } else {
+            self.source_molecule = None;
         }
+        self.cut_planes.clear();
+    }
+
+    pub fn create_ses_from_array(
+        &mut self,
+        spheres: &[SurfSphere],
+        density: f64,
+        probe_radius: f64,
+    ) -> cuemol_core::Result<()> {
+        if !density.is_finite() || density <= 0.0 {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "surface density must be positive",
+            ));
+        }
+        if !probe_radius.is_finite() || probe_radius < 0.0 {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "surface probe radius must be non-negative",
+            ));
+        }
+        self.mesh.clear();
+        grid_surface::build_ses_surface(
+            &mut self.mesh,
+            spheres,
+            probe_radius,
+            (1.0 / density).clamp(0.25, 1.5),
+        );
+        self.cut_planes.clear();
+        Ok(())
+    }
+
+    pub fn create_sesfrom_array(
+        &mut self,
+        spheres: &[SurfSphere],
+        density: f64,
+        probe_radius: f64,
+    ) -> cuemol_core::Result<()> {
+        self.create_ses_from_array(spheres, density, probe_radius)
     }
 
     pub fn create_sesfrom_mol<'a, M, S>(
@@ -978,36 +1529,198 @@ impl MolSurfObj {
         self.create_ses_from_mol(molecule, selection, density, probe_radius);
     }
 
-    pub fn regenerate_ses(&mut self, density: f64) {
+    pub fn regenerate_ses(&mut self, density: f64) -> cuemol_core::Result<()> {
+        let molecule = self.source_molecule.clone().ok_or_else(|| {
+            cuemol_core::CueMolError::undefined_reference(
+                "cannot regenerate surface: original molecule is unavailable",
+            )
+        })?;
+        self.regenerate_ses_from_mol(&molecule, None, density, -1.0)
+    }
+
+    pub fn regenerate_ses1(&mut self, density: f64) -> cuemol_core::Result<()> {
+        self.regenerate_ses(density)
+    }
+
+    pub fn regenerate_ses_1(&mut self, density: f64) -> cuemol_core::Result<()> {
+        self.regenerate_ses1(density)
+    }
+
+    pub fn regenerate_ses_from_mol(
+        &mut self,
+        molecule: &MolCoord,
+        selection: Option<&Selector>,
+        density: f64,
+        probe_radius: f64,
+    ) -> cuemol_core::Result<()> {
+        if self.orig_den < 0.0 || self.orig_prad < 0.0 {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "cannot regenerate surface: invalid original density or probe radius",
+            ));
+        }
+        let density = if density < 0.0 {
+            self.orig_den
+        } else {
+            density
+        };
+        let probe_radius = if probe_radius < 0.0 {
+            self.orig_prad
+        } else {
+            probe_radius
+        };
+        if !density.is_finite() || density <= 0.0 {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "surface density must be positive",
+            ));
+        }
+        if !probe_radius.is_finite() || probe_radius < 0.0 {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "surface probe radius must be non-negative",
+            ));
+        }
+
+        let selector = selection
+            .cloned()
+            .unwrap_or_else(|| parse_selector(&self.orig_sel).unwrap_or(Selector::All));
+        let selection_text = selector.dump();
+        self.mesh.clear();
+        build_mol_surface(&mut self.mesh, molecule, &selector, density, probe_radius);
+        self.orig_sel = selection_text;
         self.orig_den = density;
+        self.orig_prad = probe_radius;
+        self.source_molecule = Some(molecule.clone());
+        self.cut_planes.clear();
+        Ok(())
     }
 
-    pub fn regenerate_ses1(&mut self, density: f64) {
-        self.regenerate_ses(density);
-    }
-
-    pub fn regenerate_ses_1(&mut self, density: f64) {
-        self.regenerate_ses1(density);
-    }
-
-    pub fn create_hole_test1(
+    pub fn create_hole_test1<'a, M>(
         &mut self,
-        molecule_name: impl Into<String>,
-        _dir_norm: Vector4,
-        start_pos: Vector4,
-    ) {
-        self.orig_mol = molecule_name.into();
-        self.orig_sel = format!("hole-start:{},{},{}", start_pos.x, start_pos.y, start_pos.z);
-    }
-
-    pub fn create_hole_test_1(
-        &mut self,
-        molecule_name: impl Into<String>,
+        molecule: M,
         dir_norm: Vector4,
         start_pos: Vector4,
-    ) {
-        self.create_hole_test1(molecule_name, dir_norm, start_pos);
+    ) -> cuemol_core::Result<()>
+    where
+        M: IntoSurfaceMoleculeSource<'a>,
+    {
+        let molecule = molecule.into_surface_molecule_source();
+        let source_name = molecule.source_name();
+        let SurfaceMoleculeSource::Molecule(molecule) = molecule else {
+            return Err(cuemol_core::CueMolError::undefined_reference(
+                "createHoleTest1 requires a resolved molecule",
+            ));
+        };
+        hole_surface::build_hole_test_tube(&mut self.mesh, molecule, dir_norm, start_pos)?;
+        self.orig_mol = source_name;
+        self.orig_sel = format!("hole-start:{},{},{}", start_pos.x, start_pos.y, start_pos.z);
+        self.source_molecule = None;
+        self.cut_planes.clear();
+        Ok(())
     }
+
+    pub fn create_hole_test_1<'a, M>(
+        &mut self,
+        molecule: M,
+        dir_norm: Vector4,
+        start_pos: Vector4,
+    ) -> cuemol_core::Result<()>
+    where
+        M: IntoSurfaceMoleculeSource<'a>,
+    {
+        self.create_hole_test1(molecule, dir_norm, start_pos)
+    }
+}
+
+pub type SharedMolSurfObj = Rc<RefCell<MolSurfObj>>;
+
+/// Undo/redo record for molecular-surface geometry edits.
+///
+/// Like C++ `MolSurfEditInfo`, this keeps the geometry on the opposite side of
+/// the current edit and swaps it with the target on both undo and redo. The Rust
+/// version also swaps the recorded cut-plane list so the public object state
+/// remains consistent with the restored mesh.
+#[derive(Debug)]
+pub struct MolSurfEditInfo {
+    target: Weak<RefCell<MolSurfObj>>,
+    mesh: SurfaceMesh,
+    cut_planes: Vec<CutPlane>,
+}
+
+impl MolSurfEditInfo {
+    pub fn setup(target: &SharedMolSurfObj) -> Self {
+        let target_ref = target.borrow();
+        Self {
+            target: Rc::downgrade(target),
+            mesh: target_ref.mesh.clone(),
+            cut_planes: target_ref.cut_planes.clone(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.mesh.clear();
+        self.cut_planes.clear();
+    }
+
+    fn swap_target_state(&mut self) -> bool {
+        let Some(target) = self.target.upgrade() else {
+            return false;
+        };
+        let mut target = target.borrow_mut();
+        std::mem::swap(&mut target.mesh, &mut self.mesh);
+        std::mem::swap(&mut target.cut_planes, &mut self.cut_planes);
+        true
+    }
+}
+
+impl EditInfo for MolSurfEditInfo {
+    fn undo(&mut self) -> bool {
+        self.swap_target_state()
+    }
+
+    fn redo(&mut self) -> bool {
+        self.swap_target_state()
+    }
+}
+
+/// Apply a plane cut and add a `MolSurfEditInfo` to an active scene undo
+/// transaction. The edit is always performed; the return value reports whether
+/// an undo record was accepted by the manager.
+#[allow(clippy::too_many_arguments)]
+pub fn cut_surface_by_plane_with_undo(
+    target: &SharedMolSurfObj,
+    undo_manager: &UndoManagerHandle,
+    cdiv: f64,
+    normal: Vector4,
+    position: Vector4,
+    body: bool,
+    section: bool,
+) -> bool {
+    let edit = undo_manager
+        .with(|manager| manager.is_ok())
+        .then(|| MolSurfEditInfo::setup(target));
+    target
+        .borrow_mut()
+        .cut_by_plane2(cdiv, normal, position, body, section);
+    edit.is_some_and(|edit| undo_manager.with_mut(|manager| manager.add_edit_info(Box::new(edit))))
+}
+
+/// Regenerate a surface from the current molecule and register the geometry
+/// swap with an active scene undo transaction.
+pub fn regenerate_surface_with_undo(
+    target: &SharedMolSurfObj,
+    undo_manager: &UndoManagerHandle,
+    molecule: &MolCoord,
+    selection: Option<&Selector>,
+    density: f64,
+    probe_radius: f64,
+) -> cuemol_core::Result<bool> {
+    let edit = undo_manager
+        .with(|manager| manager.is_ok())
+        .then(|| MolSurfEditInfo::setup(target));
+    target
+        .borrow_mut()
+        .regenerate_ses_from_mol(molecule, selection, density, probe_radius)?;
+    Ok(edit
+        .is_some_and(|edit| undo_manager.with_mut(|manager| manager.add_edit_info(Box::new(edit)))))
 }
 
 /// Build the molecular (van-der-Waals / solvent-accessible) surface of the
@@ -1098,14 +1811,6 @@ fn normalize_or_z(value: Vector4) -> Vector4 {
     } else {
         value.scale(1.0 / length)
     }
-}
-
-fn triangle_points(mesh: &SurfaceMesh, triangle: [u32; 3]) -> Option<[Vector4; 3]> {
-    Some([
-        mesh.vertices.get(triangle[0] as usize)?.position,
-        mesh.vertices.get(triangle[1] as usize)?.position,
-        mesh.vertices.get(triangle[2] as usize)?.position,
-    ])
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1547,6 +2252,7 @@ impl MolSurfRenderer {
 pub struct DirectSurfRenderer {
     color_mode: i32,
     target: String,
+    selection: Selector,
     detail: i32,
     probe_radius: f64,
     surface_type: i32,
@@ -1572,6 +2278,7 @@ impl Default for DirectSurfRenderer {
         Self {
             color_mode: Self::DS_MOLFANC,
             target: String::new(),
+            selection: Selector::All,
             detail: 6,
             probe_radius: 1.4,
             surface_type: Self::DS_SES,
@@ -1611,7 +2318,7 @@ impl DirectSurfRenderer {
     }
 
     pub fn type_name(&self) -> &'static str {
-        "directsurf"
+        "dsurface"
     }
 
     pub fn color_mode(&self) -> i32 {
@@ -1648,6 +2355,18 @@ impl DirectSurfRenderer {
 
     pub fn set_tgt_obj_name(&mut self, value: impl Into<String>) {
         self.set_target(value);
+    }
+
+    pub fn selection(&self) -> &Selector {
+        &self.selection
+    }
+
+    pub fn get_selection(&self) -> &Selector {
+        self.selection()
+    }
+
+    pub fn set_selection(&mut self, value: Selector) {
+        self.selection = value;
     }
 
     pub fn detail(&self) -> i32 {
@@ -2001,6 +2720,49 @@ impl DirectSurfRenderer {
     pub fn set_ramp_value(&mut self, value: f64) {
         self.ramp_value = value;
     }
+
+    pub fn grid_spacing(&self) -> f64 {
+        let detail = self.detail.clamp(0, 20) as f64;
+        (1.0 / (1.0 + detail * 0.3)).clamp(0.15, 1.0)
+    }
+
+    pub fn render_mesh(&self, molecule: &MolCoord) -> SurfaceMesh {
+        let spheres: Vec<_> = molecule
+            .atoms()
+            .iter()
+            .filter(|atom| self.selection.matches_in_molecule(atom, molecule))
+            .map(|atom| SurfSphere {
+                center: atom.position,
+                radius: self.vdw_radii.radius_for_element(&atom.element),
+            })
+            .collect();
+        let mut mesh = SurfaceMesh::new();
+        let spacing = self.grid_spacing();
+        match self.surface_type {
+            Self::DS_VDW => {
+                grid_surface::build_sphere_union_surface(&mut mesh, &spheres, spacing);
+            }
+            Self::DS_SAS => {
+                let accessible: Vec<_> = spheres
+                    .iter()
+                    .map(|sphere| SurfSphere {
+                        center: sphere.center,
+                        radius: sphere.radius + self.probe_radius.max(0.0),
+                    })
+                    .collect();
+                grid_surface::build_sphere_union_surface(&mut mesh, &accessible, spacing);
+            }
+            _ => {
+                grid_surface::build_ses_surface(
+                    &mut mesh,
+                    &spheres,
+                    self.probe_radius.max(0.0),
+                    spacing,
+                );
+            }
+        }
+        mesh
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -2098,6 +2860,12 @@ pub struct ElePotMap {
     grid_size: [f64; 3],
     origin: Vector4,
     values: Vec<f64>,
+    min_value: f64,
+    max_value: f64,
+    mean_value: f64,
+    rmsd_value: f64,
+    level_base: f64,
+    level_step: f64,
     fit_view_calls: usize,
 }
 
@@ -2105,9 +2873,15 @@ impl Default for ElePotMap {
     fn default() -> Self {
         Self {
             counts: [0, 0, 0],
-            grid_size: [0.0, 0.0, 0.0],
+            grid_size: [1.0, 1.0, 1.0],
             origin: Vector4::ZERO,
             values: Vec::new(),
+            min_value: 0.0,
+            max_value: 0.0,
+            mean_value: 0.0,
+            rmsd_value: 0.0,
+            level_base: 0.0,
+            level_step: 0.0,
             fit_view_calls: 0,
         }
     }
@@ -2128,6 +2902,10 @@ impl ElePotMap {
 
     pub fn fit_view_calls(&self) -> usize {
         self.fit_view_calls
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
     }
 
     pub fn col_no(&self) -> usize {
@@ -2158,6 +2936,25 @@ impl ElePotMap {
         self.origin
     }
 
+    pub fn get_origin(&self) -> Vector4 {
+        self.origin()
+    }
+
+    pub fn center(&self) -> Vector4 {
+        if self.is_empty() {
+            return Vector4::ZERO;
+        }
+        self.conv_to_orth(Vector4::new3(
+            self.counts[0] as f64 / 2.0,
+            self.counts[1] as f64 / 2.0,
+            self.counts[2] as f64 / 2.0,
+        ))
+    }
+
+    pub fn get_center(&self) -> Vector4 {
+        self.center()
+    }
+
     pub fn values(&self) -> &[f64] {
         &self.values
     }
@@ -2182,6 +2979,7 @@ impl ElePotMap {
         self.values = values.to_vec();
         self.values.resize(expected, 0.0);
         self.values.truncate(expected);
+        self.update_statistics();
     }
 
     pub fn at_float(&self, col: usize, row: usize, sec: usize) -> f64 {
@@ -2191,16 +2989,296 @@ impl ElePotMap {
         let index = col + self.counts[0] * (row + self.counts[1] * sec);
         self.values.get(index).copied().unwrap_or(0.0)
     }
+
+    pub fn is_in_boundary(&self, col: isize, row: isize, sec: isize) -> bool {
+        col >= 0
+            && row >= 0
+            && sec >= 0
+            && (col as usize) < self.counts[0]
+            && (row as usize) < self.counts[1]
+            && (sec as usize) < self.counts[2]
+    }
+
+    pub fn at_byte(&self, col: usize, row: usize, sec: usize) -> u8 {
+        if self.level_step <= 0.0 {
+            return 0;
+        }
+        ((self.at_float(col, row, sec) - self.level_base) / self.level_step).clamp(0.0, 255.0) as u8
+    }
+
+    pub fn min_density(&self) -> f64 {
+        self.min_value
+    }
+
+    pub fn get_min_density(&self) -> f64 {
+        self.min_density()
+    }
+
+    pub fn max_density(&self) -> f64 {
+        self.max_value
+    }
+
+    pub fn get_max_density(&self) -> f64 {
+        self.max_density()
+    }
+
+    pub fn mean_density(&self) -> f64 {
+        self.mean_value
+    }
+
+    pub fn get_mean_density(&self) -> f64 {
+        self.mean_density()
+    }
+
+    pub fn rmsd_density(&self) -> f64 {
+        self.rmsd_value
+    }
+
+    pub fn get_rmsd_density(&self) -> f64 {
+        self.rmsd_density()
+    }
+
+    pub fn level_base(&self) -> f64 {
+        self.level_base
+    }
+
+    pub fn get_level_base(&self) -> f64 {
+        self.level_base()
+    }
+
+    pub fn level_step(&self) -> f64 {
+        self.level_step
+    }
+
+    pub fn get_level_step(&self) -> f64 {
+        self.level_step()
+    }
+
+    pub fn start_col(&self) -> usize {
+        0
+    }
+
+    pub fn start_row(&self) -> usize {
+        0
+    }
+
+    pub fn start_sec(&self) -> usize {
+        0
+    }
+
+    pub fn conv_to_orth(&self, index: Vector4) -> Vector4 {
+        Vector4::new3(
+            self.origin.x + index.x * self.grid_size[0],
+            self.origin.y + index.y * self.grid_size[1],
+            self.origin.z + index.z * self.grid_size[2],
+        )
+    }
+
+    pub fn is_in_range(&self, position: Vector4) -> bool {
+        if self.is_empty()
+            || self
+                .grid_size
+                .iter()
+                .any(|value| value.abs() <= f64::EPSILON)
+        {
+            return false;
+        }
+        let relative = position - self.origin;
+        let grid = [
+            relative.x / self.grid_size[0],
+            relative.y / self.grid_size[1],
+            relative.z / self.grid_size[2],
+        ];
+        grid.iter()
+            .zip(self.counts)
+            .all(|(value, count)| *value >= 0.0 && *value <= count as f64)
+    }
+
+    pub fn value_at(&self, position: Vector4) -> f64 {
+        if self.counts.iter().any(|count| *count < 2)
+            || self
+                .grid_size
+                .iter()
+                .any(|value| value.abs() <= f64::EPSILON)
+        {
+            return 0.0;
+        }
+        let relative = position - self.origin;
+        let coordinate = [
+            relative.x / self.grid_size[0],
+            relative.y / self.grid_size[1],
+            relative.z / self.grid_size[2],
+        ];
+        let base = [
+            coordinate[0] as isize,
+            coordinate[1] as isize,
+            coordinate[2] as isize,
+        ];
+        if base
+            .iter()
+            .zip(self.counts)
+            .any(|(index, count)| *index < 0 || *index >= count as isize - 1)
+        {
+            return 0.0;
+        }
+        let [x, y, z] = [base[0] as usize, base[1] as usize, base[2] as usize];
+        let [tx, ty, tz] = [
+            coordinate[0] - x as f64,
+            coordinate[1] - y as f64,
+            coordinate[2] - z as f64,
+        ];
+        let x00 = (1.0 - tx) * self.at_float(x, y, z) + tx * self.at_float(x + 1, y, z);
+        let x10 = (1.0 - tx) * self.at_float(x, y + 1, z) + tx * self.at_float(x + 1, y + 1, z);
+        let x01 = (1.0 - tx) * self.at_float(x, y, z + 1) + tx * self.at_float(x + 1, y, z + 1);
+        let x11 =
+            (1.0 - tx) * self.at_float(x, y + 1, z + 1) + tx * self.at_float(x + 1, y + 1, z + 1);
+        let y0 = (1.0 - ty) * x00 + ty * x10;
+        let y1 = (1.0 - ty) * x01 + ty * x11;
+        (1.0 - tz) * y0 + tz * y1
+    }
+
+    pub fn get_value_at(&self, position: Vector4) -> f64 {
+        self.value_at(position)
+    }
+
+    pub fn smooth(&mut self, radius: f64) {
+        if self.is_empty() || !radius.is_finite() || radius <= 0.0 {
+            return;
+        }
+        let limits = self.smoothing_limits(radius);
+        let mut offsets = Vec::new();
+        for x in -limits[0]..=limits[0] {
+            for y in -limits[1]..=limits[1] {
+                for z in -limits[2]..=limits[2] {
+                    let distance = Vector4::new3(
+                        x as f64 * self.grid_size[0],
+                        y as f64 * self.grid_size[1],
+                        z as f64 * self.grid_size[2],
+                    )
+                    .length3d();
+                    if distance < radius {
+                        offsets.push([x, y, z]);
+                    }
+                }
+            }
+        }
+        if offsets.is_empty() {
+            return;
+        }
+        let mut smoothed = vec![0.0; self.values.len()];
+        for z in 0..self.counts[2] {
+            for y in 0..self.counts[1] {
+                for x in 0..self.counts[0] {
+                    let sum = offsets
+                        .iter()
+                        .filter_map(|offset| {
+                            self.signed_value(
+                                x as isize + offset[0],
+                                y as isize + offset[1],
+                                z as isize + offset[2],
+                            )
+                        })
+                        .sum::<f64>();
+                    smoothed[self.flat_index(x, y, z)] = sum / offsets.len() as f64;
+                }
+            }
+        }
+        self.values = smoothed;
+    }
+
+    pub fn smooth2(&mut self, radius: f64) {
+        if self.is_empty() || !radius.is_finite() || radius <= 0.0 {
+            return;
+        }
+        let limits = self.smoothing_limits(radius);
+        let mut source = self.values.clone();
+        let mut target = vec![0.0; self.values.len()];
+        for axis in 0..3 {
+            let limit = limits[axis];
+            let denominator = (limit * 2 + 1) as f64;
+            for z in 0..self.counts[2] {
+                for y in 0..self.counts[1] {
+                    for x in 0..self.counts[0] {
+                        let coordinates = [x, y, z];
+                        let mut sum = 0.0;
+                        for offset in -limit..limit {
+                            let mut sample = [x as isize, y as isize, z as isize];
+                            sample[axis] = coordinates[axis] as isize + offset;
+                            if self.is_in_boundary(sample[0], sample[1], sample[2]) {
+                                sum += source[self.flat_index(
+                                    sample[0] as usize,
+                                    sample[1] as usize,
+                                    sample[2] as usize,
+                                )];
+                            }
+                        }
+                        target[self.flat_index(x, y, z)] = sum / denominator;
+                    }
+                }
+            }
+            std::mem::swap(&mut source, &mut target);
+            target.fill(0.0);
+        }
+        self.values = source;
+    }
+
+    fn smoothing_limits(&self, radius: f64) -> [isize; 3] {
+        self.grid_size.map(|spacing| {
+            if spacing.abs() <= f64::EPSILON {
+                0
+            } else {
+                (radius / spacing.abs()).floor() as isize
+            }
+        })
+    }
+
+    fn signed_value(&self, col: isize, row: isize, sec: isize) -> Option<f64> {
+        self.is_in_boundary(col, row, sec)
+            .then(|| self.at_float(col as usize, row as usize, sec as usize))
+    }
+
+    fn flat_index(&self, col: usize, row: usize, sec: usize) -> usize {
+        col + self.counts[0] * (row + self.counts[1] * sec)
+    }
+
+    fn update_statistics(&mut self) {
+        if self.values.is_empty() {
+            self.min_value = 0.0;
+            self.max_value = 0.0;
+            self.mean_value = 0.0;
+            self.rmsd_value = 0.0;
+            self.level_base = 0.0;
+            self.level_step = 0.0;
+            return;
+        }
+        self.min_value = self.values.iter().copied().fold(f64::INFINITY, f64::min);
+        self.max_value = self
+            .values
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        self.mean_value = self.values.iter().sum::<f64>() / self.values.len() as f64;
+        let square_mean =
+            self.values.iter().map(|value| value * value).sum::<f64>() / self.values.len() as f64;
+        self.rmsd_value = (square_mean - self.mean_value * self.mean_value)
+            .max(0.0)
+            .sqrt();
+        self.level_base = self.min_value;
+        self.level_step = (self.max_value - self.min_value) / 256.0;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HoleSurfBuilder {
     target_mol: String,
     target_sel: String,
+    target_molecule: Option<MolCoord>,
+    target_selection: Option<Selector>,
     dir_norm: Vector4,
     start_pos: Vector4,
     surf_den: f64,
     surf_probe_r: f64,
+    path: Vec<HolePathPoint>,
     result: Option<MolSurfObj>,
 }
 
@@ -2209,10 +3287,13 @@ impl Default for HoleSurfBuilder {
         Self {
             target_mol: String::new(),
             target_sel: String::new(),
+            target_molecule: None,
+            target_selection: None,
             dir_norm: Vector4::new3(0.0, 0.0, 1.0),
             start_pos: Vector4::new3(0.0, 0.0, 0.0),
-            surf_den: 0.0,
+            surf_den: 2.0,
             surf_probe_r: 1.4,
+            path: Vec::new(),
             result: None,
         }
     }
@@ -2231,8 +3312,18 @@ impl HoleSurfBuilder {
         self.target_mol()
     }
 
-    pub fn set_target_mol(&mut self, value: impl Into<String>) {
-        self.target_mol = value.into();
+    pub fn set_target_mol<'a, M>(&mut self, value: M)
+    where
+        M: IntoSurfaceMoleculeSource<'a>,
+    {
+        let source = value.into_surface_molecule_source();
+        self.target_mol = source.source_name();
+        self.target_molecule = match source {
+            SurfaceMoleculeSource::Name(_) => None,
+            SurfaceMoleculeSource::Molecule(molecule) => Some(molecule.clone()),
+        };
+        self.result = None;
+        self.path.clear();
     }
 
     pub fn target_sel(&self) -> &str {
@@ -2243,8 +3334,15 @@ impl HoleSurfBuilder {
         self.target_sel()
     }
 
-    pub fn set_target_sel(&mut self, value: impl Into<String>) {
-        self.target_sel = value.into();
+    pub fn set_target_sel<'a, S>(&mut self, value: S)
+    where
+        S: IntoSurfaceSelectionSource<'a>,
+    {
+        let source = value.into_surface_selection_source();
+        self.target_sel = source.source_text();
+        self.target_selection = source.selector();
+        self.result = None;
+        self.path.clear();
     }
 
     pub fn dir_norm(&self) -> Vector4 {
@@ -2311,6 +3409,10 @@ impl HoleSurfBuilder {
         self.surf_probe_r = value;
     }
 
+    pub fn path(&self) -> &[HolePathPoint] {
+        &self.path
+    }
+
     pub fn result(&self) -> Option<&MolSurfObj> {
         self.result.as_ref()
     }
@@ -2319,15 +3421,30 @@ impl HoleSurfBuilder {
         self.result()
     }
 
-    pub fn doit(&mut self) {
+    pub fn doit(&mut self) -> cuemol_core::Result<()> {
+        let molecule = self.target_molecule.as_ref().ok_or_else(|| {
+            cuemol_core::CueMolError::undefined_reference(
+                "hole surface builder requires a resolved target molecule",
+            )
+        })?;
+        let selector = if let Some(selector) = &self.target_selection {
+            selector.clone()
+        } else if self.target_sel.trim().is_empty() {
+            Selector::All
+        } else {
+            parse_selector(&self.target_sel)?
+        };
+        let path =
+            hole_surface::trace_hole_path(molecule, &selector, self.dir_norm, self.start_pos)?;
         let mut result = MolSurfObj::new();
-        result.create_ses_from_mol(
-            self.target_mol.clone(),
-            self.target_sel.clone(),
-            self.surf_den,
-            self.surf_probe_r,
-        );
+        hole_surface::build_hole_ses(result.mesh_mut(), &path, self.surf_den, self.surf_probe_r)?;
+        result.orig_mol = self.target_mol.clone();
+        result.orig_sel = self.target_sel.clone();
+        result.orig_den = self.surf_den;
+        result.orig_prad = self.surf_probe_r;
+        self.path = path;
         self.result = Some(result);
+        Ok(())
     }
 }
 
@@ -2394,6 +3511,84 @@ mod tests {
     }
 
     #[test]
+    fn molsurf_regeneration_rebuilds_geometry_from_the_original_molecule() {
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(surface_atom(1, "CA", "C", 0.0));
+        let mut surface = MolSurfObj::new();
+        surface.create_ses_from_mol(&molecule, "name CA", 2.0, 1.4);
+        let coarse_triangles = surface.mesh().triangle_count();
+
+        surface.regenerate_ses(5.0).unwrap();
+
+        assert_eq!(surface.orig_den(), 5.0);
+        assert_eq!(surface.orig_prad(), 1.4);
+        assert_eq!(surface.orig_sel(), "name CA");
+        assert!(surface.mesh().triangle_count() > coarse_triangles);
+
+        let mut detached = MolSurfObj::new();
+        assert!(detached.regenerate_ses(2.0).is_err());
+    }
+
+    #[test]
+    fn molsurf_plane_cut_undo_and_redo_swap_the_complete_structure() {
+        let mut surface = MolSurfObj::new();
+        *surface.mesh_mut() = cube_mesh(1.0);
+        let target = Rc::new(RefCell::new(surface));
+        let undo_manager = UndoManagerHandle::new();
+        let before = target.borrow().mesh().clone();
+
+        undo_manager.with_mut(|manager| manager.start_txn("cut surface"));
+        assert!(cut_surface_by_plane_with_undo(
+            &target,
+            &undo_manager,
+            1.0,
+            Vector4::new3(1.0, 0.0, 0.0),
+            Vector4::ZERO,
+            true,
+            true,
+        ));
+        assert!(undo_manager.with_mut(|manager| manager.commit_txn()));
+        let after = target.borrow().mesh().clone();
+        assert_ne!(after, before);
+        assert_eq!(target.borrow().cut_planes().len(), 1);
+
+        assert!(undo_manager.with_mut(|manager| manager.undo()));
+        assert_eq!(target.borrow().mesh(), &before);
+        assert!(target.borrow().cut_planes().is_empty());
+
+        assert!(undo_manager.with_mut(|manager| manager.redo()));
+        assert_eq!(target.borrow().mesh(), &after);
+        assert_eq!(target.borrow().cut_planes().len(), 1);
+    }
+
+    #[test]
+    fn molsurf_regeneration_participates_in_scene_undo_transactions() {
+        let mut original = MolCoord::new();
+        original.push_atom(surface_atom(1, "CA", "C", 0.0));
+        let mut surface = MolSurfObj::new();
+        surface.create_ses_from_mol(&original, "*", 2.0, 1.4);
+        let target = Rc::new(RefCell::new(surface));
+        let undo_manager = UndoManagerHandle::new();
+        let before = target.borrow().mesh().clone();
+
+        let mut changed = original.clone();
+        changed.push_atom(surface_atom(2, "CB", "C", 3.0));
+        undo_manager.with_mut(|manager| manager.start_txn("regenerate surface"));
+        assert!(
+            regenerate_surface_with_undo(&target, &undo_manager, &changed, None, 3.0, -1.0,)
+                .unwrap()
+        );
+        assert!(undo_manager.with_mut(|manager| manager.commit_txn()));
+        let after = target.borrow().mesh().clone();
+        assert_ne!(after, before);
+
+        assert!(undo_manager.with_mut(|manager| manager.undo()));
+        assert_eq!(target.borrow().mesh(), &before);
+        assert!(undo_manager.with_mut(|manager| manager.redo()));
+        assert_eq!(target.borrow().mesh(), &after);
+    }
+
+    #[test]
     fn molsurf_obj_builds_selected_atom_mesh_from_molecule() {
         let mut molecule = MolCoord::new();
         molecule.push_atom(surface_atom(1, "N", "N", 0.0));
@@ -2455,6 +3650,67 @@ mod tests {
     }
 
     #[test]
+    fn plane_cut_splits_crossing_triangles_at_the_plane() {
+        let mut mesh = cube_mesh(1.0);
+        mesh.cut_by_plane_detailed(
+            Vector4::new3(1.0, 0.0, 0.0),
+            Vector4::ZERO,
+            true,
+            true,
+            false,
+        );
+
+        assert!(mesh.vertex_count() > 0);
+        assert!(mesh
+            .vertices()
+            .iter()
+            .all(|vertex| vertex.position.x >= -1.0e-9));
+        assert!(mesh
+            .vertices()
+            .iter()
+            .any(|vertex| vertex.position.x.abs() < 1.0e-9));
+        assert!(mesh
+            .vertices()
+            .iter()
+            .any(|vertex| (vertex.position.x - 1.0).abs() < 1.0e-9));
+    }
+
+    #[test]
+    fn plane_cut_builds_an_outward_facing_section() {
+        let mut mesh = cube_mesh(1.0);
+        mesh.cut_by_plane_detailed(
+            Vector4::new3(1.0, 0.0, 0.0),
+            Vector4::ZERO,
+            true,
+            true,
+            true,
+        );
+
+        let cap_area = section_area(&mesh, Vector4::new3(-1.0, 0.0, 0.0));
+        assert!((cap_area - 4.0).abs() < 1.0e-5, "cap area {cap_area}");
+    }
+
+    #[test]
+    fn section_only_cut_honours_nested_contours_as_holes() {
+        let mut mesh = cube_mesh(2.0);
+        append_mesh(&mut mesh, cube_mesh(1.0));
+        mesh.cut_by_plane_detailed(
+            Vector4::new3(1.0, 0.0, 0.0),
+            Vector4::ZERO,
+            true,
+            false,
+            true,
+        );
+
+        assert!(mesh
+            .vertices()
+            .iter()
+            .all(|vertex| vertex.position.x.abs() < 1.0e-9));
+        let area = section_area(&mesh, Vector4::new3(-1.0, 0.0, 0.0));
+        assert!((area - 12.0).abs() < 1.0e-5, "annular area {area}");
+    }
+
+    #[test]
     fn apbs_input_config_writes_reference_shape() {
         let mut config = ApbsInputConfig::new("mol", "mol.pqr", "mol.dx");
         config.center = Vector4::new3(1.0, 2.0, 3.0);
@@ -2466,6 +3722,16 @@ mod tests {
 
     #[test]
     fn surface_io_metadata_matches_qif_reference() {
+        let ply = PlyFileReader::new();
+        assert_eq!(ply.handler().name(), "ply");
+        assert_eq!(ply.handler().type_descr(), "PLY polygon file (*.ply)");
+        assert_eq!(ply.handler().file_ext(), "*.ply");
+        assert_eq!(
+            ply.can_handle_content(b"ply\nformat ascii 1.0\n"),
+            cuemol_molstr::ContentVerdict::Yes
+        );
+        assert!(ply.create_default_obj().is_empty());
+
         let msms = MsmsFileReader::new();
         assert_eq!(msms.handler().name(), "msms");
         assert_eq!(
@@ -2475,6 +3741,11 @@ mod tests {
         assert_eq!(msms.handler().file_ext(), "*.face");
         assert_eq!(msms.handler().category(), InOutHandler::IOH_CAT_OBJREADER);
         assert_eq!(msms.vertex_file(), "");
+        assert_eq!(
+            msms.can_handle_content("# MSMS solvent excluded surface\n"),
+            cuemol_molstr::ContentVerdict::Yes
+        );
+        assert!(msms.create_default_obj().is_empty());
 
         let opendx = OpenDxPotReader::new();
         assert_eq!(opendx.handler().name(), "apbs");
@@ -2514,6 +3785,40 @@ mod tests {
         assert_eq!(qdfpot.handler().type_descr(), "CueMol elepot file (*.qdf)");
         assert_eq!(qdfpot.handler().file_ext(), "*.qdf");
         assert_eq!(qdfpot.handler().category(), InOutHandler::IOH_CAT_OBJWRITER);
+    }
+
+    #[test]
+    fn opendx_reader_builds_interpolated_electrostatic_map() {
+        let input = "\
+object 1 class gridpositions counts 2 2 2
+origin -1 -2 -3
+delta 0.5 0 0
+delta 0 1 0
+delta 0 0 2
+object 2 class gridconnections counts 2 2 2
+object 3 class array type double rank 0 items 8 data follows
+0 1 2
+3 4 5
+6 7
+attribute \"dep\" string \"positions\"
+";
+        let reader = OpenDxPotReader::new();
+        assert_eq!(
+            reader.can_handle_content(input),
+            cuemol_molstr::ContentVerdict::Yes
+        );
+        let map = reader.read_str(input).unwrap();
+        assert_eq!([map.col_no(), map.row_no(), map.sec_no()], [2, 2, 2]);
+        assert_eq!(map.origin(), Vector4::new3(-1.0, -2.0, -3.0));
+        assert_eq!(map.at_float(1, 0, 0), 4.0);
+        assert_eq!(map.at_float(0, 0, 1), 1.0);
+        assert_eq!(map.min_density(), 0.0);
+        assert_eq!(map.max_density(), 7.0);
+        assert!((map.mean_density() - 3.5).abs() < 1.0e-12);
+        assert!((map.value_at(Vector4::new3(-0.75, -1.5, -2.0)) - 3.5).abs() < 1.0e-12);
+        assert_eq!(map.at_byte(1, 1, 1), 255);
+        assert!(map.is_in_range(Vector4::new3(-1.0, -2.0, -3.0)));
+        assert!(!map.is_in_range(Vector4::new3(-1.1, -2.0, -3.0)));
     }
 
     #[test]
@@ -2645,7 +3950,7 @@ mod tests {
     #[test]
     fn directsurf_renderer_defaults_match_qif() {
         let renderer = DirectSurfRenderer::new();
-        assert_eq!(renderer.type_name(), "directsurf");
+        assert_eq!(renderer.type_name(), "dsurface");
         assert_eq!(renderer.color_mode(), DirectSurfRenderer::DS_MOLFANC);
         assert_eq!(renderer.get_color_mode(), DirectSurfRenderer::DS_MOLFANC);
         assert_eq!(renderer.detail(), 6);
@@ -2674,6 +3979,37 @@ mod tests {
     }
 
     #[test]
+    fn directsurf_renderer_builds_vdw_sas_and_ses_geometry() {
+        let molecule = MolCoord::with_atoms(vec![surface_atom(1, "CA", "C", 0.0)]);
+        let mut renderer = DirectSurfRenderer::new();
+
+        renderer.set_surface_type(DirectSurfRenderer::DS_VDW);
+        let vdw = renderer.render_mesh(&molecule);
+        renderer.set_surface_type(DirectSurfRenderer::DS_SAS);
+        let sas = renderer.render_mesh(&molecule);
+        renderer.set_surface_type(DirectSurfRenderer::DS_SES);
+        let ses = renderer.render_mesh(&molecule);
+
+        let extent = |mesh: &SurfaceMesh| {
+            mesh.vertices()
+                .iter()
+                .map(|vertex| vertex.position.x.abs())
+                .fold(0.0_f64, f64::max)
+        };
+        assert!((extent(&vdw) - 1.7).abs() < renderer.grid_spacing());
+        assert!((extent(&sas) - 3.1).abs() < renderer.grid_spacing());
+        assert!((extent(&ses) - 1.7).abs() < renderer.grid_spacing());
+        assert!(sas.triangle_count() > vdw.triangle_count());
+
+        renderer.set_selection(parse_selector("name N").unwrap());
+        assert!(renderer.render_mesh(&molecule).is_empty());
+
+        let mut renderer2 = DirectSurfRenderer2::new();
+        renderer2.set_surface_type(DirectSurfRenderer2::DS_VDW);
+        assert!(renderer2.render_mesh(&molecule).triangle_count() > 0);
+    }
+
+    #[test]
     fn ms2_test_renderer_builds_the_reference_sas_mesh() {
         let renderer = Ms2TestRenderer::new();
         let molecule = MolCoord::with_atoms(vec![surface_atom(1, "CA", "C", 0.0)]);
@@ -2698,17 +4034,32 @@ mod tests {
         elepot.fit_view();
         assert_eq!(elepot.fit_view_calls(), 1);
 
+        let mut molecule = MolCoord::new();
+        let mut serial = 1;
+        for z in [-2.0, 0.0, 2.0, 4.0, 6.0] {
+            for division in 0..12 {
+                let angle = division as f64 * std::f64::consts::TAU / 12.0;
+                let mut atom = surface_atom(serial, "C", "C", 4.0 * angle.cos());
+                atom.position.y = 4.0 * angle.sin();
+                atom.position.z = z;
+                molecule.push_atom(atom);
+                serial += 1;
+            }
+        }
         let mut builder = HoleSurfBuilder::new();
-        builder.set_target_mol("mol1");
+        assert_eq!(builder.surf_den(), 2.0);
+        builder.set_target_mol(&molecule);
         builder.set_target_sel("*");
-        builder.set_surf_den(4.0);
+        builder.set_surf_den(2.0);
         builder.set_surf_probe_r(1.2);
-        builder.doit();
+        builder.doit().unwrap();
         let result = builder.result().unwrap();
-        assert_eq!(result.orig_mol(), "mol1");
+        assert_eq!(result.orig_mol(), "MolCoord");
         assert_eq!(result.orig_sel(), "*");
-        assert_eq!(result.orig_den(), 4.0);
+        assert_eq!(result.orig_den(), 2.0);
         assert_eq!(result.orig_prad(), 1.2);
+        assert!(!builder.path().is_empty());
+        assert!(result.mesh().triangle_count() > 0);
 
         assert_eq!(Ms2TestRenderer::new().type_name(), "ms2test");
     }
@@ -2729,5 +4080,74 @@ mod tests {
             formal_charge: None,
             int_props: BTreeMap::new(),
         }
+    }
+
+    fn cube_mesh(half: f64) -> SurfaceMesh {
+        let positions = [
+            Vector4::new3(-half, -half, -half),
+            Vector4::new3(half, -half, -half),
+            Vector4::new3(half, half, -half),
+            Vector4::new3(-half, half, -half),
+            Vector4::new3(-half, -half, half),
+            Vector4::new3(half, -half, half),
+            Vector4::new3(half, half, half),
+            Vector4::new3(-half, half, half),
+        ];
+        let mut mesh = SurfaceMesh::new();
+        for position in positions {
+            mesh.push_vertex(SurfaceVertex {
+                position,
+                normal: normalize_or_z(position),
+            });
+        }
+        for triangle in [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ] {
+            mesh.push_triangle(triangle);
+        }
+        mesh
+    }
+
+    fn append_mesh(target: &mut SurfaceMesh, source: SurfaceMesh) {
+        let offset = target.vertex_count() as u32;
+        for vertex in source.vertices {
+            target.push_vertex(vertex);
+        }
+        for [a, b, c] in source.triangles {
+            target.push_triangle([a + offset, b + offset, c + offset]);
+        }
+    }
+
+    fn section_area(mesh: &SurfaceMesh, cap_normal: Vector4) -> f64 {
+        mesh.triangles()
+            .iter()
+            .filter_map(|triangle| {
+                let vertices = [
+                    &mesh.vertices()[triangle[0] as usize],
+                    &mesh.vertices()[triangle[1] as usize],
+                    &mesh.vertices()[triangle[2] as usize],
+                ];
+                vertices
+                    .iter()
+                    .all(|vertex| vertex.normal.dot3d(cap_normal) > 0.9999)
+                    .then(|| {
+                        (vertices[1].position - vertices[0].position)
+                            .cross(vertices[2].position - vertices[0].position)
+                            .length3d()
+                            * 0.5
+                    })
+            })
+            .sum()
     }
 }

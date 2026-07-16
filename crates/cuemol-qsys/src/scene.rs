@@ -1,5 +1,8 @@
 use crate::{Camera, SceneEvent, SceneObject, ScrEventManagerHandle, UndoManagerHandle, View};
-use cuemol_core::{EventCaster, SharedEventListener, Uid, UidGenerator};
+use cuemol_core::{
+    parse_ldom2_xml, write_ldom2_xml, EventCaster, LDom2Node, SharedEventListener, Uid,
+    UidGenerator,
+};
 use cuemol_gfx::SolidColor;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,6 +22,7 @@ pub struct Scene<T> {
     source: String,
     source_type: String,
     base_path: String,
+    qsc_options: Option<LDom2Node>,
     bg_color: SolidColor,
     ao_enabled: bool,
     ao_radius: f64,
@@ -73,6 +77,7 @@ impl<T> Scene<T> {
             source: String::new(),
             source_type: String::new(),
             base_path: String::new(),
+            qsc_options: None,
             bg_color: SolidColor::from_rgb(0.0, 0.0, 0.0),
             ao_enabled: false,
             ao_radius: 4.0,
@@ -184,6 +189,14 @@ impl<T> Scene<T> {
     pub fn set_base_path(&mut self, value: impl Into<String>) {
         self.base_path = value.into();
         self.fire_property_changed("base_path");
+    }
+
+    pub fn qsc_options(&self) -> Option<&LDom2Node> {
+        self.qsc_options.as_ref()
+    }
+
+    pub fn set_qsc_options(&mut self, value: Option<LDom2Node>) {
+        self.qsc_options = value;
     }
 
     pub fn bg_color(&self) -> &SolidColor {
@@ -734,6 +747,10 @@ impl<T> Scene<T> {
         self.cameras.len()
     }
 
+    pub fn cameras(&self) -> &BTreeMap<String, Camera> {
+        &self.cameras
+    }
+
     pub fn destroy_camera(&mut self, name: &str) -> bool {
         self.cameras.remove(name).is_some()
     }
@@ -787,7 +804,36 @@ impl<T> Scene<T> {
         let Some(camera) = self.cameras.get(camera_name) else {
             return false;
         };
-        if std::fs::write(filename, camera.to_camera_data()).is_err() {
+        let Some(mut tree) = parse_ldom2_xml(&camera.to_xml_string()).ok() else {
+            return false;
+        };
+        if camera.visibility_size() != 0 {
+            let visibilities = tree.top_mut().append_child("visibilities");
+            for (uid, visible, is_object) in camera.visibility_settings() {
+                if is_object {
+                    let Some(object) = self.objects.get(&Uid::new(uid)) else {
+                        continue;
+                    };
+                    let node = visibilities.append_child("object");
+                    node.set_value(visible.to_string());
+                    node.set_str_attr("target", object.name());
+                } else {
+                    let Some((object, renderer)) = self.objects.values().find_map(|object| {
+                        object
+                            .renderer(Uid::new(uid))
+                            .map(|renderer| (object, renderer))
+                    }) else {
+                        continue;
+                    };
+                    let node = visibilities.append_child("renderer");
+                    node.set_value(visible.to_string());
+                    node.set_str_attr("target", renderer.name());
+                    node.set_str_attr("type", renderer.type_name());
+                    node.set_str_attr("client", object.name());
+                }
+            }
+        }
+        if std::fs::write(filename, write_ldom2_xml(&tree)).is_err() {
             return false;
         }
         if camera_name != "__current" {
@@ -801,7 +847,34 @@ impl<T> Scene<T> {
 
     pub fn load_camera(&self, filename: impl AsRef<std::path::Path>) -> Option<Camera> {
         let filename = filename.as_ref();
-        let mut camera = Camera::from_camera_data(&std::fs::read_to_string(filename).ok()?)?;
+        let xml = std::fs::read_to_string(filename).ok()?;
+        let mut camera = Camera::from_xml_string(&xml).ok()?;
+        let tree = parse_ldom2_xml(&xml).ok()?;
+        if let Some(visibilities) = tree.top().find_child("visibilities") {
+            for node in visibilities
+                .children()
+                .iter()
+                .filter(|node| !node.is_attr())
+            {
+                let visible = node.value().eq_ignore_ascii_case("true");
+                if node.tag_name() == "object" {
+                    let target = node.str_attr("target").to_string();
+                    if let Some(object) = self.object_by_name(&target) {
+                        camera.vis_append(object.uid().get(), visible, true);
+                    }
+                } else if node.tag_name() == "renderer" {
+                    let client = node.str_attr("client").to_string();
+                    let target = node.str_attr("target").to_string();
+                    let type_name = node.str_attr("type").to_string();
+                    let renderer = self
+                        .object_by_name(&client)
+                        .and_then(|object| object.renderer_by_name_type(&target, &type_name));
+                    if let Some(renderer) = renderer {
+                        camera.vis_append(renderer.uid().get(), visible, false);
+                    }
+                }
+            }
+        }
         camera.set_source(filename.to_string_lossy().into_owned());
         Some(camera)
     }
@@ -1397,19 +1470,24 @@ mod tests {
     #[test]
     fn scene_saves_and_loads_camera_file() {
         let mut scene = Scene::<()>::new(Uid::new(1), "test scene");
+        let object_uid = scene.add_object("target", ());
         let mut camera = Camera::new();
         camera.set_name("cam\tone");
         camera.set_zoom(88.0);
         camera.set_center(cuemol_core::Vector4::new3(1.0, 2.0, 3.0));
-        camera.vis_append(10, false, true);
+        camera.vis_append(object_uid.get(), false, true);
         scene.set_camera("cam1", camera);
         let path = std::env::temp_dir().join(format!(
-            "cuemol2-rs-camera-{}-{}.txt",
+            "cuemol2-rs-camera-{}-{}.xml",
             std::process::id(),
             scene.uid().get()
         ));
 
         assert!(scene.save_camera_to("cam1", &path));
+        let saved_xml = std::fs::read_to_string(&path).unwrap();
+        assert!(saved_xml.contains("<camera"));
+        assert!(saved_xml.contains("<visibilities>"));
+        assert!(saved_xml.contains("target=\"target\""));
         assert_eq!(
             scene.camera("cam1").unwrap().source(),
             path.to_string_lossy()
@@ -1422,7 +1500,11 @@ mod tests {
         assert_eq!(loaded.center(), cuemol_core::Vector4::new3(1.0, 2.0, 3.0));
         assert_eq!(
             loaded.visibility_json(),
-            "{\"10\":{\"uid\":10,\"type\":\"object\",\"include\":true,\"visible\":false}}"
+            format!(
+                "{{\"{}\":{{\"uid\":{},\"type\":\"object\",\"include\":true,\"visible\":false}}}}",
+                object_uid.get(),
+                object_uid.get()
+            )
         );
         assert_eq!(loaded.source(), path.to_string_lossy());
     }

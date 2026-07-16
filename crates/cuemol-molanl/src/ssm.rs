@@ -428,6 +428,10 @@ mod tests {
                 .expect("SSM should align the structures");
         assert!(rmsd < 1.0e-6, "rmsd={rmsd}");
         assert_eq!(nfit, reference.atoms().len(), "all residues fitted");
+        let manager_rmsd = crate::MolAnlManager::new()
+            .superpose_ssm_rmsd(&reference, &Selector::All, &moving, &Selector::All, false)
+            .unwrap();
+        assert!(manager_rmsd < 1.0e-6, "manager RMSD = {manager_rmsd}");
 
         // Applying the transform maps a moving CA onto its (geometric)
         // reference partner — independent of the scrambled order.

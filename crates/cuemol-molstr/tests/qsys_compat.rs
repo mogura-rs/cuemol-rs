@@ -168,13 +168,13 @@ fn qsc_loader_resolves_atom_interaction_renderer_defs() {
     let measure = mol.renderer_by_name("measure").unwrap();
     assert_eq!(
         measure.get_defs_json(),
-        "[{\"a0\":\"9 ALA 27 CA\",\"a1\":\"A CYS 3 CA\"}]"
+        "[{\"id\":0,\"mode\":1,\"a0\":\"9 ALA 27 CA\",\"a1\":\"A CYS 3 CA\"}]"
     );
 
     let measure2 = mol.renderer_by_name("measure2").unwrap();
     assert_eq!(
         measure2.get_defs_json(),
-        "[{\"a0\":\"9 ALA 27 CA\",\"a1\":\"A CYS 3 CA\"}]"
+        "[{\"id\":0,\"mode\":1,\"a0\":\"9 ALA 27 CA\",\"a1\":\"A CYS 3 CA\"}]"
     );
 
     // The measured distance is the actual CA(9/27)-CA(A/3) separation. Cross-check
@@ -267,7 +267,7 @@ fn qsc_writer_roundtrips_loaded_scene_subset() {
     let measure = mol.renderer_by_name("measure").unwrap();
     assert_eq!(
         measure.get_defs_json(),
-        "[{\"a0\":\"9 ALA 27 CA\",\"a1\":\"A CYS 3 CA\"}]"
+        "[{\"id\":0,\"mode\":1,\"a0\":\"9 ALA 27 CA\",\"a1\":\"A CYS 3 CA\"}]"
     );
 }
 

@@ -10,9 +10,8 @@
 //! against (distance `r_atom + r_probe`).
 //!
 //! The grid SES ([`crate::grid_surface::build_ses_surface`]) is the production
-//! path; this analytic port matches C++'s exact patch geometry. The reduced-surface
-//! traversal and the `Tg*` patch triangulators are layered on these primitives in
-//! later increments — see the `analytic-ses-plan` memory.
+//! path; this analytic port provides the convex, saddle-torus, and concave patch
+//! geometry used by [`build_analytic_ses`].
 
 use cuemol_core::Vector4;
 
@@ -274,7 +273,6 @@ pub fn accessible_concave_probes_with_atoms(
 
 /// Build the concave (reentrant) component of the analytic SES: a [`SurfaceMesh`]
 /// of the spherical-triangle patches at every accessible concave-probe position.
-/// (The convex sphere caps and the saddle tori are the remaining components.)
 pub fn build_concave_patches(atoms: &[(Vector4, f64)], r_p: f64, ndiv: usize) -> SurfaceMesh {
     let mut mesh = SurfaceMesh::new();
     for (probe, [i, j, k]) in accessible_concave_probes_with_atoms(atoms, r_p) {

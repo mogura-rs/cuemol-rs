@@ -1,5 +1,5 @@
 use crate::{RendererEvent, SceneEvent, ScrEventManagerHandle};
-use cuemol_core::{EventCaster, LString, Matrix4, SharedEventListener, Uid, Vector4};
+use cuemol_core::{EventCaster, LDom2Node, LString, Matrix4, SharedEventListener, Uid, Vector4};
 use cuemol_gfx::{RawHitData, Rgba8, SolidColor};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -109,6 +109,36 @@ impl MultiGradient {
         self.nodes.clear();
     }
 
+    pub fn read_from_ldom2_node(
+        &mut self,
+        node: &LDom2Node,
+        mut resolve_color: impl FnMut(&str) -> Option<Rgba8>,
+    ) -> usize {
+        self.clear();
+        for gradient_node in node
+            .children()
+            .iter()
+            .filter(|child| !child.is_attr() && child.tag_name() == "gradnode")
+        {
+            let Some(value) = gradient_node.str_attr("par").as_str().parse::<f64>().ok() else {
+                continue;
+            };
+            let Some(color_node) = gradient_node.find_child("col") else {
+                continue;
+            };
+            let color_text = if color_node.value().trim().is_empty() {
+                color_node.contents().trim()
+            } else {
+                color_node.value().trim()
+            };
+            let Some(color) = resolve_color(color_text) else {
+                continue;
+            };
+            self.insert(value, color);
+        }
+        self.size()
+    }
+
     pub fn color(&self, value: f64) -> Rgba8 {
         match self.nodes.as_slice() {
             [] => Rgba8 {
@@ -160,6 +190,7 @@ pub struct Renderer {
     edge_line_type: i32,
     edge_line_width: f64,
     edge_line_color: SolidColor,
+    properties: BTreeMap<String, String>,
     event_caster: Arc<EventCaster<RendererEvent>>,
     _scene_event_caster: Option<Arc<EventCaster<SceneEvent>>>,
     event_manager: Option<ScrEventManagerHandle>,
@@ -191,6 +222,7 @@ impl Renderer {
             edge_line_type: Self::ELT_NONE,
             edge_line_width: 0.01,
             edge_line_color: SolidColor::from_rgb(0.0, 0.0, 0.0),
+            properties: BTreeMap::new(),
             event_caster: Arc::new(EventCaster::new()),
             _scene_event_caster: None,
             event_manager: None,
@@ -474,6 +506,49 @@ impl Renderer {
     pub fn set_edge_line_color(&mut self, value: SolidColor) {
         self.edge_line_color = value;
         self.fire_property_changed("egcolor");
+    }
+
+    pub fn property_str(&self, name: &str) -> Option<&str> {
+        self.properties.get(name).map(String::as_str)
+    }
+
+    pub fn set_property_str(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.properties.insert(name.into(), value.into());
+    }
+
+    pub fn properties(&self) -> &BTreeMap<String, String> {
+        &self.properties
+    }
+
+    pub fn read_properties_from_node(&mut self, node: &cuemol_core::LDom2Node) {
+        for child in node.children().iter().filter(|child| child.is_attr()) {
+            match child.tag_name() {
+                "name" => self.set_name(child.value()),
+                "group" => self.set_group_name(child.value()),
+                "style" => self.apply_styles(child.value()),
+                "visible" => {
+                    self.set_visible(!matches!(child.value(), "false" | "0" | "no" | "off"))
+                }
+                "locked" => self.set_ui_locked(matches!(child.value(), "true" | "1" | "yes")),
+                "default_material" => self.set_default_material(child.value()),
+                "default_alpha" => {
+                    if let Ok(value) = child.value().parse() {
+                        self.set_default_alpha(value);
+                    }
+                }
+                "xformMat" => {
+                    if let Ok(value) = Matrix4::from_script_string(child.value()) {
+                        self.set_xform_matrix(value);
+                    }
+                }
+                "ui_order" => {
+                    if let Ok(value) = child.value().parse() {
+                        self.set_ui_order(value);
+                    }
+                }
+                name => self.set_property_str(name, child.value()),
+            }
+        }
     }
 
     pub fn script_string(&self) -> LString {
@@ -1070,6 +1145,25 @@ mod tests {
         gradient.clear();
         assert_eq!(gradient.color(0.5), color(0, 0, 0));
         assert_eq!(MultiGradient::create_default().size(), 1);
+    }
+
+    #[test]
+    fn multi_gradient_reads_ldom_gradnodes() {
+        let mut node = LDom2Node::new();
+        node.set_tag_name("multi_grad");
+        let gradient_node = node.append_child("gradnode");
+        gradient_node.set_str_attr("par", "2.5");
+        gradient_node.append_child("col").set_value("#0a141e");
+
+        let mut gradient = MultiGradient::new();
+        assert_eq!(
+            gradient.read_from_ldom2_node(&node, |value| {
+                cuemol_gfx::parse_color(value).ok()?.rgba8()
+            }),
+            1
+        );
+        assert_eq!(gradient.value_at(0), Some(2.5));
+        assert_eq!(gradient.color_at(0), Some(color(10, 20, 30)));
     }
 
     #[test]

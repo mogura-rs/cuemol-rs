@@ -14,6 +14,8 @@
 //! the cell and intervals (origin at the cell origin), matching the
 //! crystallographic convention C++ uses.
 
+use std::path::Path;
+
 use cuemol_core::Result;
 use cuemol_qsys::{
     InOutHandler, ObjReader, ObjWriter, QdfReader, QdfWriter, ScalarObject, QDF_TYPE_FLOAT32,
@@ -204,6 +206,10 @@ impl QdfDenMapReader {
     pub fn read_bytes(&self, input: &[u8]) -> Result<DensityMap> {
         read_qdf_denmap_bytes(input)
     }
+
+    pub fn read_file(&self, path: impl AsRef<Path>) -> Result<DensityMap> {
+        self.read_bytes(&std::fs::read(path)?)
+    }
 }
 
 impl Default for QdfDenMapReader {
@@ -243,6 +249,11 @@ impl QdfDenMapWriter {
 
     pub fn write_bytes(&self, object: &DensityMap) -> Vec<u8> {
         write_qdf_denmap_bytes(object)
+    }
+
+    pub fn write_file(&self, object: &DensityMap, path: impl AsRef<Path>) -> Result<()> {
+        std::fs::write(path, self.write_bytes(object))?;
+        Ok(())
     }
 }
 

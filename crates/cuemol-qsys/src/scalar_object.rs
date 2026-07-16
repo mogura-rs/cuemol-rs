@@ -31,6 +31,10 @@ pub trait ScalarObject {
     fn at_float(&self, col: isize, row: isize, sec: isize) -> f64;
     fn conv_to_orth(&self, index: Vector4) -> Vector4;
 
+    fn is_periodic_grid(&self) -> bool {
+        false
+    }
+
     fn den_sigma(&self) -> f64 {
         self.rmsd_density()
     }

@@ -85,7 +85,7 @@ pub struct Bond {
     pub atom2: usize,
     pub order: BondOrder,
     /// MDL/SDF bond stereo flag: 0 = none, 1 = up (wedge, fat end at atom2),
-    /// 6 = down (hashed). Used by BallStick valence-bond display.
+    /// 6 = down (hashed). Preserved for stereochemistry-aware rendering/export.
     pub stereo: i32,
     /// Whether this bond was explicitly DEPOSITED (a PDB LINK / SSBOND record),
     /// as opposed to inferred by the topology/distance builder (C++
@@ -762,56 +762,143 @@ impl MolCoord {
         crate::toppar::build_topology_bonds(self);
     }
 
-    pub fn calc_base_pair(&mut self, cutoff: f64, _tilt: f64) -> usize {
+    pub fn calc_base_pair(&mut self, cutoff: f64, tilt: f64) -> usize {
         let cutoff = cutoff.max(0.0);
+        let tilt_cos = (90.0_f64 - tilt.clamp(0.0, 90.0)).to_radians().cos();
         let residues = self
             .residue_summaries()
             .into_iter()
-            .filter(|summary| is_nucleotide_residue(&summary.res_name))
             .filter_map(|summary| {
-                Some((
-                    summary.key,
-                    summary.atom_indices.clone(),
-                    residue_centroid(self, &summary.atom_indices)?,
-                ))
+                let base_type = self
+                    .get_residue_prop_str(
+                        &summary.key.chain_id,
+                        &summary.key.script_index(),
+                        "basetype",
+                    )
+                    .ok()
+                    .flatten()
+                    .map(str::to_string)
+                    .or_else(|| {
+                        crate::toppar::TopoDB::global()
+                            .residue_property(&summary.res_name, "basetype")
+                            .map(str::to_string)
+                    })?;
+                if !matches!(base_type.as_str(), "pur" | "pyr") {
+                    return None;
+                }
+                let atom_position = |name: &str| {
+                    summary
+                        .atom_indices
+                        .iter()
+                        .find(|&&index| self.atoms[index].matches_name_case_insensitive(name))
+                        .map(|&index| self.atoms[index].position)
+                };
+                let normal_names = if base_type == "pur" {
+                    ["C4", "C5", "C8"]
+                } else {
+                    ["C2", "C4", "C6"]
+                };
+                let p1 = atom_position(normal_names[0])?;
+                let p2 = atom_position(normal_names[1])?;
+                let p3 = atom_position(normal_names[2])?;
+                let normal = (p2 - p1).cross(p3 - p1).normalize3d().ok()?;
+                Some((summary.key, summary.atom_indices.clone(), normal))
             })
             .collect::<Vec<_>>();
 
+        for residue in &residues {
+            let _ = self.remove_residue_prop_str(
+                &residue.0.chain_id,
+                &residue.0.script_index(),
+                "basepair",
+            );
+        }
+        for atom in &mut self.atoms {
+            atom.int_props.remove("base_pair");
+        }
+
+        const EDGE_NAMES: [&str; 8] = ["N1", "N2", "O6", "N6", "N3", "N4", "O2", "O4"];
         let mut paired = BTreeSet::new();
-        let mut pairs = Vec::new();
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
         for i in 0..residues.len() {
             if paired.contains(&i) {
                 continue;
             }
-            let mut best: Option<(usize, f64)> = None;
-            for j in (i + 1)..residues.len() {
-                if paired.contains(&j) {
+            let mut partner_counts: BTreeMap<usize, usize> = BTreeMap::new();
+            for &atom_index in &residues[i].1 {
+                let atom = &self.atoms[atom_index];
+                if !EDGE_NAMES
+                    .iter()
+                    .any(|name| atom.matches_name_case_insensitive(name))
+                {
                     continue;
                 }
-                let distance = (residues[i].2 - residues[j].2).length3d();
-                if distance <= cutoff && best.is_none_or(|(_, best_dist)| distance < best_dist) {
-                    best = Some((j, distance));
+                let mut nearest: Option<(usize, f64)> = None;
+                for (j, residue) in residues.iter().enumerate() {
+                    if i == j || paired.contains(&j) {
+                        continue;
+                    }
+                    for &other_index in &residue.1 {
+                        let other = &self.atoms[other_index];
+                        if !is_wc_hbond_pair(&atom.name, &other.name) {
+                            continue;
+                        }
+                        let delta = atom.position - other.position;
+                        let distance = delta.length3d();
+                        if distance <= 1.0e-12 || distance > cutoff {
+                            continue;
+                        }
+                        let plane_ok =
+                            |normal: Vector4| (normal.dot3d(delta) / distance).abs() <= tilt_cos;
+                        if !plane_ok(residues[i].2) || !plane_ok(residue.2) {
+                            continue;
+                        }
+                        let distance_sq = delta.sqlen3d();
+                        if nearest.is_none_or(|(_, best)| distance_sq < best) {
+                            nearest = Some((j, distance_sq));
+                        }
+                    }
+                }
+                if let Some((j, _)) = nearest {
+                    *partner_counts.entry(j).or_default() += 1;
                 }
             }
-            if let Some((j, _)) = best {
+
+            let partner = partner_counts
+                .into_iter()
+                .filter(|(_, count)| (2..=3).contains(count))
+                .max_by_key(|(_, count)| *count)
+                .map(|(j, _)| j);
+            if let Some(j) = partner {
                 paired.insert(i);
                 paired.insert(j);
                 pairs.push((i, j));
             }
         }
 
-        for atom in &mut self.atoms {
-            atom.int_props.remove("base_pair");
-        }
         for (i, j) in &pairs {
-            let lhs_resid = residues[*i].0.res_id;
-            let rhs_resid = residues[*j].0.res_id;
+            let lhs = &residues[*i].0;
+            let rhs = &residues[*j].0;
+            let lhs_resid = lhs.res_id;
+            let rhs_resid = rhs.res_id;
             for index in &residues[*i].1 {
                 self.atoms[*index].set_int_prop("base_pair", rhs_resid);
             }
             for index in &residues[*j].1 {
                 self.atoms[*index].set_int_prop("base_pair", lhs_resid);
             }
+            let _ = self.set_residue_prop_str(
+                &lhs.chain_id,
+                &lhs.script_index(),
+                "basepair",
+                format!("{}.{}", rhs.chain_id, rhs.script_index()),
+            );
+            let _ = self.set_residue_prop_str(
+                &rhs.chain_id,
+                &rhs.script_index(),
+                "basepair",
+                format!("{}.{}", lhs.chain_id, lhs.script_index()),
+            );
         }
         pairs.len()
     }
@@ -1236,22 +1323,16 @@ fn atom_key(atom: &Atom) -> (String, i32, Option<char>, String, Option<char>) {
     )
 }
 
-fn is_nucleotide_residue(name: &str) -> bool {
-    matches!(
-        name.trim().to_ascii_uppercase().as_str(),
-        "A" | "C" | "G" | "T" | "U" | "DA" | "DC" | "DG" | "DT" | "DU"
-    )
-}
-
-fn residue_centroid(molecule: &MolCoord, atom_indices: &[usize]) -> Option<Vector4> {
-    if atom_indices.is_empty() {
-        return None;
-    }
-    let mut sum = Vector4::ZERO;
-    for index in atom_indices {
-        sum = sum + molecule.atoms.get(*index)?.position;
-    }
-    Some(sum / atom_indices.len() as f64)
+fn is_wc_hbond_pair(lhs: &str, rhs: &str) -> bool {
+    let lhs = lhs.trim().to_ascii_uppercase();
+    let rhs = rhs.trim().to_ascii_uppercase();
+    let pair = |a: &str, b: &str| (lhs == a && rhs == b) || (lhs == b && rhs == a);
+    pair("N4", "O6")
+        || pair("N3", "N1")
+        || pair("O2", "N2")
+        || pair("O4", "N6")
+        || pair("N3", "O6")
+        || pair("O2", "N1")
 }
 
 #[cfg(test)]
@@ -1442,20 +1523,48 @@ mod tests {
     #[test]
     fn molcoord_calc_base_pair_marks_near_nucleotide_residues() {
         let mut mol = MolCoord::new();
-        let mut a = atom(1, "A", 1, "N1", 0.0);
-        a.res_name = "A".to_string();
-        let mut t = atom(2, "B", 2, "N3", 3.0);
-        t.res_name = "T".to_string();
-        let mut far = atom(3, "C", 3, "N1", 10.0);
+        let mut serial = 1;
+        let mut push = |chain: &str, resid: i32, res_name: &str, name: &str, x: f64, y: f64| {
+            let mut value = atom(serial, chain, resid, name, x);
+            serial += 1;
+            value.res_name = res_name.to_string();
+            value.position.y = y;
+            mol.push_atom(value);
+        };
+        for (name, x, y) in [
+            ("C4", 0.0, 0.0),
+            ("C5", 1.0, 0.0),
+            ("C8", 0.0, 1.0),
+            ("N6", 0.0, 0.0),
+            ("N1", 0.0, 1.0),
+        ] {
+            push("A", 1, "A", name, x, y);
+        }
+        for (name, x, y) in [
+            ("C2", 3.0, 0.0),
+            ("C4", 4.0, 0.0),
+            ("C6", 3.0, 1.0),
+            ("O4", 3.0, 0.0),
+            ("N3", 3.0, 1.0),
+        ] {
+            push("B", 2, "T", name, x, y);
+        }
+        let mut far = atom(serial, "C", 3, "N1", 10.0);
         far.res_name = "G".to_string();
-        mol.push_atom(a);
-        mol.push_atom(t);
         mol.push_atom(far);
 
         assert_eq!(mol.calc_base_pair(3.7, 30.0), 1);
 
         assert_eq!(mol.atoms()[0].int_prop("base_pair"), Some(2));
-        assert_eq!(mol.atoms()[1].int_prop("base_pair"), Some(1));
-        assert_eq!(mol.atoms()[2].int_prop("base_pair"), None);
+        assert_eq!(mol.atoms()[5].int_prop("base_pair"), Some(1));
+        assert_eq!(mol.atoms()[10].int_prop("base_pair"), None);
+        assert_eq!(
+            mol.get_residue_prop_str("A", "1", "basepair").unwrap(),
+            Some("B.2")
+        );
+        assert_eq!(
+            mol.get_residue_prop_str("B", "2", "basepair").unwrap(),
+            Some("A.1")
+        );
     }
 }

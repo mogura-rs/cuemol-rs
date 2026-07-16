@@ -1,4 +1,4 @@
-use cuemol_core::{Matrix4, Uid, Vector4};
+use cuemol_core::{CueMolError, LDom2Node, Matrix4, Result, Uid, Vector4};
 use cuemol_molstr::MolCoord;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1022,6 +1022,250 @@ impl_anim_obj_deref!(
 );
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum AnimMotion {
+    Noop(NoopAnimObj),
+    Camera(CamMotion),
+    RealProperty(RealPropAnim),
+    Molecule(MolAnim),
+    RendererTransform(RendXformAnim),
+    ShowHide(ShowHideAnim),
+    Spin(SimpleSpin),
+    Slide(SlideInOutAnim),
+    Unknown { node: LDom2Node, base: AnimObj },
+}
+
+impl AnimMotion {
+    pub fn type_name(&self) -> &str {
+        match self {
+            Self::Noop(_) => "NoopAnimObj",
+            Self::Camera(_) => "CamMotion",
+            Self::RealProperty(_) => "RealPropAnim",
+            Self::Molecule(_) => "MolAnim",
+            Self::RendererTransform(_) => "RendXformAnim",
+            Self::ShowHide(_) => "ShowHideAnim",
+            Self::Spin(_) => "SimpleSpin",
+            Self::Slide(_) => "SlideInOutAnim",
+            Self::Unknown { node, .. } => node.type_name(),
+        }
+    }
+
+    pub fn base(&self) -> &AnimObj {
+        match self {
+            Self::Noop(value) => value.base(),
+            Self::Camera(value) => value.base(),
+            Self::RealProperty(value) => value.base(),
+            Self::Molecule(value) => value.base(),
+            Self::RendererTransform(value) => value.base(),
+            Self::ShowHide(value) => value.base(),
+            Self::Spin(value) => value.base(),
+            Self::Slide(value) => value.base(),
+            Self::Unknown { base, .. } => base,
+        }
+    }
+
+    pub fn base_mut(&mut self) -> &mut AnimObj {
+        match self {
+            Self::Noop(value) => value.base_mut(),
+            Self::Camera(value) => value.base_mut(),
+            Self::RealProperty(value) => value.base_mut(),
+            Self::Molecule(value) => value.base_mut(),
+            Self::RendererTransform(value) => value.base_mut(),
+            Self::ShowHide(value) => value.base_mut(),
+            Self::Spin(value) => value.base_mut(),
+            Self::Slide(value) => value.base_mut(),
+            Self::Unknown { base, .. } => base,
+        }
+    }
+
+    pub fn from_ldom2_node(node: &LDom2Node) -> Result<Self> {
+        if node.tag_name() != "motion" {
+            return Err(CueMolError::parse(format!(
+                "expected motion node, got {}",
+                node.tag_name()
+            )));
+        }
+        let type_name = node.type_name();
+        let mut motion = match type_name {
+            "NoopAnimObj" => Self::Noop(NoopAnimObj::new()),
+            "CamMotion" => Self::Camera(CamMotion::new()),
+            "RealPropAnim" => Self::RealProperty(RealPropAnim::new()),
+            "MolAnim" => Self::Molecule(MolAnim::new()),
+            "RendXformAnim" => Self::RendererTransform(RendXformAnim::new()),
+            "ShowHideAnim" => Self::ShowHide(ShowHideAnim::new()),
+            "SimpleSpin" => Self::Spin(SimpleSpin::new()),
+            "SlideInOutAnim" => Self::Slide(SlideInOutAnim::new()),
+            _ => Self::Unknown {
+                node: node.clone(),
+                base: AnimObj::new(),
+            },
+        };
+        read_common_motion_attrs(node, motion.base_mut())?;
+        match &mut motion {
+            Self::Camera(value) => {
+                value.set_endcam(node.str_attr("endcam").to_string());
+                value.set_ignorecenter(read_bool_attr(node, "ignorecenter", false));
+                value.set_ignorerotate(read_bool_attr(node, "ignorerotate", false));
+                value.set_ignorezoom(read_bool_attr(node, "ignorezoom", false));
+                value.set_ignoreslab(read_bool_attr(node, "ignoreslab", false));
+                value.set_keepquatpositive(read_bool_attr(node, "keepquatpositive", true));
+            }
+            Self::RealProperty(value) => {
+                value.set_start_value(read_f64_attr(node, "startValue", 0.0)?);
+                value.set_end_value(read_f64_attr(node, "endValue", 1.0)?);
+                value.set_prop(node.str_attr("prop").to_string());
+                value.set_rend(node.str_attr("rend").to_string());
+            }
+            Self::Molecule(value) => {
+                value.set_start_value(read_f64_attr(node, "startValue", 0.0)?);
+                value.set_end_value(read_f64_attr(node, "endValue", 1.0)?);
+                value.set_prop(node.str_attr("prop").to_string());
+                value.set_mol(node.str_attr("mol").to_string());
+            }
+            Self::RendererTransform(value) => {
+                value.set_prop(node.str_attr("prop").to_string());
+                value.set_rend(node.str_attr("rend").to_string());
+                value.set_start_tran(read_vector_attr(node, "start_tran", Vector4::ZERO)?);
+                value.set_end_tran(read_vector_attr(node, "end_tran", Vector4::ZERO)?);
+            }
+            Self::ShowHide(value) => {
+                value.set_hide(read_bool_attr(node, "hide", false));
+                value.set_fade(read_bool_attr(node, "fade", true));
+                value.set_rend(node.str_attr("rend").to_string());
+                value.set_tgt_alpha(read_f64_attr(node, "tgt_alpha", 1.0)?);
+            }
+            Self::Spin(value) => {
+                value.set_angle(read_f64_attr(node, "angle", 0.0)?);
+                let axis = read_vector_attr(node, "axis", Vector4::new4(0.0, 1.0, 0.0, 0.0))?;
+                if !value.set_axis(axis) {
+                    return Err(CueMolError::parse("SimpleSpin axis is zero"));
+                }
+            }
+            Self::Slide(value) => {
+                value.set_rend(node.str_attr("rend").to_string());
+                value.set_hide(read_bool_attr(node, "hide", false));
+                value.set_direction(read_f64_attr(node, "direction", 0.0)?);
+                value.set_distance(read_f64_attr(node, "distance", 1.0)?);
+            }
+            Self::Noop(_) | Self::Unknown { .. } => {}
+        }
+        Ok(motion)
+    }
+
+    pub fn to_ldom2_node(&self) -> LDom2Node {
+        if let Self::Unknown { node, .. } = self {
+            return node.clone();
+        }
+        let mut node = LDom2Node::new();
+        node.set_tag_name("motion");
+        node.set_type_name(self.type_name());
+        write_common_motion_attrs(&mut node, self.base());
+        match self {
+            Self::Camera(value) => {
+                node.set_str_attr("endcam", value.endcam());
+                node.set_str_attr("ignorecenter", value.ignorecenter().to_string());
+                node.set_str_attr("ignorerotate", value.ignorerotate().to_string());
+                node.set_str_attr("ignorezoom", value.ignorezoom().to_string());
+                node.set_str_attr("ignoreslab", value.ignoreslab().to_string());
+                node.set_str_attr("keepquatpositive", value.keepquatpositive().to_string());
+            }
+            Self::RealProperty(value) => {
+                node.set_str_attr("startValue", value.start_value().to_string());
+                node.set_str_attr("endValue", value.end_value().to_string());
+                node.set_str_attr("prop", value.prop());
+                node.set_str_attr("rend", value.rend());
+            }
+            Self::Molecule(value) => {
+                node.set_str_attr("startValue", value.start_value().to_string());
+                node.set_str_attr("endValue", value.end_value().to_string());
+                node.set_str_attr("prop", value.prop());
+                node.set_str_attr("mol", value.mol());
+            }
+            Self::RendererTransform(value) => {
+                node.set_str_attr("prop", value.prop());
+                node.set_str_attr("rend", value.rend());
+                node.set_str_attr("start_tran", value.start_tran().script_string());
+                node.set_str_attr("end_tran", value.end_tran().script_string());
+            }
+            Self::ShowHide(value) => {
+                node.set_str_attr("hide", value.hide().to_string());
+                node.set_str_attr("fade", value.fade().to_string());
+                node.set_str_attr("rend", value.rend());
+                node.set_str_attr("tgt_alpha", value.tgt_alpha().to_string());
+            }
+            Self::Spin(value) => {
+                node.set_str_attr("angle", value.angle().to_string());
+                node.set_str_attr("axis", value.axis().script_string());
+            }
+            Self::Slide(value) => {
+                node.set_str_attr("rend", value.rend());
+                node.set_str_attr("hide", value.hide().to_string());
+                node.set_str_attr("direction", value.direction().to_string());
+                node.set_str_attr("distance", value.distance().to_string());
+            }
+            Self::Noop(_) | Self::Unknown { .. } => {}
+        }
+        node
+    }
+}
+
+fn read_common_motion_attrs(node: &LDom2Node, base: &mut AnimObj) -> Result<()> {
+    base.set_name(node.str_attr("name").to_string());
+    base.set_disabled(read_bool_attr(node, "disabled", false));
+    base.set_time_ref_name(node.str_attr("timeRefName").to_string());
+    base.set_rel_start(read_i64_attr(node, "start", 0)?);
+    base.set_rel_end(read_i64_attr(node, "end", base.rel_start())?);
+    base.set_quadric(read_f64_attr(node, "quadric", 0.0)?);
+    Ok(())
+}
+
+fn write_common_motion_attrs(node: &mut LDom2Node, base: &AnimObj) {
+    node.set_str_attr("name", base.name());
+    node.set_str_attr("disabled", base.disabled().to_string());
+    node.set_str_attr("timeRefName", base.time_ref_name());
+    node.set_str_attr("start", base.rel_start().to_string());
+    node.set_str_attr("end", base.rel_end().to_string());
+    node.set_str_attr("quadric", base.quadric().to_string());
+}
+
+fn read_bool_attr(node: &LDom2Node, name: &str, default: bool) -> bool {
+    let value = node.str_attr(name).to_string();
+    if value.is_empty() {
+        default
+    } else {
+        value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes") || value == "1"
+    }
+}
+
+fn read_i64_attr(node: &LDom2Node, name: &str, default: i64) -> Result<i64> {
+    let value = node.str_attr(name).to_string();
+    if value.is_empty() {
+        return Ok(default);
+    }
+    value
+        .parse()
+        .map_err(|_| CueMolError::parse(format!("invalid {name} animation value")))
+}
+
+fn read_f64_attr(node: &LDom2Node, name: &str, default: f64) -> Result<f64> {
+    let value = node.str_attr(name).to_string();
+    if value.is_empty() {
+        return Ok(default);
+    }
+    value
+        .parse()
+        .map_err(|_| CueMolError::parse(format!("invalid {name} animation value")))
+}
+
+fn read_vector_attr(node: &LDom2Node, name: &str, default: Vector4) -> Result<Vector4> {
+    let value = node.str_attr(name).to_string();
+    if value.is_empty() {
+        Ok(default)
+    } else {
+        Vector4::from_script_string(&value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct MorphFrame {
     name: String,
     src: String,
@@ -1256,7 +1500,7 @@ pub struct AnimMgr {
     elapsed: TimeValue,
     play_state: AnimPlayState,
     frame_no: i32,
-    objects: Vec<AnimObj>,
+    motions: Vec<AnimMotion>,
 }
 
 impl Default for AnimMgr {
@@ -1269,7 +1513,7 @@ impl Default for AnimMgr {
             elapsed: 0,
             play_state: AnimPlayState::Stop,
             frame_no: 0,
-            objects: Vec::new(),
+            motions: Vec::new(),
         }
     }
 }
@@ -1364,7 +1608,7 @@ impl AnimMgr {
     }
 
     pub fn size(&self) -> usize {
-        self.objects.len()
+        self.motions.len()
     }
 
     pub fn get_size(&self) -> usize {
@@ -1425,46 +1669,102 @@ impl AnimMgr {
     }
 
     pub fn clear(&mut self) {
-        self.objects.clear();
+        self.motions.clear();
     }
 
     pub fn get_at(&self, index: usize) -> Option<&AnimObj> {
-        self.objects.get(index)
+        self.motions.get(index).map(AnimMotion::base)
     }
 
     pub fn get_by_name(&self, name: &str) -> Option<&AnimObj> {
-        self.objects.iter().find(|object| object.name() == name)
+        self.motions
+            .iter()
+            .map(AnimMotion::base)
+            .find(|object| object.name() == name)
+    }
+
+    pub fn motions(&self) -> &[AnimMotion] {
+        &self.motions
+    }
+
+    pub fn append_motion(&mut self, motion: AnimMotion) {
+        self.motions.push(motion);
     }
 
     pub fn append(&mut self, object: AnimObj) {
-        self.objects.push(object);
+        self.motions
+            .push(AnimMotion::Noop(NoopAnimObj { base: object }));
     }
 
     pub fn insert_before(&mut self, index: usize, object: AnimObj) {
-        if index >= self.objects.len() {
-            self.objects.push(object);
+        let motion = AnimMotion::Noop(NoopAnimObj { base: object });
+        if index >= self.motions.len() {
+            self.motions.push(motion);
         } else {
-            self.objects.insert(index, object);
+            self.motions.insert(index, motion);
         }
     }
 
     pub fn remove_at(&mut self, index: usize) -> bool {
-        if index >= self.objects.len() {
+        if index >= self.motions.len() {
             false
         } else {
-            self.objects.remove(index);
+            self.motions.remove(index);
             true
         }
     }
 
     pub fn resolve_rel_time(&mut self) {
         let mut current = 0;
-        for object in &mut self.objects {
+        for motion in &mut self.motions {
+            let object = motion.base_mut();
             let start = current + object.rel_start();
             object.set_abs_start(start);
             object.set_abs_end(start + (object.rel_end() - object.rel_start()).max(0));
             current = object.abs_end();
         }
+    }
+
+    pub fn from_ldom2_node(node: &LDom2Node) -> Result<Self> {
+        if node.tag_name() != "animation" {
+            return Err(CueMolError::parse(format!(
+                "expected animation node, got {}",
+                node.tag_name()
+            )));
+        }
+        let mut manager = Self::new();
+        manager.set_length(read_i64_attr(node, "length", 0)?);
+        manager.set_startcam(node.str_attr("startcam").to_string());
+        manager.set_loop(read_bool_attr(node, "loop", false));
+        for child in node
+            .children()
+            .iter()
+            .filter(|child| !child.is_attr() && child.tag_name() == "motion")
+        {
+            manager.append_motion(AnimMotion::from_ldom2_node(child)?);
+        }
+        manager.resolve_rel_time();
+        if node.str_attr("length").is_empty() {
+            manager.length = manager
+                .motions
+                .iter()
+                .map(|motion| motion.base().abs_end())
+                .max()
+                .unwrap_or(0);
+        }
+        Ok(manager)
+    }
+
+    pub fn to_ldom2_node(&self) -> LDom2Node {
+        let mut node = LDom2Node::new();
+        node.set_tag_name("animation");
+        node.set_str_attr("length", self.length.to_string());
+        node.set_str_attr("startcam", &self.startcam);
+        node.set_str_attr("loop", self.loop_enabled.to_string());
+        for motion in &self.motions {
+            node.append_child_node(motion.to_ldom2_node());
+        }
+        node
     }
 }
 
@@ -1475,6 +1775,7 @@ fn json_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuemol_core::{parse_ldom2_xml, write_ldom2_xml, LDom2Tree};
     use cuemol_molstr::Atom;
 
     fn atom(serial: i32, x: f64) -> Atom {
@@ -1546,6 +1847,49 @@ mod tests {
             Vector4::new3(2.0, 0.0, 0.0)
         );
         assert_eq!(slide.translation_at_rho(2.0, 1.0), Vector4::ZERO);
+    }
+
+    #[test]
+    fn animation_ldom_roundtrip_preserves_typed_and_unknown_motions() {
+        let tree = parse_ldom2_xml(
+            r#"<animation length="2500" startcam="start" loop="true">
+                 <motion type="SimpleSpin" name="spin" start="100" end="2100"
+                         quadric="0.2" angle="180" axis="(0,0,1,0)"/>
+                 <motion type="FutureMotion" name="future" start="0" end="50"
+                         payload="a&amp;b"/>
+               </animation>"#,
+        )
+        .unwrap();
+        let manager = AnimMgr::from_ldom2_node(tree.top()).unwrap();
+        assert_eq!(manager.length(), 2500);
+        assert_eq!(manager.startcam(), "start");
+        assert!(manager.loop_enabled());
+        assert_eq!(manager.motions().len(), 2);
+        let AnimMotion::Spin(spin) = &manager.motions()[0] else {
+            panic!("expected SimpleSpin")
+        };
+        assert_eq!(spin.name(), "spin");
+        assert_eq!(spin.angle(), 180.0);
+        assert_eq!(spin.axis(), Vector4::new4(0.0, 0.0, 1.0, 0.0));
+        assert!(matches!(
+            &manager.motions()[1],
+            AnimMotion::Unknown { node, .. }
+                if node.type_name() == "FutureMotion"
+                    && node.str_attr("payload").as_str() == "a&b"
+        ));
+
+        let output = write_ldom2_xml(&LDom2Tree::from(manager.to_ldom2_node()));
+        assert!(output.contains("type=\"SimpleSpin\""));
+        assert!(output.contains("type=\"FutureMotion\""));
+        assert!(output.contains("payload=\"a&amp;b\""));
+        let reparsed = parse_ldom2_xml(&output).unwrap();
+        assert_eq!(
+            AnimMgr::from_ldom2_node(reparsed.top())
+                .unwrap()
+                .motions()
+                .len(),
+            2
+        );
     }
 
     #[test]

@@ -235,6 +235,11 @@ fn write_node(output: &mut String, node: &LDom2Node, indent: usize) {
     output.push('<');
     output.push_str(node.tag_name());
 
+    let id = node.str_attr("id").to_string();
+    if !id.is_empty() {
+        write_attr(output, "id", &id);
+    }
+
     let permit_user_type_attr = node.is_read_only() && node.child_count() != 0;
     if !permit_user_type_attr {
         let type_attr = node.str_attr("type").to_string();
@@ -685,7 +690,7 @@ mod tests {
         assert!(xml.contains("<root"));
         assert!(xml.contains("type=\"MyClass\""));
         assert!(xml.contains("value=\"42\""));
-        assert!(!xml.contains("id=\"root-id\""));
+        assert_eq!(xml.matches("id=\"root-id\"").count(), 1);
         assert!(xml.contains("name=\"myobj\""));
         assert!(xml.contains("&amp;"));
         assert!(xml.contains("&lt;"));
@@ -740,16 +745,19 @@ mod tests {
         node.set_tag_name("root");
         node.set_type_name("RootType");
         node.set_str_attr("type", "RootType");
+        node.set_str_attr("id", "root-id");
         node.set_str_attr("name", "hello");
         node.append_child("child").set_str_attr("key", "value");
 
         let xml = write_ldom2_xml(&LDom2Tree { top: node });
         assert_eq!(xml.matches("type=\"RootType\"").count(), 1);
+        assert_eq!(xml.matches("id=\"root-id\"").count(), 1);
         assert!(xml.contains("name=\"hello\""));
 
         let parsed = parse_ldom2_xml(&xml).unwrap();
         assert_eq!(parsed.top().tag_name(), "root");
         assert_eq!(parsed.top().type_name(), "RootType");
+        assert!(parsed.top().str_attr("id").equals("root-id"));
         assert!(parsed.top().str_attr("type").equals("RootType"));
         assert!(parsed.top().str_attr("name").equals("hello"));
         assert!(parsed
