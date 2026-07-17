@@ -21,8 +21,8 @@ pub mod view;
 
 pub use camera::{Camera, CenterMark, StereoMode};
 pub use command::{
-    CmdMgr, CommandContext, CommandInstance, CommandValue, CreatedRenderer, LoadObjectCommand,
-    LoadSceneCommand, NewRendererCommand, NewSceneCommand,
+    CmdMgr, CommandContext, CommandInstance, CommandValue, CreatedRenderer, HandlerContentSniffer,
+    LoadObjectCommand, LoadSceneCommand, NewRendererCommand, NewSceneCommand,
 };
 pub use events::{
     shared_view_event_listener, DispListCacheImpl, InDevEvent, ObjectEvent, QsysEvent,

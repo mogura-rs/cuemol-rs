@@ -931,6 +931,7 @@ dependencies = [
  "cuemol-core",
  "cuemol-gfx",
  "cuemol-qsys",
+ "png 0.17.16",
 ]
 
 [[package]]

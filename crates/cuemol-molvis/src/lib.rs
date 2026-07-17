@@ -3267,6 +3267,9 @@ pub struct MoleculeRenderOptions {
     /// occupancy lerped low_color→high_color (C++ BfacColoring, auto-scaled to the
     /// molecule range by default). Another object coloring scheme. `None` = off.
     pub bfac: Option<BfacColoring>,
+    /// Renderer-level integer atom property interpreted as a packed color code.
+    /// Used by `AtomPropColoring` when importing PyMOL sessions.
+    pub atom_color_property: Option<String>,
     /// Multiple-bond geometry used by the source renderer. `Simple` emits two
     /// or three parallel lines; `BallStickType1` emits the original full bond
     /// plus one shortened, offset cylinder with spherical end caps.
@@ -3464,6 +3467,7 @@ impl Default for MoleculeRenderOptions {
             object_paint: Vec::new(),
             rainbow: None,
             bfac: None,
+            atom_color_property: None,
             valence_bond_mode: ValenceBondMode::Off,
             simple_bond_offsets: [0.1, 0.0],
             linear_backbone: false,
@@ -3685,6 +3689,9 @@ pub fn apply_renderer_styles(
         if let Some(bfac) = bfac_coloring_from_attrs(Some(coloring_type.as_str()), get) {
             options.bfac = Some(bfac);
         }
+        if coloring_type == "AtomPropColoring" {
+            options.atom_color_property = Some("col".to_string());
+        }
     }
 }
 
@@ -3799,6 +3806,13 @@ pub fn resolve_atom_colors(molecule: &MolCoord, options: &MoleculeRenderOptions)
         .iter()
         .enumerate()
         .map(|(index, atom)| {
+            if let Some(property) = options.atom_color_property.as_deref() {
+                let color = atom
+                    .int_prop(property)
+                    .map(|code| SolidColor::from_code(code as u32))
+                    .unwrap_or_else(|| SolidColor::from_rgb(0.5, 0.5, 0.5));
+                return solid_color_to_spec(&color);
+            }
             object_carbon_color(index, atom)
                 .unwrap_or_else(|| atom_color(atom.element.as_str(), options.color_mode))
         })
@@ -4326,6 +4340,40 @@ fn ribbon_bfac_colors(
         .collect()
 }
 
+fn ribbon_atom_prop_colors(
+    sample_count: usize,
+    pivots: &[MainchainPoint],
+    subdiv: usize,
+    property: &str,
+    molecule: &MolCoord,
+) -> Vec<Option<[f32; 4]>> {
+    let subdiv = subdiv.max(1);
+    let pivot_colors = pivots
+        .iter()
+        .map(|pivot| {
+            let color = molecule
+                .atoms()
+                .get(pivot.atom_index)
+                .and_then(|atom| atom.int_prop(property))
+                .map(|code| SolidColor::from_code(code as u32))
+                .unwrap_or_else(|| SolidColor::from_rgb(0.5, 0.5, 0.5));
+            let color = color.rgba8();
+            Some([
+                color.r as f32 / 255.0,
+                color.g as f32 / 255.0,
+                color.b as f32 / 255.0,
+                color.a as f32 / 255.0,
+            ])
+        })
+        .collect::<Vec<_>>();
+    (0..sample_count)
+        .map(|index| {
+            let segment = (index / subdiv).min(pivots.len().saturating_sub(1));
+            pivot_colors.get(segment).copied().flatten()
+        })
+        .collect()
+}
+
 /// The putty target value (B-factor or occupancy) of a backbone pivot.
 fn pivot_target(point: &MainchainPoint, target: PuttyTarget) -> f64 {
     match target {
@@ -4741,8 +4789,16 @@ pub fn ribbon_mesh_snapshot(
                 putty_aver,
             );
         }
-        // Object colour scheme precedence: Rainbow, then Bfac, then $molcol→paint.
-        let paint = if let Some(rainbow) = &options.rainbow {
+        // Renderer coloring takes precedence, followed by the object scheme.
+        let paint = if let Some(property) = options.atom_color_property.as_deref() {
+            Some(ribbon_atom_prop_colors(
+                samples.len(),
+                pivots,
+                subdiv,
+                property,
+                molecule,
+            ))
+        } else if let Some(rainbow) = &options.rainbow {
             Some(ribbon_rainbow_colors(
                 samples.len(),
                 chain_offset,
@@ -5992,6 +6048,50 @@ mod tests {
             formal_charge: None,
             int_props: Default::default(),
         }
+    }
+
+    #[test]
+    fn atom_prop_coloring_uses_packed_atom_colors_and_gray_fallback() {
+        let mut colored = sample_atom("C1", "C", 0.0, 0.0, 0.0);
+        colored
+            .int_props
+            .insert("col".to_string(), 0xff00_00ff_u32 as i32);
+        let molecule = MolCoord::with_atoms(vec![colored, sample_atom("C2", "C", 2.0, 0.0, 0.0)]);
+
+        let mut manager = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = manager.new_scene("s");
+        let scene = manager.scene_mut(scene_uid).unwrap();
+        let object_uid = scene.add_molecule("m", molecule.clone());
+        let object = scene.object_mut(object_uid).unwrap();
+        let renderer_uid = object.add_renderer("simple", "simple1");
+        let renderer = object.renderer_mut(renderer_uid).unwrap();
+        let mut coloring = cuemol_core::LDom2Node::new();
+        coloring.set_tag_name("coloring");
+        coloring.set_type_name("AtomPropColoring");
+        renderer.set_qsc_children(vec![coloring]);
+
+        let mut options = MoleculeRenderOptions::default();
+        apply_renderer_styles(&mut options, renderer, &default_style_manager(), 0);
+        assert_eq!(options.atom_color_property.as_deref(), Some("col"));
+        let colors = resolve_atom_colors(&molecule, &options);
+        assert_eq!(
+            colors[0].rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255,
+            }
+        );
+        assert_eq!(
+            colors[1].rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 128,
+                g: 128,
+                b: 128,
+                a: 255,
+            }
+        );
     }
 
     /// Build a 2-atom ball-and-stick scene with the given style preset (and an

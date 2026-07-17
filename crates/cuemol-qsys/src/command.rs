@@ -3,8 +3,13 @@ use cuemol_core::{CueMolError, Result, Uid};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::rc::Rc;
+
+/// Content probe used to disambiguate handlers sharing a file extension.
+pub type HandlerContentSniffer = fn(&[u8]) -> bool;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandValue {
@@ -147,6 +152,7 @@ pub struct CommandContext<T> {
     scene_manager: SceneManager<T>,
     renderer_factory: RendererFactory,
     handlers: Vec<InOutHandler>,
+    content_sniffers: BTreeMap<(i32, String), HandlerContentSniffer>,
     renderers: BTreeMap<Uid, CreatedRenderer>,
 }
 
@@ -162,6 +168,7 @@ impl<T> CommandContext<T> {
             scene_manager: SceneManager::new(),
             renderer_factory: RendererFactory::new(),
             handlers: Vec::new(),
+            content_sniffers: BTreeMap::new(),
             renderers: BTreeMap::new(),
         }
     }
@@ -189,6 +196,35 @@ impl<T> CommandContext<T> {
             return false;
         }
         self.handlers.push(handler);
+        true
+    }
+
+    /// Register a handler together with its content probe.
+    pub fn register_handler_with_sniffer(
+        &mut self,
+        handler: InOutHandler,
+        sniffer: HandlerContentSniffer,
+    ) -> bool {
+        let key = (handler.category(), handler.name().to_string());
+        if !self.register_handler(handler) {
+            return false;
+        }
+        self.content_sniffers.insert(key, sniffer);
+        true
+    }
+
+    /// Add or replace the content probe for an already registered handler.
+    pub fn register_content_sniffer(
+        &mut self,
+        name: &str,
+        category: i32,
+        sniffer: HandlerContentSniffer,
+    ) -> bool {
+        if self.create_handler(name, category).is_none() {
+            return false;
+        }
+        self.content_sniffers
+            .insert((category, name.to_string()), sniffer);
         true
     }
 
@@ -261,6 +297,37 @@ impl<T> CommandContext<T> {
             .filter(|handler| handler.category() == category)
             .filter(|handler| !filtered || wanted.iter().any(|name| *name == handler.name()))
             .find(|handler| extension_matches(&path_lower, handler.file_ext()))
+            .map(|handler| handler.name().to_string())
+            .unwrap_or_default()
+    }
+
+    fn guess_format_by_content(
+        &self,
+        path: &str,
+        category: i32,
+        candidates: Option<&[&InOutHandler]>,
+        max_bytes: u64,
+    ) -> String {
+        let Some(input) = read_sniff_bytes(path, max_bytes) else {
+            return String::new();
+        };
+        let mut handlers = candidates.map_or_else(
+            || {
+                self.handlers
+                    .iter()
+                    .filter(|handler| handler.category() == category)
+                    .collect::<Vec<_>>()
+            },
+            |handlers| handlers.to_vec(),
+        );
+        handlers.sort_by(|lhs, rhs| lhs.name().cmp(rhs.name()));
+        handlers
+            .into_iter()
+            .find(|handler| {
+                self.content_sniffers
+                    .get(&(category, handler.name().to_string()))
+                    .is_some_and(|sniffer| sniffer(&input))
+            })
             .map(|handler| handler.name().to_string())
             .unwrap_or_default()
     }
@@ -615,6 +682,52 @@ impl LoadObjectCommand {
         self.result_object
     }
 
+    /// Pick a reader by extension and, when needed, by registered content
+    /// probes. In content-first mode the extension is ignored. A zero byte cap
+    /// reads to EOF; a positive cap exposes only that many bytes to each probe.
+    pub fn guess_file_format<T>(
+        &self,
+        context: &CommandContext<T>,
+        category: i32,
+        content_first: bool,
+        max_sniff_bytes: u64,
+    ) -> String {
+        if content_first {
+            return context.guess_format_by_content(
+                &self.file_path,
+                category,
+                None,
+                max_sniff_bytes,
+            );
+        }
+
+        let path_lower = self.file_path.to_ascii_lowercase();
+        let mut candidates = context
+            .handlers()
+            .iter()
+            .filter(|handler| handler.category() == category)
+            .filter(|handler| extension_matches(&path_lower, handler.file_ext()))
+            .collect::<Vec<_>>();
+        candidates.sort_by(|lhs, rhs| lhs.name().cmp(rhs.name()));
+        match candidates.as_slice() {
+            [] => String::new(),
+            [handler] => handler.name().to_string(),
+            _ => {
+                let hit = context.guess_format_by_content(
+                    &self.file_path,
+                    category,
+                    Some(&candidates),
+                    max_sniff_bytes,
+                );
+                if hit.is_empty() {
+                    candidates[0].name().to_string()
+                } else {
+                    hit
+                }
+            }
+        }
+    }
+
     fn reset_outputs(&mut self) {
         self.result_object = None;
     }
@@ -625,10 +738,11 @@ impl LoadObjectCommand {
             .ok_or_else(|| CueMolError::invalid_argument("target_scene is required"))?;
 
         if self.file_format.is_empty() {
-            self.file_format = context.guess_format_by_extension(
-                &self.file_path,
+            self.file_format = self.guess_file_format(
+                context,
                 InOutHandler::IOH_CAT_OBJREADER,
-                None,
+                self.content_first,
+                self.max_sniff_bytes,
             );
             if self.file_format.is_empty() {
                 return Err(CueMolError::invalid_argument("cannot guess file type"));
@@ -675,6 +789,19 @@ impl LoadObjectCommand {
         );
         output
     }
+}
+
+fn read_sniff_bytes(path: &str, max_bytes: u64) -> Option<Vec<u8>> {
+    let file = File::open(path).ok()?;
+    let mut input = Vec::new();
+    if max_bytes == 0 {
+        let mut reader = file;
+        reader.read_to_end(&mut input).ok()?;
+    } else {
+        let mut reader = file.take(max_bytes);
+        reader.read_to_end(&mut input).ok()?;
+    }
+    Some(input)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1122,6 +1249,122 @@ mod tests {
         assert_eq!(object.name(), "1CRN.pdb");
         assert_eq!(object.source(), "/tmp/1CRN.pdb.gz");
         assert_eq!(object.source_type(), "pdb");
+    }
+
+    fn sniff_coordinate_cif(input: &[u8]) -> bool {
+        String::from_utf8_lossy(input).contains("_atom_site.")
+    }
+
+    fn sniff_reflection_cif(input: &[u8]) -> bool {
+        String::from_utf8_lossy(input).contains("_refln.")
+    }
+
+    #[test]
+    fn load_object_format_guess_uses_content_and_byte_cap() {
+        let mut context = CommandContext::<()>::new();
+        assert!(context.register_handler_with_sniffer(
+            handler(
+                "mmcifmap",
+                "mmCIF reflection data",
+                "*.cif",
+                InOutHandler::IOH_CAT_OBJREADER,
+            ),
+            sniff_reflection_cif,
+        ));
+        assert!(context.register_handler_with_sniffer(
+            handler(
+                "mmcif",
+                "mmCIF coordinates",
+                "*.cif",
+                InOutHandler::IOH_CAT_OBJREADER,
+            ),
+            sniff_coordinate_cif,
+        ));
+
+        let base =
+            std::env::temp_dir().join(format!("cuemol-load-command-sniff-{}", std::process::id()));
+        let coordinate_path = base.with_extension("cif");
+        let reflection_path = base.with_extension("pdb");
+        let unknown_path = base.with_extension("txt");
+        std::fs::write(
+            &coordinate_path,
+            b"data_test\nloop_\n_atom_site.group_PDB\nATOM 1 N\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &reflection_path,
+            b"data_test\nloop_\n_refln.index_h\n1 12.34\n",
+        )
+        .unwrap();
+        std::fs::write(&unknown_path, b"unrecognized content\n").unwrap();
+
+        let mut command = LoadObjectCommand::new();
+        command.set_file_path(coordinate_path.to_string_lossy());
+        assert_eq!(
+            command.guess_file_format(&context, InOutHandler::IOH_CAT_OBJREADER, false, 0,),
+            "mmcif"
+        );
+        command.set_file_path(reflection_path.to_string_lossy());
+        assert_eq!(
+            command.guess_file_format(&context, InOutHandler::IOH_CAT_OBJREADER, true, 0,),
+            "mmcifmap"
+        );
+        command.set_file_path(unknown_path.to_string_lossy());
+        assert_eq!(
+            command.guess_file_format(&context, InOutHandler::IOH_CAT_OBJREADER, true, 0,),
+            ""
+        );
+
+        let capped_path = base.with_file_name(format!(
+            "cuemol-load-command-sniff-cap-{}.cif",
+            std::process::id()
+        ));
+        let mut capped = String::from("data_test\n");
+        while capped.len() < 2048 {
+            capped.push_str("# padding ignored by the content probe\n");
+        }
+        capped.push_str("loop_\n_atom_site.group_PDB\nATOM 1 N\n");
+        std::fs::write(&capped_path, capped).unwrap();
+        command.set_file_path(capped_path.to_string_lossy());
+        assert_eq!(
+            command.guess_file_format(&context, InOutHandler::IOH_CAT_OBJREADER, true, 512,),
+            ""
+        );
+        assert_eq!(
+            command.guess_file_format(&context, InOutHandler::IOH_CAT_OBJREADER, true, 0,),
+            "mmcif"
+        );
+
+        let scene_uid = context.scene_manager_mut().create_scene_named("target");
+        let mut args = BTreeMap::new();
+        args.insert("target_scene".to_string(), CommandValue::Uid(scene_uid));
+        args.insert(
+            "file_path".to_string(),
+            CommandValue::String(reflection_path.to_string_lossy().into_owned()),
+        );
+        args.insert("content_first".to_string(), CommandValue::Bool(true));
+        let output = CmdMgr::new()
+            .run_cmd_args_with_context("load_object", args, &mut context)
+            .unwrap();
+        let object_uid = match output.get("result_object") {
+            Some(CommandValue::Uid(uid)) => *uid,
+            other => panic!("unexpected result_object: {other:?}"),
+        };
+        assert_eq!(
+            context
+                .scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .object(object_uid)
+                .unwrap()
+                .source_type(),
+            "mmcifmap"
+        );
+
+        let _ = std::fs::remove_file(coordinate_path);
+        let _ = std::fs::remove_file(reflection_path);
+        let _ = std::fs::remove_file(unknown_path);
+        let _ = std::fs::remove_file(capped_path);
     }
 
     #[test]

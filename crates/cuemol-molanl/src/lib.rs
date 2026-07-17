@@ -135,18 +135,24 @@ impl MolAnlManager {
         &self,
         reference: &MolCoord,
         reference_selector: &Selector,
-        moving: &MolCoord,
+        moving: &mut MolCoord,
         moving_selector: &Selector,
-        _use_prop: bool,
+        use_prop: bool,
     ) -> Result<Matrix4> {
-        self.superpose_lsq_matrix(reference, reference_selector, moving, moving_selector)
+        let matrix =
+            self.superpose_lsq_matrix(reference, reference_selector, moving, moving_selector)?;
+        if !use_prop {
+            moving.xform_by_mat(matrix, None);
+            moving.fire_atoms_moved();
+        }
+        Ok(matrix)
     }
 
     pub fn superpose_lsq_1(
         &self,
         reference: &MolCoord,
         reference_selector: &Selector,
-        moving: &MolCoord,
+        moving: &mut MolCoord,
         moving_selector: &Selector,
         use_prop: bool,
     ) -> Result<Matrix4> {
@@ -166,13 +172,12 @@ impl MolAnlManager {
     /// LSQ when the structures lack enough secondary structure for SSM (e.g.
     /// tiny / SS-less selections of equal size), preserving the LSQ contract
     /// there.
-    pub fn superpose_ssm1(
+    pub fn superpose_ssm_matrix(
         &self,
         reference: &MolCoord,
         reference_selector: &Selector,
         moving: &MolCoord,
         moving_selector: &Selector,
-        _use_prop: bool,
     ) -> Result<Matrix4> {
         match ssm::superpose_ssm_native(reference, reference_selector, moving, moving_selector) {
             Ok((matrix, _rmsd, _nfit)) => Ok(matrix),
@@ -182,11 +187,28 @@ impl MolAnlManager {
         }
     }
 
+    pub fn superpose_ssm1(
+        &self,
+        reference: &MolCoord,
+        reference_selector: &Selector,
+        moving: &mut MolCoord,
+        moving_selector: &Selector,
+        use_prop: bool,
+    ) -> Result<Matrix4> {
+        let matrix =
+            self.superpose_ssm_matrix(reference, reference_selector, moving, moving_selector)?;
+        if !use_prop {
+            moving.xform_by_mat(matrix, None);
+            moving.fire_atoms_moved();
+        }
+        Ok(matrix)
+    }
+
     pub fn superpose_ssm_1(
         &self,
         reference: &MolCoord,
         reference_selector: &Selector,
-        moving: &MolCoord,
+        moving: &mut MolCoord,
         moving_selector: &Selector,
         use_prop: bool,
     ) -> Result<Matrix4> {
@@ -243,21 +265,17 @@ impl MolAnlManager {
             .ok_or_else(|| CueMolError::NotFound(format!("moving object {moving_id}")))?
             .mol()
             .clone();
-        let matrix = self.superpose_ssm1(
-            &reference,
-            &reference_selector,
-            &moving,
-            &moving_selector,
-            false,
-        )?;
-        let moved_count = scene_manager
+        let matrix =
+            self.superpose_ssm_matrix(&reference, &reference_selector, &moving, &moving_selector)?;
+        let moving = scene_manager
             .object_mut(moving_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("moving object {moving_id}")))?
-            .mol_mut()
-            .xform_by_mat(matrix, Some(&moving_selector));
+            .mol_mut();
+        let moved_count = moving.xform_by_mat(matrix, None);
         if moved_count == 0 {
             return Err(CueMolError::invalid_argument("no moving atoms selected"));
         }
+        moving.fire_atoms_moved();
         Ok(matrix)
     }
 
@@ -378,9 +396,11 @@ impl MolAnlManager {
         let Some(index2) = atom_index_by_serial(molecule, aid2) else {
             return false;
         };
-        let before = molecule.bond_count();
+        if molecule.mark_bond_persistent(index1, index2) {
+            return true;
+        }
         molecule.add_bond(index1, index2, BondOrder::Single);
-        molecule.bond_count() != before
+        molecule.mark_bond_persistent(index1, index2)
     }
 
     pub fn remove_bond(&self, molecule: &mut MolCoord, aid1: i32, aid2: i32) -> bool {
@@ -388,18 +408,21 @@ impl MolAnlManager {
     }
 
     pub fn get_nostd_bonds_json(&self, molecule: &MolCoord) -> String {
-        bond_pairs_json(
-            molecule
-                .bonds()
-                .iter()
-                .filter_map(|bond| {
-                    let aid1 = molecule.atoms().get(bond.atom1)?.serial;
-                    let aid2 = molecule.atoms().get(bond.atom2)?.serial;
-                    Some(sorted_pair(aid1, aid2))
-                })
-                .collect::<BTreeSet<_>>()
-                .into_iter(),
-        )
+        let bonds = molecule
+            .bonds()
+            .iter()
+            .filter(|bond| bond.persist)
+            .filter_map(|bond| {
+                let atom1 = molecule.atoms().get(bond.atom1)?;
+                let atom2 = molecule.atoms().get(bond.atom2)?;
+                Some(format!(
+                    "[{},{}]",
+                    contact_atom_json(atom1),
+                    contact_atom_json(atom2)
+                ))
+            })
+            .collect::<Vec<_>>();
+        format!("[{}]", bonds.join(","))
     }
 
     pub fn calc_atom_contact_json(
@@ -619,8 +642,8 @@ fn selected_index_pairs(
     moving: &MolCoord,
     moving_selector: &Selector,
 ) -> Result<Vec<(usize, usize)>> {
-    let ref_indices = reference.select_indices(reference_selector);
-    let mov_indices = moving.select_indices(moving_selector);
+    let ref_indices = selected_indices_in_mol_array_order(reference, reference_selector);
+    let mov_indices = selected_indices_in_mol_array_order(moving, moving_selector);
     if ref_indices.is_empty() {
         return Err(CueMolError::invalid_argument("no reference atoms selected"));
     }
@@ -632,6 +655,20 @@ fn selected_index_pairs(
         )));
     }
     Ok(ref_indices.into_iter().zip(mov_indices).collect())
+}
+
+/// Reproduce C++ `MolArrayMap` ordering. Its map key contains only chain,
+/// integer residue id, and atom name, so alternate-location duplicates with the
+/// same key collapse to the first selected atom.
+fn selected_indices_in_mol_array_order(molecule: &MolCoord, selector: &Selector) -> Vec<usize> {
+    let mut atoms = BTreeMap::new();
+    for index in molecule.select_indices(selector) {
+        let atom = &molecule.atoms()[index];
+        atoms
+            .entry((atom.chain_id.clone(), atom.res_id, atom.name.clone()))
+            .or_insert(index);
+    }
+    atoms.into_values().collect()
 }
 
 fn validate_superpose_ids(reference_id: u64, moving_id: u64) -> Result<()> {
@@ -881,21 +918,33 @@ fn remove_bond_by_serial(molecule: &mut MolCoord, aid1: i32, aid2: i32) -> bool 
         return false;
     };
 
-    let mut rebuilt = MolCoord::with_atoms(molecule.atoms().to_vec());
-    let mut removed = false;
-    for bond in molecule.bonds() {
-        let is_target = (bond.atom1 == index1 && bond.atom2 == index2)
-            || (bond.atom1 == index2 && bond.atom2 == index1);
-        if is_target {
-            removed = true;
-        } else {
-            rebuilt.add_bond(bond.atom1, bond.atom2, bond.order);
-        }
+    molecule.remove_bond_between(index1, index2)
+}
+
+fn contact_atom_json(atom: &Atom) -> String {
+    let residue = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
+    let mut output = format!(
+        "{{\"aid\":{},\"chain\":\"{}\",\"resid\":\"{}\",\"resn\":\"{}\",\"aname\":\"{}\"",
+        atom.serial,
+        json_escape(&atom.chain_id),
+        json_escape(&residue.script_index()),
+        json_escape(&atom.res_name),
+        json_escape(&atom.name)
+    );
+    if let Some(alt_loc) = atom.alt_loc {
+        write!(
+            output,
+            ",\"altc\":\"{}\"",
+            json_escape(&alt_loc.to_string())
+        )
+        .expect("writing to a String cannot fail");
     }
-    if removed {
-        *molecule = rebuilt;
-    }
-    removed
+    output.push('}');
+    output
+}
+
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -947,6 +996,31 @@ mod tests {
     }
 
     #[test]
+    fn rmsd_pairs_atoms_in_mol_array_key_order() {
+        let mut reference = MolCoord::new();
+        reference.push_atom(atom(1, "N", "A", 1, "N", 0.0));
+        reference.push_atom(atom(2, "CA", "A", 1, "C", 10.0));
+
+        let mut moving = MolCoord::new();
+        // Storage order differs, but the molecular atom keys and positions are
+        // identical. C++ MolArrayMap sorts both selections before pairing.
+        moving.push_atom(atom(2, "CA", "A", 1, "C", 10.0));
+        moving.push_atom(atom(1, "N", "A", 1, "N", 0.0));
+
+        let manager = MolAnlManager::new();
+        assert_eq!(
+            manager
+                .calc_rmsd_without_report(&reference, &Selector::All, &moving, &Selector::All,)
+                .unwrap(),
+            0.0
+        );
+        assert!(manager
+            .superpose_lsq_matrix(&reference, &Selector::All, &moving, &Selector::All,)
+            .unwrap()
+            .is_ident());
+    }
+
+    #[test]
     fn manager_calc_rmsd_scr_writes_reference_report() {
         let mut reference = MolCoord::new();
         reference.push_atom(atom(1, "N", "A", 1, "N", 1.0));
@@ -986,13 +1060,37 @@ mod tests {
         let shared = Arc::new(Mutex::new(scene_manager));
         let manager = MolAnlManager::with_scene_manager(shared.clone());
         manager
-            .superpose_ssm2(reference_uid.get(), "all", moving_uid.get(), "all")
+            .superpose_ssm2(reference_uid.get(), "aid 1", moving_uid.get(), "aid 1")
             .unwrap();
 
         let scene_manager = shared.lock().unwrap();
         let moved = scene_manager.object(moving_uid).unwrap().mol();
         assert_eq!(moved.atoms()[0].position, Vector4::new3(1.0, 0.0, 0.0));
         assert_eq!(moved.atoms()[1].position, Vector4::new3(2.0, 0.0, 0.0));
+        assert_eq!(moved.atoms_moved_generation(), 1);
+    }
+
+    #[test]
+    fn superpose_lsq1_applies_transform_to_the_whole_moving_molecule() {
+        let mut reference = MolCoord::new();
+        reference.push_atom(atom(1, "N", "A", 1, "N", 1.0));
+        reference.push_atom(atom(2, "CA", "A", 1, "C", 2.0));
+        let mut moving = MolCoord::new();
+        moving.push_atom(atom(1, "N", "A", 1, "N", 3.0));
+        moving.push_atom(atom(2, "CA", "A", 1, "C", 4.0));
+
+        MolAnlManager::new()
+            .superpose_lsq1(
+                &reference,
+                &parse_selector("aid 1").unwrap(),
+                &mut moving,
+                &parse_selector("aid 1").unwrap(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(moving.atoms()[0].position, Vector4::new3(1.0, 0.0, 0.0));
+        assert_eq!(moving.atoms()[1].position, Vector4::new3(2.0, 0.0, 0.0));
+        assert_eq!(moving.atoms_moved_generation(), 1);
     }
 
     #[test]
@@ -1084,13 +1182,42 @@ mod tests {
             "[[1,2]]"
         );
         assert!(manager.make_bond(&mut molecule, 1, 2));
-        assert_eq!(manager.get_nostd_bonds_json(&molecule), "[[1,2]]");
+        assert_eq!(
+            manager.get_nostd_bonds_json(&molecule),
+            "[[{\"aid\":1,\"chain\":\"A\",\"resid\":\"1\",\"resn\":\"ALA\",\"aname\":\"N\"},{\"aid\":2,\"chain\":\"A\",\"resid\":\"2\",\"resn\":\"ALA\",\"aname\":\"O\"}]]"
+        );
         assert_eq!(
             manager.calc_atom_contact_json(&molecule, &Selector::All, 1.0, 3.0, false, 10),
             "[[2,3]]"
         );
         assert!(manager.remove_bond(&mut molecule, 1, 2));
-        assert_eq!(manager.get_nostd_bonds_json(&molecule), "");
+        assert_eq!(manager.get_nostd_bonds_json(&molecule), "[]");
+    }
+
+    #[test]
+    fn persistent_bond_edit_preserves_other_molecule_metadata() {
+        let manager = MolAnlManager::new();
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1, "N", "A", 1, "N", 0.0));
+        molecule.push_atom(atom(2, "O", "A", 2, "O", 2.5));
+        molecule
+            .set_residue_prop_str("A", "1", "secondary", "Hs")
+            .unwrap();
+        molecule.add_bond(0, 1, BondOrder::Single);
+        assert_eq!(manager.get_nostd_bonds_json(&molecule), "[]");
+
+        // Making an already inferred bond marks that same bond persistent.
+        assert!(manager.make_bond(&mut molecule, 1, 2));
+        assert!(molecule.bonds()[0].persist);
+        assert_ne!(manager.get_nostd_bonds_json(&molecule), "[]");
+        assert!(manager.remove_bond(&mut molecule, 1, 2));
+        assert_eq!(molecule.bond_count(), 0);
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "1", "secondary")
+                .unwrap(),
+            Some("Hs")
+        );
     }
 
     #[test]

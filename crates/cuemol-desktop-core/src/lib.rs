@@ -1,13 +1,13 @@
 use cuemol_anim::{AnimMgr, MorphFrame, MorphMol};
-use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
-use cuemol_importers::PseFileReader;
+use cuemol_core::{CueMolError, LDom2Node, Matrix4, RangeSet, Result, Uid, Vector4};
+use cuemol_importers::{PseFileReader, PseMeasurementKind, PseRepresentation};
 use cuemol_mdtools::{read_amber_prmtop_file, read_gro_file, read_psf_file};
 use cuemol_molanl::MolAnlManager;
 use cuemol_molstr::{
-    parse_selector, read_mol2_file, write_pdb_string, write_sdf_string, LoadObjectResult,
-    LoadedDensityMap, LoadedLWObject, LoadedLWRenderer, LoadedSurface, MolCommandManager, MolCoord,
-    MolObject, MolRenderer, MolSceneManager, NewRendererResult, NewSceneResult, QdfMolFileReader,
-    QdfMolFileWriter, QscLoadStatus, Selector, StreamManager,
+    parse_selector, read_mol2_file, write_pdb_string, write_sdf_string, AtomIntrKind,
+    LoadObjectResult, LoadedDensityMap, LoadedLWObject, LoadedLWRenderer, LoadedSurface,
+    MolCommandManager, MolCoord, MolObject, MolRenderer, MolSceneManager, NewRendererResult,
+    NewSceneResult, QdfMolFileReader, QdfMolFileWriter, QscLoadStatus, Selector, StreamManager,
 };
 #[cfg(test)]
 use cuemol_molvis::default_style_manager;
@@ -19,7 +19,7 @@ use cuemol_molvis::{
 use cuemol_qsys::{MultiGradient, ScalarObject, StyleManager};
 #[cfg(feature = "offscreen")]
 use cuemol_render::PngSceneExporter;
-use cuemol_render::{PovSceneExporter, RenderSceneSnapshot};
+use cuemol_render::{PovSceneExporter, RenderSceneSnapshot, UmbreonFrame, UmbreonSceneExporter};
 use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter};
 use cuemol_xtal::{
     density_map_from_cif, read_brix_map_bytes, read_brix_map_file, read_ccp4_map_bytes,
@@ -1708,21 +1708,140 @@ impl DesktopAppState {
     ) -> Result<Vec<Uid>> {
         let mut reader = PseFileReader::new();
         reader.set_path(path.to_string_lossy());
-        let molecules = reader.read_named_molecules()?;
-        let mut object_uids = Vec::with_capacity(molecules.len());
-        for (index, (name, molecule)) in molecules.into_iter().enumerate() {
-            let name = if name.trim().is_empty() {
+        let camera = reader.read_camera()?;
+        let records = reader.read_molecule_records()?;
+        let measurement_records = reader.read_measurement_records()?;
+        let mut object_uids = Vec::with_capacity(records.len());
+        for (index, record) in records.into_iter().enumerate() {
+            let name = if record.name().trim().is_empty() {
                 format!("{fallback_name}_{}", index + 1)
             } else {
-                name
+                record.name().to_string()
             };
-            let object_uid = self
+            let visible = record.is_visible();
+            let labels = record
+                .labels()
+                .iter()
+                .map(|label| (label.atom_index(), label.text().to_string()))
+                .collect::<Vec<_>>();
+            let representations = [
+                (
+                    PseRepresentation::Sticks,
+                    "ballstick",
+                    "ballstick1",
+                    Some("DefaultBallStick"),
+                ),
+                (
+                    PseRepresentation::Spheres,
+                    "cpk",
+                    "cpk1",
+                    Some("DefaultCPK"),
+                ),
+                (
+                    PseRepresentation::Cartoon,
+                    "ribbon",
+                    "ribbon1",
+                    Some("DefaultRibbon"),
+                ),
+                (
+                    PseRepresentation::Lines,
+                    "simple",
+                    "simple1",
+                    Some("DefaultSimple"),
+                ),
+                (PseRepresentation::Surface, "directsurf", "surface1", None),
+            ]
+            .map(|(representation, renderer_type, renderer_name, style)| {
+                (
+                    record.atom_indices(representation).to_vec(),
+                    renderer_type,
+                    renderer_name,
+                    style,
+                )
+            });
+            let scene = self
                 .scene_manager_mut()
                 .scene_mut(scene_uid)
-                .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?
-                .add_molecule(name, molecule);
-            self.new_renderer(scene_uid, object_uid, "simple", "simple")?;
+                .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+            let object_uid = scene.add_molecule(name, record.into_molecule());
+            let object = scene.object_mut(object_uid).unwrap();
+            object.set_visible(visible);
+            for (atom_indices, renderer_type, renderer_name, style) in representations {
+                if atom_indices.is_empty() {
+                    continue;
+                }
+                let renderer_uid = object.add_renderer(renderer_type, renderer_name);
+                let renderer = object.renderer_mut(renderer_uid).unwrap();
+                renderer.set_selection(pse_atom_selector(&atom_indices));
+                if let Some(style) = style {
+                    renderer.set_qsc_attr("style", style);
+                }
+                renderer.set_qsc_children(vec![pse_atom_coloring_node()]);
+            }
+            if !labels.is_empty() {
+                let renderer_uid = object.add_renderer("*namelabel", "namelabel1");
+                let renderer = object.renderer_mut(renderer_uid).unwrap();
+                renderer.set_qsc_attr("style", "DefaultLabel");
+                renderer.set_qsc_children(
+                    labels
+                        .iter()
+                        .map(|(atom_index, text)| pse_atom_label_node(*atom_index, text))
+                        .collect(),
+                );
+            }
             object_uids.push(object_uid);
+        }
+        for (index, record) in measurement_records.into_iter().enumerate() {
+            let target_uid = match record
+                .molecule_index()
+                .and_then(|index| object_uids.get(index).copied())
+            {
+                Some(uid) => uid,
+                None => {
+                    let scene = self
+                        .scene_manager_mut()
+                        .scene_mut(scene_uid)
+                        .ok_or_else(|| {
+                            CueMolError::NotFound(format!("scene {}", scene_uid.get()))
+                        })?;
+                    let uid =
+                        scene.add_molecule_with_source_type("dummy", MolCoord::new(), "qdfmol");
+                    object_uids.push(uid);
+                    uid
+                }
+            };
+            let defs = record
+                .measurements()
+                .iter()
+                .map(|measurement| {
+                    let kind = match measurement.kind() {
+                        PseMeasurementKind::Distance => AtomIntrKind::Distance,
+                        PseMeasurementKind::Angle => AtomIntrKind::Angle,
+                        PseMeasurementKind::Torsion => AtomIntrKind::Torsion,
+                    };
+                    (kind, measurement.positions().to_vec())
+                })
+                .collect::<Vec<_>>();
+            let scene = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+            let object = scene.object_mut(target_uid).unwrap();
+            let renderer_name = if record.name().trim().is_empty() {
+                format!("atomintr{}", index + 1)
+            } else {
+                record.name().to_string()
+            };
+            let renderer_uid = object.add_atom_intr_position_renderer_defs(renderer_name, &defs)?;
+            let renderer = object.renderer_mut(renderer_uid).unwrap();
+            renderer.set_qsc_attr("style", "DefaultLabel,DefaultAtomIntr");
+            renderer.set_visible(record.is_visible());
+        }
+        if let Some(camera) = camera {
+            self.scene_manager_mut()
+                .scene_mut(scene_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?
+                .set_camera(camera);
         }
         Ok(object_uids)
     }
@@ -1787,8 +1906,20 @@ impl DesktopAppState {
         selection_text: &str,
     ) -> Result<usize> {
         let snapshot = self.active_render_snapshot(selection_text)?;
-        let output = PovSceneExporter::new().write_atoms_string(&snapshot.atoms);
-        fs::write(path, output)?;
+        let mesh = cuemol_render::tessellate_snapshot(&snapshot);
+        let camera = self
+            .active_scene_saved_camera()
+            .unwrap_or_else(|| auto_frame_camera(&snapshot));
+        let mut exporter = PovSceneExporter::new();
+        exporter
+            .handler_mut()
+            .set_path(path.as_ref().to_string_lossy().into_owned());
+        exporter.write_scene_file(
+            &mesh,
+            camera.center(),
+            (camera.zoom() / 1.2).max(1.0),
+            camera.is_perspective(),
+        )?;
         Ok(snapshot.atom_count())
     }
 
@@ -2051,6 +2182,48 @@ impl DesktopAppState {
         out
     }
 
+    /// Project enabled `*namelabel` renderer labels into viewport pixels.
+    pub fn active_name_labels(
+        &self,
+        mvp: [[f32; 4]; 4],
+        width: f32,
+        height: f32,
+        max: usize,
+    ) -> Vec<GuiAtomLabel> {
+        let Some(scene_uid) = self.active_scene else {
+            return Vec::new();
+        };
+        let Some(scene) = self.scene_manager().scene(scene_uid) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for object in scene.objects().iter().filter(|object| object.is_visible()) {
+            for renderer in object.renderers().iter().filter(|renderer| {
+                renderer.is_visible() && renderer.renderer_type() == "*namelabel"
+            }) {
+                let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
+                for (mut position, text) in object.name_label_entries(renderer) {
+                    if out.len() >= max {
+                        return out;
+                    }
+                    if xform != Matrix4::IDENTITY {
+                        xform.xform3d(&mut position);
+                    }
+                    let Some((x, y)) = project_to_image(
+                        mvp,
+                        [position.x as f32, position.y as f32, position.z as f32],
+                        width,
+                        height,
+                    ) else {
+                        continue;
+                    };
+                    out.push(GuiAtomLabel { x, y, text });
+                }
+            }
+        }
+        out
+    }
+
     /// Distance / angle / torsion of the selected atoms (CueMol2 AtomIntr): 2 selected
     /// atoms → distance, 3 → angle, 4 → torsion, in atom-index order. Shared by all
     /// three front ends. `None` for any other count.
@@ -2088,6 +2261,61 @@ impl DesktopAppState {
             .camera_by_name("__current")
             .or_else(|| scene.cameras().first())
             .cloned()
+    }
+
+    /// Render the active scene with the in-process Umbreon-compatible CPU ray
+    /// tracer. This path does not require a GPU adapter.
+    pub fn export_active_scene_umbreon(
+        &self,
+        path: impl AsRef<Path>,
+        width: u32,
+        height: u32,
+        selection_text: &str,
+    ) -> Result<UmbreonFrame> {
+        let scene_uid = self
+            .active_scene
+            .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
+        let mut exporter = UmbreonSceneExporter::new();
+        exporter.scene_mut().attach(scene_uid);
+        exporter
+            .handler_mut()
+            .set_path(path.as_ref().to_string_lossy());
+        exporter.set_width(width.min(i32::MAX as u32) as i32);
+        exporter.set_height(height.min(i32::MAX as u32) as i32);
+        self.write_umbreon_exporter(&mut exporter, selection_text)
+    }
+
+    /// Execute a configured Umbreon exporter against its attached scene.
+    pub fn write_umbreon_exporter(
+        &self,
+        exporter: &mut UmbreonSceneExporter,
+        selection_text: &str,
+    ) -> Result<UmbreonFrame> {
+        let scene_uid = exporter
+            .scene()
+            .client_scene()
+            .ok_or_else(|| CueMolError::invalid_argument("Umbreon exporter is not attached"))?;
+        let snapshot = self.render_snapshot(scene_uid, selection_text)?;
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let named_camera = exporter.scene().camera_name();
+        let camera = if named_camera.is_empty() {
+            scene
+                .camera_by_name("__current")
+                .or_else(|| scene.cameras().first())
+                .cloned()
+        } else {
+            Some(
+                scene
+                    .camera_by_name(named_camera)
+                    .cloned()
+                    .ok_or_else(|| CueMolError::NotFound(format!("camera {named_camera}")))?,
+            )
+        }
+        .unwrap_or_else(|| auto_frame_camera(&snapshot));
+        exporter.write_snapshot(&snapshot, &camera, [0.1, 0.1, 0.12, 1.0])
     }
 
     /// Render the active scene to a PNG file via the offscreen wgpu renderer.
@@ -3431,7 +3659,6 @@ impl DesktopAppState {
     }
 }
 
-#[cfg(feature = "offscreen")]
 fn auto_frame_camera(snapshot: &RenderSceneSnapshot) -> cuemol_qsys::Camera {
     let mut camera = cuemol_qsys::Camera::new();
     if let Some((min, max)) = snapshot.bounds {
@@ -4609,6 +4836,32 @@ fn merge_bounds(
     }
 }
 
+fn pse_atom_selector(atom_indices: &[usize]) -> Selector {
+    let mut ranges = RangeSet::new();
+    for &index in atom_indices {
+        if let Ok(index) = i32::try_from(index) {
+            ranges.insert_value(index);
+        }
+    }
+    Selector::Aid(ranges)
+}
+
+fn pse_atom_coloring_node() -> LDom2Node {
+    let mut node = LDom2Node::new();
+    node.set_tag_name("coloring");
+    node.set_type_name("AtomPropColoring");
+    node
+}
+
+fn pse_atom_label_node(atom_index: usize, text: &str) -> LDom2Node {
+    let mut node = LDom2Node::new();
+    node.set_tag_name("label");
+    node.set_attr_flag(false);
+    node.set_str_attr("aid", atom_index.to_string());
+    node.set_str_attr("text", text);
+    node
+}
+
 fn parse_gui_selector(selection_text: &str) -> Result<Option<cuemol_molstr::Selector>> {
     let trimmed = selection_text.trim();
     if trimmed.is_empty() {
@@ -5594,6 +5847,31 @@ mod tests {
     }
 
     #[test]
+    fn exports_active_scene_with_umbreon_cpu_raytracer() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("umbreon", false).result_scene;
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00\n",
+        )
+        .unwrap();
+        app.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let path = std::env::temp_dir().join(format!(
+            "cuemol2-rs-umbreon-export-{}.png",
+            std::process::id()
+        ));
+        let frame = app.export_active_scene_umbreon(&path, 24, 24, "").unwrap();
+        assert_eq!(frame.width, 24);
+        assert_eq!(frame.height, 24);
+        assert!(std::fs::read(&path)
+            .unwrap()
+            .starts_with(b"\x89PNG\r\n\x1a\n"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn desktop_app_state_exposes_command_and_stream_facades() {
         let mut app = DesktopAppState::new();
         assert_eq!(app.scene_manager().scene_count(), 0);
@@ -6395,6 +6673,39 @@ mod tests {
                 && (label.x - 50.0).abs() < 1.0e-4
                 && (label.y - 50.0).abs() < 1.0e-4
         }));
+    }
+
+    #[test]
+    fn name_label_renderer_projects_custom_pse_text() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("labels", false).result_scene;
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let object = app.scene_manager_mut().object_mut(object_uid).unwrap();
+        let renderer_uid = object.add_renderer("*namelabel", "labels");
+        object
+            .renderer_mut(renderer_uid)
+            .unwrap()
+            .set_qsc_children(vec![pse_atom_label_node(0, "PyMOL label")]);
+
+        let mvp = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let labels = app.active_name_labels(mvp, 100.0, 100.0, 10);
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].text, "PyMOL label");
+        assert!((labels[0].x - 50.0).abs() < 1.0e-6);
+        assert!((labels[0].y - 50.0).abs() < 1.0e-6);
     }
 
     #[test]
@@ -7900,7 +8211,7 @@ attribute \"dep\" string \"positions\"
             .join("../cuemol-importers/tests/fixtures/mol3.pse");
         let mut app = DesktopAppState::new();
         let GuiLoadedPath::Object {
-            scene_uid: _,
+            scene_uid,
             object_uid,
         } = app.open_path(path).unwrap()
         else {
@@ -7910,7 +8221,26 @@ attribute \"dep\" string \"positions\"
         assert_eq!(object.name(), "mol1");
         assert_eq!(object.mol().atom_count(), 3);
         assert_eq!(object.mol().bonds().len(), 1);
-        assert_eq!(object.renderers().len(), 1);
+        assert_eq!(
+            object
+                .renderers()
+                .iter()
+                .map(MolRenderer::renderer_type)
+                .collect::<Vec<_>>(),
+            vec!["ballstick", "ribbon"]
+        );
+        assert!(object.renderers().iter().all(|renderer| {
+            renderer.resolved_child_type("coloring", &default_style_manager(), DEFAULT_STYLE_SCOPE)
+                == Some("AtomPropColoring".to_string())
+        }));
+        let camera = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .camera_by_name("__current")
+            .unwrap();
+        assert!(camera.zoom().is_finite());
+        assert!(camera.slab_depth() > 0.0);
     }
 
     #[test]
@@ -7959,9 +8289,9 @@ attribute \"dep\" string \"positions\"
 
         let exported_atoms = app.export_active_scene_pov(&pov_path, "name CA").unwrap();
         assert_eq!(exported_atoms, 327);
-        assert!(std::fs::read_to_string(&pov_path)
-            .unwrap()
-            .contains("sphere"));
+        let pov = std::fs::read_to_string(&pov_path).unwrap();
+        assert!(pov.contains("camera {"));
+        assert!(pov.contains("mesh2 {"));
 
         let rows = app.active_sequence_summaries();
         assert_eq!(rows.len(), 1);

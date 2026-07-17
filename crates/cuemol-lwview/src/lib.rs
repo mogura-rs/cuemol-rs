@@ -319,7 +319,7 @@ impl LWObject {
     }
 
     pub fn data_chunk_reader_name(&self, _qdf_version: i32) -> &'static str {
-        "qdf_lwobj"
+        "qdflwobj"
     }
 }
 
@@ -511,6 +511,7 @@ impl LWViewerManager {
                             renderer.name().to_string()
                         });
                         converted.set_visible(renderer.is_visible());
+                        converted.set_property_str("data_id", uid.get().to_string());
                     }
                 }
                 target.insert_object(scene_object);
@@ -553,6 +554,7 @@ impl LWViewerManager {
             let data_id = i32::try_from(renderer_uid.get()).unwrap_or(i32::MAX);
             if let Some(renderer) = scene_object.renderer_mut(renderer_uid) {
                 renderer.set_name("render");
+                renderer.set_property_str("data_id", data_id.to_string());
             }
             if !mesh.indices.is_empty() {
                 let vertices = mesh
@@ -636,7 +638,7 @@ mod tests {
         assert_eq!(object.hit_data(0).unwrap().id(), 7);
         assert_eq!(object.hit_data(0).unwrap().message(), "atom");
         assert!(object.is_data_src_writable());
-        assert_eq!(object.data_chunk_reader_name(1), "qdf_lwobj");
+        assert_eq!(object.data_chunk_reader_name(1), "qdflwobj");
         object.end_build();
         assert!(!object.is_building());
     }
@@ -705,7 +707,9 @@ mod tests {
     fn lw_viewer_manager_copies_qsys_scene_objects() {
         let mut source = Scene::new(Uid::new(1), "source");
         let object_uid = source.add_object("obj", ());
-        source.object_mut(object_uid).unwrap().set_visible(false);
+        let object = source.object_mut(object_uid).unwrap();
+        object.set_visible(false);
+        object.create_renderer("simple");
         let mut target = Scene::new(Uid::new(2), "target");
 
         let mut manager = LWViewerManager::new();
@@ -716,6 +720,14 @@ mod tests {
         assert_eq!(copied.name(), "obj");
         assert!(!copied.is_visible());
         assert_eq!(copied.data().name(), "obj");
+        assert_eq!(copied.rend_count(), 1);
+        let renderer = copied.renderer_by_index(0).unwrap();
+        assert_eq!(
+            renderer
+                .property_str("data_id")
+                .and_then(|value| value.parse::<u64>().ok()),
+            Some(renderer.uid().get())
+        );
     }
 
     #[test]
@@ -754,6 +766,16 @@ mod tests {
         assert_eq!(object.class_name(), "LWObject");
         assert_eq!(object.rend_count(), 1);
         assert_eq!(object.data().draw_elements().len(), 1);
+        let renderer = object.renderer_by_index(0).unwrap();
+        assert_eq!(
+            renderer.property_str("data_id"),
+            Some(
+                object.data().draw_elements()[0]
+                    .data_id()
+                    .to_string()
+                    .as_str()
+            )
+        );
         let element = &object.data().draw_elements()[0];
         assert_eq!(element.type_id(), LW_DRAW_VNCI);
         let LWDrawData::VertexNormalColorIndices { vertices, indices } = element.data() else {

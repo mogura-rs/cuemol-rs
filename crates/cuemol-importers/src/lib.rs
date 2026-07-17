@@ -7,9 +7,14 @@ use std::path::Path;
 use std::process::Command;
 
 pub mod pickle;
+mod pse_colors;
 pub use pickle::{parse_pickle, PickleValue};
 pub mod pse_extract;
-pub use pse_extract::{extract_pse_molecules, extract_pse_named_molecules};
+pub use pse_extract::{
+    extract_pse_camera, extract_pse_measurement_records, extract_pse_molecule_records,
+    extract_pse_molecules, extract_pse_named_molecules, PseAtomLabel, PseMeasurement,
+    PseMeasurementKind, PseMeasurementRecord, PseMoleculeRecord, PseRepresentation,
+};
 
 pub use cuemol_molstr::{
     read_mmcif_file, read_mmcif_file_with_options, read_mmcif_str, read_mmcif_str_with_options,
@@ -661,6 +666,21 @@ impl PseFileReader {
     pub fn read_named_molecules(&self) -> Result<Vec<(String, cuemol_molstr::MolCoord)>> {
         let tree = self.parse_pickle_tree()?;
         Ok(extract_pse_named_molecules(&tree))
+    }
+
+    pub fn read_molecule_records(&self) -> Result<Vec<PseMoleculeRecord>> {
+        let tree = self.parse_pickle_tree()?;
+        Ok(extract_pse_molecule_records(&tree))
+    }
+
+    pub fn read_measurement_records(&self) -> Result<Vec<PseMeasurementRecord>> {
+        let tree = self.parse_pickle_tree()?;
+        Ok(extract_pse_measurement_records(&tree))
+    }
+
+    pub fn read_camera(&self) -> Result<Option<cuemol_qsys::Camera>> {
+        let tree = self.parse_pickle_tree()?;
+        Ok(extract_pse_camera(&tree))
     }
 }
 

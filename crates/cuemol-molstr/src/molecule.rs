@@ -408,6 +408,18 @@ impl MolCoord {
         false
     }
 
+    /// Remove the bond between two atom indices without rebuilding the
+    /// molecule, preserving residue properties, selection, coloring, and cell
+    /// metadata.
+    pub fn remove_bond_between(&mut self, atom1: usize, atom2: usize) -> bool {
+        let before = self.bonds.len();
+        self.bonds.retain(|bond| {
+            !((bond.atom1 == atom1 && bond.atom2 == atom2)
+                || (bond.atom1 == atom2 && bond.atom2 == atom1))
+        });
+        self.bonds.len() != before
+    }
+
     pub fn bonds(&self) -> &[Bond] {
         &self.bonds
     }

@@ -985,6 +985,14 @@ fn default_handlers() -> Vec<StreamHandlerInfo> {
             None,
         ),
         StreamHandlerInfo::new(
+            "cuemol_rs::UmbreonSceneExporter",
+            "umbreon",
+            "Umbreon ray-traced image (*.png)",
+            "*.png",
+            HandlerCategory::RendToFile,
+            None,
+        ),
+        StreamHandlerInfo::new(
             "cuemol_rs::PovSceneExporter",
             "pov",
             "POV-Ray SDL (*.pov)",
@@ -1646,8 +1654,14 @@ fn renderer_node_from_mol(renderer: &MolRenderer, type_override: Option<&str>) -
                 AtomIntrKind::Torsion => "torsion",
             };
             let child = node.append_child(tag);
-            for (index, aid) in definition.aids().iter().enumerate() {
-                child.set_str_attr(format!("aid{}", index + 1), aid);
+            if definition.positions().is_empty() {
+                for (index, aid) in definition.aids().iter().enumerate() {
+                    child.set_str_attr(format!("aid{}", index + 1), aid);
+                }
+            } else {
+                for (index, position) in definition.positions().iter().enumerate() {
+                    child.set_str_attr(format!("pos{}", index + 1), position.to_string());
+                }
             }
         }
     }

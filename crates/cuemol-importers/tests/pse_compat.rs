@@ -34,6 +34,8 @@ fn extracts_the_known_molecule_from_a_real_pse() {
     assert_eq!(atoms[0].res_id, 1);
     assert!((atoms[0].position.x - 0.0).abs() < 1.0e-4);
     assert!((atoms[0].b_factor - 20.0).abs() < 1.0e-3);
+    assert!(atoms[0].int_prop("pymol_color").is_some());
+    assert!(atoms[0].int_prop("col").is_some());
 
     assert_eq!(atoms[1].name, "CA");
     assert_eq!(atoms[1].element, "C");

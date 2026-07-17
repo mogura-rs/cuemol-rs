@@ -1309,6 +1309,12 @@ impl Model {
             h as f32,
             80_usize.saturating_sub(labels.len()),
         ));
+        labels.extend(self.state.active_name_labels(
+            mvp,
+            w as f32,
+            h as f32,
+            80_usize.saturating_sub(labels.len()),
+        ));
         labels
     }
 

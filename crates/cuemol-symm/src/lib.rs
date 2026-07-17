@@ -1,7 +1,7 @@
-use cuemol_core::{Matrix4, Vector4};
+use cuemol_core::{CueMolError, Matrix4, Result, Vector4};
 use cuemol_gfx::RawHitData;
 use cuemol_gfx::SolidColor;
-use cuemol_qsys::DispListRenderer;
+use cuemol_qsys::{DispListRenderer, ObjExtData, ObjectEvent, SceneObject};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
@@ -310,6 +310,7 @@ pub struct SymmetryOperator {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpaceGroup {
     pub id: i32,
+    pub asymmetric_unit_count: usize,
     pub lattice: LatticeSystem,
     pub name: String,
     pub canonical_name: String,
@@ -382,6 +383,38 @@ impl SymmOpManager {
         self.groups.get(&nsg).map(|group| group.name.as_str())
     }
 
+    /// Return the number of asymmetric-unit operators, or `-1` for an unknown
+    /// space group. This matches C++ `SymOpDB::getAsymNum`.
+    pub fn get_asym_num(&self, nsg: i32) -> i32 {
+        self.groups
+            .get(&nsg)
+            .and_then(|group| i32::try_from(group.asymmetric_unit_count).ok())
+            .unwrap_or(-1)
+    }
+
+    /// Return the crystallographic-system ID, or `-1` for an unknown group.
+    pub fn get_xtal_sys_id(&self, nsg: i32) -> i32 {
+        self.lattice_for_space_group(nsg)
+            .map(|lattice| lattice as i32)
+            .unwrap_or(-1)
+    }
+
+    /// Find a space-group number by its full Hermann-Mauguin name.
+    pub fn get_sg_id_by_cname(&self, name: &str) -> i32 {
+        self.groups
+            .iter()
+            .find_map(|(id, group)| (group.canonical_name == name).then_some(*id))
+            .unwrap_or(-1)
+    }
+
+    /// Find a space-group number by its abbreviated Hermann-Mauguin name.
+    pub fn get_sg_id_by_name(&self, name: &str) -> i32 {
+        self.groups
+            .iter()
+            .find_map(|(id, group)| (group.name == name).then_some(*id))
+            .unwrap_or(-1)
+    }
+
     pub fn lattice_for_space_group(&self, nsg: i32) -> Option<LatticeSystem> {
         self.groups.get(&nsg).map(|group| group.lattice)
     }
@@ -407,12 +440,115 @@ impl SymmOpManager {
         CrystalInfo::with_space_group(a, b, c, alpha, beta, gamma, nsg)
     }
 
+    /// Replace or remove crystallographic extension data on an object and emit
+    /// the structural-change event used by renderers.
+    pub fn change_xi_impl<T>(
+        &self,
+        object: &mut SceneObject<T>,
+        crystal: Option<&CrystalInfo>,
+    ) -> bool {
+        if let Some(crystal) = crystal {
+            object.set_ext_data(crystal.to_obj_ext_data());
+        } else {
+            object.remove_ext_data("CrystalInfo");
+        }
+
+        let mut event = ObjectEvent::new();
+        event.set_event_type(ObjectEvent::OBE_CHANGED);
+        event.set_target(object.uid().get());
+        event.set_descr("crystalinfo");
+        object.fire_object_event(&mut event);
+        true
+    }
+
+    /// Apply new crystallographic information to an object and return the
+    /// reversible edit record corresponding to C++ `SymmEditInfo`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn change_xtal_info_on_object<T>(
+        &self,
+        object: &mut SceneObject<T>,
+        a: f64,
+        b: f64,
+        c: f64,
+        alpha: f64,
+        beta: f64,
+        gamma: f64,
+        nsg: i32,
+    ) -> SymmEditInfo {
+        let old_crystal = object
+            .get_ext_data("CrystalInfo")
+            .and_then(CrystalInfo::from_obj_ext_data);
+        let new_crystal = CrystalInfo::with_space_group(a, b, c, alpha, beta, gamma, nsg);
+        self.change_xi_impl(object, Some(&new_crystal));
+        object.set_modified(true);
+        SymmEditInfo::new(object.uid(), old_crystal, Some(new_crystal))
+    }
+
     /// Load the full built-in space-group table (all 230 groups plus alternate
     /// settings) from the vendored `symop.dat`. Replaces the former hand-coded
     /// P1/P-1-only stub, so crystallographic operations on non-triclinic cells
     /// now get their real symmetry operators instead of falling back to P1.
     fn register_builtin_groups(&mut self) {
         self.groups = builtin_symop_table().clone();
+    }
+}
+
+/// Reversible crystallographic extension-data change. The target object is
+/// passed explicitly because Rust's scene owns objects by value instead of
+/// resolving them through CueMol2's global UID registry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SymmEditInfo {
+    target_uid: cuemol_core::Uid,
+    old_crystal: Option<CrystalInfo>,
+    new_crystal: Option<CrystalInfo>,
+}
+
+impl SymmEditInfo {
+    pub fn new(
+        target_uid: cuemol_core::Uid,
+        old_crystal: Option<CrystalInfo>,
+        new_crystal: Option<CrystalInfo>,
+    ) -> Self {
+        Self {
+            target_uid,
+            old_crystal,
+            new_crystal,
+        }
+    }
+
+    pub fn target_uid(&self) -> cuemol_core::Uid {
+        self.target_uid
+    }
+
+    pub fn old_crystal(&self) -> Option<&CrystalInfo> {
+        self.old_crystal.as_ref()
+    }
+
+    pub fn new_crystal(&self) -> Option<&CrystalInfo> {
+        self.new_crystal.as_ref()
+    }
+
+    pub fn is_undoable(&self) -> bool {
+        true
+    }
+
+    pub fn is_redoable(&self) -> bool {
+        true
+    }
+
+    pub fn undo<T>(&self, object: &mut SceneObject<T>) -> bool {
+        self.apply(object, self.old_crystal.as_ref())
+    }
+
+    pub fn redo<T>(&self, object: &mut SceneObject<T>) -> bool {
+        self.apply(object, self.new_crystal.as_ref())
+    }
+
+    fn apply<T>(&self, object: &mut SceneObject<T>, crystal: Option<&CrystalInfo>) -> bool {
+        if object.uid() != self.target_uid {
+            return false;
+        }
+        SymmOpManager::new().change_xi_impl(object, crystal)
     }
 }
 
@@ -994,12 +1130,116 @@ impl CrystalInfo {
     pub fn from_cell_params(cell: &cuemol_core::CellParams) -> Option<CrystalInfo> {
         let nsg = cell
             .space_group_number
-            .filter(|n| *n > 0)
+            .filter(|n| builtin_symop_table().contains_key(n))
             .or_else(|| space_group_number_by_name(&cell.space_group_name))?;
         Some(CrystalInfo::with_space_group(
             cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma, nsg,
         ))
     }
+
+    /// Convert to the property-shaped object extension used by `qsys::Object`.
+    pub fn to_obj_ext_data(&self) -> ObjExtData {
+        let mut data = ObjExtData::new("CrystalInfo");
+        data.set_value("a", self.a.to_string());
+        data.set_value("b", self.b.to_string());
+        data.set_value("c", self.c.to_string());
+        data.set_value("alpha", self.alpha.to_string());
+        data.set_value("beta", self.beta.to_string());
+        data.set_value("gamma", self.gamma.to_string());
+        data.set_value("nsg", self.nsg.to_string());
+        data
+    }
+
+    /// Reconstruct crystallographic information from object extension data.
+    /// Both runtime property names and serialized `CrystalInfo.*` QDF keys are
+    /// accepted so the bridge also handles data read from native files.
+    pub fn from_obj_ext_data(data: &ObjExtData) -> Option<Self> {
+        if data.class_name() != "CrystalInfo" {
+            return None;
+        }
+        let real = |property: &str, qdf_key: &str, default: f64| {
+            data.value(property)
+                .or_else(|| data.value(qdf_key))
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(default)
+        };
+        let nsg = data
+            .value("nsg")
+            .or_else(|| data.value("CrystalInfo.sgid"))
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(1);
+        Some(Self::with_space_group(
+            real("a", "CrystalInfo.lena", 100.0),
+            real("b", "CrystalInfo.lenb", 100.0),
+            real("c", "CrystalInfo.lenc", 100.0),
+            real("alpha", "CrystalInfo.anga", 90.0),
+            real("beta", "CrystalInfo.angb", 90.0),
+            real("gamma", "CrystalInfo.angg", 90.0),
+            nsg,
+        ))
+    }
+
+    /// Set the space group from either its full or abbreviated
+    /// Hermann-Mauguin name.
+    pub fn set_sg_by_name(&mut self, name: &str) -> Result<()> {
+        let manager = SymmOpManager::new();
+        let mut nsg = manager.get_sg_id_by_cname(name);
+        if nsg < 1 {
+            nsg = manager.get_sg_id_by_name(name);
+        }
+        if nsg < 1 {
+            return Err(CueMolError::InvalidArgument(format!(
+                "invalid space-group name <{name}>"
+            )));
+        }
+        self.set_sg(nsg);
+        Ok(())
+    }
+
+    /// Write the original `CrystalInfo.*` QDF extension-data keys.
+    pub fn write_qdf_data(&self, output: &mut BTreeMap<String, String>) {
+        output.insert("CrystalInfo.lena".to_string(), self.a.to_string());
+        output.insert("CrystalInfo.lenb".to_string(), self.b.to_string());
+        output.insert("CrystalInfo.lenc".to_string(), self.c.to_string());
+        output.insert("CrystalInfo.anga".to_string(), self.alpha.to_string());
+        output.insert("CrystalInfo.angb".to_string(), self.beta.to_string());
+        output.insert("CrystalInfo.angg".to_string(), self.gamma.to_string());
+        output.insert("CrystalInfo.sgid".to_string(), self.nsg.to_string());
+    }
+
+    /// Read any present `CrystalInfo.*` QDF extension-data keys. Missing or
+    /// malformed values leave the corresponding property unchanged, matching
+    /// the permissive C++ reader.
+    pub fn read_qdf_data(&mut self, input: &BTreeMap<String, String>) {
+        if let Some(value) = parse_qdf_value(input, "CrystalInfo.lena") {
+            self.a = value;
+        }
+        if let Some(value) = parse_qdf_value(input, "CrystalInfo.lenb") {
+            self.b = value;
+        }
+        if let Some(value) = parse_qdf_value(input, "CrystalInfo.lenc") {
+            self.c = value;
+        }
+        if let Some(value) = parse_qdf_value(input, "CrystalInfo.anga") {
+            self.alpha = value;
+        }
+        if let Some(value) = parse_qdf_value(input, "CrystalInfo.angb") {
+            self.beta = value;
+        }
+        if let Some(value) = parse_qdf_value(input, "CrystalInfo.angg") {
+            self.gamma = value;
+        }
+        if let Some(value) = input
+            .get("CrystalInfo.sgid")
+            .and_then(|value| value.parse::<i32>().ok())
+        {
+            self.nsg = value;
+        }
+    }
+}
+
+fn parse_qdf_value(input: &BTreeMap<String, String>, key: &str) -> Option<f64> {
+    input.get(key).and_then(|value| value.parse::<f64>().ok())
 }
 
 /// Resolve a Hermann–Mauguin space-group name (full e.g. "P 1 21 1", or short
@@ -1077,9 +1317,11 @@ fn parse_sg_header(header: &str) -> Option<SpaceGroup> {
         return None;
     }
     let id = parts[0].parse::<i32>().ok()?;
+    let asymmetric_unit_count = parts[1].parse::<usize>().ok()?;
     let lattice = LatticeSystem::from_name(parts[4])?;
     Some(SpaceGroup {
         id,
+        asymmetric_unit_count,
         lattice,
         name: parts[2].to_string(),
         canonical_name: parts[3].to_string(),
@@ -1181,7 +1423,9 @@ fn json_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuemol_core::shared_event_listener;
     use cuemol_gfx::{HitData, HittestContext};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn crystal_info_defaults_and_transforms_match_reference() {
@@ -1229,6 +1473,13 @@ mod tests {
         let manager = SymmOpManager::new();
         assert_eq!(manager.get_cname(1), Some("P 1"));
         assert_eq!(manager.get_name(2), Some("P-1"));
+        assert_eq!(manager.get_asym_num(19), 4);
+        assert_eq!(manager.get_asym_num(999), -1);
+        assert_eq!(manager.get_xtal_sys_id(19), CrystalInfo::ORTHORHOMBIC);
+        assert_eq!(manager.get_xtal_sys_id(999), -1);
+        assert_eq!(manager.get_sg_id_by_cname("P 21 21 21"), 19);
+        assert_eq!(manager.get_sg_id_by_name("P212121"), 19);
+        assert_eq!(manager.get_sg_id_by_name("not a group"), -1);
         assert!(manager.get_sg_names_json("TRICLINIC").contains("\"id\":1"));
         assert_eq!(manager.symmetry_operators(1).unwrap().len(), 1);
         assert_eq!(manager.symmetry_operators(2).unwrap().len(), 2);
@@ -1236,6 +1487,7 @@ mod tests {
         let parsed =
             SymmOpManager::from_symop_dat(">4,2,P21,P 1 21 1,MONOCLINIC\nx,y,z\n-x,y+1/2,-z\n");
         assert_eq!(parsed.get_cname(4), Some("P 1 21 1"));
+        assert_eq!(parsed.get_asym_num(4), 2);
         let ops = parsed.symmetry_operators(4).unwrap();
         assert_eq!(ops.len(), 2);
         assert_eq!(ops[1].matrix.values[0][0], -1.0);
@@ -1633,5 +1885,144 @@ mod tests {
         let mut cell2 = cell.clone();
         cell2.space_group_number = Some(19);
         assert_eq!(CrystalInfo::from_cell_params(&cell2).unwrap().nsg, 19);
+
+        // An invalid numeric ID falls back to the valid Hermann-Mauguin name.
+        cell2.space_group_number = Some(999);
+        assert_eq!(CrystalInfo::from_cell_params(&cell2).unwrap().nsg, 4);
+    }
+
+    #[test]
+    fn crystal_info_space_group_lookup_and_qdf_data_match_reference() {
+        let mut crystal = CrystalInfo::default();
+        crystal.set_sg_by_name("P 21 21 21").unwrap();
+        assert_eq!(crystal.nsg(), 19);
+        crystal.set_sg_by_name("P43212").unwrap();
+        assert_eq!(crystal.nsg(), 96);
+        assert!(crystal.set_sg_by_name("not a group").is_err());
+
+        crystal.set_cell_dimension(40.96, 18.65, 22.52, 90.0, 90.77, 90.0);
+        let mut data = BTreeMap::new();
+        crystal.write_qdf_data(&mut data);
+        assert_eq!(
+            data.get("CrystalInfo.lena").map(String::as_str),
+            Some("40.96")
+        );
+        assert_eq!(data.get("CrystalInfo.sgid").map(String::as_str), Some("96"));
+
+        data.insert("CrystalInfo.lenb".to_string(), "19.5".to_string());
+        data.insert("CrystalInfo.anga".to_string(), "invalid".to_string());
+        data.remove("CrystalInfo.lenc");
+        let mut restored = CrystalInfo::default();
+        restored.read_qdf_data(&data);
+        assert_eq!(restored.a(), 40.96);
+        assert_eq!(restored.b(), 19.5);
+        assert_eq!(restored.c(), 100.0);
+        assert_eq!(restored.alpha(), 90.0);
+        assert_eq!(restored.beta(), 90.77);
+        assert_eq!(restored.nsg(), 96);
+    }
+
+    #[test]
+    fn crystal_info_object_extension_accepts_runtime_and_qdf_keys() {
+        let crystal = CrystalInfo::with_space_group(40.96, 18.65, 22.52, 90.0, 90.77, 90.0, 4);
+        let runtime = crystal.to_obj_ext_data();
+        assert_eq!(CrystalInfo::from_obj_ext_data(&runtime), Some(crystal));
+
+        let mut qdf = ObjExtData::new("CrystalInfo");
+        qdf.set_value("CrystalInfo.lena", "40.96");
+        qdf.set_value("CrystalInfo.lenb", "18.65");
+        qdf.set_value("CrystalInfo.lenc", "22.52");
+        qdf.set_value("CrystalInfo.anga", "90");
+        qdf.set_value("CrystalInfo.angb", "90.77");
+        qdf.set_value("CrystalInfo.angg", "90");
+        qdf.set_value("CrystalInfo.sgid", "4");
+        assert_eq!(CrystalInfo::from_obj_ext_data(&qdf), Some(crystal));
+        assert_eq!(
+            CrystalInfo::from_obj_ext_data(&ObjExtData::new("Other")),
+            None
+        );
+    }
+
+    #[test]
+    fn symm_edit_info_applies_undoes_and_redoes_object_change() {
+        let manager = SymmOpManager::new();
+        let mut object = SceneObject::new(cuemol_core::Uid::new(7), ());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let listener_events = Arc::clone(&events);
+        object.add_listener(shared_event_listener(move |event: &mut ObjectEvent| {
+            listener_events.lock().unwrap().push(event.clone());
+        }));
+
+        let edit = manager.change_xtal_info_on_object(
+            &mut object,
+            40.96,
+            18.65,
+            22.52,
+            90.0,
+            90.77,
+            90.0,
+            4,
+        );
+        let changed = object
+            .get_ext_data("CrystalInfo")
+            .and_then(CrystalInfo::from_obj_ext_data)
+            .unwrap();
+        assert_eq!(changed.nsg(), 4);
+        assert_eq!(changed.a(), 40.96);
+        assert!(object.modified());
+        assert_eq!(edit.target_uid(), cuemol_core::Uid::new(7));
+        assert_eq!(edit.old_crystal(), None);
+        assert_eq!(edit.new_crystal(), Some(&changed));
+        assert!(edit.is_undoable());
+        assert!(edit.is_redoable());
+
+        assert!(edit.undo(&mut object));
+        assert!(object.get_ext_data("CrystalInfo").is_none());
+        assert!(edit.redo(&mut object));
+        assert_eq!(
+            object
+                .get_ext_data("CrystalInfo")
+                .and_then(CrystalInfo::from_obj_ext_data),
+            Some(changed)
+        );
+
+        let mut other = SceneObject::new(cuemol_core::Uid::new(8), ());
+        assert!(!edit.undo(&mut other));
+        assert!(other.get_ext_data("CrystalInfo").is_none());
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(events
+            .iter()
+            .all(|event| event.event_type() == ObjectEvent::OBE_CHANGED));
+        assert!(events.iter().all(|event| event.target() == 7));
+        assert!(events.iter().all(|event| event.descr() == "crystalinfo"));
+    }
+
+    #[test]
+    fn symm_edit_info_restores_replaced_crystal_info() {
+        let manager = SymmOpManager::new();
+        let old = CrystalInfo::with_space_group(10.0, 20.0, 30.0, 90.0, 90.0, 90.0, 1);
+        let mut object = SceneObject::new(cuemol_core::Uid::new(9), ());
+        object.set_ext_data(old.to_obj_ext_data());
+
+        let edit = manager.change_xtal_info_on_object(
+            &mut object,
+            20.0,
+            30.0,
+            40.0,
+            90.0,
+            90.0,
+            120.0,
+            168,
+        );
+        assert_eq!(edit.old_crystal(), Some(&old));
+        assert!(edit.undo(&mut object));
+        assert_eq!(
+            object
+                .get_ext_data("CrystalInfo")
+                .and_then(CrystalInfo::from_obj_ext_data),
+            Some(old)
+        );
     }
 }

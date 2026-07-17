@@ -19,7 +19,12 @@ const VIEW_UID_BASE: u64 = 3_000_000_000;
 const UID_SCENE_STRIDE: u64 = 1_000_000;
 const UID_OBJECT_STRIDE: u64 = 1_000;
 
-type PendingAtomIntrRenderer = (String, Vec<(AtomIntrKind, Vec<String>)>);
+type PendingAtomIntrRenderer = (String, Vec<PendingAtomIntrDef>);
+
+enum PendingAtomIntrDef {
+    Atoms(AtomIntrKind, Vec<String>),
+    Positions(AtomIntrKind, Vec<Vector4>),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MolRenderer {
@@ -34,7 +39,7 @@ pub struct MolRenderer {
     default_color: SolidColor,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AtomIntrLine {
     pub a0: String,
     pub a1: String,
@@ -42,6 +47,7 @@ pub struct AtomIntrLine {
     pub a3: Option<String>,
     kind: AtomIntrKind,
     aids: Vec<String>,
+    positions: Vec<Vector4>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +86,10 @@ impl AtomIntrLine {
 
     pub fn aids(&self) -> &[String] {
         &self.aids
+    }
+
+    pub fn positions(&self) -> &[Vector4] {
+        &self.positions
     }
 }
 
@@ -561,27 +571,67 @@ impl MolObject {
         defs: &[(AtomIntrKind, Vec<String>)],
         qsc_attrs: BTreeMap<String, String>,
     ) -> Result<Uid> {
+        let defs = defs
+            .iter()
+            .map(|(kind, aids)| PendingAtomIntrDef::Atoms(*kind, aids.clone()))
+            .collect::<Vec<_>>();
+        self.add_pending_atom_intr_renderer(name, &defs, qsc_attrs)
+    }
+
+    fn add_pending_atom_intr_renderer(
+        &mut self,
+        name: impl Into<String>,
+        defs: &[PendingAtomIntrDef],
+        qsc_attrs: BTreeMap<String, String>,
+    ) -> Result<Uid> {
         let mut lines = Vec::new();
-        for (kind, aids) in defs {
-            if aids.len() != kind.atom_count() {
-                return Err(CueMolError::invalid_argument(format!(
-                    "AtomIntr {} requires {} atoms",
-                    kind.tag(),
-                    kind.atom_count()
-                )));
+        for def in defs {
+            match def {
+                PendingAtomIntrDef::Atoms(kind, aids) => {
+                    if aids.len() != kind.atom_count() {
+                        return Err(CueMolError::invalid_argument(format!(
+                            "AtomIntr {} requires {} atoms",
+                            kind.tag(),
+                            kind.atom_count()
+                        )));
+                    }
+                    let labels = aids
+                        .iter()
+                        .map(|aid| self.resolve_atom_label(aid))
+                        .collect::<Result<Vec<_>>>()?;
+                    lines.push(AtomIntrLine {
+                        a0: labels[0].clone(),
+                        a1: labels[1].clone(),
+                        a2: labels.get(2).cloned(),
+                        a3: labels.get(3).cloned(),
+                        kind: *kind,
+                        aids: aids.clone(),
+                        positions: Vec::new(),
+                    });
+                }
+                PendingAtomIntrDef::Positions(kind, positions) => {
+                    if positions.len() != kind.atom_count() {
+                        return Err(CueMolError::invalid_argument(format!(
+                            "AtomIntr {} requires {} positions",
+                            kind.tag(),
+                            kind.atom_count()
+                        )));
+                    }
+                    let labels = positions
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>();
+                    lines.push(AtomIntrLine {
+                        a0: labels[0].clone(),
+                        a1: labels[1].clone(),
+                        a2: labels.get(2).cloned(),
+                        a3: labels.get(3).cloned(),
+                        kind: *kind,
+                        aids: Vec::new(),
+                        positions: positions.clone(),
+                    });
+                }
             }
-            let labels = aids
-                .iter()
-                .map(|aid| self.resolve_atom_label(aid))
-                .collect::<Result<Vec<_>>>()?;
-            lines.push(AtomIntrLine {
-                a0: labels[0].clone(),
-                a1: labels[1].clone(),
-                a2: labels.get(2).cloned(),
-                a3: labels.get(3).cloned(),
-                kind: *kind,
-                aids: aids.clone(),
-            });
         }
         let uid = Uid::new(self.next_renderer_uid);
         self.next_renderer_uid += 1;
@@ -597,6 +647,18 @@ impl MolObject {
             default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
         });
         Ok(uid)
+    }
+
+    pub fn add_atom_intr_position_renderer_defs(
+        &mut self,
+        name: impl Into<String>,
+        defs: &[(AtomIntrKind, Vec<Vector4>)],
+    ) -> Result<Uid> {
+        let defs = defs
+            .iter()
+            .map(|(kind, positions)| PendingAtomIntrDef::Positions(*kind, positions.clone()))
+            .collect::<Vec<_>>();
+        self.add_pending_atom_intr_renderer(name, &defs, BTreeMap::new())
     }
 
     /// Resolve an atom-interaction reference (`aid`) to an atom. The reference is
@@ -626,6 +688,16 @@ impl MolObject {
             .ok_or_else(|| CueMolError::NotFound(format!("atom id {aid}")))
     }
 
+    fn atom_intr_points(&self, line: &AtomIntrLine) -> Option<Vec<Vector4>> {
+        if !line.positions.is_empty() {
+            return Some(line.positions.clone());
+        }
+        line.aids
+            .iter()
+            .map(|aid| self.resolve_atom(aid).map(|atom| atom.position))
+            .collect()
+    }
+
     /// Distance (Å) measured by each distance definition, in declaration order.
     /// Angle and torsion definitions return `None`; use [`Self::atom_intr_values`]
     /// to evaluate all three CueMol measurement modes.
@@ -637,8 +709,9 @@ impl MolObject {
                 if line.kind != AtomIntrKind::Distance {
                     return None;
                 }
-                let p0 = self.resolve_atom(&line.aids[0])?.position;
-                let p1 = self.resolve_atom(&line.aids[1])?.position;
+                let points = self.atom_intr_points(line)?;
+                let p0 = points[0];
+                let p1 = points[1];
                 Some((p0 - p1).length3d())
             })
             .collect()
@@ -652,11 +725,7 @@ impl MolObject {
             .atom_intr_lines
             .iter()
             .map(|line| {
-                let points = line
-                    .aids
-                    .iter()
-                    .map(|aid| self.resolve_atom(aid).map(|atom| atom.position))
-                    .collect::<Option<Vec<_>>>()?;
+                let points = self.atom_intr_points(line)?;
                 match line.kind {
                     AtomIntrKind::Distance => Some((points[0] - points[1]).length3d()),
                     AtomIntrKind::Angle => points[0]
@@ -684,11 +753,7 @@ impl MolObject {
             .atom_intr_lines
             .iter()
             .flat_map(|line| {
-                let points = line
-                    .aids
-                    .iter()
-                    .map(|aid| self.resolve_atom(aid).map(|atom| atom.position))
-                    .collect::<Option<Vec<_>>>();
+                let points = self.atom_intr_points(line);
                 points
                     .map(|points| {
                         points
@@ -710,11 +775,7 @@ impl MolObject {
             .atom_intr_lines
             .iter()
             .filter_map(|line| {
-                let points = line
-                    .aids
-                    .iter()
-                    .map(|aid| self.resolve_atom(aid).map(|atom| atom.position))
-                    .collect::<Option<Vec<_>>>()?;
+                let points = self.atom_intr_points(line)?;
                 match line.kind {
                     AtomIntrKind::Distance => {
                         let value = (points[0] - points[1]).length3d();
@@ -738,6 +799,38 @@ impl MolObject {
                         Some(((points[1] + points[2]) * 0.5, format!("{value:.2}")))
                     }
                 }
+            })
+            .collect()
+    }
+
+    /// Atom positions and text held by a `*namelabel` renderer. CueMol's QSC
+    /// format normally stores only `aid`; the optional `text` attribute keeps
+    /// labels imported from PyMOL while remaining readable by CueMol2.
+    pub fn name_label_entries(&self, renderer: &MolRenderer) -> Vec<(Vector4, String)> {
+        renderer
+            .qsc_children()
+            .iter()
+            .filter(|child| child.tag_name() == "label")
+            .filter_map(|child| {
+                let aid = child.str_attr("aid").to_string();
+                let atom = self.resolve_atom(&aid)?;
+                let text = child.str_attr("text").to_string();
+                let text = if text.is_empty() {
+                    let mut residue = atom.res_id.to_string();
+                    if let Some(insertion) = atom.ins_code {
+                        residue.push(insertion);
+                    }
+                    format!(
+                        "{} {}{} {}",
+                        atom.chain_id,
+                        atom.res_name,
+                        residue,
+                        atom.name.trim()
+                    )
+                } else {
+                    text
+                };
+                Some((atom.position, text))
             })
             .collect()
     }
@@ -1388,17 +1481,30 @@ impl MolScene {
             } else if let Some(kind) = atom_intr_kind_from_line(line) {
                 if let Some((_, defs)) = current_atomintr.as_mut() {
                     let aids = (1..=kind.atom_count())
+                        .map(|index| attr_value(line, &format!("aid{index}")))
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(aids) = aids {
+                        defs.push(PendingAtomIntrDef::Atoms(kind, aids));
+                        continue;
+                    }
+                    let positions = (1..=kind.atom_count())
                         .map(|index| {
-                            attr_value(line, &format!("aid{index}")).ok_or_else(|| {
-                                CueMolError::parse(format!("AtomIntr aid{index} not found"))
-                            })
+                            let value = attr_value(line, &format!("pos{index}"))?;
+                            Vector4::from_script_string(&value).ok()
                         })
-                        .collect::<Result<Vec<_>>>()?;
-                    defs.push((kind, aids));
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(positions) = positions {
+                        defs.push(PendingAtomIntrDef::Positions(kind, positions));
+                    } else {
+                        return Err(CueMolError::parse(format!(
+                            "AtomIntr {} requires aid or pos attributes",
+                            kind.tag()
+                        )));
+                    }
                 }
             } else if line.starts_with("</renderer>") {
                 if let Some((name, defs)) = current_atomintr.take() {
-                    object.add_atom_intr_renderer_defs_with_attrs(
+                    object.add_pending_atom_intr_renderer(
                         name,
                         &defs,
                         std::mem::take(&mut current_atomintr_attrs),
@@ -1408,7 +1514,7 @@ impl MolScene {
         }
 
         if let Some((name, defs)) = current_atomintr.take() {
-            object.add_atom_intr_renderer_defs_with_attrs(name, &defs, current_atomintr_attrs)?;
+            object.add_pending_atom_intr_renderer(name, &defs, current_atomintr_attrs)?;
         }
 
         if let Some(coloring) = object_node
@@ -1556,14 +1662,27 @@ impl MolScene {
                         format_renderer_attrs(renderer, Some("DefaultLabel,DefaultAtomIntr"))
                     ));
                     for line in &renderer.atom_intr_lines {
-                        let attrs = line
-                            .aids
-                            .iter()
-                            .enumerate()
-                            .map(|(index, aid)| {
-                                format!(" aid{}=\"{}\"", index + 1, escape_xml(aid))
-                            })
-                            .collect::<String>();
+                        let attrs = if line.positions.is_empty() {
+                            line.aids
+                                .iter()
+                                .enumerate()
+                                .map(|(index, aid)| {
+                                    format!(" aid{}=\"{}\"", index + 1, escape_xml(aid))
+                                })
+                                .collect::<String>()
+                        } else {
+                            line.positions
+                                .iter()
+                                .enumerate()
+                                .map(|(index, position)| {
+                                    format!(
+                                        " pos{}=\"{}\"",
+                                        index + 1,
+                                        escape_xml(&position.to_string())
+                                    )
+                                })
+                                .collect::<String>()
+                        };
                         output.push_str(&format!("\t\t\t<{}{attrs}/>\n", line.kind.tag()));
                     }
                     for child in renderer.qsc_children() {
@@ -2860,6 +2979,58 @@ mod tests {
         assert!(renderer.get_defs_json().contains("\"mode\":2"));
         assert!(renderer.get_defs_json().contains("\"mode\":3"));
         assert_eq!(object.atom_intr_segments(renderer).len(), 6);
+    }
+
+    #[test]
+    fn atom_intr_fixed_positions_round_trip_through_qsc() {
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("fixed-measurements");
+        let molecule =
+            read_pdb_str("ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00\n")
+                .unwrap();
+        let object_uid = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("dummy", molecule);
+        let object = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap();
+        object
+            .add_atom_intr_position_renderer_defs(
+                "pse-distance",
+                &[(
+                    AtomIntrKind::Distance,
+                    vec![Vector4::new3(1.0, 2.0, 3.0), Vector4::new3(4.0, 6.0, 3.0)],
+                )],
+            )
+            .unwrap();
+
+        let renderer = object.renderer_by_name("pse-distance").unwrap();
+        assert_eq!(object.atom_intr_values(renderer), vec![Some(5.0)]);
+        assert!(renderer.atom_intr_lines()[0].aids().is_empty());
+        assert_eq!(renderer.atom_intr_lines()[0].positions().len(), 2);
+
+        let qsc = manager.scene(scene_uid).unwrap().write_qsc_string();
+        assert!(qsc.contains("<line pos1=\"(1,2,3)\" pos2=\"(4,6,3)\"/>"));
+
+        let mut reloaded = MolSceneManager::new();
+        let reloaded_uid = reloaded.new_scene("reloaded");
+        reloaded
+            .scene_mut(reloaded_uid)
+            .unwrap()
+            .load_qsc_str(&qsc)
+            .unwrap();
+        let object = reloaded
+            .scene(reloaded_uid)
+            .unwrap()
+            .objects()
+            .first()
+            .unwrap();
+        let renderer = object.renderer_by_name("pse-distance").unwrap();
+        assert_eq!(object.atom_intr_values(renderer), vec![Some(5.0)]);
+        assert_eq!(object.atom_intr_segments(renderer).len(), 1);
     }
 
     #[test]

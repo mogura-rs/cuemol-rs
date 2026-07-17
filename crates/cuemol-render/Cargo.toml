@@ -8,6 +8,7 @@ license.workspace = true
 cuemol-core.workspace = true
 cuemol-gfx.workspace = true
 cuemol-qsys.workspace = true
+png = "0.17"
 
 [lib]
 name = "cuemol_render"

@@ -1879,11 +1879,13 @@ impl AnimMgr {
 
     pub fn append_motion(&mut self, motion: AnimMotion) {
         self.motions.push(motion);
+        self.update_timeline();
     }
 
     pub fn append(&mut self, object: AnimObj) {
         self.motions
             .push(AnimMotion::Noop(NoopAnimObj { base: object }));
+        self.update_timeline();
     }
 
     pub fn insert_before(&mut self, index: usize, object: AnimObj) {
@@ -1893,6 +1895,7 @@ impl AnimMgr {
         } else {
             self.motions.insert(index, motion);
         }
+        self.update_timeline();
     }
 
     pub fn remove_at(&mut self, index: usize) -> bool {
@@ -1900,19 +1903,59 @@ impl AnimMgr {
             false
         } else {
             self.motions.remove(index);
+            self.update_timeline();
             true
         }
     }
 
-    pub fn resolve_rel_time(&mut self) {
-        let mut current = 0;
-        for motion in &mut self.motions {
-            let object = motion.base_mut();
-            let start = current + object.rel_start();
-            object.set_abs_start(start);
-            object.set_abs_end(start + (object.rel_end() - object.rel_start()).max(0));
-            current = object.abs_end();
+    fn update_timeline(&mut self) {
+        if self.play_state != AnimPlayState::Stop {
+            self.stop();
         }
+        let _ = self.try_resolve_rel_time();
+        self.length = self
+            .motions
+            .iter()
+            .map(|motion| motion.base().abs_end())
+            .max()
+            .unwrap_or(0);
+    }
+
+    /// Resolve relative motion times using each motion's `timeRefName`.
+    ///
+    /// A motion without a reference uses its relative values as absolute
+    /// values. A referenced motion is offset from the referenced motion's end,
+    /// matching C++ `AnimMgr::resolveTimeImpl`.
+    pub fn try_resolve_rel_time(&mut self) -> Result<()> {
+        let specs = self
+            .motions
+            .iter()
+            .map(|motion| {
+                let base = motion.base();
+                MotionTimingSpec {
+                    name: base.name().to_string(),
+                    reference: base.time_ref_name().to_string(),
+                    rel_start: base.rel_start(),
+                    rel_end: base.rel_end(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut states = vec![TimingResolveState::Unresolved; specs.len()];
+        let mut resolved = vec![(0, 0); specs.len()];
+        for index in 0..specs.len() {
+            resolve_motion_timing(index, &specs, &mut states, &mut resolved)?;
+        }
+        for (motion, (start, end)) in self.motions.iter_mut().zip(resolved) {
+            motion.base_mut().set_abs_start(start);
+            motion.base_mut().set_abs_end(end);
+        }
+        Ok(())
+    }
+
+    /// Compatibility wrapper for the original void scripting method. Use
+    /// [`Self::try_resolve_rel_time`] when resolution errors must be reported.
+    pub fn resolve_rel_time(&mut self) {
+        let _ = self.try_resolve_rel_time();
     }
 
     pub fn from_ldom2_node(node: &LDom2Node) -> Result<Self> {
@@ -1931,9 +1974,11 @@ impl AnimMgr {
             .iter()
             .filter(|child| !child.is_attr() && child.tag_name() == "motion")
         {
-            manager.append_motion(AnimMotion::from_ldom2_node(child)?);
+            // The C++ reader uses appendImpl here to avoid edit events and
+            // timeline updates until all forward references are available.
+            manager.motions.push(AnimMotion::from_ldom2_node(child)?);
         }
-        manager.resolve_rel_time();
+        manager.try_resolve_rel_time()?;
         if node.str_attr("length").is_empty() {
             manager.length = manager
                 .motions
@@ -1956,6 +2001,70 @@ impl AnimMgr {
         }
         node
     }
+}
+
+#[derive(Debug)]
+struct MotionTimingSpec {
+    name: String,
+    reference: String,
+    rel_start: TimeValue,
+    rel_end: TimeValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimingResolveState {
+    Unresolved,
+    Resolving,
+    Resolved,
+}
+
+fn resolve_motion_timing(
+    index: usize,
+    specs: &[MotionTimingSpec],
+    states: &mut [TimingResolveState],
+    resolved: &mut [(TimeValue, TimeValue)],
+) -> Result<()> {
+    match states[index] {
+        TimingResolveState::Resolved => return Ok(()),
+        TimingResolveState::Resolving => {
+            let name = if specs[index].name.is_empty() {
+                format!("#{index}")
+            } else {
+                specs[index].name.clone()
+            };
+            return Err(CueMolError::invalid_argument(format!(
+                "animation time reference cycle at <{name}>"
+            )));
+        }
+        TimingResolveState::Unresolved => {}
+    }
+
+    states[index] = TimingResolveState::Resolving;
+    let spec = &specs[index];
+    let base = if spec.reference.is_empty() {
+        0
+    } else {
+        let reference_index = specs
+            .iter()
+            .position(|candidate| candidate.name == spec.reference)
+            .ok_or_else(|| {
+                CueMolError::invalid_argument(format!(
+                    "animation time reference <{}> was not found",
+                    spec.reference
+                ))
+            })?;
+        resolve_motion_timing(reference_index, specs, states, resolved)?;
+        resolved[reference_index].1
+    };
+    let start = base.checked_add(spec.rel_start).ok_or_else(|| {
+        CueMolError::invalid_argument("animation start time overflowed the supported range")
+    })?;
+    let end = base.checked_add(spec.rel_end).ok_or_else(|| {
+        CueMolError::invalid_argument("animation end time overflowed the supported range")
+    })?;
+    resolved[index] = (start, end);
+    states[index] = TimingResolveState::Resolved;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2309,8 +2418,8 @@ mod tests {
         scene.set_camera("end", destination);
 
         let set_timing = |base: &mut AnimObj| {
-            base.set_abs_start(0);
-            base.set_abs_end(100);
+            base.set_rel_start(0);
+            base.set_rel_end(100);
         };
         let mut camera = CamMotion::new();
         camera.set_endcam("end");
@@ -2397,7 +2506,10 @@ mod tests {
         obj.set_name("a1");
         obj.set_rel_end(100);
         manager.append(obj.clone());
+        assert_eq!(manager.length(), 100);
+        manager.start(&view);
         manager.insert_before(10, AnimObj::new());
+        assert_eq!(manager.play_state(), AnimPlayState::Stop);
         assert_eq!(manager.size(), 2);
         assert!(manager.get_by_name("a1").is_some());
         manager.resolve_rel_time();
@@ -2415,5 +2527,79 @@ mod tests {
         assert_eq!(writer.client_scene(), None);
         manager.clear();
         assert_eq!(manager.size(), 0);
+    }
+
+    #[test]
+    fn anim_manager_resolves_named_time_references_and_forward_references() {
+        let mut child = AnimObj::new();
+        child.set_name("child");
+        child.set_time_ref_name("base");
+        child.set_rel_start(10);
+        child.set_rel_end(30);
+
+        let mut independent = AnimObj::new();
+        independent.set_name("independent");
+        independent.set_rel_start(50);
+        independent.set_rel_end(80);
+
+        let mut base = AnimObj::new();
+        base.set_name("base");
+        base.set_rel_start(100);
+        base.set_rel_end(200);
+
+        let mut grandchild = AnimObj::new();
+        grandchild.set_name("grandchild");
+        grandchild.set_time_ref_name("child");
+        grandchild.set_rel_start(5);
+        grandchild.set_rel_end(15);
+
+        let mut manager = AnimMgr::new();
+        // The dependent objects intentionally precede their references.
+        manager.append(child);
+        manager.append(independent);
+        manager.append(grandchild);
+        manager.append(base);
+        manager.try_resolve_rel_time().unwrap();
+
+        let child = manager.get_by_name("child").unwrap();
+        assert_eq!((child.abs_start(), child.abs_end()), (210, 230));
+        let independent = manager.get_by_name("independent").unwrap();
+        assert_eq!((independent.abs_start(), independent.abs_end()), (50, 80));
+        let base = manager.get_by_name("base").unwrap();
+        assert_eq!((base.abs_start(), base.abs_end()), (100, 200));
+        let grandchild = manager.get_by_name("grandchild").unwrap();
+        assert_eq!((grandchild.abs_start(), grandchild.abs_end()), (235, 245));
+    }
+
+    #[test]
+    fn anim_manager_rejects_missing_and_cyclic_time_references() {
+        let mut missing = AnimObj::new();
+        missing.set_name("missing-user");
+        missing.set_time_ref_name("absent");
+        let mut manager = AnimMgr::new();
+        manager.append(missing);
+        let error = manager.try_resolve_rel_time().unwrap_err().to_string();
+        assert!(error.contains("<absent> was not found"));
+
+        let mut lhs = AnimObj::new();
+        lhs.set_name("lhs");
+        lhs.set_time_ref_name("rhs");
+        let mut rhs = AnimObj::new();
+        rhs.set_name("rhs");
+        rhs.set_time_ref_name("lhs");
+        let mut manager = AnimMgr::new();
+        manager.append(lhs);
+        manager.append(rhs);
+        let error = manager.try_resolve_rel_time().unwrap_err().to_string();
+        assert!(error.contains("time reference cycle"));
+
+        let tree = parse_ldom2_xml(
+            r#"<animation>
+                 <motion type="NoopAnimObj" name="a" timeRefName="b"/>
+                 <motion type="NoopAnimObj" name="b" timeRefName="a"/>
+               </animation>"#,
+        )
+        .unwrap();
+        assert!(AnimMgr::from_ldom2_node(tree.top()).is_err());
     }
 }

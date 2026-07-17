@@ -1,11 +1,14 @@
 pub mod raytrace;
 
-use cuemol_core::{Matrix4, Uid, Vector4};
+use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
 use cuemol_gfx::{CmsXform, ColorSpec, Rgba8};
 use cuemol_qsys::{InOutHandler, SceneExporter as QsysSceneExporter};
 use std::fmt::Write as _;
 
-pub use raytrace::{render_umbreon_smoke, UmbreonSmokeResult};
+pub use raytrace::{
+    render_umbreon_smoke, render_umbreon_snapshot, UmbreonFrame, UmbreonRenderParams,
+    UmbreonSceneExporter, UmbreonSmokeResult,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderAtom {
@@ -903,6 +906,20 @@ impl PovSceneExporter {
         self.state.write();
     }
 
+    /// Write a complete POV-Ray scene to the configured handler path.
+    pub fn write_scene_file(
+        &mut self,
+        mesh: &RenderMesh,
+        center: Vector4,
+        size: f64,
+        perspective: bool,
+    ) -> Result<()> {
+        let output = self.write_scene_string(mesh, center, size, perspective);
+        self.handler().write_string(&output)?;
+        self.state.write();
+        Ok(())
+    }
+
     pub fn write_mesh2_string(&self, vertices: &[Vector4], triangles: &[[usize; 3]]) -> String {
         let valid_triangles = triangles
             .iter()
@@ -1182,6 +1199,14 @@ impl MqoSceneExporter {
     pub fn write(&mut self) {
         self.state.write();
     }
+
+    /// Write an MQO document to the configured handler path.
+    pub fn write_mesh_file(&mut self, name: &str, mesh: &RenderMesh) -> Result<()> {
+        let output = self.write_mqo_string(name, mesh);
+        self.handler().write_string(&output)?;
+        self.state.write();
+        Ok(())
+    }
 }
 
 impl Default for MqoSceneExporter {
@@ -1434,6 +1459,25 @@ impl WbpSceneExporter {
     pub fn write(&mut self) {
         self.state.write();
     }
+
+    /// Write a Warabi project and its sibling MQO geometry file.
+    pub fn write_scene_files(&mut self, name: &str, mesh: &RenderMesh) -> Result<()> {
+        if self.handler().path().is_empty() {
+            return Err(CueMolError::invalid_argument("Warabi output path is empty"));
+        }
+        let project_path = std::path::Path::new(self.handler().path());
+        let mqo_path = project_path.with_extension("mqo");
+        let mqo_filename = mqo_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("scene.mqo");
+        let mqo = MqoSceneExporter::new().write_mqo_string(name, mesh);
+        std::fs::write(&mqo_path, mqo)?;
+        let project = self.write_wbp_string(name, mesh, mqo_filename);
+        self.handler().write_string(&project)?;
+        self.state.write();
+        Ok(())
+    }
 }
 
 impl Default for WbpSceneExporter {
@@ -1474,6 +1518,14 @@ impl StlSceneExporter {
 
     pub fn write(&mut self) {
         self.state.write();
+    }
+
+    /// Write binary STL geometry to the configured handler path.
+    pub fn write_mesh_file(&mut self, mesh: &RenderMesh) -> Result<()> {
+        let bytes = self.write_binary_stl_bytes(&mesh.positions(), &mesh.triangles());
+        self.handler().write_bytes(&bytes)?;
+        self.state.write();
+        Ok(())
     }
 
     pub fn write_binary_stl_bytes(
@@ -1593,7 +1645,7 @@ impl LuxRendSceneExporter {
     /// (triangle indices + point list) — the geometry CORE of C++
     /// `LuxRendDisplayContext` output, paralleling the POV mesh writer. This is
     /// a geometry FRAGMENT (no Film/Camera/LightSource/WorldBegin scene chrome —
-    /// those defunct-renderer scene parts are intentionally not ported).
+    /// use [`Self::write_scene_string`] for the complete scene document).
     pub fn write_mesh_string(&self, vertices: &[Vector4], triangles: &[[usize; 3]]) -> String {
         let valid: Vec<[usize; 3]> = triangles
             .iter()
@@ -1757,6 +1809,20 @@ impl LuxRendSceneExporter {
 
     pub fn write(&mut self) {
         self.state.write();
+    }
+
+    /// Write a complete LuxRender scene to the configured handler path.
+    pub fn write_scene_file(
+        &mut self,
+        mesh: &RenderMesh,
+        center: Vector4,
+        size: f64,
+        perspective: bool,
+    ) -> Result<()> {
+        let output = self.write_scene_string(mesh, center, size, perspective);
+        self.handler().write_string(&output)?;
+        self.state.write();
+        Ok(())
     }
 }
 
@@ -1946,6 +2012,38 @@ impl LuxCoreSceneExporter {
 
     pub fn write(&mut self) {
         self.state.write();
+    }
+
+    /// Write the LuxCore CFG plus sibling SCN and PLY files.
+    pub fn write_scene_files(
+        &mut self,
+        name: &str,
+        mesh: &RenderMesh,
+        width: i32,
+        height: i32,
+    ) -> Result<()> {
+        if self.handler().path().is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "LuxCore output path is empty",
+            ));
+        }
+        let cfg_path = std::path::Path::new(self.handler().path());
+        let scn_path = cfg_path.with_extension("scn");
+        let ply_path = cfg_path.with_extension("ply");
+        let scene_base = cfg_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("scene");
+        let ply_filename = ply_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("scene.ply");
+        std::fs::write(&ply_path, self.write_ply_string(mesh))?;
+        std::fs::write(&scn_path, self.write_scn_string(name, ply_filename))?;
+        self.handler()
+            .write_string(&self.write_cfg_string(scene_base, width, height))?;
+        self.state.write();
+        Ok(())
     }
 }
 
@@ -2736,6 +2834,72 @@ mod tests {
         assert_eq!(core.halt_spp(), 10000);
         assert_eq!(core.film_opts(), "");
         assert_eq!(core.bg_mode(), LuxBackgroundMode::Transparent);
+    }
+
+    #[test]
+    fn vector_exporters_write_configured_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-render-exporters-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom::new(Vector4::ZERO, 1.0, None)],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        let mesh = tessellate_snapshot(&snapshot);
+
+        let mut pov = PovSceneExporter::new();
+        pov.handler_mut()
+            .set_path(dir.join("scene.pov").to_string_lossy());
+        pov.write_scene_file(&mesh, Vector4::ZERO, 4.0, false)
+            .unwrap();
+        assert_eq!(pov.write_count(), 1);
+        assert!(std::fs::read_to_string(dir.join("scene.pov"))
+            .unwrap()
+            .contains("camera {"));
+
+        let mut mqo = MqoSceneExporter::new();
+        mqo.handler_mut()
+            .set_path(dir.join("scene.mqo").to_string_lossy());
+        mqo.write_mesh_file("scene", &mesh).unwrap();
+        assert!(dir.join("scene.mqo").is_file());
+
+        let mut stl = StlSceneExporter::new();
+        stl.handler_mut()
+            .set_path(dir.join("scene.stl").to_string_lossy());
+        stl.write_mesh_file(&mesh).unwrap();
+        assert!(std::fs::metadata(dir.join("scene.stl")).unwrap().len() > 84);
+
+        let mut wbp = WbpSceneExporter::new();
+        wbp.handler_mut()
+            .set_path(dir.join("warabi.wbp").to_string_lossy());
+        wbp.write_scene_files("scene", &mesh).unwrap();
+        assert!(dir.join("warabi.wbp").is_file());
+        assert!(dir.join("warabi.mqo").is_file());
+
+        let mut lux = LuxRendSceneExporter::new();
+        lux.handler_mut()
+            .set_path(dir.join("scene.lxs").to_string_lossy());
+        lux.write_scene_file(&mesh, Vector4::ZERO, 4.0, false)
+            .unwrap();
+        assert!(dir.join("scene.lxs").is_file());
+
+        let mut core = LuxCoreSceneExporter::new();
+        core.handler_mut()
+            .set_path(dir.join("scene.cfg").to_string_lossy());
+        core.write_scene_files("scene", &mesh, 640, 480).unwrap();
+        assert!(dir.join("scene.cfg").is_file());
+        assert!(dir.join("scene.scn").is_file());
+        assert!(dir.join("scene.ply").is_file());
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

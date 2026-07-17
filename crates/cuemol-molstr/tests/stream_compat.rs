@@ -55,7 +55,9 @@ fn stream_manager_default_registry_matches_reference_handlers() {
     assert!(info_json.contains("\"name\":\"qdflwobj\""));
     assert!(info_json.contains("\"name\":\"qsc_xml\""));
     assert!(info_json.contains("\"name\":\"psefile\""));
-    for exporter in ["mqo", "png", "pov", "wbp", "stl", "luxrend", "luxcore"] {
+    for exporter in [
+        "mqo", "png", "umbreon", "pov", "wbp", "stl", "luxrend", "luxcore",
+    ] {
         assert!(info_json.contains(&format!("\"name\":\"{exporter}\"")));
     }
     assert!(info_json.contains("\"category\":3"));

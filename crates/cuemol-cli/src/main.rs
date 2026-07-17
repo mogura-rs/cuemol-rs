@@ -15,11 +15,11 @@ use cuemol_molvis::{
     na_renderer_snapshot, ribbon_mesh_snapshot, scene_style_manager, MoleculeRenderOptions,
     NARenderOptions, NARenderer, DEFAULT_STYLE_SCOPE,
 };
-use cuemol_qsys::{MultiGradient, ScalarObject};
+use cuemol_qsys::{Camera, MultiGradient, ScalarObject};
 use cuemol_render::{
     tessellate_snapshot, tessellate_snapshot_with_detail, LuxCoreSceneExporter,
     LuxRendSceneExporter, MqoSceneExporter, PovSceneExporter, RenderMesh, RenderSceneSnapshot,
-    StlSceneExporter, WbpSceneExporter,
+    StlSceneExporter, UmbreonSceneExporter, WbpSceneExporter,
 };
 use cuemol_surface::{read_msms_surface_files, read_obj_file};
 use cuemol_xtal::{
@@ -74,7 +74,7 @@ fn run() -> Result<(), String> {
                 .ok_or_else(|| "missing input molecule path".to_string())?;
             let output = args
                 .next()
-                .ok_or_else(|| "missing output path (.stl/.obj/.pov)".to_string())?;
+                .ok_or_else(|| "missing output path (.stl/.obj/.pov/.png)".to_string())?;
             export_scene(&input, &output)
         }
         "render-qsc" => {
@@ -83,7 +83,7 @@ fn run() -> Result<(), String> {
                 .ok_or_else(|| "missing input .qsc path".to_string())?;
             let output = args
                 .next()
-                .ok_or_else(|| "missing output path (.stl/.obj)".to_string())?;
+                .ok_or_else(|| "missing output path (.stl/.obj/.png)".to_string())?;
             render_qsc_scene(&input, &output)
         }
         "mmcif-info" => {
@@ -575,10 +575,10 @@ fn print_usage() {
     eprintln!("  cuemol stream-search <objreader|objwriter|scereader|scewriter|0-4> <file> [nicknames_csv]");
     eprintln!("  cuemol select-dump <selection-expression>");
     eprintln!(
-        "  cuemol export-scene <file.pdb|.cif|.sdf|.mol2> <out.stl|.obj|.pov|.mqo|.lxs|.cfg(LuxCore)|.wbp(Warabi)>"
+        "  cuemol export-scene <file.pdb|.cif|.sdf|.mol2> <out.stl|.obj|.pov|.png(Umbreon)|.mqo|.lxs|.cfg(LuxCore)|.wbp(Warabi)>"
     );
     eprintln!(
-        "  cuemol render-qsc <file.qsc> <out.stl|.obj>   (renders the scene with resolved styles)"
+        "  cuemol render-qsc <file.qsc> <out.stl|.obj|.png>   (renders the scene with resolved styles)"
     );
 }
 
@@ -632,6 +632,17 @@ fn scene_center_size(snapshot: &RenderSceneSnapshot) -> (cuemol_core::Vector4, f
     }
 }
 
+fn camera_for_snapshot(snapshot: &RenderSceneSnapshot) -> Camera {
+    let (center, size) = scene_center_size(snapshot);
+    let mut camera = Camera::new();
+    camera.set_center(center);
+    camera.set_zoom(size * 1.2);
+    camera.set_cam_dist(size * 2.5);
+    camera.set_slab_depth(size * 3.0);
+    camera.set_perspective(true);
+    camera
+}
+
 /// Infer a molecule reader format from a path's file extension.
 fn format_from_ext(path: &str) -> Result<&'static str, String> {
     let lower = path.to_ascii_lowercase();
@@ -671,6 +682,22 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
     if lower.ends_with(".wbp") {
         return export_wbp(name, output, &mesh, &snapshot);
     }
+    if lower.ends_with(".png") {
+        let mut exporter = UmbreonSceneExporter::new();
+        exporter.handler_mut().set_path(output);
+        exporter.set_width(640);
+        exporter.set_height(480);
+        let camera = camera_for_snapshot(&snapshot);
+        exporter
+            .write_snapshot(&snapshot, &camera, [0.0, 0.0, 0.0, 1.0])
+            .map_err(|error| error.to_string())?;
+        eprintln!(
+            "ray-traced {} atoms / {} bonds to {output}",
+            snapshot.atom_count(),
+            snapshot.bond_count()
+        );
+        return Ok(());
+    }
     let bytes: Vec<u8> = if lower.ends_with(".stl") {
         StlSceneExporter::new()
             .write_ascii_stl_string(name, &mesh.positions(), &mesh.triangles())
@@ -693,7 +720,7 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
             .into_bytes()
     } else {
         return Err(format!(
-            "unsupported output format (use .stl/.obj/.pov/.mqo/.lxs): {output}"
+            "unsupported output format (use .stl/.obj/.pov/.png/.mqo/.lxs): {output}"
         ));
     };
     std::fs::write(output, &bytes).map_err(|err| err.to_string())?;
@@ -1114,6 +1141,30 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         .and_then(|stem| stem.to_str())
         .unwrap_or("cuemol");
     let lower = output.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        let mut snapshot = RenderSceneSnapshot {
+            atoms: Vec::new(),
+            bonds: Vec::new(),
+            meshes: vec![combined.clone()],
+            bounds: None,
+        };
+        snapshot.recompute_bounds();
+        let mut exporter = UmbreonSceneExporter::new();
+        exporter.handler_mut().set_path(output);
+        exporter.set_width(640);
+        exporter.set_height(480);
+        exporter
+            .write_snapshot(
+                &snapshot,
+                &camera_for_snapshot(&snapshot),
+                [0.0, 0.0, 0.0, 1.0],
+            )
+            .map_err(|error| error.to_string())?;
+        eprintln!(
+            "ray-traced {renderer_count} renderers ({total_atoms} atoms / {total_bonds} bonds) to {output}"
+        );
+        return Ok(());
+    }
     let bytes: Vec<u8> = if lower.ends_with(".stl") {
         StlSceneExporter::new()
             .write_ascii_stl_string(name, &combined.positions(), &combined.triangles())
@@ -1122,7 +1173,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         combined.to_obj_string(name).into_bytes()
     } else {
         return Err(format!(
-            "unsupported output format (use .stl/.obj): {output}"
+            "unsupported output format (use .stl/.obj/.png): {output}"
         ));
     };
     std::fs::write(output, &bytes).map_err(|err| err.to_string())?;

@@ -2,7 +2,7 @@
 
 Rust reimplementation of CueMol2.
 
-This repository is being rebuilt from `../cuemol2` as a Rust-native workspace.
+This repository implements `../cuemol2` as a Rust-native workspace.
 The original C++ tree is used as a specification, fixture, and test reference
 only.
 
