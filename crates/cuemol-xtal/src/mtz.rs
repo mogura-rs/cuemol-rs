@@ -1,4 +1,4 @@
-use crate::fft::{auto_resolution, synthesize_density_map_with_cell, Reflection, SymOp};
+use crate::fft::{MapFFT, Reflection};
 use crate::map_renderers::DensityMap;
 use cuemol_core::{CueMolError, Result};
 use cuemol_qsys::{InOutHandler, ObjReader};
@@ -281,10 +281,11 @@ impl Mtz2MapReader {
         let f_col = self
             .selected_f
             .ok_or_else(|| CueMolError::parse("no amplitude (F) column selected"))?;
-        density_map_from_mtz(
+        density_map_from_mtz_weighted(
             mtz,
             f_col,
             self.selected_phi,
+            self.selected_weight,
             self.resolution,
             self.grid_size,
         )
@@ -302,6 +303,17 @@ pub fn density_map_from_mtz(
     resolution: f64,
     grid_size: f64,
 ) -> Result<DensityMap> {
+    density_map_from_mtz_weighted(mtz, f_col, phi_col, None, resolution, grid_size)
+}
+
+pub fn density_map_from_mtz_weighted(
+    mtz: &MtzFile,
+    f_col: usize,
+    phi_col: Option<usize>,
+    weight_col: Option<usize>,
+    resolution: f64,
+    grid_size: f64,
+) -> Result<DensityMap> {
     let cell6 = mtz
         .cell
         .ok_or_else(|| CueMolError::parse("MTZ has no unit cell"))?;
@@ -312,12 +324,16 @@ pub fn density_map_from_mtz(
             continue;
         };
         let values = &mtz.reflections[index].values;
-        let Some(&f) = values.get(f_col) else {
+        let Some(&amplitude) = values.get(f_col) else {
             continue;
         };
-        if !f.is_finite() {
+        if !amplitude.is_finite() {
             continue; // missing reflection
         }
+        let weight = weight_col
+            .and_then(|column| values.get(column).copied())
+            .unwrap_or(1.0);
+        let f = amplitude * weight;
         let phi_deg = phi_col
             .and_then(|c| values.get(c).copied())
             .filter(|p| p.is_finite())
@@ -332,7 +348,12 @@ pub fn density_map_from_mtz(
     }
 
     let sg = mtz.space_group.unwrap_or(1);
-    density_map_from_reflections_with_cell(&reflections, cell6, sg, resolution, grid_size)
+    let mut fft = MapFFT::new();
+    fft.set_params(
+        cell6[0], cell6[1], cell6[2], cell6[3], cell6[4], cell6[5], sg, grid_size, resolution,
+    );
+    fft.set_reflections(&reflections, phi_col.is_some());
+    fft.build_density_map()
 }
 
 /// Shared structure-factors -> electron-density core used by every reflection
@@ -365,38 +386,20 @@ pub fn density_map_from_reflections_with_cell(
     resolution: f64,
     grid_size: f64,
 ) -> Result<DensityMap> {
-    let cell_abc = [cell[0], cell[1], cell[2]];
-    let max_hkl = reflections.iter().fold([1i32; 3], |mut max, r| {
-        max[0] = max[0].max(r.h.abs());
-        max[1] = max[1].max(r.k.abs());
-        max[2] = max[2].max(r.l.abs());
-        max
-    });
-
-    let grid_spacing = if grid_size > 0.0 {
-        grid_size
-    } else {
-        1.0 / 3.0
-    };
-    let resolution = if resolution > 0.1 {
-        resolution
-    } else {
-        auto_resolution(cell_abc, max_hkl, grid_spacing)
-    };
-
-    let manager = cuemol_symm::SymmOpManager::new();
-    let symops: Vec<SymOp> = manager
-        .symmetry_operators(space_group)
-        .map(|ops| {
-            ops.iter()
-                .map(|op| SymOp::from_matrix(&op.matrix))
-                .collect()
-        })
-        .unwrap_or_else(|| vec![SymOp::identity()]);
-
-    let grid =
-        synthesize_density_map_with_cell(reflections, &symops, cell, resolution, grid_spacing)?;
-    Ok(DensityMap::from_grid_map(grid))
+    let mut fft = MapFFT::new();
+    fft.set_params(
+        cell[0],
+        cell[1],
+        cell[2],
+        cell[3],
+        cell[4],
+        cell[5],
+        space_group,
+        grid_size,
+        resolution,
+    );
+    fft.set_reflections(reflections, true);
+    fft.build_density_map()
 }
 
 pub fn read_mtz_file(path: impl AsRef<Path>) -> Result<MtzFile> {
@@ -713,6 +716,43 @@ mod tests {
     }
 
     #[test]
+    fn mtz_reader_applies_selected_weight_column() {
+        let mtz = MtzFile {
+            header_start_word: 0,
+            column_count: 6,
+            reflection_count: 1,
+            columns: vec![
+                column("H", 'H', 0),
+                column("K", 'H', 1),
+                column("L", 'H', 2),
+                column("F", 'F', 3),
+                column("PHI", 'P', 4),
+                column("WT", 'W', 5),
+            ],
+            cell: Some([10.0, 10.0, 10.0, 90.0, 90.0, 90.0]),
+            space_group: Some(1),
+            resolution: None,
+            byte_swapped: false,
+            reflections: vec![MtzReflection {
+                values: vec![1.0, 0.0, 0.0, 1000.0, 0.0, 0.25],
+            }],
+        };
+        let unweighted = density_map_from_mtz(&mtz, 3, Some(4), 3.0, 1.0 / 3.0).unwrap();
+
+        let mut reader = Mtz2MapReader::new();
+        reader.set_column_f("F");
+        reader.set_column_phi("PHI");
+        reader.set_column_weight("WT");
+        reader.select_fft_columns_from(&mtz).unwrap();
+        reader.mtz = Some(mtz);
+        reader.set_resolution(3.0);
+        reader.set_grid_size(1.0 / 3.0);
+        let weighted = reader.build_density_map().unwrap();
+
+        assert!((weighted.den_max() / unweighted.den_max() - 0.25).abs() < 1.0e-4);
+    }
+
+    #[test]
     fn density_map_from_mtz_skips_missing_amplitude() {
         // A NaN amplitude reflection must be skipped (no panic; finite map).
         let mtz = MtzFile {
@@ -785,5 +825,6 @@ mod tests {
             "P212121 synthesis did not differ from P1 (symmetry not applied)"
         );
         assert!(p212121.den_sigma() > 0.0);
+        assert_eq!(p212121.cell().space_group(), 19);
     }
 }

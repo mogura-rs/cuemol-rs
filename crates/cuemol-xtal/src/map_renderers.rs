@@ -70,6 +70,35 @@ impl DensityMap {
         map
     }
 
+    /// Build a crystallographic map while preserving its file-header grid
+    /// start, unit-cell intervals, cell, and space group.
+    pub fn from_crystallographic_grid(
+        grid: GridMap,
+        start: [isize; 3],
+        intervals: [usize; 3],
+        cell: [f64; 6],
+        space_group: i32,
+    ) -> Self {
+        // GridMap::origin is the Cartesian position of its first stored voxel,
+        // whereas DensityMap::origin is the crystallographic cell origin.
+        let origin = grid.origin
+            - grid.delta[0].scale(start[0] as f64)
+            - grid.delta[1].scale(start[1] as f64)
+            - grid.delta[2].scale(start[2] as f64);
+        let mut map = Self::new();
+        map.set_map_float_array(
+            &grid.values,
+            grid.counts,
+            start,
+            intervals,
+            origin,
+            grid.delta,
+        );
+        map.set_xtal_params(cell[0], cell[1], cell[2], cell[3], cell[4], cell[5]);
+        map.set_space_group(space_group);
+        map
+    }
+
     pub fn set_map_float_array(
         &mut self,
         values: &[f64],
@@ -299,9 +328,9 @@ impl DensityMap {
     fn index_from_position(&self, position: Vector4) -> [isize; 3] {
         let rel = position - self.origin;
         [
-            project_axis(rel, self.delta[0]).floor() as isize + self.start[0],
-            project_axis(rel, self.delta[1]).floor() as isize + self.start[1],
-            project_axis(rel, self.delta[2]).floor() as isize + self.start[2],
+            project_axis(rel, self.delta[0]).floor() as isize,
+            project_axis(rel, self.delta[1]).floor() as isize,
+            project_axis(rel, self.delta[2]).floor() as isize,
         ]
     }
 }
@@ -2186,6 +2215,38 @@ attribute \"dep\" string \"positions\"
         assert!((cell.alpha - 90.0).abs() < 1.0e-12);
         assert!((cell.beta - 90.0).abs() < 1.0e-12);
         assert!((cell.gamma - 120.0).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn crystallographic_grid_preserves_start_and_position_lookup() {
+        let start = [3, -2, 5];
+        let grid = GridMap {
+            counts: [2, 2, 2],
+            origin: Vector4::new3(3.0, -4.0, 15.0),
+            delta: [
+                Vector4::new3(1.0, 0.0, 0.0),
+                Vector4::new3(0.0, 2.0, 0.0),
+                Vector4::new3(0.0, 0.0, 3.0),
+            ],
+            values: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        };
+        let map = DensityMap::from_crystallographic_grid(
+            grid,
+            start,
+            [10, 10, 10],
+            [10.0, 20.0, 30.0, 90.0, 90.0, 90.0],
+            19,
+        );
+
+        assert_eq!([map.start_col(), map.start_row(), map.start_sec()], start);
+        assert_eq!(map.intervals(), [10, 10, 10]);
+        assert_eq!(map.cell().space_group(), 19);
+        let first_position = map.conv_to_orth(Vector4::ZERO);
+        assert!((first_position - Vector4::new3(3.0, -4.0, 15.0)).length3d() < 1.0e-12);
+        assert!(map.is_in_range(first_position));
+        assert!((map.value_at(first_position) - 1.0).abs() < 0.05);
+        assert!((map.at_float(3, -2, 5) - 1.0).abs() < 0.05);
+        assert!(!map.is_in_boundary(0, 0, 0));
     }
 
     #[test]

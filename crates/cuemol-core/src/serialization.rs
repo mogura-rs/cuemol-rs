@@ -104,6 +104,15 @@ pub fn read_properties_from_dom(
     Ok(())
 }
 
+/// Convert one DOM property node using the supplied property specification.
+pub fn variant_from_dom_node(
+    node: &LDom2Node,
+    spec: &PropSpec,
+    registry: &ClassRegistry,
+) -> Result<LVariant> {
+    variant_from_node(&mut node.clone(), spec, registry)
+}
+
 fn setup_node_by_variant(node: &mut LDom2Node, value: &LVariant) -> Result<()> {
     match value {
         LVariant::Object(object) | LVariant::SmartPtr(object) => {

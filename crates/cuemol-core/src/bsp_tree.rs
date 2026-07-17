@@ -197,6 +197,19 @@ impl<T> BSPTree<T> {
         values
     }
 
+    /// Return the value whose point is nearest to `position`.
+    ///
+    /// The tree is traversed in near-first order and branches whose bounding
+    /// boxes cannot improve the current result are discarded. As with the
+    /// reference implementation, an allocated but empty tree has no nearest
+    /// value and an unbuilt tree is not searchable.
+    pub fn nearest(&self, position: Vector4) -> Option<&T> {
+        let root = self.root.as_deref()?;
+        let mut best = None;
+        nearest_index(root, &self.data, position, &mut best);
+        best.map(|(index, _)| &self.data[index].value)
+    }
+
     pub fn coll_chk(&self, position: Vector4, radius: f64) -> bool {
         let Some(root) = self.root.as_deref() else {
             return false;
@@ -220,6 +233,64 @@ impl<T> BSPTree<T> {
             (position - point).sqlen() < radius_squared
         })
     }
+}
+
+fn nearest_index<T>(
+    node: &Node,
+    data: &[Tuple<T>],
+    position: Vector4,
+    best: &mut Option<(usize, f64)>,
+) {
+    let box_distance = point_box_distance_squared(position, node.minimum, node.maximum);
+    if best.is_some_and(|(_, distance)| box_distance > distance) {
+        return;
+    }
+
+    if node.is_leaf() {
+        for (offset, tuple) in data[node.start..node.end].iter().enumerate() {
+            let dx = tuple.position[0] - position.x;
+            let dy = tuple.position[1] - position.y;
+            let dz = tuple.position[2] - position.z;
+            let distance = dx * dx + dy * dy + dz * dz;
+            if best.is_none_or(|(_, current)| distance < current) {
+                *best = Some((node.start + offset, distance));
+            }
+        }
+        return;
+    }
+
+    let coordinate = match node.direction {
+        0 => position.x,
+        1 => position.y,
+        _ => position.z,
+    };
+    let (near, far) = if coordinate < node.divider {
+        (node.lower.as_deref(), node.upper.as_deref())
+    } else {
+        (node.upper.as_deref(), node.lower.as_deref())
+    };
+    if let Some(child) = near {
+        nearest_index(child, data, position, best);
+    }
+    if let Some(child) = far {
+        nearest_index(child, data, position, best);
+    }
+}
+
+fn point_box_distance_squared(position: Vector4, minimum: Vector4, maximum: Vector4) -> f64 {
+    let axis_distance = |value: f64, low: f64, high: f64| {
+        if value < low {
+            low - value
+        } else if value > high {
+            value - high
+        } else {
+            0.0
+        }
+    };
+    let dx = axis_distance(position.x, minimum.x, maximum.x);
+    let dy = axis_distance(position.y, minimum.y, maximum.y);
+    let dz = axis_distance(position.z, minimum.z, maximum.z);
+    dx * dx + dy * dy + dz * dz
 }
 
 impl<T: Default> BSPTree<T> {
@@ -414,6 +485,7 @@ mod tests {
         let mut empty = BSPTree::<i32>::new();
         empty.build();
         assert!(empty.values_around(Vector4::ZERO, 1.0).is_empty());
+        assert_eq!(empty.nearest(Vector4::ZERO), None);
 
         let mut tied = BSPTree::new();
         for index in 0..16 {
@@ -422,5 +494,17 @@ mod tests {
         }
         tied.build();
         assert!(tied.coll_chk(Vector4::new3(2.0, 2.0, 2.0), 0.1));
+        assert_eq!(
+            tied.nearest(Vector4::new3(2.1, 2.0, 2.0))
+                .copied()
+                .map(|index| index % 4),
+            Some(2)
+        );
+        assert_eq!(
+            tied.nearest(Vector4::new3(100.0, 100.0, 100.0))
+                .copied()
+                .map(|index| index % 4),
+            Some(3)
+        );
     }
 }

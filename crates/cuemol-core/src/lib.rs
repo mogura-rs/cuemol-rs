@@ -73,7 +73,9 @@ pub use range_set::{IntRange, RangeSet};
 pub use regex::LRegExpr;
 pub use scene::{Object, Renderer, Scene, SceneManager, Uid};
 pub use script_compat::{ClassA, ClassAEnum, ClassB, ClassS, LScrCallBack, LScrObject};
-pub use serialization::{read_properties_from_dom, write_properties_to_dom, LSerializable};
+pub use serialization::{
+    read_properties_from_dom, variant_from_dom_node, write_properties_to_dom, LSerializable,
+};
 pub use streams::{
     FileInStream, FileOutStream, InStream, LineStream, OutStream, PrintStream, PrintValue,
     StrInStream, StrOutStream,

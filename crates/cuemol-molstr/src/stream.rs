@@ -3,7 +3,8 @@ use cuemol_core::{
     parse_ldom2_xml, write_ldom2_xml, ByteArray, CueMolError, LDom2Node, LDom2Tree, Result,
 };
 use cuemol_qsys::{
-    Camera, InOutHandler, ObjReader, Renderer as QsysRenderer, SceneXMLReader, SceneXMLWriter,
+    Camera, IOThread, InOutHandler, ObjReader, Renderer as QsysRenderer, SceneXMLReader,
+    SceneXMLWriter,
 };
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -140,10 +141,11 @@ impl StreamHandlerInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct AsyncLoadTask {
     reader_type: String,
-    data: Vec<u8>,
+    worker: Option<IOThread<AsyncLoadResult>>,
+    byte_len: usize,
     eos: bool,
 }
 
@@ -160,11 +162,25 @@ pub enum AsyncLoadedObject {
     },
 }
 
+#[derive(Debug)]
+struct AsyncLoadResult {
+    data: Vec<u8>,
+    object: Result<AsyncLoadedObject>,
+}
+
 impl AsyncLoadTask {
     fn new(reader_type: impl Into<String>) -> Self {
+        let reader_type = reader_type.into();
+        let worker_reader_type = reader_type.clone();
         Self {
-            reader_type: reader_type.into(),
-            data: Vec::new(),
+            reader_type,
+            worker: Some(IOThread::spawn(move |input| {
+                let mut data = Vec::new();
+                input.read_to_end(&mut data)?;
+                let object = parse_async_object(&worker_reader_type, &data);
+                Ok(AsyncLoadResult { data, object })
+            })),
+            byte_len: 0,
             eos: false,
         }
     }
@@ -174,19 +190,51 @@ impl AsyncLoadTask {
     }
 
     pub fn byte_len(&self) -> usize {
-        self.data.len()
+        self.byte_len
     }
 
     pub fn is_eos(&self) -> bool {
         self.eos
     }
+
+    fn supply_data(&mut self, data: &[u8]) -> bool {
+        if self.eos {
+            return false;
+        }
+        let supplied = self
+            .worker
+            .as_mut()
+            .is_some_and(|worker| worker.supply_data(data));
+        if supplied {
+            self.byte_len = self.byte_len.saturating_add(data.len());
+        }
+        supplied
+    }
+
+    fn wait(&mut self) -> Result<AsyncLoadResult> {
+        self.eos = true;
+        self.worker
+            .take()
+            .ok_or_else(|| CueMolError::invalid_argument("asynchronous load already completed"))?
+            .wait()
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct StreamManager {
     handlers: Vec<StreamHandlerInfo>,
     next_async_load_id: i32,
     async_loads: BTreeMap<i32, AsyncLoadTask>,
+}
+
+impl Clone for StreamManager {
+    fn clone(&self) -> Self {
+        Self {
+            handlers: self.handlers.clone(),
+            next_async_load_id: self.next_async_load_id,
+            async_loads: BTreeMap::new(),
+        }
+    }
 }
 
 impl Default for StreamManager {
@@ -350,8 +398,7 @@ impl StreamManager {
         let Some(data) = data.get(..data_len) else {
             return false;
         };
-        task.data.extend_from_slice(data);
-        true
+        task.supply_data(data)
     }
 
     pub fn supply_all_data_async(&mut self, load_id: i32, data: &[u8]) -> bool {
@@ -363,8 +410,8 @@ impl StreamManager {
 
     pub fn wait_load_bytes_async(&mut self, load_id: i32) -> Option<ByteArray> {
         let mut task = self.async_loads.remove(&load_id)?;
-        task.eos = true;
-        Some(ByteArray::copy_from_u8(&task.data))
+        let result = task.wait().ok()?;
+        Some(ByteArray::copy_from_u8(&result.data))
     }
 
     pub fn wait_load_async(&mut self, load_id: i32) -> Option<AsyncLoadedObject> {
@@ -375,8 +422,7 @@ impl StreamManager {
         let Some(mut task) = self.async_loads.remove(&load_id) else {
             return Ok(None);
         };
-        task.eos = true;
-        parse_async_object(&task.reader_type, &task.data).map(Some)
+        task.wait()?.object.map(Some)
     }
 
     pub fn async_load(&self, load_id: i32) -> Option<&AsyncLoadTask> {

@@ -42,6 +42,59 @@ pub const QDF_TYPE_VEC4: i8 = 52;
 pub const QDF_TYPE_RGB: i8 = 53;
 pub const QDF_TYPE_RGBA: i8 = 54;
 
+/// Namespace for persistent QDF type tags and version helpers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QdfDataType;
+
+impl QdfDataType {
+    pub const QDF_TYPE_BOOL: i8 = QDF_TYPE_BOOL;
+    pub const QDF_TYPE_UINT8: i8 = QDF_TYPE_UINT8;
+    pub const QDF_TYPE_UINT16: i8 = QDF_TYPE_UINT16;
+    pub const QDF_TYPE_UINT32: i8 = QDF_TYPE_UINT32;
+    pub const QDF_TYPE_UINT64: i8 = QDF_TYPE_UINT64;
+    pub const QDF_TYPE_UID: i8 = QDF_TYPE_UID;
+    pub const QDF_TYPE_INT8: i8 = QDF_TYPE_INT8;
+    pub const QDF_TYPE_INT16: i8 = QDF_TYPE_INT16;
+    pub const QDF_TYPE_INT32: i8 = QDF_TYPE_INT32;
+    pub const QDF_TYPE_INT64: i8 = QDF_TYPE_INT64;
+    pub const QDF_TYPE_FLOAT16: i8 = QDF_TYPE_FLOAT16;
+    pub const QDF_TYPE_FLOAT32: i8 = QDF_TYPE_FLOAT32;
+    pub const QDF_TYPE_FLOAT64: i8 = QDF_TYPE_FLOAT64;
+    pub const QDF_TYPE_FLOAT128: i8 = QDF_TYPE_FLOAT128;
+    pub const QDF_TYPE_UTF8STR: i8 = QDF_TYPE_UTF8STR;
+    pub const QDF_TYPE_FIXSTR8: i8 = QDF_TYPE_FIXSTR8;
+    pub const QDF_TYPE_FIXSTR16: i8 = QDF_TYPE_FIXSTR16;
+    pub const QDF_TYPE_FIXSTR32: i8 = QDF_TYPE_FIXSTR32;
+    pub const QDF_TYPE_VEC3: i8 = QDF_TYPE_VEC3;
+    pub const QDF_TYPE_VEC4: i8 = QDF_TYPE_VEC4;
+    pub const QDF_TYPE_RGB: i8 = QDF_TYPE_RGB;
+    pub const QDF_TYPE_RGBA: i8 = QDF_TYPE_RGBA;
+
+    pub fn get_size(type_tag: i8, fixed: bool) -> Result<usize> {
+        if type_tag == QDF_TYPE_UTF8STR && fixed {
+            return Ok(std::mem::size_of::<i32>());
+        }
+        qdf_type_size(type_tag).ok_or_else(|| {
+            CueMolError::invalid_argument(format!(
+                "QDF type {type_tag} has no context-free fixed size"
+            ))
+        })
+    }
+
+    pub fn create_version_string(version: u16) -> Result<String> {
+        qdf_version_string(version)
+    }
+
+    pub fn parse_version_string(version: &str) -> Result<u16> {
+        if version.len() != 4 {
+            return Err(CueMolError::parse(
+                "QDF version signature must be four bytes",
+            ));
+        }
+        parse_qdf_version(version.as_bytes())
+    }
+}
+
 /// Return the fixed byte width of a QDF value. Variable-length UTF-8 strings
 /// only have a fixed four-byte length prefix and therefore return `None`.
 pub fn qdf_type_size(type_tag: i8) -> Option<usize> {
@@ -562,6 +615,11 @@ impl QdfWriter {
     }
 }
 
+pub type QdfAbsReader<'a> = QdfReader<'a>;
+pub type QdfInStream<'a> = QdfReader<'a>;
+pub type QdfAbsWriter = QdfWriter;
+pub type QdfOutStream = QdfWriter;
+
 /// The file-type tag of a QDF stream, or `None` if the header is unparseable.
 pub fn qdf_file_type(input: &[u8]) -> Option<String> {
     QdfReader::from_bytes(input)
@@ -738,6 +796,9 @@ mod tests {
         assert_eq!(qdf_version_string(0x12).unwrap(), "QD12");
         assert_eq!(qdf_version_string(0x123).unwrap(), "Q123");
         assert!(qdf_version_string(0x1000).is_err());
+        assert_eq!(QdfDataType::parse_version_string("QD12").unwrap(), 0x12);
+        assert_eq!(QdfDataType::get_size(QDF_TYPE_UTF8STR, true).unwrap(), 4);
+        assert!(QdfDataType::get_size(QDF_TYPE_UTF8STR, false).is_err());
     }
 
     #[test]

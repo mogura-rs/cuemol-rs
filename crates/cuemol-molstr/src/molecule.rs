@@ -720,6 +720,21 @@ impl MolCoord {
         indices.len()
     }
 
+    /// Transform atoms and record the before/after coordinates for undo.
+    pub fn xform_by_mat_with_undo(
+        &mut self,
+        matrix: Matrix4,
+        selector: Option<&Selector>,
+        undo: &mut crate::mol_undo::MolUndoManager,
+    ) -> usize {
+        let mut edit = crate::mol_undo::MolXformEditInfo::new();
+        edit.save_before_pos_selected(self, selector);
+        let count = self.xform_by_mat(matrix, selector);
+        edit.save_after_pos_selected(self, selector);
+        undo.record(Box::new(edit));
+        count
+    }
+
     pub fn fit_view(&self, view: &mut View, selected: bool) -> bool {
         let selector = selected.then_some(&self.selection);
         self.fit_view2(view, selector)

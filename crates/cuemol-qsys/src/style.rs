@@ -446,12 +446,25 @@ impl StyleManager {
     }
 
     pub fn destroy_style_set(&mut self, scope_id: u64, style_set_id: u64) -> bool {
-        let Some(sets) = self.scopes.get_mut(&scope_id) else {
-            return false;
-        };
-        let before = sets.len();
-        sets.retain(|set| set.uid() != style_set_id);
-        before != sets.len()
+        self.take_style_set(scope_id, style_set_id).is_some()
+    }
+
+    /// Remove and return a style set and its insertion index for undo/redo.
+    pub fn take_style_set(
+        &mut self,
+        scope_id: u64,
+        style_set_id: u64,
+    ) -> Option<(StyleSet, usize)> {
+        let sets = self.scopes.get_mut(&scope_id)?;
+        let index = sets.iter().position(|set| set.uid() == style_set_id)?;
+        Some((sets.remove(index), index))
+    }
+
+    pub fn style_set_index(&self, scope_id: u64, style_set_id: u64) -> Option<usize> {
+        self.scopes
+            .get(&scope_id)?
+            .iter()
+            .position(|set| set.uid() == style_set_id)
     }
 
     pub fn register_style_set(&mut self, mut set: StyleSet, before: isize, scope_id: u64) -> bool {
@@ -1128,6 +1141,10 @@ impl StyleNamedColorResolver {
         self.context_id.store(context_id, Ordering::SeqCst);
     }
 
+    pub fn context_id(&self) -> u64 {
+        self.context_id.load(Ordering::SeqCst)
+    }
+
     pub fn with_manager<R>(&self, operation: impl FnOnce(&StyleManager) -> R) -> R {
         let manager = self
             .manager
@@ -1160,7 +1177,7 @@ impl NamedColorResolver for StyleNamedColorResolver {
     }
 
     fn context_id(&self) -> u64 {
-        self.context_id.load(Ordering::SeqCst)
+        self.context_id()
     }
 
     fn make_cache(&self) -> u64 {
@@ -1198,6 +1215,43 @@ impl NamedColorResolver for StyleNamedColorResolver {
             .clear();
     }
 }
+
+/// Scoped style-context switch that restores the previous context on drop.
+pub struct AutoStyleContext<'a> {
+    resolver: &'a StyleNamedColorResolver,
+    previous_context_id: u64,
+    active: bool,
+}
+
+impl<'a> AutoStyleContext<'a> {
+    pub fn new(resolver: &'a StyleNamedColorResolver, context_id: u64) -> Self {
+        let previous_context_id = resolver.context_id();
+        let active = context_id != INVALID_UID;
+        if active {
+            resolver.set_context_id(context_id);
+        }
+        Self {
+            resolver,
+            previous_context_id,
+            active,
+        }
+    }
+
+    pub fn end_request(&mut self) {
+        if self.active {
+            self.resolver.set_context_id(self.previous_context_id);
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for AutoStyleContext<'_> {
+    fn drop(&mut self) {
+        self.end_request();
+    }
+}
+
+pub type AutoStyleCtxt<'a> = AutoStyleContext<'a>;
 
 fn canonical_key(name: &str) -> String {
     name.to_ascii_lowercase()
@@ -1643,6 +1697,27 @@ mod tests {
         );
         resolver.set_context_id(11);
         assert_eq!(resolver.context_id(), 11);
+    }
+
+    #[test]
+    fn auto_style_context_restores_the_previous_scope() {
+        let resolver = StyleNamedColorResolver::new(StyleManager::new(), 10);
+        {
+            let mut context = AutoStyleContext::new(&resolver, 20);
+            assert_eq!(resolver.context_id(), 20);
+            context.end_request();
+            assert_eq!(resolver.context_id(), 10);
+        }
+        assert_eq!(resolver.context_id(), 10);
+        {
+            let _context = AutoStyleContext::new(&resolver, 30);
+            assert_eq!(resolver.context_id(), 30);
+        }
+        assert_eq!(resolver.context_id(), 10);
+        {
+            let _context = AutoStyleContext::new(&resolver, INVALID_UID);
+            assert_eq!(resolver.context_id(), 10);
+        }
     }
 
     #[test]

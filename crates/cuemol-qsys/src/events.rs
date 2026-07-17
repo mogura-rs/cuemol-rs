@@ -1,4 +1,5 @@
 use cuemol_core::{IndexedTable, LLogEvent, LScrCallBack, LString, LVarArgs, Result};
+use cuemol_gfx::{DisplayContext, DisplayList};
 use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
@@ -985,10 +986,10 @@ impl ViewEvent {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct DispListCacheImpl {
-    valid: bool,
-    hit_valid: bool,
+    display_list: Option<DisplayList>,
+    hittest_display_list: Option<DisplayList>,
 }
 
 impl DispListCacheImpl {
@@ -996,12 +997,74 @@ impl DispListCacheImpl {
         Self::default()
     }
 
+    /// Build the display list once and replay it on subsequent calls.
+    ///
+    /// Returns true when this call created the cache.
+    pub fn display<Render, PreRender, PostRender>(
+        &mut self,
+        target: &mut DisplayContext,
+        render: Render,
+        pre_render: PreRender,
+        post_render: PostRender,
+    ) -> bool
+    where
+        Render: FnOnce(&mut DisplayList),
+        PreRender: FnOnce(&mut DisplayContext),
+        PostRender: FnOnce(&mut DisplayContext),
+    {
+        let created = self.display_list.is_none();
+        if created {
+            let mut display_list = DisplayList::new();
+            display_list.record_start();
+            render(&mut display_list);
+            display_list.record_end();
+            self.display_list = Some(display_list);
+        }
+
+        pre_render(target);
+        self.display_list
+            .as_mut()
+            .expect("display cache is missing after creation")
+            .call_display_list(target);
+        post_render(target);
+        created
+    }
+
+    /// Build and replay the independent hit-test display list.
+    pub fn display_hit<Render>(&mut self, target: &DisplayContext, render: Render) -> bool
+    where
+        Render: FnOnce(&mut DisplayList),
+    {
+        let created = self.hittest_display_list.is_none();
+        if created {
+            let mut display_list = DisplayList::new();
+            display_list.record_start();
+            render(&mut display_list);
+            display_list.record_end();
+            self.hittest_display_list = Some(display_list);
+        }
+        self.hittest_display_list
+            .as_mut()
+            .expect("hit-test cache is missing after creation")
+            .call_display_list(target);
+        created
+    }
+
     pub fn invalidate(&mut self) {
-        self.valid = false;
+        self.display_list = None;
+        self.hittest_display_list = None;
     }
 
     pub fn invalidate_hit(&mut self) {
-        self.hit_valid = false;
+        self.hittest_display_list = None;
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.display_list.is_some()
+    }
+
+    pub fn is_hit_valid(&self) -> bool {
+        self.hittest_display_list.is_some()
     }
 }
 

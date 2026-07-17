@@ -595,6 +595,19 @@ fn stream_manager_async_load_preserves_extension_crate_inputs() {
 }
 
 #[test]
+fn stream_manager_clone_preserves_registry_without_sharing_active_workers() {
+    let mut manager = StreamManager::new();
+    let active_id = manager.load_object_async(&"pdb");
+    let mut cloned = manager.clone();
+
+    assert_eq!(cloned.handlers(), manager.handlers());
+    assert!(cloned.async_load(active_id).is_none());
+    assert!(manager.async_load(active_id).is_some());
+    assert!(cloned.load_object_async(&"pdb") > active_id);
+    assert!(manager.wait_load_bytes_async(active_id).is_some());
+}
+
+#[test]
 fn stream_manager_xml_helpers_preserve_basic_metadata() {
     let manager = StreamManager::new();
     let value = 10_i32;

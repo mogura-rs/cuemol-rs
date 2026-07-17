@@ -1,8 +1,13 @@
 use crate::{RendererEvent, SceneEvent, ScrEventManagerHandle};
-use cuemol_core::{EventCaster, LDom2Node, LString, Matrix4, SharedEventListener, Uid, Vector4};
+use cuemol_core::{
+    EventCaster, LDom2Node, LPropEvent, LPropSupport, LString, LVariant, Matrix4,
+    SharedEventListener, Uid, Vector4,
+};
 use cuemol_gfx::{RawHitData, Rgba8, SolidColor};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 pub const INVALID_UID: u64 = 0;
@@ -845,12 +850,14 @@ impl Default for RendGroup {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PropEditInfo {
     target_uid: u64,
     prop_name: String,
-    old_value: String,
-    new_value: String,
+    old_value: LVariant,
+    new_value: LVariant,
+    old_default: bool,
+    new_default: bool,
+    target: Option<Weak<RefCell<dyn LPropSupport>>>,
 }
 
 impl Default for PropEditInfo {
@@ -858,9 +865,26 @@ impl Default for PropEditInfo {
         Self {
             target_uid: INVALID_UID,
             prop_name: String::new(),
-            old_value: String::new(),
-            new_value: String::new(),
+            old_value: LVariant::Null,
+            new_value: LVariant::Null,
+            old_default: false,
+            new_default: false,
+            target: None,
         }
+    }
+}
+
+impl fmt::Debug for PropEditInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PropEditInfo")
+            .field("target_uid", &self.target_uid)
+            .field("prop_name", &self.prop_name)
+            .field("old_value", &self.old_value)
+            .field("new_value", &self.new_value)
+            .field("old_default", &self.old_default)
+            .field("new_default", &self.new_default)
+            .finish_non_exhaustive()
     }
 }
 
@@ -894,24 +918,103 @@ impl PropEditInfo {
     ) {
         self.target_uid = target_uid;
         self.prop_name = prop_name.into();
-        self.old_value = old_value.into();
-        self.new_value = new_value.into();
+        self.old_value = LVariant::String(old_value.into().into());
+        self.new_value = LVariant::String(new_value.into().into());
+        self.old_default = false;
+        self.new_default = false;
+        self.target = None;
+    }
+
+    pub fn setup_with_target(
+        &mut self,
+        target: Rc<RefCell<dyn LPropSupport>>,
+        prop_name: impl Into<String>,
+        old_value: LVariant,
+        new_value: LVariant,
+    ) {
+        self.target_uid = target.borrow().root_uid();
+        self.prop_name = prop_name.into();
+        self.old_value = old_value;
+        self.new_value = new_value;
+        self.old_default = false;
+        self.new_default = false;
+        self.target = Some(Rc::downgrade(&target));
+    }
+
+    pub fn setup_from_event(&mut self, target: Rc<RefCell<dyn LPropSupport>>, event: &LPropEvent) {
+        let prop_name = if event.parent_name().is_empty() {
+            event.name().as_str().to_string()
+        } else {
+            format!("{}.{}", event.parent_name(), event.name())
+        };
+        self.target_uid = target.borrow().root_uid();
+        self.prop_name = prop_name;
+        self.old_value = event.old_value().clone();
+        self.new_value = event.new_value().clone();
+        self.old_default = event.is_old_default();
+        self.new_default = event.is_new_default();
+        self.target = Some(Rc::downgrade(&target));
     }
 
     pub fn is_undoable(&self) -> bool {
-        self.target_uid != INVALID_UID
+        self.target_exists()
     }
 
     pub fn is_redoable(&self) -> bool {
-        self.target_uid != INVALID_UID
+        self.target_exists()
     }
 
     pub fn undo(&self) -> bool {
-        self.is_undoable()
+        self.apply(&self.old_value, self.old_default)
     }
 
     pub fn redo(&self) -> bool {
-        self.is_redoable()
+        self.apply(&self.new_value, self.new_default)
+    }
+
+    fn target_exists(&self) -> bool {
+        let Some(target) = self.target.as_ref().and_then(Weak::upgrade) else {
+            return false;
+        };
+        let target = target.borrow();
+        let name = LString::from(self.prop_name.as_str());
+        if self.prop_name.contains('.') {
+            target.has_nested_writable_property(&name)
+        } else {
+            target.has_writable_property(&name)
+        }
+    }
+
+    fn apply(&self, value: &LVariant, default: bool) -> bool {
+        let Some(target) = self.target.as_ref().and_then(Weak::upgrade) else {
+            return false;
+        };
+        let mut target = target.borrow_mut();
+        let name = LString::from(self.prop_name.as_str());
+        match (self.prop_name.contains('.'), default) {
+            (true, true) => target.reset_nested_property(&name),
+            (true, false) => target.set_nested_property(&name, value),
+            (false, true) => target.reset_property(&name),
+            (false, false) => target.set_property(&name, value),
+        }
+    }
+}
+
+impl crate::EditInfo for PropEditInfo {
+    fn undo(&mut self) -> bool {
+        PropEditInfo::undo(self)
+    }
+
+    fn redo(&mut self) -> bool {
+        PropEditInfo::redo(self)
+    }
+
+    fn is_undoable(&self) -> bool {
+        PropEditInfo::is_undoable(self)
+    }
+
+    fn is_redoable(&self) -> bool {
+        PropEditInfo::is_redoable(self)
     }
 }
 
@@ -1193,7 +1296,7 @@ fn lerp_color(lhs: Rgba8, rhs: Rgba8, t: f32) -> Rgba8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cuemol_core::shared_event_listener;
+    use cuemol_core::{shared_event_listener, MapPropContainer, PropObject, PropSpec};
     use std::sync::Mutex;
 
     fn color(r: u8, g: u8, b: u8) -> Rgba8 {
@@ -1369,6 +1472,91 @@ mod tests {
         edit.setup(INVALID_UID, "someProp", "old", "new");
         assert!(!edit.undo());
         assert!(!edit.redo());
+    }
+
+    #[test]
+    fn prop_edit_info_applies_values_defaults_and_nested_properties() {
+        let mut properties = MapPropContainer::new();
+        properties.set_root_uid(42);
+        properties.add_property(
+            "count",
+            PropSpec::writable("integer").with_default(),
+            7.into(),
+        );
+        assert!(properties.set_prop_int("count", 9));
+        assert!(properties.reset_property(&"count".into()));
+        let target: Rc<RefCell<dyn LPropSupport>> = Rc::new(RefCell::new(properties));
+
+        let mut reset_event = LPropEvent::new("count");
+        reset_event.set_old_value(&9.into());
+        reset_event.set_new_default(true);
+        let mut reset_edit = PropEditInfo::new();
+        reset_edit.setup_from_event(target.clone(), &reset_event);
+        assert!(reset_edit.undo());
+        assert_eq!(
+            target
+                .borrow()
+                .get_property(&"count".into())
+                .unwrap()
+                .get_int_value()
+                .unwrap(),
+            9
+        );
+        assert!(!target.borrow().is_prop_default(&"count".into()));
+        assert!(reset_edit.redo());
+        assert_eq!(
+            target
+                .borrow()
+                .get_property(&"count".into())
+                .unwrap()
+                .get_int_value()
+                .unwrap(),
+            7
+        );
+        assert!(target.borrow().is_prop_default(&"count".into()));
+
+        let mut child = MapPropContainer::new();
+        child.add_property(
+            "value",
+            PropSpec::writable("real").with_default(),
+            1.5.into(),
+        );
+        let mut root = MapPropContainer::new();
+        root.set_root_uid(77);
+        root.add_property(
+            "child",
+            PropSpec::writable("object"),
+            LVariant::Object(Box::new(PropObject::new(child))),
+        );
+        assert!(root.set_nested_property(&"child.value".into(), &2.25.into()));
+        let nested_target: Rc<RefCell<dyn LPropSupport>> = Rc::new(RefCell::new(root));
+        let mut nested_edit = PropEditInfo::new();
+        nested_edit.setup_with_target(
+            nested_target.clone(),
+            "child.value",
+            1.5.into(),
+            2.25.into(),
+        );
+        assert!(nested_edit.undo());
+        assert_eq!(
+            nested_target
+                .borrow()
+                .get_nested_property(&"child.value".into())
+                .unwrap()
+                .get_real_value()
+                .unwrap(),
+            1.5
+        );
+        assert!(nested_edit.redo());
+        assert_eq!(
+            nested_target
+                .borrow()
+                .get_nested_property(&"child.value".into())
+                .unwrap()
+                .get_real_value()
+                .unwrap(),
+            2.25
+        );
     }
 
     #[test]

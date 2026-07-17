@@ -1,4 +1,4 @@
-use crate::{parse_selector, Atom, MolCoord, ResidueKey, ResidueSummary, Selector};
+use crate::{parse_selector, Atom, Bond, MolCoord, ResidueKey, ResidueSummary, Selector};
 use cuemol_core::Result;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -85,6 +85,115 @@ impl std::fmt::Display for AtomIterator<'_> {
         write!(
             f,
             "AtomIterator(size={}, cursor={})",
+            self.indices.len(),
+            self.cursor
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BondIterator<'a> {
+    target: &'a MolCoord,
+    selection: Selector,
+    indices: Vec<usize>,
+    cursor: usize,
+}
+
+impl<'a> BondIterator<'a> {
+    pub fn new(target: &'a MolCoord, selection: Selector) -> Self {
+        let selected = target
+            .select_indices(&selection)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let indices = target
+            .bonds()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bond)| {
+                (bond.atom1 < target.atom_count()
+                    && bond.atom2 < target.atom_count()
+                    && selected.contains(&bond.atom1)
+                    && selected.contains(&bond.atom2))
+                .then_some(index)
+            })
+            .collect();
+        Self {
+            target,
+            selection,
+            indices,
+            cursor: 0,
+        }
+    }
+
+    pub fn all(target: &'a MolCoord) -> Self {
+        Self::new(target, Selector::All)
+    }
+
+    pub fn target(&self) -> &'a MolCoord {
+        self.target
+    }
+
+    pub fn get_target(&self) -> &'a MolCoord {
+        self.target()
+    }
+
+    pub fn set_target(&mut self, target: &'a MolCoord) {
+        *self = Self::new(target, self.selection.clone());
+    }
+
+    pub fn selection(&self) -> &Selector {
+        &self.selection
+    }
+
+    pub fn get_selection(&self) -> &Selector {
+        self.selection()
+    }
+
+    pub fn set_selection(&mut self, selection: Selector) {
+        *self = Self::new(self.target, selection);
+    }
+
+    pub fn set_sel(&mut self, selection: Selector) {
+        self.set_selection(selection);
+    }
+
+    pub fn first(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn next(&mut self) {
+        self.cursor = self.cursor.saturating_add(1);
+    }
+
+    pub fn has_more(&self) -> bool {
+        self.cursor < self.indices.len()
+    }
+
+    pub fn get_bond(&self) -> Option<&'a Bond> {
+        self.indices
+            .get(self.cursor)
+            .and_then(|index| self.target.bonds().get(*index))
+    }
+
+    pub fn get(&self) -> Option<(&'a Atom, &'a Atom)> {
+        let bond = self.get_bond()?;
+        Some((
+            self.target.atoms().get(bond.atom1)?,
+            self.target.atoms().get(bond.atom2)?,
+        ))
+    }
+
+    pub fn get_id(&self) -> Option<(i32, i32)> {
+        self.get()
+            .map(|(atom1, atom2)| (atom1.serial, atom2.serial))
+    }
+}
+
+impl std::fmt::Display for BondIterator<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "BondIterator(size={}, cursor={})",
             self.indices.len(),
             self.cursor
         )
@@ -552,6 +661,8 @@ mod tests {
         mol.push_atom(atom(1, "A", 1, "N"));
         mol.push_atom(atom(2, "A", 1, "CA"));
         mol.push_atom(atom(3, "B", 2, "CA"));
+        mol.add_bond(0, 1, crate::BondOrder::Single);
+        mol.add_bond(1, 2, crate::BondOrder::Double);
         mol
     }
 
@@ -601,6 +712,30 @@ mod tests {
         assert_eq!(chains.get().unwrap().name(), "B");
         chains.set_selection(parse_selector("chain A").unwrap());
         assert_eq!(chains.get().unwrap().name(), "A");
+    }
+
+    #[test]
+    fn bond_iterator_requires_both_atoms_to_be_selected() {
+        let mol = molecule();
+        let mut all = BondIterator::all(&mol);
+        assert_eq!(all.get_id(), Some((1, 2)));
+        assert_eq!(all.get_bond().unwrap().order, crate::BondOrder::Single);
+        all.next();
+        assert_eq!(all.get_id(), Some((2, 3)));
+        all.next();
+        assert!(!all.has_more());
+        all.first();
+        assert_eq!(all.get_id(), Some((1, 2)));
+
+        let mut chain_a = BondIterator::new(&mol, parse_selector("chain A").unwrap());
+        assert_eq!(chain_a.get_id(), Some((1, 2)));
+        chain_a.next();
+        assert!(!chain_a.has_more());
+
+        chain_a.set_sel(parse_selector("name CA").unwrap());
+        assert_eq!(chain_a.get_id(), Some((2, 3)));
+        assert_eq!(chain_a.get_target().atom_count(), 3);
+        assert!(chain_a.to_string().contains("BondIterator"));
     }
 
     #[test]

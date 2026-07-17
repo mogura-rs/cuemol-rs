@@ -7,9 +7,9 @@
 
 use wgpu::util::DeviceExt;
 
-use cuemol_core::Matrix4;
+use cuemol_core::{CueMolError, Matrix4, Result, Uid};
 use cuemol_gfx::{jitter_offset, jitter_sample_count};
-use cuemol_qsys::Camera;
+use cuemol_qsys::{Camera, View, ViewCap};
 use cuemol_render::{tessellate_snapshot, RenderMesh, RenderSceneSnapshot};
 
 #[repr(C)]
@@ -277,6 +277,253 @@ impl SceneRenderer {
             }),
         )
     }
+}
+
+struct RenderedFrame {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+/// Off-screen view state backed by a reusable [`SceneRenderer`].
+///
+/// This is the Rust counterpart of CueMol's framebuffer-backed `OffScreenView`.
+/// It owns the camera/view state and retains the last rendered frame for RGB or
+/// RGBA sub-rectangle readback.
+pub struct OffScreenView {
+    view: View,
+    renderer: Option<SceneRenderer>,
+    background_transparent: bool,
+    depth_mode: bool,
+    super_sample_level: i32,
+    frame: Option<RenderedFrame>,
+}
+
+impl OffScreenView {
+    /// Create an off-screen view. [`Self::is_valid`] is false when no GPU
+    /// adapter is available or either dimension is zero.
+    pub fn new(uid: Uid, scene_uid: Uid, width: u32, height: u32) -> Self {
+        let mut view = View::new(uid, scene_uid);
+        view.set_view_size(width, height);
+        Self {
+            view,
+            renderer: SceneRenderer::new(),
+            background_transparent: false,
+            depth_mode: false,
+            super_sample_level: 5,
+            frame: None,
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.renderer.is_some() && self.view.width() > 0 && self.view.height() > 0
+    }
+
+    pub fn capabilities(&self) -> ViewCap {
+        ViewCap::new(true, true, true, true, false)
+    }
+
+    pub fn view(&self) -> &View {
+        &self.view
+    }
+
+    pub fn view_mut(&mut self) -> &mut View {
+        &mut self.view
+    }
+
+    pub fn set_view_size(&mut self, width: u32, height: u32) {
+        self.view.set_view_size(width, height);
+        self.frame = None;
+    }
+
+    pub fn camera(&self) -> Camera {
+        self.view.camera()
+    }
+
+    pub fn set_camera(&mut self, camera: &Camera) {
+        self.view.set_camera(camera);
+    }
+
+    pub fn is_background_transparent(&self) -> bool {
+        self.background_transparent
+    }
+
+    pub fn set_background_transparent(&mut self, value: bool) {
+        self.background_transparent = value;
+    }
+
+    pub fn is_depth_mode(&self) -> bool {
+        self.depth_mode
+    }
+
+    pub fn set_depth_mode(&mut self, value: bool) {
+        self.depth_mode = value;
+    }
+
+    pub fn super_sample_level(&self) -> i32 {
+        self.super_sample_level
+    }
+
+    pub fn set_super_sample_level(&mut self, level: i32) {
+        self.super_sample_level = level.clamp(0, 5);
+    }
+
+    /// Render a scene snapshot using the current view camera.
+    ///
+    /// `background` supplies RGB only. Alpha is forced to zero for transparent
+    /// capture and one for opaque capture, matching the reference behavior.
+    pub fn draw_scene(&mut self, snapshot: &RenderSceneSnapshot, mut background: [f64; 4]) -> bool {
+        let Some(renderer) = self.renderer.as_ref() else {
+            self.frame = None;
+            return false;
+        };
+        let width = self.view.width();
+        let height = self.view.height();
+        if width == 0 || height == 0 {
+            self.frame = None;
+            return false;
+        }
+
+        let camera = self.view.camera();
+        let aspect = f64::from(width) / f64::from(height);
+        let mvp = camera_mvp(&camera, aspect);
+        let mesh = tessellate_snapshot(snapshot);
+        let pixels = if self.depth_mode {
+            let (near, far) = camera_depth_range(&camera);
+            renderer.render_depth(
+                &[mesh],
+                mvp,
+                width,
+                height,
+                near,
+                far,
+                camera.is_perspective(),
+            )
+        } else {
+            background[3] = if self.background_transparent {
+                0.0
+            } else {
+                1.0
+            };
+            renderer.render_supersampled(
+                &[mesh],
+                mvp,
+                width,
+                height,
+                background,
+                self.super_sample_level,
+            )
+        };
+
+        let Some(rgba) = pixels else {
+            self.frame = None;
+            return false;
+        };
+        self.frame = Some(RenderedFrame {
+            width,
+            height,
+            rgba,
+        });
+        true
+    }
+
+    pub fn pixels(&self) -> Option<&[u8]> {
+        self.frame.as_ref().map(|frame| frame.rgba.as_slice())
+    }
+
+    pub fn rendered_size(&self) -> Option<(u32, u32)> {
+        self.frame.as_ref().map(|frame| (frame.width, frame.height))
+    }
+
+    /// Read a top-down sub-rectangle from the last rendered frame.
+    pub fn read_pixels(
+        &self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        components: usize,
+    ) -> Result<Vec<u8>> {
+        let frame = self
+            .frame
+            .as_ref()
+            .ok_or_else(|| CueMolError::undefined_reference("off-screen frame is not rendered"))?;
+        read_pixel_rect(frame, x, y, width, height, components)
+    }
+
+    pub fn read_pixels_into(
+        &self,
+        rectangle: [u32; 4],
+        components: usize,
+        output: &mut [u8],
+    ) -> Result<usize> {
+        let pixels = self.read_pixels(
+            rectangle[0],
+            rectangle[1],
+            rectangle[2],
+            rectangle[3],
+            components,
+        )?;
+        if output.len() < pixels.len() {
+            return Err(CueMolError::invalid_argument(
+                "off-screen readback buffer is too small",
+            ));
+        }
+        output[..pixels.len()].copy_from_slice(&pixels);
+        Ok(pixels.len())
+    }
+
+    pub fn swap_buffers(&self) {}
+}
+
+fn read_pixel_rect(
+    frame: &RenderedFrame,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    components: usize,
+) -> Result<Vec<u8>> {
+    if !matches!(components, 3 | 4) {
+        return Err(CueMolError::invalid_argument(
+            "off-screen readback must use three or four components",
+        ));
+    }
+    let end_x = x
+        .checked_add(width)
+        .filter(|end| *end <= frame.width)
+        .ok_or_else(|| {
+            CueMolError::invalid_argument("off-screen readback rectangle is out of range")
+        })?;
+    let end_y = y
+        .checked_add(height)
+        .filter(|end| *end <= frame.height)
+        .ok_or_else(|| {
+            CueMolError::invalid_argument("off-screen readback rectangle is out of range")
+        })?;
+
+    let frame_width = frame.width as usize;
+    let expected_len = frame_width
+        .checked_mul(frame.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| CueMolError::invalid_argument("off-screen frame size overflow"))?;
+    if frame.rgba.len() != expected_len {
+        return Err(CueMolError::invalid_argument(
+            "off-screen frame has an invalid byte length",
+        ));
+    }
+    let output_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(components))
+        .ok_or_else(|| CueMolError::invalid_argument("off-screen readback size overflow"))?;
+    let mut output = Vec::with_capacity(output_len);
+    for row in y..end_y {
+        for column in x..end_x {
+            let offset = (row as usize * frame_width + column as usize) * 4;
+            output.extend_from_slice(&frame.rgba[offset..offset + components]);
+        }
+    }
+    Ok(output)
 }
 
 async fn render_impl(
@@ -888,6 +1135,30 @@ mod tests {
             resolve_rgba(&accumulated, 2),
             vec![5, 15, 25, 20, 150, 160, 170, 180]
         );
+    }
+
+    #[test]
+    fn offscreen_frame_reads_rgb_sub_rectangles() {
+        let frame = RenderedFrame {
+            width: 3,
+            height: 2,
+            rgba: vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24,
+            ],
+        };
+        assert_eq!(
+            read_pixel_rect(&frame, 1, 0, 2, 2, 3).unwrap(),
+            vec![5, 6, 7, 9, 10, 11, 17, 18, 19, 21, 22, 23]
+        );
+        assert!(matches!(
+            read_pixel_rect(&frame, 2, 0, 2, 1, 4),
+            Err(CueMolError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            read_pixel_rect(&frame, 0, 0, 1, 1, 2),
+            Err(CueMolError::InvalidArgument(_))
+        ));
     }
 
     fn vert(x: f32, y: f32, color: [f32; 4]) -> MeshVertex {

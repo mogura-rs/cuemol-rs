@@ -1,6 +1,6 @@
 use cuemol_core::{
     lformat, BinInStream, BinOutStream, ByteArray, ElementType, EventManager, LRegExpr, LString,
-    LimitedInStream, Matrix4, ProcessManager, Quat, TaskStatus, Vector4,
+    LimitedInStream, Matrix3, Matrix4, ProcessManager, Quat, TaskStatus, Vector4,
 };
 use std::fs;
 use std::sync::{Arc, Mutex};
@@ -563,4 +563,31 @@ fn quat_slerp_and_euler_cover_reference_basics() {
     assert!(euler.0.abs() < 1.0e-10);
     assert!(euler.1.abs() < 1.0e-10);
     assert!(euler.2.abs() < 1.0e-10);
+}
+
+#[test]
+fn matrix_basis_and_quaternion_conversion_match_reference() {
+    let e1 = Vector4::new3(0.0, 0.0, 1.0);
+    let e2 = Vector4::new3(1.0, 0.0, 0.0);
+    let translation = Vector4::new3(4.0, 5.0, 6.0);
+    let matrix = Matrix4::make_rot_tran_mat(e1, e2, translation);
+    assert_eq!(matrix.col(1).unwrap(), Vector4::new4(1.0, 0.0, 0.0, 0.0));
+    assert_eq!(matrix.col(2).unwrap(), Vector4::new4(0.0, 1.0, 0.0, 0.0));
+    assert_eq!(matrix.col(3).unwrap(), Vector4::new4(0.0, 0.0, 1.0, 0.0));
+    assert_eq!(matrix.get_trans_part(), translation);
+    assert_eq!(matrix.get_matrix3d(), Matrix3::IDENTITY);
+
+    for axis in [
+        Vector4::new3(1.0, 0.0, 0.0),
+        Vector4::new3(0.0, 1.0, 0.0),
+        Vector4::new3(0.0, 0.0, 1.0),
+        Vector4::new3(1.0, 2.0, 3.0).normalize().unwrap(),
+    ] {
+        for angle in [0.2, 1.4, 2.8, std::f64::consts::PI] {
+            let original = Quat::from_axis_angle(axis, angle).unwrap();
+            let rotation = original.to_rot_matrix();
+            let converted = Quat::make_from_rot_mat(rotation.get_matrix3d()).unwrap();
+            assert!(converted.to_rot_matrix().equals(rotation));
+        }
+    }
 }

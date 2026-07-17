@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::{Rc, Weak};
 
 pub mod analytic_ses;
+pub mod boundary;
 pub mod grid_surface;
 pub mod hole_surface;
 pub mod msms;
@@ -16,6 +17,7 @@ pub mod obj;
 pub mod ply;
 pub mod qdf;
 
+pub use boundary::{Boundary, BoundaryElement, BoundarySet};
 pub use grid_surface::{
     build_grid_isosurface, build_grid_isosurface_masked, ScalarField, SurfSphere,
 };

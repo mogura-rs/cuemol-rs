@@ -465,11 +465,16 @@ impl<T> SceneObject<T> {
     }
 
     pub fn destroy_renderer(&mut self, uid: Uid) -> bool {
+        self.detach_renderer(uid).is_some()
+    }
+
+    /// Remove and return a renderer while preserving it for undo/redo.
+    pub fn detach_renderer(&mut self, uid: Uid) -> Option<Renderer> {
         if !self.renderers.contains_key(&uid) {
-            return false;
+            return None;
         }
         self.fire_renderer_scene_event(SceneEvent::SCE_REND_REMOVING, uid);
-        self.renderers.remove(&uid).is_some()
+        self.renderers.remove(&uid)
     }
 
     pub fn rend_count(&self) -> usize {

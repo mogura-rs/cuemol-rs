@@ -23,9 +23,9 @@ use cuemol_render::{
 };
 use cuemol_surface::{read_msms_surface_files, read_obj_file};
 use cuemol_xtal::{
-    density_map_from_cif, read_brix_map_bytes, read_ccp4_map_bytes, read_mtz_file,
-    read_qdf_denmap_bytes, read_xplor_map_str, DensityMap, MapColorMode, MapMeshRenderer,
-    MapSurfRenderer, MapSurfaceDrawMode, Mtz2MapReader,
+    density_map_from_cif, read_mtz_file, read_qdf_denmap_bytes, BrixMapReader, Ccp4MapReader,
+    DensityMap, MapColorMode, MapMeshRenderer, MapSurfRenderer, MapSurfaceDrawMode, Mtz2MapReader,
+    XplorMapReader,
 };
 use std::env;
 use std::process::ExitCode;
@@ -1424,21 +1424,26 @@ fn read_loaded_density_map(loaded: &LoadedDensityMap) -> Result<DensityMap, Stri
             0.33,
         )
         .map_err(|error| error.to_string())?,
-        format => {
-            let grid = match format {
-                "apbs" => cuemol_molstr::read_opendx_str(
+        format => match format {
+            "apbs" => DensityMap::from_grid_map(
+                cuemol_molstr::read_opendx_str(
                     std::str::from_utf8(bytes).map_err(|error| error.to_string())?,
-                ),
-                "ccp4map" => read_ccp4_map_bytes(bytes),
-                "xplormap" => read_xplor_map_str(
+                )
+                .map_err(|error| error.to_string())?,
+            ),
+            "ccp4map" => Ccp4MapReader::new()
+                .read_density_map_bytes(bytes)
+                .map_err(|error| error.to_string())?,
+            "xplormap" => XplorMapReader::new()
+                .read_density_map_str(
                     std::str::from_utf8(bytes).map_err(|error| error.to_string())?,
-                ),
-                "brix" => read_brix_map_bytes(bytes),
-                other => return Err(format!("unsupported QSC density map format {other}")),
-            }
-            .map_err(|error| error.to_string())?;
-            DensityMap::from_grid_map(grid)
-        }
+                )
+                .map_err(|error| error.to_string())?,
+            "brix" => BrixMapReader::new()
+                .read_density_map_bytes(bytes)
+                .map_err(|error| error.to_string())?,
+            other => return Err(format!("unsupported QSC density map format {other}")),
+        },
     };
     Ok(map)
 }

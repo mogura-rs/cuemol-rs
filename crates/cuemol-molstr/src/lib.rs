@@ -1,5 +1,7 @@
+pub mod atom_pos_map;
 pub mod chem;
 pub mod cns_par;
+pub mod evaluator;
 mod fileio;
 pub mod iterators;
 pub mod map;
@@ -17,10 +19,12 @@ pub mod selection;
 pub mod stream;
 pub mod toppar;
 
+pub use atom_pos_map::{AtomPosMap, AtomPosMap2};
 pub use chem::{ElemSym, MolAtom, MolBond, MolChain, MolResidue, ResidIndex, INVALID_UID};
+pub use evaluator::{IntNumEvaluator, RealNumEvaluator};
 pub use fileio::{read_bytes_maybe_compressed, read_text_maybe_compressed};
 pub use iterators::{
-    AtomIterator, ChainIterator, ChainView, ResidIterator, ResidRangeSet, ResidueView,
+    AtomIterator, BondIterator, ChainIterator, ChainView, ResidIterator, ResidRangeSet, ResidueView,
 };
 pub use map::{
     read_brix_map_bytes, read_brix_map_file, read_brix_map_with_header_bytes,
@@ -38,6 +42,7 @@ pub use mol2::{
     read_mol2_file, read_mol2_file_with_options, read_mol2_str, read_mol2_str_with_options,
     Mol2ReadOptions, Mol2Reader,
 };
+pub use mol_undo::{MolEditInfo, MolUndoManager, MolXformEditInfo, ResiduePropsEdit};
 pub use molecule::{Atom, Bond, BondOrder, ChainSummary, MolCoord, ResidueKey, ResidueSummary};
 pub use pdb::{
     read_pdb_file, read_pdb_file_with_options, read_pdb_str, read_pdb_str_with_options,

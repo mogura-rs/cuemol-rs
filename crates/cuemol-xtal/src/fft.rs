@@ -10,17 +10,294 @@ use cuemol_core::{CueMolError, Matrix4, Result, Vector4};
 use cuemol_molstr::GridMap;
 use rustfft::{num_complex::Complex, FftPlanner};
 
+use crate::map_renderers::DensityMap;
+
 /// Largest prime factor allowed in an FFT grid dimension (C++ `ftprim`).
 const FT_PRIM: i32 = 5;
 
 /// A measured/calculated structure factor: Miller indices, amplitude, phase (deg).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Reflection {
     pub h: i32,
     pub k: i32,
     pub l: i32,
     pub f: f32,
     pub phi_deg: f32,
+}
+
+/// Stateful structure-factor to density-map transformer.
+///
+/// This is the Rust counterpart of C++ `xtal::MapFFT`. It accepts either
+/// typed reflections or the original row-major float buffer, applies the space
+/// group's symmetry operations, selects a suitable FFT grid, and writes the
+/// result into an optional owned target map.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapFFT {
+    cell: [f64; 6],
+    space_group: i32,
+    grid_size: f64,
+    map_resolution: f64,
+    reflections: Vec<Reflection>,
+    use_phases: bool,
+    target: Option<DensityMap>,
+    effective_resolution: Option<f64>,
+    grid_dimensions: Option<[usize; 3]>,
+}
+
+impl Default for MapFFT {
+    fn default() -> Self {
+        Self {
+            cell: [0.0; 6],
+            space_group: -1,
+            grid_size: 1.0 / 3.0,
+            map_resolution: -1.0,
+            reflections: Vec::new(),
+            use_phases: true,
+            target: None,
+            effective_resolution: None,
+            grid_dimensions: None,
+        }
+    }
+}
+
+impl MapFFT {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_params(
+        &mut self,
+        cell_a: f64,
+        cell_b: f64,
+        cell_c: f64,
+        alpha: f64,
+        beta: f64,
+        gamma: f64,
+        space_group: i32,
+        grid_size: f64,
+        map_resolution: f64,
+    ) {
+        self.cell = [cell_a, cell_b, cell_c, alpha, beta, gamma];
+        self.space_group = space_group;
+        self.grid_size = grid_size;
+        self.map_resolution = map_resolution;
+        self.effective_resolution = None;
+        self.grid_dimensions = None;
+    }
+
+    pub fn cell(&self) -> [f64; 6] {
+        self.cell
+    }
+
+    pub fn space_group(&self) -> i32 {
+        self.space_group
+    }
+
+    pub fn grid_size(&self) -> f64 {
+        self.grid_size
+    }
+
+    pub fn map_resolution(&self) -> f64 {
+        self.map_resolution
+    }
+
+    pub fn effective_resolution(&self) -> Option<f64> {
+        self.effective_resolution
+    }
+
+    pub fn grid_dimensions(&self) -> Option<[usize; 3]> {
+        self.grid_dimensions
+    }
+
+    pub fn reflections(&self) -> &[Reflection] {
+        &self.reflections
+    }
+
+    pub fn uses_phases(&self) -> bool {
+        self.use_phases
+    }
+
+    pub fn set_reflections(&mut self, reflections: &[Reflection], use_phases: bool) {
+        self.reflections = reflections.to_vec();
+        self.use_phases = use_phases;
+        self.effective_resolution = None;
+        self.grid_dimensions = None;
+    }
+
+    /// Import C++ `MapFFT::setData`'s row-major float buffer.
+    ///
+    /// `phase_index` and `weight_index` use `-1` to indicate an absent column.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_data(
+        &mut self,
+        reflection_count: usize,
+        row_stride: usize,
+        buffer: &[f32],
+        h_index: usize,
+        k_index: usize,
+        l_index: usize,
+        amplitude_index: usize,
+        phase_index: isize,
+        weight_index: isize,
+    ) -> Result<()> {
+        if row_stride == 0 {
+            return Err(CueMolError::invalid_argument(
+                "MapFFT row stride must be positive",
+            ));
+        }
+        let phase_index = usize::try_from(phase_index).ok();
+        let weight_index = usize::try_from(weight_index).ok();
+        let mut required = h_index.max(k_index).max(l_index).max(amplitude_index);
+        if let Some(index) = phase_index {
+            required = required.max(index);
+        }
+        if let Some(index) = weight_index {
+            required = required.max(index);
+        }
+        if required >= row_stride {
+            return Err(CueMolError::invalid_argument(
+                "MapFFT column index is outside the row stride",
+            ));
+        }
+        let required_len = reflection_count
+            .checked_mul(row_stride)
+            .ok_or_else(|| CueMolError::invalid_argument("MapFFT buffer size overflow"))?;
+        if buffer.len() < required_len {
+            return Err(CueMolError::invalid_argument(
+                "MapFFT reflection buffer is too short",
+            ));
+        }
+
+        self.reflections.clear();
+        self.reflections.reserve(reflection_count);
+        self.use_phases = phase_index.is_some();
+        for row in buffer[..required_len].chunks_exact(row_stride) {
+            let weight = weight_index.map_or(1.0, |index| row[index]);
+            let amplitude = row[amplitude_index] * weight;
+            self.reflections.push(Reflection {
+                h: row[h_index] as i32,
+                k: row[k_index] as i32,
+                l: row[l_index] as i32,
+                f: if amplitude.is_finite() {
+                    amplitude
+                } else {
+                    0.0
+                },
+                phi_deg: phase_index
+                    .map(|index| row[index])
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(0.0),
+            });
+        }
+        self.effective_resolution = None;
+        self.grid_dimensions = None;
+        Ok(())
+    }
+
+    /// Set an owned output object, matching the lifetime-independent part of
+    /// C++ `setTarget`.
+    pub fn set_target(&mut self, target: DensityMap) {
+        self.target = Some(target);
+    }
+
+    pub fn target(&self) -> Option<&DensityMap> {
+        self.target.as_ref()
+    }
+
+    pub fn target_mut(&mut self) -> Option<&mut DensityMap> {
+        self.target.as_mut()
+    }
+
+    pub fn take_target(&mut self) -> Option<DensityMap> {
+        self.target.take()
+    }
+
+    /// Run the transform and replace the previously supplied target.
+    pub fn do_fft(&mut self) -> Result<()> {
+        if self.target.is_none() {
+            return Err(CueMolError::invalid_argument(
+                "MapFFT target map is not set",
+            ));
+        }
+        let map = self.build_density_map()?;
+        self.target = Some(map);
+        Ok(())
+    }
+
+    pub fn do_fft_into(&mut self, target: &mut DensityMap) -> Result<()> {
+        *target = self.build_density_map()?;
+        Ok(())
+    }
+
+    /// Run the configured transform and return a new map.
+    pub fn build_density_map(&mut self) -> Result<DensityMap> {
+        if self.reflections.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "MapFFT has no reflection data",
+            ));
+        }
+        let cell_abc = [self.cell[0], self.cell[1], self.cell[2]];
+        if cell_abc
+            .iter()
+            .any(|length| !length.is_finite() || *length <= 0.0)
+        {
+            return Err(CueMolError::invalid_argument(
+                "MapFFT unit cell lengths must be positive",
+            ));
+        }
+        let grid_size = if self.grid_size.is_finite() && self.grid_size > 0.0 {
+            self.grid_size
+        } else {
+            1.0 / 3.0
+        };
+        let max_hkl = self.reflections.iter().fold([1_i32; 3], |mut max, r| {
+            max[0] = max[0].max(r.h.abs());
+            max[1] = max[1].max(r.k.abs());
+            max[2] = max[2].max(r.l.abs());
+            max
+        });
+        let resolution = if self.map_resolution.is_finite() && self.map_resolution > 0.1 {
+            self.map_resolution
+        } else {
+            auto_resolution(cell_abc, max_hkl, grid_size)
+        };
+        if !resolution.is_finite() || resolution <= 0.0 {
+            return Err(CueMolError::invalid_argument(
+                "MapFFT resolution must be positive",
+            ));
+        }
+
+        let manager = cuemol_symm::SymmOpManager::new();
+        let operations = manager
+            .symmetry_operators(self.space_group)
+            .ok_or_else(|| {
+                CueMolError::parse(format!("invalid space-group number {}", self.space_group))
+            })?;
+        let symops = operations
+            .iter()
+            .map(|operation| SymOp::from_matrix(&operation.matrix))
+            .collect::<Vec<_>>();
+        let grid = synthesize_density_map_with_cell_and_phase_mode(
+            &self.reflections,
+            &symops,
+            self.cell,
+            resolution,
+            grid_size,
+            self.use_phases,
+        )?;
+        let dimensions = grid.counts;
+        let map = DensityMap::from_crystallographic_grid(
+            grid,
+            [0, 0, 0],
+            dimensions,
+            self.cell,
+            self.space_group,
+        );
+        self.effective_resolution = Some(resolution);
+        self.grid_dimensions = Some(dimensions);
+        Ok(map)
+    }
 }
 
 /// Flat index into a density/reciprocal grid: c fastest, a slowest
@@ -187,6 +464,22 @@ pub fn synthesize_density(
     nb: usize,
     nc: usize,
 ) -> Vec<f64> {
+    synthesize_density_with_phase_mode(reflections, symops, cell_abc, na, nb, nc, true)
+}
+
+/// Structure-factor synthesis with explicit phase availability.
+///
+/// Patterson maps have no phase column; matching C++ `MapFFT`, symmetry
+/// translation phase shifts are disabled in that mode.
+pub fn synthesize_density_with_phase_mode(
+    reflections: &[Reflection],
+    symops: &[SymOp],
+    cell_abc: [f64; 3],
+    na: usize,
+    nb: usize,
+    nc: usize,
+    use_phases: bool,
+) -> Vec<f64> {
     let fscale = (1.0 / (cell_abc[0] * cell_abc[1] * cell_abc[2])) as f32;
     let mut grid = vec![Complex::<f32>::new(0.0, 0.0); na * nb * nc];
 
@@ -194,10 +487,13 @@ pub fn synthesize_density(
         for refl in reflections {
             let (h, k, l) = apply_recip(&sym.recip, refl.h, refl.k, refl.l);
             // Phase shift from the real-space translation, on the rotated indices.
-            let phsh =
+            let phsh = if use_phases {
                 (sym.trans[0] * h as f64 + sym.trans[1] * k as f64 + sym.trans[2] * l as f64)
                     * std::f64::consts::PI
-                    * 2.0;
+                    * 2.0
+            } else {
+                0.0
+            };
             let ampl = refl.f * fscale;
             let phas = refl.phi_deg * std::f32::consts::PI / 180.0;
             let floc = Complex::from_polar(1.0, phsh as f32) * Complex::from_polar(ampl, phas);
@@ -265,10 +561,29 @@ pub fn synthesize_density_map_with_cell(
     resolution: f64,
     grid_spacing: f64,
 ) -> Result<GridMap> {
+    synthesize_density_map_with_cell_and_phase_mode(
+        reflections,
+        symops,
+        cell,
+        resolution,
+        grid_spacing,
+        true,
+    )
+}
+
+pub fn synthesize_density_map_with_cell_and_phase_mode(
+    reflections: &[Reflection],
+    symops: &[SymOp],
+    cell: [f64; 6],
+    resolution: f64,
+    grid_spacing: f64,
+    use_phases: bool,
+) -> Result<GridMap> {
     let cell_abc = [cell[0], cell[1], cell[2]];
     let (na, nb, nc) = fft_grid_size(cell_abc, resolution, grid_spacing);
     let (na, nb, nc) = (na as usize, nb as usize, nc as usize);
-    let density = synthesize_density(reflections, symops, cell_abc, na, nb, nc);
+    let density =
+        synthesize_density_with_phase_mode(reflections, symops, cell_abc, na, nb, nc, use_phases);
 
     // Re-index: GridMap values are x-fastest (x + na*(y + nb*z)); synthesis is
     // c-fastest (c + nc*(b + nb*a)) with a along cell-a, b cell-b, c cell-c.
@@ -376,6 +691,83 @@ pub fn fft_grid_size(cell_abc: [f64; 3], resolution: f64, grid: f64) -> (i32, i3
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuemol_qsys::ScalarObject;
+
+    #[test]
+    fn map_fft_defaults_match_reference() {
+        let fft = MapFFT::new();
+        assert_eq!(fft.cell(), [0.0; 6]);
+        assert_eq!(fft.space_group(), -1);
+        assert!((fft.grid_size() - 1.0 / 3.0).abs() < 1.0e-12);
+        assert_eq!(fft.map_resolution(), -1.0);
+        assert!(fft.uses_phases());
+        assert!(fft.reflections().is_empty());
+        assert!(fft.target().is_none());
+    }
+
+    #[test]
+    fn map_fft_imports_weighted_rows_and_populates_target() {
+        let mut fft = MapFFT::new();
+        fft.set_params(10.0, 10.0, 10.0, 90.0, 90.0, 90.0, 1, 1.0 / 3.0, 3.0);
+        fft.set_data(1, 6, &[1.0, 0.0, 0.0, 1000.0, 0.0, 0.5], 0, 1, 2, 3, 4, 5)
+            .unwrap();
+        assert_eq!(fft.reflections()[0].f, 500.0);
+        assert!(fft.uses_phases());
+
+        fft.set_target(DensityMap::new());
+        fft.do_fft().unwrap();
+        let map = fft.target().unwrap();
+        assert!((map.den_max() - 1.0).abs() < 1.0e-4);
+        assert_eq!(map.cell().space_group(), 1);
+        assert_eq!(
+            fft.grid_dimensions(),
+            Some([map.col_no(), map.row_no(), map.sec_no()])
+        );
+        assert_eq!(fft.effective_resolution(), Some(3.0));
+    }
+
+    #[test]
+    fn map_fft_validates_buffer_target_and_space_group() {
+        let mut fft = MapFFT::new();
+        assert!(fft.set_data(2, 5, &[0.0; 5], 0, 1, 2, 3, 4, -1).is_err());
+        fft.set_params(10.0, 10.0, 10.0, 90.0, 90.0, 90.0, 999, 1.0 / 3.0, 3.0);
+        fft.set_reflections(
+            &[Reflection {
+                h: 1,
+                k: 0,
+                l: 0,
+                f: 1000.0,
+                phi_deg: 0.0,
+            }],
+            true,
+        );
+        assert!(fft.do_fft().is_err());
+        fft.set_target(DensityMap::new());
+        assert!(fft.do_fft().is_err());
+    }
+
+    #[test]
+    fn patterson_mode_omits_symmetry_translation_phase() {
+        let screw = SymOp::from_real_space(
+            [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]],
+            [0.0, 0.0, 0.5],
+        );
+        let reflection = [Reflection {
+            h: 0,
+            k: 0,
+            l: 1,
+            f: 1000.0,
+            phi_deg: 0.0,
+        }];
+        let symops = [SymOp::identity(), screw];
+        let phased =
+            synthesize_density_with_phase_mode(&reflection, &symops, [10.0; 3], 4, 4, 4, true);
+        let patterson =
+            synthesize_density_with_phase_mode(&reflection, &symops, [10.0; 3], 4, 4, 4, false);
+
+        assert!(phased[0] < -1.9);
+        assert!(patterson[0] > 1.9);
+    }
 
     #[test]
     fn calc_prime_rounds_up_to_smooth_numbers() {

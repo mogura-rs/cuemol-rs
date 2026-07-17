@@ -1,4 +1,4 @@
-use crate::{CueMolError, Result};
+use crate::{geometry::Matrix3, CueMolError, Result};
 use std::fmt;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
@@ -578,6 +578,29 @@ impl Matrix4 {
         Ok(Quat::from_axis_angle(axis, angle_rad)?.to_rot_matrix())
     }
 
+    /// Construct the basis matrix whose columns are `e2`, `e1 × e2`, and `e1`.
+    pub fn make_basis_rot_mat(e1: Vector4, e2: Vector4) -> Self {
+        let e3 = e1.cross(e2);
+        let mut matrix = Self::IDENTITY;
+        matrix.values[0][0] = e2.x;
+        matrix.values[1][0] = e2.y;
+        matrix.values[2][0] = e2.z;
+        matrix.values[0][1] = e3.x;
+        matrix.values[1][1] = e3.y;
+        matrix.values[2][1] = e3.z;
+        matrix.values[0][2] = e1.x;
+        matrix.values[1][2] = e1.y;
+        matrix.values[2][2] = e1.z;
+        matrix
+    }
+
+    /// Construct a CueMol basis rotation with a translation column.
+    pub fn make_rot_tran_mat(e1: Vector4, e2: Vector4, translation: Vector4) -> Self {
+        let mut matrix = Self::make_basis_rot_mat(e1, e2);
+        matrix.set_trans_part(translation);
+        matrix
+    }
+
     pub fn set_unit(&mut self) {
         self.set_ident();
     }
@@ -656,6 +679,14 @@ impl Matrix4 {
 
     pub fn get_trans_part(self) -> Vector4 {
         Vector4::new3(self.values[0][3], self.values[1][3], self.values[2][3])
+    }
+
+    pub fn get_matrix3d(self) -> Matrix3 {
+        Matrix3::new([
+            [self.values[0][0], self.values[0][1], self.values[0][2]],
+            [self.values[1][0], self.values[1][1], self.values[1][2]],
+            [self.values[2][0], self.values[2][1], self.values[2][2]],
+        ])
     }
 
     pub fn set_trans_part(&mut self, value: Vector4) {
@@ -970,6 +1001,62 @@ impl Quat {
 
     pub fn to_matrix(self) -> Matrix4 {
         self.to_rot_matrix()
+    }
+
+    /// Convert CueMol's clockwise 3×3 rotation matrix to a quaternion.
+    pub fn from_rot_matrix(matrix: Matrix3) -> Result<Self> {
+        let m = matrix.values;
+        let trace = m[0][0] + m[1][1] + m[2][2] + 1.0;
+        let quaternion = if trace >= 1.0 {
+            let s = 0.5 / trace.sqrt();
+            Self::from_scalar_vector(
+                0.25 / s,
+                (m[1][2] - m[2][1]) * s,
+                (m[2][0] - m[0][2]) * s,
+                (m[0][1] - m[1][0]) * s,
+            )
+        } else if m[0][0] > m[1][1].max(m[2][2]) {
+            let root = (m[0][0] - m[1][1] - m[2][2] + 1.0).sqrt();
+            if root <= f64::EPSILON {
+                return Err(CueMolError::invalid_argument("invalid rotation matrix"));
+            }
+            let s = 0.5 / root;
+            Self::from_scalar_vector(
+                (m[1][2] - m[2][1]) * s,
+                root * 0.5,
+                (m[0][1] + m[1][0]) * s,
+                (m[2][0] + m[0][2]) * s,
+            )
+        } else if m[1][1] > m[2][2] {
+            let root = (m[1][1] - m[2][2] - m[0][0] + 1.0).sqrt();
+            if root <= f64::EPSILON {
+                return Err(CueMolError::invalid_argument("invalid rotation matrix"));
+            }
+            let s = 0.5 / root;
+            Self::from_scalar_vector(
+                (m[2][0] - m[0][2]) * s,
+                (m[0][1] + m[1][0]) * s,
+                root * 0.5,
+                (m[1][2] + m[2][1]) * s,
+            )
+        } else {
+            let root = (m[2][2] - m[0][0] - m[1][1] + 1.0).sqrt();
+            if root <= f64::EPSILON {
+                return Err(CueMolError::invalid_argument("invalid rotation matrix"));
+            }
+            let s = 0.5 / root;
+            Self::from_scalar_vector(
+                (m[0][1] - m[1][0]) * s,
+                (m[2][0] + m[0][2]) * s,
+                (m[1][2] + m[2][1]) * s,
+                root * 0.5,
+            )
+        };
+        quaternion.normalize()
+    }
+
+    pub fn make_from_rot_mat(matrix: Matrix3) -> Result<Self> {
+        Self::from_rot_matrix(matrix)
     }
 
     pub fn normalize_self(&mut self) -> Result<()> {

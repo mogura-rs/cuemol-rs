@@ -8,7 +8,14 @@ use std::fmt::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
+mod lm_minimizer;
 mod ssm;
+
+pub use lm_minimizer::{LMMinimizer, LmEvaluator, LmMinimizer, LmOutcome};
+
+pub mod minpack {
+    pub use crate::{LMMinimizer, LmEvaluator, LmMinimizer, LmOutcome};
+}
 
 static DEFAULT_SCENE_MANAGER: OnceLock<Arc<Mutex<MolSceneManager>>> = OnceLock::new();
 
@@ -165,6 +172,24 @@ impl MolAnlManager {
         )
     }
 
+    pub fn superpose_lsq1_with_undo(
+        &self,
+        reference: &MolCoord,
+        reference_selector: &Selector,
+        moving: &mut MolCoord,
+        moving_selector: &Selector,
+        use_prop: bool,
+        undo: &mut MolUndoManager,
+    ) -> Result<Matrix4> {
+        let matrix =
+            self.superpose_lsq_matrix(reference, reference_selector, moving, moving_selector)?;
+        if !use_prop {
+            moving.xform_by_mat_with_undo(matrix, None, undo);
+            moving.fire_atoms_moved();
+        }
+        Ok(matrix)
+    }
+
     /// SSM (Secondary Structure Matching) superposition: aligns `moving` onto
     /// `reference` by matching secondary-structure elements — NO pre-supplied
     /// atom correspondence needed (unlike LSQ). Native reimplementation of the
@@ -219,6 +244,24 @@ impl MolAnlManager {
             moving_selector,
             use_prop,
         )
+    }
+
+    pub fn superpose_ssm1_with_undo(
+        &self,
+        reference: &MolCoord,
+        reference_selector: &Selector,
+        moving: &mut MolCoord,
+        moving_selector: &Selector,
+        use_prop: bool,
+        undo: &mut MolUndoManager,
+    ) -> Result<Matrix4> {
+        let matrix =
+            self.superpose_ssm_matrix(reference, reference_selector, moving, moving_selector)?;
+        if !use_prop {
+            moving.xform_by_mat_with_undo(matrix, None, undo);
+            moving.fire_atoms_moved();
+        }
+        Ok(matrix)
     }
 
     pub fn superpose_ssm2(
@@ -1091,6 +1134,33 @@ mod tests {
         assert_eq!(moving.atoms()[0].position, Vector4::new3(1.0, 0.0, 0.0));
         assert_eq!(moving.atoms()[1].position, Vector4::new3(2.0, 0.0, 0.0));
         assert_eq!(moving.atoms_moved_generation(), 1);
+    }
+
+    #[test]
+    fn superpose_lsq1_with_undo_restores_and_reapplies_coordinates() {
+        let mut reference = MolCoord::new();
+        reference.push_atom(atom(1, "N", "A", 1, "N", 1.0));
+        reference.push_atom(atom(2, "CA", "A", 1, "C", 2.0));
+        let mut moving = MolCoord::new();
+        moving.push_atom(atom(1, "N", "A", 1, "N", 3.0));
+        moving.push_atom(atom(2, "CA", "A", 1, "C", 4.0));
+        let mut undo = MolUndoManager::new();
+
+        MolAnlManager::new()
+            .superpose_lsq1_with_undo(
+                &reference,
+                &Selector::All,
+                &mut moving,
+                &Selector::All,
+                false,
+                &mut undo,
+            )
+            .unwrap();
+        assert_eq!(moving.atoms()[0].position, Vector4::new3(1.0, 0.0, 0.0));
+        assert!(undo.undo(&mut moving));
+        assert_eq!(moving.atoms()[0].position, Vector4::new3(3.0, 0.0, 0.0));
+        assert!(undo.redo(&mut moving));
+        assert_eq!(moving.atoms()[0].position, Vector4::new3(1.0, 0.0, 0.0));
     }
 
     #[test]

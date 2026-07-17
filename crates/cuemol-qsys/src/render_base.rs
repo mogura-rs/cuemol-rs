@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 
 use cuemol_core::Uid;
+use cuemol_gfx::{DisplayContext, DisplayList};
+
+use crate::{DispListCacheImpl, ObjectEvent, SceneEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DrawObj {
@@ -61,6 +64,103 @@ impl DispListRenderer {
     }
 }
 
+/// Renderer-side display-list cache and invalidation policy.
+#[derive(Debug)]
+pub struct DispCacheRenderer {
+    cache: DispListCacheImpl,
+    shader_alpha: bool,
+    scene_update_requested: bool,
+}
+
+impl DispCacheRenderer {
+    pub fn new(shader_alpha: bool) -> Self {
+        Self {
+            cache: DispListCacheImpl::new(),
+            shader_alpha,
+            scene_update_requested: false,
+        }
+    }
+
+    pub fn display<Render>(&mut self, context: &mut DisplayContext, render: Render) -> bool
+    where
+        Render: FnOnce(&mut DisplayList),
+    {
+        self.cache.display(
+            context,
+            render,
+            |context| context.set_lighting(true),
+            |context| context.set_lighting(false),
+        )
+    }
+
+    pub fn display_hit<Render>(&mut self, context: &DisplayContext, render: Render) -> bool
+    where
+        Render: FnOnce(&mut DisplayList),
+    {
+        self.cache.display_hit(context, render)
+    }
+
+    pub fn invalidate_display_cache(&mut self) {
+        self.cache.invalidate();
+        self.scene_update_requested = true;
+    }
+
+    pub fn invalidate_hittest_cache(&mut self) {
+        self.cache.invalidate_hit();
+    }
+
+    pub fn unloading(&mut self) {
+        self.invalidate_display_cache();
+        self.invalidate_hittest_cache();
+    }
+
+    pub fn object_changed(&mut self, event: &ObjectEvent) {
+        if event.event_type() == ObjectEvent::OBE_CHANGED {
+            self.invalidate_display_cache();
+            self.invalidate_hittest_cache();
+        } else if event.event_type() == ObjectEvent::OBE_PROPCHG && event.descr() == "xformMat" {
+            self.invalidate_display_cache();
+        }
+    }
+
+    pub fn property_changed(&mut self, property_name: &str) {
+        if !self.shader_alpha && matches!(property_name, "alpha" | "material") {
+            self.invalidate_display_cache();
+        }
+    }
+
+    pub fn style_changed(&mut self) {
+        self.invalidate_display_cache();
+    }
+
+    pub fn scene_changed(&mut self, event: &SceneEvent) {
+        if event.event_type() == SceneEvent::SCE_SCENE_PROPCHG
+            && matches!(
+                event.descr(),
+                "icc_filename" | "use_colproof" | "icc_intent"
+            )
+        {
+            self.invalidate_display_cache();
+        }
+    }
+
+    pub fn use_shader_alpha(&self) -> bool {
+        self.shader_alpha
+    }
+
+    pub fn is_display_cache_valid(&self) -> bool {
+        self.cache.is_valid()
+    }
+
+    pub fn is_hittest_cache_valid(&self) -> bool {
+        self.cache.is_hit_valid()
+    }
+
+    pub fn take_scene_update_request(&mut self) -> bool {
+        std::mem::take(&mut self.scene_update_requested)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShaderObjMgr {
     entries: BTreeMap<(Uid, String), usize>,
@@ -112,6 +212,7 @@ impl ShaderObjMgr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn draw_obj_and_disp_list_renderer_match_reference_state_contract() {
@@ -147,5 +248,48 @@ mod tests {
         manager.remove_scene(scene);
         assert_eq!(manager.shader_object("shader", scene), None);
         assert_eq!(manager.shader_object("shader2", scene2), Some(400));
+    }
+
+    #[test]
+    fn display_cache_builds_once_and_tracks_reference_invalidations() {
+        let mut renderer = DispCacheRenderer::new(false);
+        let mut context = DisplayContext::new();
+        let render_count = Cell::new(0);
+
+        assert!(renderer.display(&mut context, |_| {
+            render_count.set(render_count.get() + 1);
+        }));
+        assert!(!renderer.display(&mut context, |_| {
+            render_count.set(render_count.get() + 1);
+        }));
+        assert_eq!(render_count.get(), 1);
+        assert!(renderer.is_display_cache_valid());
+        assert!(!context.lighting());
+
+        renderer.property_changed("alpha");
+        assert!(!renderer.is_display_cache_valid());
+        assert!(renderer.take_scene_update_request());
+
+        let mut object_event = ObjectEvent::new();
+        object_event.set_event_type(ObjectEvent::OBE_CHANGED);
+        renderer.display_hit(&context, |_| {});
+        assert!(renderer.is_hittest_cache_valid());
+        renderer.object_changed(&object_event);
+        assert!(!renderer.is_hittest_cache_valid());
+    }
+
+    #[test]
+    fn shader_alpha_avoids_geometry_rebuild_for_alpha_changes() {
+        let mut renderer = DispCacheRenderer::new(true);
+        let mut context = DisplayContext::new();
+        renderer.display(&mut context, |_| {});
+        renderer.property_changed("alpha");
+        assert!(renderer.is_display_cache_valid());
+
+        let mut event = SceneEvent::new();
+        event.set_event_type(SceneEvent::SCE_SCENE_PROPCHG);
+        event.set_descr("icc_filename");
+        renderer.scene_changed(&event);
+        assert!(!renderer.is_display_cache_valid());
     }
 }

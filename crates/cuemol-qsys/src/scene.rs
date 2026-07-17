@@ -502,12 +502,17 @@ impl<T> Scene<T> {
     }
 
     pub fn destroy_object(&mut self, uid: Uid) -> bool {
+        self.detach_object(uid).is_some()
+    }
+
+    /// Remove and return an object while preserving it for undo/redo.
+    pub fn detach_object(&mut self, uid: Uid) -> Option<SceneObject<T>> {
         if !self.objects.contains_key(&uid) {
-            return false;
+            return None;
         }
         self.fire_scene_event_type(SceneEvent::SCE_OBJ_REMOVING, uid, "");
-        let removed = self.objects.remove(&uid).is_some();
-        if removed {
+        let removed = self.objects.remove(&uid);
+        if removed.is_some() {
             if self.active_object_uid == Some(uid) {
                 self.active_object_uid = None;
             }
@@ -598,6 +603,12 @@ impl<T> Scene<T> {
         self.objects
             .values()
             .find_map(|object| object.renderer(uid))
+    }
+
+    pub fn get_renderer_mut(&mut self, uid: Uid) -> Option<&mut crate::Renderer> {
+        self.objects
+            .values_mut()
+            .find_map(|object| object.renderer_mut(uid))
     }
 
     pub fn get_rend_by_name(&self, name: &str) -> Option<&crate::Renderer> {

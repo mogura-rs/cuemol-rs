@@ -22,10 +22,9 @@ use cuemol_render::PngSceneExporter;
 use cuemol_render::{PovSceneExporter, RenderSceneSnapshot, UmbreonFrame, UmbreonSceneExporter};
 use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter};
 use cuemol_xtal::{
-    density_map_from_cif, read_brix_map_bytes, read_brix_map_file, read_ccp4_map_bytes,
-    read_ccp4_map_file, read_mmcif_map_file, read_opendx_file, read_opendx_str,
-    read_xplor_map_file, read_xplor_map_str, MapColorMode, MapMeshRenderer, MapSurfRenderer,
-    MapSurfaceDrawMode, Mtz2MapReader, QdfDenMapReader,
+    density_map_from_cif, read_mmcif_map_file, read_opendx_file, read_opendx_str, BrixMapReader,
+    Ccp4MapReader, MapColorMode, MapMeshRenderer, MapSurfRenderer, MapSurfaceDrawMode,
+    Mtz2MapReader, QdfDenMapReader, XplorMapReader,
 };
 // Re-exported so consumers (and tests) can name the scalar-field types the surface
 // potential API takes — e.g. `set_surface_potential_map(DensityMap)`.
@@ -5101,19 +5100,16 @@ fn read_density_map(path: &Path, format: &str) -> Result<DensityMap> {
         );
         return Ok(map);
     }
-    let grid = match format {
-        "apbs" => read_opendx_file(path)?,
-        "ccp4map" => read_ccp4_map_file(path)?,
-        "xplormap" => read_xplor_map_file(path)?,
-        "brix" => read_brix_map_file(path)?,
-        "mmcifmap" => return read_mmcif_map_file(path),
-        other => {
-            return Err(CueMolError::invalid_argument(format!(
-                "unknown density map format {other}"
-            )))
-        }
-    };
-    Ok(DensityMap::from_grid_map(grid))
+    match format {
+        "apbs" => Ok(DensityMap::from_grid_map(read_opendx_file(path)?)),
+        "ccp4map" => Ccp4MapReader::new().read_density_map_file(path),
+        "xplormap" => XplorMapReader::new().read_density_map_file(path),
+        "brix" => BrixMapReader::new().read_density_map_file(path),
+        "mmcifmap" => read_mmcif_map_file(path),
+        other => Err(CueMolError::invalid_argument(format!(
+            "unknown density map format {other}"
+        ))),
+    }
 }
 
 fn read_density_map_bytes(bytes: &[u8], format: &str) -> Result<DensityMap> {
@@ -5145,29 +5141,26 @@ fn read_density_map_bytes(bytes: &[u8], format: &str) -> Result<DensityMap> {
         );
         return Ok(map);
     }
-    let grid =
-        match format {
-            "apbs" => read_opendx_str(std::str::from_utf8(bytes).map_err(|error| {
-                CueMolError::parse(format!("OpenDX map is not UTF-8: {error}"))
-            })?)?,
-            "ccp4map" => read_ccp4_map_bytes(bytes)?,
-            "xplormap" => read_xplor_map_str(std::str::from_utf8(bytes).map_err(|error| {
-                CueMolError::parse(format!("XPLOR map is not UTF-8: {error}"))
-            })?)?,
-            "brix" => read_brix_map_bytes(bytes)?,
-            "mmcifmap" => {
-                let input = std::str::from_utf8(bytes).map_err(|error| {
-                    CueMolError::parse(format!("mmCIF map is not UTF-8: {error}"))
-                })?;
-                return density_map_from_cif(input, -1.0, 0.33);
-            }
-            other => {
-                return Err(CueMolError::invalid_argument(format!(
-                    "unknown density map format {other}"
-                )))
-            }
-        };
-    Ok(DensityMap::from_grid_map(grid))
+    match format {
+        "apbs" => Ok(DensityMap::from_grid_map(read_opendx_str(
+            std::str::from_utf8(bytes)
+                .map_err(|error| CueMolError::parse(format!("OpenDX map is not UTF-8: {error}")))?,
+        )?)),
+        "ccp4map" => Ccp4MapReader::new().read_density_map_bytes(bytes),
+        "xplormap" => XplorMapReader::new().read_density_map_str(
+            std::str::from_utf8(bytes)
+                .map_err(|error| CueMolError::parse(format!("XPLOR map is not UTF-8: {error}")))?,
+        ),
+        "brix" => BrixMapReader::new().read_density_map_bytes(bytes),
+        "mmcifmap" => {
+            let input = std::str::from_utf8(bytes)
+                .map_err(|error| CueMolError::parse(format!("mmCIF map is not UTF-8: {error}")))?;
+            density_map_from_cif(input, -1.0, 0.33)
+        }
+        other => Err(CueMolError::invalid_argument(format!(
+            "unknown density map format {other}"
+        ))),
+    }
 }
 
 fn read_extension_molecule(path: &Path, format: &str) -> Result<MolCoord> {
@@ -7955,7 +7948,7 @@ attribute \"dep\" string \"positions\"
 ",
         )
         .unwrap();
-        std::fs::write(&xplor_path, xplor_map([2, 1, 1], [0, 0, 0], [1.0, 2.0])).unwrap();
+        std::fs::write(&xplor_path, xplor_map([2, 1, 1], [3, -2, 5], [1.0, 2.0])).unwrap();
         std::fs::write(
             &cif_path,
             "data_map\n\
@@ -7995,6 +7988,28 @@ attribute \"dep\" string \"positions\"
         let summary = app.density_map_summary(map_uid).unwrap();
         assert_eq!(summary.format, "xplormap");
         assert_eq!(summary.counts, [2, 1, 1]);
+        let map = &app.density_maps.get(&map_uid).unwrap().map;
+        assert_eq!(
+            [map.start_col(), map.start_row(), map.start_sec()],
+            [3, -2, 5]
+        );
+        let qdf_data = &app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_density_maps()
+            .last()
+            .unwrap()
+            .raw_data;
+        let qdf_map = cuemol_xtal::read_qdf_denmap_bytes(qdf_data).unwrap();
+        assert_eq!(
+            [
+                qdf_map.start_col(),
+                qdf_map.start_row(),
+                qdf_map.start_sec()
+            ],
+            [3, -2, 5]
+        );
         assert_eq!(app.active_density_map_summaries().len(), 2);
 
         let GuiLoadedPath::Map { map_uid, .. } = app.open_path(&cif_path).unwrap() else {
