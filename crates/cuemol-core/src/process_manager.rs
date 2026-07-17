@@ -85,6 +85,10 @@ impl ProcessManager {
         self.error_msg()
     }
 
+    pub fn errormsg(&self) -> &str {
+        self.error_msg()
+    }
+
     pub fn set_slot_size(&mut self, slot_size: usize) {
         self.slot_size = if slot_size == 0 {
             std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)

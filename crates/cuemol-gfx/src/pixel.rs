@@ -1,10 +1,22 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PixelBuffer {
     width: usize,
     height: usize,
     depth: usize,
     data: Vec<u8>,
     rep_handle: Option<usize>,
+}
+
+impl Clone for PixelBuffer {
+    fn clone(&self) -> Self {
+        Self {
+            width: self.width,
+            height: self.height,
+            depth: self.depth,
+            data: self.data.clone(),
+            rep_handle: None,
+        }
+    }
 }
 
 impl Default for PixelBuffer {
@@ -53,7 +65,7 @@ impl PixelBuffer {
     }
 
     pub fn resize(&mut self, size: usize) {
-        self.data.resize(size, 0);
+        self.data = vec![0; size];
     }
 
     pub fn data(&self) -> &[u8] {
@@ -79,5 +91,29 @@ impl PixelBuffer {
 
     pub fn set_rep_handle(&mut self, value: Option<usize>) {
         self.rep_handle = value;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clone_drops_backend_representation_and_resize_replaces_storage() {
+        let mut buffer = PixelBuffer::new();
+        buffer.set_width(2);
+        buffer.set_height(1);
+        buffer.resize(2);
+        buffer.data_mut().copy_from_slice(&[10, 20]);
+        buffer.set_rep_handle(Some(99));
+        let copy = buffer.clone();
+        assert_eq!(copy.data(), &[10, 20]);
+        assert_eq!(copy.rep_handle(), None);
+        assert_eq!(buffer.rep_handle(), Some(99));
+        buffer.resize(3);
+        assert_eq!(buffer.data(), &[0, 0, 0]);
+        assert_eq!(buffer.rep_handle(), Some(99));
+        buffer.clear();
+        assert_eq!(buffer.rep_handle(), None);
     }
 }

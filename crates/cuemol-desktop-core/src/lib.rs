@@ -1092,7 +1092,7 @@ impl DesktopAppState {
         {
             let mut renderer = MapSurfRenderer::new();
             renderer.map_mut().set_siglevel(siglevel);
-            let surface = renderer.generate_surf_obj(&map_object.map);
+            let surface = renderer.generate_surf_obj_from(&map_object.map);
             let mesh = surface.mesh();
             let base = vertices.len() as u32;
             vertices.extend(
@@ -2165,12 +2165,13 @@ impl DesktopAppState {
             crate::offscreen::render_snapshot_depth_offscreen(&snapshot, &camera, width, height)
         } else {
             let mvp = crate::offscreen::camera_mvp(&camera, aspect);
-            crate::offscreen::render_snapshot_offscreen(
+            crate::offscreen::render_snapshot_supersampled_offscreen(
                 &snapshot,
                 mvp,
                 width,
                 height,
                 [0.1, 0.1, 0.12, if exporter.use_alpha() { 0.0 } else { 1.0 }],
+                5,
             )
         }
         .ok_or_else(|| CueMolError::invalid_argument("no GPU adapter for offscreen render"))?;

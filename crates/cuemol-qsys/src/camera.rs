@@ -88,6 +88,10 @@ impl Camera {
         self.source()
     }
 
+    pub fn src(&self) -> &str {
+        self.source()
+    }
+
     pub fn set_source(&mut self, source: impl Into<String>) {
         self.source = source.into();
     }
@@ -128,6 +132,14 @@ impl Camera {
         self.slab_depth = slab_depth.clamp(0.1, 10000.0);
     }
 
+    pub fn slab(&self) -> f64 {
+        self.slab_depth()
+    }
+
+    pub fn set_slab(&mut self, slab_depth: f64) {
+        self.set_slab_depth(slab_depth);
+    }
+
     pub fn cam_dist(&self) -> f64 {
         self.cam_dist
     }
@@ -140,12 +152,28 @@ impl Camera {
         self.cam_dist = cam_dist.clamp(0.1, 10000.0);
     }
 
+    pub fn distance(&self) -> f64 {
+        self.cam_dist()
+    }
+
+    pub fn set_distance(&mut self, cam_dist: f64) {
+        self.set_cam_dist(cam_dist);
+    }
+
     pub fn stereo_distance(&self) -> f64 {
         self.stereo_distance
     }
 
     pub fn set_stereo_distance(&mut self, stereo_distance: f64) {
         self.stereo_distance = stereo_distance;
+    }
+
+    pub fn stereo_dist(&self) -> f64 {
+        self.stereo_distance()
+    }
+
+    pub fn set_stereo_dist(&mut self, stereo_distance: f64) {
+        self.set_stereo_distance(stereo_distance);
     }
 
     pub fn stereo_mode(&self) -> StereoMode {
@@ -166,6 +194,14 @@ impl Camera {
 
     pub fn set_perspective(&mut self, perspective: bool) {
         self.perspective = perspective;
+    }
+
+    pub fn perspec(&self) -> bool {
+        self.is_perspective()
+    }
+
+    pub fn set_perspec(&mut self, perspective: bool) {
+        self.set_perspective(perspective);
     }
 
     pub fn center_mark(&self) -> CenterMark {
@@ -630,12 +666,17 @@ mod tests {
         let camera = Camera::default();
         assert_eq!(camera.zoom(), 50.0);
         assert_eq!(camera.source(), "");
+        assert_eq!(camera.src(), "");
         assert_eq!(camera.alt_source(), "");
         assert_eq!(camera.slab_depth(), 50.0);
+        assert_eq!(camera.slab(), 50.0);
+        assert_eq!(camera.distance(), 200.0);
+        assert_eq!(camera.stereo_dist(), 1.0);
         assert_eq!(camera.cam_dist(), 200.0);
         assert_eq!(camera.stereo_distance(), 1.0);
         assert_eq!(camera.stereo_mode(), StereoMode::None);
         assert!(!camera.is_perspective());
+        assert!(!camera.perspec());
         assert_eq!(camera.center_mark(), CenterMark::Cross);
         assert_eq!(camera.center(), Vector4::ZERO);
         assert_eq!(camera.rotation(), Quat::IDENTITY);

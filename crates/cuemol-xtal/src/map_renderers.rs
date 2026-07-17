@@ -4,6 +4,7 @@ use cuemol_molstr::{GridMap, Selector};
 use cuemol_qsys::{DispListRenderer, MultiGradient, ScalarObject, View};
 use cuemol_surface::{build_grid_isosurface_masked, MolSurfObj, ScalarField, SurfaceMesh};
 use cuemol_symm::CrystalInfo;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DensityMap {
@@ -519,6 +520,31 @@ impl MapColorMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MapClientInfo {
+    rmsd_density: f64,
+    min_density: f64,
+    max_density: f64,
+    counts: [usize; 3],
+    grid_sizes: [f64; 3],
+}
+
+impl MapClientInfo {
+    fn from_scalar(scalar: &impl ScalarObject) -> Self {
+        Self {
+            rmsd_density: scalar.rmsd_density(),
+            min_density: scalar.min_density(),
+            max_density: scalar.max_density(),
+            counts: [scalar.col_no(), scalar.row_no(), scalar.sec_no()],
+            grid_sizes: [
+                scalar.col_grid_size(),
+                scalar.row_grid_size(),
+                scalar.sec_grid_size(),
+            ],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapRenderer {
     disp_list: DispListRenderer,
@@ -534,6 +560,7 @@ pub struct MapRenderer {
     bndry_sel: Option<Selector>,
     multi_grad: MultiGradient,
     color_mapname: String,
+    client_info: Option<MapClientInfo>,
 }
 
 impl Default for MapRenderer {
@@ -552,6 +579,7 @@ impl Default for MapRenderer {
             bndry_sel: None,
             multi_grad: MultiGradient::new(),
             color_mapname: String::new(),
+            client_info: None,
         }
     }
 }
@@ -577,6 +605,10 @@ impl MapRenderer {
         self.color_mode_code()
     }
 
+    pub fn colormode(&self) -> i32 {
+        self.color_mode_code()
+    }
+
     pub fn set_color_mode(&mut self, value: MapColorMode) {
         self.color_mode = value;
         self.invalidate_display_cache();
@@ -591,6 +623,10 @@ impl MapRenderer {
         self.invalidate_display_cache();
     }
 
+    pub fn set_colormode(&mut self, value: i32) {
+        self.set_color_mode_code(value);
+    }
+
     pub fn color(&self) -> &SolidColor {
         &self.color
     }
@@ -599,8 +635,16 @@ impl MapRenderer {
         self.color()
     }
 
+    pub fn defaultcolor(&self) -> &SolidColor {
+        self.color()
+    }
+
     pub fn set_color(&mut self, value: SolidColor) {
         self.color = value;
+    }
+
+    pub fn set_defaultcolor(&mut self, value: SolidColor) {
+        self.set_color(value);
     }
 
     pub fn siglevel(&self) -> f64 {
@@ -760,15 +804,39 @@ impl MapRenderer {
         self.set_color_mapname(value);
     }
 
-    pub fn level(&self, scalar: &impl ScalarObject) -> f64 {
+    pub fn attach_client_scalar(&mut self, scalar: &impl ScalarObject) {
+        self.client_info = Some(MapClientInfo::from_scalar(scalar));
+        self.invalidate_display_cache();
+    }
+
+    pub fn clear_client_scalar(&mut self) {
+        self.client_info = None;
+        self.invalidate_display_cache();
+    }
+
+    pub fn level(&self) -> f64 {
+        self.client_info
+            .map_or(0.0, |client| self.siglevel * client.rmsd_density)
+    }
+
+    pub fn level_from(&self, scalar: &impl ScalarObject) -> f64 {
         self.siglevel * scalar.rmsd_density()
     }
 
-    pub fn get_level(&self, scalar: &impl ScalarObject) -> f64 {
-        self.level(scalar)
+    pub fn get_level(&self) -> f64 {
+        self.level()
     }
 
-    pub fn set_level(&mut self, scalar: &impl ScalarObject, value: f64) {
+    pub fn set_level(&mut self, value: f64) {
+        let rmsd = self.client_info.map_or(0.0, |client| client.rmsd_density);
+        self.set_siglevel(if rmsd.abs() < 1.0e-12 {
+            0.0
+        } else {
+            value / rmsd
+        });
+    }
+
+    pub fn set_level_from(&mut self, scalar: &impl ScalarObject, value: f64) {
         let rmsd = scalar.rmsd_density();
         self.set_siglevel(if rmsd.abs() < 1.0e-12 {
             0.0
@@ -777,7 +845,17 @@ impl MapRenderer {
         });
     }
 
-    pub fn max_level(&self, scalar: &impl ScalarObject) -> f64 {
+    pub fn max_level(&self) -> f64 {
+        self.client_info.map_or(0.0, |client| {
+            if client.rmsd_density.abs() < 1.0e-12 {
+                0.0
+            } else {
+                client.max_density / client.rmsd_density
+            }
+        })
+    }
+
+    pub fn max_level_from(&self, scalar: &impl ScalarObject) -> f64 {
         let rmsd = scalar.rmsd_density();
         if rmsd.abs() < 1.0e-12 {
             0.0
@@ -786,11 +864,21 @@ impl MapRenderer {
         }
     }
 
-    pub fn get_max_level(&self, scalar: &impl ScalarObject) -> f64 {
-        self.max_level(scalar)
+    pub fn get_max_level(&self) -> f64 {
+        self.max_level()
     }
 
-    pub fn min_level(&self, scalar: &impl ScalarObject) -> f64 {
+    pub fn min_level(&self) -> f64 {
+        self.client_info.map_or(0.0, |client| {
+            if client.rmsd_density.abs() < 1.0e-12 {
+                0.0
+            } else {
+                client.min_density / client.rmsd_density
+            }
+        })
+    }
+
+    pub fn min_level_from(&self, scalar: &impl ScalarObject) -> f64 {
         let rmsd = scalar.rmsd_density();
         if rmsd.abs() < 1.0e-12 {
             0.0
@@ -799,8 +887,8 @@ impl MapRenderer {
         }
     }
 
-    pub fn get_min_level(&self, scalar: &impl ScalarObject) -> f64 {
-        self.min_level(scalar)
+    pub fn get_min_level(&self) -> f64 {
+        self.min_level()
     }
 
     pub fn display_cache_valid(&self) -> bool {
@@ -904,15 +992,25 @@ impl MapMeshRenderer {
         self.dragupdate = value;
     }
 
-    pub fn max_extent(&self, scalar: &impl ScalarObject) -> f64 {
+    pub fn max_extent(&self) -> f64 {
+        let Some(client) = self.map.client_info else {
+            return 0.0;
+        };
+        let half = self.bufsize as f64 / 2.0;
+        (half * client.grid_sizes[0])
+            .min(half * client.grid_sizes[1])
+            .min(half * client.grid_sizes[2])
+    }
+
+    pub fn max_extent_from(&self, scalar: &impl ScalarObject) -> f64 {
         let half = self.bufsize as f64 / 2.0;
         (half * scalar.col_grid_size())
             .min(half * scalar.row_grid_size())
             .min(half * scalar.sec_grid_size())
     }
 
-    pub fn get_max_extent(&self, scalar: &impl ScalarObject) -> f64 {
-        self.max_extent(scalar)
+    pub fn get_max_extent(&self) -> f64 {
+        self.max_extent()
     }
 
     /// Contour the density into wireframe line segments at the renderer's level
@@ -930,7 +1028,7 @@ impl MapMeshRenderer {
         scalar: &impl ScalarObject,
         boundary_points: Option<&[Vector4]>,
     ) -> Vec<[Vector4; 2]> {
-        let level = self.map.level(scalar);
+        let level = self.map.level_from(scalar);
         let Some(mut range) = self.map.grid_range(scalar) else {
             return Vec::new();
         };
@@ -1113,6 +1211,7 @@ impl MapSurfaceDrawMode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapSurfRenderer {
     map: MapRenderer,
+    client_map: Option<Arc<DensityMap>>,
     autoupdate: bool,
     dragupdate: bool,
     cullface: bool,
@@ -1128,6 +1227,7 @@ impl Default for MapSurfRenderer {
     fn default() -> Self {
         Self {
             map: MapRenderer::new(),
+            client_map: None,
             autoupdate: true,
             dragupdate: false,
             cullface: false,
@@ -1163,6 +1263,24 @@ impl MapSurfRenderer {
 
     pub fn map_mut(&mut self) -> &mut MapRenderer {
         &mut self.map
+    }
+
+    pub fn client_map(&self) -> Option<&DensityMap> {
+        self.client_map.as_deref()
+    }
+
+    pub fn attach_client_map(&mut self, map: Arc<DensityMap>) {
+        self.map.attach_client_scalar(map.as_ref());
+        self.client_map = Some(map);
+    }
+
+    pub fn set_client_map(&mut self, map: DensityMap) {
+        self.attach_client_map(Arc::new(map));
+    }
+
+    pub fn clear_client_map(&mut self) {
+        self.client_map = None;
+        self.map.clear_client_scalar();
     }
 
     pub fn autoupdate(&self) -> bool {
@@ -1270,12 +1388,18 @@ impl MapSurfRenderer {
         self.map.invalidate_display_cache();
     }
 
-    pub fn max_extent(&self, scalar: &impl ScalarObject) -> f64 {
+    pub fn max_extent(&self) -> f64 {
+        self.map.client_info.map_or(0.0, |client| {
+            self.max_grids as f64 * client.grid_sizes[0] / 2.0
+        })
+    }
+
+    pub fn max_extent_from(&self, scalar: &impl ScalarObject) -> f64 {
         self.max_grids as f64 * scalar.col_grid_size() / 2.0
     }
 
-    pub fn get_max_extent(&self, scalar: &impl ScalarObject) -> f64 {
-        self.max_extent(scalar)
+    pub fn get_max_extent(&self) -> f64 {
+        self.max_extent()
     }
 
     /// Contour the density into a triangle isosurface at the renderer's level.
@@ -1286,7 +1410,15 @@ impl MapSurfRenderer {
     /// nodes, crossings are mapped to Cartesian via the map transform), reusing
     /// the shared marching-tetrahedra core in `cuemol-surface`. This is the
     /// visual consumer of the MTZ/mmCIF -> density pipeline.
-    pub fn generate_surf_obj(&self, scalar: &impl ScalarObject) -> MolSurfObj {
+    pub fn generate_surf_obj(&self) -> MolSurfObj {
+        self.client_map
+            .as_ref()
+            .map_or_else(MolSurfObj::new, |map| {
+                self.generate_surf_obj_from(map.as_ref())
+            })
+    }
+
+    pub fn generate_surf_obj_from(&self, scalar: &impl ScalarObject) -> MolSurfObj {
         self.generate_surf_obj_with_boundary(scalar, None)
     }
 
@@ -1296,8 +1428,8 @@ impl MapSurfRenderer {
         boundary_points: Option<&[Vector4]>,
     ) -> MolSurfObj {
         let mut object = MolSurfObj::new();
-        let level = self.map.level(scalar);
-        let extent = self.map.extent().min(self.max_extent(scalar));
+        let level = self.map.level_from(scalar);
+        let extent = self.map.extent().min(self.max_extent_from(scalar));
         let Some(range) =
             GridRange::from_center_extent(scalar, self.map.center(), extent, self.map.use_pbc())
         else {
@@ -1783,14 +1915,23 @@ impl GlslMapMeshRenderer {
         self.map_texture_ok = value;
     }
 
-    pub fn max_extent(&self, scalar: &impl ScalarObject) -> f64 {
+    pub fn max_extent(&self) -> f64 {
+        let Some(client) = self.map.client_info else {
+            return 0.0;
+        };
+        (50.0 * client.grid_sizes[0])
+            .min(50.0 * client.grid_sizes[1])
+            .min(50.0 * client.grid_sizes[2])
+    }
+
+    pub fn max_extent_from(&self, scalar: &impl ScalarObject) -> f64 {
         (50.0 * scalar.col_grid_size())
             .min(50.0 * scalar.row_grid_size())
             .min(50.0 * scalar.sec_grid_size())
     }
 
-    pub fn get_max_extent(&self, scalar: &impl ScalarObject) -> f64 {
-        self.max_extent(scalar)
+    pub fn get_max_extent(&self) -> f64 {
+        self.max_extent()
     }
 
     pub fn invalidate_display_cache(&mut self) {
@@ -1895,14 +2036,23 @@ impl GlslMapVolRenderer {
         self.map_texture_ok = value;
     }
 
-    pub fn max_extent(&self, scalar: &impl ScalarObject) -> f64 {
+    pub fn max_extent(&self) -> f64 {
+        let Some(client) = self.map.client_info else {
+            return 0.0;
+        };
+        (client.counts[0] as f64 * client.grid_sizes[0] / 2.0)
+            .max(client.counts[1] as f64 * client.grid_sizes[1] / 2.0)
+            .max(client.counts[2] as f64 * client.grid_sizes[2] / 2.0)
+    }
+
+    pub fn max_extent_from(&self, scalar: &impl ScalarObject) -> f64 {
         (scalar.col_no() as f64 * scalar.col_grid_size() / 2.0)
             .max(scalar.row_no() as f64 * scalar.row_grid_size() / 2.0)
             .max(scalar.sec_no() as f64 * scalar.sec_grid_size() / 2.0)
     }
 
-    pub fn get_max_extent(&self, scalar: &impl ScalarObject) -> f64 {
-        self.max_extent(scalar)
+    pub fn get_max_extent(&self) -> f64 {
+        self.max_extent()
     }
 
     pub fn invalidate_display_cache(&mut self) {
@@ -2076,9 +2226,16 @@ attribute \"dep\" string \"positions\"
         let mut renderer = MapRenderer::new();
         assert_eq!(renderer.color_mode(), MapColorMode::Solid);
         assert_eq!(renderer.color_mode_code(), MapRenderer::MAPREND_SIMPLE);
+        assert_eq!(renderer.colormode(), MapRenderer::MAPREND_SIMPLE);
         assert_eq!(
             renderer.color().rgba8(),
             SolidColor::from_rgb(0.0, 0.0, 1.0).rgba8()
+        );
+        assert_eq!(renderer.defaultcolor().rgba8(), renderer.color().rgba8());
+        renderer.set_defaultcolor(SolidColor::from_rgb(0.0, 1.0, 0.0));
+        assert_eq!(
+            renderer.color().rgba8(),
+            SolidColor::from_rgb(0.0, 1.0, 0.0).rgba8()
         );
         assert_eq!(renderer.siglevel(), 1.1);
         assert_eq!(renderer.extent(), 15.0);
@@ -2090,19 +2247,18 @@ attribute \"dep\" string \"positions\"
         assert!(renderer.bndry_sel().is_none());
         assert_eq!(renderer.multi_grad().size(), 0);
         assert_eq!(renderer.color_mapname(), "");
-        assert!((renderer.level(&map) - 1.1 * map.rmsd_density()).abs() < 1.0e-12);
-        assert!(
-            (renderer.max_level(&map) - map.max_density() / map.rmsd_density()).abs() < 1.0e-12
-        );
+        renderer.attach_client_scalar(&map);
+        assert!((renderer.level() - 1.1 * map.rmsd_density()).abs() < 1.0e-12);
+        assert!((renderer.max_level() - map.max_density() / map.rmsd_density()).abs() < 1.0e-12);
 
         renderer.mark_display_cache_valid();
-        renderer.set_color_mode(MapColorMode::MultiGradient);
+        renderer.set_colormode(MapRenderer::MAPREND_MULTIGRAD);
         assert!(!renderer.display_cache_valid());
         renderer.set_bndry_rng(-1.0);
         assert_eq!(renderer.bndry_rng(), 0.0);
         renderer.set_bndry_sel(Some(parse_selector("name CA").unwrap()));
         assert!(renderer.bndry_sel().is_some());
-        renderer.set_level(&map, map.rmsd_density() * 2.0);
+        renderer.set_level(map.rmsd_density() * 2.0);
         assert_eq!(renderer.siglevel(), 2.0);
     }
 
@@ -2115,7 +2271,8 @@ attribute \"dep\" string \"positions\"
         assert_eq!(mesh.bufsize(), 100);
         assert!(mesh.autoupdate());
         assert!(!mesh.dragupdate());
-        assert_eq!(mesh.max_extent(&map), 50.0);
+        mesh.map_mut().attach_client_scalar(&map);
+        assert_eq!(mesh.max_extent(), 50.0);
         mesh.set_bufsize(5);
         assert_eq!(mesh.bufsize(), 10);
 
@@ -2129,17 +2286,21 @@ attribute \"dep\" string \"positions\"
         assert_eq!(surf.width(), 1.2);
         assert_eq!(surf.binning(), 1);
         assert_eq!(surf.max_grids(), 100);
-        assert_eq!(surf.max_extent(&map), 50.0);
+        assert_eq!(surf.max_extent(), 0.0);
         assert_eq!(surf.glrender_mode(), MapSurfRenderer::MSR_REND_DLIST);
         assert_eq!(MapSurfRenderer::MSR_REND_VBO, 1);
         assert_eq!(MapSurfRenderer::MSR_REND_SHADER, 2);
         assert_eq!(surf.omp_thr(), -1);
+        assert!(surf.client_map().is_none());
+        assert_eq!(surf.generate_surf_obj().mesh().triangle_count(), 0);
+        surf.set_client_map(map.clone());
+        assert_eq!(surf.max_extent(), 50.0);
         surf.set_drawmode(MapSurfaceDrawMode::Line);
         assert_eq!(surf.drawmode_code(), MapSurfRenderer::MSRDRAW_LINE);
         surf.set_binning(0);
         assert_eq!(surf.binning(), 1);
         surf.map_mut().set_color_mapname("map1");
-        let obj = surf.generate_surf_obj(&map);
+        let obj = surf.generate_surf_obj();
         // The contour now triangulates the density grid itself (the level cuts
         // through the 0..7 single-cube grid), not a misrouted molecular SES.
         assert!(obj.mesh().triangle_count() > 0);
@@ -2178,12 +2339,12 @@ attribute \"dep\" string \"positions\"
 
         // Contour at density == 19 => sphere of radius R0 - 19 = 6.
         let mut surf = MapSurfRenderer::new();
-        surf.map_mut().set_level(&map, 19.0);
+        surf.map_mut().set_level_from(&map, 19.0);
         surf.map_mut().set_center(center);
         surf.map_mut().set_extent(8.0);
-        assert!((surf.map().level(&map) - 19.0).abs() < 1.0e-3);
+        assert!((surf.map().level_from(&map) - 19.0).abs() < 1.0e-3);
 
-        let obj = surf.generate_surf_obj(&map);
+        let obj = surf.generate_surf_obj_from(&map);
         let mesh = obj.mesh();
         assert!(
             mesh.triangle_count() > 200,
@@ -2225,13 +2386,13 @@ attribute \"dep\" string \"positions\"
         );
 
         surf.set_binning(2);
-        let coarse = surf.generate_surf_obj(&map);
+        let coarse = surf.generate_surf_obj_from(&map);
         assert!(coarse.mesh().triangle_count() > 0);
         assert!(coarse.mesh().triangle_count() < mesh.triangle_count());
 
         surf.map_mut().set_center(Vector4::ZERO);
         surf.map_mut().set_extent(2.0);
-        assert_eq!(surf.generate_surf_obj(&map).mesh().triangle_count(), 0);
+        assert_eq!(surf.generate_surf_obj_from(&map).mesh().triangle_count(), 0);
     }
 
     #[test]
@@ -2273,10 +2434,10 @@ attribute \"dep\" string \"positions\"
 
         let radius = 6.0_f64;
         let mut surf = MapSurfRenderer::new();
-        surf.map_mut().set_level(&map, r0 - radius); // density == 19 => |p - cc| == 6
+        surf.map_mut().set_level_from(&map, r0 - radius); // density == 19 => |p - cc| == 6
         surf.map_mut().set_center(cc);
         surf.map_mut().set_extent(8.0);
-        let obj = surf.generate_surf_obj(&map);
+        let obj = surf.generate_surf_obj_from(&map);
         let mesh = obj.mesh();
         assert!(
             mesh.triangle_count() > 100,
@@ -2327,7 +2488,7 @@ attribute \"dep\" string \"positions\"
 
         let radius = 6.0_f64;
         let mut mesh = MapMeshRenderer::new();
-        mesh.map_mut().set_level(&map, r0 - radius);
+        mesh.map_mut().set_level_from(&map, r0 - radius);
         mesh.map_mut().set_center(center);
         mesh.map_mut().set_extent(8.0);
         let segments = mesh.generate_contour_lines(&map);
@@ -2358,7 +2519,7 @@ attribute \"dep\" string \"positions\"
     fn contour_lines_empty_when_level_exceeds_max() {
         let map = DensityMap::from_grid_map(test_grid());
         let mut mesh = MapMeshRenderer::new();
-        mesh.map_mut().set_level(&map, 100.0);
+        mesh.map_mut().set_level_from(&map, 100.0);
         assert!(mesh.generate_contour_lines(&map).is_empty());
     }
 
@@ -2385,7 +2546,7 @@ attribute \"dep\" string \"positions\"
 
         let center = Vector4::new3(4.0, 1.5, 1.5);
         let mut wire = MapMeshRenderer::new();
-        wire.map_mut().set_level(&map, 5.0);
+        wire.map_mut().set_level_from(&map, 5.0);
         wire.map_mut().set_center(center);
         wire.map_mut().set_extent(1.5);
         wire.map_mut().set_use_pbc(false);
@@ -2404,13 +2565,16 @@ attribute \"dep\" string \"positions\"
             .is_empty());
 
         let mut surface = MapSurfRenderer::new();
-        surface.map_mut().set_level(&map, 5.0);
+        surface.map_mut().set_level_from(&map, 5.0);
         surface.map_mut().set_center(center);
         surface.map_mut().set_extent(1.5);
         surface.map_mut().set_use_pbc(false);
-        assert_eq!(surface.generate_surf_obj(&map).mesh().triangle_count(), 0);
+        assert_eq!(
+            surface.generate_surf_obj_from(&map).mesh().triangle_count(),
+            0
+        );
         surface.map_mut().set_use_pbc(true);
-        let surface_count = surface.generate_surf_obj(&map).mesh().triangle_count();
+        let surface_count = surface.generate_surf_obj_from(&map).mesh().triangle_count();
         assert!(surface_count > 0);
         surface.map_mut().set_bndry_rng(100.0);
         assert_eq!(
@@ -2448,8 +2612,8 @@ attribute \"dep\" string \"positions\"
         // spurious surface (guards the inside/outside sign convention).
         let map = DensityMap::from_grid_map(test_grid());
         let mut surf = MapSurfRenderer::new();
-        surf.map_mut().set_level(&map, 100.0);
-        let obj = surf.generate_surf_obj(&map);
+        surf.map_mut().set_level_from(&map, 100.0);
+        let obj = surf.generate_surf_obj_from(&map);
         assert_eq!(obj.mesh().triangle_count(), 0);
     }
 
@@ -2468,7 +2632,8 @@ attribute \"dep\" string \"positions\"
         assert!(mesh.dragupdate());
         assert!(!mesh.shader_checked());
         assert!(!mesh.map_texture_ok());
-        assert_eq!(mesh.max_extent(&map), 50.0);
+        mesh.map_mut().attach_client_scalar(&map);
+        assert_eq!(mesh.max_extent(), 50.0);
         mesh.invalidate_display_cache();
         assert!(!mesh.map_texture_ok());
 
@@ -2485,7 +2650,8 @@ attribute \"dep\" string \"positions\"
         assert_eq!(GlslMapVolRenderer::GLMV_AUTO2, 2);
         assert!(!vol.shader_checked());
         assert!(!vol.map_texture_ok());
-        assert_eq!(vol.max_extent(&map), 3.0);
+        vol.map_mut().attach_client_scalar(&map);
+        assert_eq!(vol.max_extent(), 3.0);
         vol.set_xferfn_type(GlslMapVolRenderer::GLMV_AUTO2);
         assert_eq!(vol.xferfn_type(), GlslMapVolRenderer::GLMV_AUTO2);
     }

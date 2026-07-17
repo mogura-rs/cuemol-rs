@@ -3326,10 +3326,8 @@ impl GuiApplication {
                 self.snapshot.meshes.push(mesh);
             }
         }
-        if self.color_proofing {
-            if self.state.apply_color_proof(&mut self.snapshot).is_err() {
-                cuemol_render::apply_generic_color_proof(&mut self.snapshot);
-            }
+        if self.color_proofing && self.state.apply_color_proof(&mut self.snapshot).is_err() {
+            cuemol_render::apply_generic_color_proof(&mut self.snapshot);
         }
     }
 

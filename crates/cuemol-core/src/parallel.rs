@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 pub fn parallel_enabled() -> bool {
-    parallel_max_concurrency() > 1
+    true
 }
 
 pub fn parallel_max_concurrency() -> usize {
@@ -58,6 +58,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     #[test]
     fn covers_each_index_once() {
+        assert!(parallel_enabled());
         let hits = (0..257).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>();
         parallel_for(0, hits.len(), |index| {
             hits[index].fetch_add(1, Ordering::Relaxed);

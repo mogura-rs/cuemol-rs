@@ -1,9 +1,11 @@
 use crate::{
-    Camera, CenterMark, DragState, DrawObj, InDevEvent, MouseEventHandler, ScrEventManagerHandle,
-    StereoMode, ViewEvent,
+    Camera, CenterMark, DragState, DrawObj, FrameRenderParams, InDevEvent, MouseEventHandler,
+    ScrEventManagerHandle, StereoMode, ViewEvent,
 };
 use cuemol_core::{EventCaster, LRegExpr, Matrix4, Quat, SharedEventListener, Uid, Vector4};
-use cuemol_gfx::{HitData, HittestContext, RawHitData};
+use cuemol_gfx::{
+    jitter_offset, jitter_sample_count, AoConstants, HitData, HittestContext, RawHitData,
+};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -62,6 +64,11 @@ pub struct View {
     event_manager: Option<ScrEventManagerHandle>,
     hit_precision: f64,
     hit_candidates: Vec<ViewHitCandidate>,
+    jitter_sample_index: i32,
+    jitter_more_samples: bool,
+    jitter_reset_requested: bool,
+    jitter_offset_pixels: (f64, f64),
+    ao_half_pending: bool,
 }
 
 impl View {
@@ -95,6 +102,11 @@ impl View {
             event_manager: None,
             hit_precision: 10.0,
             hit_candidates: Vec::new(),
+            jitter_sample_index: 0,
+            jitter_more_samples: false,
+            jitter_reset_requested: false,
+            jitter_offset_pixels: (0.0, 0.0),
+            ao_half_pending: false,
         }
     }
 
@@ -186,6 +198,14 @@ impl View {
         self.fire_property_changed("distance", false);
     }
 
+    pub fn distance(&self) -> f64 {
+        self.view_dist()
+    }
+
+    pub fn set_distance(&mut self, view_dist: f64) {
+        self.set_view_dist(view_dist);
+    }
+
     pub fn slab_depth(&self) -> f64 {
         self.slab_depth
     }
@@ -208,6 +228,10 @@ impl View {
         self.fire_property_changed("slab", false);
     }
 
+    pub fn set_slab(&mut self, slab_depth: f64) {
+        self.set_slab_depth(slab_depth);
+    }
+
     pub fn rot_quat(&self) -> Quat {
         self.rot_quat
     }
@@ -223,6 +247,14 @@ impl View {
     pub fn set_rot_quat(&mut self, rot_quat: Quat) {
         self.rot_quat = rot_quat.normalize().unwrap_or(rot_quat);
         self.fire_property_changed("rotation", false);
+    }
+
+    pub fn rotation(&self) -> Quat {
+        self.rot_quat()
+    }
+
+    pub fn set_rotation(&mut self, rot_quat: Quat) {
+        self.set_rot_quat(rot_quat);
     }
 
     pub fn rotate_view(&mut self, x_deg: f64, y_deg: f64, z_deg: f64) {
@@ -266,6 +298,10 @@ impl View {
 
     pub fn is_perspective(&self) -> bool {
         self.perspective
+    }
+
+    pub fn perspective(&self) -> bool {
+        self.is_perspective()
     }
 
     pub fn is_perspec(&self) -> bool {
@@ -454,22 +490,11 @@ impl View {
     }
 
     pub fn proj_to_screen(&self, world_position: Vector4) -> Vector4 {
-        let slab_depth = self.slab_depth.max(0.1);
-        let distance = self.view_dist;
-        let slab_near = distance - slab_depth / 2.0;
-        let slab_far = distance + slab_depth;
-        let view_width = self.zoom / 2.0;
         let width = f64::from(self.width);
         let height = f64::from(self.height);
-        let aspect = if height > 0.0 { width / height } else { 1.0 };
-
-        let projection = if self.perspective {
-            perspective_projection(view_width, aspect, slab_near, slab_far, distance)
-        } else {
-            orthographic_projection(view_width, aspect, slab_near, slab_far)
-        };
+        let projection = self.projection_matrix();
         let mut model_view = Matrix4::IDENTITY;
-        model_view.translate(Vector4::new3(0.0, 0.0, -distance));
+        model_view.translate(Vector4::new3(0.0, 0.0, -self.view_dist));
         model_view.rotate(self.rot_quat);
         model_view.translate(self.center.negate());
 
@@ -532,6 +557,144 @@ impl View {
         self.scale_factor
     }
 
+    pub fn backing_width(&self) -> u32 {
+        backing_dimension(self.width, self.scale_factor.0)
+    }
+
+    pub fn backing_height(&self) -> u32 {
+        backing_dimension(self.height, self.scale_factor.1)
+    }
+
+    pub fn projection_matrix(&self) -> Matrix4 {
+        let slab_depth = self.slab_depth.max(0.1);
+        let distance = self.view_dist;
+        let slab_near = (distance - slab_depth / 2.0).max(0.1);
+        let slab_far = distance + slab_depth;
+        let view_width = self.zoom / 2.0;
+        let height = f64::from(self.height);
+        let mut aspect = if height > 0.0 {
+            f64::from(self.width) / height
+        } else {
+            1.0
+        };
+        if matches!(self.stereo_mode, StereoMode::Parallel | StereoMode::Cross) {
+            aspect /= 2.0;
+        }
+        let mut projection = if self.perspective {
+            perspective_projection(view_width, aspect, slab_near, slab_far, distance)
+        } else {
+            orthographic_projection(view_width, aspect, slab_near, slab_far)
+        };
+
+        let backing_width = f64::from(self.backing_width());
+        let backing_height = f64::from(self.backing_height());
+        let jitter_x = if backing_width > 0.0 {
+            2.0 * self.jitter_offset_pixels.0 / backing_width
+        } else {
+            0.0
+        };
+        let jitter_y = if backing_height > 0.0 {
+            2.0 * self.jitter_offset_pixels.1 / backing_height
+        } else {
+            0.0
+        };
+        if self.perspective {
+            projection.values[0][2] -= jitter_x;
+            projection.values[1][2] -= jitter_y;
+        } else {
+            projection.values[0][3] += jitter_x;
+            projection.values[1][3] += jitter_y;
+        }
+        projection
+    }
+
+    pub fn set_jitter_offset_pixels(&mut self, x: f64, y: f64) {
+        self.jitter_offset_pixels = (x, y);
+    }
+
+    pub fn jitter_offset_pixels(&self) -> (f64, f64) {
+        self.jitter_offset_pixels
+    }
+
+    pub fn compute_ao_constants(&self) -> AoConstants {
+        let aspect = if self.height > 0 {
+            f64::from(self.width) / f64::from(self.height)
+        } else {
+            1.0
+        };
+        AoConstants::from_camera(
+            self.view_dist,
+            self.zoom,
+            self.slab_depth,
+            aspect,
+            self.backing_width() as i32,
+            self.backing_height() as i32,
+            self.perspective,
+        )
+    }
+
+    pub fn prepare_frame_render(
+        &mut self,
+        jitter_level: i32,
+        externally_updated: bool,
+        ao_half_resolution: bool,
+    ) -> FrameRenderParams {
+        self.jitter_more_samples = false;
+        self.jitter_offset_pixels = (0.0, 0.0);
+        self.ao_half_pending = ao_half_resolution;
+
+        let jitter_level = jitter_level.clamp(0, 5);
+        let jitter_active = jitter_level > 0;
+        let jitter_count = jitter_sample_count(jitter_level) as i32;
+        if jitter_active {
+            if externally_updated
+                || self.jitter_reset_requested
+                || self.jitter_sample_index >= jitter_count
+            {
+                self.jitter_sample_index = 0;
+            }
+            self.jitter_reset_requested = false;
+            self.jitter_offset_pixels = jitter_offset(jitter_level, self.jitter_sample_index);
+        }
+
+        let ao_noise_offset = if jitter_active {
+            let value = f64::from(self.jitter_sample_index) * 0.618_033_988_7;
+            value.fract() as f32
+        } else {
+            0.0
+        };
+        FrameRenderParams {
+            camera_ao_constants: self.compute_ao_constants(),
+            ao_noise_offset,
+            jitter_active,
+            jitter_index: self.jitter_sample_index,
+            jitter_count,
+            blit_depth_to_default: true,
+            ..FrameRenderParams::default()
+        }
+    }
+
+    pub fn complete_frame_render(&mut self, params: &FrameRenderParams) {
+        if !params.jitter_active {
+            return;
+        }
+        if params.jitter_index + 1 < params.jitter_count {
+            self.jitter_sample_index = params.jitter_index + 1;
+            self.jitter_more_samples = true;
+        } else {
+            self.jitter_more_samples = false;
+        }
+    }
+
+    pub fn needs_continuous_redraw(&self) -> bool {
+        self.jitter_more_samples || self.ao_half_pending
+    }
+
+    pub fn force_redraw(&mut self) {
+        self.jitter_reset_requested = true;
+        self.set_projection_changed();
+    }
+
     pub fn is_projection_changed(&self) -> bool {
         self.projection_changed
     }
@@ -561,6 +724,10 @@ impl View {
     }
 
     pub fn get_style_names(&self) -> &str {
+        self.style_names()
+    }
+
+    pub fn style(&self) -> &str {
         self.style_names()
     }
 
@@ -957,6 +1124,10 @@ fn current_time_millis() -> i64 {
         .map_or(0, |duration| duration.as_millis() as i64)
 }
 
+fn backing_dimension(logical: u32, scale: f64) -> u32 {
+    (f64::from(logical) * scale).clamp(0.0, f64::from(u32::MAX)) as u32
+}
+
 fn orthographic_projection(view_width: f64, aspect: f64, slab_near: f64, slab_far: f64) -> Matrix4 {
     let left = -view_width * aspect;
     let right = view_width * aspect;
@@ -1149,15 +1320,17 @@ mod tests {
         assert!(view.zoom() > 0.0);
         view.set_view_dist(0.0);
         assert!(view.view_dist() >= 0.1);
-        view.set_view_dist(99999.0);
-        assert!(view.view_dist() <= 10000.0);
-        view.set_slab_depth(0.0);
+        view.set_distance(99999.0);
+        assert!(view.distance() <= 10000.0);
+        view.set_slab(0.0);
         assert!(view.slab_depth() >= 0.1);
 
-        view.set_rot_quat(Quat::new(2.0, 0.0, 0.0, 0.0));
-        assert!((sqlen(view.rot_quat()) - 1.0).abs() < 1.0e-6);
-        view.set_rot_quat(Quat::new(0.0, 0.0, 0.0, 0.0));
-        assert_eq!(sqlen(view.rot_quat()), 0.0);
+        view.set_rotation(Quat::new(2.0, 0.0, 0.0, 0.0));
+        assert!((sqlen(view.rotation()) - 1.0).abs() < 1.0e-6);
+        view.set_rotation(Quat::new(0.0, 0.0, 0.0, 0.0));
+        assert_eq!(sqlen(view.rotation()), 0.0);
+        assert!(!view.perspective());
+        assert_eq!(view.style(), "");
     }
 
     #[test]
@@ -1242,6 +1415,80 @@ mod tests {
         assert!((perspective_center.x - 400.0).abs() < 1.0e-9);
         assert!((perspective_center.y - 300.0).abs() < 1.0e-9);
         assert!(perspective_center.z.is_finite());
+    }
+
+    #[test]
+    fn view_projection_jitter_and_ao_constants_use_backing_pixels() {
+        let mut view = View::new(Uid::new(1), Uid::new(2));
+        view.set_view_size(200, 100);
+        view.set_scl_fac(2.0, 3.0);
+        assert_eq!(view.backing_width(), 400);
+        assert_eq!(view.backing_height(), 300);
+
+        let plain_ortho = view.projection_matrix();
+        view.set_jitter_offset_pixels(0.25, -0.5);
+        let jittered_ortho = view.projection_matrix();
+        assert!((jittered_ortho.values[0][3] - plain_ortho.values[0][3] - 0.00125).abs() < 1.0e-12);
+        assert!(
+            (jittered_ortho.values[1][3] - plain_ortho.values[1][3] + 1.0 / 300.0).abs() < 1.0e-12
+        );
+
+        view.set_perspective(true);
+        view.set_jitter_offset_pixels(0.0, 0.0);
+        let plain_perspective = view.projection_matrix();
+        view.set_jitter_offset_pixels(0.25, -0.5);
+        let jittered_perspective = view.projection_matrix();
+        assert!(
+            (jittered_perspective.values[0][2] - plain_perspective.values[0][2] + 0.00125).abs()
+                < 1.0e-12
+        );
+        assert!(
+            (jittered_perspective.values[1][2] - plain_perspective.values[1][2] - 1.0 / 300.0)
+                .abs()
+                < 1.0e-12
+        );
+
+        let constants = view.compute_ao_constants();
+        assert_eq!(constants.is_ortho, 0);
+        assert!((constants.viewport_pixel_size[0] - 1.0 / 400.0).abs() < 1.0e-7);
+        assert!((constants.viewport_pixel_size[1] - 1.0 / 300.0).abs() < 1.0e-7);
+    }
+
+    #[test]
+    fn view_frame_state_accumulates_and_restarts_temporal_jitter() {
+        let mut view = View::new(Uid::new(1), Uid::new(2));
+        view.set_view_size(320, 240);
+
+        let first = view.prepare_frame_render(2, true, true);
+        assert!(first.jitter_active);
+        assert_eq!(first.jitter_index, 0);
+        assert_eq!(first.jitter_count, 4);
+        assert_eq!(view.jitter_offset_pixels(), (0.0, 0.0));
+        assert!(view.needs_continuous_redraw());
+        view.complete_frame_render(&first);
+        assert!(view.needs_continuous_redraw());
+
+        let second = view.prepare_frame_render(2, false, false);
+        assert_eq!(second.jitter_index, 1);
+        assert_eq!(view.jitter_offset_pixels(), (0.375, -0.125));
+        assert!((second.ao_noise_offset - 0.618_034_f32).abs() < 1.0e-6);
+        view.complete_frame_render(&second);
+
+        let third = view.prepare_frame_render(2, false, false);
+        view.complete_frame_render(&third);
+        let fourth = view.prepare_frame_render(2, false, false);
+        view.complete_frame_render(&fourth);
+        assert!(!view.needs_continuous_redraw());
+
+        view.force_redraw();
+        assert!(view.is_projection_changed());
+        let restarted = view.prepare_frame_render(2, false, false);
+        assert_eq!(restarted.jitter_index, 0);
+
+        let disabled = view.prepare_frame_render(0, false, false);
+        assert!(!disabled.jitter_active);
+        assert_eq!(disabled.jitter_count, 1);
+        assert_eq!(view.jitter_offset_pixels(), (0.0, 0.0));
     }
 
     #[test]

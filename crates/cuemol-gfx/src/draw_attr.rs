@@ -11,20 +11,68 @@ pub struct AttrInfo {
     pub divisor: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub trait AbstractDrawAttrs {
+    fn typ(&self) -> i32;
+    fn base(&self) -> &DrawAttrsBase;
+    fn base_mut(&mut self) -> &mut DrawAttrsBase;
+    fn data_ptr(&self) -> *const u8;
+    fn elem_size(&self) -> usize;
+
+    fn data_size(&self) -> usize {
+        self.elem_size() * self.base().draw_elem().size()
+    }
+
+    fn ind_data_ptr(&self) -> *const u8 {
+        std::ptr::null()
+    }
+
+    fn ind_elem_size(&self) -> usize {
+        0
+    }
+
+    fn ind_size(&self) -> usize {
+        0
+    }
+
+    fn ind_data_size(&self) -> usize {
+        self.ind_elem_size() * self.ind_size()
+    }
+}
+
+pub trait VboRep {
+    fn bind(&mut self);
+    fn update(&mut self, attrs: &mut dyn AbstractDrawAttrs);
+    fn set_attrib(&mut self, attrs: &dyn AbstractDrawAttrs);
+    fn draw(&mut self, attrs: &dyn AbstractDrawAttrs);
+    fn unbind(&mut self, attrs: &dyn AbstractDrawAttrs);
+}
+
 pub struct AbstDrawElem {
     size: usize,
     draw_mode: i32,
     updated: bool,
+    vbo: Option<Box<dyn VboRep>>,
 }
 
 impl Default for AbstDrawElem {
     fn default() -> Self {
         Self {
             size: 0,
-            draw_mode: 0,
-            updated: true,
+            draw_mode: Self::DRAW_POINTS,
+            updated: false,
+            vbo: None,
         }
+    }
+}
+
+impl fmt::Debug for AbstDrawElem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AbstDrawElem")
+            .field("size", &self.size)
+            .field("draw_mode", &self.draw_mode)
+            .field("updated", &self.updated)
+            .field("has_vbo", &self.vbo.is_some())
+            .finish()
     }
 }
 
@@ -65,6 +113,31 @@ impl AbstDrawElem {
 
     pub fn set_updated(&mut self, updated: bool) {
         self.updated = updated;
+    }
+
+    pub fn vbo(&self) -> Option<&dyn VboRep> {
+        self.vbo
+            .as_ref()
+            .map(|representation| representation.as_ref())
+    }
+
+    pub fn vbo_mut(&mut self) -> Option<&mut (dyn VboRep + '_)> {
+        match self.vbo.as_mut() {
+            Some(representation) => Some(representation.as_mut()),
+            None => None,
+        }
+    }
+
+    pub fn set_vbo(&mut self, representation: Box<dyn VboRep>) {
+        self.vbo = Some(representation);
+    }
+
+    pub fn take_vbo(&mut self) -> Option<Box<dyn VboRep>> {
+        self.vbo.take()
+    }
+
+    pub fn invalidate_cache(&mut self) {
+        self.vbo = None;
     }
 }
 
@@ -352,6 +425,28 @@ impl<T: Default + Clone> DrawAttrArray<T> {
     }
 }
 
+impl<T: Default + Clone> AbstractDrawAttrs for DrawAttrArray<T> {
+    fn typ(&self) -> i32 {
+        self.typ()
+    }
+
+    fn base(&self) -> &DrawAttrsBase {
+        self.base()
+    }
+
+    fn base_mut(&mut self) -> &mut DrawAttrsBase {
+        self.base_mut()
+    }
+
+    fn data_ptr(&self) -> *const u8 {
+        self.data().cast()
+    }
+
+    fn elem_size(&self) -> usize {
+        self.elem_size()
+    }
+}
+
 #[derive(Debug)]
 pub struct DrawAttrElems<I, T> {
     base: DrawAttrsBase,
@@ -472,5 +567,121 @@ impl<I: Default + Clone, T: Default + Clone> DrawAttrElems<I, T> {
 
     pub fn base_mut(&mut self) -> &mut DrawAttrsBase {
         &mut self.base
+    }
+}
+
+impl<I: Default + Clone, T: Default + Clone> AbstractDrawAttrs for DrawAttrElems<I, T> {
+    fn typ(&self) -> i32 {
+        self.typ()
+    }
+
+    fn base(&self) -> &DrawAttrsBase {
+        self.base()
+    }
+
+    fn base_mut(&mut self) -> &mut DrawAttrsBase {
+        self.base_mut()
+    }
+
+    fn data_ptr(&self) -> *const u8 {
+        self.data().cast()
+    }
+
+    fn elem_size(&self) -> usize {
+        self.elem_size()
+    }
+
+    fn ind_data_ptr(&self) -> *const u8 {
+        self.ind_data().cast()
+    }
+
+    fn ind_elem_size(&self) -> usize {
+        self.ind_elem_size()
+    }
+
+    fn ind_size(&self) -> usize {
+        self.ind_size()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::DisplayContext;
+
+    struct RecordingVbo {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl RecordingVbo {
+        fn record(&self, event: &'static str) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    impl VboRep for RecordingVbo {
+        fn bind(&mut self) {
+            self.record("bind");
+        }
+
+        fn update(&mut self, attrs: &mut dyn AbstractDrawAttrs) {
+            self.record("update");
+            attrs.base_mut().draw_elem_mut().set_updated(false);
+        }
+
+        fn set_attrib(&mut self, _attrs: &dyn AbstractDrawAttrs) {
+            self.record("attrib");
+        }
+
+        fn draw(&mut self, _attrs: &dyn AbstractDrawAttrs) {
+            self.record("draw");
+        }
+
+        fn unbind(&mut self, _attrs: &dyn AbstractDrawAttrs) {
+            self.record("unbind");
+        }
+    }
+
+    #[test]
+    fn draw_element_defaults_and_cache_invalidation_match_reference() {
+        let mut elem = AbstDrawElem::default();
+        assert_eq!(elem.size(), 0);
+        assert_eq!(elem.draw_mode(), AbstDrawElem::DRAW_POINTS);
+        assert!(!elem.is_updated());
+        assert!(elem.vbo().is_none());
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        elem.set_vbo(Box::new(RecordingVbo {
+            events: Arc::clone(&events),
+        }));
+        assert!(elem.vbo().is_some());
+        elem.invalidate_cache();
+        assert!(elem.vbo().is_none());
+    }
+
+    #[test]
+    fn display_context_reuses_and_updates_cached_vbo() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut attrs = DrawAttrArray::<u32>::new();
+        attrs.alloc(3);
+        let context = DisplayContext::new();
+
+        assert!(context.draw_elem(&mut attrs, {
+            let events = Arc::clone(&events);
+            move |_| {
+                events.lock().unwrap().push("create");
+                Some(Box::new(RecordingVbo { events }))
+            }
+        }));
+        attrs.base_mut().draw_elem_mut().set_updated(true);
+        assert!(context.draw_elem(&mut attrs, |_| { panic!("cached VBO should be reused") }));
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["create", "attrib", "draw", "unbind", "bind", "update", "attrib", "draw", "unbind"]
+        );
+        assert!(!attrs.base().draw_elem().is_updated());
     }
 }

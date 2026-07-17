@@ -8,6 +8,7 @@
 use wgpu::util::DeviceExt;
 
 use cuemol_core::Matrix4;
+use cuemol_gfx::{jitter_offset, jitter_sample_count};
 use cuemol_qsys::Camera;
 use cuemol_render::{tessellate_snapshot, RenderMesh, RenderSceneSnapshot};
 
@@ -102,6 +103,18 @@ pub fn render_meshes_offscreen(
         clear,
         None,
     ))
+}
+
+/// Render and average 1 to 32 sub-pixel-jittered color samples.
+pub fn render_meshes_supersampled_offscreen(
+    meshes: &[RenderMesh],
+    mvp: [[f32; 4]; 4],
+    width: u32,
+    height: u32,
+    clear: [f64; 4],
+    level: i32,
+) -> Option<Vec<u8>> {
+    SceneRenderer::new()?.render_supersampled(meshes, mvp, width, height, clear, level)
 }
 
 /// Render a linearized grayscale depth image. Near geometry is white, far
@@ -203,6 +216,34 @@ impl SceneRenderer {
     ) -> Option<Vec<u8>> {
         let mesh = tessellate_snapshot(snapshot);
         self.render(&[mesh], mvp, width, height, clear)
+    }
+
+    /// Render and average the reference jitter table at the requested level.
+    pub fn render_supersampled(
+        &self,
+        meshes: &[RenderMesh],
+        mvp: [[f32; 4]; 4],
+        width: u32,
+        height: u32,
+        clear: [f64; 4],
+        level: i32,
+    ) -> Option<Vec<u8>> {
+        let width = width.max(1);
+        let height = height.max(1);
+        let level = level.clamp(0, 5);
+        let sample_count = jitter_sample_count(level);
+        if sample_count == 1 {
+            return self.render(meshes, mvp, width, height, clear);
+        }
+
+        let mut accumulated = vec![0_u32; width as usize * height as usize * 4];
+        for index in 0..sample_count {
+            let offset = jitter_offset(level, index as i32);
+            let sample_mvp = jittered_mvp(mvp, width, height, offset);
+            let sample = self.render(meshes, sample_mvp, width, height, clear)?;
+            accumulate_rgba(&mut accumulated, &sample);
+        }
+        Some(resolve_rgba(&accumulated, sample_count))
     }
 
     /// Render meshes as a linearized grayscale depth image while reusing the
@@ -667,6 +708,35 @@ pub fn camera_depth_range(camera: &Camera) -> (f64, f64) {
     )
 }
 
+fn jittered_mvp(
+    mut mvp: [[f32; 4]; 4],
+    width: u32,
+    height: u32,
+    offset: (f64, f64),
+) -> [[f32; 4]; 4] {
+    let shift_x = (2.0 * offset.0 / f64::from(width.max(1))) as f32;
+    let shift_y = (2.0 * offset.1 / f64::from(height.max(1))) as f32;
+    for column in &mut mvp {
+        column[0] += shift_x * column[3];
+        column[1] += shift_y * column[3];
+    }
+    mvp
+}
+
+fn accumulate_rgba(accumulated: &mut [u32], sample: &[u8]) {
+    for (sum, value) in accumulated.iter_mut().zip(sample.iter().copied()) {
+        *sum += u32::from(value);
+    }
+}
+
+fn resolve_rgba(accumulated: &[u32], sample_count: usize) -> Vec<u8> {
+    let divisor = sample_count.max(1) as u32;
+    accumulated
+        .iter()
+        .map(|sum| ((sum + divisor / 2) / divisor) as u8)
+        .collect()
+}
+
 /// Render a whole molecular scene (atoms + bonds + meshes) to an offscreen RGBA8
 /// image — the full 3D image the gpui GUI will composite. Returns `None` when no
 /// GPU adapter is available.
@@ -679,6 +749,19 @@ pub fn render_snapshot_offscreen(
 ) -> Option<Vec<u8>> {
     let mesh = tessellate_snapshot(snapshot);
     render_meshes_offscreen(&[mesh], mvp, width, height, clear)
+}
+
+/// Render a whole scene with jitter supersampling.
+pub fn render_snapshot_supersampled_offscreen(
+    snapshot: &RenderSceneSnapshot,
+    mvp: [[f32; 4]; 4],
+    width: u32,
+    height: u32,
+    clear: [f64; 4],
+    level: i32,
+) -> Option<Vec<u8>> {
+    let mesh = tessellate_snapshot(snapshot);
+    render_meshes_supersampled_offscreen(&[mesh], mvp, width, height, clear, level)
 }
 
 /// Render a whole scene as a linearized grayscale depth image.
@@ -745,9 +828,8 @@ pub fn encode_png(
     out
 }
 
-/// Render a molecular scene straight to PNG bytes — a headless molecular image
-/// (the offscreen 3D render, ready to write to a file). Returns `None` if no GPU
-/// adapter is available.
+/// Render a molecular scene straight to PNG bytes using the reference default
+/// of 32 jittered samples. Returns `None` if no GPU adapter is available.
 pub fn render_snapshot_png(
     snapshot: &RenderSceneSnapshot,
     mvp: [[f32; 4]; 4],
@@ -755,7 +837,7 @@ pub fn render_snapshot_png(
     height: u32,
     clear: [f64; 4],
 ) -> Option<Vec<u8>> {
-    let rgba = render_snapshot_offscreen(snapshot, mvp, width, height, clear)?;
+    let rgba = render_snapshot_supersampled_offscreen(snapshot, mvp, width, height, clear, 5)?;
     Some(encode_rgba_png(&rgba, width, height))
 }
 
@@ -787,6 +869,25 @@ mod tests {
     fn pixel(img: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * width + x) * 4) as usize;
         [img[i], img[i + 1], img[i + 2], img[i + 3]]
+    }
+
+    #[test]
+    fn jittered_mvp_applies_a_backing_pixel_clip_shift() {
+        let shifted = jittered_mvp(IDENTITY, 100, 200, (0.25, -0.5));
+        assert!((shifted[3][0] - 0.005).abs() < 1.0e-7);
+        assert!((shifted[3][1] + 0.005).abs() < 1.0e-7);
+        assert_eq!(shifted[3][3], 1.0);
+    }
+
+    #[test]
+    fn supersample_resolve_averages_all_rgba_channels() {
+        let mut accumulated = vec![0_u32; 8];
+        accumulate_rgba(&mut accumulated, &[0, 10, 20, 0, 100, 110, 120, 130]);
+        accumulate_rgba(&mut accumulated, &[10, 20, 30, 40, 200, 210, 220, 230]);
+        assert_eq!(
+            resolve_rgba(&accumulated, 2),
+            vec![5, 15, 25, 20, 150, 160, 170, 180]
+        );
     }
 
     fn vert(x: f32, y: f32, color: [f32; 4]) -> MeshVertex {

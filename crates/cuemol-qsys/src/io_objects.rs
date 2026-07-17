@@ -385,8 +385,16 @@ impl SceneExporter {
         self.camera_name()
     }
 
+    pub fn camera(&self) -> &str {
+        self.camera_name()
+    }
+
     pub fn set_camera_name(&mut self, value: impl Into<String>) {
         self.camera_name = value.into();
+    }
+
+    pub fn set_camera(&mut self, value: impl Into<String>) {
+        self.set_camera_name(value);
     }
 
     pub fn width(&self) -> i32 {
@@ -557,11 +565,19 @@ impl SceneXMLReader {
         self.buffer_size()
     }
 
+    pub fn bufsize(&self) -> usize {
+        self.buffer_size()
+    }
+
     pub fn set_buffer_size(&mut self, value: usize) {
         self.buffer_size = value;
     }
 
     pub fn set_buf_size(&mut self, value: usize) {
+        self.set_buffer_size(value);
+    }
+
+    pub fn set_bufsize(&mut self, value: usize) {
         self.set_buffer_size(value);
     }
 
@@ -945,7 +961,8 @@ mod tests {
         assert!(!reader.file_ext().is_empty());
         assert_eq!(reader.category(), InOutHandler::IOH_CAT_SCEREADER);
         assert_eq!(reader.buffer_size(), 1024 * 1024);
-        reader.set_buffer_size(512 * 1024);
+        assert_eq!(reader.bufsize(), 1024 * 1024);
+        reader.set_bufsize(512 * 1024);
         assert_eq!(reader.buffer_size(), 512 * 1024);
         reader.attach_scene(uid);
         assert_eq!(reader.client_scene(), Some(uid));
@@ -1010,8 +1027,8 @@ mod tests {
         exporter.set_height(600);
         assert_eq!(exporter.height(), 600);
         assert_eq!(exporter.camera_name(), "");
-        exporter.set_camera_name("main");
-        assert_eq!(exporter.camera_name(), "main");
+        exporter.set_camera("main");
+        assert_eq!(exporter.camera(), "main");
         assert_eq!(exporter.category(), InOutHandler::IOH_CAT_RENDTOFILE);
     }
 }

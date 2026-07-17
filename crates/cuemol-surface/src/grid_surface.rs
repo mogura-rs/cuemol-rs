@@ -1,6 +1,6 @@
 //! Grid-based molecular surface generation.
 //!
-//! Two surfaces, both extracted by marching tetrahedra over a signed grid field:
+//! Two surfaces, both extracted by marching cubes over a signed grid field:
 //! - [`build_sphere_union_surface`] — the union-of-spheres signed-distance field
 //!   `f(p) = min_i(|p - c_i| - r_i)`, i.e. the van-der-Waals / solvent-ACCESSIBLE
 //!   surface (each atom a sphere of `vdw + probe`).
@@ -12,8 +12,12 @@
 //! Both are real, smooth, closed surfaces — a large step up from the original
 //! one-octahedron-per-atom placeholder.
 
-use cuemol_core::Vector4;
+use cuemol_core::{parallel_for, Vector4};
+use cuemol_gfx::{
+    CUBE_EDGE_CONNECTION, CUBE_EDGE_FLAGS, CUBE_VERTEX_OFFSET, TRIANGLE_CONNECTION_TABLE,
+};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::{SurfaceMesh, SurfaceVertex};
 
@@ -93,6 +97,32 @@ fn at(x: f64, y: f64, z: f64) -> Vector4 {
     Vector4::new4(x, y, z, 1.0)
 }
 
+fn sample_grid_parallel<T, S>(dims: [usize; 3], sample: S) -> Vec<T>
+where
+    T: Send + Sync,
+    S: Fn(usize, usize, usize) -> T + Sync,
+{
+    let slab_size = dims[0] * dims[1];
+    let slabs = (0..dims[2]).map(|_| OnceLock::new()).collect::<Vec<_>>();
+    parallel_for(0, dims[2], |iz| {
+        let mut slab = Vec::with_capacity(slab_size);
+        for iy in 0..dims[1] {
+            for ix in 0..dims[0] {
+                slab.push(sample(ix, iy, iz));
+            }
+        }
+        assert!(slabs[iz].set(slab).is_ok(), "grid slab initialized twice");
+    });
+    let mut values = Vec::with_capacity(slab_size * dims[2]);
+    for slab in slabs {
+        values.extend(
+            slab.into_inner()
+                .expect("parallel grid slab was initialized"),
+        );
+    }
+    values
+}
+
 /// Build the union-of-spheres molecular surface into `mesh`, sampling the field
 /// at the given grid `spacing` (Angstrom). Vertices carry outward normals (the
 /// normalised field gradient) and are welded so shared edges are not duplicated.
@@ -121,6 +151,10 @@ pub fn build_sphere_union_surface(mesh: &mut SurfaceMesh, spheres: &[SurfSphere]
 
     let grid = SphereGrid::new(spheres, max_radius + spacing);
     let coord = |i: usize, axis: usize| origin[axis] + i as f64 * spacing;
+    let flat = |i: usize, j: usize, k: usize| i + counts[0] * (j + counts[1] * k);
+    let values = sample_grid_parallel(counts, |ix, iy, iz| {
+        grid.field(at(coord(ix, 0), coord(iy, 1), coord(iz, 2)))
+    });
 
     // The sphere field and the marching are now driven by the generic grid
     // isosurface mesher: each node value is the signed sphere field, each node
@@ -129,7 +163,7 @@ pub fn build_sphere_union_surface(mesh: &mut SurfaceMesh, spheres: &[SurfSphere]
         mesh,
         &grid,
         counts,
-        |ix, iy, iz| grid.field(at(coord(ix, 0), coord(iy, 1), coord(iz, 2))),
+        |ix, iy, iz| values[flat(ix, iy, iz)],
         |ix, iy, iz| at(coord(ix, 0), coord(iy, 1), coord(iz, 2)),
         spacing,
     );
@@ -158,36 +192,14 @@ impl ScalarField for SphereGrid<'_> {
     }
 }
 
-// Cube corner offsets (unit cube), indices 0..8.
-const CUBE_CORNERS: [[usize; 3]; 8] = [
-    [0, 0, 0],
-    [1, 0, 0],
-    [1, 1, 0],
-    [0, 1, 0],
-    [0, 0, 1],
-    [1, 0, 1],
-    [1, 1, 1],
-    [0, 1, 1],
-];
-// Six tetrahedra sharing the main diagonal 0-6 (table-free, no ambiguous cases).
-const CUBE_TETS: [[usize; 4]; 6] = [
-    [0, 1, 2, 6],
-    [0, 2, 3, 6],
-    [0, 3, 7, 6],
-    [0, 7, 4, 6],
-    [0, 4, 5, 6],
-    [0, 5, 1, 6],
-];
-
 /// Extract the `f = 0` isosurface of a signed field sampled on a regular index
-/// grid `[0..dims]` into `mesh` by marching tetrahedra.
+/// grid `[0..dims]` into `mesh` by marching cubes.
 ///
 /// `value(i, j, k)` returns the exact signed field at node `(i, j, k)` (negative
 /// inside the surface); `position(i, j, k)` maps a node to its Cartesian
 /// coordinate (so non-uniform / sheared grids are handled by the caller); and
-/// `field` supplies the outward gradient used for vertex normals and triangle
-/// winding. `weld_scale` is the characteristic node spacing used to weld shared
-/// crossing points.
+/// `field` supplies the outward gradient used for vertex normals. Grid-edge
+/// keys weld every crossing shared by adjacent cubes.
 ///
 /// This is the shared core behind both the molecular union-of-spheres surface
 /// and the crystallographic density isosurface (`xtal::MapSurfRenderer`).
@@ -223,7 +235,7 @@ pub fn build_grid_isosurface_masked<F, V, P, M>(
     value: V,
     position: P,
     valid: M,
-    weld_scale: f64,
+    _weld_scale: f64,
 ) where
     F: ScalarField,
     V: Fn(usize, usize, usize) -> f64,
@@ -238,8 +250,8 @@ pub fn build_grid_isosurface_masked<F, V, P, M>(
     // eight cubes); a flat array is faster than re-sampling or hashing.
     let stride_y = dims[0];
     let stride_z = dims[0] * dims[1];
-    let mut vals = vec![0.0_f64; dims[0] * dims[1] * dims[2]];
-    let mut valid_nodes = vec![true; dims[0] * dims[1] * dims[2]];
+    let mut vals = vec![0.0_f64; stride_z * dims[2]];
+    let mut valid_nodes = vec![true; stride_z * dims[2]];
     for iz in 0..dims[2] {
         for iy in 0..dims[1] {
             for ix in 0..dims[0] {
@@ -250,145 +262,135 @@ pub fn build_grid_isosurface_masked<F, V, P, M>(
         }
     }
 
-    let mut welder = VertexWelder::new(weld_scale);
-
-    for iz in 0..dims[2] - 1 {
+    // Classify independent z-slabs in parallel and defer edge welding to the
+    // deterministic serial merge below.
+    let triangle_slabs = (0..dims[2] - 1)
+        .map(|_| OnceLock::new())
+        .collect::<Vec<_>>();
+    parallel_for(0, dims[2] - 1, |iz| {
+        let mut slab_triangles = Vec::new();
         for iy in 0..dims[1] - 1 {
             for ix in 0..dims[0] - 1 {
-                let mut corner_pos = [Vector4::ZERO; 8];
                 let mut corner_val = [0.0_f64; 8];
                 let mut corner_valid = [true; 8];
-                for (c, off) in CUBE_CORNERS.iter().enumerate() {
+                let mut mask = 0_usize;
+                for (c, off) in CUBE_VERTEX_OFFSET.iter().enumerate() {
                     let (cx, cy, cz) = (ix + off[0], iy + off[1], iz + off[2]);
                     let index = cx + cy * stride_y + cz * stride_z;
-                    corner_pos[c] = position(cx, cy, cz);
                     corner_val[c] = vals[index];
                     corner_valid[c] = valid_nodes[index];
+                    if corner_val[c] <= 0.0 {
+                        mask |= 1 << c;
+                    }
                 }
-                for tet in &CUBE_TETS {
-                    march_tetra(
-                        [
-                            corner_pos[tet[0]],
-                            corner_pos[tet[1]],
-                            corner_pos[tet[2]],
-                            corner_pos[tet[3]],
-                        ],
-                        [
-                            corner_val[tet[0]],
-                            corner_val[tet[1]],
-                            corner_val[tet[2]],
-                            corner_val[tet[3]],
-                        ],
-                        [
-                            corner_valid[tet[0]],
-                            corner_valid[tet[1]],
-                            corner_valid[tet[2]],
-                            corner_valid[tet[3]],
-                        ],
-                        field,
-                        &mut welder,
-                        mesh,
-                    );
+
+                if CUBE_EDGE_FLAGS[mask] == 0 {
+                    continue;
+                }
+                let triangles = &TRIANGLE_CONNECTION_TABLE[mask];
+                let mut offset = 0;
+                while triangles[offset] >= 0 {
+                    let edges = [
+                        triangles[offset] as usize,
+                        triangles[offset + 1] as usize,
+                        triangles[offset + 2] as usize,
+                    ];
+                    if edges.iter().all(|edge| {
+                        let [corner0, corner1] = CUBE_EDGE_CONNECTION[*edge];
+                        corner_valid[corner0] && corner_valid[corner1]
+                    }) {
+                        slab_triangles.push(edges.map(|edge| grid_edge_key([ix, iy, iz], edge)));
+                    }
+                    offset += 3;
                 }
             }
+        }
+        triangle_slabs[iz]
+            .set(slab_triangles)
+            .expect("marching-cubes slab is initialized once");
+    });
+
+    let mut edge_cache = HashMap::new();
+    for slab in triangle_slabs {
+        for keys in slab
+            .into_inner()
+            .expect("parallel marching-cubes slab was initialized")
+        {
+            let indices = keys.map(|key| {
+                grid_edge_vertex(mesh, field, &mut edge_cache, key, dims, &vals, &position)
+            });
+            mesh.push_triangle(indices);
         }
     }
 }
 
-/// Emit the isosurface triangles for one tetrahedron (isolevel 0). Inside = field
-/// < 0. Crossing points on each inside/outside edge are interpolated; triangles
-/// are wound so their normal points outward (toward increasing field).
-fn march_tetra<F: ScalarField>(
-    pos: [Vector4; 4],
-    val: [f64; 4],
-    valid: [bool; 4],
-    field: &F,
-    welder: &mut VertexWelder,
-    mesh: &mut SurfaceMesh,
-) {
-    let inside: Vec<usize> = (0..4).filter(|&i| val[i] < 0.0).collect();
-    let outside: Vec<usize> = (0..4).filter(|&i| val[i] >= 0.0).collect();
-    let crossings: Vec<(Vector4, bool)> = match (inside.len(), outside.len()) {
-        (1, 3) | (3, 1) => {
-            let (lone, others) = if inside.len() == 1 {
-                (inside[0], outside.clone())
-            } else {
-                (outside[0], inside.clone())
-            };
-            others
-                .iter()
-                .map(|&o| {
-                    (
-                        edge_point(pos[lone], val[lone], pos[o], val[o]),
-                        valid[lone] && valid[o],
-                    )
-                })
-                .collect()
-        }
-        (2, 2) => {
-            // Quad in cyclic order so consecutive points share a tet vertex.
-            vec![
-                (
-                    edge_point(
-                        pos[inside[0]],
-                        val[inside[0]],
-                        pos[outside[0]],
-                        val[outside[0]],
-                    ),
-                    valid[inside[0]] && valid[outside[0]],
-                ),
-                (
-                    edge_point(
-                        pos[inside[0]],
-                        val[inside[0]],
-                        pos[outside[1]],
-                        val[outside[1]],
-                    ),
-                    valid[inside[0]] && valid[outside[1]],
-                ),
-                (
-                    edge_point(
-                        pos[inside[1]],
-                        val[inside[1]],
-                        pos[outside[1]],
-                        val[outside[1]],
-                    ),
-                    valid[inside[1]] && valid[outside[1]],
-                ),
-                (
-                    edge_point(
-                        pos[inside[1]],
-                        val[inside[1]],
-                        pos[outside[0]],
-                        val[outside[0]],
-                    ),
-                    valid[inside[1]] && valid[outside[0]],
-                ),
-            ]
-        }
-        _ => return, // all inside or all outside: no surface
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct GridEdgeKey {
+    lower: [usize; 3],
+    axis: usize,
+}
 
-    let emit = |indices: [usize; 3], welder: &mut VertexWelder, mesh: &mut SurfaceMesh| {
-        if indices.iter().all(|index| crossings[*index].1) {
-            emit_triangle(
-                [
-                    crossings[indices[0]].0,
-                    crossings[indices[1]].0,
-                    crossings[indices[2]].0,
-                ],
-                field,
-                welder,
-                mesh,
-            );
-        }
-    };
-    if crossings.len() == 3 {
-        emit([0, 1, 2], welder, mesh);
-    } else if crossings.len() == 4 {
-        emit([0, 1, 2], welder, mesh);
-        emit([0, 2, 3], welder, mesh);
+fn grid_edge_key(cell: [usize; 3], edge: usize) -> GridEdgeKey {
+    let [corner0, corner1] = CUBE_EDGE_CONNECTION[edge];
+    let offset0 = CUBE_VERTEX_OFFSET[corner0];
+    let offset1 = CUBE_VERTEX_OFFSET[corner1];
+    let grid0 = [
+        cell[0] + offset0[0],
+        cell[1] + offset0[1],
+        cell[2] + offset0[2],
+    ];
+    let grid1 = [
+        cell[0] + offset1[0],
+        cell[1] + offset1[1],
+        cell[2] + offset1[2],
+    ];
+    let axis = (0..3)
+        .find(|axis| grid0[*axis] != grid1[*axis])
+        .expect("marching-cubes edge has identical endpoints");
+    GridEdgeKey {
+        lower: [
+            grid0[0].min(grid1[0]),
+            grid0[1].min(grid1[1]),
+            grid0[2].min(grid1[2]),
+        ],
+        axis,
     }
+}
+
+fn grid_edge_vertex<F, P>(
+    mesh: &mut SurfaceMesh,
+    field: &F,
+    edge_cache: &mut HashMap<GridEdgeKey, u32>,
+    key: GridEdgeKey,
+    dims: [usize; 3],
+    values: &[f64],
+    position: &P,
+) -> u32
+where
+    F: ScalarField,
+    P: Fn(usize, usize, usize) -> Vector4,
+{
+    if let Some(index) = edge_cache.get(&key) {
+        return *index;
+    }
+
+    let grid0 = key.lower;
+    let mut grid1 = grid0;
+    grid1[key.axis] += 1;
+    let flat = |grid: [usize; 3]| grid[0] + dims[0] * (grid[1] + dims[1] * grid[2]);
+    let vertex = edge_point(
+        position(grid0[0], grid0[1], grid0[2]),
+        values[flat(grid0)],
+        position(grid1[0], grid1[1], grid1[2]),
+        values[flat(grid1)],
+    );
+    let index = mesh.vertex_count() as u32;
+    mesh.push_vertex(SurfaceVertex {
+        position: vertex,
+        normal: normalize(field.gradient(vertex)),
+    });
+    edge_cache.insert(key, index);
+    index
 }
 
 /// Linear interpolation of the `f = 0` crossing on edge a->b.
@@ -406,43 +408,12 @@ fn edge_point(a: Vector4, fa: f64, b: Vector4, fb: f64) -> Vector4 {
     )
 }
 
-/// Push one triangle, welding its vertices and orienting it so the face normal
-/// points outward (same hemisphere as the field gradient at the centroid).
-fn emit_triangle<F: ScalarField>(
-    tri: [Vector4; 3],
-    field: &F,
-    welder: &mut VertexWelder,
-    mesh: &mut SurfaceMesh,
-) {
-    let edge1 = sub(tri[1], tri[0]);
-    let edge2 = sub(tri[2], tri[0]);
-    let face = cross(edge1, edge2);
-    if length(face) < 1.0e-12 {
-        return; // degenerate
-    }
-    let centroid = at(
-        (tri[0].x + tri[1].x + tri[2].x) / 3.0,
-        (tri[0].y + tri[1].y + tri[2].y) / 3.0,
-        (tri[0].z + tri[1].z + tri[2].z) / 3.0,
-    );
-    let grad = field.gradient(centroid);
-    let mut order = [0usize, 1, 2];
-    if dot(face, grad) < 0.0 {
-        order = [0, 2, 1]; // flip winding to face outward
-    }
-
-    let mut indices = [0u32; 3];
-    for (slot, &corner) in order.iter().enumerate() {
-        let normal = normalize(field.gradient(tri[corner]));
-        indices[slot] = welder.weld(mesh, tri[corner], normal);
-    }
-    mesh.push_triangle(indices);
-}
-
+#[cfg(test)]
 fn sub(a: Vector4, b: Vector4) -> Vector4 {
     Vector4::new3(a.x - b.x, a.y - b.y, a.z - b.z)
 }
 
+#[cfg(test)]
 fn cross(a: Vector4, b: Vector4) -> Vector4 {
     Vector4::new3(
         a.y * b.z - a.z * b.y,
@@ -465,37 +436,6 @@ fn normalize(v: Vector4) -> Vector4 {
         Vector4::new3(0.0, 0.0, 1.0)
     } else {
         Vector4::new3(v.x / len, v.y / len, v.z / len)
-    }
-}
-
-/// Welds vertices that fall on the same quantised position so the mesh shares
-/// edges (each crossing point is produced by several tetrahedra).
-struct VertexWelder {
-    map: HashMap<[i64; 3], u32>,
-    quantum: f64,
-}
-
-impl VertexWelder {
-    fn new(spacing: f64) -> Self {
-        Self {
-            map: HashMap::new(),
-            quantum: (spacing * 1.0e-3).max(1.0e-6),
-        }
-    }
-
-    fn weld(&mut self, mesh: &mut SurfaceMesh, position: Vector4, normal: Vector4) -> u32 {
-        let key = [
-            (position.x / self.quantum).round() as i64,
-            (position.y / self.quantum).round() as i64,
-            (position.z / self.quantum).round() as i64,
-        ];
-        if let Some(&index) = self.map.get(&key) {
-            return index;
-        }
-        let index = mesh.vertex_count() as u32;
-        mesh.push_vertex(SurfaceVertex { position, normal });
-        self.map.insert(key, index);
-        index
     }
 }
 
@@ -550,17 +490,10 @@ pub fn build_ses_surface(mesh: &mut SurfaceMesh, spheres: &[SurfSphere], probe: 
         })
         .collect();
     let grid = SphereGrid::new(&expanded, max_vdw + probe + spacing);
-    let mut is_candidate = vec![false; total];
-    for k in 0..counts[2] {
-        for j in 0..counts[1] {
-            for i in 0..counts[0] {
-                let p = at(coord(i, 0), coord(j, 1), coord(k, 2));
-                if grid.field(p) >= 0.0 {
-                    is_candidate[flat(i, j, k)] = true;
-                }
-            }
-        }
-    }
+    let is_candidate = sample_grid_parallel(counts, |i, j, k| {
+        let p = at(coord(i, 0), coord(j, 1), coord(k, 2));
+        grid.field(p) >= 0.0
+    });
 
     // Flood fill the exterior-connected accessible region from the grid boundary
     // (6-connectivity), so probe-inaccessible interior voids are NOT solvent.
@@ -770,6 +703,14 @@ fn edt_squared_1d(f: &[f64]) -> Vec<f64> {
 mod tests {
     use super::*;
 
+    struct AxisField(Vector4);
+
+    impl ScalarField for AxisField {
+        fn gradient(&self, _p: Vector4) -> Vector4 {
+            self.0
+        }
+    }
+
     fn surface_area(mesh: &SurfaceMesh) -> f64 {
         mesh.triangles()
             .iter()
@@ -780,6 +721,80 @@ mod tests {
                 0.5 * length(cross(sub(b, a), sub(c, a)))
             })
             .sum()
+    }
+
+    #[test]
+    fn single_cube_case_uses_reference_edge_table() {
+        let mut mesh = SurfaceMesh::new();
+        build_grid_isosurface(
+            &mut mesh,
+            &AxisField(Vector4::new3(1.0, 1.0, 1.0)),
+            [2, 2, 2],
+            |i, j, k| if [i, j, k] == [0, 0, 0] { -1.0 } else { 1.0 },
+            |i, j, k| at(i as f64, j as f64, k as f64),
+            1.0,
+        );
+
+        assert_eq!(mesh.vertex_count(), 3);
+        assert_eq!(mesh.triangle_count(), 1);
+        assert_eq!(mesh.triangles()[0], [0, 1, 2]);
+        let positions = mesh
+            .vertices()
+            .iter()
+            .map(|vertex| vertex.position)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            positions,
+            [at(0.5, 0.0, 0.0), at(0.0, 0.0, 0.5), at(0.0, 0.5, 0.0)]
+        );
+    }
+
+    #[test]
+    fn adjacent_cubes_share_canonical_edge_vertices() {
+        let mut mesh = SurfaceMesh::new();
+        build_grid_isosurface(
+            &mut mesh,
+            &AxisField(Vector4::new3(0.0, 1.0, 0.0)),
+            [3, 2, 2],
+            |_i, j, _k| j as f64 - 0.5,
+            |i, j, k| at(i as f64, j as f64, k as f64),
+            1.0,
+        );
+
+        assert_eq!(mesh.vertex_count(), 6);
+        assert_eq!(mesh.triangle_count(), 4);
+        assert_eq!(
+            mesh.vertices()
+                .iter()
+                .filter(|vertex| (vertex.position.x - 1.0).abs() < 1.0e-12)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn parallel_slab_merge_is_deterministic() {
+        let build = || {
+            let mut mesh = SurfaceMesh::new();
+            build_grid_isosurface(
+                &mut mesh,
+                &AxisField(Vector4::new3(1.0, 1.0, 1.0)),
+                [8, 7, 6],
+                |i, j, k| {
+                    let dx = i as f64 - 3.5;
+                    let dy = j as f64 - 3.0;
+                    let dz = k as f64 - 2.5;
+                    (dx * dx + dy * dy + dz * dz).sqrt() - 2.2
+                },
+                |i, j, k| at(i as f64, j as f64, k as f64),
+                1.0,
+            );
+            mesh
+        };
+        let first = build();
+        let second = build();
+        assert!(first.triangle_count() > 0);
+        assert_eq!(first, second);
     }
 
     #[test]

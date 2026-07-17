@@ -4,15 +4,51 @@ use cuemol_molstr::{
     parse_selector, Atom, BondOrder, MolCoord, MolSceneManager, Prot2ndrySet, ResidueKey, Selector,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write;
+use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 
 mod ssm;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct MolAnlManager;
+static DEFAULT_SCENE_MANAGER: OnceLock<Arc<Mutex<MolSceneManager>>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+pub struct MolAnlManager {
+    scene_manager: Arc<Mutex<MolSceneManager>>,
+}
+
+impl Default for MolAnlManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MolAnlManager {
     pub fn new() -> Self {
-        Self
+        Self {
+            scene_manager: DEFAULT_SCENE_MANAGER
+                .get_or_init(|| Arc::new(Mutex::new(MolSceneManager::new())))
+                .clone(),
+        }
+    }
+
+    pub fn with_scene_manager(scene_manager: Arc<Mutex<MolSceneManager>>) -> Self {
+        Self { scene_manager }
+    }
+
+    pub fn scene_manager(&self) -> Arc<Mutex<MolSceneManager>> {
+        self.scene_manager.clone()
+    }
+
+    pub fn with_scene_manager_mut<R>(
+        &self,
+        operation: impl FnOnce(&mut MolSceneManager) -> R,
+    ) -> R {
+        let mut manager = self
+            .scene_manager
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        operation(&mut manager)
     }
 
     pub fn centroid(&self, molecule: &MolCoord) -> Option<Vector4> {
@@ -29,10 +65,58 @@ impl MolAnlManager {
         reference_selector: &Selector,
         moving: &MolCoord,
         moving_selector: &Selector,
+        path: impl AsRef<Path>,
+    ) -> Result<f64> {
+        self.calc_rmsd_scr(reference, reference_selector, moving, moving_selector, path)
+    }
+
+    pub fn calc_rmsd_without_report(
+        &self,
+        reference: &MolCoord,
+        reference_selector: &Selector,
+        moving: &MolCoord,
+        moving_selector: &Selector,
     ) -> Result<f64> {
         let pairs =
             selected_position_pairs(reference, reference_selector, moving, moving_selector)?;
         Ok(rmsd_for_pairs(&pairs, Matrix4::IDENTITY))
+    }
+
+    pub fn calc_rmsd_scr(
+        &self,
+        reference: &MolCoord,
+        reference_selector: &Selector,
+        moving: &MolCoord,
+        moving_selector: &Selector,
+        path: impl AsRef<Path>,
+    ) -> Result<f64> {
+        let index_pairs =
+            selected_index_pairs(reference, reference_selector, moving, moving_selector)?;
+        let mut output = String::new();
+        let mut squared_distance_sum = 0.0;
+        for (reference_index, moving_index) in &index_pairs {
+            let reference_atom = &reference.atoms()[*reference_index];
+            let moving_atom = &moving.atoms()[*moving_index];
+            let distance = (reference_atom.position - moving_atom.position).length3d();
+            squared_distance_sum += distance * distance;
+            writeln!(
+                output,
+                "ref {} {}  mov {} {} {:.6}",
+                reference_atom.chain_id,
+                reference_atom.res_id,
+                moving_atom.chain_id,
+                moving_atom.res_id,
+                distance
+            )
+            .expect("writing to a String cannot fail");
+        }
+        let rmsd = (squared_distance_sum / index_pairs.len() as f64).sqrt();
+        if path.as_ref().as_os_str().is_empty() {
+            return Ok(rmsd);
+        }
+        writeln!(output, "Total RMSD {:.6}", rmsd).expect("writing to a String cannot fail");
+        std::fs::write(path, output)?;
+        Ok(rmsd)
     }
 
     pub fn superpose_lsq_matrix(
@@ -122,12 +206,16 @@ impl MolAnlManager {
         moving_id: u64,
         moving_selection: &str,
     ) -> Result<()> {
-        validate_superpose_ids(reference_id, moving_id)?;
-        parse_selector(reference_selection).map_err(|err| CueMolError::parse(err.to_string()))?;
-        parse_selector(moving_selection).map_err(|err| CueMolError::parse(err.to_string()))?;
-        Err(CueMolError::invalid_argument(
-            "superpose_ssm2 requires a MolSceneManager; use superpose_ssm2_in_manager",
-        ))
+        self.with_scene_manager_mut(|scene_manager| {
+            self.superpose_ssm2_in_manager(
+                scene_manager,
+                reference_id,
+                reference_selection,
+                moving_id,
+                moving_selection,
+            )
+            .map(|_| ())
+        })
     }
 
     pub fn superpose_ssm2_in_manager(
@@ -512,6 +600,25 @@ fn selected_position_pairs(
     moving: &MolCoord,
     moving_selector: &Selector,
 ) -> Result<Vec<(Vector4, Vector4)>> {
+    Ok(
+        selected_index_pairs(reference, reference_selector, moving, moving_selector)?
+            .into_iter()
+            .map(|(ref_index, mov_index)| {
+                (
+                    reference.atoms()[ref_index].position,
+                    moving.atoms()[mov_index].position,
+                )
+            })
+            .collect(),
+    )
+}
+
+fn selected_index_pairs(
+    reference: &MolCoord,
+    reference_selector: &Selector,
+    moving: &MolCoord,
+    moving_selector: &Selector,
+) -> Result<Vec<(usize, usize)>> {
     let ref_indices = reference.select_indices(reference_selector);
     let mov_indices = moving.select_indices(moving_selector);
     if ref_indices.is_empty() {
@@ -524,16 +631,7 @@ fn selected_position_pairs(
             mov_indices.len()
         )));
     }
-    Ok(ref_indices
-        .into_iter()
-        .zip(mov_indices)
-        .map(|(ref_index, mov_index)| {
-            (
-                reference.atoms()[ref_index].position,
-                moving.atoms()[mov_index].position,
-            )
-        })
-        .collect())
+    Ok(ref_indices.into_iter().zip(mov_indices).collect())
 }
 
 fn validate_superpose_ids(reference_id: u64, moving_id: u64) -> Result<()> {
@@ -849,7 +947,29 @@ mod tests {
     }
 
     #[test]
-    fn manager_superpose_ssm2_in_manager_transforms_moving_object() {
+    fn manager_calc_rmsd_scr_writes_reference_report() {
+        let mut reference = MolCoord::new();
+        reference.push_atom(atom(1, "N", "A", 1, "N", 1.0));
+        reference.push_atom(atom(2, "CA", "A", 2, "C", 2.0));
+        let mut moving = MolCoord::new();
+        moving.push_atom(atom(1, "N", "B", 3, "N", 3.0));
+        moving.push_atom(atom(2, "CA", "B", 4, "C", 4.0));
+        let path =
+            std::env::temp_dir().join(format!("cuemol_molanl_rmsd_{}.txt", std::process::id()));
+
+        let rmsd = MolAnlManager::new()
+            .calc_rmsd(&reference, &Selector::All, &moving, &Selector::All, &path)
+            .unwrap();
+        assert_eq!(rmsd, 2.0);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "ref A 1  mov B 3 2.000000\nref A 2  mov B 4 2.000000\nTotal RMSD 2.000000\n"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn manager_superpose_ssm2_transforms_shared_scene_object() {
         let mut reference = MolCoord::new();
         reference.push_atom(atom(1, "N", "A", 1, "N", 1.0));
         reference.push_atom(atom(2, "CA", "A", 1, "C", 2.0));
@@ -863,17 +983,13 @@ mod tests {
         let reference_uid = scene.add_molecule("ref", reference);
         let moving_uid = scene.add_molecule("mov", moving);
 
-        let matrix = MolAnlManager::new()
-            .superpose_ssm2_in_manager(
-                &mut scene_manager,
-                reference_uid.get(),
-                "all",
-                moving_uid.get(),
-                "all",
-            )
+        let shared = Arc::new(Mutex::new(scene_manager));
+        let manager = MolAnlManager::with_scene_manager(shared.clone());
+        manager
+            .superpose_ssm2(reference_uid.get(), "all", moving_uid.get(), "all")
             .unwrap();
 
-        assert_eq!(matrix.get_trans_part(), Vector4::new3(-2.0, 0.0, 0.0));
+        let scene_manager = shared.lock().unwrap();
         let moved = scene_manager.object(moving_uid).unwrap().mol();
         assert_eq!(moved.atoms()[0].position, Vector4::new3(1.0, 0.0, 0.0));
         assert_eq!(moved.atoms()[1].position, Vector4::new3(2.0, 0.0, 0.0));

@@ -733,6 +733,10 @@ impl MolResidue {
         self.res_type()
     }
 
+    pub fn r#type(&self) -> &str {
+        self.res_type()
+    }
+
     pub fn set_type(&mut self, value: impl Into<String>) {
         self.set_res_type(value);
     }
@@ -833,6 +837,14 @@ impl MolResidue {
 
     pub fn get_str_index(&self) -> String {
         self.str_index()
+    }
+
+    pub fn sindex(&self) -> String {
+        self.str_index()
+    }
+
+    pub fn set_sindex(&mut self, value: impl Into<String>) {
+        self.set_str_index(value);
     }
 
     pub fn get_scr_index(&self) -> i32 {
@@ -1150,8 +1162,12 @@ mod tests {
         residue.set_pivot_atom_name("CA");
         assert_eq!(residue.name(), "ALA");
         assert_eq!(residue.res_type(), "protein");
+        assert_eq!(residue.r#type(), "protein");
         assert_eq!(residue.scr_index(), 10);
         assert_eq!(residue.str_index(), "10A");
+        assert_eq!(residue.sindex(), "10A");
+        residue.set_sindex("11B");
+        assert_eq!(residue.sindex(), "11B");
         assert_eq!(residue.pivot_atom_name(), "CA");
         residue.set_link_next_index(Some(ResidIndex::new(11)));
         assert!(residue.is_linked_to_index(ResidIndex::new(11)));

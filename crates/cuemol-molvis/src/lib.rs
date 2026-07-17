@@ -37,7 +37,7 @@ impl Default for DistPickDrawObj {
         Self {
             draw_obj: DrawObj::new(),
             color: SolidColor::from_rgba(1.0, 1.0, 1.0, 0.5),
-            width: 3.0,
+            width: 4.0,
             positions: Vec::new(),
         }
     }
@@ -773,6 +773,7 @@ impl AnIsoURenderer {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AtomIntrRenderer {
+    client_mol_id: i32,
     mode: i32,
     showlabel: bool,
     detail: i32,
@@ -794,6 +795,7 @@ pub struct AtomIntrRenderer {
 impl Default for AtomIntrRenderer {
     fn default() -> Self {
         Self {
+            client_mol_id: 0,
             mode: Self::AIR_FANCY,
             showlabel: false,
             detail: 5,
@@ -881,6 +883,14 @@ impl AtomIntrRenderer {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn client_mol_id(&self) -> i32 {
+        self.client_mol_id
+    }
+
+    pub fn set_client_mol_id(&mut self, value: i32) {
+        self.client_mol_id = value;
     }
 
     pub fn type_name(&self) -> &'static str {
@@ -1339,20 +1349,13 @@ impl AtomIntrRenderer {
         })
     }
 
-    pub fn append_by_id(
-        &mut self,
-        aid1: i32,
-        mol_id1: i32,
-        aid2: i32,
-        mol_id2: i32,
-        show_message: bool,
-    ) -> i32 {
+    pub fn append_by_id(&mut self, aid1: i32, mol_id2: i32, aid2: i32, show_message: bool) -> i32 {
         self.push_def(AtomIntrDef {
             id: 0,
             kind: AtomIntrDefKind::Distance,
             selections: Vec::new(),
             atom_ids: vec![aid1, aid2],
-            mol_ids: vec![mol_id1, mol_id2],
+            mol_ids: vec![self.client_mol_id, mol_id2],
             positions: Vec::new(),
             show_message,
         })
@@ -1381,18 +1384,17 @@ impl AtomIntrRenderer {
     pub fn append_angle_by_id(
         &mut self,
         aid1: i32,
-        mol_id1: i32,
-        aid2: i32,
         mol_id2: i32,
-        aid3: i32,
+        aid2: i32,
         mol_id3: i32,
+        aid3: i32,
     ) -> i32 {
         self.push_def(AtomIntrDef {
             id: 0,
             kind: AtomIntrDefKind::Angle,
             selections: Vec::new(),
             atom_ids: vec![aid1, aid2, aid3],
-            mol_ids: vec![mol_id1, mol_id2, mol_id3],
+            mol_ids: vec![self.client_mol_id, mol_id2, mol_id3],
             positions: Vec::new(),
             show_message: true,
         })
@@ -1402,20 +1404,19 @@ impl AtomIntrRenderer {
     pub fn append_torsion_by_id(
         &mut self,
         aid1: i32,
-        mol_id1: i32,
-        aid2: i32,
         mol_id2: i32,
-        aid3: i32,
+        aid2: i32,
         mol_id3: i32,
-        aid4: i32,
+        aid3: i32,
         mol_id4: i32,
+        aid4: i32,
     ) -> i32 {
         self.push_def(AtomIntrDef {
             id: 0,
             kind: AtomIntrDefKind::Torsion,
             selections: Vec::new(),
             atom_ids: vec![aid1, aid2, aid3, aid4],
-            mol_ids: vec![mol_id1, mol_id2, mol_id3, mol_id4],
+            mol_ids: vec![self.client_mol_id, mol_id2, mol_id3, mol_id4],
             positions: Vec::new(),
             show_message: true,
         })
@@ -1674,6 +1675,10 @@ impl TubeSection {
         self.section_type()
     }
 
+    pub fn r#type(&self) -> i32 {
+        self.section_type()
+    }
+
     pub fn set_section_type(&mut self, value: i32) {
         self.section_type = value;
         self.invalidate();
@@ -1744,6 +1749,10 @@ impl JctTable {
     }
 
     pub fn get_type(&self) -> i32 {
+        self.jct_type()
+    }
+
+    pub fn r#type(&self) -> i32 {
         self.jct_type()
     }
 
@@ -3058,6 +3067,10 @@ impl PaintColoring {
 
     pub fn get_size(&self) -> i32 {
         i32::try_from(self.len()).unwrap_or(i32::MAX)
+    }
+
+    pub fn size(&self) -> i32 {
+        self.get_size()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -6889,12 +6902,12 @@ mod tests {
         ]);
 
         let mut r = AtomIntrRenderer::new();
-        let dist = r.append_by_id(1, 0, 2, 0, true);
-        let angle = r.append_angle_by_id(3, 0, 4, 0, 5, 0);
-        let tors_pos = r.append_torsion_by_id(6, 0, 7, 0, 8, 0, 9, 0);
-        let tors_neg = r.append_torsion_by_id(6, 0, 7, 0, 8, 0, 10, 0);
+        let dist = r.append_by_id(1, 0, 2, true);
+        let angle = r.append_angle_by_id(3, 0, 4, 0, 5);
+        let tors_pos = r.append_torsion_by_id(6, 0, 7, 0, 8, 0, 9);
+        let tors_neg = r.append_torsion_by_id(6, 0, 7, 0, 8, 0, 10);
         // An unresolvable atom id yields no measurement.
-        let missing = r.append_by_id(1, 0, 999, 0, true);
+        let missing = r.append_by_id(1, 0, 999, true);
 
         let value = |id: i32| {
             let def = r.defs().iter().find(|d| d.id() == id).unwrap();
@@ -6921,8 +6934,8 @@ mod tests {
             intr_atom(5, 1.0, 1.0, 0.0),
         ]);
         let mut r = AtomIntrRenderer::new();
-        r.append_by_id(1, 0, 2, 0, true); // distance -> 1 segment
-        r.append_angle_by_id(3, 0, 4, 0, 5, 0); // angle -> 2 arm segments
+        r.append_by_id(1, 0, 2, true); // distance -> 1 segment
+        r.append_angle_by_id(3, 0, 4, 0, 5); // angle -> 2 arm segments
         let lines = r.measurement_lines(&mol);
         assert_eq!(lines.len(), 3, "1 distance segment + 2 angle arms");
         // The distance segment spans atoms 1 (0,0,0) and 2 (3,0,0).
@@ -6939,7 +6952,7 @@ mod tests {
             intr_atom(3, 0.0, 2.0, 0.0), // arm 2 along +y
         ]);
         let mut r = AtomIntrRenderer::new();
-        r.append_angle_by_id(1, 0, 2, 0, 3, 0);
+        r.append_angle_by_id(1, 0, 2, 0, 3);
         let arcs = r.measurement_arcs(&mol, 0.5, 8);
         assert_eq!(arcs.len(), 1);
         let arc = &arcs[0];
@@ -6954,7 +6967,7 @@ mod tests {
         assert!((arc[8].y - 1.0).abs() < 1.0e-9 && arc[8].x.abs() < 1.0e-9);
         // Distance defs have no arc.
         let mut r2 = AtomIntrRenderer::new();
-        r2.append_by_id(1, 0, 2, 0, true);
+        r2.append_by_id(1, 0, 2, true);
         assert!(r2.measurement_arcs(&mol, 0.5, 8).is_empty());
     }
 
@@ -7367,7 +7380,7 @@ mod tests {
             draw.color().rgba8(),
             SolidColor::from_rgba(1.0, 1.0, 1.0, 0.5).rgba8()
         );
-        assert_f64_eq(draw.width(), 3.0);
+        assert_f64_eq(draw.width(), 4.0);
         assert!(draw.positions().is_empty());
 
         draw.set_enabled(true);
@@ -7490,8 +7503,9 @@ mod tests {
         assert!(!atom_intr.is_show_label());
         assert_f64_eq(atom_intr.get_stipple0(), 1.0);
         let dist_id = atom_intr.append("name N", "name CA");
-        let angle_id = atom_intr.append_angle_by_id(1, 10, 2, 10, 3, 10);
-        let torsion_id = atom_intr.append_torsion_by_id(1, 10, 2, 10, 3, 10, 4, 10);
+        atom_intr.set_client_mol_id(10);
+        let angle_id = atom_intr.append_angle_by_id(1, 10, 2, 10, 3);
+        let torsion_id = atom_intr.append_torsion_by_id(1, 10, 2, 10, 3, 10, 4);
         assert_eq!(atom_intr.defs().len(), 3);
         assert!(atom_intr.get_defs_json().contains("\"type\":\"torsion\""));
         assert!(atom_intr.remove(angle_id));
@@ -7532,6 +7546,7 @@ mod tests {
         assert_eq!(section.section_type(), TubeSection::TS_ELLIPTICAL);
         assert_eq!(section.detail(), 16);
         assert_eq!(section.get_type(), TubeSection::TS_ELLIPTICAL);
+        assert_eq!(section.r#type(), TubeSection::TS_ELLIPTICAL);
         assert_eq!(section.get_detail(), 16);
 
         let jct = JctTable::new();
@@ -7540,6 +7555,7 @@ mod tests {
         assert_f64_eq(jct.basw(), 0.0);
         assert_f64_eq(jct.arrow(), 1.8);
         assert_eq!(jct.get_type(), JctTable::JT_SMOOTH1);
+        assert_eq!(jct.r#type(), JctTable::JT_SMOOTH1);
         assert_f64_eq(jct.get_gamma(), 2.2);
 
         let tube = TubeRenderer::new();
@@ -7641,7 +7657,9 @@ mod tests {
         paint.insert_before(-1, "name O", SolidColor::from_rgb(0.0, 0.0, 1.0));
         assert_eq!(paint.len(), 3);
         assert_eq!(paint.get_size(), 3);
+        assert_eq!(paint.size(), 3);
         assert_eq!(paint.get_selection_at(0), Some("name N"));
+        assert_eq!(paint.get_sel_at(0), Some("name N"));
         assert_eq!(paint.get_selection_at(1), Some("name CA"));
         assert_eq!(paint.get_selection_at(2), Some("name O"));
         assert!(paint.change_at(1, "name C", SolidColor::from_rgb(1.0, 1.0, 0.0)));

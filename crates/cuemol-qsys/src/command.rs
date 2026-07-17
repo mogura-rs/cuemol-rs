@@ -1,8 +1,10 @@
 use crate::{InOutHandler, RendererFactory, RendererInstance, SceneManager};
 use cuemol_core::{CueMolError, Result, Uid};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandValue {
@@ -347,7 +349,7 @@ impl NewSceneCommand {
         } else {
             self.scene_name.clone()
         };
-        let scene_uid = context.scene_manager_mut().create_scene(scene_name);
+        let scene_uid = context.scene_manager_mut().create_scene_named(scene_name);
         self.result_scene = Some(scene_uid);
 
         if self.create_view {
@@ -782,7 +784,7 @@ impl LoadSceneCommand {
                 } else {
                     self.scene_name.clone()
                 };
-                context.scene_manager_mut().create_scene(name)
+                context.scene_manager_mut().create_scene_named(name)
             }
         };
 
@@ -881,7 +883,11 @@ impl CommandInstance {
         }
     }
 
-    pub fn run<T: Default>(&mut self, context: &mut CommandContext<T>) -> Result<()> {
+    pub fn run(&mut self) -> Result<()> {
+        self.run_with_context(&mut CommandContext::<()>::new())
+    }
+
+    pub fn run_with_context<T: Default>(&mut self, context: &mut CommandContext<T>) -> Result<()> {
         self.reset_outputs();
         match self {
             Self::NewScene(command) => command.run(context),
@@ -901,15 +907,17 @@ impl CommandInstance {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CmdMgr {
     commands: BTreeMap<String, CommandInstance>,
+    default_context: Rc<RefCell<CommandContext<()>>>,
 }
 
 impl Default for CmdMgr {
     fn default() -> Self {
         let mut manager = Self {
             commands: BTreeMap::new(),
+            default_context: Rc::new(RefCell::new(CommandContext::new())),
         };
         manager.register(CommandInstance::NewScene(NewSceneCommand::new()));
         manager.register(CommandInstance::NewRenderer(NewRendererCommand::new()));
@@ -938,7 +946,19 @@ impl CmdMgr {
         self.commands.get(name).cloned()
     }
 
-    pub fn run_cmd<T: Default>(
+    pub fn run_cmd(&self, name: &str) -> Result<()> {
+        self.with_default_context(|context| self.run_cmd_with_context(name, context).map(|_| ()))
+    }
+
+    pub fn run_cmd_args(
+        &self,
+        name: &str,
+        args: BTreeMap<String, CommandValue>,
+    ) -> Result<BTreeMap<String, CommandValue>> {
+        self.with_default_context(|context| self.run_cmd_args_with_context(name, args, context))
+    }
+
+    pub fn run_cmd_with_context<T: Default>(
         &self,
         name: &str,
         context: &mut CommandContext<T>,
@@ -946,11 +966,11 @@ impl CmdMgr {
         let mut command = self
             .get_cmd(name)
             .ok_or_else(|| CueMolError::NotFound(format!("command not found: {name}")))?;
-        command.run(context)?;
+        command.run_with_context(context)?;
         Ok(command)
     }
 
-    pub fn run_cmd_args<T: Default>(
+    pub fn run_cmd_args_with_context<T: Default>(
         &self,
         name: &str,
         args: BTreeMap<String, CommandValue>,
@@ -962,8 +982,16 @@ impl CmdMgr {
         for (key, value) in args {
             command.set_arg(&key, value)?;
         }
-        command.run(context)?;
+        command.run_with_context(context)?;
         Ok(command.outputs())
+    }
+
+    pub fn with_default_context<R>(
+        &self,
+        operation: impl FnOnce(&mut CommandContext<()>) -> R,
+    ) -> R {
+        let mut context = self.default_context.borrow_mut();
+        operation(&mut context)
     }
 
     pub fn command_names(&self) -> Vec<&str> {
@@ -1031,13 +1059,28 @@ mod tests {
         assert!(manager.get_cmd("load_object").is_some());
         assert!(manager.get_cmd("load_scene").is_some());
         assert!(manager.get_cmd("__missing__").is_none());
+        manager.run_cmd("new_scene").unwrap();
+        manager.run_cmd("new_scene").unwrap();
+        assert_eq!(
+            manager.with_default_context(|context| context.scene_manager().scene_count()),
+            2
+        );
+
+        let mut command = manager.get_cmd("new_scene").unwrap();
+        command.run().unwrap();
+        assert!(matches!(
+            command.outputs().get("result_scene"),
+            Some(CommandValue::Uid(_))
+        ));
     }
 
     #[test]
     fn new_scene_command_matches_reference_defaults_and_results() {
         let manager = CmdMgr::new();
         let mut context = CommandContext::<()>::new();
-        let command = manager.run_cmd("new_scene", &mut context).unwrap();
+        let command = manager
+            .run_cmd_with_context("new_scene", &mut context)
+            .unwrap();
         assert_eq!(command.name(), "new_scene");
         assert_eq!(context.scene_manager().scene_count(), 1);
         let scene_uid = match command.outputs().get("result_scene") {
@@ -1059,7 +1102,7 @@ mod tests {
             "*.pdb; *.ent; *.pdb.gz",
             InOutHandler::IOH_CAT_OBJREADER,
         ));
-        let scene_uid = context.scene_manager_mut().create_scene("target");
+        let scene_uid = context.scene_manager_mut().create_scene_named("target");
         let manager = CmdMgr::new();
         let mut args = BTreeMap::new();
         args.insert("target_scene".to_string(), CommandValue::Uid(scene_uid));
@@ -1068,7 +1111,7 @@ mod tests {
             CommandValue::String("/tmp/1CRN.pdb.gz".to_string()),
         );
         let output = manager
-            .run_cmd_args("load_object", args, &mut context)
+            .run_cmd_args_with_context("load_object", args, &mut context)
             .unwrap();
         let object_uid = match output.get("result_object") {
             Some(CommandValue::Uid(uid)) => *uid,
@@ -1101,7 +1144,7 @@ mod tests {
             CommandValue::String("loaded".to_string()),
         );
         let output = manager
-            .run_cmd_args("load_scene", args, &mut context)
+            .run_cmd_args_with_context("load_scene", args, &mut context)
             .unwrap();
         let scene_uid = match output.get("result_scene") {
             Some(CommandValue::Uid(uid)) => *uid,
@@ -1118,7 +1161,7 @@ mod tests {
     fn new_renderer_command_uses_factory_and_records_result() {
         let mut context = CommandContext::<()>::new();
         context.renderer_factory_mut().register("ballstick", false);
-        let scene_uid = context.scene_manager_mut().create_scene("target");
+        let scene_uid = context.scene_manager_mut().create_scene_named("target");
         let object_uid = context
             .scene_manager_mut()
             .scene_mut(scene_uid)
@@ -1131,7 +1174,7 @@ mod tests {
         args.insert("renderer_name".to_string(), "rend1".into());
         args.insert("default_style_name".to_string(), "default".into());
         let output = manager
-            .run_cmd_args("new_renderer", args, &mut context)
+            .run_cmd_args_with_context("new_renderer", args, &mut context)
             .unwrap();
         let renderer_uid = match output.get("result_renderer") {
             Some(CommandValue::Uid(uid)) => *uid,

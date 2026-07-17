@@ -94,24 +94,48 @@ impl PdbReader {
         self.load_model
     }
 
+    pub fn loadmodel(&self) -> bool {
+        self.load_model()
+    }
+
     pub fn set_load_model(&mut self, value: bool) {
         self.load_model = value;
+    }
+
+    pub fn set_loadmodel(&mut self, value: bool) {
+        self.set_load_model(value);
     }
 
     pub fn load_anisou(&self) -> bool {
         self.load_anisou
     }
 
+    pub fn loadanisou(&self) -> bool {
+        self.load_anisou()
+    }
+
     pub fn set_load_anisou(&mut self, value: bool) {
         self.load_anisou = value;
+    }
+
+    pub fn set_loadanisou(&mut self, value: bool) {
+        self.set_load_anisou(value);
     }
 
     pub fn load_alt_conf(&self) -> bool {
         self.load_alt_conf
     }
 
+    pub fn loadaltconf(&self) -> bool {
+        self.load_alt_conf()
+    }
+
     pub fn set_load_alt_conf(&mut self, value: bool) {
         self.load_alt_conf = value;
+    }
+
+    pub fn set_loadaltconf(&mut self, value: bool) {
+        self.set_load_alt_conf(value);
     }
 
     pub fn build_secondary(&self) -> bool {
@@ -158,8 +182,16 @@ impl PdbReader {
         self.auto_topo_gen
     }
 
+    pub fn autotopogen(&self) -> bool {
+        self.auto_topo_gen()
+    }
+
     pub fn set_auto_topo_gen(&mut self, value: bool) {
         self.auto_topo_gen = value;
+    }
+
+    pub fn set_autotopogen(&mut self, value: bool) {
+        self.set_auto_topo_gen(value);
     }
 
     pub fn read_str(input: &str) -> Result<MolCoord> {
@@ -244,6 +276,10 @@ impl QdfPdbReader {
 
     pub fn set_build_secondary(&mut self, value: bool) {
         self.reader.set_build_secondary(value);
+    }
+
+    pub fn set_build2ndry(&mut self, value: bool) {
+        self.set_build_secondary(value);
     }
 
     pub fn read_str(input: &str) -> Result<MolCoord> {
@@ -1322,7 +1358,7 @@ mod tests {
 
     #[test]
     fn pdb_reader_writer_state_matches_qif_defaults() {
-        let reader = PdbReader::new();
+        let mut reader = PdbReader::new();
         assert_eq!(reader.handler().name(), "pdb");
         assert_eq!(
             reader.handler().type_descr(),
@@ -1336,13 +1372,27 @@ mod tests {
         assert!(reader.build_secondary());
         assert!(!reader.load_seg_id());
         assert!(reader.auto_topo_gen());
+        assert!(!reader.loadmodel());
+        assert!(reader.loadanisou());
+        assert!(reader.loadaltconf());
+        assert!(reader.autotopogen());
+        reader.set_loadmodel(true);
+        reader.set_loadanisou(false);
+        reader.set_loadaltconf(false);
+        reader.set_autotopogen(false);
+        assert!(reader.load_model());
+        assert!(!reader.load_anisou());
+        assert!(!reader.load_alt_conf());
+        assert!(!reader.auto_topo_gen());
 
-        let qdfpdb = QdfPdbReader::new();
+        let mut qdfpdb = QdfPdbReader::new();
         assert_eq!(qdfpdb.handler().name(), "qdfpdb");
         assert_eq!(qdfpdb.handler().type_descr(), "QDF-PDB (*.qdfpdb)");
         assert_eq!(qdfpdb.handler().file_ext(), "*.qdfpdb");
         assert_eq!(qdfpdb.handler().category(), InOutHandler::IOH_CAT_OBJREADER);
         assert!(!qdfpdb.build_secondary());
+        qdfpdb.set_build2ndry(true);
+        assert!(qdfpdb.build_secondary());
 
         let writer = PdbWriter::new();
         assert_eq!(writer.handler().name(), "pdb");

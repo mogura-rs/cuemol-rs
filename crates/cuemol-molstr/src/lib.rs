@@ -58,7 +58,8 @@ pub use renderers::{
 };
 pub use sdf::{
     read_sdf_file, read_sdf_file_with_options, read_sdf_str, read_sdf_str_with_options,
-    write_sdf_string, SdfReadOptions, SdfReader, SdfWriter,
+    write_sdf_file, write_sdf_string, write_sdf_string_with_selection, SdfReadOptions, SdfReader,
+    SdfWriter,
 };
 pub use selection::{parse_selector, SelCommand, Selector};
 pub use stream::{
@@ -69,7 +70,7 @@ pub use stream::{
 pub type ColoringScheme = SolidColoring;
 pub type CPKColoring = CpkColoring;
 pub type MainChainRenderer = TraceRenderer;
-pub type MolSelection = Selector;
+pub type MolSelection = SelCommand;
 pub type PDBFileReader = PdbReader;
 pub type PDBFileWriter = PdbWriter;
 // C++ dual names: the real QDF molecule reader/writer (was a fake alias to

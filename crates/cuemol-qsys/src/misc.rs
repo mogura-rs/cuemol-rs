@@ -367,11 +367,19 @@ impl Renderer {
         self.fire_property_changed("locked");
     }
 
+    pub fn set_locked(&mut self, value: bool) {
+        self.set_ui_locked(value);
+    }
+
     pub fn style_names(&self) -> &str {
         &self.style_names
     }
 
     pub fn get_style_names(&self) -> &str {
+        self.style_names()
+    }
+
+    pub fn style(&self) -> &str {
         self.style_names()
     }
 
@@ -388,9 +396,17 @@ impl Renderer {
         self.default_material()
     }
 
+    pub fn material(&self) -> &str {
+        self.default_material()
+    }
+
     pub fn set_default_material(&mut self, value: impl Into<String>) {
         self.default_material = value.into();
         self.fire_property_changed("default_material");
+    }
+
+    pub fn set_material(&mut self, value: impl Into<String>) {
+        self.set_default_material(value);
     }
 
     pub fn default_alpha(&self) -> f64 {
@@ -401,9 +417,17 @@ impl Renderer {
         self.default_alpha()
     }
 
+    pub fn alpha(&self) -> f64 {
+        self.default_alpha()
+    }
+
     pub fn set_default_alpha(&mut self, value: f64) {
         self.default_alpha = value;
         self.fire_property_changed("default_alpha");
+    }
+
+    pub fn set_alpha(&mut self, value: f64) {
+        self.set_default_alpha(value);
     }
 
     pub fn xform_matrix(&self) -> Matrix4 {
@@ -457,6 +481,10 @@ impl Renderer {
         self.fire_property_changed("group");
     }
 
+    pub fn set_group(&mut self, value: impl Into<String>) {
+        self.set_group_name(value);
+    }
+
     pub fn edge_line_type(&self) -> i32 {
         self.edge_line_type
     }
@@ -472,6 +500,10 @@ impl Renderer {
     pub fn set_edge_line_type(&mut self, value: i32) {
         self.edge_line_type = value;
         self.fire_property_changed("egtype");
+    }
+
+    pub fn set_egtype(&mut self, value: i32) {
+        self.set_edge_line_type(value);
     }
 
     pub fn edge_line_width(&self) -> f64 {
@@ -491,6 +523,10 @@ impl Renderer {
         self.fire_property_changed("eglinew");
     }
 
+    pub fn set_eglinew(&mut self, value: f64) {
+        self.set_edge_line_width(value);
+    }
+
     pub fn edge_line_color(&self) -> &SolidColor {
         &self.edge_line_color
     }
@@ -508,6 +544,10 @@ impl Renderer {
         self.fire_property_changed("egcolor");
     }
 
+    pub fn set_egcolor(&mut self, value: SolidColor) {
+        self.set_edge_line_color(value);
+    }
+
     pub fn property_str(&self, name: &str) -> Option<&str> {
         self.properties.get(name).map(String::as_str)
     }
@@ -518,6 +558,26 @@ impl Renderer {
 
     pub fn properties(&self) -> &BTreeMap<String, String> {
         &self.properties
+    }
+
+    pub fn to_style_node(&self) -> LDom2Node {
+        let mut node = LDom2Node::new();
+        node.set_tag_name("style");
+        node.set_type_name("renderer");
+        node.set_str_attr("visible", self.visible.to_string());
+        node.set_str_attr("locked", self.ui_locked.to_string());
+        node.set_str_attr("material", &self.default_material);
+        node.set_str_attr("alpha", self.default_alpha.to_string());
+        node.set_str_attr("xformMat", self.xform_matrix.to_script_string().to_string());
+        node.set_str_attr("egtype", self.edge_line_type.to_string());
+        node.set_str_attr("eglinew", self.edge_line_width.to_string());
+        node.set_str_attr("egcolor", self.edge_line_color.script_string().to_string());
+        for (name, value) in &self.properties {
+            if !matches!(name.as_str(), "name" | "type" | "ui_order" | "group") {
+                node.set_str_attr(name, value);
+            }
+        }
+        node
     }
 
     pub fn read_properties_from_node(&mut self, node: &cuemol_core::LDom2Node) {
@@ -743,6 +803,10 @@ impl RendGroup {
         self.ui_collapsed
     }
 
+    pub fn ui_collapsed(&self) -> bool {
+        self.is_ui_collapsed()
+    }
+
     pub fn set_ui_collapsed(&mut self, value: bool) {
         self.ui_collapsed = value;
     }
@@ -934,8 +998,16 @@ impl ViewInputConfig {
         self.style_name()
     }
 
+    pub fn style(&self) -> &str {
+        self.style_name()
+    }
+
     pub fn apply_style(&mut self, value: impl Into<String>) {
         self.style_name = value.into();
+    }
+
+    pub fn set_style(&mut self, value: impl Into<String>) {
+        self.apply_style(value);
     }
 
     pub fn hitprec(&self) -> f64 {
@@ -1187,6 +1259,35 @@ mod tests {
             SolidColor::from_rgb(0.0, 0.0, 0.0).rgba8()
         );
         assert!(!renderer.has_center());
+        renderer.set_locked(true);
+        renderer.set_material("matte");
+        renderer.set_alpha(0.75);
+        renderer.set_group("main");
+        renderer.set_egtype(Renderer::ELT_EDGES);
+        renderer.set_eglinew(0.02);
+        renderer.set_egcolor(SolidColor::from_rgb(1.0, 0.0, 0.0));
+        assert!(renderer.locked());
+        assert_eq!(renderer.material(), "matte");
+        assert_eq!(renderer.alpha(), 0.75);
+        assert_eq!(renderer.group(), "main");
+        assert_eq!(renderer.egtype(), Renderer::ELT_EDGES);
+        assert_eq!(renderer.eglinew(), 0.02);
+        assert_eq!(
+            renderer.egcolor().rgba8(),
+            SolidColor::from_rgb(1.0, 0.0, 0.0).rgba8()
+        );
+        renderer.set_property_str("bondw", "0.2");
+        let style = renderer.to_style_node();
+        assert_eq!(style.tag_name(), "style");
+        assert_eq!(style.type_name(), "renderer");
+        assert_eq!(style.str_attr("visible").to_string(), "true");
+        assert_eq!(style.str_attr("locked").to_string(), "true");
+        assert_eq!(style.str_attr("material").to_string(), "matte");
+        assert_eq!(style.str_attr("alpha").to_string(), "0.75");
+        assert_eq!(style.str_attr("egtype").to_string(), "1");
+        assert_eq!(style.str_attr("bondw").to_string(), "0.2");
+        assert!(style.str_attr("name").is_empty());
+        assert!(style.str_attr("group").is_empty());
         renderer.set_center(Vector4::new3(1.0, 2.0, 3.0));
         assert!(renderer.has_center());
         assert_eq!(renderer.center(), Vector4::new3(1.0, 2.0, 3.0));
@@ -1194,6 +1295,7 @@ mod tests {
         assert!(!renderer.has_center());
         assert_eq!(renderer.style_generation(), 0);
         renderer.apply_styles("default");
+        assert_eq!(renderer.style(), "default");
         assert_eq!(renderer.style_generation(), 1);
         renderer.reapply_style();
         assert_eq!(renderer.style_generation(), 2);
@@ -1252,7 +1354,7 @@ mod tests {
         assert!(group.is_compatible_obj());
         assert!(!group.is_ui_collapsed());
         group.set_ui_collapsed(true);
-        assert!(group.is_ui_collapsed());
+        assert!(group.ui_collapsed());
         assert!(group.is_visible());
         assert!(!group.is_ui_locked());
         assert!(!group.is_hit_test_supported());
@@ -1283,6 +1385,8 @@ mod tests {
         );
         assert_eq!(config.get_conf_slab().as_str(), "LBUTTON|SHIFT|MOUSE_X");
         assert!(config.get_conf_dist().is_empty());
+        config.set_style("default");
+        assert_eq!(config.style(), "default");
         config.set_tb_rad(1.5);
         config.set_hit_prec(0.05);
         assert_eq!(config.tb_rad(), 1.5);

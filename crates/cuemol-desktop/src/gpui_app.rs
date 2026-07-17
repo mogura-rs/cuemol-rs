@@ -620,10 +620,8 @@ impl CueMolGpuiApp {
                 snapshot.meshes.push(mesh.clone());
             }
         }
-        if self.color_proof {
-            if self.state.apply_color_proof(&mut snapshot).is_err() {
-                cuemol_render::apply_generic_color_proof(&mut snapshot);
-            }
+        if self.color_proof && self.state.apply_color_proof(&mut snapshot).is_err() {
+            cuemol_render::apply_generic_color_proof(&mut snapshot);
         }
         Some(snapshot)
     }

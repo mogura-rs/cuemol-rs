@@ -16,9 +16,10 @@ pub use cuemol_molstr::{
     read_mol2_file, read_mol2_file_with_options, read_mol2_str, read_mol2_str_with_options,
     read_opendx_file, read_opendx_str, read_pdb_file, read_pdb_str, read_sdf_file,
     read_sdf_file_with_options, read_sdf_str, read_sdf_str_with_options, write_pdb_file,
-    write_pdb_string, write_sdf_string, CompressionMode, ContentVerdict, HandlerCategory,
-    HandlerSniffer, MmcifMapStatus, MmcifReadOptions, MmcifReader, Mol2ReadOptions, Mol2Reader,
-    PdbReader, PdbWriter, SdfReadOptions, SdfReader, SdfWriter, StreamHandlerInfo, StreamManager,
+    write_pdb_string, write_sdf_file, write_sdf_string, write_sdf_string_with_selection,
+    CompressionMode, ContentVerdict, HandlerCategory, HandlerSniffer, MmcifMapStatus,
+    MmcifReadOptions, MmcifReader, Mol2ReadOptions, Mol2Reader, PdbReader, PdbWriter,
+    SdfReadOptions, SdfReader, SdfWriter, StreamHandlerInfo, StreamManager,
 };
 
 pub fn default_stream_manager() -> StreamManager {
@@ -432,6 +433,15 @@ impl SdfMolWriter {
 
     pub fn set_selection(&mut self, value: Selector) {
         self.selection = value;
+    }
+
+    pub fn write_string(&self, mol: &cuemol_molstr::MolCoord) -> String {
+        write_sdf_string_with_selection(mol, &self.selection)
+    }
+
+    pub fn write_file(&self, path: impl AsRef<Path>, mol: &cuemol_molstr::MolCoord) -> Result<()> {
+        fs::write(path, self.write_string(mol))?;
+        Ok(())
     }
 }
 

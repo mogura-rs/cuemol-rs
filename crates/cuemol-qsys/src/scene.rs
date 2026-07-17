@@ -211,6 +211,10 @@ impl<T> Scene<T> {
         self.bg_color()
     }
 
+    pub fn set_bgcolor(&mut self, value: SolidColor) {
+        self.set_bg_color(value);
+    }
+
     pub fn set_bg_color(&mut self, value: SolidColor) {
         self.bg_color = value;
         self.modified = true;
@@ -219,6 +223,10 @@ impl<T> Scene<T> {
 
     pub fn is_ao_enabled(&self) -> bool {
         self.ao_enabled
+    }
+
+    pub fn ao_enabled(&self) -> bool {
+        self.is_ao_enabled()
     }
 
     pub fn set_ao_enabled(&mut self, value: bool) {
@@ -280,6 +288,10 @@ impl<T> Scene<T> {
 
     pub fn is_ao_half_res(&self) -> bool {
         self.ao_half_res
+    }
+
+    pub fn ao_half_res(&self) -> bool {
+        self.is_ao_half_res()
     }
 
     pub fn set_ao_half_res(&mut self, value: bool) {
@@ -383,6 +395,10 @@ impl<T> Scene<T> {
 
     pub fn is_modified(&self) -> bool {
         self.modified
+    }
+
+    pub fn modified(&self) -> bool {
+        self.is_modified()
     }
 
     pub fn set_modified(&mut self, value: bool) {
@@ -1111,7 +1127,11 @@ impl<T> SceneManager<T> {
         }
     }
 
-    pub fn create_scene(&mut self, name: impl Into<String>) -> Uid {
+    pub fn create_scene(&mut self) -> Uid {
+        self.create_scene_named("")
+    }
+
+    pub fn create_scene_named(&mut self, name: impl Into<String>) -> Uid {
         let uid = self.uid_generator.next_uid();
         let mut scene = Scene::with_uid_generator(uid, name, self.uid_generator.clone());
         scene.attach_event_manager(self.event_manager.clone());
@@ -1354,11 +1374,13 @@ mod tests {
     fn scene_render_options_match_reference_defaults_and_invalidate_views() {
         let mut scene = Scene::<()>::new(Uid::new(1), "scene");
         assert!(!scene.is_ao_enabled());
+        assert!(!scene.ao_enabled());
         assert_eq!(scene.ao_radius(), 4.0);
         assert_eq!(scene.ao_intensity(), 2.2);
         assert_eq!(scene.ao_slices(), 9);
         assert_eq!(scene.ao_steps(), 3);
         assert!(!scene.is_ao_half_res());
+        assert!(!scene.ao_half_res());
         assert_eq!(scene.aa_method(), AAMethod::Fxaa);
         assert_eq!(scene.aa_jitter_level(), 0);
 
@@ -1374,15 +1396,18 @@ mod tests {
         scene.set_aa_jitter_level(4);
 
         assert!(scene.is_ao_enabled());
+        assert!(scene.ao_enabled());
         assert_eq!(scene.get_ao_radius(), 7.5);
         assert_eq!(scene.get_ao_intensity(), 1.4);
         assert_eq!(scene.get_ao_slices(), 12);
         assert_eq!(scene.get_ao_steps(), 5);
         assert!(scene.is_ao_half_res());
+        assert!(scene.ao_half_res());
         assert_eq!(scene.get_aa_method(), AAMethod::Smaa);
         assert_eq!(scene.get_aa_jitter_level(), 4);
         assert!(scene.view(view_uid).unwrap().is_projection_changed());
         assert!(scene.is_modified());
+        assert!(scene.modified());
     }
 
     #[test]
@@ -1417,7 +1442,7 @@ mod tests {
     #[test]
     fn scene_manages_objects_and_cameras() {
         let mut manager = SceneManager::new();
-        let scene_uid = manager.create_scene("test scene");
+        let scene_uid = manager.create_scene_named("test scene");
         assert_eq!(manager.active_scene_uid(), Some(scene_uid));
         let scene = manager.scene_mut(scene_uid).unwrap();
         assert!(scene.is_just_created());
@@ -1512,7 +1537,7 @@ mod tests {
     #[test]
     fn scene_manager_check_and_update_resets_view_flags() {
         let mut manager = SceneManager::<()>::new();
-        let scene_uid = manager.create_scene("scene");
+        let scene_uid = manager.create_scene_named("scene");
         let view_uid = manager.scene_mut(scene_uid).unwrap().create_view();
         manager
             .scene_mut(scene_uid)
@@ -1614,7 +1639,7 @@ mod tests {
     #[test]
     fn scene_manager_notifies_unloading_before_removing_objects() {
         let mut manager = SceneManager::new();
-        let scene_uid = manager.create_scene("scene");
+        let scene_uid = manager.create_scene_named("scene");
         let events = Arc::new(Mutex::new(Vec::new()));
         let listener_events = Arc::clone(&events);
         let listener = shared_event_listener(move |event: &mut SceneEvent| {
@@ -1669,7 +1694,7 @@ mod tests {
     #[test]
     fn scene_and_view_events_reach_the_shared_script_event_manager() {
         let mut manager = SceneManager::new();
-        let scene_uid = manager.create_scene("scene");
+        let scene_uid = manager.create_scene_named("scene");
         let handle = manager.event_manager();
         let calls = Rc::new(RefCell::new(Vec::new()));
         let callback = Rc::new(ScriptRecorder {
@@ -1758,8 +1783,9 @@ mod tests {
     #[test]
     fn manager_allocates_unique_uids_across_all_qsys_object_kinds() {
         let mut manager = SceneManager::new();
-        let first_scene = manager.create_scene("first");
-        let second_scene = manager.create_scene("second");
+        let first_scene = manager.create_scene();
+        let second_scene = manager.create_scene_named("second");
+        assert_eq!(manager.scene(first_scene).unwrap().name(), "");
 
         let first = manager.scene_mut(first_scene).unwrap();
         let first_object = first.add_object("object1", ());

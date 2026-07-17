@@ -181,6 +181,10 @@ impl MolCoord {
         self.selection()
     }
 
+    pub fn sel(&self) -> &Selector {
+        self.selection()
+    }
+
     pub fn coloring(&self) -> &SolidColoring {
         &self.coloring
     }
@@ -193,6 +197,10 @@ impl MolCoord {
         self.coloring = value;
     }
 
+    pub fn set_coloring(&mut self, value: SolidColoring) {
+        self.set_col_schm(value);
+    }
+
     pub fn default_color(&self) -> &SolidColor {
         &self.default_color
     }
@@ -201,12 +209,24 @@ impl MolCoord {
         self.default_color()
     }
 
+    pub fn defaultcolor(&self) -> &SolidColor {
+        self.default_color()
+    }
+
     pub fn set_default_color(&mut self, value: SolidColor) {
         self.default_color = value;
     }
 
+    pub fn set_defaultcolor(&mut self, value: SolidColor) {
+        self.set_default_color(value);
+    }
+
     pub fn set_selection(&mut self, selection: Selector) {
         self.selection = selection;
+    }
+
+    pub fn set_sel(&mut self, selection: Selector) {
+        self.set_selection(selection);
     }
 
     /// Crystallographic unit-cell parameters (from PDB CRYST1 or mmCIF
@@ -1361,6 +1381,14 @@ mod tests {
     #[test]
     fn molcoord_qif_accessors_and_edit_helpers_work() {
         let mut mol = MolCoord::new();
+        assert_eq!(mol.defaultcolor(), mol.default_color());
+        let default_color = SolidColor::from_rgb(0.25, 0.5, 0.75);
+        mol.set_defaultcolor(default_color.clone());
+        assert_eq!(mol.default_color(), &default_color);
+        mol.set_sel(parse_selector("chain A").unwrap());
+        assert_eq!(mol.sel(), &parse_selector("chain A").unwrap());
+        mol.set_coloring(SolidColoring::new());
+        assert_eq!(mol.coloring().type_name(), "SolidColoring");
         mol.push_atom(atom(1, "A", 1, "N", 0.0));
         mol.push_atom(atom(2, "A", 1, "CA", 2.0));
         mol.push_atom(atom(3, "B", 2, "CA", 4.0));

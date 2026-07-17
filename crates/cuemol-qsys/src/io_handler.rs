@@ -165,8 +165,16 @@ impl InOutHandler {
         self.compress_mode()
     }
 
+    pub fn compress(&self) -> i32 {
+        self.compress_mode()
+    }
+
     pub fn set_compress_mode(&mut self, value: i32) {
         self.compress_mode = value;
+    }
+
+    pub fn set_compress(&mut self, value: i32) {
+        self.set_compress_mode(value);
     }
 
     pub fn base64_flag(&self) -> bool {
@@ -233,6 +241,8 @@ mod tests {
         assert_eq!(handler.sub_path("aux"), "/aux.dat");
 
         assert_eq!(handler.compress_mode(), InOutHandler::COMP_NONE);
+        handler.set_compress(InOutHandler::COMP_GZIP);
+        assert_eq!(handler.compress(), InOutHandler::COMP_GZIP);
         assert!(!handler.base64_flag());
         assert_eq!(InOutHandler::COMP_NONE, 0);
         assert_ne!(InOutHandler::COMP_GZIP, InOutHandler::COMP_NONE);

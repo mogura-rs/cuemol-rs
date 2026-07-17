@@ -218,32 +218,64 @@ impl BfacColoring {
         &self.low_color
     }
 
+    pub fn lowcol(&self) -> &SolidColor {
+        self.low_color()
+    }
+
     pub fn set_low_color(&mut self, value: SolidColor) {
         self.low_color = value;
+    }
+
+    pub fn set_lowcol(&mut self, value: SolidColor) {
+        self.set_low_color(value);
     }
 
     pub fn high_color(&self) -> &SolidColor {
         &self.high_color
     }
 
+    pub fn highcol(&self) -> &SolidColor {
+        self.high_color()
+    }
+
     pub fn set_high_color(&mut self, value: SolidColor) {
         self.high_color = value;
+    }
+
+    pub fn set_highcol(&mut self, value: SolidColor) {
+        self.set_high_color(value);
     }
 
     pub fn low_param(&self) -> f64 {
         self.low_param
     }
 
+    pub fn lowpar(&self) -> f64 {
+        self.low_param()
+    }
+
     pub fn set_low_param(&mut self, value: f64) {
         self.low_param = value;
+    }
+
+    pub fn set_lowpar(&mut self, value: f64) {
+        self.set_low_param(value);
     }
 
     pub fn high_param(&self) -> f64 {
         self.high_param
     }
 
+    pub fn highpar(&self) -> f64 {
+        self.high_param()
+    }
+
     pub fn set_high_param(&mut self, value: f64) {
         self.high_param = value;
+    }
+
+    pub fn set_highpar(&mut self, value: f64) {
+        self.set_high_param(value);
     }
 
     pub fn auto_low_param(&self) -> f64 {
@@ -772,6 +804,10 @@ impl SelectionRenderer {
         self.selection()
     }
 
+    pub fn sel(&self) -> &Selector {
+        self.selection()
+    }
+
     pub fn set_selection_text(&mut self, value: impl Into<String>) -> Result<()> {
         let value = value.into();
         let selection = parse_selector(&value)?;
@@ -934,10 +970,10 @@ pub struct SimpleRenderer {
 impl Default for SimpleRenderer {
     fn default() -> Self {
         Self {
-            line_width: 1.0,
+            line_width: 1.2,
             val_bond: true,
-            vb_scl1: -0.05,
-            vb_scl2: 0.05,
+            vb_scl1: 0.1,
+            vb_scl2: 0.0,
             use_shader: false,
             check_shader_ok: false,
             line_gpu_prim_valid: false,
@@ -967,9 +1003,17 @@ impl SimpleRenderer {
         self.line_width()
     }
 
+    pub fn width(&self) -> f64 {
+        self.line_width()
+    }
+
     pub fn set_line_width(&mut self, value: f64) {
         self.line_width = value;
         self.invalidate_display_cache();
+    }
+
+    pub fn set_width(&mut self, value: f64) {
+        self.set_line_width(value);
     }
 
     pub fn val_bond(&self) -> bool {
@@ -980,9 +1024,17 @@ impl SimpleRenderer {
         self.val_bond()
     }
 
+    pub fn valbond(&self) -> bool {
+        self.val_bond()
+    }
+
     pub fn set_val_bond(&mut self, value: bool) {
         self.val_bond = value;
         self.invalidate_display_cache();
+    }
+
+    pub fn set_valbond(&mut self, value: bool) {
+        self.set_val_bond(value);
     }
 
     pub fn vb_scl1(&self) -> f64 {
@@ -1059,7 +1111,7 @@ pub struct TraceRenderer {
 impl Default for TraceRenderer {
     fn default() -> Self {
         Self {
-            line_width: 1.0,
+            line_width: 1.2,
             piv_atom_name: String::new(),
             display_cache_valid: false,
         }
@@ -1083,9 +1135,17 @@ impl TraceRenderer {
         self.line_width()
     }
 
+    pub fn width(&self) -> f64 {
+        self.line_width()
+    }
+
     pub fn set_line_width(&mut self, value: f64) {
         self.line_width = value;
         self.invalidate_display_cache();
+    }
+
+    pub fn set_width(&mut self, value: f64) {
+        self.set_line_width(value);
     }
 
     pub fn is_hit_test_supported(&self) -> bool {
@@ -1248,19 +1308,34 @@ mod tests {
         );
         assert_eq!(coloring.low_param(), 20.0);
         assert_eq!(coloring.high_param(), 80.0);
+        assert_eq!(coloring.lowcol(), coloring.low_color());
+        assert_eq!(coloring.highcol(), coloring.high_color());
+        assert_eq!(coloring.lowpar(), 20.0);
+        assert_eq!(coloring.highpar(), 80.0);
+
+        let custom_low = SolidColor::from_rgb(0.0, 1.0, 0.0);
+        let custom_high = SolidColor::from_rgb(1.0, 1.0, 0.0);
+        coloring.set_lowcol(custom_low.clone());
+        coloring.set_highcol(custom_high.clone());
+        coloring.set_lowpar(10.0);
+        coloring.set_highpar(90.0);
+        assert_eq!(coloring.low_color(), &custom_low);
+        assert_eq!(coloring.high_color(), &custom_high);
+        assert_eq!(coloring.low_param(), 10.0);
+        assert_eq!(coloring.high_param(), 90.0);
 
         assert_eq!(
-            coloring.color_for_atom(&atom("C", 10.0, 1.0, 0.0)).rgba8(),
+            coloring.color_for_atom(&atom("C", 0.0, 1.0, 0.0)).rgba8(),
             coloring.low_color().rgba8()
         );
         assert_eq!(
-            coloring.color_for_atom(&atom("C", 90.0, 1.0, 0.0)).rgba8(),
+            coloring.color_for_atom(&atom("C", 100.0, 1.0, 0.0)).rgba8(),
             coloring.high_color().rgba8()
         );
         let mid = coloring.color_for_atom(&atom("C", 50.0, 1.0, 0.0)).rgba8();
         assert_eq!(mid.r, 128);
-        assert_eq!(mid.g, 0);
-        assert_eq!(mid.b, 128);
+        assert_eq!(mid.g, 255);
+        assert_eq!(mid.b, 0);
     }
 
     #[test]
@@ -1374,6 +1449,7 @@ mod tests {
         assert!(renderer.is_transparent());
         assert_eq!(renderer.selection_text(), "!*");
         assert_eq!(renderer.selection(), &Selector::None);
+        assert_eq!(renderer.sel(), &Selector::None);
 
         renderer.mark_display_cache_valid();
         assert!(renderer.display_cache_valid());
@@ -1418,15 +1494,17 @@ mod tests {
     fn simple_renderer_defaults_and_accessors_match_reference() {
         let mut renderer = SimpleRenderer::new();
         assert!(renderer.val_bond());
-        assert_eq!(renderer.vb_scl1(), -0.05);
-        assert_eq!(renderer.vb_scl2(), 0.05);
+        assert!(renderer.valbond());
+        assert_eq!(renderer.width(), 1.2);
+        assert_eq!(renderer.vb_scl1(), 0.1);
+        assert_eq!(renderer.vb_scl2(), 0.0);
         assert_eq!(renderer.type_name(), "simple");
         assert!(renderer.is_rend_bond());
         assert!(!renderer.use_shader());
         assert!(!renderer.check_shader_ok());
         assert!(!renderer.line_gpu_prim_valid());
 
-        renderer.set_val_bond(false);
+        renderer.set_valbond(false);
         assert!(!renderer.val_bond());
         renderer.set_val_bond(true);
         assert!(renderer.val_bond());
@@ -1435,7 +1513,7 @@ mod tests {
         assert_eq!(renderer.vb_scl1(), -0.1);
         renderer.set_vb_scl2(0.1);
         assert_eq!(renderer.vb_scl2(), 0.1);
-        renderer.set_line_width(2.5);
+        renderer.set_width(2.5);
         assert_eq!(renderer.line_width(), 2.5);
     }
 
@@ -1443,10 +1521,11 @@ mod tests {
     fn trace_renderer_accessors_match_reference() {
         let mut renderer = TraceRenderer::new();
         assert_eq!(renderer.type_name(), "trace");
+        assert_eq!(renderer.width(), 1.2);
         assert!(renderer.is_hit_test_supported());
         assert_eq!(renderer.piv_atom_name(), "");
 
-        renderer.set_line_width(2.0);
+        renderer.set_width(2.0);
         assert_eq!(renderer.line_width(), 2.0);
         renderer.set_piv_atom_name("CA");
         assert_eq!(renderer.piv_atom_name(), "CA");

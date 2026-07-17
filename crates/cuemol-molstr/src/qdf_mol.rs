@@ -612,12 +612,14 @@ fn read_mol_ext_data(reader: &mut QdfReader, count: usize) -> Result<Option<Cell
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QdfMolFileReader {
     reader: ObjReader,
+    build2ndry: bool,
 }
 
 impl QdfMolFileReader {
     pub fn new() -> Self {
         Self {
             reader: ObjReader::new("qdfmol", "CueMol molecule file (*.qdf)", "*.qdf"),
+            build2ndry: false,
         }
     }
 
@@ -627,6 +629,14 @@ impl QdfMolFileReader {
 
     pub fn create_default_obj(&self) -> MolCoord {
         MolCoord::new()
+    }
+
+    pub fn build2ndry(&self) -> bool {
+        self.build2ndry
+    }
+
+    pub fn set_build2ndry(&mut self, value: bool) {
+        self.build2ndry = value;
     }
 
     pub fn read_bytes(&self, input: &[u8]) -> Result<MolCoord> {
@@ -985,9 +995,12 @@ mod tests {
 
     #[test]
     fn handler_metadata_matches_reference() {
-        let reader = QdfMolFileReader::new();
+        let mut reader = QdfMolFileReader::new();
         assert_eq!(reader.handler().name(), "qdfmol");
         assert_eq!(reader.handler().file_ext(), "*.qdf");
+        assert!(!reader.build2ndry());
+        reader.set_build2ndry(true);
+        assert!(reader.build2ndry());
         let writer = QdfMolFileWriter::new();
         assert_eq!(writer.handler().name(), "qdfmol");
         assert!(writer.can_handle(&MolCoord::new()));

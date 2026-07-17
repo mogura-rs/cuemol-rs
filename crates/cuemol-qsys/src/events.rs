@@ -269,24 +269,48 @@ impl ScrEventManager {
         InDevEvent::INDEV_SHIFT
     }
 
+    pub fn indev_shift(&self) -> i32 {
+        self.get_indev_shift()
+    }
+
     pub fn get_indev_ctrl(&self) -> i32 {
         InDevEvent::INDEV_CTRL
+    }
+
+    pub fn indev_ctrl(&self) -> i32 {
+        self.get_indev_ctrl()
     }
 
     pub fn get_indev_alt(&self) -> i32 {
         InDevEvent::INDEV_ALT
     }
 
+    pub fn indev_alt(&self) -> i32 {
+        self.get_indev_alt()
+    }
+
     pub fn get_indev_lbtn(&self) -> i32 {
         InDevEvent::INDEV_LBTN
+    }
+
+    pub fn indev_lbtn(&self) -> i32 {
+        self.get_indev_lbtn()
     }
 
     pub fn get_indev_mbtn(&self) -> i32 {
         InDevEvent::INDEV_MBTN
     }
 
+    pub fn indev_mbtn(&self) -> i32 {
+        self.get_indev_mbtn()
+    }
+
     pub fn get_indev_rbtn(&self) -> i32 {
         InDevEvent::INDEV_RBTN
+    }
+
+    pub fn indev_rbtn(&self) -> i32 {
+        self.get_indev_rbtn()
     }
 
     pub fn add_listener(&mut self, callback: Rc<dyn LScrCallBack>) -> i32 {
@@ -1023,6 +1047,13 @@ mod tests {
         assert_eq!(ScrEventManager::SEM_VIEW, 0x0020);
         assert_eq!(ScrEventManager::SEM_PROPCHG, 3);
         assert_eq!(ScrEventManager::SEM_CHANGED, 4);
+        let manager = ScrEventManager::new();
+        assert_eq!(manager.indev_shift(), InDevEvent::INDEV_SHIFT);
+        assert_eq!(manager.indev_ctrl(), InDevEvent::INDEV_CTRL);
+        assert_eq!(manager.indev_alt(), InDevEvent::INDEV_ALT);
+        assert_eq!(manager.indev_lbtn(), InDevEvent::INDEV_LBTN);
+        assert_eq!(manager.indev_mbtn(), InDevEvent::INDEV_MBTN);
+        assert_eq!(manager.indev_rbtn(), InDevEvent::INDEV_RBTN);
     }
 
     #[test]

@@ -1,7 +1,10 @@
 use cuemol_core::{type_consts, Vector4};
 use std::cell::Cell;
 
-use crate::draw_attr::{AbstDrawElem, DrawAttrElems};
+use crate::{
+    draw_attr::{AbstDrawElem, DrawAttrArray, DrawAttrElems},
+    AbstractColor, DisplayContext, PixelBuffer,
+};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -74,6 +77,30 @@ pub type SphElemAry32 = DrawAttrElems<u32, SphElem>;
 pub type CylElemAry32 = DrawAttrElems<u32, CylElem>;
 pub type TrigMesh = DrawAttrElems<u32, TrigVertAttr>;
 pub type LineArray = DrawAttrElems<u32, LineElem>;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PixVertAttr {
+    pub x: f32,
+    pub y: f32,
+    pub tx: f32,
+    pub ty: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PixDrawParams {
+    pub frag_alpha: f32,
+    pub padding1: [f32; 3],
+    pub position: [f32; 3],
+    pub padding2: f32,
+    pub size: [f32; 2],
+    pub viewport_size: [f32; 2],
+    pub color_bias: [f32; 3],
+    pub padding3: f32,
+}
+
+pub type PixQuad = DrawAttrArray<PixVertAttr>;
 
 const DSPS: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]];
 
@@ -333,13 +360,29 @@ impl CylinderGpuPrim {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TrigGpuPrim {
     initialized: bool,
     draw_elem: Option<TrigMesh>,
     edge_line_type: i32,
+    polygon_mode: i32,
+    face_count: usize,
     no_depth: bool,
     draw_count: Cell<usize>,
+}
+
+impl Default for TrigGpuPrim {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            draw_elem: None,
+            edge_line_type: 0,
+            polygon_mode: 2,
+            face_count: 0,
+            no_depth: false,
+            draw_count: Cell::new(0),
+        }
+    }
 }
 
 impl TrigGpuPrim {
@@ -356,11 +399,15 @@ impl TrigGpuPrim {
         self.initialized = true;
         let mut data = TrigMesh::new();
         data.alloc(nverts);
-        data.alloc_ind(nfaces * 3);
-        data.base_mut()
-            .draw_elem_mut()
-            .set_draw_mode(AbstDrawElem::DRAW_TRIANGLES);
+        let wireframe = self.polygon_mode == 1;
+        data.alloc_ind(nfaces * if wireframe { 6 } else { 3 });
+        data.base_mut().draw_elem_mut().set_draw_mode(if wireframe {
+            AbstDrawElem::DRAW_LINES
+        } else {
+            AbstDrawElem::DRAW_TRIANGLES
+        });
         setup_trig_attrs(&mut data);
+        self.face_count = nfaces;
         self.draw_elem = Some(data);
     }
 
@@ -373,9 +420,7 @@ impl TrigGpuPrim {
     }
 
     pub fn face_size(&self) -> usize {
-        self.draw_elem
-            .as_ref()
-            .map_or(0, |data| data.ind_size() / 3)
+        self.draw_elem.as_ref().map_or(0, |_| self.face_count)
     }
 
     pub fn data(&self) -> Option<&TrigMesh> {
@@ -422,6 +467,16 @@ impl TrigGpuPrim {
             .draw_elem
             .as_mut()
             .expect("triangle primitive is not allocated");
+        if self.polygon_mode == 1 {
+            let offset = index * 6;
+            *data.at_ind_mut(offset) = v1;
+            *data.at_ind_mut(offset + 1) = v2;
+            *data.at_ind_mut(offset + 2) = v2;
+            *data.at_ind_mut(offset + 3) = v3;
+            *data.at_ind_mut(offset + 4) = v3;
+            *data.at_ind_mut(offset + 5) = v1;
+            return;
+        }
         *data.at_ind_mut(index * 3) = v1;
         *data.at_ind_mut(index * 3 + 1) = v2;
         *data.at_ind_mut(index * 3 + 2) = v3;
@@ -433,6 +488,14 @@ impl TrigGpuPrim {
 
     pub fn set_edge_line_type(&mut self, value: i32) {
         self.edge_line_type = value;
+    }
+
+    pub fn polygon_mode(&self) -> i32 {
+        self.polygon_mode
+    }
+
+    pub fn set_polygon_mode(&mut self, value: i32) {
+        self.polygon_mode = value;
     }
 
     pub fn is_no_depth(&self) -> bool {
@@ -461,6 +524,7 @@ impl TrigGpuPrim {
 
     pub fn invalidate(&mut self) {
         self.draw_elem = None;
+        self.face_count = 0;
     }
 }
 
@@ -603,6 +667,146 @@ impl LineGpuPrim {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct PixGpuPrim {
+    initialized: bool,
+    draw_elem: Option<PixQuad>,
+    last_draw_params: Option<PixDrawParams>,
+    draw_count: Cell<usize>,
+}
+
+impl PixGpuPrim {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn init(&mut self) -> bool {
+        if self.initialized {
+            return true;
+        }
+        let mut data = PixQuad::new();
+        data.base_mut().set_attr_size(2);
+        data.base_mut().set_attr_info(
+            0,
+            0,
+            2,
+            type_consts::QTC_FLOAT32,
+            std::mem::offset_of!(PixVertAttr, x) as i32,
+        );
+        data.base_mut().set_attr_info(
+            1,
+            1,
+            2,
+            type_consts::QTC_FLOAT32,
+            std::mem::offset_of!(PixVertAttr, tx) as i32,
+        );
+        data.alloc(4);
+        data.base_mut()
+            .draw_elem_mut()
+            .set_draw_mode(AbstDrawElem::DRAW_TRIANGLE_STRIP);
+        data.assign_elems([
+            PixVertAttr {
+                x: 0.0,
+                y: 1.0,
+                tx: 0.0,
+                ty: 1.0,
+            },
+            PixVertAttr {
+                x: 0.0,
+                y: 0.0,
+                tx: 0.0,
+                ty: 0.0,
+            },
+            PixVertAttr {
+                x: 1.0,
+                y: 1.0,
+                tx: 1.0,
+                ty: 1.0,
+            },
+            PixVertAttr {
+                x: 1.0,
+                y: 0.0,
+                tx: 1.0,
+                ty: 0.0,
+            },
+        ]);
+        self.draw_elem = Some(data);
+        self.initialized = true;
+        true
+    }
+
+    pub fn draw_pixels(
+        &mut self,
+        context: &DisplayContext,
+        position: Vector4,
+        pixel_buffer: &PixelBuffer,
+        color: Option<&dyn AbstractColor>,
+    ) -> bool {
+        let viewport = context.viewport();
+        self.draw_pixels_with_viewport(
+            context,
+            position,
+            pixel_buffer,
+            color,
+            [viewport.z as f32, viewport.w as f32],
+        )
+    }
+
+    pub fn draw_pixels_with_viewport(
+        &mut self,
+        context: &DisplayContext,
+        position: Vector4,
+        pixel_buffer: &PixelBuffer,
+        color: Option<&dyn AbstractColor>,
+        viewport_size: [f32; 2],
+    ) -> bool {
+        if !self.initialized {
+            self.init();
+        }
+        if pixel_buffer.rep_handle().is_none() || viewport_size[0] <= 0.0 || viewport_size[1] <= 0.0
+        {
+            return false;
+        }
+        let color = color.map_or([1.0; 3], |value| {
+            [value.fr() as f32, value.fg() as f32, value.fb() as f32]
+        });
+        self.last_draw_params = Some(PixDrawParams {
+            frag_alpha: context.alpha() as f32,
+            padding1: [0.0; 3],
+            position: [position.x as f32, position.y as f32, position.z as f32],
+            padding2: 0.0,
+            size: [pixel_buffer.width() as f32, pixel_buffer.height() as f32],
+            viewport_size,
+            color_bias: color,
+            padding3: 0.0,
+        });
+        self.draw_count.set(self.draw_count.get() + 1);
+        true
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.initialized && self.draw_elem.is_some()
+    }
+
+    pub fn data(&self) -> Option<&PixQuad> {
+        self.draw_elem.as_ref()
+    }
+
+    pub fn last_draw_params(&self) -> Option<&PixDrawParams> {
+        self.last_draw_params.as_ref()
+    }
+
+    pub fn draw_count(&self) -> usize {
+        self.draw_count.get()
+    }
+
+    pub fn invalidate(&mut self) {
+        self.initialized = false;
+        self.draw_elem = None;
+        self.last_draw_params = None;
+    }
+}
+
 fn set_quad_indices<T: Default + Clone>(data: &mut DrawAttrElems<u32, T>, base: usize, ind: usize) {
     *data.at_ind_mut(ind) = base as u32;
     *data.at_ind_mut(ind + 1) = (base + 1) as u32;
@@ -685,4 +889,55 @@ fn split_devcode(devcode: u32) -> (u8, u8, u8, u8) {
         (devcode & 0xff) as u8,
         ((devcode >> 24) & 0xff) as u8,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SolidColor;
+
+    #[test]
+    fn pixel_primitive_builds_reference_quad_and_draw_parameters() {
+        assert_eq!(std::mem::size_of::<PixDrawParams>(), 64);
+        let mut primitive = PixGpuPrim::new();
+        assert!(primitive.init());
+        let quad = primitive.data().unwrap();
+        assert_eq!(quad.size(), 4);
+        assert_eq!(
+            quad.base().draw_elem().draw_mode(),
+            AbstDrawElem::DRAW_TRIANGLE_STRIP
+        );
+        assert_eq!(
+            *quad.at(0),
+            PixVertAttr {
+                x: 0.0,
+                y: 1.0,
+                tx: 0.0,
+                ty: 1.0,
+            }
+        );
+
+        let mut context = DisplayContext::new();
+        context.set_alpha(0.75);
+        context.set_viewport(Vector4::new4(0.0, 0.0, 800.0, 600.0));
+        let mut buffer = PixelBuffer::new();
+        buffer.set_width(10);
+        buffer.set_height(4);
+        assert!(!primitive.draw_pixels(&context, Vector4::ZERO, &buffer, None));
+        buffer.set_rep_handle(Some(1));
+        let color = SolidColor::from_rgb_u8(64, 128, 255);
+        assert!(primitive.draw_pixels(
+            &context,
+            Vector4::new3(1.0, 2.0, 3.0),
+            &buffer,
+            Some(&color),
+        ));
+        let params = primitive.last_draw_params().unwrap();
+        assert_eq!(params.frag_alpha, 0.75);
+        assert_eq!(params.position, [1.0, 2.0, 3.0]);
+        assert_eq!(params.size, [10.0, 4.0]);
+        assert_eq!(params.viewport_size, [800.0, 600.0]);
+        assert_eq!(params.color_bias, [64.0 / 255.0, 128.0 / 255.0, 1.0]);
+        assert_eq!(primitive.draw_count(), 1);
+    }
 }

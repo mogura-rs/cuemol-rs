@@ -112,8 +112,16 @@ impl MolRenderer {
         self.selection()
     }
 
+    pub fn sel(&self) -> &Selector {
+        self.selection()
+    }
+
     pub fn set_selection(&mut self, value: Selector) {
         self.selection = value;
+    }
+
+    pub fn set_sel(&mut self, value: Selector) {
+        self.set_selection(value);
     }
 
     pub fn coloring(&self) -> &SolidColoring {
@@ -128,6 +136,10 @@ impl MolRenderer {
         self.coloring = value;
     }
 
+    pub fn set_coloring(&mut self, value: SolidColoring) {
+        self.set_col_schm(value);
+    }
+
     pub fn default_color(&self) -> &SolidColor {
         &self.default_color
     }
@@ -136,8 +148,16 @@ impl MolRenderer {
         self.default_color()
     }
 
+    pub fn defaultcolor(&self) -> &SolidColor {
+        self.default_color()
+    }
+
     pub fn set_default_color(&mut self, value: SolidColor) {
         self.default_color = value;
+    }
+
+    pub fn set_defaultcolor(&mut self, value: SolidColor) {
+        self.set_default_color(value);
     }
 
     pub fn qsc_attr(&self, name: &str) -> Option<&str> {
@@ -2603,7 +2623,7 @@ mod tests {
             "ATOM      1  CA  ALA A   1       1.000   2.000   3.000  0.50 12.00\nATOM      2  CB  ALA A   1       4.000   5.000   6.000  1.00 20.00\n",
         )
         .unwrap();
-        let renderer = MolRenderer {
+        let mut renderer = MolRenderer {
             uid: Uid::new(7),
             name: "simple".to_string(),
             renderer_type: "simple".to_string(),
@@ -2614,6 +2634,14 @@ mod tests {
             coloring: SolidColoring::new(),
             default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
         };
+        renderer.set_sel(crate::parse_selector("name CA").unwrap());
+        assert_eq!(renderer.sel(), &crate::parse_selector("name CA").unwrap());
+        renderer.set_coloring(SolidColoring::new());
+        assert_eq!(renderer.coloring().type_name(), "SolidColoring");
+        assert_eq!(renderer.defaultcolor(), renderer.default_color());
+        let default_color = SolidColor::from_rgb(0.25, 0.5, 0.75);
+        renderer.set_defaultcolor(default_color.clone());
+        assert_eq!(renderer.default_color(), &default_color);
         let mut context = cuemol_gfx::HittestContext::new();
         context.add_hit(renderer.uid(), 0.2, vec![1]);
         let mut hit_data = cuemol_gfx::HitData::new();

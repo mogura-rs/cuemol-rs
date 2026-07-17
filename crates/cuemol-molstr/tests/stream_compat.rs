@@ -545,11 +545,13 @@ fn stream_manager_async_load_buffers_supplied_chunks() {
     let reader = "pdb";
     let id1 = manager.load_object_async(&reader);
     let id2 = manager.load_object_async(&reader);
+    let id3 = manager.load_object_async(&reader);
     assert!(id1 > 0);
     assert!(id2 > id1);
+    assert!(id3 > id2);
     let pdb = b"ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00\n";
-    assert!(manager.supply_data_async(id1, &pdb[..20]));
-    assert!(manager.supply_data_async(id1, &pdb[20..]));
+    assert!(manager.supply_data_async(id1, &pdb[..20], 20));
+    assert!(manager.supply_data_async(id1, &pdb[20..], (pdb.len() - 20) as i32));
     assert_eq!(manager.async_load(id1).unwrap().byte_len(), pdb.len());
 
     let loaded = manager.wait_load_async(id1).unwrap();
@@ -563,9 +565,16 @@ fn stream_manager_async_load_buffers_supplied_chunks() {
     );
     assert!(manager.async_load(id1).is_none());
     assert!(manager.wait_load_async(99999).is_none());
-    assert!(!manager.supply_data_async(99999, b"ignored"));
-    assert!(manager.supply_data_async(id2, pdb));
+    assert!(!manager.supply_data_async(99999, b"ignored", 7));
+    assert!(manager.supply_data_async(id2, pdb, pdb.len() as i32));
     assert!(manager.wait_load_object_async(id2).unwrap().is_some());
+    assert!(!manager.supply_data_async(id3, b"abcdef", -1));
+    assert!(!manager.supply_data_async(id3, b"abcdef", 7));
+    assert!(manager.supply_data_async(id3, b"abcdef", 3));
+    assert_eq!(
+        manager.wait_load_bytes_async(id3).unwrap().as_bytes(),
+        b"abc"
+    );
 }
 
 #[test]
@@ -574,7 +583,7 @@ fn stream_manager_async_load_preserves_extension_crate_inputs() {
     let reader = "gro";
     let id = manager.load_object_async(&reader);
     let input = b"sample\n1\n    1WAT     OW    1   0.000   0.000   0.000\n1 1 1\n";
-    assert!(manager.supply_data_async(id, input));
+    assert!(manager.supply_data_async(id, input, input.len() as i32));
     let loaded = manager.wait_load_object_async(id).unwrap().unwrap();
     let cuemol_molstr::AsyncLoadedObject::Buffered { reader_type, data } = loaded else {
         panic!("expected buffered extension input")

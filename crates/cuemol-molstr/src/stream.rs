@@ -337,15 +337,28 @@ impl StreamManager {
         id
     }
 
-    pub fn supply_data_async(&mut self, load_id: i32, data: &[u8]) -> bool {
+    pub fn supply_data_async(&mut self, load_id: i32, data: &[u8], data_len: i32) -> bool {
         let Some(task) = self.async_loads.get_mut(&load_id) else {
             return false;
         };
         if task.eos {
             return false;
         }
+        let Ok(data_len) = usize::try_from(data_len) else {
+            return false;
+        };
+        let Some(data) = data.get(..data_len) else {
+            return false;
+        };
         task.data.extend_from_slice(data);
         true
+    }
+
+    pub fn supply_all_data_async(&mut self, load_id: i32, data: &[u8]) -> bool {
+        let Ok(data_len) = i32::try_from(data.len()) else {
+            return false;
+        };
+        self.supply_data_async(load_id, data, data_len)
     }
 
     pub fn wait_load_bytes_async(&mut self, load_id: i32) -> Option<ByteArray> {

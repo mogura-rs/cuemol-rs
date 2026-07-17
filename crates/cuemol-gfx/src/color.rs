@@ -1,4 +1,5 @@
 use cuemol_core::{CueMolError, Result, Vector4};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColorBase {
@@ -164,12 +165,12 @@ impl SolidColor {
         self.code()
     }
 
-    pub fn get_dev_code(&self, _context_id: u64) -> u32 {
-        self.code()
+    pub fn get_dev_code(&self, context_id: u64) -> u32 {
+        apply_device_transform(context_id, self.code())
     }
 
-    pub fn is_in_gamut(&self, _context_id: u64) -> bool {
-        true
+    pub fn is_in_gamut(&self, context_id: u64) -> bool {
+        device_color_is_in_gamut(context_id, self.code())
     }
 
     pub fn set_code(&mut self, code: u32) {
@@ -309,6 +310,10 @@ pub trait AbstractColor {
     fn material(&self) -> String;
     fn to_color_string(&self) -> String;
 
+    fn to_string(&self) -> String {
+        self.to_color_string()
+    }
+
     fn fr(&self) -> f64 {
         f64::from(self.r()) / 255.0
     }
@@ -325,17 +330,87 @@ pub trait AbstractColor {
         f64::from(self.a()) / 255.0
     }
 
-    fn get_dev_code(&self, _context_id: u64) -> u32 {
-        self.code()
+    fn get_dev_code(&self, context_id: u64) -> u32 {
+        apply_device_transform(context_id, self.code())
     }
 
-    fn is_in_gamut(&self, _context_id: u64) -> bool {
-        true
+    fn is_in_gamut(&self, context_id: u64) -> bool {
+        device_color_is_in_gamut(context_id, self.code())
     }
 
     fn get_material(&self) -> String {
         self.material()
     }
+
+    fn is_named_color(&self) -> bool {
+        false
+    }
+}
+
+pub type ColorPtr = Arc<dyn AbstractColor + Send + Sync>;
+
+pub trait NamedColorResolver: Send + Sync {
+    fn get_color(&self, name: &str, context_id: u64) -> Option<ColorPtr>;
+    fn context_id(&self) -> u64;
+    fn make_cache(&self) -> u64;
+    fn is_cached(&self, cache_id: u64) -> bool;
+    fn set_cached(&self, cache_id: u64, cached: bool);
+    fn invalidate_cache(&self);
+}
+
+#[derive(Default)]
+struct NamedColorResolverSlot {
+    generation: u64,
+    resolver: Option<Arc<dyn NamedColorResolver>>,
+}
+
+static NAMED_COLOR_RESOLVER: OnceLock<RwLock<NamedColorResolverSlot>> = OnceLock::new();
+
+fn named_color_resolver_slot() -> &'static RwLock<NamedColorResolverSlot> {
+    NAMED_COLOR_RESOLVER.get_or_init(|| RwLock::new(NamedColorResolverSlot::default()))
+}
+
+pub fn set_named_color_resolver(
+    resolver: Option<Arc<dyn NamedColorResolver>>,
+) -> Option<Arc<dyn NamedColorResolver>> {
+    let mut slot = named_color_resolver_slot()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    slot.generation = slot.generation.wrapping_add(1);
+    std::mem::replace(&mut slot.resolver, resolver)
+}
+
+pub fn named_color_resolver() -> Option<Arc<dyn NamedColorResolver>> {
+    named_color_resolver_slot()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .resolver
+        .clone()
+}
+
+pub fn invalidate_named_color_cache() {
+    if let Some(resolver) = named_color_resolver() {
+        resolver.invalidate_cache();
+    }
+}
+
+fn current_named_color_resolver() -> (u64, Option<Arc<dyn NamedColorResolver>>) {
+    let slot = named_color_resolver_slot()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (slot.generation, slot.resolver.clone())
+}
+
+fn apply_device_transform(context_id: u64, code: u32) -> u32 {
+    crate::cms::global_color_profile_manager()
+        .lock()
+        .map_or(code, |manager| manager.do_xform(context_id, code))
+}
+
+fn device_color_is_in_gamut(context_id: u64, code: u32) -> bool {
+    crate::cms::global_color_profile_manager()
+        .lock()
+        .map_or(true, |manager| manager.is_in_gamut(context_id, code))
 }
 
 impl AbstractColor for SolidColor {
@@ -368,14 +443,80 @@ impl AbstractColor for SolidColor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+const INVALID_COLOR_CACHE_ID: u64 = u64::MAX;
+
+struct NamedColorCache {
+    generation: u64,
+    cache_id: u64,
+    referenced: Option<ColorPtr>,
+}
+
+impl Default for NamedColorCache {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            cache_id: INVALID_COLOR_CACHE_ID,
+            referenced: None,
+        }
+    }
+}
+
 pub struct NamedColor {
     name: String,
+    context_id: u64,
     material: String,
     alpha: f64,
     mod_h: f64,
     mod_s: f64,
     mod_b: f64,
+    cache: Mutex<NamedColorCache>,
+}
+
+impl std::fmt::Debug for NamedColor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NamedColor")
+            .field("name", &self.name)
+            .field("context_id", &self.context_id)
+            .field("material", &self.material)
+            .field("alpha", &self.alpha)
+            .field("mod_h", &self.mod_h)
+            .field("mod_s", &self.mod_s)
+            .field("mod_b", &self.mod_b)
+            .finish()
+    }
+}
+
+impl Clone for NamedColor {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            context_id: self.context_id,
+            material: self.material.clone(),
+            alpha: self.alpha,
+            mod_h: self.mod_h,
+            mod_s: self.mod_s,
+            mod_b: self.mod_b,
+            cache: Mutex::new(NamedColorCache::default()),
+        }
+    }
+}
+
+impl PartialEq for NamedColor {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.context_id == other.context_id
+            && self.material == other.material
+            && self.alpha == other.alpha
+            && self.mod_h == other.mod_h
+            && self.mod_s == other.mod_s
+            && self.mod_b == other.mod_b
+    }
+}
+
+impl Drop for NamedColor {
+    fn drop(&mut self) {
+        self.release_cache();
+    }
 }
 
 impl Default for NamedColor {
@@ -388,17 +529,28 @@ impl NamedColor {
     pub fn new() -> Self {
         Self {
             name: String::new(),
+            context_id: u64::MAX,
             material: String::new(),
             alpha: -1.0,
             mod_h: 0.0,
             mod_s: 0.0,
             mod_b: 0.0,
+            cache: Mutex::new(NamedColorCache::default()),
         }
     }
 
     pub fn from_name(name: impl Into<String>) -> Self {
         let mut color = Self::new();
         color.name = name.into();
+        color.context_id =
+            named_color_resolver().map_or(u64::MAX, |resolver| resolver.context_id());
+        color
+    }
+
+    pub fn from_name_in_context(name: impl Into<String>, context_id: u64) -> Self {
+        let mut color = Self::new();
+        color.name = name.into();
+        color.context_id = context_id;
         color
     }
 
@@ -411,7 +563,17 @@ impl NamedColor {
     }
 
     pub fn set_name(&mut self, value: impl Into<String>) {
+        self.release_cache();
         self.name = value.into();
+    }
+
+    pub fn context_id(&self) -> u64 {
+        self.context_id
+    }
+
+    pub fn set_context_id(&mut self, value: u64) {
+        self.release_cache();
+        self.context_id = value;
     }
 
     pub fn material(&self) -> &str {
@@ -495,8 +657,9 @@ impl NamedColor {
     }
 
     pub fn resolved_color(&self) -> SolidColor {
-        let base =
-            named_color(&self.name).unwrap_or_else(|| SolidColor::from_rgba(0.5, 0.5, 0.5, 0.5));
+        let referenced = self.resolved_reference();
+        let mut base = SolidColor::from_code(referenced.code());
+        base.set_material(referenced.material());
         apply_color_overrides(
             base,
             self.material.clone(),
@@ -507,6 +670,70 @@ impl NamedColor {
         )
     }
 
+    fn resolved_reference(&self) -> ColorPtr {
+        let (generation, resolver) = current_named_color_resolver();
+        if let Some(resolver) = resolver.as_ref() {
+            let cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if cache.generation == generation
+                && cache.cache_id != INVALID_COLOR_CACHE_ID
+                && resolver.is_cached(cache.cache_id)
+            {
+                if let Some(referenced) = cache.referenced.as_ref() {
+                    return Arc::clone(referenced);
+                }
+            }
+        }
+
+        let referenced: ColorPtr = if let Some(resolver) = resolver.as_ref() {
+            resolver
+                .get_color(&self.name, self.context_id)
+                .filter(|color| !color.is_named_color())
+                .unwrap_or_else(|| Arc::new(SolidColor::from_rgba(0.5, 0.5, 0.5, 0.5)))
+        } else {
+            Arc::new(
+                named_color(&self.name)
+                    .unwrap_or_else(|| SolidColor::from_rgba(0.5, 0.5, 0.5, 0.5)),
+            )
+        };
+
+        if let Some(resolver) = resolver {
+            let mut cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cache_id =
+                if cache.generation == generation && cache.cache_id != INVALID_COLOR_CACHE_ID {
+                    resolver.set_cached(cache.cache_id, true);
+                    cache.cache_id
+                } else {
+                    resolver.make_cache()
+                };
+            *cache = NamedColorCache {
+                generation,
+                cache_id,
+                referenced: Some(Arc::clone(&referenced)),
+            };
+        }
+        referenced
+    }
+
+    fn release_cache(&mut self) {
+        let cache = self
+            .cache
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (generation, resolver) = current_named_color_resolver();
+        if cache.generation == generation && cache.cache_id != INVALID_COLOR_CACHE_ID {
+            if let Some(resolver) = resolver {
+                resolver.set_cached(cache.cache_id, false);
+            }
+        }
+        *cache = NamedColorCache::default();
+    }
+
     pub fn code(&self) -> u32 {
         self.resolved_color().code()
     }
@@ -515,12 +742,12 @@ impl NamedColor {
         self.code()
     }
 
-    pub fn get_dev_code(&self, _context_id: u64) -> u32 {
-        self.code()
+    pub fn get_dev_code(&self, context_id: u64) -> u32 {
+        apply_device_transform(context_id, self.code())
     }
 
-    pub fn is_in_gamut(&self, _context_id: u64) -> bool {
-        true
+    pub fn is_in_gamut(&self, context_id: u64) -> bool {
+        device_color_is_in_gamut(context_id, self.code())
     }
 
     pub fn to_color_string(&self) -> String {
@@ -569,6 +796,10 @@ impl AbstractColor for NamedColor {
 
     fn to_color_string(&self) -> String {
         self.to_color_string()
+    }
+
+    fn is_named_color(&self) -> bool {
+        true
     }
 }
 
@@ -697,12 +928,12 @@ impl MolColorRef {
         self.code()
     }
 
-    pub fn get_dev_code(&self, _context_id: u64) -> u32 {
-        self.code()
+    pub fn get_dev_code(&self, context_id: u64) -> u32 {
+        apply_device_transform(context_id, self.code())
     }
 
-    pub fn is_in_gamut(&self, _context_id: u64) -> bool {
-        true
+    pub fn is_in_gamut(&self, context_id: u64) -> bool {
+        device_color_is_in_gamut(context_id, self.code())
     }
 
     pub fn to_color_string(&self) -> String {
@@ -880,12 +1111,12 @@ impl GradientColor {
         self.code()
     }
 
-    pub fn get_dev_code(&self, _context_id: u64) -> u32 {
-        self.code()
+    pub fn get_dev_code(&self, context_id: u64) -> u32 {
+        apply_device_transform(context_id, self.code())
     }
 
-    pub fn is_in_gamut(&self, _context_id: u64) -> bool {
-        true
+    pub fn is_in_gamut(&self, context_id: u64) -> bool {
+        device_color_is_in_gamut(context_id, self.code())
     }
 
     pub fn material(&self) -> &str {
@@ -1354,7 +1585,66 @@ fn format_real(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::BTreeSet,
+        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    };
+
     use super::*;
+
+    struct TestNamedColorResolver {
+        color: Mutex<SolidColor>,
+        next_cache_id: AtomicU64,
+        cached: Mutex<BTreeSet<u64>>,
+        resolve_count: AtomicUsize,
+    }
+
+    impl TestNamedColorResolver {
+        fn new(color: SolidColor) -> Self {
+            Self {
+                color: Mutex::new(color),
+                next_cache_id: AtomicU64::new(0),
+                cached: Mutex::new(BTreeSet::new()),
+                resolve_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl NamedColorResolver for TestNamedColorResolver {
+        fn get_color(&self, name: &str, _context_id: u64) -> Option<ColorPtr> {
+            self.resolve_count.fetch_add(1, Ordering::SeqCst);
+            (name == "accent").then(|| {
+                let color = self.color.lock().unwrap().clone();
+                Arc::new(color) as ColorPtr
+            })
+        }
+
+        fn context_id(&self) -> u64 {
+            42
+        }
+
+        fn make_cache(&self) -> u64 {
+            let id = self.next_cache_id.fetch_add(1, Ordering::SeqCst) + 1;
+            self.cached.lock().unwrap().insert(id);
+            id
+        }
+
+        fn is_cached(&self, cache_id: u64) -> bool {
+            self.cached.lock().unwrap().contains(&cache_id)
+        }
+
+        fn set_cached(&self, cache_id: u64, cached: bool) {
+            if cached {
+                self.cached.lock().unwrap().insert(cache_id);
+            } else {
+                self.cached.lock().unwrap().remove(&cache_id);
+            }
+        }
+
+        fn invalidate_cache(&self) {
+            self.cached.lock().unwrap().clear();
+        }
+    }
 
     #[test]
     fn accepts_cuemol_color_syntax_representatives() {
@@ -1409,6 +1699,33 @@ mod tests {
         assert_eq!(color.modifiers[1].name, "alpha");
         assert_eq!(color.modifiers[1].value.as_number(), Some(0.5));
         assert_eq!(color.rgba8().unwrap().a, 128);
+    }
+
+    #[test]
+    fn named_color_resolver_cache_and_invalidation_match_reference() {
+        let resolver = Arc::new(TestNamedColorResolver::new(SolidColor::from_rgb_u8(
+            255, 0, 0,
+        )));
+        let previous = set_named_color_resolver(Some(resolver.clone()));
+        {
+            let color = NamedColor::from_name("accent");
+            assert_eq!(color.context_id(), 42);
+            assert_eq!(color.code(), 0xffff_0000);
+            assert_eq!(color.code(), 0xffff_0000);
+            assert_eq!(resolver.resolve_count.load(Ordering::SeqCst), 1);
+
+            *resolver.color.lock().unwrap() = SolidColor::from_rgb_u8(0, 0, 255);
+            assert_eq!(color.code(), 0xffff_0000);
+            invalidate_named_color_cache();
+            assert_eq!(color.code(), 0xff00_00ff);
+            assert_eq!(resolver.resolve_count.load(Ordering::SeqCst), 2);
+
+            let cloned = color.clone();
+            assert_eq!(cloned.code(), 0xff00_00ff);
+            assert_eq!(resolver.resolve_count.load(Ordering::SeqCst), 3);
+        }
+        assert!(resolver.cached.lock().unwrap().is_empty());
+        set_named_color_resolver(previous);
     }
 
     #[test]

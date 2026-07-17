@@ -8,21 +8,36 @@ only.
 
 ## Current workspace
 
-- `cuemol-core`: shared error, math, range, scene, ByteArray, and process primitives
-- `cuemol-gfx`: color syntax parser and GenericCMYK proof-compatible cases
-- `cuemol-molstr`: molecule model, PDB/QDF-PDB/mmCIF/SDF/MOL2/OpenDX/Xplor/CCP4/BRIX readers, gzip/bzip2/xz input helpers, selection parser, and QSC scene facade
-- `cuemol-mdtools`: GRO, NAMD coordinate, AMBER topology/restart/mdcrd, and PSF topology readers
-- `cuemol-xtal`: DensityMap model, map renderers, and MTZ/map reader facades
-- `cuemol-render`: rendering abstraction and headless backend
-- `cuemol-desktop`: desktop scene state facade for molecule and density map loading
+- `cuemol-core`: errors, math, ranges, processes, streams, and shared primitives
+- `cuemol-gfx`: colors, meshes, shaders, materials, hit testing, text, and GPU primitives
+- `cuemol-qsys`: scenes, views, cameras, renderers, commands, styles, events, and I/O
+- `cuemol-molstr`: molecular models, selections, readers/writers, and renderers
+- `cuemol-importers`: external molecular-data import facades
+- `cuemol-molvis`: interaction, measurement, label, and molecular renderers
+- `cuemol-surface`: molecular-surface and grid-surface generation
+- `cuemol-symm`: crystallographic symmetry operations
+- `cuemol-xtal`: density maps, crystallographic readers, and map renderers
+- `cuemol-molanl`: molecular analysis, RMSD, and structural superposition
+- `cuemol-anim`: scene, camera, property, and renderer animation
+- `cuemol-mdtools`: GRO, NAMD, AMBER, and PSF readers
+- `cuemol-lwview`: lightweight scene viewer
+- `cuemol-molclient`: molecular client facade
+- `cuemol-render`: render snapshots, GPU/headless backends, and ray tracing
+- `cuemol-desktop-core`: shared desktop application state and offscreen rendering
+- `cuemol-desktop`: GPUI desktop application
 - `cuemol-cli`: command-line validation utility
-- `cuemol-node`: Node binding-facing facade for selection/color/PDB/stream entry points
-- `cuemol-py`: Python bridge/facade for script execution plus selection/color/PDB/stream entry points
+- `cuemol-node`: Node.js binding facade
+- `cuemol-py`: Python binding facade
+
+The Dioxus desktop frontend is maintained in the excluded
+`crates/cuemol-desktop-dioxus` package and is checked separately.
 
 ## Development
 
 ```sh
-cargo test --workspace
+cargo test --workspace --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features
+cargo check --manifest-path crates/cuemol-desktop-dioxus/Cargo.toml --all-targets
 cargo run -p cuemol-cli -- select-dump "chain A and elem C"
 cargo run -p cuemol-cli -- pdb-info ../cuemol2/tests/test_data/1CRN.pdb
 cargo run -p cuemol-cli -- qdfpdb-info example.qdfpdb

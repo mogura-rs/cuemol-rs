@@ -1,5 +1,7 @@
-use cuemol_core::Uid;
+use cuemol_core::{CueMolError, Result, Uid, Vector4};
 use std::collections::BTreeMap;
+
+use crate::DisplayContext;
 
 pub trait RawHitData {
     fn data_size(&self, renderer_id: Uid) -> usize;
@@ -13,9 +15,57 @@ pub struct HitRecord {
     pub names: Vec<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HitPoint {
+    pub position: Vector4,
+    pub id: i32,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
+pub struct HittestList {
+    points: Vec<HitPoint>,
+}
+
+impl HittestList {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn draw_point_hit(&mut self, id: i32, mut position: Vector4) {
+        position.w = 1.0;
+        self.points.push(HitPoint { position, id });
+    }
+
+    pub fn points(&self) -> &[HitPoint] {
+        &self.points
+    }
+
+    pub fn clear(&mut self) {
+        self.points.clear();
+    }
+
+    pub fn is_display_list(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct HittestContext {
     records: Vec<HitRecord>,
+    context: DisplayContext,
+    names: Vec<i32>,
+    current_renderer_id: Option<Uid>,
+}
+
+impl Default for HittestContext {
+    fn default() -> Self {
+        Self {
+            records: Vec::new(),
+            context: DisplayContext::new(),
+            names: vec![-1],
+            current_renderer_id: None,
+        }
+    }
 }
 
 impl HittestContext {
@@ -33,6 +83,70 @@ impl HittestContext {
 
     pub fn records(&self) -> &[HitRecord] {
         &self.records
+    }
+
+    pub fn context(&self) -> &DisplayContext {
+        &self.context
+    }
+
+    pub fn context_mut(&mut self) -> &mut DisplayContext {
+        &mut self.context
+    }
+
+    pub fn start_hit(&mut self, renderer_id: Uid) {
+        self.current_renderer_id = Some(renderer_id);
+    }
+
+    pub fn end_hit(&mut self) {
+        self.current_renderer_id = None;
+    }
+
+    pub fn load_name(&mut self, name: i32) {
+        self.names[0] = name;
+    }
+
+    pub fn push_name(&mut self, name: i32) {
+        self.names.insert(0, name);
+    }
+
+    pub fn pop_name(&mut self) -> Result<()> {
+        if self.names.len() <= 1 {
+            return Err(CueMolError::invalid_argument(
+                "HittestContext name stack underflow",
+            ));
+        }
+        self.names.remove(0);
+        Ok(())
+    }
+
+    pub fn name_stack(&self) -> &[i32] {
+        &self.names
+    }
+
+    pub fn call_display_list(&mut self, list: &HittestList) {
+        let Some(renderer_id) = self.current_renderer_id else {
+            return;
+        };
+        let transform = self
+            .context
+            .projection_matrix()
+            .mul_mat(self.context.model_view_matrix());
+        for point in list.points() {
+            let projected = transform.mul_vec(point.position);
+            if projected.w.abs() < f64::EPSILON {
+                continue;
+            }
+            let projected = projected.scale(1.0 / projected.w);
+            if !(-1.0..1.0).contains(&projected.x)
+                || !(-1.0..1.0).contains(&projected.y)
+                || !(-1.0..1.0).contains(&projected.z)
+            {
+                continue;
+            }
+            let mut names = self.names.iter().skip(1).copied().collect::<Vec<_>>();
+            names.push(point.id);
+            self.add_hit(renderer_id, projected.z, names);
+        }
     }
 
     pub fn clear(&mut self) {
@@ -181,5 +295,37 @@ mod tests {
         assert_eq!(data.data_at(Uid::new(1), 0, 1), Some(11));
         assert_eq!(data.data_at(Uid::new(1), 0, 2), None);
         assert_eq!(data.data_at(Uid::new(1), 1, 0), Some(12));
+    }
+
+    #[test]
+    fn cpu_context_projects_points_and_preserves_reference_name_order() {
+        let mut list = HittestList::new();
+        list.draw_point_hit(101, Vector4::new3(0.25, 0.5, -0.25));
+        list.draw_point_hit(102, Vector4::new3(2.0, 0.0, 0.0));
+
+        let mut context = HittestContext::new();
+        context.start_hit(Uid::new(9));
+        context.load_name(10);
+        context.push_name(20);
+        context.call_display_list(&list);
+        assert_eq!(context.records().len(), 1);
+        assert_eq!(context.records()[0].renderer_id, Uid::new(9));
+        assert_eq!(context.records()[0].depth, -0.25);
+        assert_eq!(context.records()[0].names, vec![10, 101]);
+        context.pop_name().unwrap();
+        assert!(context.pop_name().is_err());
+    }
+
+    #[test]
+    fn cpu_context_applies_model_view_before_projection() {
+        let mut list = HittestList::new();
+        list.draw_point_hit(7, Vector4::ZERO);
+        let mut context = HittestContext::new();
+        context.start_hit(Uid::new(1));
+        context
+            .context_mut()
+            .translate(Vector4::new3(0.0, 0.0, 0.75));
+        context.call_display_list(&list);
+        assert_eq!(context.records()[0].depth, 0.75);
     }
 }

@@ -58,6 +58,7 @@ pub struct SceneObject<T> {
     alt_source: String,
     xform_matrix: cuemol_core::Matrix4,
     ui_order: i32,
+    properties: BTreeMap<String, String>,
     renderers: BTreeMap<Uid, Renderer>,
     ext_data: BTreeMap<String, ObjExtData>,
     uid_generator: UidGenerator,
@@ -83,6 +84,7 @@ impl<T> SceneObject<T> {
             alt_source: String::new(),
             xform_matrix: cuemol_core::Matrix4::IDENTITY,
             ui_order: uid.get() as i32,
+            properties: BTreeMap::new(),
             renderers: BTreeMap::new(),
             ext_data: BTreeMap::new(),
             uid_generator: UidGenerator::starting_after(uid.get()),
@@ -164,6 +166,20 @@ impl<T> SceneObject<T> {
         self.fire_property_changed("name");
     }
 
+    pub fn property_str(&self, name: &str) -> Option<&str> {
+        self.properties.get(name).map(String::as_str)
+    }
+
+    pub fn set_property_str(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        let name = name.into();
+        self.properties.insert(name.clone(), value.into());
+        self.fire_property_changed(&name);
+    }
+
+    pub fn properties(&self) -> &BTreeMap<String, String> {
+        &self.properties
+    }
+
     pub fn is_visible(&self) -> bool {
         self.visible
     }
@@ -188,6 +204,10 @@ impl<T> SceneObject<T> {
     pub fn set_ui_locked(&mut self, locked: bool) {
         self.ui_locked = locked;
         self.fire_property_changed("locked");
+    }
+
+    pub fn set_locked(&mut self, locked: bool) {
+        self.set_ui_locked(locked);
     }
 
     pub fn is_ui_collapsed(&self) -> bool {
@@ -223,6 +243,10 @@ impl<T> SceneObject<T> {
         self.source()
     }
 
+    pub fn src(&self) -> &str {
+        self.source()
+    }
+
     pub fn set_source(&mut self, source: impl Into<String>) {
         self.source = source.into();
         self.fire_property_changed("src");
@@ -233,6 +257,10 @@ impl<T> SceneObject<T> {
     }
 
     pub fn get_source_type(&self) -> &str {
+        self.source_type()
+    }
+
+    pub fn srctype(&self) -> &str {
         self.source_type()
     }
 
@@ -685,7 +713,7 @@ mod tests {
 
     #[test]
     fn object_defaults_match_qsys_reference() {
-        let object = SceneObject::new(Uid::new(1), ());
+        let mut object = SceneObject::new(Uid::new(1), ());
         assert_eq!(object.uid(), Uid::new(1));
         assert_eq!(object.scene_uid(), None);
         assert!(object.is_visible());
@@ -695,6 +723,10 @@ mod tests {
         assert_eq!(object.class_name(), "Object");
         assert_eq!(object.name(), "");
         assert_eq!(object.source(), "");
+        assert_eq!(object.src(), "");
+        assert_eq!(object.srctype(), "");
+        object.set_locked(true);
+        assert!(object.locked());
     }
 
     #[test]

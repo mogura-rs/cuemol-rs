@@ -1,6 +1,7 @@
 pub mod camera;
 pub mod command;
 pub mod events;
+pub mod frame_render_pipeline;
 pub mod io_handler;
 pub mod io_objects;
 pub mod misc;
@@ -28,6 +29,7 @@ pub use events::{
     RendererEvent, SceneEvent, ScrEventManager, ScrEventManagerHandle, ScriptEventSlot,
     SharedViewEventListener, ViewEvent,
 };
+pub use frame_render_pipeline::{FrameRenderParams, FrameRenderPipeline};
 pub use io_handler::InOutHandler;
 pub use io_objects::{
     ObjReader, ObjWriter, SceneExporter, SceneWriterOptions, SceneXMLReader, SceneXMLWriter,
@@ -48,7 +50,7 @@ pub use render_base::{DispListRenderer, DrawObj, ShaderObjMgr};
 pub use renderer_factory::{RendererFactory, RendererInstance};
 pub use scalar_object::ScalarObject;
 pub use scene::{AAMethod, AnimMgrHandle, Scene, SceneManager};
-pub use style::{StyleManager, StyleSet};
+pub use style::{StyleManager, StyleNamedColorResolver, StyleSet};
 pub use sys_config::{SysConfig, SysConfigSection};
 pub use text_render::{create_text_render, destroy_text_render, Canvas2DTextRender2};
 pub use undo::{EditInfo, UndoManager, UndoManagerHandle};
@@ -56,3 +58,4 @@ pub use view::{View, ViewHitCandidate};
 
 pub type Command = CommandInstance;
 pub type GUIView = View;
+pub type Object<T = ()> = SceneObject<T>;

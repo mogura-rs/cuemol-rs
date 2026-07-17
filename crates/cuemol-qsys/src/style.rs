@@ -1,7 +1,14 @@
-use crate::{misc::INVALID_UID, SysConfig};
+use crate::{
+    misc::{Renderer, INVALID_UID},
+    SysConfig,
+};
 use cuemol_core::{parse_ldom2_xml, LDom2Node};
-use cuemol_gfx::{parse_color, SolidColor};
+use cuemol_gfx::{parse_color, set_named_color_resolver, ColorPtr, NamedColorResolver, SolidColor};
 use std::collections::BTreeMap;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, RwLock,
+};
 
 /// Bundled default style sheet (C++ `data/default_style.xml`): named renderer
 /// style presets (`DefaultBallStick`/`DefaultCPK`/…) plus the X11 named-colour
@@ -114,6 +121,10 @@ impl StyleSet {
     }
 
     pub fn get_source(&self) -> &str {
+        self.source()
+    }
+
+    pub fn src(&self) -> &str {
         self.source()
     }
 
@@ -764,8 +775,24 @@ impl StyleManager {
         self.get_material_names_json2(scope_id, style_set_id)
     }
 
-    pub fn create_style_from_obj(&mut self, name: impl Into<String>, scope_id: u64) -> u64 {
-        self.create_style_set(name, scope_id)
+    pub fn create_style_from_obj(
+        &mut self,
+        _scope_id: u64,
+        style_set_id: u64,
+        name: impl AsRef<str>,
+        object: &Renderer,
+    ) -> bool {
+        let Some(set) = self.get_style_set_mut(style_set_id) else {
+            return false;
+        };
+        if set.read_only() {
+            return false;
+        }
+        let name = name.as_ref();
+        if set.has_style(name) {
+            set.remove_style(name);
+        }
+        set.set_style(name, object.to_style_node())
     }
 
     pub fn compile_color(&self, rep: &str, _scope_id: u64) -> SolidColor {
@@ -1070,6 +1097,105 @@ impl StyleManager {
         let uid = self.next_uid;
         self.next_uid += 1;
         uid
+    }
+}
+
+#[derive(Debug)]
+pub struct StyleNamedColorResolver {
+    manager: RwLock<StyleManager>,
+    context_id: AtomicU64,
+    next_cache_id: AtomicU64,
+    cached: Mutex<std::collections::BTreeSet<u64>>,
+}
+
+impl StyleNamedColorResolver {
+    pub fn new(manager: StyleManager, context_id: u64) -> Self {
+        Self {
+            manager: RwLock::new(manager),
+            context_id: AtomicU64::new(context_id),
+            next_cache_id: AtomicU64::new(0),
+            cached: Mutex::new(std::collections::BTreeSet::new()),
+        }
+    }
+
+    pub fn install(self) -> Arc<Self> {
+        let resolver = Arc::new(self);
+        set_named_color_resolver(Some(resolver.clone()));
+        resolver
+    }
+
+    pub fn set_context_id(&self, context_id: u64) {
+        self.context_id.store(context_id, Ordering::SeqCst);
+    }
+
+    pub fn with_manager<R>(&self, operation: impl FnOnce(&StyleManager) -> R) -> R {
+        let manager = self
+            .manager
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        operation(&manager)
+    }
+
+    pub fn with_manager_mut<R>(&self, operation: impl FnOnce(&mut StyleManager) -> R) -> R {
+        let result = {
+            let mut manager = self
+                .manager
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            operation(&mut manager)
+        };
+        self.invalidate_cache();
+        result
+    }
+}
+
+impl NamedColorResolver for StyleNamedColorResolver {
+    fn get_color(&self, name: &str, context_id: u64) -> Option<ColorPtr> {
+        self.with_manager(|manager| {
+            manager
+                .get_color(name, context_id)
+                .cloned()
+                .map(|color| Arc::new(color) as ColorPtr)
+        })
+    }
+
+    fn context_id(&self) -> u64 {
+        self.context_id.load(Ordering::SeqCst)
+    }
+
+    fn make_cache(&self) -> u64 {
+        let cache_id = self.next_cache_id.fetch_add(1, Ordering::SeqCst) + 1;
+        self.cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(cache_id);
+        cache_id
+    }
+
+    fn is_cached(&self, cache_id: u64) -> bool {
+        self.cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&cache_id)
+    }
+
+    fn set_cached(&self, cache_id: u64, cached: bool) {
+        let mut cache = self
+            .cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cached {
+            cache.insert(cache_id);
+        } else {
+            cache.remove(&cache_id);
+        }
+    }
+
+    fn invalidate_cache(&self) {
+        self.cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 }
 
@@ -1450,6 +1576,7 @@ mod tests {
         let mut set = StyleSet::new(7, "Default");
         assert_eq!(set.uid(), 7);
         assert_eq!(set.name(), "Default");
+        assert_eq!(set.src(), "");
         assert!(!set.read_only());
         assert!(!set.modified());
 
@@ -1489,6 +1616,33 @@ mod tests {
         assert!(!set.set_color("x", SolidColor::from_rgb(1.0, 0.0, 0.0)));
         assert!(!set.set_str_data("cat", "key", "value"));
         assert!(!set.set_style("style", LDom2Node::new()));
+    }
+
+    #[test]
+    fn style_named_color_resolver_tracks_scope_and_invalidates_caches() {
+        let mut manager = StyleManager::new();
+        let set_id = manager.create_style_set("scene", 10);
+        assert!(manager.set_color("accent", SolidColor::from_rgb_u8(255, 0, 0), 10, set_id));
+        let resolver = StyleNamedColorResolver::new(manager, 10);
+
+        assert_eq!(resolver.context_id(), 10);
+        assert_eq!(
+            resolver.get_color("accent", 10).unwrap().code(),
+            0xffff_0000
+        );
+        let cache_id = resolver.make_cache();
+        assert!(resolver.is_cached(cache_id));
+
+        resolver.with_manager_mut(|manager| {
+            manager.set_color("accent", SolidColor::from_rgb_u8(0, 0, 255), 10, set_id);
+        });
+        assert!(!resolver.is_cached(cache_id));
+        assert_eq!(
+            resolver.get_color("accent", 10).unwrap().code(),
+            0xff00_00ff
+        );
+        resolver.set_context_id(11);
+        assert_eq!(resolver.context_id(), 11);
     }
 
     #[test]
@@ -1537,6 +1691,38 @@ mod tests {
         assert!(manager.register_style_set(first, -1, 1));
         assert!(!manager.register_style_set(duplicate, -1, 1));
         assert_eq!(manager.has_style_set("Default", 1), 100);
+    }
+
+    #[test]
+    fn style_manager_extracts_and_replaces_renderer_styles() {
+        let mut manager = StyleManager::new();
+        let uid = manager.create_style_set("Default", 10);
+        let mut renderer = Renderer::new("simple");
+        renderer.set_name("source");
+        renderer.set_alpha(0.4);
+        renderer.set_property_str("bondw", "0.2");
+
+        assert!(manager.create_style_from_obj(10, uid, "Custom", &renderer));
+        let style = manager
+            .get_style_set(uid)
+            .and_then(|set| set.get_style("Custom"))
+            .unwrap();
+        assert_eq!(style.type_name(), "renderer");
+        assert_eq!(style.str_attr("alpha").to_string(), "0.4");
+        assert_eq!(style.str_attr("bondw").to_string(), "0.2");
+        assert!(style.str_attr("name").is_empty());
+
+        renderer.set_property_str("bondw", "0.3");
+        assert!(manager.create_style_from_obj(10, uid, "Custom", &renderer));
+        let style = manager
+            .get_style_set(uid)
+            .and_then(|set| set.get_style("Custom"))
+            .unwrap();
+        assert_eq!(style.str_attr("bondw").to_string(), "0.3");
+
+        manager.get_style_set_mut(uid).unwrap().set_read_only(true);
+        assert!(!manager.create_style_from_obj(10, uid, "Blocked", &renderer));
+        assert!(!manager.create_style_from_obj(10, INVALID_UID, "Missing", &renderer));
     }
 
     #[test]

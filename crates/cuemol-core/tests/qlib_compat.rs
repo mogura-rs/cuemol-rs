@@ -440,6 +440,7 @@ fn process_manager_matches_reference_queue_flow() {
     let mut manager = ProcessManager::new();
     assert_eq!(manager.queue_len(), 0);
     assert_eq!(manager.error_msg(), "");
+    assert_eq!(manager.errormsg(), "");
 
     manager.set_slot_size(1);
     assert_eq!(manager.get_slot_size(), 1);

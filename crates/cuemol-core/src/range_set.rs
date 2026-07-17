@@ -42,8 +42,8 @@ impl RangeSet {
         self.insert_range(IntRange::new(value, value));
     }
 
-    pub fn append_int(&mut self, value: i32) {
-        self.insert_value(value);
+    pub fn append_int(&self, start: i32, end: i32) -> Result<Self> {
+        self.scr_append_int(start, end)
     }
 
     pub fn insert_range(&mut self, range: IntRange) {
@@ -85,8 +85,8 @@ impl RangeSet {
         self.ranges.iter().any(|range| range.contains(value))
     }
 
-    pub fn contains_int(&self, value: i32) -> bool {
-        self.contains(value)
+    pub fn contains_int(&self, start: i32, end: i32) -> bool {
+        self.contains_range(start, end)
     }
 
     pub fn contains_range(&self, start: i32, end: i32) -> bool {
@@ -102,7 +102,7 @@ impl RangeSet {
         })
     }
 
-    pub fn remove_int(&mut self, value: i32) -> bool {
+    pub fn remove_value(&mut self, value: i32) -> bool {
         let mut changed = false;
         let mut next = Vec::new();
         for range in self.ranges.drain(..) {
@@ -168,6 +168,10 @@ impl RangeSet {
         let mut result = self.clone();
         result.remove_interval(start, end)?;
         Ok(result)
+    }
+
+    pub fn remove_int(&self, start: i32, end: i32) -> Result<Self> {
+        self.scr_remove_int(start, end)
     }
 
     pub fn negate(&self) -> Self {
@@ -280,11 +284,13 @@ mod tests {
         assert!(ranges.contains_range(1, 4));
         assert!(ranges.contains_range(4, 4));
         assert!(!ranges.contains_range(3, 6));
+        assert!(ranges.contains_int(1, 4));
+        assert!(!ranges.contains_int(3, 6));
 
-        let appended = ranges.scr_append_int(4, 5).unwrap();
+        let appended = ranges.append_int(4, 5).unwrap();
         assert_eq!(ranges.to_string(), "1:3,5");
         assert_eq!(appended.to_string(), "1:5");
-        let removed = appended.scr_remove_int(2, 5).unwrap();
+        let removed = appended.remove_int(2, 5).unwrap();
         assert_eq!(removed.to_string(), "1,5");
 
         let mut invalid_target = ranges.clone();

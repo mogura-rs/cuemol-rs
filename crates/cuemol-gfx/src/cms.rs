@@ -1,10 +1,11 @@
 use crate::rgba_code;
-use cuemol_core::{CueMolError, Result};
+use cuemol_core::{CueMolError, Result, Vector4};
 use libloading::Library;
+use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 type Profile = *mut c_void;
 type Transform = *mut c_void;
@@ -316,6 +317,90 @@ impl CmsXform {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ColProfMgr {
+    transforms: BTreeMap<u64, CmsXform>,
+}
+
+impl ColProfMgr {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register_cms(&mut self, scene_id: u64) {
+        self.transforms.entry(scene_id).or_default();
+    }
+
+    pub fn unregister_cms(&mut self, scene_id: u64) {
+        self.transforms.remove(&scene_id);
+    }
+
+    pub fn cms_by_id(&self, scene_id: u64) -> Option<&CmsXform> {
+        self.transforms.get(&scene_id)
+    }
+
+    pub fn cms_by_id_mut(&mut self, scene_id: u64) -> Option<&mut CmsXform> {
+        self.transforms.get_mut(&scene_id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.transforms.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.transforms.is_empty()
+    }
+
+    pub fn do_xform(&self, scene_id: u64, color: u32) -> u32 {
+        self.cms_by_id(scene_id)
+            .filter(|transform| transform.is_prof_ok())
+            .map_or(color, |transform| transform.do_xform(color))
+    }
+
+    pub fn is_in_gamut(&self, scene_id: u64, color: u32) -> bool {
+        self.cms_by_id(scene_id)
+            .filter(|transform| transform.is_prof_ok())
+            .is_none_or(|transform| transform.is_in_gamut(color))
+    }
+
+    pub fn do_xform_vector(&self, scene_id: u64, color: Vector4) -> Vector4 {
+        let code = rgba_code(
+            float_color_component(color.x),
+            float_color_component(color.y),
+            float_color_component(color.z),
+            float_color_component(color.w),
+        );
+        let transformed = self.do_xform(scene_id, code);
+        Vector4::new4(
+            f64::from((transformed >> 16) as u8) / 255.0,
+            f64::from((transformed >> 8) as u8) / 255.0,
+            f64::from(transformed as u8) / 255.0,
+            f64::from((transformed >> 24) as u8) / 255.0,
+        )
+    }
+}
+
+pub fn global_color_profile_manager() -> &'static Mutex<ColProfMgr> {
+    static MANAGER: OnceLock<Mutex<ColProfMgr>> = OnceLock::new();
+    MANAGER.get_or_init(|| Mutex::new(ColProfMgr::new()))
+}
+
+pub fn register_color_profile_scene(scene_id: u64) {
+    if let Ok(mut manager) = global_color_profile_manager().lock() {
+        manager.register_cms(scene_id);
+    }
+}
+
+pub fn unregister_color_profile_scene(scene_id: u64) {
+    if let Ok(mut manager) = global_color_profile_manager().lock() {
+        manager.unregister_cms(scene_id);
+    }
+}
+
+fn float_color_component(value: f64) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0 + 0.5).floor() as u8
+}
+
 fn profile_info(api: &LcmsApi, profile: Profile) -> String {
     [0, 1, 2, 3]
         .into_iter()
@@ -366,6 +451,22 @@ mod tests {
         assert!(!transform.is_prof_ok());
         transform.set_icc_intent(99);
         assert_eq!(transform.get_icc_intent(), 3);
+    }
+
+    #[test]
+    fn profile_manager_registration_and_unloaded_fallback_match_reference() {
+        let mut manager = ColProfMgr::new();
+        manager.register_cms(10);
+        manager.register_cms(10);
+        assert_eq!(manager.len(), 1);
+        assert!(manager.cms_by_id(10).is_some());
+        assert_eq!(manager.do_xform(10, 0x8040_80ff), 0x8040_80ff);
+        assert_eq!(
+            manager.do_xform_vector(10, Vector4::new4(0.25, 0.5, 1.0, 0.5)),
+            Vector4::new4(64.0 / 255.0, 128.0 / 255.0, 1.0, 128.0 / 255.0)
+        );
+        manager.unregister_cms(10);
+        assert!(manager.is_empty());
     }
 
     #[test]

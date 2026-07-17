@@ -1,7 +1,9 @@
 use cuemol_core::Vector4;
 use cuemol_gfx::SolidColor;
 use cuemol_molstr::{parse_selector, Atom, MolCoord, Selector, SolidColoring};
-use cuemol_qsys::{EditInfo, InOutHandler, MultiGradient, ObjReader, ObjWriter, UndoManagerHandle};
+use cuemol_qsys::{
+    EditInfo, InOutHandler, MultiGradient, ObjReader, ObjWriter, UndoManagerHandle, View,
+};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::{Rc, Weak};
@@ -1903,6 +1905,10 @@ impl MolSurfRenderer {
         self.cull_face
     }
 
+    pub fn cullface(&self) -> bool {
+        self.cull_face()
+    }
+
     pub fn is_cull_face(&self) -> bool {
         self.cull_face()
     }
@@ -1911,8 +1917,16 @@ impl MolSurfRenderer {
         self.cull_face = value;
     }
 
+    pub fn set_cullface(&mut self, value: bool) {
+        self.set_cull_face(value);
+    }
+
     pub fn draw_mode(&self) -> i32 {
         self.draw_mode
+    }
+
+    pub fn drawmode(&self) -> i32 {
+        self.draw_mode()
     }
 
     pub fn get_draw_mode(&self) -> i32 {
@@ -1921,6 +1935,10 @@ impl MolSurfRenderer {
 
     pub fn set_draw_mode(&mut self, value: i32) {
         self.draw_mode = value;
+    }
+
+    pub fn set_drawmode(&mut self, value: i32) {
+        self.set_draw_mode(value);
     }
 
     pub fn color_mode(&self) -> i32 {
@@ -1995,6 +2013,10 @@ impl MolSurfRenderer {
         &self.elepot
     }
 
+    pub fn color_mapname(&self) -> &str {
+        self.color_map_name()
+    }
+
     pub fn get_color_map_name(&self) -> &str {
         self.color_map_name()
     }
@@ -2005,6 +2027,10 @@ impl MolSurfRenderer {
 
     pub fn set_color_map_name(&mut self, value: impl Into<String>) {
         self.set_elepot(value);
+    }
+
+    pub fn set_color_mapname(&mut self, value: impl Into<String>) {
+        self.set_color_map_name(value);
     }
 
     pub fn low_param(&self) -> f64 {
@@ -2179,7 +2205,15 @@ impl MolSurfRenderer {
         self.selection()
     }
 
+    pub fn sel(&self) -> &str {
+        self.selection()
+    }
+
     pub fn set_mol_sel(&mut self, value: impl Into<String>) {
+        self.set_selection(value);
+    }
+
+    pub fn set_sel(&mut self, value: impl Into<String>) {
         self.set_selection(value);
     }
 
@@ -2453,6 +2487,10 @@ impl DirectSurfRenderer {
         self.cull_face
     }
 
+    pub fn cullface(&self) -> bool {
+        self.cull_face()
+    }
+
     pub fn is_cull_face(&self) -> bool {
         self.cull_face()
     }
@@ -2461,8 +2499,16 @@ impl DirectSurfRenderer {
         self.cull_face = value;
     }
 
+    pub fn set_cullface(&mut self, value: bool) {
+        self.set_cull_face(value);
+    }
+
     pub fn draw_mode(&self) -> i32 {
         self.draw_mode
+    }
+
+    pub fn drawmode(&self) -> i32 {
+        self.draw_mode()
     }
 
     pub fn get_draw_mode(&self) -> i32 {
@@ -2471,6 +2517,10 @@ impl DirectSurfRenderer {
 
     pub fn set_draw_mode(&mut self, value: i32) {
         self.draw_mode = value;
+    }
+
+    pub fn set_drawmode(&mut self, value: i32) {
+        self.set_draw_mode(value);
     }
 
     pub fn width(&self) -> f64 {
@@ -2515,6 +2565,62 @@ impl DirectSurfRenderer {
 
     pub fn vdw_radius(&self, element: &str) -> f64 {
         self.vdw_radii.radius_for_element(element)
+    }
+
+    pub fn vdwr_h(&self) -> f64 {
+        self.vdw_radii.h()
+    }
+
+    pub fn set_vdwr_h(&mut self, value: f64) {
+        self.vdw_radii.set_h(value);
+    }
+
+    pub fn vdwr_c(&self) -> f64 {
+        self.vdw_radii.c()
+    }
+
+    pub fn set_vdwr_c(&mut self, value: f64) {
+        self.vdw_radii.set_c(value);
+    }
+
+    pub fn vdwr_n(&self) -> f64 {
+        self.vdw_radii.n()
+    }
+
+    pub fn set_vdwr_n(&mut self, value: f64) {
+        self.vdw_radii.set_n(value);
+    }
+
+    pub fn vdwr_o(&self) -> f64 {
+        self.vdw_radii.o()
+    }
+
+    pub fn set_vdwr_o(&mut self, value: f64) {
+        self.vdw_radii.set_o(value);
+    }
+
+    pub fn vdwr_s(&self) -> f64 {
+        self.vdw_radii.s()
+    }
+
+    pub fn set_vdwr_s(&mut self, value: f64) {
+        self.vdw_radii.set_s(value);
+    }
+
+    pub fn vdwr_p(&self) -> f64 {
+        self.vdw_radii.p()
+    }
+
+    pub fn set_vdwr_p(&mut self, value: f64) {
+        self.vdw_radii.set_p(value);
+    }
+
+    pub fn vdwr_x(&self) -> f64 {
+        self.vdw_radii.x()
+    }
+
+    pub fn set_vdwr_x(&mut self, value: f64) {
+        self.vdw_radii.set_x(value);
     }
 
     pub fn vdw_radii(&self) -> &SurfaceVdwRadii {
@@ -2866,7 +2972,6 @@ pub struct ElePotMap {
     rmsd_value: f64,
     level_base: f64,
     level_step: f64,
-    fit_view_calls: usize,
 }
 
 impl Default for ElePotMap {
@@ -2882,7 +2987,6 @@ impl Default for ElePotMap {
             rmsd_value: 0.0,
             level_base: 0.0,
             level_step: 0.0,
-            fit_view_calls: 0,
         }
     }
 }
@@ -2896,13 +3000,7 @@ impl ElePotMap {
         "elepot"
     }
 
-    pub fn fit_view(&mut self) {
-        self.fit_view_calls += 1;
-    }
-
-    pub fn fit_view_calls(&self) -> usize {
-        self.fit_view_calls
-    }
+    pub fn fit_view(&self, _view: &mut View, _dummy: bool) {}
 
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
@@ -3927,7 +4025,7 @@ attribute \"dep\" string \"positions\"
 
     #[test]
     fn molsurf_renderer_defaults_match_qif() {
-        let renderer = MolSurfRenderer::new();
+        let mut renderer = MolSurfRenderer::new();
         assert_eq!(renderer.type_name(), "molsurf");
         assert_eq!(
             renderer.default_color().rgba8(),
@@ -3945,11 +4043,21 @@ attribute \"dep\" string \"positions\"
         assert!(!renderer.ramp_above());
         assert_eq!(renderer.ramp_value(), 1.4);
         assert_eq!(renderer.coloring().type_name(), "SolidColoring");
+        renderer.set_sel("name CA");
+        assert_eq!(renderer.sel(), "name CA");
+        assert!(!renderer.cullface());
+        assert_eq!(renderer.drawmode(), MolSurfRenderer::SFDRAW_FILL);
+        renderer.set_cullface(true);
+        renderer.set_drawmode(MolSurfRenderer::SFDRAW_LINE);
+        renderer.set_color_mapname("potential");
+        assert!(renderer.cull_face());
+        assert_eq!(renderer.draw_mode(), MolSurfRenderer::SFDRAW_LINE);
+        assert_eq!(renderer.color_mapname(), "potential");
     }
 
     #[test]
     fn directsurf_renderer_defaults_match_qif() {
-        let renderer = DirectSurfRenderer::new();
+        let mut renderer = DirectSurfRenderer::new();
         assert_eq!(renderer.type_name(), "dsurface");
         assert_eq!(renderer.color_mode(), DirectSurfRenderer::DS_MOLFANC);
         assert_eq!(renderer.get_color_mode(), DirectSurfRenderer::DS_MOLFANC);
@@ -3966,16 +4074,43 @@ attribute \"dep\" string \"positions\"
         assert_eq!(renderer.get_line_width(), 1.2);
         assert_eq!(renderer.vdw_radius("H"), 1.2);
         assert_eq!(renderer.vdw_radius("Xe"), 1.7);
+        assert_eq!(renderer.vdwr_h(), 1.2);
+        assert_eq!(renderer.vdwr_c(), 1.7);
+        assert_eq!(renderer.vdwr_n(), 1.55);
+        assert_eq!(renderer.vdwr_o(), 1.52);
+        assert_eq!(renderer.vdwr_s(), 1.8);
+        assert_eq!(renderer.vdwr_p(), 1.8);
+        assert_eq!(renderer.vdwr_x(), 1.7);
         assert!(!renderer.ramp_above());
         assert!(!renderer.is_ramp_above());
         assert_eq!(renderer.ramp_value(), 1.4);
+        renderer.set_cullface(true);
+        renderer.set_drawmode(DirectSurfRenderer::SFDRAW_POINT);
+        renderer.set_vdwr_h(1.1);
+        renderer.set_vdwr_c(1.6);
+        renderer.set_vdwr_n(1.5);
+        renderer.set_vdwr_o(1.4);
+        renderer.set_vdwr_s(1.9);
+        renderer.set_vdwr_p(2.0);
+        renderer.set_vdwr_x(2.1);
+        assert!(renderer.cull_face());
+        assert_eq!(renderer.draw_mode(), DirectSurfRenderer::SFDRAW_POINT);
+        assert_eq!(renderer.vdw_radius("H"), 1.1);
+        assert_eq!(renderer.vdw_radius("C"), 1.6);
+        assert_eq!(renderer.vdw_radius("N"), 1.5);
+        assert_eq!(renderer.vdw_radius("O"), 1.4);
+        assert_eq!(renderer.vdw_radius("S"), 1.9);
+        assert_eq!(renderer.vdw_radius("P"), 2.0);
+        assert_eq!(renderer.vdw_radius("Xe"), 2.1);
 
-        let renderer2 = DirectSurfRenderer2::new();
+        let mut renderer2 = DirectSurfRenderer2::new();
         assert_eq!(renderer2.type_name(), "dsurf2");
         assert_eq!(renderer2.get_color_mode(), DirectSurfRenderer2::DS_MOLFANC);
         assert_eq!(renderer2.get_surf_type(), DirectSurfRenderer2::DS_SES);
         assert_eq!(renderer2.get_draw_mode(), DirectSurfRenderer2::SFDRAW_FILL);
         assert_eq!(renderer2.get_probe_radius(), 1.4);
+        renderer2.set_vdwr_c(1.65);
+        assert_eq!(renderer2.vdwr_c(), 1.65);
     }
 
     #[test]
@@ -4029,10 +4164,12 @@ attribute \"dep\" string \"positions\"
 
     #[test]
     fn elepot_and_hole_builder_state_matches_qif_surface_flow() {
-        let mut elepot = ElePotMap::new();
+        let elepot = ElePotMap::new();
         assert_eq!(elepot.type_name(), "elepot");
-        elepot.fit_view();
-        assert_eq!(elepot.fit_view_calls(), 1);
+        let mut view = View::new(cuemol_core::Uid::new(1), cuemol_core::Uid::new(2));
+        let camera = view.camera();
+        elepot.fit_view(&mut view, false);
+        assert_eq!(view.camera(), camera);
 
         let mut molecule = MolCoord::new();
         let mut serial = 1;

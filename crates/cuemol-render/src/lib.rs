@@ -1,7 +1,11 @@
+pub mod raytrace;
+
 use cuemol_core::{Matrix4, Uid, Vector4};
 use cuemol_gfx::{CmsXform, ColorSpec, Rgba8};
 use cuemol_qsys::{InOutHandler, SceneExporter as QsysSceneExporter};
 use std::fmt::Write as _;
+
+pub use raytrace::{render_umbreon_smoke, UmbreonSmokeResult};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderAtom {
@@ -559,11 +563,19 @@ impl ImgSceneExporter {
         self.resolution_dpi()
     }
 
+    pub fn resoln(&self) -> f64 {
+        self.resolution_dpi()
+    }
+
     pub fn set_resolution_dpi(&mut self, value: f64) {
         self.resolution_dpi = value;
     }
 
     pub fn set_res_dpi(&mut self, value: f64) {
+        self.set_resolution_dpi(value);
+    }
+
+    pub fn set_resoln(&mut self, value: f64) {
         self.set_resolution_dpi(value);
     }
 
@@ -575,8 +587,16 @@ impl ImgSceneExporter {
         self.use_alpha()
     }
 
+    pub fn alpha(&self) -> bool {
+        self.use_alpha()
+    }
+
     pub fn set_use_alpha(&mut self, value: bool) {
         self.use_alpha = value;
+    }
+
+    pub fn set_alpha(&mut self, value: bool) {
+        self.set_use_alpha(value);
     }
 
     pub fn use_depth(&self) -> bool {
@@ -587,8 +607,16 @@ impl ImgSceneExporter {
         self.use_depth()
     }
 
+    pub fn depth(&self) -> bool {
+        self.use_depth()
+    }
+
     pub fn set_use_depth(&mut self, value: bool) {
         self.use_depth = value;
+    }
+
+    pub fn set_depth(&mut self, value: bool) {
+        self.set_use_depth(value);
     }
 
     pub fn aa_opt(&self) -> i32 {
@@ -1294,6 +1322,7 @@ const WBP_LIGHT_AND_CAMERA: &str = concat!(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WbpSceneExporter {
     state: ExportState,
+    camera_name: String,
     use_clip_z: bool,
     perspective: bool,
     grad_steps: i32,
@@ -1303,6 +1332,7 @@ impl WbpSceneExporter {
     pub fn new() -> Self {
         Self {
             state: ExportState::new("wbp", "Warabi project file (*.wbp)", "*.wbp"),
+            camera_name: String::new(),
             use_clip_z: false,
             perspective: false,
             grad_steps: 16,
@@ -1359,6 +1389,22 @@ impl WbpSceneExporter {
 
     pub fn handler(&self) -> &InOutHandler {
         self.state.handler()
+    }
+
+    pub fn camera(&self) -> &str {
+        &self.camera_name
+    }
+
+    pub fn get_camera_name(&self) -> &str {
+        self.camera()
+    }
+
+    pub fn set_camera(&mut self, value: impl Into<String>) {
+        self.camera_name = value.into();
+    }
+
+    pub fn set_camera_name(&mut self, value: impl Into<String>) {
+        self.set_camera(value);
     }
 
     pub fn use_clip_z(&self) -> bool {
@@ -2575,8 +2621,15 @@ mod tests {
         assert_eq!(img.width(), 500);
         assert_eq!(img.height(), 500);
         assert_eq!(img.resolution_dpi(), 72.0);
+        assert_eq!(img.resoln(), 72.0);
+        img.set_resoln(96.0);
+        assert_eq!(img.resolution_dpi(), 96.0);
         assert!(!img.use_alpha());
         assert!(!img.use_depth());
+        img.set_alpha(true);
+        img.set_depth(true);
+        assert!(img.alpha());
+        assert!(img.depth());
         assert_eq!(img.aa_opt(), 0);
         img.write();
         assert_eq!(img.write_count(), 1);
@@ -2651,9 +2704,12 @@ mod tests {
         assert_eq!(mqo.grad_steps(), 16);
         assert!(!mqo.use_clip_z());
 
-        let wbp = WbpSceneExporter::new();
+        let mut wbp = WbpSceneExporter::new();
         assert_eq!(wbp.handler().name(), "wbp");
         assert_eq!(wbp.grad_steps(), 16);
+        assert_eq!(wbp.camera(), "");
+        wbp.set_camera_name("front");
+        assert_eq!(wbp.get_camera_name(), "front");
 
         let stl = StlSceneExporter::new();
         assert_eq!(stl.handler().name(), "stl");

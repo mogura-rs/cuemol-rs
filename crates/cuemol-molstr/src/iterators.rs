@@ -45,8 +45,16 @@ impl<'a> AtomIterator<'a> {
         self.selection()
     }
 
+    pub fn sel(&self) -> &Selector {
+        self.selection()
+    }
+
     pub fn set_selection(&mut self, selection: Selector) {
         *self = Self::new(self.target, selection);
+    }
+
+    pub fn set_sel(&mut self, selection: Selector) {
+        self.set_selection(selection);
     }
 
     pub fn first(&mut self) {
@@ -140,8 +148,16 @@ impl<'a> ResidIterator<'a> {
         self.selection()
     }
 
+    pub fn sel(&self) -> &Selector {
+        self.selection()
+    }
+
     pub fn set_selection(&mut self, selection: Selector) {
         *self = Self::new(self.target, selection);
+    }
+
+    pub fn set_sel(&mut self, selection: Selector) {
+        self.set_selection(selection);
     }
 
     pub fn first(&mut self) {
@@ -295,8 +311,16 @@ impl<'a> ChainIterator<'a> {
         self.selection()
     }
 
+    pub fn sel(&self) -> &Selector {
+        self.selection()
+    }
+
     pub fn set_selection(&mut self, selection: Selector) {
         *self = Self::new(self.target, selection);
+    }
+
+    pub fn set_sel(&mut self, selection: Selector) {
+        self.set_selection(selection);
     }
 
     pub fn first(&mut self) {
@@ -544,7 +568,8 @@ mod tests {
         assert!(!iter.has_more());
         iter.first();
         assert_eq!(iter.get().unwrap().serial, 2);
-        iter.set_selection(parse_selector("chain B").unwrap());
+        iter.set_sel(parse_selector("chain B").unwrap());
+        assert_eq!(iter.sel(), &parse_selector("chain B").unwrap());
         assert_eq!(iter.get_id(), Some(3));
         assert_eq!(iter.get_target().atom_count(), 3);
         assert!(iter.to_string().contains("AtomIterator"));
@@ -554,6 +579,7 @@ mod tests {
     fn residue_and_chain_iterators_return_summaries() {
         let mol = molecule();
         let mut residues = ResidIterator::new(&mol, parse_selector("chain A").unwrap());
+        assert_eq!(residues.sel(), &parse_selector("chain A").unwrap());
         assert!(residues.has_more());
         let residue = residues.get().unwrap();
         assert_eq!(residue.chain_name(), "A");
@@ -569,6 +595,9 @@ mod tests {
         assert_eq!(chains.get().unwrap().name(), "A");
         assert_eq!(chains.get().unwrap().resids_json(), "[\"1\"]");
         chains.next();
+        assert_eq!(chains.get().unwrap().name(), "B");
+        chains.set_sel(parse_selector("chain B").unwrap());
+        assert_eq!(chains.sel(), &parse_selector("chain B").unwrap());
         assert_eq!(chains.get().unwrap().name(), "B");
         chains.set_selection(parse_selector("chain A").unwrap());
         assert_eq!(chains.get().unwrap().name(), "A");
