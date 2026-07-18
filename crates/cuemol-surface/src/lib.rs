@@ -375,10 +375,14 @@ impl PqrFileWriter {
 
     pub fn write_pqr_string(&self, molecule: &MolCoord) -> String {
         let mut output = String::new();
-        for (index, atom) in molecule.atoms().iter().enumerate() {
+        let mut output_index = 0;
+        for atom in molecule.atoms() {
             // Drop hydrogens in the default united-atom mode + honour the selection
             // (C++ PQRFileWriter:104 / selected_surface_atoms).
             if !self.use_h && atom.element.trim().eq_ignore_ascii_case("H") {
+                continue;
+            }
+            if atom.alt_loc.is_some_and(|alt| alt != 'A') {
                 continue;
             }
             if let Some(selector) = self.selection.as_ref() {
@@ -392,19 +396,16 @@ impl PqrFileWriter {
             // bonded hydrogens' charges (the H are dropped); the explicit-H mode
             // writes each atom's own charge. A non-template atom (ligand/ion/water)
             // has no template charge -> 0.0, matching C++ (getCharge false -> 0).
-            let charge = if self.use_h {
-                cuemol_molstr::toppar::partial_charge_for_atom(atom)
-            } else {
-                cuemol_molstr::toppar::united_atom_partial_charge(molecule, index)
-            }
-            .unwrap_or(0.0);
+            let charge =
+                cuemol_molstr::toppar::charge_for_atom_mode(atom, self.use_h, &self.namespace)
+                    .unwrap_or(0.0);
             // Radius matches the charge mode: vdwhr (united-atom) or vdwr
             // (explicit-H), C++ getVdwRadius(atom, m_bUseH).
             let radius = cuemol_molstr::toppar::vdw_radius_for_atom_mode(atom, self.use_h);
             output.push_str(&format!(
                 "ATOM  {:5} {:<4} {:>3} {:1}{:4}    {:8.3}{:8.3}{:8.3} {:7.4} {:6.3}\n",
-                atom.serial,
-                namespaced_atom_name(atom, &self.namespace),
+                output_index,
+                atom.name,
                 atom.res_name,
                 atom.chain_id,
                 atom.res_id,
@@ -414,6 +415,7 @@ impl PqrFileWriter {
                 charge,
                 radius
             ));
+            output_index += 1;
         }
         output
     }
@@ -541,14 +543,6 @@ fn selected_surface_atoms<'a>(
             selection.is_none_or(|selector| selector.matches_in_molecule(atom, molecule))
         })
         .collect()
-}
-
-fn namespaced_atom_name(atom: &Atom, namespace: &str) -> String {
-    if namespace.is_empty() {
-        atom.name.clone()
-    } else {
-        format!("{namespace}:{}", atom.name)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3996,8 +3990,9 @@ attribute \"dep\" string \"positions\"
         pqr.set_namespace("ns");
         let with_h = pqr.write_pqr_string(&molecule);
         assert_eq!(with_h.lines().count(), 2);
-        assert!(with_h.contains("ns:CA"));
-        assert!(with_h.contains("ns:H"));
+        assert!(with_h.contains(" CA "));
+        assert!(with_h.contains(" H "));
+        assert!(!with_h.contains("ns:"));
 
         let mut xyzr = XyzrFileWriter::new();
         xyzr.set_selection(Some(parse_selector("name N").unwrap()));
@@ -4010,14 +4005,14 @@ attribute \"dep\" string \"positions\"
     #[test]
     fn pqr_writes_template_partial_charge_and_united_atom_radius() {
         // C++ PQRFileWriter writes the force-field partial charge + united-atom
-        // radius. A backbone CA in ALA -> charge 0.058 (prot_top.xml) and radius
-        // 1.95 (CH1 vdwhr, default_params.xml), NOT formal charge 0 / element 1.70.
+        // radius. A backbone CA in ALA -> united charge 0.104 (CA 0.058 +
+        // topology HA 0.046) and radius 1.95 (CH1 vdwhr, default_params.xml).
         let mut molecule = MolCoord::new();
         molecule.push_atom(surface_atom(1, "CA", "C", 0.0));
         let out = PqrFileWriter::new().write_pqr_string(&molecule);
         assert!(
-            out.contains("0.0580"),
-            "PQR must write the partial charge 0.058, got: {out}"
+            out.contains("0.1040"),
+            "PQR must write the united-atom charge 0.104, got: {out}"
         );
         assert!(
             out.contains("1.950"),
@@ -4218,6 +4213,7 @@ attribute \"dep\" string \"positions\"
             element: element.to_string(),
             formal_charge: None,
             int_props: BTreeMap::new(),
+            real_props: BTreeMap::new(),
         }
     }
 

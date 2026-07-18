@@ -1174,6 +1174,24 @@ pub fn parse_color(input: &str) -> Result<ColorSpec> {
     Ok(ColorSpec { base, modifiers })
 }
 
+/// Stateless compatibility facade for C++ `gfx::ColCompiler`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ColCompiler;
+
+impl ColCompiler {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    pub fn compile(&self, input: &str) -> Result<ColorSpec> {
+        parse_color(input)
+    }
+
+    pub fn compile_s(input: &str) -> Result<ColorSpec> {
+        parse_color(input)
+    }
+}
+
 impl ColorSpec {
     pub fn rgba8(&self) -> Option<Rgba8> {
         let mut rgba = match self.base {
@@ -1668,6 +1686,21 @@ mod tests {
         ] {
             assert!(parse_color(color).is_ok(), "{color}");
         }
+    }
+
+    #[test]
+    fn color_compiler_facade_delegates_to_the_reference_parser() {
+        let parsed = ColCompiler::new().compile("rgb(255, 0, 0)").unwrap();
+        assert_eq!(
+            parsed.rgba8(),
+            Some(Rgba8 {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            })
+        );
+        assert!(ColCompiler::compile_s("not a color").is_err());
     }
 
     #[test]

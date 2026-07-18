@@ -249,15 +249,20 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
         .iter()
         .any(|atom| atom.int_prop("anisou_u11").is_some());
     let anisou_props: BTreeSet<_> = ANISO_COLUMNS.iter().map(|(_, name)| *name).collect();
-    let atom_prop_names: Vec<String> = mol
-        .atoms()
-        .iter()
-        .flat_map(|atom| atom.int_props.keys())
-        .filter(|name| !anisou_props.contains(name.as_str()))
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let mut atom_prop_types = BTreeMap::new();
+    for atom in mol.atoms() {
+        for name in atom
+            .int_props
+            .keys()
+            .filter(|name| !anisou_props.contains(name.as_str()))
+        {
+            atom_prop_types.entry(name.clone()).or_insert(false);
+        }
+        for name in atom.real_props.keys() {
+            atom_prop_types.insert(name.clone(), true);
+        }
+    }
+    let atom_prop_names = atom_prop_types.keys().cloned().collect::<Vec<_>>();
     let atom_prop_columns: Vec<_> = atom_prop_names
         .iter()
         .map(|name| format!("{PROP_PFX}{name}"))
@@ -280,8 +285,16 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
             atom_schema.push((col, QDF_TYPE_FLOAT32, 0));
         }
     }
-    for column in &atom_prop_columns {
-        atom_schema.push((column, QDF_TYPE_INT32, 0));
+    for (name, column) in atom_prop_names.iter().zip(&atom_prop_columns) {
+        atom_schema.push((
+            column,
+            if atom_prop_types[name] {
+                QDF_TYPE_FLOAT32
+            } else {
+                QDF_TYPE_INT32
+            },
+            0,
+        ));
     }
     w.data_def("atom", mol.atom_count());
     w.record_def_ext(&atom_schema);
@@ -306,12 +319,21 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
             }
         }
         for name in &atom_prop_names {
-            w.i32(atom.int_prop(name).unwrap_or(0));
+            if atom_prop_types[name] {
+                w.f32(atom.real_prop(name).unwrap_or(0.0) as f32);
+            } else {
+                w.i32(atom.int_prop(name).unwrap_or(0));
+            }
         }
     }
 
-    // bond block (schema written only when there are bonds, matching C++)
-    let bonds = mol.bonds();
+    // Only user-defined/persistent bonds are serialized. Topology bonds are
+    // regenerated after reading, matching QdfMolWriter/QdfMolReader.
+    let bonds = mol
+        .bonds()
+        .iter()
+        .filter(|bond| bond.persist)
+        .collect::<Vec<_>>();
     w.data_def("bond", bonds.len());
     if !bonds.is_empty() {
         w.record_def_ext(&[
@@ -326,7 +348,7 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
             w.u32(bond.atom1 as u32);
             w.u32(bond.atom2 as u32);
             w.u8(bond.order.sdf_code().clamp(0, 255) as u8);
-            w.u8(1);
+            w.u8(u8::from(bond.persist));
         }
     }
 
@@ -468,6 +490,7 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
             element: number_to_element(elem).to_string(),
             formal_charge: None,
             int_props: BTreeMap::new(),
+            real_props: BTreeMap::new(),
         };
         if let Some(vals) = aniso {
             for ((_, prop), value) in ANISO_COLUMNS.iter().zip(vals) {
@@ -482,7 +505,7 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
                     r.read_bool()?;
                 }
                 QDF_TYPE_FLOAT32 => {
-                    r.read_f32()?;
+                    atom.set_real_prop(name, f64::from(r.read_f32()?));
                 }
                 QDF_TYPE_FIXSTR8 | QDF_TYPE_FIXSTR16 | QDF_TYPE_FIXSTR32 => {
                     r.read_fixed_str(definition.fixed_len)?;
@@ -519,13 +542,18 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
             let aid1 = r.read_u32()?;
             let aid2 = r.read_u32()?;
             let btype = r.read_u8()?;
-            let _udef = r.read_u8()?;
-            if let (Some(&i1), Some(&i2)) = (atom_index.get(&aid1), atom_index.get(&aid2)) {
+            let user_defined = r.read_u8()? == 1;
+            if user_defined {
+                let (Some(&i1), Some(&i2)) = (atom_index.get(&aid1), atom_index.get(&aid2)) else {
+                    continue;
+                };
                 mol.add_bond(i1, i2, BondOrder::from_sdf(btype as i32));
+                mol.mark_bond_persistent(i1, i2);
             }
         }
     }
 
+    mol.apply_topology();
     Ok(mol)
 }
 
@@ -746,6 +774,7 @@ mod tests {
             element: elem.to_string(),
             formal_charge: None,
             int_props: BTreeMap::new(),
+            real_props: BTreeMap::new(),
         }
     }
 
@@ -799,6 +828,9 @@ mod tests {
         mol.add_bond(1, 2, BondOrder::Single);
         mol.add_bond(2, 3, BondOrder::Single); // peptide bond
         mol.add_bond(3, 4, BondOrder::Double);
+        for (atom1, atom2) in [(0, 1), (1, 2), (2, 3), (3, 4)] {
+            mol.mark_bond_persistent(atom1, atom2);
+        }
         mol
     }
 
@@ -838,6 +870,30 @@ mod tests {
     }
 
     #[test]
+    fn qdf_mol_regenerates_nonpersistent_topology_bonds() {
+        let mut src = MolCoord::new();
+        src.append_atom1(
+            atom("N", "A", 1, "ALA", "N", [0.0, 0.0, 0.0]),
+            "A",
+            1,
+            "ALA",
+        );
+        src.append_atom1(
+            atom("CA", "A", 1, "ALA", "C", [1.5, 0.0, 0.0]),
+            "A",
+            1,
+            "ALA",
+        );
+        src.apply_topology();
+        assert_eq!(src.bond_count(), 1);
+        assert!(!src.bonds()[0].persist);
+
+        let dst = read_qdf_mol_bytes(&write_qdf_mol_bytes(&src)).unwrap();
+        assert_eq!(dst.bond_count(), 1);
+        assert!(!dst.bonds()[0].persist);
+    }
+
+    #[test]
     fn qdf_mol_roundtrip_preserves_crystal_info_ext_data() {
         let mut src = sample_mol();
         let mut cell = CellParams::new(40.1, 51.2, 62.3, 90.0, 101.5, 90.0);
@@ -863,6 +919,24 @@ mod tests {
         assert_eq!(dst.atoms()[1].int_prop("custom_id"), Some(-7));
         assert_eq!(dst.atoms()[2].int_prop("custom_id"), Some(0));
         assert_eq!(dst.atoms()[2].int_prop("secondary_code"), Some(8));
+    }
+
+    #[test]
+    fn qdf_mol_roundtrip_preserves_atom_real_properties() {
+        let mut src = sample_mol();
+        src.atoms_mut()[0].set_real_prop("score", 1.25);
+        src.atoms_mut()[1].set_real_prop("score", -0.5);
+        src.atoms_mut()[2].set_int_prop("replace_me", 4);
+        src.atoms_mut()[2].set_real_prop("replace_me", 3.75);
+        assert_eq!(src.atoms()[2].int_prop("replace_me"), None);
+
+        let dst = read_qdf_mol_bytes(&write_qdf_mol_bytes(&src))
+            .expect("read back QDF real atom properties");
+        assert_eq!(dst.atoms()[0].real_prop("score"), Some(1.25));
+        assert_eq!(dst.atoms()[1].real_prop("score"), Some(-0.5));
+        assert_eq!(dst.atoms()[2].real_prop("score"), Some(0.0));
+        assert_eq!(dst.atoms()[2].real_prop("replace_me"), Some(3.75));
+        assert_eq!(dst.atoms()[2].int_prop("replace_me"), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::molecule::{Atom, MolCoord};
-use cuemol_core::{CueMolError, IntRange, RangeSet, Result};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use cuemol_core::{Box3, CueMolError, IntRange, RangeSet, Result, Vector4};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selector {
@@ -293,6 +293,290 @@ pub fn parse_selector(input: &str) -> Result<Selector> {
 /// (named/saved selections). Errors on an unknown or cyclic name.
 pub fn parse_named_selector(input: &str, registry: &HashMap<String, Selector>) -> Result<Selector> {
     parse_selector(input)?.resolve_named(registry)
+}
+
+/// Stateful compatibility facade for C++ `molstr::SelCompiler`.
+#[derive(Debug, Clone, Default)]
+pub struct SelCompiler {
+    error_msg: String,
+}
+
+impl SelCompiler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn compile(&mut self, input: &str) -> Option<Selector> {
+        match parse_selector(input) {
+            Ok(selector) => {
+                self.error_msg.clear();
+                Some(selector)
+            }
+            Err(error) => {
+                self.error_msg = error.to_string();
+                None
+            }
+        }
+    }
+
+    pub fn compile_result(&mut self, input: &str) -> Result<Selector> {
+        match parse_selector(input) {
+            Ok(selector) => {
+                self.error_msg.clear();
+                Ok(selector)
+            }
+            Err(error) => {
+                self.error_msg = error.to_string();
+                Err(error)
+            }
+        }
+    }
+
+    pub fn error_msg(&self) -> &str {
+        &self.error_msg
+    }
+
+    pub fn get_error_msg(&self) -> &str {
+        self.error_msg()
+    }
+
+    pub fn check_name_ref(name: &str, registry: &HashMap<String, Selector>) -> bool {
+        registry.contains_key(name)
+    }
+}
+
+/// Cached selection result corresponding to C++ `molstr::SelCacheData`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelCacheData {
+    cache_id: i32,
+    molecule_id: usize,
+    atom_ids: BTreeSet<i32>,
+    selected_count: usize,
+    bounding_box: Option<Box3>,
+    center: Option<Vector4>,
+    atom_count: usize,
+    atoms_moved_generation: usize,
+}
+
+impl SelCacheData {
+    pub fn cache_id(&self) -> i32 {
+        self.cache_id
+    }
+
+    pub fn get_cache_id(&self) -> i32 {
+        self.cache_id()
+    }
+
+    pub fn molecule_id(&self) -> usize {
+        self.molecule_id
+    }
+
+    pub fn get_mol_id(&self) -> usize {
+        self.molecule_id()
+    }
+
+    pub fn atom_ids(&self) -> &BTreeSet<i32> {
+        &self.atom_ids
+    }
+
+    pub fn get_atom_id_set(&self) -> &BTreeSet<i32> {
+        self.atom_ids()
+    }
+
+    pub fn selected_count(&self) -> usize {
+        self.selected_count
+    }
+
+    pub fn bounding_box(&self) -> Option<Box3> {
+        self.bounding_box
+    }
+
+    pub fn get_bound_box(&self) -> Option<Box3> {
+        self.bounding_box()
+    }
+
+    pub fn center(&self) -> Option<Vector4> {
+        self.center
+    }
+
+    pub fn get_center(&self) -> Option<Vector4> {
+        self.center()
+    }
+}
+
+/// Bounded selection cache corresponding to C++ `molstr::SelCacheMgr`.
+#[derive(Debug, Clone)]
+pub struct SelCacheMgr {
+    data: BTreeMap<i32, SelCacheData>,
+    tags: HashMap<String, i32>,
+    next_id: i32,
+    max_entries: usize,
+}
+
+impl Default for SelCacheMgr {
+    fn default() -> Self {
+        Self {
+            data: BTreeMap::new(),
+            tags: HashMap::new(),
+            next_id: 0,
+            max_entries: 10,
+        }
+    }
+}
+
+impl SelCacheMgr {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+
+    pub fn set_max_entries(&mut self, value: usize) {
+        self.max_entries = value.max(1);
+        self.evict_oldest();
+    }
+
+    pub fn make_cache(&mut self, molecule: &MolCoord, selector: &Selector) -> &SelCacheData {
+        let indices = molecule.select_indices(selector);
+        let atom_ids = indices
+            .iter()
+            .map(|&index| molecule.atoms()[index].serial)
+            .collect::<BTreeSet<_>>();
+        let mut bounding_box = Box3::EMPTY;
+        let mut sum = Vector4::ZERO;
+        for &index in &indices {
+            let position = molecule.atoms()[index].position;
+            bounding_box.merge(position);
+            sum = sum + position;
+        }
+        let center = (!indices.is_empty()).then(|| sum.scale(1.0 / indices.len() as f64));
+        self.insert_cache(
+            molecule,
+            selector,
+            atom_ids,
+            (!indices.is_empty()).then_some(bounding_box),
+            center,
+        )
+    }
+
+    pub fn make_cache_by_set(
+        &mut self,
+        molecule: &MolCoord,
+        selector: &Selector,
+        atom_ids: BTreeSet<i32>,
+    ) -> &SelCacheData {
+        self.insert_cache(molecule, selector, atom_ids, None, None)
+    }
+
+    pub fn find_cache_data(
+        &self,
+        molecule: &MolCoord,
+        selector: &Selector,
+    ) -> Option<&SelCacheData> {
+        let id = self.tags.get(&Self::cache_tag(molecule, selector))?;
+        let data = self.data.get(id)?;
+        (data.atom_count == molecule.atom_count()
+            && data.atoms_moved_generation == molecule.atoms_moved_generation())
+        .then_some(data)
+    }
+
+    pub fn find_or_make_cache_data(
+        &mut self,
+        molecule: &MolCoord,
+        selector: &Selector,
+    ) -> &SelCacheData {
+        if let Some(id) = self.tags.get(&Self::cache_tag(molecule, selector)).copied() {
+            let valid = self.data.get(&id).is_some_and(|data| {
+                data.atom_count == molecule.atom_count()
+                    && data.atoms_moved_generation == molecule.atoms_moved_generation()
+            });
+            if valid {
+                return self.data.get(&id).expect("validated cache entry");
+            }
+            self.invalidate_cache(id);
+        }
+        self.make_cache(molecule, selector)
+    }
+
+    pub fn get_cache_entry(&self, id: i32) -> Option<&SelCacheData> {
+        self.data.get(&id)
+    }
+
+    pub fn is_cache_valid(&self, id: i32) -> bool {
+        id >= 0 && self.data.contains_key(&id)
+    }
+
+    pub fn invalidate_cache(&mut self, id: i32) -> bool {
+        let removed = self.data.remove(&id).is_some();
+        if removed {
+            self.tags.retain(|_, cached_id| *cached_id != id);
+        }
+        removed
+    }
+
+    pub fn invalidate_molecule(&mut self, molecule: &MolCoord) -> usize {
+        let molecule_id = Self::molecule_id(molecule);
+        let ids = self
+            .data
+            .iter()
+            .filter_map(|(id, data)| (data.molecule_id == molecule_id).then_some(*id))
+            .collect::<Vec<_>>();
+        for id in &ids {
+            self.invalidate_cache(*id);
+        }
+        ids.len()
+    }
+
+    fn insert_cache(
+        &mut self,
+        molecule: &MolCoord,
+        selector: &Selector,
+        atom_ids: BTreeSet<i32>,
+        bounding_box: Option<Box3>,
+        center: Option<Vector4>,
+    ) -> &SelCacheData {
+        let cache_id = self.next_id;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("selection cache exhausted");
+        let data = SelCacheData {
+            cache_id,
+            molecule_id: Self::molecule_id(molecule),
+            selected_count: atom_ids.len(),
+            atom_ids,
+            bounding_box,
+            center,
+            atom_count: molecule.atom_count(),
+            atoms_moved_generation: molecule.atoms_moved_generation(),
+        };
+        self.data.insert(cache_id, data);
+        self.tags
+            .insert(Self::cache_tag(molecule, selector), cache_id);
+        self.evict_oldest();
+        self.data
+            .get(&cache_id)
+            .expect("new selection cache entry was retained")
+    }
+
+    fn evict_oldest(&mut self) {
+        while self.data.len() > self.max_entries {
+            let Some(id) = self.data.keys().next().copied() else {
+                break;
+            };
+            self.invalidate_cache(id);
+        }
+    }
+
+    fn cache_tag(molecule: &MolCoord, selector: &Selector) -> String {
+        format!("{}:{}", Self::molecule_id(molecule), selector.dump())
+    }
+
+    fn molecule_id(molecule: &MolCoord) -> usize {
+        std::ptr::from_ref(molecule).addr()
+    }
 }
 
 impl Selector {
@@ -589,6 +873,9 @@ fn same_residue(lhs: &Atom, rhs: &Atom) -> bool {
 }
 
 fn is_main_chain_atom(atom: &Atom) -> bool {
+    if let Some(topology) = crate::toppar::TopoDB::global().residue(&atom.res_name) {
+        return topology.is_main_chain_atom(atom.name.trim());
+    }
     matches!(
         atom.name.trim().to_ascii_uppercase().as_str(),
         "N" | "CA"
@@ -613,7 +900,12 @@ fn is_main_chain_atom(atom: &Atom) -> bool {
 }
 
 fn is_side_chain_atom(atom: &Atom) -> bool {
-    !is_main_chain_atom(atom)
+    crate::toppar::TopoDB::global()
+        .residue(&atom.res_name)
+        .map_or_else(
+            || !is_main_chain_atom(atom),
+            |topology| topology.is_side_chain_atom(atom.name.trim()),
+        )
 }
 
 impl NamePattern {
@@ -1901,6 +2193,25 @@ ATOM      2  CA  THR A   1      16.967  12.784   4.338  1.00 10.80           C
     }
 
     #[test]
+    fn main_and_side_chain_selection_uses_topology_tables() {
+        let pdb = "\
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 10.00           N
+ATOM      2  CA  ALA A   1       1.450   0.000   0.000  1.00 10.00           C
+ATOM      3  CB  ALA A   1       1.450   1.500   0.000  1.00 10.00           C
+";
+        let mol = read_pdb_str(pdb).unwrap();
+        assert_eq!(
+            mol.select_indices(&parse_selector("bymainch *").unwrap()),
+            vec![0, 1]
+        );
+        // CueMol's residue table includes CA in both lists as the side-chain anchor.
+        assert_eq!(
+            mol.select_indices(&parse_selector("bysidech *").unwrap()),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
     fn resolves_named_sel_references() {
         let pdb = "\
 ATOM      1  N   THR A   1      17.047  14.099   3.625  1.00 13.79           N
@@ -1931,5 +2242,35 @@ ATOM      3  C   THR B   2      15.685  12.755   5.133  1.00  9.19           C
         cyclic.insert("a".to_string(), parse_selector("sel b").unwrap());
         cyclic.insert("b".to_string(), parse_selector("sel a").unwrap());
         assert!(parse_named_selector("sel a", &cyclic).is_err());
+    }
+
+    #[test]
+    fn compiler_and_cache_facades_match_reference_flow() {
+        let mut compiler = SelCompiler::new();
+        let selector = compiler.compile("name CA").unwrap();
+        assert!(compiler.error_msg().is_empty());
+        assert!(compiler.compile("name \"").is_none());
+        assert!(!compiler.error_msg().is_empty());
+
+        let pdb = "\
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 10.00           N
+ATOM      2  CA  ALA A   1       2.000   0.000   0.000  1.00 10.00           C
+";
+        let mut molecule = read_pdb_str(pdb).unwrap();
+        let mut cache = SelCacheMgr::new();
+        let entry = cache.make_cache(&molecule, &selector);
+        let first_id = entry.cache_id();
+        assert_eq!(entry.atom_ids(), &BTreeSet::from([2]));
+        assert_eq!(entry.selected_count(), 1);
+        assert_eq!(entry.center(), Some(Vector4::new3(2.0, 0.0, 0.0)));
+        assert!(cache.find_cache_data(&molecule, &selector).is_some());
+
+        molecule.fire_atoms_moved();
+        assert!(cache.find_cache_data(&molecule, &selector).is_none());
+        let replacement_id = cache
+            .find_or_make_cache_data(&molecule, &selector)
+            .cache_id();
+        assert_ne!(replacement_id, first_id);
+        assert!(!cache.is_cache_valid(first_id));
     }
 }

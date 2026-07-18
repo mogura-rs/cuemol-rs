@@ -408,6 +408,7 @@ pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result
     let mut ssbonds = Vec::new();
     let mut links = Vec::new();
     let mut secondary_ranges = Vec::new();
+    let mut last_atom_index = None;
     for (line_number, line) in input.lines().enumerate() {
         if line.starts_with("ATOM  ") || line.starts_with("HETATM") {
             if default_model.is_none() {
@@ -416,17 +417,24 @@ pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result
             if !options.load_model && Some(current_model) != default_model {
                 continue;
             }
-            if let Some(atom) = parse_atom_line_with_options(
+            if let Some(mut atom) = parse_atom_line_with_options(
                 line,
                 line_number + 1,
                 options,
                 current_model,
                 default_model,
             )? {
-                mol.push_atom(atom);
+                if make_pdb_atom_name_unique(&mol, &mut atom) {
+                    last_atom_index = Some(mol.atom_count());
+                    mol.push_atom(atom);
+                } else {
+                    last_atom_index = None;
+                }
+            } else {
+                last_atom_index = None;
             }
         } else if line.starts_with("ANISOU") && options.load_anisou {
-            apply_anisou_line(&mut mol, line, line_number + 1)?;
+            apply_anisou_line(&mut mol, line, line_number + 1, last_atom_index)?;
         } else if line.starts_with("MODEL ") {
             current_model = parse_model_number(line);
         } else if line.starts_with("ENDMDL") {
@@ -454,9 +462,7 @@ pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result
     if mol.atom_count() == 0 {
         return Err(CueMolError::parse("PDB contains no ATOM/HETATM records"));
     }
-    if options.auto_topo_gen {
-        mol.apply_topology();
-    }
+    mol.apply_topology_with_autogen(options.auto_topo_gen);
     apply_ssbond_records(&mut mol, &ssbonds);
     apply_link_records(&mut mol, &links);
     // C++ PDBFileReader: when build2ndry is set (the default), secondary
@@ -658,13 +664,15 @@ fn write_links_records(output: &mut String, mol: &MolCoord) {
             continue;
         }
         output.push_str(&format!(
-            "LINK        {} {:>3} {}{:>4}{}               {} {:>3} {}{:>4}{}\n",
+            "LINK        {}{}{:>3} {}{:>4}{}               {}{}{:>3} {}{:>4}{}\n",
             format_atom_name(atom1),
+            atom1.alt_loc.unwrap_or(' '),
             truncate_ascii(&atom1.res_name, 3),
             format_chain_id(&atom1.chain_id),
             atom1.res_id,
             atom1.ins_code.unwrap_or(' '),
             format_atom_name(atom2),
+            atom2.alt_loc.unwrap_or(' '),
             truncate_ascii(&atom2.res_name, 3),
             format_chain_id(&atom2.chain_id),
             atom2.res_id,
@@ -813,11 +821,14 @@ fn parse_atom_line_with_options(
     let serial = parse_i32(field(line, 6, 11), "atom serial", line_number)?;
     let raw_name = field(line, 12, 16).trim().to_string();
     let mut alt_loc = single_char(field(line, 16, 17));
-    let res_name = field(line, 17, 20).trim().to_string();
+    let res_name = match field(line, 17, 20).trim() {
+        "" => "UNK".to_string(),
+        value => value.to_string(),
+    };
     let mut chain_id = if options.load_seg_id {
-        field(line, 72, 76).trim().to_string()
+        normalize_chain_id(field(line, 72, 76))
     } else {
-        field(line, 21, 22).trim().to_string()
+        normalize_chain_id(field(line, 21, 22))
     };
     let res_id = parse_i32(field(line, 22, 26), "residue id", line_number)?;
     let ins_code = single_char(field(line, 26, 27));
@@ -861,6 +872,7 @@ fn parse_atom_line_with_options(
         element,
         formal_charge: None,
         int_props: Default::default(),
+        real_props: Default::default(),
     }))
 }
 
@@ -900,10 +912,10 @@ fn parse_ssbond_line(line: &str, line_number: usize) -> Result<SsBondRecord> {
 
 fn parse_fixed_ssbond_line(line: &str) -> Option<SsBondRecord> {
     Some(SsBondRecord {
-        chain1: field(line, 15, 16).trim().to_string(),
+        chain1: normalize_chain_id(field(line, 15, 16)),
         res_id1: field(line, 17, 21).trim().parse().ok()?,
         ins_code1: single_char(field(line, 21, 22)),
-        chain2: field(line, 29, 30).trim().to_string(),
+        chain2: normalize_chain_id(field(line, 29, 30)),
         res_id2: field(line, 31, 35).trim().parse().ok()?,
         ins_code2: single_char(field(line, 35, 36)),
     })
@@ -915,10 +927,12 @@ fn parse_fixed_ssbond_line(line: &str) -> Option<SsBondRecord> {
 #[derive(Debug, Clone)]
 struct LinkRecord {
     name1: String,
+    alt_loc1: Option<char>,
     chain1: String,
     res_id1: i32,
     ins_code1: Option<char>,
     name2: String,
+    alt_loc2: Option<char>,
     chain2: String,
     res_id2: i32,
     ins_code2: Option<char>,
@@ -935,11 +949,13 @@ fn parse_link_line(line: &str) -> Option<LinkRecord> {
     }
     Some(LinkRecord {
         name1,
-        chain1: field(line, 21, 22).trim().to_string(),
+        alt_loc1: single_char(field(line, 16, 17)),
+        chain1: normalize_chain_id(field(line, 21, 22)),
         res_id1: field(line, 22, 26).trim().parse().ok()?,
         ins_code1: single_char(field(line, 26, 27)),
         name2,
-        chain2: field(line, 51, 52).trim().to_string(),
+        alt_loc2: single_char(field(line, 46, 47)),
+        chain2: normalize_chain_id(field(line, 51, 52)),
         res_id2: field(line, 52, 56).trim().parse().ok()?,
         ins_code2: single_char(field(line, 56, 57)),
     })
@@ -953,6 +969,7 @@ fn apply_link_records(mol: &mut MolCoord, records: &[LinkRecord]) {
             record.res_id1,
             record.ins_code1,
             &record.name1,
+            record.alt_loc1,
         ) else {
             continue;
         };
@@ -962,6 +979,7 @@ fn apply_link_records(mol: &mut MolCoord, records: &[LinkRecord]) {
             record.res_id2,
             record.ins_code2,
             &record.name2,
+            record.alt_loc2,
         ) else {
             continue;
         };
@@ -975,17 +993,28 @@ fn apply_link_records(mol: &mut MolCoord, records: &[LinkRecord]) {
 
 fn apply_ssbond_records(mol: &mut MolCoord, records: &[SsBondRecord]) {
     for record in records {
-        let Some(atom1) =
-            find_residue_atom(mol, &record.chain1, record.res_id1, record.ins_code1, "SG")
-        else {
+        let Some(atom1) = find_residue_atom(
+            mol,
+            &record.chain1,
+            record.res_id1,
+            record.ins_code1,
+            "SG",
+            None,
+        ) else {
             continue;
         };
-        let Some(atom2) =
-            find_residue_atom(mol, &record.chain2, record.res_id2, record.ins_code2, "SG")
-        else {
+        let Some(atom2) = find_residue_atom(
+            mol,
+            &record.chain2,
+            record.res_id2,
+            record.ins_code2,
+            "SG",
+            None,
+        ) else {
             continue;
         };
         mol.add_bond(atom1, atom2, crate::molecule::BondOrder::Single);
+        mol.mark_bond_persistent(atom1, atom2);
     }
 }
 
@@ -995,13 +1024,28 @@ fn find_residue_atom(
     res_id: i32,
     ins_code: Option<char>,
     atom_name: &str,
+    alt_loc: Option<char>,
 ) -> Option<usize> {
-    mol.atoms().iter().position(|atom| {
+    let candidates = mol.atoms().iter().enumerate().filter(|(_, atom)| {
         atom.chain_id == chain_id
             && atom.res_id == res_id
             && atom.ins_code == ins_code
             && atom.matches_name_case_insensitive(atom_name)
-    })
+    });
+    match alt_loc {
+        Some(alt_loc) => candidates
+            .filter(|(_, atom)| atom.alt_loc == Some(alt_loc))
+            .map(|(index, _)| index)
+            .next(),
+        None => {
+            let candidates = candidates.collect::<Vec<_>>();
+            candidates
+                .iter()
+                .find(|(_, atom)| atom.alt_loc.is_none())
+                .or_else(|| candidates.first())
+                .map(|(index, _)| *index)
+        }
+    }
 }
 
 fn is_cys_sg(atom: &Atom) -> bool {
@@ -1016,8 +1060,15 @@ fn encode_model_in_chain(chain_id: &str, model: i32) -> String {
     }
 }
 
-fn apply_anisou_line(mol: &mut MolCoord, line: &str, line_number: usize) -> Result<()> {
-    let serial = parse_i32(field(line, 6, 11), "anisou atom serial", line_number)?;
+fn apply_anisou_line(
+    mol: &mut MolCoord,
+    line: &str,
+    line_number: usize,
+    last_atom_index: Option<usize>,
+) -> Result<()> {
+    let Some(atom_index) = last_atom_index else {
+        return Ok(());
+    };
     let values = [
         ("anisou_u11", field(line, 28, 35)),
         ("anisou_u22", field(line, 35, 42)),
@@ -1030,11 +1081,7 @@ fn apply_anisou_line(mol: &mut MolCoord, line: &str, line_number: usize) -> Resu
         .into_iter()
         .map(|(name, value)| parse_i32(value, name, line_number).map(|parsed| (name, parsed)))
         .collect::<Result<Vec<_>>>()?;
-    if let Some(atom) = mol
-        .atoms_mut()
-        .iter_mut()
-        .find(|atom| atom.serial == serial)
-    {
+    if let Some(atom) = mol.atoms_mut().get_mut(atom_index) {
         for (name, value) in parsed {
             atom.set_int_prop(name, value);
         }
@@ -1050,6 +1097,7 @@ fn field(line: &str, start: usize, end: usize) -> &str {
 #[derive(Debug, Clone)]
 struct SecondaryRange {
     kind: &'static str,
+    code: char,
     chain: String,
     start: i32,
     end: i32,
@@ -1058,12 +1106,18 @@ struct SecondaryRange {
 /// Parse a HELIX record. Columns (1-indexed): initChainID 20, initSeqNum 22-25,
 /// endChainID 32, endSeqNum 34-37.
 fn parse_helix_range(line: &str) -> Option<SecondaryRange> {
-    let chain = field(line, 19, 20).trim();
+    let chain = normalize_chain_id(field(line, 19, 20));
     let start = field(line, 21, 25).trim().parse::<i32>().ok()?;
     let end = field(line, 33, 37).trim().parse::<i32>().ok()?;
+    let code = match field(line, 38, 40).trim().parse::<i32>().unwrap_or(1) {
+        5 => 'G',
+        3 => 'I',
+        _ => 'H',
+    };
     Some(SecondaryRange {
         kind: "helix",
-        chain: chain.to_string(),
+        code,
+        chain,
         start,
         end,
     })
@@ -1072,12 +1126,13 @@ fn parse_helix_range(line: &str) -> Option<SecondaryRange> {
 /// Parse a SHEET record. Columns (1-indexed): initChainID 22, initSeqNum 23-26,
 /// endChainID 33, endSeqNum 34-37.
 fn parse_sheet_range(line: &str) -> Option<SecondaryRange> {
-    let chain = field(line, 21, 22).trim();
+    let chain = normalize_chain_id(field(line, 21, 22));
     let start = field(line, 22, 26).trim().parse::<i32>().ok()?;
     let end = field(line, 33, 37).trim().parse::<i32>().ok()?;
     Some(SecondaryRange {
         kind: "sheet",
-        chain: chain.to_string(),
+        code: 'E',
+        chain,
         start,
         end,
     })
@@ -1126,11 +1181,23 @@ fn apply_secondary_ranges(mol: &mut MolCoord, ranges: &[SecondaryRange]) {
             continue;
         }
         for res_id in range.start..=range.end {
+            let mut secondary2 = range.code.to_string();
+            if res_id == range.start {
+                secondary2.push('s');
+            } else if res_id == range.end {
+                secondary2.push('e');
+            }
             let _ = mol.set_residue_prop_str(
                 &range.chain,
                 &res_id.to_string(),
                 "secondary",
                 range.kind,
+            );
+            let _ = mol.set_residue_prop_str(
+                &range.chain,
+                &res_id.to_string(),
+                "secondary2",
+                &secondary2,
             );
         }
     }
@@ -1143,6 +1210,48 @@ fn single_char(value: &str) -> Option<char> {
     } else {
         trimmed.chars().next()
     }
+}
+
+fn normalize_chain_id(value: &str) -> String {
+    match value.trim() {
+        "" => "_".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn make_pdb_atom_name_unique(mol: &MolCoord, atom: &mut Atom) -> bool {
+    let conflicts = |name: &str| {
+        mol.atoms().iter().any(|existing| {
+            existing.chain_id == atom.chain_id
+                && existing.res_id == atom.res_id
+                && existing.ins_code == atom.ins_code
+                && existing.alt_loc == atom.alt_loc
+                && existing.name == name
+        })
+    };
+    if !conflicts(&atom.name) {
+        return true;
+    }
+
+    let original = atom.name.clone();
+    for index in 0..1000 {
+        let candidate = if index < 100 {
+            if original.len() > 2 {
+                return false;
+            }
+            format!("{original}{index:02}")
+        } else {
+            if original.len() > 1 {
+                return false;
+            }
+            format!("{}{original}{:02}", index / 100, index % 100)
+        };
+        if !conflicts(&candidate) {
+            atom.name = candidate;
+            return true;
+        }
+    }
+    false
 }
 
 fn parse_i32(value: &str, name: &str, line_number: usize) -> Result<i32> {
@@ -1425,9 +1534,11 @@ mod tests {
     fn parse_link_line_extracts_both_atom_endpoints() {
         let rec = parse_link_line(LINK_LINE).expect("LINK parse");
         assert_eq!(rec.name1, "O1");
+        assert_eq!(rec.alt_loc1, None);
         assert_eq!(rec.chain1, "A");
         assert_eq!(rec.res_id1, 1);
         assert_eq!(rec.name2, "C3");
+        assert_eq!(rec.alt_loc2, None);
         assert_eq!(rec.chain2, "A");
         assert_eq!(rec.res_id2, 2);
     }
@@ -1449,6 +1560,53 @@ ATOM      2  C3  LIG A   2       5.000   0.000   0.000  1.00  0.00           C
             mol.bond_count(),
             1,
             "LINK record should add exactly one covalent bond"
+        );
+    }
+
+    #[test]
+    fn link_record_resolves_the_requested_alternate_conformer() {
+        let pdb = concat!(
+            "HETATM    1  C1 ALIG A   1       0.000   0.000   0.000  1.00  0.00           C\n",
+            "HETATM    2  C1 BLIG A   1      30.000   0.000   0.000  1.00  0.00           C\n",
+            "HETATM    3 FE   FE2 A   2      60.000   0.000   0.000  1.00  0.00          FE\n",
+            "LINK  ",
+            "      ",
+            " C1 ",
+            "B",
+            "LIG",
+            " ",
+            "A",
+            "   1",
+            " ",
+            "               ",
+            " FE ",
+            " ",
+            "FE2",
+            " ",
+            "A",
+            "   2",
+            "\n",
+        );
+        let mol = read_pdb_str(pdb).unwrap();
+        assert_eq!(mol.bond_count(), 1);
+        let bond = &mol.bonds()[0];
+        assert!(bond.persist);
+        let pair = (bond.atom1.min(bond.atom2), bond.atom1.max(bond.atom2));
+        assert_eq!(pair, (1, 2));
+
+        let written = write_pdb_string(&mol);
+        let link = written
+            .lines()
+            .find(|line| line.starts_with("LINK"))
+            .and_then(parse_link_line)
+            .unwrap();
+        assert_eq!(link.alt_loc1, Some('B'));
+        let reloaded = read_pdb_str(&written).unwrap();
+        assert_eq!(reloaded.bond_count(), 1);
+        let bond = &reloaded.bonds()[0];
+        assert_eq!(
+            (bond.atom1.min(bond.atom2), bond.atom1.max(bond.atom2)),
+            (1, 2)
         );
     }
 
@@ -1522,16 +1680,32 @@ ATOM      4  CA  ALA A   6       9.000   0.000   0.000  1.00  0.00           C
             Some("helix")
         );
         assert_eq!(
+            mol.get_residue_prop_str("A", "1", "secondary2").unwrap(),
+            Some("Hs")
+        );
+        assert_eq!(
             mol.get_residue_prop_str("A", "3", "secondary").unwrap(),
             Some("helix")
+        );
+        assert_eq!(
+            mol.get_residue_prop_str("A", "3", "secondary2").unwrap(),
+            Some("He")
         );
         assert_eq!(
             mol.get_residue_prop_str("A", "5", "secondary").unwrap(),
             Some("sheet")
         );
         assert_eq!(
+            mol.get_residue_prop_str("A", "5", "secondary2").unwrap(),
+            Some("Es")
+        );
+        assert_eq!(
             mol.get_residue_prop_str("A", "6", "secondary").unwrap(),
             Some("sheet")
+        );
+        assert_eq!(
+            mol.get_residue_prop_str("A", "6", "secondary2").unwrap(),
+            Some("Ee")
         );
     }
 
@@ -1578,6 +1752,37 @@ ATOM      3  C   THR A   1      15.685  12.755   5.133  1.00  9.19           C
     }
 
     #[test]
+    fn blank_pdb_chain_is_normalized_to_the_reference_internal_name() {
+        let pdb =
+            "ATOM      1  CA  ALA     1       0.000   0.000   0.000  1.00 10.00           C\n";
+        let mol = read_pdb_str(pdb).unwrap();
+        assert_eq!(mol.atoms()[0].chain_id, "_");
+        assert_eq!(mol.chain_ids(), vec!["_"]);
+        assert!(write_pdb_string(&mol)
+            .lines()
+            .any(|line| line.starts_with("ATOM") && field(line, 21, 22) == " "));
+    }
+
+    #[test]
+    fn duplicate_pdb_atom_names_are_renamed_or_dropped_like_the_reference() {
+        let pdb = "\
+HETATM    1  O   HOH A   1       0.000   0.000   0.000  1.00 10.00           O
+HETATM    2  O   HOH A   1      10.000   0.000   0.000  1.00 10.00           O
+HETATM    3  ABC LIG A   2      20.000   0.000   0.000  1.00 10.00           C
+HETATM    4  ABC LIG A   2      30.000   0.000   0.000  1.00 10.00           C
+";
+        let mol = read_pdb_str(pdb).unwrap();
+        assert_eq!(mol.atom_count(), 3);
+        assert_eq!(
+            mol.atoms()
+                .iter()
+                .map(|atom| atom.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["O", "O00", "ABC"]
+        );
+    }
+
+    #[test]
     fn pdb_reader_auto_topology_option_controls_bond_generation() {
         let pdb = "\
 ATOM      1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C
@@ -1593,6 +1798,17 @@ ATOM      3  C3  LIG A   1       5.000   0.000   0.000  1.00 10.00           C
         };
         let mol = read_pdb_str_with_options(pdb, options).unwrap();
         assert_eq!(mol.bond_count(), 0);
+
+        let known = "\
+ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 10.00           N
+ATOM      2  CA  ALA A   1      10.000   0.000   0.000  1.00 10.00           C
+";
+        let mol = read_pdb_str_with_options(known, options).unwrap();
+        assert_eq!(
+            mol.bond_count(),
+            1,
+            "known topology is applied when autogeneration is disabled"
+        );
     }
 
     #[test]
@@ -1634,6 +1850,28 @@ ENDMDL
     }
 
     #[test]
+    fn anisou_applies_to_the_preceding_atom_in_each_model() {
+        let pdb = "\
+MODEL        1
+ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C
+ANISOU    1  CA  ALA A   1     1111   2222   3333    444    555    666       C
+ENDMDL
+MODEL        2
+ATOM      1  CA  ALA A   1       1.000   0.000   0.000  1.00 10.00           C
+ANISOU    1  CA  ALA A   1     9999   8888   7777    666    555    444       C
+ENDMDL
+";
+        let options = PdbReadOptions {
+            load_model: true,
+            ..PdbReadOptions::default()
+        };
+        let mol = read_pdb_str_with_options(pdb, options).unwrap();
+        assert_eq!(mol.atom_count(), 2);
+        assert_eq!(mol.atoms()[0].int_prop("anisou_u11"), Some(1111));
+        assert_eq!(mol.atoms()[1].int_prop("anisou_u11"), Some(9999));
+    }
+
+    #[test]
     fn pdb_writer_preserves_anisou_records_after_atoms() {
         let pdb = "\
 ATOM      1  CA AALA A   1       0.000   0.000   0.000  1.00 10.00           C
@@ -1670,6 +1908,7 @@ ATOM      2  SG  CYS B   2       8.000   0.000   0.000  1.00 10.00           S
         assert_eq!(mol.bond_count(), 1);
         assert_eq!(mol.bonds()[0].atom1, 0);
         assert_eq!(mol.bonds()[0].atom2, 1);
+        assert!(mol.bonds()[0].persist);
 
         let output = write_pdb_string(&mol);
         let lines = output.lines().collect::<Vec<_>>();

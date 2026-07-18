@@ -25,9 +25,9 @@ pub use cms::{
 };
 pub use color::{
     invalidate_named_color_cache, named_color_resolver, parse_color, rgba_code,
-    set_named_color_resolver, AbstractColor, Color, ColorBase, ColorModifier, ColorModifierValue,
-    ColorPtr, ColorSpec, GradientColor, MolColorRef, NamedColor, NamedColorResolver, Rgba8,
-    SolidColor,
+    set_named_color_resolver, AbstractColor, ColCompiler, Color, ColorBase, ColorModifier,
+    ColorModifierValue, ColorPtr, ColorSpec, GradientColor, MolColorRef, NamedColor,
+    NamedColorResolver, Rgba8, SolidColor,
 };
 pub use color_table::{ColorTable, ColorTableColor, IntColor};
 pub use data_texture::DataTexture;

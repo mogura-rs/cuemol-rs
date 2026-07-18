@@ -1589,9 +1589,8 @@ impl CueMolGpuiApp {
         }
     }
 
-    /// Load a script file and echo its lines into the output console (CueMol2 Tools →
-    /// Execute script). HONEST SCOPE: CueMol2 embeds a JS engine; a faithful interpreter
-    /// is the categorical floor (see the gap map). This loads + previews, like egui.
+    /// Load and execute a JavaScript file through the shared CueMol scripting
+    /// runtime (CueMol2 Tools → Execute script).
     fn run_script(&mut self, path: &str) {
         let text = match std::fs::read_to_string(path.trim()) {
             Ok(text) => text,

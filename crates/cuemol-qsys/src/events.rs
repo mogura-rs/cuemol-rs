@@ -351,6 +351,34 @@ impl ScrEventManager {
         self.slots.len()
     }
 
+    pub fn matching_slot_ids(
+        &self,
+        category: impl AsRef<str>,
+        target_type: i32,
+        event_type: i32,
+        source_uid: u64,
+    ) -> Vec<i32> {
+        let category = category.as_ref();
+        self.slots
+            .iter()
+            .filter_map(|(slot_id, slot)| {
+                if slot.source_uid != INVALID_UID && slot.source_uid != source_uid {
+                    return None;
+                }
+                if !slot.category.is_empty() && !slot.category.equals(category) {
+                    return None;
+                }
+                if slot.target_type >= 0 && target_type & slot.target_type == 0 {
+                    return None;
+                }
+                if slot.event_type >= 0 && slot.event_type != event_type {
+                    return None;
+                }
+                Some(*slot_id)
+            })
+            .collect()
+    }
+
     pub fn fire_object_event(&self, event: &ObjectEvent) -> Result<bool> {
         self.fire_category(event.category(), event.source(), event.json())
     }
@@ -417,22 +445,9 @@ impl ScrEventManager {
             return Ok(false);
         };
         let category = category.as_ref();
-        for (slot_id, slot) in self.slots.iter() {
-            if slot.source_uid != INVALID_UID && slot.source_uid != source_uid {
-                continue;
-            }
-            if !slot.category.is_empty() && !slot.category.equals(category) {
-                continue;
-            }
-            if slot.target_type >= 0 && target_type & slot.target_type == 0 {
-                continue;
-            }
-            if slot.event_type >= 0 && slot.event_type != event_type {
-                continue;
-            }
-
+        for slot_id in self.matching_slot_ids(category, target_type, event_type, source_uid) {
             let mut args = LVarArgs::new(6);
-            args.at(0).set_int_value(*slot_id);
+            args.at(0).set_int_value(slot_id);
             args.at(1).set_string_value(category);
             args.at(2).set_int_value(target_type);
             args.at(3).set_int_value(event_type);

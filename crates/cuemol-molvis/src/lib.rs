@@ -772,6 +772,141 @@ impl AnIsoURenderer {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct AtomIntrElem {
+    pub molecule_id: i32,
+    pub molecule_name: String,
+    pub mode: AtomIntrElemMode,
+    pub selection: Option<String>,
+    pub atom_id: i32,
+    pub string_atom_id: String,
+    pub position: Vector4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum AtomIntrElemMode {
+    Selection = 0,
+    AtomId = 1,
+    Position = 2,
+}
+
+impl Default for AtomIntrElem {
+    fn default() -> Self {
+        Self {
+            molecule_id: -1,
+            molecule_name: String::new(),
+            mode: AtomIntrElemMode::Position,
+            selection: None,
+            atom_id: -1,
+            string_atom_id: String::new(),
+            position: Vector4::ZERO,
+        }
+    }
+}
+
+impl AtomIntrElem {
+    pub const AI_SEL: i32 = 0;
+    pub const AI_AID: i32 = 1;
+    pub const AI_POS: i32 = 2;
+
+    pub fn set_molecule_name(&mut self, value: impl Into<String>) {
+        self.molecule_id = -1;
+        self.molecule_name = value.into();
+    }
+
+    pub fn set_selection(&mut self, value: impl Into<String>) {
+        self.selection = Some(value.into());
+        self.mode = AtomIntrElemMode::Selection;
+    }
+
+    pub fn set_atom_id(&mut self, value: i32) {
+        self.atom_id = value;
+        self.mode = AtomIntrElemMode::AtomId;
+    }
+
+    pub fn set_position(&mut self, value: Vector4) {
+        self.position = value;
+        self.mode = AtomIntrElemMode::Position;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtomIntrData {
+    pub mode: i32,
+    pub elements: [AtomIntrElem; 4],
+    pub label_cache_id: i32,
+}
+
+impl Default for AtomIntrData {
+    fn default() -> Self {
+        Self {
+            mode: 0,
+            elements: std::array::from_fn(|_| AtomIntrElem::default()),
+            label_cache_id: -1,
+        }
+    }
+}
+
+impl AtomIntrData {
+    pub fn distance_by_selection(
+        molecule_id1: i32,
+        selection1: impl Into<String>,
+        molecule_id2: i32,
+        selection2: impl Into<String>,
+    ) -> Self {
+        let mut value = Self {
+            mode: 1,
+            ..Self::default()
+        };
+        value.elements[0].set_selection(selection1);
+        value.elements[0].molecule_id = molecule_id1;
+        value.elements[1].set_selection(selection2);
+        value.elements[1].molecule_id = molecule_id2;
+        value
+    }
+
+    pub fn distance_by_id(
+        molecule_id1: i32,
+        atom_id1: i32,
+        molecule_id2: i32,
+        atom_id2: i32,
+    ) -> Self {
+        Self::by_ids(1, &[(molecule_id1, atom_id1), (molecule_id2, atom_id2)])
+    }
+
+    pub fn angle_by_id(values: [(i32, i32); 3]) -> Self {
+        Self::by_ids(2, &values)
+    }
+
+    pub fn torsion_by_id(values: [(i32, i32); 4]) -> Self {
+        Self::by_ids(3, &values)
+    }
+
+    pub fn kind(&self) -> Option<AtomIntrDefKind> {
+        match self.mode {
+            1 => Some(AtomIntrDefKind::Distance),
+            2 => Some(AtomIntrDefKind::Angle),
+            3 => Some(AtomIntrDefKind::Torsion),
+            _ => None,
+        }
+    }
+
+    fn by_ids(mode: i32, values: &[(i32, i32)]) -> Self {
+        let mut result = Self {
+            mode,
+            ..Self::default()
+        };
+        for (element, (molecule_id, atom_id)) in
+            result.elements.iter_mut().zip(values.iter().copied())
+        {
+            element.set_atom_id(atom_id);
+            element.molecule_id = molecule_id;
+        }
+        result
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AtomIntrRenderer {
     client_mol_id: i32,
     mode: i32,
@@ -871,6 +1006,31 @@ impl AtomIntrDef {
 
     pub fn show_message(&self) -> bool {
         self.show_message
+    }
+
+    pub fn to_data(&self) -> AtomIntrData {
+        let mut data = AtomIntrData {
+            mode: match self.kind {
+                AtomIntrDefKind::Distance => 1,
+                AtomIntrDefKind::Angle => 2,
+                AtomIntrDefKind::Torsion => 3,
+            },
+            ..AtomIntrData::default()
+        };
+        let count = data.mode as usize + 1;
+        for index in 0..count {
+            let molecule_id = self.mol_ids.get(index).copied().unwrap_or(-1);
+            let element = &mut data.elements[index];
+            element.molecule_id = molecule_id;
+            if let Some(selection) = self.selections.get(index) {
+                element.set_selection(selection.clone());
+            } else if let Some(atom_id) = self.atom_ids.get(index).copied() {
+                element.set_atom_id(atom_id);
+            } else if let Some(position) = self.positions.get(index).copied() {
+                element.set_position(position);
+            }
+        }
+        data
     }
 }
 
@@ -6047,6 +6207,7 @@ mod tests {
             element: element.to_string(),
             formal_charge: None,
             int_props: Default::default(),
+            real_props: Default::default(),
         }
     }
 
@@ -7502,6 +7663,7 @@ mod tests {
             element: "C".to_string(),
             formal_charge: None,
             int_props: Default::default(),
+            real_props: Default::default(),
         });
         assert!(draw.append_atom(&molecule, 7));
         assert!(!draw.append_atom(&molecule, 99));
@@ -7510,6 +7672,34 @@ mod tests {
         draw.set_enabled(false);
         assert!(!draw.is_enabled());
         assert!(draw.positions().is_empty());
+    }
+
+    #[test]
+    fn atom_intr_data_modes_and_constructors_match_reference() {
+        let default = AtomIntrData::default();
+        assert_eq!(default.mode, 0);
+        assert_eq!(default.label_cache_id, -1);
+        assert!(default.kind().is_none());
+        assert!(default
+            .elements
+            .iter()
+            .all(|element| element.mode == AtomIntrElemMode::Position));
+
+        let distance = AtomIntrData::distance_by_selection(10, "name CA", 20, "name N");
+        assert_eq!(distance.kind(), Some(AtomIntrDefKind::Distance));
+        assert_eq!(distance.elements[0].molecule_id, 10);
+        assert_eq!(distance.elements[0].selection.as_deref(), Some("name CA"));
+        assert_eq!(distance.elements[1].molecule_id, 20);
+
+        let angle = AtomIntrData::angle_by_id([(10, 1), (20, 2), (30, 3)]);
+        assert_eq!(angle.kind(), Some(AtomIntrDefKind::Angle));
+        assert_eq!(angle.elements[2].atom_id, 3);
+        assert_eq!(angle.elements[2].mode, AtomIntrElemMode::AtomId);
+
+        let torsion = AtomIntrData::torsion_by_id([(1, 4), (2, 5), (3, 6), (4, 7)]);
+        assert_eq!(torsion.kind(), Some(AtomIntrDefKind::Torsion));
+        assert_eq!(torsion.elements[3].molecule_id, 4);
+        assert_eq!(torsion.elements[3].atom_id, 7);
     }
 
     #[test]

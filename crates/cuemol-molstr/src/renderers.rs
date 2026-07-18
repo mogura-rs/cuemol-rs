@@ -5,6 +5,105 @@ use cuemol_gfx::SolidColor;
 use cuemol_qsys::DrawObj;
 use std::collections::VecDeque;
 
+/// Shared state and atom/bond accounting for atom-based molecular renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MolAtomRenderer {
+    glu_vert_max: i32,
+}
+
+impl Default for MolAtomRenderer {
+    fn default() -> Self {
+        Self {
+            glu_vert_max: 1_000_000,
+        }
+    }
+}
+
+impl MolAtomRenderer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn glu_vert_max(&self) -> i32 {
+        self.glu_vert_max
+    }
+
+    pub fn get_glu_vert_max(&self) -> i32 {
+        self.glu_vert_max()
+    }
+
+    pub fn set_glu_vert_max(&mut self, value: i32) {
+        self.glu_vert_max = value;
+    }
+
+    pub fn is_hit_test_supported(&self) -> bool {
+        true
+    }
+
+    pub fn count_atom_bond(
+        &self,
+        molecule: &MolCoord,
+        selection: &Selector,
+        render_bonds: bool,
+    ) -> (usize, usize) {
+        let selected = molecule.select_indices(selection);
+        if !render_bonds {
+            return (selected.len(), 0);
+        }
+
+        let mut selected_flags = vec![false; molecule.atom_count()];
+        for index in selected.iter().copied() {
+            selected_flags[index] = true;
+        }
+        let bond_count = molecule
+            .bonds()
+            .iter()
+            .filter(|bond| {
+                selected_flags.get(bond.atom1).copied().unwrap_or(false)
+                    && selected_flags.get(bond.atom2).copied().unwrap_or(false)
+            })
+            .count();
+        (selected.len(), bond_count)
+    }
+
+    pub fn estimated_vertex_count(
+        &self,
+        molecule: &MolCoord,
+        selection: &Selector,
+        render_bonds: bool,
+        detail: i32,
+    ) -> u128 {
+        let (atom_count, bond_count) = self.count_atom_bond(molecule, selection, render_bonds);
+        let detail_factor = detail.saturating_add(1).max(0) as u128;
+        detail_factor.saturating_mul(2).saturating_mul(
+            (atom_count as u128)
+                .saturating_mul(detail_factor)
+                .saturating_add(bond_count as u128),
+        )
+    }
+
+    pub fn setup_detail(
+        &self,
+        molecule: &MolCoord,
+        selection: &Selector,
+        render_bonds: bool,
+        is_file: bool,
+        requested_detail: i32,
+    ) -> i32 {
+        if is_file {
+            return requested_detail;
+        }
+
+        let estimated =
+            self.estimated_vertex_count(molecule, selection, render_bonds, requested_detail);
+        if estimated > self.glu_vert_max.max(0) as u128 {
+            1
+        } else {
+            requested_detail
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SolidColoring;
 
@@ -1228,6 +1327,7 @@ mod tests {
             element: element.to_string(),
             formal_charge: None,
             int_props: Default::default(),
+            real_props: Default::default(),
         }
     }
 
@@ -1272,6 +1372,70 @@ mod tests {
         assert_eq!(
             cpk.color_for_atom(&atom("Xe", 10.0, 1.0, 0.0)).rgba8(),
             cpk.col_x().rgba8()
+        );
+    }
+
+    #[test]
+    fn mol_atom_renderer_counts_selected_atoms_and_bonds() {
+        let mut molecule = MolCoord::new();
+        let mut carbon = atom("C", 0.0, 1.0, 0.0);
+        carbon.name = "CA".to_string();
+        carbon.serial = 1;
+        molecule.push_atom(carbon);
+        let mut oxygen = atom("O", 0.0, 1.0, 1.0);
+        oxygen.name = "O".to_string();
+        oxygen.serial = 2;
+        molecule.push_atom(oxygen);
+        let mut nitrogen = atom("N", 0.0, 1.0, 2.0);
+        nitrogen.name = "N".to_string();
+        nitrogen.serial = 3;
+        molecule.push_atom(nitrogen);
+        molecule.add_bond(0, 1, crate::BondOrder::Single);
+        molecule.add_bond(1, 2, crate::BondOrder::Single);
+
+        let renderer = MolAtomRenderer::new();
+        assert_eq!(renderer.glu_vert_max(), 1_000_000);
+        assert!(renderer.is_hit_test_supported());
+        assert_eq!(
+            renderer.count_atom_bond(&molecule, &Selector::All, true),
+            (3, 2)
+        );
+        let selected = parse_selector("name CA,O").unwrap();
+        assert_eq!(renderer.count_atom_bond(&molecule, &selected, true), (2, 1));
+        assert_eq!(
+            renderer.count_atom_bond(&molecule, &selected, false),
+            (2, 0)
+        );
+    }
+
+    #[test]
+    fn mol_atom_renderer_clamps_interactive_detail_only() {
+        let mut molecule = MolCoord::new();
+        for serial in 1..=10 {
+            let mut value = atom("C", 0.0, 1.0, serial as f64);
+            value.serial = serial;
+            molecule.push_atom(value);
+        }
+
+        let mut renderer = MolAtomRenderer::new();
+        renderer.set_glu_vert_max(100);
+        assert_eq!(renderer.get_glu_vert_max(), 100);
+        assert_eq!(
+            renderer.estimated_vertex_count(&molecule, &Selector::All, false, 3),
+            320
+        );
+        assert_eq!(
+            renderer.setup_detail(&molecule, &Selector::All, false, false, 3),
+            1
+        );
+        assert_eq!(
+            renderer.setup_detail(&molecule, &Selector::All, false, true, 3),
+            3
+        );
+        renderer.set_glu_vert_max(1_000);
+        assert_eq!(
+            renderer.setup_detail(&molecule, &Selector::All, false, false, 3),
+            3
         );
     }
 
@@ -1409,6 +1573,7 @@ mod tests {
             element: "C".to_string(),
             formal_charge: None,
             int_props: Default::default(),
+            real_props: Default::default(),
         };
         assert_eq!(
             NameLabelRenderer::default_label_for_atom(&atom),

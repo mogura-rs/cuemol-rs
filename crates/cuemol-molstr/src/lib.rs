@@ -19,8 +19,19 @@ pub mod selection;
 pub mod stream;
 pub mod toppar;
 
+/// C++ `molstr::param` compatibility namespace.
+pub mod param {
+    pub use crate::cns_par::{AnglTag, AnglVal, BondTag, BondVal, DiheTag, DiheVal, NonbVal};
+    pub type AtomVal = crate::toppar::AtomParam;
+}
+
 pub use atom_pos_map::{AtomPosMap, AtomPosMap2};
 pub use chem::{ElemSym, MolAtom, MolBond, MolChain, MolResidue, ResidIndex, INVALID_UID};
+pub use cns_par::{
+    builtin_param_db, read_cns_par_file, read_cns_par_str, read_cns_toppar_file,
+    read_cns_toppar_str, AnglParam, BondParam, CnsParFile, DiheParam, NonbParam,
+    ParamDB as CnsParamDB,
+};
 pub use evaluator::{IntNumEvaluator, RealNumEvaluator};
 pub use fileio::{read_bytes_maybe_compressed, read_text_maybe_compressed};
 pub use iterators::{
@@ -58,18 +69,26 @@ pub use qsys::{
     QscLoadStatus,
 };
 pub use renderers::{
-    BfacColoring, CpkColoring, NameLabel, NameLabelRenderer, RectSelDrawObj, SelectionRenderMode,
-    SelectionRenderer, SimpleRenderer, SolidColoring, TraceRenderer,
+    BfacColoring, CpkColoring, MolAtomRenderer, NameLabel, NameLabelRenderer, RectSelDrawObj,
+    SelectionRenderMode, SelectionRenderer, SimpleRenderer, SolidColoring, TraceRenderer,
 };
 pub use sdf::{
     read_sdf_file, read_sdf_file_with_options, read_sdf_str, read_sdf_str_with_options,
     write_sdf_file, write_sdf_string, write_sdf_string_with_selection, SdfReadOptions, SdfReader,
     SdfWriter,
 };
-pub use selection::{parse_selector, SelCommand, Selector};
+pub use selection::{
+    parse_named_selector, parse_selector, SelCacheData, SelCacheMgr, SelCommand, SelCompiler,
+    Selector,
+};
 pub use stream::{
     AsyncLoadedObject, CompressionMode, ContentVerdict, HandlerCategory, HandlerSniffer,
     StreamHandlerInfo, StreamManager,
+};
+pub use toppar::{
+    build_topology_bonds_with_db, build_topology_bonds_with_db_options, charge_for_atom_mode,
+    read_xml_toppar_file, read_xml_toppar_str, AtomParam, LinkDef, LinkTarget, ParamDB, ResiPatch,
+    ResiToppar, TopAtom, TopBond, TopoDB, TopparManager, XmlTopparFile, XmlTopparReadStats,
 };
 
 pub type ColoringScheme = SolidColoring;

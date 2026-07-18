@@ -184,6 +184,7 @@ fn parse_atom_line(line: &str, atom_index: usize, pos_width: usize) -> Result<At
         element: guess_element(atom_name),
         formal_charge: None,
         int_props: Default::default(),
+        real_props: Default::default(),
     })
 }
 

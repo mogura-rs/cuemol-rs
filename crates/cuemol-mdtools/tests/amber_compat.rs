@@ -319,5 +319,6 @@ fn test_atom(name: &str) -> Atom {
         element: "C".to_string(),
         formal_charge: None,
         int_props: Default::default(),
+        real_props: Default::default(),
     }
 }

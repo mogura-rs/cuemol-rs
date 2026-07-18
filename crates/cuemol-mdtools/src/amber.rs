@@ -326,6 +326,7 @@ pub fn read_amber_prmtop_with_restart_str(
             element: resolve_amber_element(atomic_number, mass, amber_type),
             formal_charge: None,
             int_props: Default::default(),
+            real_props: Default::default(),
         });
     }
 

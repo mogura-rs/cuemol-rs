@@ -20,6 +20,7 @@ pub struct Atom {
     pub element: String,
     pub formal_charge: Option<i32>,
     pub int_props: BTreeMap<String, i32>,
+    pub real_props: BTreeMap<String, f64>,
 }
 
 impl Atom {
@@ -44,7 +45,23 @@ impl Atom {
     }
 
     pub fn set_int_prop(&mut self, name: impl Into<String>, value: i32) {
-        self.int_props.insert(name.into(), value);
+        let name = name.into();
+        self.real_props.remove(&name);
+        self.int_props.insert(name, value);
+    }
+
+    pub fn real_prop(&self, name: &str) -> Option<f64> {
+        self.real_props.get(name).copied()
+    }
+
+    pub fn set_real_prop(&mut self, name: impl Into<String>, value: f64) {
+        let name = name.into();
+        self.int_props.remove(&name);
+        self.real_props.insert(name, value);
+    }
+
+    pub fn remove_prop(&mut self, name: &str) -> bool {
+        self.int_props.remove(name).is_some() | self.real_props.remove(name).is_some()
     }
 }
 
@@ -266,8 +283,75 @@ impl MolCoord {
         }))
     }
 
+    pub fn atom_by_spec_with_alt(
+        &self,
+        chain: &str,
+        sindex: &str,
+        atom_name: &str,
+        alt_loc: Option<char>,
+    ) -> Result<Option<&Atom>> {
+        let (res_id, ins_code) = parse_residue_index(sindex)?;
+        let mut candidates = self.atoms.iter().filter(|atom| {
+            atom.chain_id == chain
+                && atom.res_id == res_id
+                && atom.ins_code == ins_code
+                && atom.name == atom_name
+        });
+        Ok(match alt_loc {
+            Some(alt_loc) => candidates.find(|atom| atom.alt_loc == Some(alt_loc)),
+            None => {
+                let candidates = candidates.collect::<Vec<_>>();
+                candidates
+                    .iter()
+                    .find(|atom| atom.alt_loc.is_none())
+                    .copied()
+                    .or_else(|| candidates.first().copied())
+            }
+        })
+    }
+
     pub fn get_atom(&self, chain: &str, sindex: &str, atom_name: &str) -> Result<Option<&Atom>> {
         self.atom_by_spec(chain, sindex, atom_name)
+    }
+
+    pub fn to_str_aid(&self, serial: i32) -> String {
+        let Some(atom) = self.atom_by_serial(serial) else {
+            return String::new();
+        };
+        let mut value = format!(
+            "{}.{}.{}",
+            atom.chain_id,
+            format_residue_index(atom.res_id, atom.ins_code),
+            atom.name
+        );
+        if let Some(alt_loc) = atom.alt_loc {
+            value.push(':');
+            value.push(alt_loc);
+        }
+        value
+    }
+
+    pub fn from_str_aid(&self, value: &str) -> i32 {
+        let mut parts = value.split('.');
+        let (Some(chain), Some(sindex), Some(atom_spec), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return -1;
+        };
+        if chain.is_empty() || atom_spec.is_empty() {
+            return -1;
+        }
+        let (atom_name, alt_loc) = match atom_spec.split_once(':') {
+            Some((name, alt)) if !name.is_empty() && !alt.is_empty() && !alt.contains(':') => {
+                (name, alt.chars().next())
+            }
+            Some(_) => return -1,
+            None => (atom_spec, None),
+        };
+        self.atom_by_spec_with_alt(chain, sindex, atom_name, alt_loc)
+            .ok()
+            .flatten()
+            .map_or(-1, |atom| atom.serial)
     }
 
     pub fn residue_atoms(&self, chain: &str, sindex: &str) -> Result<Vec<&Atom>> {
@@ -345,6 +429,18 @@ impl MolCoord {
         } else {
             atom.res_name = resn;
         }
+        if atom.chain_id.is_empty()
+            || atom.name.is_empty()
+            || self.atoms.iter().any(|existing| {
+                existing.chain_id == atom.chain_id
+                    && existing.res_id == atom.res_id
+                    && existing.ins_code == atom.ins_code
+                    && existing.name == atom.name
+                    && existing.alt_loc == atom.alt_loc
+            })
+        {
+            return -1;
+        }
         let serial = atom.serial;
         self.push_atom(atom);
         serial
@@ -370,6 +466,39 @@ impl MolCoord {
 
     pub fn add_bond(&mut self, atom1: usize, atom2: usize, order: BondOrder) {
         self.add_bond_stereo(atom1, atom2, order, 0);
+    }
+
+    pub fn make_bond(&mut self, serial1: i32, serial2: i32, persist: bool) -> bool {
+        let Some(atom1) = self.atoms.iter().position(|atom| atom.serial == serial1) else {
+            return false;
+        };
+        let Some(atom2) = self.atoms.iter().position(|atom| atom.serial == serial2) else {
+            return false;
+        };
+        if self.bonds.iter().any(|bond| {
+            (bond.atom1 == atom1 && bond.atom2 == atom2)
+                || (bond.atom1 == atom2 && bond.atom2 == atom1)
+        }) {
+            if persist {
+                self.mark_bond_persistent(atom1, atom2);
+            }
+            return true;
+        }
+        self.add_bond(atom1, atom2, BondOrder::Single);
+        if persist {
+            self.mark_bond_persistent(atom1, atom2);
+        }
+        true
+    }
+
+    pub fn remove_bond(&mut self, serial1: i32, serial2: i32) -> bool {
+        let Some(atom1) = self.atoms.iter().position(|atom| atom.serial == serial1) else {
+            return false;
+        };
+        let Some(atom2) = self.atoms.iter().position(|atom| atom.serial == serial2) else {
+            return false;
+        };
+        self.remove_bond_between(atom1, atom2)
     }
 
     /// Add a bond carrying an MDL/SDF stereo flag (0 none / 1 up-wedge / 6 down).
@@ -420,6 +549,12 @@ impl MolCoord {
         self.bonds.len() != before
     }
 
+    pub fn remove_nonpersistent_bonds(&mut self) -> usize {
+        let before = self.bonds.len();
+        self.bonds.retain(|bond| bond.persist);
+        before - self.bonds.len()
+    }
+
     pub fn bonds(&self) -> &[Bond] {
         &self.bonds
     }
@@ -434,6 +569,10 @@ impl MolCoord {
 
     pub fn atom_count(&self) -> usize {
         self.atoms.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.atoms.is_empty()
     }
 
     pub fn get_atom_size(&self) -> usize {
@@ -455,6 +594,14 @@ impl MolCoord {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect()
+    }
+
+    pub fn chain_count(&self) -> usize {
+        self.chain_ids().len()
+    }
+
+    pub fn get_chain_size(&self) -> usize {
+        self.chain_count()
     }
 
     pub fn residue_count(&self) -> usize {
@@ -803,16 +950,36 @@ impl MolCoord {
     /// (peptide / phosphodiester), explicit links (disulfide) are formed between
     /// distance-matching residue pairs, and unknown residues (ligands, solvent)
     /// fall back to per-residue distance autogeneration.  Port of
-    /// `TopoBuilder::applyTopology`; see [`crate::toppar`].  Idempotent —
-    /// `add_bond` dedups, so re-running adds nothing new.
+    /// `TopoBuilder::applyTopology`; see [`crate::toppar`]. Existing
+    /// non-persistent bonds are rebuilt, while deposited persistent links remain.
     pub fn apply_topology(&mut self) {
         crate::toppar::build_topology_bonds(self);
+    }
+
+    pub fn apply_topology_with_autogen(&mut self, auto_generate: bool) {
+        crate::toppar::build_topology_bonds_with_db_options(
+            self,
+            crate::toppar::TopoDB::global(),
+            auto_generate,
+        );
+    }
+
+    pub fn apply_topology_with_db(&mut self, db: &crate::toppar::TopoDB) {
+        crate::toppar::build_topology_bonds_with_db(self, db);
+    }
+
+    pub fn apply_topology_with_db_options(
+        &mut self,
+        db: &crate::toppar::TopoDB,
+        auto_generate: bool,
+    ) {
+        crate::toppar::build_topology_bonds_with_db_options(self, db, auto_generate);
     }
 
     pub fn calc_base_pair(&mut self, cutoff: f64, tilt: f64) -> usize {
         let cutoff = cutoff.max(0.0);
         let tilt_cos = (90.0_f64 - tilt.clamp(0.0, 90.0)).to_radians().cos();
-        let residues = self
+        let nucleotide_residues = self
             .residue_summaries()
             .into_iter()
             .filter_map(|summary| {
@@ -833,6 +1000,21 @@ impl MolCoord {
                 if !matches!(base_type.as_str(), "pur" | "pyr") {
                     return None;
                 }
+                Some((summary, base_type))
+            })
+            .collect::<Vec<_>>();
+
+        for (summary, _) in &nucleotide_residues {
+            let _ = self.remove_residue_prop_str(
+                &summary.key.chain_id,
+                &summary.key.script_index(),
+                "basepair",
+            );
+        }
+
+        let residues = nucleotide_residues
+            .into_iter()
+            .filter_map(|(summary, base_type)| {
                 let atom_position = |name: &str| {
                     summary
                         .atom_indices
@@ -853,13 +1035,6 @@ impl MolCoord {
             })
             .collect::<Vec<_>>();
 
-        for residue in &residues {
-            let _ = self.remove_residue_prop_str(
-                &residue.0.chain_id,
-                &residue.0.script_index(),
-                "basepair",
-            );
-        }
         for atom in &mut self.atoms {
             atom.int_props.remove("base_pair");
         }
@@ -955,6 +1130,10 @@ impl MolCoord {
             .select_indices(selector)
             .into_iter()
             .collect::<BTreeSet<_>>();
+        self.delete_atom_indices(&selected)
+    }
+
+    fn delete_atom_indices(&mut self, selected: &BTreeSet<usize>) -> usize {
         if selected.is_empty() {
             return 0;
         }
@@ -991,6 +1170,81 @@ impl MolCoord {
         self.residue_props
             .retain(|key, _| live_residues.contains(key));
         selected.len()
+    }
+
+    pub fn remove_atom(&mut self, serial: i32) -> bool {
+        let Some(index) = self.atoms.iter().position(|atom| atom.serial == serial) else {
+            return false;
+        };
+        self.delete_atom_indices(&BTreeSet::from([index])) == 1
+    }
+
+    pub fn remove_chain(&mut self, chain: &str) -> bool {
+        let selected = self
+            .atoms
+            .iter()
+            .enumerate()
+            .filter_map(|(index, atom)| (atom.chain_id == chain).then_some(index))
+            .collect::<BTreeSet<_>>();
+        if selected.is_empty() {
+            return false;
+        }
+        self.delete_atom_indices(&selected);
+        true
+    }
+
+    pub fn change_chain_name(
+        &mut self,
+        old_chain: &str,
+        sindex: &str,
+        new_chain: &str,
+    ) -> Result<bool> {
+        let (res_id, ins_code) = parse_residue_index(sindex)?;
+        let old_key = ResidueKey::new(old_chain, res_id, ins_code);
+        let new_key = ResidueKey::new(new_chain, res_id, ins_code);
+        if !self.atoms.iter().any(|atom| residue_key(atom) == old_key) {
+            return Ok(false);
+        }
+        if old_key != new_key && self.atoms.iter().any(|atom| residue_key(atom) == new_key) {
+            return Ok(false);
+        }
+        for atom in &mut self.atoms {
+            if residue_key(atom) == old_key {
+                atom.chain_id = new_chain.to_string();
+            }
+        }
+        if let Some(props) = self.residue_props.remove(&old_key) {
+            self.residue_props.insert(new_key, props);
+        }
+        Ok(true)
+    }
+
+    pub fn change_res_index(
+        &mut self,
+        chain: &str,
+        old_sindex: &str,
+        new_sindex: &str,
+    ) -> Result<bool> {
+        let (old_res_id, old_ins_code) = parse_residue_index(old_sindex)?;
+        let (new_res_id, new_ins_code) = parse_residue_index(new_sindex)?;
+        let old_key = ResidueKey::new(chain, old_res_id, old_ins_code);
+        let new_key = ResidueKey::new(chain, new_res_id, new_ins_code);
+        if !self.atoms.iter().any(|atom| residue_key(atom) == old_key) {
+            return Ok(false);
+        }
+        if old_key != new_key && self.atoms.iter().any(|atom| residue_key(atom) == new_key) {
+            return Ok(false);
+        }
+        for atom in &mut self.atoms {
+            if residue_key(atom) == old_key {
+                atom.res_id = new_res_id;
+                atom.ins_code = new_ins_code;
+            }
+        }
+        if let Some(props) = self.residue_props.remove(&old_key) {
+            self.residue_props.insert(new_key, props);
+        }
+        Ok(true)
     }
 
     pub fn delete_atoms(&mut self, selector: &Selector) -> bool {
@@ -1402,6 +1656,7 @@ mod tests {
             element: "C".to_string(),
             formal_charge: None,
             int_props: BTreeMap::new(),
+            real_props: BTreeMap::new(),
         }
     }
 
@@ -1446,6 +1701,8 @@ mod tests {
         let serial = mol.append_atom1(atom(0, "", 0, "C", 5.0), "A", 1, "");
         assert_eq!(serial, 4);
         assert_eq!(mol.atom_by_serial(4).unwrap().res_name, "ALA");
+        assert_eq!(mol.append_atom1(atom(0, "", 0, "C", 6.0), "A", 1, ""), -1);
+        assert_eq!(mol.atom_count(), 4);
         assert_eq!(MolCoord::encode_model_in_chain("A", 1).unwrap(), "A");
         assert_eq!(MolCoord::encode_model_in_chain("A", 12).unwrap(), "12_A");
         assert_eq!(
@@ -1455,6 +1712,57 @@ mod tests {
         assert_eq!(mol.atoms_moved_generation(), 0);
         mol.fire_atoms_moved();
         assert_eq!(mol.atoms_moved_generation(), 1);
+    }
+
+    #[test]
+    fn persistent_atom_ids_round_trip_with_insertion_and_alt_ids() {
+        let mut selected = atom(11, "A", 1, "CA", 0.0);
+        selected.ins_code = Some('I');
+        selected.alt_loc = Some('B');
+        let mol = MolCoord::with_atoms(vec![selected]);
+
+        assert_eq!(mol.to_str_aid(11), "A.1I.CA:B");
+        assert_eq!(mol.from_str_aid("A.1I.CA:B"), 11);
+        assert_eq!(mol.from_str_aid("A.1I.CA:A"), -1);
+        assert_eq!(mol.from_str_aid("invalid"), -1);
+        assert_eq!(mol.to_str_aid(999), "");
+    }
+
+    #[test]
+    fn direct_atom_chain_and_residue_edits_preserve_model_consistency() {
+        let mut mol = MolCoord::new();
+        mol.push_atom(atom(1, "A", 1, "N", 0.0));
+        mol.push_atom(atom(2, "B", 2, "CA", 2.0));
+        mol.add_bond(0, 1, BondOrder::Single);
+        mol.set_residue_prop_str("A", "1", "secondary", "helix")
+            .unwrap();
+
+        assert!(mol.change_chain_name("A", "1", "Z").unwrap());
+        assert_eq!(mol.atoms()[0].chain_id, "Z");
+        assert_eq!(
+            mol.get_residue_prop_str("Z", "1", "secondary").unwrap(),
+            Some("helix")
+        );
+        assert!(mol.change_res_index("Z", "1", "3I").unwrap());
+        assert_eq!(
+            (mol.atoms()[0].res_id, mol.atoms()[0].ins_code),
+            (3, Some('I'))
+        );
+        assert_eq!(
+            mol.get_residue_prop_str("Z", "3I", "secondary").unwrap(),
+            Some("helix")
+        );
+
+        assert!(mol.remove_atom(1));
+        assert_eq!(mol.atom_count(), 1);
+        assert_eq!(mol.bond_count(), 0);
+        assert_eq!(
+            mol.get_residue_prop_str("Z", "3I", "secondary").unwrap(),
+            None
+        );
+        assert!(mol.remove_chain("B"));
+        assert!(mol.is_empty());
+        assert!(!mol.remove_chain("missing"));
     }
 
     #[test]
@@ -1538,7 +1846,7 @@ mod tests {
         );
         assert_eq!(
             mol.select_indices(&parse_selector("bysidech resi 1").unwrap()),
-            vec![2]
+            vec![1, 2]
         );
         assert_eq!(
             mol.select_indices(&parse_selector("name N neighbor 1").unwrap()),
@@ -1620,6 +1928,22 @@ mod tests {
         assert_eq!(
             mol.get_residue_prop_str("B", "2", "basepair").unwrap(),
             Some("A.1")
+        );
+    }
+
+    #[test]
+    fn molcoord_calc_base_pair_clears_stale_property_without_base_normal() {
+        let mut mol = MolCoord::new();
+        let mut value = atom(1, "A", 1, "N1", 0.0);
+        value.res_name = "A".to_string();
+        mol.push_atom(value);
+        mol.set_residue_prop_str("A", "1", "basepair", "B.2")
+            .unwrap();
+
+        assert_eq!(mol.calc_base_pair(3.7, 30.0), 0);
+        assert_eq!(
+            mol.get_residue_prop_str("A", "1", "basepair").unwrap(),
+            None
         );
     }
 }

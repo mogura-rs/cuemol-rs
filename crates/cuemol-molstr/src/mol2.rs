@@ -203,6 +203,7 @@ fn read_one_mol2(
                 element,
                 formal_charge: None,
                 int_props: Default::default(),
+                real_props: Default::default(),
             });
             atom_map.insert(source_id, atom_offset + atom_map.len());
         }
@@ -210,10 +211,14 @@ fn read_one_mol2(
     }
 
     if bond_count == 0 || skip {
+        if !skip {
+            finish_mol2_topology(molecule, atom_offset, apply_biopolymer_names, mol_type);
+        }
         return Ok(());
     }
 
     let Some(bond_marker) = find_section(lines, *index, "@<TRIPOS>BOND") else {
+        finish_mol2_topology(molecule, atom_offset, apply_biopolymer_names, mol_type);
         return Ok(());
     };
     *index = bond_marker + 1;
@@ -235,9 +240,37 @@ fn read_one_mol2(
             .get(&source_atom2)
             .ok_or_else(|| CueMolError::parse("MOL2 bond atom2 not found"))?;
         molecule.add_bond(atom1, atom2, mol2_bond_order(fields[3]));
+        molecule.mark_bond_persistent(atom1, atom2);
     }
 
+    finish_mol2_topology(molecule, atom_offset, apply_biopolymer_names, mol_type);
     Ok(())
+}
+
+fn finish_mol2_topology(
+    molecule: &mut MolCoord,
+    atom_offset: usize,
+    apply_biopolymer_topology: bool,
+    molecule_type: &str,
+) {
+    if apply_biopolymer_topology {
+        molecule.apply_topology();
+        if molecule_type == "PROTEIN" {
+            molecule.calc_prot_2ndry(-500.0, false);
+        } else if molecule_type == "NUCLEIC_ACID" {
+            molecule.calc_base_pair(3.7, 30.0);
+        }
+        return;
+    }
+
+    let residue_keys = molecule.atoms()[atom_offset..]
+        .iter()
+        .map(|atom| (atom.chain_id.clone(), atom.res_id))
+        .collect::<std::collections::BTreeSet<_>>();
+    for (chain_id, residue_id) in residue_keys {
+        let _ =
+            molecule.set_residue_prop_str(&chain_id, &residue_id.to_string(), "noautogen", "true");
+    }
 }
 
 fn find_section(lines: &[&str], start: usize, marker: &str) -> Option<usize> {
@@ -344,6 +377,13 @@ USER_CHARGES
         assert_eq!(molecule.atoms()[0].element, "N");
         assert_eq!(molecule.atoms()[1].name, "CA");
         assert_eq!(molecule.bonds()[1].order, BondOrder::Aromatic);
+        assert!(molecule.bonds().iter().all(|bond| bond.persist));
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "1", "noautogen")
+                .unwrap(),
+            Some("true")
+        );
     }
 
     #[test]
@@ -380,5 +420,9 @@ USER_CHARGES
         assert_eq!(mol.atoms()[0].name, "N1");
         assert_eq!(mol.atoms()[0].chain_id, "Z");
         assert_eq!(mol.atoms()[0].res_id, 11);
+        assert_eq!(
+            mol.get_residue_prop_str("Z", "11", "noautogen").unwrap(),
+            Some("true")
+        );
     }
 }

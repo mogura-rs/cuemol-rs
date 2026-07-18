@@ -26,6 +26,8 @@ cuemol-render.workspace = true
 cuemol-xtal.workspace = true
 cuemol-symm.workspace = true
 cuemol-lwview.workspace = true
+cuemol-molclient = { workspace = true, optional = true }
+cuemol-py = { workspace = true, optional = true }
 # Offscreen wgpu renderer deps — optional, behind the `offscreen` feature, so the
 # default workspace build stays light and headless (no GPU stack compiled).
 bytemuck = { version = "1.25", features = ["derive"], optional = true }
@@ -42,7 +44,7 @@ boa_engine = { version = "0.20", optional = true }
 default = []
 # Embed the boa JS engine so Execute-script actually runs JavaScript (with a `cuemol`
 # binding) instead of only previewing the file. Front ends enable this.
-scripting = ["dep:boa_engine"]
+scripting = ["dep:boa_engine", "dep:cuemol-molclient", "dep:cuemol-py"]
 # Compile the wgpu offscreen mesh renderer (`offscreen` module) and the
 # `DesktopAppState::export_active_scene_png` path. Front ends that show a 3D view
 # enable this; a pure scene-state build does not.

@@ -493,6 +493,7 @@ fn extract_one(data: &[PickleValue]) -> Option<ExtractedPseMolecule> {
             element,
             formal_charge: None,
             int_props,
+            real_props: BTreeMap::new(),
         };
         mol.append_atom1(atom, chain, res_id, resn);
         let atom_index = mol.atom_count() - 1;

@@ -542,6 +542,7 @@ impl<'a> SmilesParser<'a> {
             element: smiles_atom.element,
             formal_charge: smiles_atom.formal_charge,
             int_props: BTreeMap::new(),
+            real_props: BTreeMap::new(),
         });
         self.aromatic.push(smiles_atom.aromatic);
         if let Some(previous) = self.current_atom {

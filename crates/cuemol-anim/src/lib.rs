@@ -1,6 +1,7 @@
 use cuemol_core::{CueMolError, LDom2Node, Matrix4, Quat, Result, Uid, Vector4, NANOS_PER_SECOND};
 use cuemol_molstr::MolCoord;
 use cuemol_qsys::{Camera, Renderer, Scene, SceneExporter, View};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub type TimeValue = i64;
@@ -1309,6 +1310,18 @@ impl MorphFrame {
         &self.name
     }
 
+    pub fn source(&self) -> &str {
+        &self.src
+    }
+
+    pub fn source_type(&self) -> &str {
+        &self.srctype
+    }
+
+    pub fn is_this(&self) -> bool {
+        self.srctype == "<this>"
+    }
+
     pub fn positions(&self) -> &[Vector4] {
         &self.positions
     }
@@ -1387,8 +1400,31 @@ impl MorphMol {
     }
 
     pub fn insert_before(&mut self, molecule: &MolCoord, index: usize) {
-        let positions = molecule.atoms().iter().map(|atom| atom.position).collect();
+        let positions = self.positions_for_molecule(molecule);
         let frame = MorphFrame::new("", "", "molecule", positions);
+        self.insert_frame_before(frame, index);
+    }
+
+    pub fn positions_for_molecule(&self, molecule: &MolCoord) -> Vec<Vector4> {
+        let mut source = BTreeMap::new();
+        for atom in molecule.atoms() {
+            source
+                .entry((atom.chain_id.as_str(), atom.res_id, atom.name.as_str()))
+                .or_insert(atom.position);
+        }
+        self.molecule
+            .atoms()
+            .iter()
+            .map(|atom| {
+                source
+                    .get(&(atom.chain_id.as_str(), atom.res_id, atom.name.as_str()))
+                    .copied()
+                    .unwrap_or(atom.position)
+            })
+            .collect()
+    }
+
+    pub fn insert_frame_before(&mut self, frame: MorphFrame, index: usize) {
         if index >= self.frames.len() {
             self.frames.push(frame);
         } else {
@@ -1397,7 +1433,7 @@ impl MorphMol {
     }
 
     pub fn remove_frame(&mut self, index: usize) -> bool {
-        if index >= self.frames.len() {
+        if index >= self.frames.len() || self.frames[index].srctype == "<this>" {
             false
         } else {
             self.frames.remove(index);
@@ -1420,7 +1456,7 @@ impl MorphMol {
             .map(|atom| atom.position)
             .collect();
         self.frames
-            .push(MorphFrame::new("(this)", "<this>", "<this>", positions));
+            .push(MorphFrame::new("", "", "<this>", positions));
         true
     }
 
@@ -1877,8 +1913,33 @@ impl AnimMgr {
         &self.motions
     }
 
+    pub fn motions_mut(&mut self) -> &mut [AnimMotion] {
+        &mut self.motions
+    }
+
+    pub fn motion_by_uid(&self, uid: Uid) -> Option<&AnimMotion> {
+        self.motions
+            .iter()
+            .find(|motion| motion.base().uid() == uid)
+    }
+
+    pub fn motion_by_uid_mut(&mut self, uid: Uid) -> Option<&mut AnimMotion> {
+        self.motions
+            .iter_mut()
+            .find(|motion| motion.base().uid() == uid)
+    }
+
     pub fn append_motion(&mut self, motion: AnimMotion) {
         self.motions.push(motion);
+        self.update_timeline();
+    }
+
+    pub fn insert_motion_before(&mut self, index: usize, motion: AnimMotion) {
+        if index >= self.motions.len() {
+            self.motions.push(motion);
+        } else {
+            self.motions.insert(index, motion);
+        }
         self.update_timeline();
     }
 
@@ -2198,7 +2259,7 @@ mod tests {
     fn atom(serial: i32, x: f64) -> Atom {
         Atom {
             serial,
-            name: "C".to_string(),
+            name: format!("C{serial}"),
             alt_loc: None,
             res_name: "RES".to_string(),
             chain_id: "A".to_string(),
@@ -2210,6 +2271,7 @@ mod tests {
             element: "C".to_string(),
             formal_charge: None,
             int_props: Default::default(),
+            real_props: Default::default(),
         }
     }
 
@@ -2392,6 +2454,12 @@ mod tests {
         let mid = morph.interpolated_positions(0.5);
         assert_eq!(mid[0], Vector4::new3(5.0, 0.0, 0.0));
         assert_eq!(mid[1], Vector4::new3(15.0, 0.0, 0.0));
+        let mut partial = MolCoord::new();
+        partial.push_atom(atom(2, 30.0));
+        assert_eq!(
+            morph.positions_for_molecule(&partial),
+            vec![Vector4::new3(0.0, 0.0, 0.0), Vector4::new3(30.0, 0.0, 0.0)]
+        );
         assert!(morph.remove_frame(1));
         assert!(!morph.remove_frame(10));
     }

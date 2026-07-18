@@ -3,6 +3,25 @@ use cuemol_core::{CueMolError, Result, Vector4};
 use std::collections::HashMap;
 use std::path::Path;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AtomLookupKey {
+    chain_id: String,
+    res_id: i32,
+    ins_code: Option<char>,
+    atom_name: String,
+}
+
+impl AtomLookupKey {
+    fn new(chain_id: &str, res_id: i32, ins_code: Option<char>, atom_name: &str) -> Self {
+        Self {
+            chain_id: chain_id.to_string(),
+            res_id,
+            ins_code,
+            atom_name: atom_name.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MmcifReadOptions {
     pub load_model: bool,
@@ -85,7 +104,7 @@ pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Re
     let mut struct_conn_rows = Vec::new();
     let mut anisou_rows = Vec::new();
     // Secondary-structure ranges: (loop, value). _struct_conf -> "helix"
-    // (HELX_* rows only), _struct_sheet_range -> "sheet".
+    // (HELX_P rows only), _struct_sheet_range -> "sheet".
     let mut secstr_loops: Vec<(CifLoop, &'static str)> = Vec::new();
     let mut default_model: Option<String> = None;
 
@@ -111,8 +130,19 @@ pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Re
                 else {
                     continue;
                 };
-                let key = atom_key(&atom.chain_id, atom.res_id, &atom.name);
-                atom_keys.insert(key, mol.atom_count());
+                let key =
+                    AtomLookupKey::new(&atom.chain_id, atom.res_id, atom.ins_code, &atom.name);
+                if atom_keys.get(&key).is_some_and(|indices: &Vec<usize>| {
+                    indices
+                        .iter()
+                        .any(|&index| mol.atoms()[index].alt_loc == atom.alt_loc)
+                }) {
+                    continue;
+                }
+                atom_keys
+                    .entry(key)
+                    .or_insert_with(Vec::new)
+                    .push(mol.atom_count());
                 mol.push_atom(atom);
             }
         } else if cif_loop.category_is("_struct_conn") {
@@ -134,15 +164,20 @@ pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Re
     // orders, peptide links, distance-gated disulfides), the same path the PDB
     // reader uses; the explicit `_struct_conn` records below add any remaining
     // covalent links (and dedup against template disulfides). See `crate::toppar`.
-    mol.apply_topology();
+    mol.apply_topology_with_autogen(options.auto_topo_gen);
+    mol.calc_base_pair(3.7, 30.0);
     for cif_loop in anisou_rows {
         apply_anisou(&cif_loop, &mut mol);
     }
     for cif_loop in struct_conn_rows {
         apply_struct_conn(&cif_loop, &atom_keys, &mut mol);
     }
-    for (cif_loop, value) in &secstr_loops {
-        apply_secstr_range(cif_loop, &mut mol, value);
+    if options.load_secstr {
+        for (cif_loop, value) in &secstr_loops {
+            apply_secstr_range(cif_loop, &mut mol, value);
+        }
+    } else {
+        mol.calc_prot_2ndry(-500.0, false);
     }
     // Crystallographic cell + space group come as single key-value items (not a
     // loop_), so parse those separately. The symm layer resolves the space group
@@ -202,7 +237,7 @@ fn build_cell_params(items: &HashMap<String, String>) -> Option<cuemol_core::Cel
 
 /// Apply secondary-structure ranges (C++ `MmcifMolReader::apply2ndry`): set the
 /// residue `secondary` property to `value` ("helix"/"sheet") for every residue
-/// in each row's begin..=end auth-sequence range. For `_struct_conf` only HELX_*
+/// in each row's begin..=end auth-sequence range. For `_struct_conf` only HELX_P
 /// conformation types are helices (TURN_P etc. are skipped); `_struct_sheet_range`
 /// rows are all sheets. Auth columns are used (label_ as fallback) to match the
 /// auth ids the `_atom_site` parser stores. Missing residues in a range are
@@ -214,13 +249,23 @@ fn apply_secstr_range(cif_loop: &CifLoop, mol: &mut MolCoord, value: &str) {
             .map(str::to_string)
     };
     for row in &cif_loop.rows {
-        // _struct_conf carries non-helix conformation types too; keep only HELX_*.
-        if value == "helix" {
-            let conf = value_for(&cif_loop.columns, row, "conf_type_id").unwrap_or("");
-            if !conf.starts_with("HELX") {
+        let code = if value == "helix" {
+            // C++ accepts only the protein-helix record and maps PDB helix
+            // classes 5/3 to 3-10/pi helices.
+            if value_for(&cif_loop.columns, row, "conf_type_id") != Some("HELX_P") {
                 continue;
             }
-        }
+            match value_for(&cif_loop.columns, row, "pdbx_PDB_helix_class")
+                .and_then(|class| class.parse::<i32>().ok())
+                .unwrap_or(1)
+            {
+                5 => 'G',
+                3 => 'I',
+                _ => 'H',
+            }
+        } else {
+            'E'
+        };
         let (Some(chain), Some(beg), Some(end)) = (
             val(row, "beg_auth_asym_id", "beg_label_asym_id"),
             val(row, "beg_auth_seq_id", "beg_label_seq_id"),
@@ -231,9 +276,20 @@ fn apply_secstr_range(cif_loop: &CifLoop, mol: &mut MolCoord, value: &str) {
         let (Ok(beg), Ok(end)) = (beg.parse::<i32>(), end.parse::<i32>()) else {
             continue;
         };
+        if value == "helix" && beg >= end {
+            continue;
+        }
         for res_id in beg..=end {
+            let mut secondary2 = code.to_string();
+            if res_id == beg {
+                secondary2.push('s');
+            } else if res_id == end {
+                secondary2.push('e');
+            }
             // Missing residues (gaps) just return NotFound — ignore.
             let _ = mol.set_residue_prop_str(&chain, &res_id.to_string(), "secondary", value);
+            let _ =
+                mol.set_residue_prop_str(&chain, &res_id.to_string(), "secondary2", &secondary2);
         }
     }
 }
@@ -397,19 +453,30 @@ fn atom_from_row_with_options(
             .and_then(|index| row.get(index).map(String::as_str))
             .filter(|value| !matches!(*value, "." | "?"))
     };
-    let serial = get("id").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let Some(serial) = get("id").and_then(|v| v.parse().ok()) else {
+        return Ok(None);
+    };
     let name = get("auth_atom_id")
         .or_else(|| get("label_atom_id"))
         .unwrap_or("")
         .to_string();
+    if name.is_empty() {
+        return Ok(None);
+    }
     let res_name = get("auth_comp_id")
         .or_else(|| get("label_comp_id"))
         .unwrap_or("")
         .to_string();
+    if res_name.is_empty() {
+        return Ok(None);
+    }
     let mut chain_id = get("auth_asym_id")
         .or_else(|| get("label_asym_id"))
         .unwrap_or("")
         .to_string();
+    if chain_id.is_empty() {
+        return Ok(None);
+    }
     let res_id = get("auth_seq_id")
         .or_else(|| get("label_seq_id"))
         .and_then(|v| v.parse().ok())
@@ -455,6 +522,7 @@ fn atom_from_row_with_options(
         element,
         formal_charge,
         int_props: Default::default(),
+        real_props: Default::default(),
     }))
 }
 
@@ -539,8 +607,12 @@ fn parse_f64(value: Option<&str>, name: &str) -> Result<f64> {
         .map_err(|_| CueMolError::parse(format!("invalid mmCIF {name}")))
 }
 
-fn apply_struct_conn(cif_loop: &CifLoop, atom_keys: &HashMap<String, usize>, mol: &mut MolCoord) {
-    // Resolve a `_struct_conn` partner's (chain, seq, atom) with the SAME
+fn apply_struct_conn(
+    cif_loop: &CifLoop,
+    atom_keys: &HashMap<AtomLookupKey, Vec<usize>>,
+    mol: &mut MolCoord,
+) {
+    // Resolve a `_struct_conn` partner's (chain, seq, insertion, atom, alt) with the SAME
     // auth-preferred-then-label scheme the atoms were stored under (`get_atom`:
     // auth_* `||` label_*), mirroring C++ `applyLink`'s `getAsymID`/`getResidIndex`/
     // `getAtomID` (MmcifMolReader.cpp:636-645). A label-only lookup misses every
@@ -556,7 +628,14 @@ fn apply_struct_conn(cif_loop: &CifLoop, atom_keys: &HashMap<String, usize>, mol
         };
         read(auth).or_else(|| read(label))
     };
-    let partner_key = |row: &[String], n: u8| -> Option<String> {
+    let read = |row: &[String], name: &str| -> Option<String> {
+        cif_loop
+            .column_index(name)
+            .and_then(|i| row.get(i))
+            .filter(|v| !matches!(v.as_str(), "." | "?" | ""))
+            .cloned()
+    };
+    let partner_key = |row: &[String], n: u8| -> Option<(AtomLookupKey, Option<char>)> {
         let chain = pick(
             row,
             &format!("ptnr{n}_auth_asym_id"),
@@ -572,19 +651,49 @@ fn apply_struct_conn(cif_loop: &CifLoop, atom_keys: &HashMap<String, usize>, mol
             &format!("ptnr{n}_auth_atom_id"),
             &format!("ptnr{n}_label_atom_id"),
         )?;
-        Some(atom_key(&chain, seq.parse().unwrap_or(0), &atom))
+        let ins_code =
+            read(row, &format!("pdbx_ptnr{n}_PDB_ins_code")).and_then(|value| value.chars().next());
+        let alt_loc =
+            read(row, &format!("pdbx_ptnr{n}_label_alt_id")).and_then(|value| value.chars().next());
+        Some((
+            AtomLookupKey::new(&chain, seq.parse().unwrap_or(0), ins_code, &atom),
+            alt_loc,
+        ))
     };
     for row in &cif_loop.rows {
-        if let (Some(key1), Some(key2)) = (partner_key(row, 1), partner_key(row, 2)) {
-            if let (Some(&atom1), Some(&atom2)) = (atom_keys.get(&key1), atom_keys.get(&key2)) {
+        let connection_type = value_for(&cif_loop.columns, row, "conn_type_id").unwrap_or("");
+        if !connection_type.eq_ignore_ascii_case("covale")
+            && !connection_type.eq_ignore_ascii_case("disulf")
+        {
+            continue;
+        }
+        if let (Some((key1, alt1)), Some((key2, alt2))) = (partner_key(row, 1), partner_key(row, 2))
+        {
+            let resolve = |key: &AtomLookupKey, alt: Option<char>| {
+                atom_keys.get(key).and_then(|indices| {
+                    alt.map_or_else(
+                        || {
+                            indices
+                                .iter()
+                                .copied()
+                                .find(|&index| mol.atoms()[index].alt_loc.is_none())
+                                .or_else(|| indices.first().copied())
+                        },
+                        |alt| {
+                            indices
+                                .iter()
+                                .copied()
+                                .find(|&index| mol.atoms()[index].alt_loc == Some(alt))
+                        },
+                    )
+                })
+            };
+            if let (Some(atom1), Some(atom2)) = (resolve(&key1, alt1), resolve(&key2, alt2)) {
                 mol.add_bond(atom1, atom2, BondOrder::Single);
+                mol.mark_bond_persistent(atom1, atom2);
             }
         }
     }
-}
-
-fn atom_key(chain: &str, res_id: i32, atom_name: &str) -> String {
-    format!("{chain}:{res_id}:{atom_name}")
 }
 
 #[cfg(test)]
@@ -653,6 +762,60 @@ _atom_site_anisotrop.U[2][3]
     }
 
     #[test]
+    fn deposited_secondary_structure_sets_dssp_codes_and_markers() {
+        let cif = "\
+data_test
+loop_
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_seq_id
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+1 C CA ALA A 1 0.0 0.0 0.0
+2 C CA ALA A 2 10.0 0.0 0.0
+3 C CA ALA A 3 20.0 0.0 0.0
+4 C CA ALA A 4 30.0 0.0 0.0
+#
+loop_
+_struct_conf.conf_type_id
+_struct_conf.beg_label_asym_id
+_struct_conf.beg_label_seq_id
+_struct_conf.end_label_seq_id
+_struct_conf.pdbx_PDB_helix_class
+HELX_P A 1 2 5
+TURN_P A 3 4 .
+#
+loop_
+_struct_sheet_range.beg_label_asym_id
+_struct_sheet_range.beg_label_seq_id
+_struct_sheet_range.end_label_seq_id
+A 3 4
+#
+";
+        let mol = read_mmcif_str(cif).unwrap();
+        assert_eq!(
+            mol.get_residue_prop_str("A", "1", "secondary2").unwrap(),
+            Some("Gs")
+        );
+        assert_eq!(
+            mol.get_residue_prop_str("A", "2", "secondary2").unwrap(),
+            Some("Ge")
+        );
+        assert_eq!(
+            mol.get_residue_prop_str("A", "3", "secondary2").unwrap(),
+            Some("Es")
+        );
+        assert_eq!(
+            mol.get_residue_prop_str("A", "4", "secondary2").unwrap(),
+            Some("Ee")
+        );
+    }
+
+    #[test]
     fn struct_conn_resolves_partners_by_auth_ids_like_the_atoms() {
         // A `_struct_conn` covale to a metal whose auth_seq_id (100) differs from
         // its label_seq_id (`.`). Atoms are stored under auth ids, so a label-only
@@ -703,8 +866,91 @@ covale A 1 CA A 1 CA B . FE A 100 FE
         // The covale bond exists — only resolvable via auth-preferred partner keys.
         assert_eq!(mol.bonds().len(), 1, "the covale bond must be created");
         let bond = &mol.bonds()[0];
+        assert!(bond.persist);
         let pair = (bond.atom1.min(bond.atom2), bond.atom1.max(bond.atom2));
         assert_eq!(pair, (0, 1), "the bond connects CA (atom0) and FE (atom1)");
+    }
+
+    #[test]
+    fn struct_conn_resolves_insertion_codes_and_alternate_conformers() {
+        let cif = "\
+data_test
+loop_
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.label_alt_id
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+1 C C1 LIG A 10 B A 0.0 0.0 0.0
+2 C C1 LIG A 10 B B 30.0 0.0 0.0
+3 C C1 LIG A 10 A B 60.0 0.0 0.0
+4 FE FE FE2 A 20 ? . 90.0 0.0 0.0
+#
+loop_
+_struct_conn.conn_type_id
+_struct_conn.ptnr1_label_asym_id
+_struct_conn.ptnr1_label_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.pdbx_ptnr1_PDB_ins_code
+_struct_conn.pdbx_ptnr1_label_alt_id
+_struct_conn.ptnr2_label_asym_id
+_struct_conn.ptnr2_label_seq_id
+_struct_conn.ptnr2_label_atom_id
+_struct_conn.pdbx_ptnr2_PDB_ins_code
+_struct_conn.pdbx_ptnr2_label_alt_id
+covale A 10 C1 B B A 20 FE ? .
+#
+";
+        let mol = read_mmcif_str(cif).unwrap();
+        assert_eq!(mol.bond_count(), 1);
+        let bond = &mol.bonds()[0];
+        assert!(bond.persist);
+        let pair = (bond.atom1.min(bond.atom2), bond.atom1.max(bond.atom2));
+        assert_eq!(pair, (1, 3));
+    }
+
+    #[test]
+    fn mmcif_disabling_autogen_keeps_known_topology_and_ignores_non_covalent_conn() {
+        let cif = "\
+data_test
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_seq_id
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+ATOM 1 N N ALA A 1 0.0 0.0 0.0
+ATOM 2 C CA ALA A 1 10.0 0.0 0.0
+#
+loop_
+_struct_conn.conn_type_id
+_struct_conn.ptnr1_label_asym_id
+_struct_conn.ptnr1_label_seq_id
+_struct_conn.ptnr1_label_atom_id
+_struct_conn.ptnr2_label_asym_id
+_struct_conn.ptnr2_label_seq_id
+_struct_conn.ptnr2_label_atom_id
+hydrog A 1 N A 1 CA
+#
+";
+        let options = MmcifReadOptions {
+            auto_topo_gen: false,
+            ..MmcifReadOptions::default()
+        };
+        let mol = read_mmcif_str_with_options(cif, options).unwrap();
+        assert_eq!(mol.bond_count(), 1);
+        assert!(!mol.bonds()[0].persist);
     }
 
     #[test]
@@ -732,6 +978,32 @@ ATOM 2 CB GLY A 2 1.5 0.0 0.0
         assert_eq!(mol.atoms()[0].b_factor, 0.0);
         assert_eq!(mol.atoms()[0].element, "N");
         assert_eq!(mol.atoms()[1].element, "C");
+    }
+
+    #[test]
+    fn invalid_and_duplicate_atom_site_rows_are_skipped() {
+        let cif = "\
+data_test
+loop_
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_seq_id
+_atom_site.label_alt_id
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+1 C C1 LIG A 1 . 0.0 0.0 0.0
+2 C C1 LIG A 1 . 1.0 0.0 0.0
+bad C C2 LIG A 1 . 2.0 0.0 0.0
+3 C C3 LIG ? 1 . 3.0 0.0 0.0
+#
+";
+        let mol = read_mmcif_str(cif).unwrap();
+        assert_eq!(mol.atom_count(), 1);
+        assert_eq!(mol.atoms()[0].name, "C1");
     }
 
     #[test]

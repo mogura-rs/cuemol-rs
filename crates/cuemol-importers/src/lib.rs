@@ -807,6 +807,7 @@ mod tests {
             element: "C".to_string(),
             formal_charge: None,
             int_props: props,
+            real_props: BTreeMap::new(),
         }
     }
 

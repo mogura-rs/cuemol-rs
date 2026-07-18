@@ -1,7 +1,7 @@
 use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
 use cuemol_molstr::mol_undo::{MolUndoManager, ResiduePropsEdit};
 use cuemol_molstr::{
-    parse_selector, Atom, BondOrder, MolCoord, MolSceneManager, Prot2ndrySet, ResidueKey, Selector,
+    parse_selector, Atom, MolCoord, MolSceneManager, Prot2ndrySet, ResidueKey, Selector,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -433,21 +433,11 @@ impl MolAnlManager {
     }
 
     pub fn make_bond(&self, molecule: &mut MolCoord, aid1: i32, aid2: i32) -> bool {
-        let Some(index1) = atom_index_by_serial(molecule, aid1) else {
-            return false;
-        };
-        let Some(index2) = atom_index_by_serial(molecule, aid2) else {
-            return false;
-        };
-        if molecule.mark_bond_persistent(index1, index2) {
-            return true;
-        }
-        molecule.add_bond(index1, index2, BondOrder::Single);
-        molecule.mark_bond_persistent(index1, index2)
+        molecule.make_bond(aid1, aid2, true)
     }
 
     pub fn remove_bond(&self, molecule: &mut MolCoord, aid1: i32, aid2: i32) -> bool {
-        remove_bond_by_serial(molecule, aid1, aid2)
+        molecule.remove_bond(aid1, aid2)
     }
 
     pub fn get_nostd_bonds_json(&self, molecule: &MolCoord) -> String {
@@ -865,11 +855,15 @@ fn contact_json_same_molecule(
         .collect::<BTreeSet<_>>();
     let mut hits = BTreeSet::new();
     let atoms = molecule.atoms();
+    let mut checked = vec![false; atoms.len()];
     for (index1, atom1) in atoms.iter().enumerate() {
         if !selector1.matches(atom1) || excluded_contact_atom(atom1, hbond) {
             continue;
         }
-        for atom2 in atoms.iter().skip(index1 + 1) {
+        for (index2, atom2) in atoms.iter().enumerate() {
+            if checked[index2] {
+                continue;
+            }
             if !selector2.matches(atom2) || excluded_contact_atom(atom2, hbond) {
                 continue;
             }
@@ -885,6 +879,7 @@ fn contact_json_same_molecule(
                 hits.insert(pair);
             }
         }
+        checked[index1] = true;
     }
     bond_pairs_json(hits.into_iter().take(max_count))
 }
@@ -946,24 +941,6 @@ fn bond_pairs_json(pairs: impl Iterator<Item = (i32, i32)>) -> String {
     }
 }
 
-fn atom_index_by_serial(molecule: &MolCoord, serial: i32) -> Option<usize> {
-    molecule
-        .atoms()
-        .iter()
-        .position(|atom| atom.serial == serial)
-}
-
-fn remove_bond_by_serial(molecule: &mut MolCoord, aid1: i32, aid2: i32) -> bool {
-    let Some(index1) = atom_index_by_serial(molecule, aid1) else {
-        return false;
-    };
-    let Some(index2) = atom_index_by_serial(molecule, aid2) else {
-        return false;
-    };
-
-    molecule.remove_bond_between(index1, index2)
-}
-
 fn contact_atom_json(atom: &Atom) -> String {
     let residue = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
     let mut output = format!(
@@ -1009,6 +986,7 @@ mod tests {
             element: element.to_string(),
             formal_charge: None,
             int_props: Default::default(),
+            real_props: Default::default(),
         }
     }
 
@@ -1265,6 +1243,22 @@ mod tests {
     }
 
     #[test]
+    fn contact_pair_direction_does_not_depend_on_atom_order() {
+        let manager = MolAnlManager::new();
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1, "O", "A", 1, "O", 0.0));
+        molecule.push_atom(atom(2, "N", "A", 2, "N", 2.5));
+        let selector1 = parse_selector("name N").unwrap();
+        let selector2 = parse_selector("name O").unwrap();
+
+        assert_eq!(
+            manager
+                .calc_atom_contact2_json(&molecule, &selector1, &selector2, 1.0, 3.0, false, 10,),
+            "[[1,2]]"
+        );
+    }
+
+    #[test]
     fn persistent_bond_edit_preserves_other_molecule_metadata() {
         let manager = MolAnlManager::new();
         let mut molecule = MolCoord::new();
@@ -1273,7 +1267,7 @@ mod tests {
         molecule
             .set_residue_prop_str("A", "1", "secondary", "Hs")
             .unwrap();
-        molecule.add_bond(0, 1, BondOrder::Single);
+        molecule.add_bond(0, 1, cuemol_molstr::BondOrder::Single);
         assert_eq!(manager.get_nostd_bonds_json(&molecule), "[]");
 
         // Making an already inferred bond marks that same bond persistent.

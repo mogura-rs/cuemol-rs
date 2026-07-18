@@ -180,6 +180,10 @@ impl LDom2Node {
     pub fn children_mut(&mut self) -> &mut [LDom2Node] {
         &mut self.children
     }
+
+    pub fn retain_children(&mut self, mut predicate: impl FnMut(&LDom2Node) -> bool) {
+        self.children.retain(|child| predicate(child));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

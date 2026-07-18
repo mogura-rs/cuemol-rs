@@ -212,6 +212,7 @@ pub fn read_sdf_str_with_options(input: &str, options: &SdfReadOptions) -> Resul
                     element,
                     formal_charge: None,
                     int_props: Default::default(),
+                    real_props: Default::default(),
                 });
                 atom_map.push(Some(new_index));
             }
@@ -237,6 +238,7 @@ pub fn read_sdf_str_with_options(input: &str, options: &SdfReadOptions) -> Resul
                     continue;
                 };
                 mol.add_bond_stereo(*atom1, *atom2, BondOrder::from_sdf(order as i32), stereo);
+                mol.mark_bond_persistent(*atom1, *atom2);
             }
         }
         while index < lines.len() {
@@ -250,6 +252,14 @@ pub fn read_sdf_str_with_options(input: &str, options: &SdfReadOptions) -> Resul
             }
             if line.starts_with("M  END") && index >= lines.len() {
                 break;
+            }
+        }
+        if !skip {
+            if let Some(atom_index) = atom_map.iter().flatten().next().copied() {
+                let atom = &mol.atoms()[atom_index];
+                let chain_id = atom.chain_id.clone();
+                let residue_index = atom.res_id.to_string();
+                let _ = mol.set_residue_prop_str(&chain_id, &residue_index, "noautogen", "true");
             }
         }
         compound_id += 1;
@@ -426,6 +436,14 @@ $$$$
         assert_eq!(mol.atoms()[0].chain_id, "A");
         assert_eq!(mol.atoms()[0].res_id, 1);
         assert_eq!(mol.atoms()[1].res_id, 2);
+        assert_eq!(
+            mol.get_residue_prop_str("A", "1", "noautogen").unwrap(),
+            Some("true")
+        );
+        assert_eq!(
+            mol.get_residue_prop_str("A", "2", "noautogen").unwrap(),
+            Some("true")
+        );
 
         let options = SdfReadOptions {
             load_compound_id: 1,
@@ -473,6 +491,7 @@ $$$$
         assert_eq!(roundtrip.atoms()[1].formal_charge, Some(1));
         assert_eq!(roundtrip.atoms()[2].formal_charge, Some(-1));
         assert_eq!(roundtrip.bonds()[1].order, BondOrder::Other(8));
+        assert!(roundtrip.bonds().iter().all(|bond| bond.persist));
     }
 
     #[test]
@@ -520,6 +539,7 @@ $$$$
             element: element.to_string(),
             formal_charge,
             int_props: BTreeMap::new(),
+            real_props: BTreeMap::new(),
         }
     }
 }

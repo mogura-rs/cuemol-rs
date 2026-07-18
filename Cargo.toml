@@ -50,6 +50,7 @@ cuemol-anim = { path = "crates/cuemol-anim" }
 cuemol-mdtools = { path = "crates/cuemol-mdtools" }
 cuemol-lwview = { path = "crates/cuemol-lwview" }
 cuemol-molclient = { path = "crates/cuemol-molclient" }
+cuemol-py = { path = "crates/cuemol-py" }
 cuemol-render = { path = "crates/cuemol-render" }
 cuemol-desktop-core = { path = "crates/cuemol-desktop-core" }
 cuemol-desktop = { path = "crates/cuemol-desktop" }

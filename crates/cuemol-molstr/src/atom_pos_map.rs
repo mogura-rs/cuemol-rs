@@ -340,6 +340,7 @@ mod tests {
             element: name.chars().next().unwrap().to_string(),
             formal_charge: None,
             int_props: BTreeMap::new(),
+            real_props: BTreeMap::new(),
         }
     }
 

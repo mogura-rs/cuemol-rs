@@ -173,6 +173,7 @@ fn parse_atom_line(line: &str, atom_index: usize) -> Result<Atom> {
         element: mass_symbol(mass).unwrap_or("XX").to_string(),
         formal_charge: None,
         int_props: Default::default(),
+        real_props: Default::default(),
     })
 }
 

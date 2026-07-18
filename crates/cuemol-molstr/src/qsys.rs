@@ -110,6 +110,10 @@ impl MolRenderer {
         &self.name
     }
 
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+
     pub fn renderer_type(&self) -> &str {
         &self.renderer_type
     }
@@ -383,7 +387,14 @@ fn format_atom_message(atom: &Atom) -> String {
 pub struct MolObject {
     uid: Uid,
     name: String,
+    object_type: String,
     source_type: String,
+    source: String,
+    alt_source: String,
+    modified: bool,
+    ui_locked: bool,
+    ui_collapsed: bool,
+    ui_order: i32,
     mol: MolCoord,
     renderers: Vec<MolRenderer>,
     next_renderer_uid: u64,
@@ -399,6 +410,9 @@ pub struct MolObject {
     coloring_type: Option<String>,
     coloring_attrs: BTreeMap<String, String>,
     qsc_coloring_node: Option<LDom2Node>,
+    qsc_extra_attrs: BTreeMap<String, String>,
+    qsc_extension_nodes: Vec<LDom2Node>,
+    qsc_extra_data: BTreeMap<String, Vec<u8>>,
     /// The object's `xformMat` transform (C++ `Object::getXformMatrix`). In C++
     /// it is propagated onto every atom (`MolAtom::getPos` applies it), so the
     /// rendered structure sits at its transformed position — e.g. a structure
@@ -425,6 +439,20 @@ impl MolObject {
         &self.name
     }
 
+    pub fn object_type(&self) -> &str {
+        &self.object_type
+    }
+
+    pub fn set_object_type(&mut self, object_type: impl Into<String>) {
+        self.object_type = object_type.into();
+        self.modified = true;
+    }
+
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+        self.modified = true;
+    }
+
     pub fn mol(&self) -> &MolCoord {
         &self.mol
     }
@@ -434,7 +462,66 @@ impl MolObject {
     }
 
     pub fn mol_mut(&mut self) -> &mut MolCoord {
+        self.modified = true;
         &mut self.mol
+    }
+
+    pub fn replace_mol(&mut self, molecule: MolCoord) {
+        if self.mol != molecule {
+            self.mol = molecule;
+            self.modified = true;
+        }
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn set_source(&mut self, source: impl Into<String>) {
+        self.source = source.into();
+    }
+
+    pub fn alt_source(&self) -> &str {
+        &self.alt_source
+    }
+
+    pub fn set_alt_source(&mut self, source: impl Into<String>) {
+        self.alt_source = source.into();
+        self.modified = true;
+    }
+
+    pub fn modified(&self) -> bool {
+        self.modified
+    }
+
+    pub fn set_modified(&mut self, modified: bool) {
+        self.modified = modified;
+    }
+
+    pub fn is_ui_locked(&self) -> bool {
+        self.ui_locked
+    }
+
+    pub fn set_ui_locked(&mut self, locked: bool) {
+        self.ui_locked = locked;
+        self.modified = true;
+    }
+
+    pub fn is_ui_collapsed(&self) -> bool {
+        self.ui_collapsed
+    }
+
+    pub fn set_ui_collapsed(&mut self, collapsed: bool) {
+        self.ui_collapsed = collapsed;
+        self.modified = true;
+    }
+
+    pub fn ui_order(&self) -> i32 {
+        self.ui_order
+    }
+
+    pub fn set_ui_order(&mut self, order: i32) {
+        self.ui_order = order;
     }
 
     pub fn renderers(&self) -> &[MolRenderer] {
@@ -460,6 +547,10 @@ impl MolObject {
         self.coloring_attrs.get(name).map(String::as_str)
     }
 
+    pub fn coloring_attrs(&self) -> &BTreeMap<String, String> {
+        &self.coloring_attrs
+    }
+
     pub fn set_coloring(&mut self, coloring_type: Option<String>, attrs: BTreeMap<String, String>) {
         self.coloring_type = coloring_type;
         self.coloring_attrs = attrs;
@@ -468,6 +559,79 @@ impl MolObject {
 
     pub fn qsc_coloring_node(&self) -> Option<&LDom2Node> {
         self.qsc_coloring_node.as_ref()
+    }
+
+    pub fn set_qsc_coloring_node(&mut self, node: Option<LDom2Node>) {
+        let Some(node) = node else {
+            self.coloring_type = None;
+            self.coloring_attrs.clear();
+            self.paint_coloring.clear();
+            self.qsc_coloring_node = None;
+            self.modified = true;
+            return;
+        };
+        let coloring_type = if node.type_name().is_empty() {
+            let value = node.str_attr("type").to_string();
+            (!value.is_empty()).then_some(value)
+        } else {
+            Some(node.type_name().to_string())
+        };
+        self.coloring_attrs = node
+            .children()
+            .iter()
+            .filter(|child| child.is_attr() && child.tag_name() != "type")
+            .map(|child| (child.tag_name().to_string(), child.value().to_string()))
+            .collect();
+        self.paint_coloring = node
+            .children()
+            .iter()
+            .filter(|child| !child.is_attr() && child.tag_name() == "paint")
+            .filter_map(|child| {
+                let selection = child.str_attr("sel").to_string();
+                let color = child.str_attr("color").to_string();
+                (!selection.is_empty() && !color.is_empty()).then_some((selection, color))
+            })
+            .collect();
+        self.coloring_type = coloring_type;
+        self.qsc_coloring_node = Some(node);
+        self.modified = true;
+    }
+
+    pub fn qsc_extra_attrs(&self) -> &BTreeMap<String, String> {
+        &self.qsc_extra_attrs
+    }
+
+    pub fn set_qsc_extra_attr(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.qsc_extra_attrs.insert(name.into(), value.into());
+        self.modified = true;
+    }
+
+    pub fn remove_qsc_extra_attr(&mut self, name: &str) -> bool {
+        let removed = self.qsc_extra_attrs.remove(name).is_some();
+        self.modified |= removed;
+        removed
+    }
+
+    pub fn qsc_extension_nodes(&self) -> &[LDom2Node] {
+        &self.qsc_extension_nodes
+    }
+
+    pub fn qsc_extra_data(&self, source: &str) -> Option<&[u8]> {
+        self.qsc_extra_data.get(source).map(Vec::as_slice)
+    }
+
+    pub fn qsc_extra_data_map(&self) -> &BTreeMap<String, Vec<u8>> {
+        &self.qsc_extra_data
+    }
+
+    pub fn replace_qsc_extensions(
+        &mut self,
+        nodes: Vec<LDom2Node>,
+        extra_data: BTreeMap<String, Vec<u8>>,
+    ) {
+        self.qsc_extension_nodes = nodes;
+        self.qsc_extra_data = extra_data;
+        self.modified = true;
     }
 
     /// The object's `xformMat` transform, identity when unset. Applied to the
@@ -482,6 +646,7 @@ impl MolObject {
         } else {
             Some(matrix)
         };
+        self.modified = true;
     }
 
     /// Whether this object is visible (drawn) — C++ `Object::isVisible`. An
@@ -493,6 +658,7 @@ impl MolObject {
 
     pub fn set_visible(&mut self, visible: bool) {
         self.visible = visible;
+        self.modified = true;
     }
 
     pub fn renderer_by_name(&self, name: &str) -> Option<&MolRenderer> {
@@ -504,6 +670,7 @@ impl MolObject {
     }
 
     pub fn renderer_mut(&mut self, uid: Uid) -> Option<&mut MolRenderer> {
+        self.modified = true;
         self.renderers
             .iter_mut()
             .find(|renderer| renderer.uid == uid)
@@ -512,7 +679,9 @@ impl MolObject {
     pub fn destroy_renderer(&mut self, uid: Uid) -> bool {
         let before = self.renderers.len();
         self.renderers.retain(|renderer| renderer.uid != uid);
-        self.renderers.len() != before
+        let changed = self.renderers.len() != before;
+        self.modified |= changed;
+        changed
     }
 
     pub fn add_renderer(
@@ -531,6 +700,7 @@ impl MolObject {
     ) -> Uid {
         let uid = Uid::new(self.next_renderer_uid);
         self.next_renderer_uid += 1;
+        self.modified = true;
         self.renderers.push(MolRenderer {
             uid,
             name: name.into(),
@@ -543,6 +713,101 @@ impl MolObject {
             default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
         });
         uid
+    }
+
+    pub fn rend_uid_list(&self) -> String {
+        self.renderers
+            .iter()
+            .map(|renderer| renderer.uid().get().to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    pub fn force_embed(&mut self) {
+        self.source = "datachunk:".to_string();
+        self.alt_source.clear();
+        self.modified = true;
+    }
+
+    pub fn create_preset_renderer_with_style(
+        &mut self,
+        styles: &StyleManager,
+        scope_id: u64,
+        preset_name: &str,
+        group_name: &str,
+        name_prefix: &str,
+    ) -> Result<Uid> {
+        let node = styles
+            .style_node(scope_id, preset_name)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer preset {preset_name}")))?;
+        if !node.type_name().ends_with("-rendpreset") {
+            return Err(CueMolError::invalid_argument(format!(
+                "{preset_name} is not a renderer preset ({})",
+                node.type_name()
+            )));
+        }
+        let group_uid = self.add_renderer("*group", group_name);
+        for child in node
+            .children()
+            .iter()
+            .filter(|child| child.tag_name() == "renderer")
+        {
+            let renderer_type = child.type_name();
+            if renderer_type.is_empty() {
+                continue;
+            }
+            let mut attributes = child
+                .children()
+                .iter()
+                .filter(|attribute| attribute.is_attr())
+                .map(|attribute| {
+                    (
+                        attribute.tag_name().to_string(),
+                        attribute.value().to_string(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            attributes
+                .entry("group".to_string())
+                .or_insert_with(|| group_name.to_string());
+            let name = attributes
+                .get("name")
+                .cloned()
+                .unwrap_or_else(|| format!("{name_prefix}{renderer_type}"));
+            let uid = self.add_renderer_with_attrs(renderer_type, name, attributes);
+            if let Some(renderer) = self.renderer_mut(uid) {
+                renderer.qsc_children = child
+                    .children()
+                    .iter()
+                    .filter(|node| !node.is_attr())
+                    .cloned()
+                    .collect();
+            }
+        }
+        Ok(group_uid)
+    }
+
+    pub fn detach_renderer(&mut self, uid: Uid) -> Option<MolRenderer> {
+        let index = self
+            .renderers
+            .iter()
+            .position(|renderer| renderer.uid == uid)?;
+        self.modified = true;
+        Some(self.renderers.remove(index))
+    }
+
+    pub fn attach_renderer(&mut self, renderer: MolRenderer) -> bool {
+        if self
+            .renderers
+            .iter()
+            .any(|existing| existing.uid == renderer.uid)
+        {
+            return false;
+        }
+        self.next_renderer_uid = self.next_renderer_uid.max(renderer.uid.get() + 1);
+        self.renderers.push(renderer);
+        self.modified = true;
+        true
     }
 
     pub fn add_atom_intr_renderer(
@@ -876,6 +1141,7 @@ impl MolObject {
 /// geometry through the reader selected by `srctype`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedSurface {
+    pub uid: Uid,
     pub name: String,
     pub object_type: String,
     pub srctype: String,
@@ -909,6 +1175,7 @@ pub struct LoadedLWRenderer {
 /// payload is parsed by `cuemol-lwview`, outside this molecule-only crate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedLWObject {
+    pub uid: Uid,
     pub name: String,
     pub srctype: String,
     pub raw_data: Vec<u8>,
@@ -973,6 +1240,10 @@ impl MolScene {
         &self.name
     }
 
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+
     pub fn objects(&self) -> &[MolObject] {
         &self.objects
     }
@@ -990,12 +1261,44 @@ impl MolScene {
         &self.loaded_surfaces
     }
 
+    pub fn loaded_surfaces_mut(&mut self) -> &mut [LoadedSurface] {
+        &mut self.loaded_surfaces
+    }
+
+    pub fn remove_loaded_surface(&mut self, uid: Uid) -> bool {
+        let previous = self.loaded_surfaces.len();
+        self.loaded_surfaces.retain(|surface| surface.uid != uid);
+        previous != self.loaded_surfaces.len()
+    }
+
     pub fn loaded_density_maps(&self) -> &[LoadedDensityMap] {
         &self.loaded_density_maps
     }
 
+    pub fn loaded_density_maps_mut(&mut self) -> &mut [LoadedDensityMap] {
+        &mut self.loaded_density_maps
+    }
+
+    pub fn remove_loaded_density_map(&mut self, index: usize) -> bool {
+        if index >= self.loaded_density_maps.len() {
+            return false;
+        }
+        self.loaded_density_maps.remove(index);
+        true
+    }
+
     pub fn loaded_lw_objects(&self) -> &[LoadedLWObject] {
         &self.loaded_lw_objects
+    }
+
+    pub fn loaded_lw_objects_mut(&mut self) -> &mut [LoadedLWObject] {
+        &mut self.loaded_lw_objects
+    }
+
+    pub fn remove_loaded_lw_object(&mut self, uid: Uid) -> bool {
+        let previous = self.loaded_lw_objects.len();
+        self.loaded_lw_objects.retain(|object| object.uid != uid);
+        previous != self.loaded_lw_objects.len()
     }
 
     pub fn loaded_qsc_objects(&self) -> &[LoadedQscObject] {
@@ -1008,6 +1311,10 @@ impl MolScene {
 
     pub fn scene_attributes(&self) -> &BTreeMap<String, String> {
         &self.scene_attributes
+    }
+
+    pub fn replace_scene_attributes(&mut self, attributes: BTreeMap<String, String>) {
+        self.scene_attributes = attributes;
     }
 
     pub fn scene_attribute(&self, name: &str) -> Option<&str> {
@@ -1060,20 +1367,58 @@ impl MolScene {
         Ok(())
     }
 
-    pub fn add_loaded_surface(&mut self, surface: LoadedSurface) {
+    pub fn add_loaded_surface(&mut self, mut surface: LoadedSurface) -> Uid {
+        if surface.uid.get() == 0
+            || self
+                .loaded_surfaces
+                .iter()
+                .any(|entry| entry.uid == surface.uid)
+            || self.objects.iter().any(|entry| entry.uid() == surface.uid)
+        {
+            surface.uid = Uid::new(self.next_object_uid);
+            self.next_object_uid += 1;
+        } else {
+            self.next_object_uid = self
+                .next_object_uid
+                .max(surface.uid.get().saturating_add(1));
+        }
+        let uid = surface.uid;
         self.loaded_surfaces.push(surface);
+        uid
     }
 
     pub fn add_loaded_density_map(&mut self, map: LoadedDensityMap) {
         self.loaded_density_maps.push(map);
     }
 
-    pub fn add_loaded_lw_object(&mut self, object: LoadedLWObject) {
+    pub fn add_loaded_lw_object(&mut self, mut object: LoadedLWObject) -> Uid {
+        if object.uid.get() == 0
+            || self
+                .loaded_lw_objects
+                .iter()
+                .any(|entry| entry.uid == object.uid)
+            || self.objects.iter().any(|entry| entry.uid() == object.uid)
+            || self
+                .loaded_surfaces
+                .iter()
+                .any(|entry| entry.uid == object.uid)
+        {
+            object.uid = Uid::new(self.next_object_uid);
+            self.next_object_uid += 1;
+        } else {
+            self.next_object_uid = self.next_object_uid.max(object.uid.get().saturating_add(1));
+        }
+        let uid = object.uid;
         self.loaded_lw_objects.push(object);
+        uid
     }
 
     pub fn cameras(&self) -> &[Camera] {
         &self.cameras
+    }
+
+    pub fn replace_cameras(&mut self, cameras: Vec<Camera>) {
+        self.cameras = cameras;
     }
 
     pub fn camera_by_name(&self, name: &str) -> Option<&Camera> {
@@ -1104,12 +1449,32 @@ impl MolScene {
         self.objects.iter_mut().find(|object| object.uid == uid)
     }
 
+    pub fn destroy_object(&mut self, uid: Uid) -> bool {
+        let previous = self.objects.len();
+        self.objects.retain(|object| object.uid != uid);
+        previous != self.objects.len()
+    }
+
+    pub fn clear_all_data(&mut self) {
+        self.objects.clear();
+        self.loaded_surfaces.clear();
+        self.loaded_density_maps.clear();
+        self.loaded_lw_objects.clear();
+        self.loaded_qsc_objects.clear();
+        self.loaded_styles.clear();
+        self.cameras.clear();
+        self.skipped_qsc_objects.clear();
+        self.scene_extension_nodes.clear();
+        self.animation_node = None;
+    }
+
     pub fn load_object(
         &mut self,
         file_path: impl AsRef<Path>,
         object_name: impl Into<String>,
         file_format: &str,
     ) -> Result<Uid> {
+        let file_path = file_path.as_ref();
         let mol = match file_format {
             "pdb" => read_pdb_file(file_path)?,
             "qdfpdb" => read_qdfpdb_file(file_path)?,
@@ -1123,7 +1488,12 @@ impl MolScene {
                 )))
             }
         };
-        Ok(self.add_molecule_with_source_type(object_name, mol, file_format))
+        let uid = self.add_molecule_with_source_type(object_name, mol, file_format);
+        if let Some(object) = self.object_mut(uid) {
+            object.set_source(file_path.to_string_lossy());
+            object.set_modified(false);
+        }
+        Ok(uid)
     }
 
     pub fn add_molecule(&mut self, name: impl Into<String>, mol: MolCoord) -> Uid {
@@ -1144,7 +1514,14 @@ impl MolScene {
         self.objects.push(MolObject {
             uid,
             name: name.into(),
+            object_type: "MolCoord".to_string(),
             source_type: source_type.into(),
+            source: String::new(),
+            alt_source: String::new(),
+            modified: false,
+            ui_locked: false,
+            ui_collapsed: false,
+            ui_order: object_local as i32,
             mol,
             renderers: Vec::new(),
             next_renderer_uid: RENDERER_UID_BASE
@@ -1155,6 +1532,9 @@ impl MolScene {
             coloring_type: None,
             coloring_attrs: BTreeMap::new(),
             qsc_coloring_node: None,
+            qsc_extra_attrs: BTreeMap::new(),
+            qsc_extension_nodes: Vec::new(),
+            qsc_extra_data: BTreeMap::new(),
             xform: None,
             visible: true,
         });
@@ -1311,7 +1691,7 @@ impl MolScene {
         // unsupported classes or source formats as skipped.
         // A missing `type` means MolCoord (the Rust writer always emits `type="MolCoord"`).
         let object_type = attr_value(object_line, "type").unwrap_or_else(|| "MolCoord".to_string());
-        if object_type != "MolCoord" {
+        if !matches!(object_type.as_str(), "MolCoord" | "MorphMol") {
             // Capture every supported surface representation. QDF1 is an ASCII
             // envelope, so it remains safe in the text datachunk map.
             let srctype = attr_value(object_line, "srctype").unwrap_or_default();
@@ -1319,7 +1699,8 @@ impl MolScene {
                 && matches!(srctype.as_str(), "obj" | "ply" | "qdfsurf")
             {
                 if let Ok(data) = load_qsc_source_data(object_line, chunks, base_path) {
-                    self.loaded_surfaces.push(LoadedSurface {
+                    self.add_loaded_surface(LoadedSurface {
+                        uid: Uid::new(0),
                         name: object_name.clone(),
                         object_type: object_type.clone(),
                         srctype,
@@ -1379,7 +1760,8 @@ impl MolScene {
                                 .unwrap_or(Matrix4::IDENTITY),
                         })
                         .collect();
-                    self.loaded_lw_objects.push(LoadedLWObject {
+                    self.add_loaded_lw_object(LoadedLWObject {
+                        uid: Uid::new(0),
                         name: object_name.clone(),
                         srctype,
                         raw_data: data,
@@ -1441,9 +1823,55 @@ impl MolScene {
             }
         };
         let object_uid = self.add_molecule_with_source_type(object_name, molecule, srctype);
+        let qsc_extra_attrs = object_node
+            .children()
+            .iter()
+            .filter(|node| {
+                node.is_attr()
+                    && !matches!(
+                        node.tag_name(),
+                        "type"
+                            | "name"
+                            | "src"
+                            | "alt_src"
+                            | "srctype"
+                            | "locked"
+                            | "ui_collapsed"
+                            | "ui_order"
+                            | "xformMat"
+                            | "visible"
+                    )
+            })
+            .map(|node| (node.tag_name().to_string(), node.value().to_string()))
+            .collect::<BTreeMap<_, _>>();
+        let qsc_extension_nodes = object_node
+            .children()
+            .iter()
+            .filter(|node| !node.is_attr() && !matches!(node.tag_name(), "coloring" | "renderer"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut qsc_extra_data = BTreeMap::new();
+        for node in &qsc_extension_nodes {
+            collect_qsc_extension_data(node, chunks, base_path, &mut qsc_extra_data)?;
+        }
         let object = self
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound("loaded QSC object".to_string()))?;
+        object.object_type = object_type;
+        object.qsc_extra_attrs = qsc_extra_attrs;
+        object.qsc_extension_nodes = qsc_extension_nodes;
+        object.qsc_extra_data = qsc_extra_data;
+        object.set_source(attr_value(object_line, "src").unwrap_or_default());
+        object.alt_source = attr_value(object_line, "alt_src").unwrap_or_default();
+        object.ui_locked = attr_value(object_line, "locked")
+            .is_some_and(|value| matches!(value.as_str(), "true" | "1" | "yes" | "on"));
+        object.ui_collapsed = attr_value(object_line, "ui_collapsed")
+            .is_some_and(|value| matches!(value.as_str(), "true" | "1" | "yes" | "on"));
+        if let Some(order) =
+            attr_value(object_line, "ui_order").and_then(|value| value.parse::<i32>().ok())
+        {
+            object.ui_order = order;
+        }
 
         // Object-level `xformMat` (C++ `Object::xformMat`): the structure's saved
         // transform (e.g. a persisted superposition fit). Applied to the rendered
@@ -1553,7 +1981,22 @@ impl MolScene {
             .children()
             .iter()
             .filter(|node| !node.is_attr() && node.tag_name() == "renderer");
-        for (renderer, node) in object.renderers.iter_mut().zip(renderer_nodes) {
+        for node in renderer_nodes {
+            let name = node.str_attr("name").to_string();
+            let renderer_type = if node.type_name().is_empty() {
+                node.str_attr("type").to_string()
+            } else {
+                node.type_name().to_string()
+            };
+            let renderer = object.renderers.iter_mut().find(|renderer| {
+                (!name.is_empty() && renderer.name == name)
+                    || (name.is_empty()
+                        && !renderer_type.is_empty()
+                        && renderer.renderer_type == renderer_type)
+            });
+            let Some(renderer) = renderer else {
+                continue;
+            };
             renderer.qsc_children = node
                 .children()
                 .iter()
@@ -1563,6 +2006,7 @@ impl MolScene {
                 .cloned()
                 .collect();
         }
+        object.set_modified(false);
         Ok(())
     }
 
@@ -1597,6 +2041,23 @@ impl MolScene {
                 output.push('\n');
             }
         }
+        let mut next_extra_chunk = self.objects.len();
+        let object_extra_chunk_ids = self
+            .objects
+            .iter()
+            .map(|object| {
+                object
+                    .qsc_extra_data
+                    .keys()
+                    .filter(|source| source.starts_with("datachunk:"))
+                    .map(|source| {
+                        let chunk_id = format!("{next_extra_chunk:05}");
+                        next_extra_chunk += 1;
+                        (source.clone(), chunk_id)
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .collect::<Vec<_>>();
         for (index, object) in self.objects.iter().enumerate() {
             let chunk_id = format!("{index:05}");
             // Emit `xformMat` only for a transformed object (C++ omits the identity
@@ -1615,13 +2076,36 @@ impl MolScene {
             } else {
                 " visible=\"false\"".to_string()
             };
+            let locked_attr = object
+                .is_ui_locked()
+                .then_some(" locked=\"true\"")
+                .unwrap_or_default();
+            let collapsed_attr = object
+                .is_ui_collapsed()
+                .then_some(" ui_collapsed=\"true\"")
+                .unwrap_or_default();
+            let alt_source_attr = if object.alt_source().is_empty() {
+                String::new()
+            } else {
+                format!(" alt_src=\"{}\"", escape_xml(object.alt_source()))
+            };
+            let extra_attrs = object
+                .qsc_extra_attrs
+                .iter()
+                .map(|(name, value)| format!(" {name}=\"{}\"", escape_xml(value)))
+                .collect::<String>();
             output.push_str(&format!(
-                "\t<object type=\"MolCoord\" name=\"{}\" src=\"datachunk:{}\" srctype=\"{}\"{}{}>\n",
+                "\t<object type=\"{}\" name=\"{}\" src=\"datachunk:{}\" srctype=\"{}\"{}{}{}{}{}{}>\n",
+                escape_xml(&object.object_type),
                 escape_xml(object.name()),
                 chunk_id,
                 escape_xml(object.source_type()),
                 xform_attr,
-                visible_attr
+                visible_attr,
+                locked_attr,
+                collapsed_attr,
+                alt_source_attr,
+                extra_attrs
             ));
             if let Some(coloring) = object.qsc_coloring_node() {
                 for line in qsc_node_lines(coloring) {
@@ -1713,9 +2197,19 @@ impl MolScene {
                     output.push_str("\t\t</renderer>\n");
                 }
             }
+            for extension in &object.qsc_extension_nodes {
+                let mut extension = extension.clone();
+                remap_qsc_extension_sources(
+                    &mut extension,
+                    object_extra_chunk_ids
+                        .get(index)
+                        .expect("extra chunk plan matches objects"),
+                );
+                append_qsc_node(&mut output, &extension, 2);
+            }
             output.push_str("\t</object>\n");
         }
-        let surface_base = self.objects.len();
+        let surface_base = next_extra_chunk;
         for (index, surface) in self.loaded_surfaces.iter().enumerate() {
             let chunk_id = format!("{:05}", surface_base + index);
             if let Some(source_node) = &surface.qsc_node {
@@ -1903,6 +2397,13 @@ impl MolScene {
                 output.push_str(&format!("\n==========END datachunk:{chunk_id}==========\n"));
             }
         }
+        for (object, chunk_ids) in self.objects.iter().zip(&object_extra_chunk_ids) {
+            for (source, chunk_id) in chunk_ids {
+                if let Some(data) = object.qsc_extra_data.get(source) {
+                    append_qsc_data_chunk(&mut output, chunk_id, data);
+                }
+            }
+        }
         for (index, surface) in self.loaded_surfaces.iter().enumerate() {
             let chunk_id = format!("{:05}", surface_base + index);
             if surface
@@ -2005,6 +2506,10 @@ impl MolSceneManager {
 
     pub fn scene_uids(&self) -> Vec<Uid> {
         self.scenes.iter().map(MolScene::uid).collect()
+    }
+
+    pub fn next_scene_uid_hint(&self) -> Uid {
+        Uid::new(self.next_scene_uid)
     }
 
     pub fn scene_mut(&mut self, uid: Uid) -> Option<&mut MolScene> {
@@ -2131,6 +2636,37 @@ impl MolCommandManager {
         self.views.iter().find(|view| view.uid() == uid)
     }
 
+    pub fn view_mut(&mut self, uid: Uid) -> Option<&mut MolView> {
+        self.views.iter_mut().find(|view| view.uid() == uid)
+    }
+
+    pub fn views(&self) -> &[MolView] {
+        &self.views
+    }
+
+    pub fn replace_views(&mut self, views: Vec<MolView>) {
+        self.next_view_uid = views
+            .iter()
+            .map(|view| view.uid().get())
+            .max()
+            .unwrap_or(VIEW_UID_BASE)
+            .saturating_add(1);
+        self.views = views;
+    }
+
+    pub fn destroy_scene_command(&mut self, uid: Uid) -> bool {
+        if !self.scene_manager.destroy_scene(uid) {
+            return false;
+        }
+        self.views.retain(|view| view.scene_uid() != uid);
+        true
+    }
+
+    pub fn destroy_all_scenes_command(&mut self) {
+        self.scene_manager.destroy_all_scenes();
+        self.views.clear();
+    }
+
     pub fn new_scene_command(
         &mut self,
         scene_name: impl Into<String>,
@@ -2224,6 +2760,27 @@ fn atom_display_name(atom: &Atom) -> String {
         atom.res_id,
         atom.name.trim()
     )
+}
+
+fn collect_qsc_extension_data(
+    node: &LDom2Node,
+    chunks: &BTreeMap<String, Vec<u8>>,
+    base_path: Option<&Path>,
+    output: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    let source = node.str_attr("src").to_string();
+    let source_type = node.str_attr("srctype").to_string();
+    if !source.is_empty() && !source_type.is_empty() && !output.contains_key(&source) {
+        let line = qsc_node_lines(node)
+            .into_iter()
+            .next()
+            .ok_or_else(|| CueMolError::parse("QSC extension source element not found"))?;
+        output.insert(source, load_qsc_source_data(&line, chunks, base_path)?);
+    }
+    for child in node.children().iter().filter(|child| !child.is_attr()) {
+        collect_qsc_extension_data(child, chunks, base_path, output)?;
+    }
+    Ok(())
 }
 
 fn load_qsc_source_data(
@@ -2396,6 +2953,20 @@ fn qsc_node_lines(node: &LDom2Node) -> Vec<String> {
         .filter(|line| !line.is_empty() && !line.starts_with("<?xml"))
         .map(str::to_string)
         .collect()
+}
+
+fn remap_qsc_extension_sources(node: &mut LDom2Node, chunk_ids: &BTreeMap<String, String>) {
+    let source = node.str_attr("src").to_string();
+    if let Some(chunk_id) = chunk_ids.get(&source) {
+        node.set_str_attr("src", format!("datachunk:{chunk_id}"));
+    }
+    for child in node
+        .children_mut()
+        .iter_mut()
+        .filter(|child| !child.is_attr())
+    {
+        remap_qsc_extension_sources(child, chunk_ids);
+    }
 }
 
 fn append_qsc_node(output: &mut String, node: &LDom2Node, indent: usize) {
@@ -2866,6 +3437,53 @@ mod tests {
     }
 
     #[test]
+    fn object_qif_state_round_trips_through_qsc() {
+        let mut manager = MolSceneManager::new();
+        let scene = manager.new_scene("s");
+        let object_uid = manager.scene_mut(scene).unwrap().add_molecule(
+            "mol",
+            read_pdb_str("ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00  0.00\n")
+                .unwrap(),
+        );
+        let object = manager
+            .scene_mut(scene)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap();
+        object.set_ui_locked(true);
+        object.set_ui_collapsed(true);
+        object.set_ui_order(19);
+        object.set_alt_source("fallback.pdb");
+        let renderer_uid = object.add_renderer("simple", "r1");
+        assert_eq!(object.rend_uid_list(), renderer_uid.get().to_string());
+        assert!(object.modified());
+
+        let xml = manager.scene(scene).unwrap().write_qsc_string();
+        assert!(xml.contains("locked=\"true\""));
+        assert!(xml.contains("ui_collapsed=\"true\""));
+        assert!(xml.contains("alt_src=\"fallback.pdb\""));
+        assert!(!xml.contains("ui_order=\"19\""));
+
+        let mut reloaded = MolSceneManager::new();
+        let target_scene = reloaded.new_scene("target");
+        reloaded
+            .scene_mut(target_scene)
+            .unwrap()
+            .load_qsc_str(&xml)
+            .unwrap();
+        let object = reloaded
+            .scene(target_scene)
+            .unwrap()
+            .object_by_name("mol")
+            .unwrap();
+        assert!(object.is_ui_locked());
+        assert!(object.is_ui_collapsed());
+        assert_eq!(object.alt_source(), "fallback.pdb");
+        assert_eq!(object.source(), "datachunk:00000");
+        assert!(!object.modified());
+    }
+
+    #[test]
     fn qsc_xml_entities_round_trip_in_names_and_renderer_properties() {
         let mut manager = MolSceneManager::new();
         let scene_uid = manager.new_scene("entities");
@@ -3112,11 +3730,21 @@ mod tests {
         );
         assert_eq!(scene_ref.loaded_surfaces()[0].name, "surf1");
         assert_eq!(scene_ref.loaded_surfaces()[0].srctype, "obj");
+        assert_ne!(
+            scene_ref.loaded_surfaces()[0].uid,
+            scene_ref.objects()[0].uid()
+        );
         assert!(scene_ref.loaded_surfaces()[0].data.contains("v 0 0 0"));
         assert!(
             scene_ref.skipped_qsc_objects().is_empty(),
             "an OBJ-text surface is displayable, not a skip"
         );
+        let surface_uid = scene_ref.loaded_surfaces()[0].uid;
+        let next_uid = reloaded
+            .scene_mut(scene2)
+            .unwrap()
+            .add_molecule("after-surface", MolCoord::new());
+        assert_ne!(surface_uid, next_uid);
     }
 
     #[test]
@@ -3177,6 +3805,57 @@ mod tests {
             reloaded_object.mol().atoms()[0].int_prop("custom"),
             Some(42)
         );
+    }
+
+    #[test]
+    fn qsc_preserves_molecule_derived_extensions_and_chunks() {
+        let start =
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n";
+        let end =
+            "ATOM      1  CA  GLY A   1      10.000   0.000   0.000  1.00 10.00           C  \nEND\n";
+        let qsc = format!(
+            "<scene>\n\
+             <object type=\"MorphMol\" name=\"morph\" src=\"datachunk:00000\" \
+             srctype=\"qdfpdb\" scale_frame=\"true\">\n\
+             <frames><this/><mol name=\"end\" src=\"datachunk:00001\" \
+             srctype=\"qdfpdb\"/></frames>\n\
+             </object>\n\
+             </scene>\n\
+             ========== End of XML ==========\n\
+             ==========START datachunk:00000==========\n\
+             {start}\
+             ==========END datachunk:00000==========\n\
+             ==========START datachunk:00001==========\n\
+             {end}\
+             ==========END datachunk:00001==========\n"
+        );
+        let mut scene = MolSceneManager::new();
+        let uid = scene.new_scene("morph");
+        scene.scene_mut(uid).unwrap().load_qsc_str(&qsc).unwrap();
+        let object = &scene.scene(uid).unwrap().objects()[0];
+        assert_eq!(object.object_type(), "MorphMol");
+        assert_eq!(
+            object.qsc_extra_attrs().get("scale_frame"),
+            Some(&"true".to_string())
+        );
+        assert_eq!(object.qsc_extension_nodes()[0].tag_name(), "frames");
+        assert!(object.qsc_extra_data("datachunk:00001").is_some());
+
+        let rewritten = scene.scene(uid).unwrap().write_qsc_string();
+        assert!(rewritten.contains("type=\"MorphMol\""));
+        assert!(rewritten.contains("scale_frame=\"true\""));
+        assert!(rewritten.contains("<frames>"));
+        assert!(rewritten.contains("name=\"end\""));
+        let mut reloaded = MolSceneManager::new();
+        let reloaded_uid = reloaded.new_scene("reloaded");
+        reloaded
+            .scene_mut(reloaded_uid)
+            .unwrap()
+            .load_qsc_str(&rewritten)
+            .unwrap();
+        let object = &reloaded.scene(reloaded_uid).unwrap().objects()[0];
+        assert_eq!(object.object_type(), "MorphMol");
+        assert!(object.qsc_extra_data("datachunk:00001").is_some());
     }
 
     #[test]
