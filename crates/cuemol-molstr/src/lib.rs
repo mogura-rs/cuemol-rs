@@ -57,16 +57,16 @@ pub use mol_undo::{MolEditInfo, MolUndoManager, MolXformEditInfo, ResiduePropsEd
 pub use molecule::{Atom, Bond, BondOrder, ChainSummary, MolCoord, ResidueKey, ResidueSummary};
 pub use pdb::{
     read_pdb_file, read_pdb_file_with_options, read_pdb_str, read_pdb_str_with_options,
-    read_qdfpdb_file, read_qdfpdb_str, write_pdb_file, write_pdb_string, PdbReadOptions, PdbReader,
-    PdbWriter, QdfPdbReader,
+    read_qdfpdb_file, read_qdfpdb_str, write_pdb_file, write_pdb_string,
+    write_pdb_string_with_selection, PdbReadOptions, PdbReader, PdbWriter, QdfPdbReader,
 };
 pub use prot2ndry::{calc_prot_2ndry, calc_prot_2ndry2, Prot2ndrySet};
 pub use qdf_mol::{read_qdf_mol_bytes, write_qdf_mol_bytes, QdfMolFileReader, QdfMolFileWriter};
 pub use qsys::{
-    AtomIntrKind, LoadObjectResult, LoadSceneResult, LoadedDensityMap, LoadedLWObject,
-    LoadedLWRenderer, LoadedQscObject, LoadedStyle, LoadedSurface, MolCommandManager, MolObject,
-    MolRenderer, MolScene, MolSceneManager, MolView, NewRendererResult, NewSceneResult,
-    QscLoadStatus,
+    atom_intr_defs_json, AtomIntrKind, AtomIntrLine, LoadObjectResult, LoadSceneResult,
+    LoadedDensityMap, LoadedLWObject, LoadedLWRenderer, LoadedQscObject, LoadedStyle,
+    LoadedSurface, MolCommandManager, MolObject, MolRenderer, MolScene, MolSceneManager, MolView,
+    NewRendererResult, NewSceneResult, QscLoadStatus,
 };
 pub use renderers::{
     BfacColoring, CpkColoring, MolAtomRenderer, NameLabel, NameLabelRenderer, RectSelDrawObj,

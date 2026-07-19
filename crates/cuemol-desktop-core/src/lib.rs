@@ -18,6 +18,8 @@ use cuemol_molstr::{
     NewRendererResult, NewSceneResult, QdfMolFileReader, QdfMolFileWriter, QscLoadStatus, Selector,
     StreamManager,
 };
+#[cfg(feature = "scripting")]
+use cuemol_molstr::{write_pdb_string_with_selection, AtomIntrLine};
 #[cfg(test)]
 use cuemol_molvis::default_style_manager;
 use cuemol_molvis::{
@@ -26,9 +28,11 @@ use cuemol_molvis::{
     NARenderOptions, NARenderer, ValenceBondMode, DEFAULT_STYLE_SCOPE,
 };
 use cuemol_qsys::{MultiGradient, ScalarObject, StyleManager};
-#[cfg(feature = "offscreen")]
+#[cfg(any(feature = "offscreen", feature = "scripting"))]
 use cuemol_render::PngSceneExporter;
 use cuemol_render::{PovSceneExporter, RenderSceneSnapshot, UmbreonFrame, UmbreonSceneExporter};
+#[cfg(feature = "scripting")]
+use cuemol_surface::XyzrFileWriter;
 use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter};
 use cuemol_xtal::{
     density_map_from_cif, read_mmcif_map_file, read_opendx_file, read_opendx_str, BrixMapReader,
@@ -41,6 +45,8 @@ pub use cuemol_xtal::{DensityMap, GridMap};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+#[cfg(feature = "scripting")]
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 // Offscreen wgpu mesh renderer (verifiable headless; the wgpu 3D component every
@@ -48,6 +54,270 @@ use std::sync::{Mutex, OnceLock};
 // GPU-free; GUI crates that show a 3D view enable it.
 #[cfg(feature = "offscreen")]
 pub mod offscreen;
+
+/// Script-visible runtime classes mirrored from the reference QIF registry.
+#[cfg(feature = "scripting")]
+const SCRIPT_RUNTIME_CLASS_NAMES: &[&str] = &[
+    "AbstractColor",
+    "AmberPrmtopReader",
+    "AnIsoURenderer",
+    "AnimMgr",
+    "AnimObj",
+    "AtomIntrRenderer",
+    "AtomIterator",
+    "AtomPropColoring",
+    "BallStickRenderer",
+    "BfacColoring",
+    "BrixMapReader",
+    "ByteArray",
+    "CCP4MapReader",
+    "CPK2Renderer",
+    "CPKColoring",
+    "CPKRenderer",
+    "CamMotion",
+    "Camera",
+    "ChainIterator",
+    "ClassA",
+    "ClassB",
+    "ClassS",
+    "CmdMgr",
+    "Color",
+    "ColoringScheme",
+    "Command",
+    "CrystalInfo",
+    "DensityMap",
+    "DirectSurfRenderer",
+    "DirectSurfRenderer2",
+    "DisoRenderer",
+    "DistPickDrawObj",
+    "DrawObj",
+    "ElePotMap",
+    "GLSLMapMeshRenderer",
+    "GLSLMapMeshRenderer2",
+    "GLSLMapVolRenderer",
+    "GROFileReader",
+    "GUIView",
+    "GradientColor",
+    "HoleSurfBuilder",
+    "ImgSceneExporter",
+    "InOutHandler",
+    "JctTable",
+    "LScrCallBack",
+    "LScrObject",
+    "LWObject",
+    "LWRenderer",
+    "LWViewerManager",
+    "LoadObjectCommand",
+    "LoadSceneCommand",
+    "LuxCoreSceneExporter",
+    "LuxRendSceneExporter",
+    "MOL2MolReader",
+    "MS2TestRenderer",
+    "MSMSFileReader",
+    "MTZ2MapReader",
+    "MainChainRenderer",
+    "MapMeshRenderer",
+    "MapRenderer",
+    "MapSurfRenderer",
+    "Matrix",
+    "MmcifMapReader",
+    "MmcifMolReader",
+    "MolAnim",
+    "MolAnlManager",
+    "MolAtom",
+    "MolChain",
+    "MolClientManager",
+    "MolColorRef",
+    "MolCoord",
+    "MolRenderer",
+    "MolResidue",
+    "MolSelection",
+    "MolSurfObj",
+    "MolSurfRenderer",
+    "MorphMol",
+    "MqoSceneExporter",
+    "MsgLog",
+    "MultiGradient",
+    "NAMDCoorReader",
+    "NARenderer",
+    "NameLabelRenderer",
+    "NamedColor",
+    "NewRendererCommand",
+    "NewSceneCommand",
+    "NoopAnimObj",
+    "ObjReader",
+    "ObjWriter",
+    "Object",
+    "OpenDXPotReader",
+    "PDBFileReader",
+    "PDBFileWriter",
+    "PLYFileReader",
+    "PQRFileWriter",
+    "PSEFileReader",
+    "PaintColoring",
+    "PngSceneExporter",
+    "PovSceneExporter",
+    "ProcessManager",
+    "PythonBridge",
+    "QdfMolReader",
+    "QdfPdbReader",
+    "Quat",
+    "RainbowColoring",
+    "RangeSet",
+    "RealPropAnim",
+    "RectSelDrawObj",
+    "RegExpr",
+    "RendGroup",
+    "RendXformAnim",
+    "Renderer",
+    "ResidIterator",
+    "ResidRangeSet",
+    "Ribbon2Renderer",
+    "RibbonRenderer",
+    "SDFMolReader",
+    "SDFMolWriter",
+    "ScalarObject",
+    "Scene",
+    "SceneExporter",
+    "SceneManager",
+    "SceneXMLReader",
+    "SceneXMLWriter",
+    "ScrEventManager",
+    "ScriptColoring",
+    "SelCommand",
+    "SelectionRenderer",
+    "ShowHideAnim",
+    "SimpleRenderer",
+    "SimpleSpin",
+    "SlideInOutAnim",
+    "SolidColoring",
+    "SplineRenderer",
+    "StlSceneExporter",
+    "StreamManager",
+    "StyleManager",
+    "StyleSet",
+    "SymmOpManager",
+    "SymmRenderer",
+    "TestRenderer",
+    "TextImgBuf",
+    "TimeValue",
+    "TraceRenderer",
+    "TubeRenderer",
+    "TubeSection",
+    "UmbreonSceneExporter",
+    "UnitCellRenderer",
+    "Vector",
+    "View",
+    "ViewInputConfig",
+    "WbpSceneExporter",
+    "XYZRFileWriter",
+    "XmlRpcConn",
+];
+
+/// Direct base classes mirrored from the reference QIF declarations.
+#[cfg(feature = "scripting")]
+const SCRIPT_RUNTIME_CLASS_PARENTS: &[(&str, &str)] = &[
+    ("AmberPrmtopReader", "ObjReader"),
+    ("AnIsoURenderer", "BallStickRenderer"),
+    ("AtomIntrRenderer", "Renderer"),
+    ("AtomPropColoring", "ColoringScheme"),
+    ("BallStickRenderer", "MolRenderer"),
+    ("BfacColoring", "ColoringScheme"),
+    ("BrixMapReader", "ObjReader"),
+    ("CCP4MapReader", "ObjReader"),
+    ("CPK2Renderer", "MolRenderer"),
+    ("CPKColoring", "ColoringScheme"),
+    ("CPKRenderer", "MolRenderer"),
+    ("CamMotion", "AnimObj"),
+    ("ClassB", "ClassA"),
+    ("Color", "AbstractColor"),
+    ("DensityMap", "ScalarObject"),
+    ("DirectSurfRenderer", "MolRenderer"),
+    ("DirectSurfRenderer2", "MolRenderer"),
+    ("DisoRenderer", "MolRenderer"),
+    ("DistPickDrawObj", "DrawObj"),
+    ("ElePotMap", "ScalarObject"),
+    ("GLSLMapMeshRenderer", "MapRenderer"),
+    ("GLSLMapMeshRenderer2", "MapRenderer"),
+    ("GLSLMapVolRenderer", "MapRenderer"),
+    ("GROFileReader", "ObjReader"),
+    ("GUIView", "View"),
+    ("GradientColor", "AbstractColor"),
+    ("ImgSceneExporter", "SceneExporter"),
+    ("LWObject", "Object"),
+    ("LWRenderer", "Renderer"),
+    ("LoadObjectCommand", "Command"),
+    ("LoadSceneCommand", "Command"),
+    ("LuxCoreSceneExporter", "SceneExporter"),
+    ("LuxRendSceneExporter", "SceneExporter"),
+    ("MOL2MolReader", "ObjReader"),
+    ("MS2TestRenderer", "MolRenderer"),
+    ("MSMSFileReader", "ObjReader"),
+    ("MTZ2MapReader", "ObjReader"),
+    ("MainChainRenderer", "MolRenderer"),
+    ("MapMeshRenderer", "MapRenderer"),
+    ("MapRenderer", "Renderer"),
+    ("MapSurfRenderer", "MapRenderer"),
+    ("MmcifMapReader", "ObjReader"),
+    ("MmcifMolReader", "ObjReader"),
+    ("MolAnim", "AnimObj"),
+    ("MolColorRef", "AbstractColor"),
+    ("MolCoord", "Object"),
+    ("MolRenderer", "Renderer"),
+    ("MolSurfObj", "Object"),
+    ("MolSurfRenderer", "Renderer"),
+    ("MorphMol", "MolCoord"),
+    ("MqoSceneExporter", "SceneExporter"),
+    ("NAMDCoorReader", "ObjReader"),
+    ("NARenderer", "TubeRenderer"),
+    ("NameLabelRenderer", "Renderer"),
+    ("NamedColor", "AbstractColor"),
+    ("NewRendererCommand", "Command"),
+    ("NewSceneCommand", "Command"),
+    ("NoopAnimObj", "AnimObj"),
+    ("ObjReader", "InOutHandler"),
+    ("ObjWriter", "InOutHandler"),
+    ("OpenDXPotReader", "ObjReader"),
+    ("PDBFileReader", "ObjReader"),
+    ("PDBFileWriter", "ObjWriter"),
+    ("PLYFileReader", "ObjReader"),
+    ("PQRFileWriter", "ObjWriter"),
+    ("PaintColoring", "ColoringScheme"),
+    ("PngSceneExporter", "ImgSceneExporter"),
+    ("PovSceneExporter", "SceneExporter"),
+    ("QdfMolReader", "PDBFileReader"),
+    ("QdfPdbReader", "PDBFileReader"),
+    ("RainbowColoring", "ColoringScheme"),
+    ("RealPropAnim", "AnimObj"),
+    ("RectSelDrawObj", "DrawObj"),
+    ("RendGroup", "Renderer"),
+    ("RendXformAnim", "AnimObj"),
+    ("Ribbon2Renderer", "MainChainRenderer"),
+    ("RibbonRenderer", "SplineRenderer"),
+    ("SDFMolReader", "ObjReader"),
+    ("SDFMolWriter", "ObjWriter"),
+    ("ScalarObject", "Object"),
+    ("SceneExporter", "InOutHandler"),
+    ("SceneXMLWriter", "InOutHandler"),
+    ("ScriptColoring", "ColoringScheme"),
+    ("SelCommand", "MolSelection"),
+    ("SelectionRenderer", "MolRenderer"),
+    ("ShowHideAnim", "AnimObj"),
+    ("SimpleRenderer", "MolRenderer"),
+    ("SimpleSpin", "AnimObj"),
+    ("SlideInOutAnim", "AnimObj"),
+    ("SolidColoring", "ColoringScheme"),
+    ("SplineRenderer", "MainChainRenderer"),
+    ("StlSceneExporter", "SceneExporter"),
+    ("SymmRenderer", "Renderer"),
+    ("TestRenderer", "Renderer"),
+    ("TraceRenderer", "MainChainRenderer"),
+    ("TubeRenderer", "SplineRenderer"),
+    ("UmbreonSceneExporter", "SceneExporter"),
+    ("UnitCellRenderer", "Renderer"),
+    ("WbpSceneExporter", "SceneExporter"),
+    ("XYZRFileWriter", "ObjWriter"),
+];
 
 #[derive(Debug, Clone)]
 pub struct DesktopAppState {
@@ -75,7 +345,7 @@ pub struct DesktopAppState {
     /// out by near-atom potential spikes. `Some(s)` clamps the gradient to `mid ± s`.
     potential_scale: Option<f64>,
     #[cfg(feature = "scripting")]
-    script_styles: BTreeMap<u64, StyleManager>,
+    script_styles: StyleManager,
     #[cfg(feature = "scripting")]
     script_view_input_config: cuemol_qsys::ViewInputConfig,
     #[cfg(feature = "scripting")]
@@ -95,7 +365,7 @@ struct DesktopSceneSnapshot {
     trajectories: BTreeMap<Uid, Vec<Vec<cuemol_core::Vector4>>>,
     surface_potential: Option<DensityMap>,
     potential_scale: Option<f64>,
-    script_styles: BTreeMap<u64, StyleManager>,
+    script_styles: StyleManager,
     script_view_input_config: cuemol_qsys::ViewInputConfig,
 }
 
@@ -488,7 +758,7 @@ impl Default for DesktopAppState {
             surface_potential: None,
             potential_scale: None,
             #[cfg(feature = "scripting")]
-            script_styles: BTreeMap::new(),
+            script_styles: cuemol_molvis::default_style_manager(),
             #[cfg(feature = "scripting")]
             script_view_input_config: cuemol_qsys::ViewInputConfig::new(),
             #[cfg(feature = "scripting")]
@@ -637,9 +907,9 @@ impl DesktopAppState {
     }
 
     /// `(name, type)` of objects skipped when the active scene's `.qsc` was loaded
-    /// because their class is not a molecule this port can render yet (surface/map
-    /// objects). Empty for an all-molecule scene. A front end appends this to its load
-    /// status so a partially-loaded scene is reported, not silently truncated.
+    /// because their class or source format is not supported. Empty when every object
+    /// was loaded. A front end appends this to its load status so a partially-loaded
+    /// scene is reported, not silently truncated.
     pub fn active_scene_skipped_objects(&self) -> Vec<(String, String)> {
         self.active_scene
             .and_then(|uid| self.scene_manager().scene(uid))
@@ -650,25 +920,38 @@ impl DesktopAppState {
     /// Convert the active scene's `.qsc`-loaded surface objects (OBJ/PLY or QDFSurf
     /// data captured by the loader) into render meshes. The visible MolSurfRenderer
     /// supplies its transform and solid, molecule, potential, or multi-gradient
-    /// colouring. Empty for a scene with no loadable surface objects. A front end
-    /// appends these to its surface slot.
+    /// colouring. Empty for a scene with no loadable surface objects. These meshes are
+    /// already included in the shared render snapshot.
     pub fn active_scene_surface_meshes(&self) -> Vec<cuemol_render::RenderMesh> {
-        let Some(scene) = self
-            .active_scene
-            .and_then(|uid| self.scene_manager().scene(uid))
-        else {
+        let Some(scene_uid) = self.active_scene else {
             return Vec::new();
         };
+        self.scene_surface_meshes(scene_uid)
+    }
+
+    fn scene_surface_meshes(&self, scene_uid: Uid) -> Vec<cuemol_render::RenderMesh> {
+        let Some(scene) = self.scene_manager().scene(scene_uid) else {
+            return Vec::new();
+        };
+        self.loaded_surface_meshes(scene, scene.loaded_surfaces(), false)
+    }
+
+    fn loaded_surface_meshes(
+        &self,
+        scene: &cuemol_molstr::MolScene,
+        surfaces: &[LoadedSurface],
+        include_hidden: bool,
+    ) -> Vec<cuemol_render::RenderMesh> {
         let styles = scene_style_manager(scene);
-        scene
-            .loaded_surfaces()
+        surfaces
             .iter()
             .flat_map(|surface| {
                 let object_node = surface.qsc_node.as_ref();
-                if object_node
-                    .map(|node| node.str_attr("visible").to_string())
-                    .filter(|value| !value.is_empty())
-                    .is_some_and(|value| !qsc_bool(&value))
+                if !include_hidden
+                    && object_node
+                        .map(|node| node.str_attr("visible").to_string())
+                        .filter(|value| !value.is_empty())
+                        .is_some_and(|value| !qsc_bool(&value))
                 {
                     return Vec::new();
                 }
@@ -684,8 +967,10 @@ impl DesktopAppState {
                     renderer_nodes
                         .into_iter()
                         .filter(|node| {
-                            let visible = node.str_attr("visible").to_string();
-                            visible.is_empty() || qsc_bool(&visible)
+                            include_hidden || {
+                                let visible = node.str_attr("visible").to_string();
+                                visible.is_empty() || qsc_bool(&visible)
+                            }
                         })
                         .map(Some)
                         .collect()
@@ -710,7 +995,7 @@ impl DesktopAppState {
                 };
                 renderer_nodes
                     .into_iter()
-                    .filter_map(|renderer_node| {
+                    .map(|renderer_node| {
                         let renderer_xform = renderer_node
                             .map(|node| node.str_attr("xformMat").to_string())
                             .filter(|value| !value.is_empty())
@@ -782,7 +1067,14 @@ impl DesktopAppState {
                                     .object_by_name(&target_name)
                                     .map(|object| {
                                         let selector = renderer_attr("sel")
-                                            .and_then(|value| parse_selector(&value).ok())
+                                            .and_then(|value| {
+                                                parse_selector_with_styles(
+                                                    &value,
+                                                    &styles,
+                                                    scene.uid().get(),
+                                                )
+                                                .ok()
+                                            })
                                             .unwrap_or(Selector::All);
                                         surface_mesh_render_mesh(object, &selector, &mesh)
                                     })
@@ -888,7 +1180,9 @@ impl DesktopAppState {
                         };
                         let show_selection = renderer_attr("showsel")
                             .filter(|value| !value.trim().is_empty() && value.trim() != "*")
-                            .and_then(|value| parse_selector(&value).ok());
+                            .and_then(|value| {
+                                parse_selector_with_styles(&value, &styles, scene.uid().get()).ok()
+                            });
                         if let Some(show_selection) = show_selection {
                             let target_name = renderer_attr("target")
                                 .or_else(|| {
@@ -899,7 +1193,14 @@ impl DesktopAppState {
                                 .unwrap_or_default();
                             if let Some(object) = scene.object_by_name(&target_name) {
                                 let map_selection = renderer_attr("sel")
-                                    .and_then(|value| parse_selector(&value).ok())
+                                    .and_then(|value| {
+                                        parse_selector_with_styles(
+                                            &value,
+                                            &styles,
+                                            scene.uid().get(),
+                                        )
+                                        .ok()
+                                    })
                                     .unwrap_or(Selector::All);
                                 render_mesh = filter_surface_mesh_by_atom_selection(
                                     render_mesh,
@@ -938,7 +1239,7 @@ impl DesktopAppState {
                             vertex.position = position;
                             vertex.normal = normal;
                         }
-                        Some(render_mesh)
+                        render_mesh
                     })
                     .collect::<Vec<_>>()
             })
@@ -1207,12 +1508,26 @@ impl DesktopAppState {
     }
 
     fn append_saved_density_geometry(&self, snapshot: &mut RenderSceneSnapshot, scene_uid: Uid) {
-        for map_object in self
-            .density_maps
-            .values()
-            .filter(|object| object.scene_uid == scene_uid && object.visible)
-        {
-            for config in map_object.renderers.iter().filter(|config| config.visible) {
+        self.append_saved_density_geometry_filtered(snapshot, scene_uid, None, None, false);
+    }
+
+    fn append_saved_density_geometry_filtered(
+        &self,
+        snapshot: &mut RenderSceneSnapshot,
+        scene_uid: Uid,
+        map_uid: Option<Uid>,
+        renderer_uid: Option<Uid>,
+        include_hidden: bool,
+    ) {
+        for map_object in self.density_maps.values().filter(|object| {
+            object.scene_uid == scene_uid
+                && map_uid.is_none_or(|uid| object.uid == uid)
+                && (include_hidden || object.visible)
+        }) {
+            for config in map_object.renderers.iter().filter(|config| {
+                renderer_uid.is_none_or(|uid| config.uid == uid)
+                    && (include_hidden || config.visible)
+            }) {
                 let mut rendered = RenderSceneSnapshot::empty();
                 let boundary_points = if config.bndry_molname.is_empty() {
                     None
@@ -1521,6 +1836,17 @@ impl DesktopAppState {
         name: impl Into<String>,
         map: DensityMap,
     ) -> Uid {
+        let uid = Uid::new(self.next_density_map_uid);
+        self.add_density_map_with_uid(uid, scene_uid, name, map)
+    }
+
+    fn add_density_map_with_uid(
+        &mut self,
+        uid: Uid,
+        scene_uid: Uid,
+        name: impl Into<String>,
+        map: DensityMap,
+    ) -> Uid {
         let name = name.into();
         let storage_index = if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
             let index = scene.loaded_density_maps().len();
@@ -1537,8 +1863,10 @@ impl DesktopAppState {
         } else {
             0
         };
-        let uid = Uid::new(self.next_density_map_uid);
-        self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
+        self.next_density_map_uid = self
+            .next_density_map_uid
+            .max(uid.get().saturating_add(1))
+            .max(1);
         self.density_maps.insert(
             uid,
             GuiDensityMapObject {
@@ -1688,6 +2016,15 @@ impl DesktopAppState {
         let result = self
             .command_manager
             .new_scene_command(name.into(), create_view);
+        if let Some(view_uid) = result.result_view {
+            if let Some(scene) = self
+                .command_manager
+                .scene_manager_mut()
+                .scene_mut(result.result_scene)
+            {
+                scene.set_active_view_uid(Some(view_uid));
+            }
+        }
         self.active_scene = Some(result.result_scene);
         result
     }
@@ -1714,7 +2051,7 @@ impl DesktopAppState {
             .retain(|_, map| map.scene_uid != scene_uid);
         #[cfg(feature = "scripting")]
         {
-            self.script_styles.remove(&scene_uid.get());
+            self.script_styles.clear_scope(scene_uid.get());
             self.script_scene_undo.remove(&scene_uid.get());
         }
         if self.active_scene == Some(scene_uid) {
@@ -1732,7 +2069,7 @@ impl DesktopAppState {
         self.surface_potential = None;
         #[cfg(feature = "scripting")]
         {
-            self.script_styles.clear();
+            self.script_styles = cuemol_molvis::default_style_manager();
             self.script_scene_undo.clear();
         }
     }
@@ -1855,6 +2192,23 @@ impl DesktopAppState {
         Ok(())
     }
 
+    pub fn reset_renderer_property(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        key: &str,
+    ) -> Result<()> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let renderer = object
+            .renderer_mut(renderer_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        renderer.remove_qsc_attr(key);
+        Ok(())
+    }
+
     /// The inline value of a renderer property attribute (`None` if unset, so the front
     /// end can fall back to the style/default). Companion to
     /// [`set_renderer_property`](Self::set_renderer_property).
@@ -1884,7 +2238,17 @@ impl DesktopAppState {
     }
 
     pub fn load_qsc_file(&mut self, path: impl AsRef<Path>) -> Result<Option<Uid>> {
-        let result = self.command_manager.load_scene_command(path, None)?;
+        self.load_qsc_file_into(path.as_ref(), None)
+    }
+
+    fn load_qsc_file_into(
+        &mut self,
+        path: &Path,
+        target_scene: Option<Uid>,
+    ) -> Result<Option<Uid>> {
+        let result = self
+            .command_manager
+            .load_scene_command(path, target_scene)?;
         self.last_qsc_status = Some(result.status.clone());
         self.active_scene = result.result_scene;
         if let Some(scene_uid) = result.result_scene {
@@ -2234,6 +2598,7 @@ impl DesktopAppState {
                 .iter()
                 .map(|label| (label.atom_index(), label.text().to_string()))
                 .collect::<Vec<_>>();
+            let surface_indices = record.atom_indices(PseRepresentation::Surface).to_vec();
             let representations = [
                 (
                     PseRepresentation::Sticks,
@@ -2259,7 +2624,6 @@ impl DesktopAppState {
                     "simple1",
                     Some("DefaultSimple"),
                 ),
-                (PseRepresentation::Surface, "directsurf", "surface1", None),
             ]
             .map(|(representation, renderer_type, renderer_name, style)| {
                 (
@@ -2269,35 +2633,41 @@ impl DesktopAppState {
                     style,
                 )
             });
+            let molecule = record.into_molecule();
             let scene = self
                 .scene_manager_mut()
                 .scene_mut(scene_uid)
                 .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-            let object_uid = scene.add_molecule(name, record.into_molecule());
-            let object = scene.object_mut(object_uid).unwrap();
-            object.set_visible(visible);
-            for (atom_indices, renderer_type, renderer_name, style) in representations {
-                if atom_indices.is_empty() {
-                    continue;
-                }
-                let renderer_uid = object.add_renderer(renderer_type, renderer_name);
-                let renderer = object.renderer_mut(renderer_uid).unwrap();
-                renderer.set_selection(pse_atom_selector(&atom_indices));
-                if let Some(style) = style {
-                    renderer.set_qsc_attr("style", style);
-                }
-                renderer.set_qsc_children(vec![pse_atom_coloring_node()]);
+            if !surface_indices.is_empty() {
+                scene.add_loaded_surface(pse_surface_object(&name, &molecule, &surface_indices));
             }
-            if !labels.is_empty() {
-                let renderer_uid = object.add_renderer("*namelabel", "namelabel1");
-                let renderer = object.renderer_mut(renderer_uid).unwrap();
-                renderer.set_qsc_attr("style", "DefaultLabel");
-                renderer.set_qsc_children(
-                    labels
-                        .iter()
-                        .map(|(atom_index, text)| pse_atom_label_node(*atom_index, text))
-                        .collect(),
-                );
+            let object_uid = scene.add_molecule(name, molecule);
+            {
+                let object = scene.object_mut(object_uid).unwrap();
+                object.set_visible(visible);
+                for (atom_indices, renderer_type, renderer_name, style) in representations {
+                    if atom_indices.is_empty() {
+                        continue;
+                    }
+                    let renderer_uid = object.add_renderer(renderer_type, renderer_name);
+                    let renderer = object.renderer_mut(renderer_uid).unwrap();
+                    renderer.set_selection(pse_atom_selector(&atom_indices));
+                    if let Some(style) = style {
+                        renderer.set_qsc_attr("style", style);
+                    }
+                    renderer.set_qsc_children(vec![pse_atom_coloring_node()]);
+                }
+                if !labels.is_empty() {
+                    let renderer_uid = object.add_renderer("*namelabel", "namelabel1");
+                    let renderer = object.renderer_mut(renderer_uid).unwrap();
+                    renderer.set_qsc_attr("style", "DefaultLabel");
+                    renderer.set_qsc_children(
+                        labels
+                            .iter()
+                            .map(|(atom_index, text)| pse_atom_label_node(*atom_index, text))
+                            .collect(),
+                    );
+                }
             }
             object_uids.push(object_uid);
         }
@@ -3085,6 +3455,7 @@ impl DesktopAppState {
                 object,
                 selector.as_ref(),
                 &styles,
+                scene_uid.get(),
                 self.surface_potential.as_ref(),
             );
         }
@@ -3095,9 +3466,255 @@ impl DesktopAppState {
         {
             append_lw_object_snapshot(&mut snapshot, object)?;
         }
+        snapshot.meshes.extend(self.scene_surface_meshes(scene_uid));
         self.append_saved_density_geometry(&mut snapshot, scene_uid);
         snapshot.recompute_bounds();
         Ok(snapshot)
+    }
+
+    #[cfg(feature = "scripting")]
+    fn convert_scene_to_lw(&mut self, source_uid: Uid, target_uid: Uid) -> Result<usize> {
+        let source = self
+            .scene_manager()
+            .scene(source_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", source_uid.get())))?;
+        let cameras = source.cameras().to_vec();
+        let animation = source.animation_node().cloned();
+        let styles = scene_style_manager(source);
+        let mut render_objects = source
+            .objects()
+            .iter()
+            .map(|object| {
+                let selected_indices = Vec::new();
+                let mut renderers = object
+                    .renderers()
+                    .iter()
+                    .filter(|renderer| !renderer.renderer_type().starts_with('*'))
+                    .map(|renderer| {
+                        let mut snapshot = RenderSceneSnapshot::empty();
+                        append_object_renderer_snapshot(
+                            &mut snapshot,
+                            object,
+                            Some(renderer),
+                            &selected_indices,
+                            &styles,
+                            source_uid.get(),
+                            self.surface_potential.as_ref(),
+                        );
+                        cuemol_lwview::RenderLWRendererSnapshot {
+                            name: if renderer.name().is_empty() {
+                                format!("({})", renderer.renderer_type())
+                            } else {
+                                renderer.name().to_string()
+                            },
+                            visible: renderer.is_visible(),
+                            snapshot,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if renderers.is_empty() {
+                    let mut snapshot = RenderSceneSnapshot::empty();
+                    append_object_renderer_snapshot(
+                        &mut snapshot,
+                        object,
+                        None,
+                        &selected_indices,
+                        &styles,
+                        source_uid.get(),
+                        self.surface_potential.as_ref(),
+                    );
+                    renderers.push(cuemol_lwview::RenderLWRendererSnapshot {
+                        name: "(simple)".to_string(),
+                        visible: true,
+                        snapshot,
+                    });
+                }
+                cuemol_lwview::RenderLWObjectSnapshot {
+                    uid: object.uid(),
+                    name: object.name().to_string(),
+                    visible: object.is_visible(),
+                    renderers,
+                }
+            })
+            .collect::<Vec<_>>();
+        for loaded in source.loaded_lw_objects() {
+            let object = cuemol_lwview::read_qdf_lwobj_bytes(&loaded.raw_data)?;
+            let renderers = loaded
+                .renderers
+                .iter()
+                .map(|renderer| {
+                    let mut snapshot = RenderSceneSnapshot::empty();
+                    for element in object.draw_elements_for(renderer.data_id) {
+                        append_lw_draw_element(&mut snapshot, element);
+                    }
+                    let xform = renderer.xform.mul_mat(loaded.xform);
+                    if xform != Matrix4::IDENTITY {
+                        snapshot.apply_xform(&xform);
+                    } else {
+                        snapshot.recompute_bounds();
+                    }
+                    cuemol_lwview::RenderLWRendererSnapshot {
+                        name: renderer.name.clone(),
+                        visible: renderer.visible,
+                        snapshot,
+                    }
+                })
+                .collect();
+            render_objects.push(cuemol_lwview::RenderLWObjectSnapshot {
+                uid: loaded.uid,
+                name: loaded.name.clone(),
+                visible: loaded.visible,
+                renderers,
+            });
+        }
+        for surface in source.loaded_surfaces() {
+            let meshes = self.loaded_surface_meshes(source, std::slice::from_ref(surface), true);
+            let renderer_nodes = surface
+                .qsc_node
+                .iter()
+                .flat_map(|node| node.children())
+                .filter(|node| node.tag_name() == "renderer" && !node.is_attr())
+                .filter(|node| matches!(node.type_name(), "molsurf" | "MolSurfRenderer"))
+                .collect::<Vec<_>>();
+            let renderer_states = if renderer_nodes.is_empty() {
+                vec![("(molsurf)".to_string(), true)]
+            } else {
+                renderer_nodes
+                    .into_iter()
+                    .map(|node| {
+                        let name = node.str_attr("name");
+                        let name = if name.is_empty() {
+                            format!("({})", node.type_name())
+                        } else {
+                            name.to_string()
+                        };
+                        let visible = node.str_attr("visible");
+                        let visible = visible.is_empty() || qsc_bool(visible.as_ref());
+                        (name, visible)
+                    })
+                    .collect()
+            };
+            let renderers = renderer_states
+                .into_iter()
+                .enumerate()
+                .map(|(index, (name, visible))| {
+                    let mut snapshot = RenderSceneSnapshot::empty();
+                    if let Some(mesh) = meshes.get(index) {
+                        snapshot.meshes.push(mesh.clone());
+                        snapshot.recompute_bounds();
+                    }
+                    cuemol_lwview::RenderLWRendererSnapshot {
+                        name,
+                        visible,
+                        snapshot,
+                    }
+                })
+                .collect();
+            let visible = surface
+                .qsc_node
+                .as_ref()
+                .map(|node| node.str_attr("visible").to_string())
+                .filter(|value| !value.is_empty())
+                .is_none_or(|value| qsc_bool(&value));
+            render_objects.push(cuemol_lwview::RenderLWObjectSnapshot {
+                uid: surface.uid,
+                name: surface.name.clone(),
+                visible,
+                renderers,
+            });
+        }
+        for map_object in self
+            .density_maps
+            .values()
+            .filter(|object| object.scene_uid == source_uid)
+        {
+            let renderers = map_object
+                .renderers
+                .iter()
+                .map(|renderer| {
+                    let mut snapshot = RenderSceneSnapshot::empty();
+                    self.append_saved_density_geometry_filtered(
+                        &mut snapshot,
+                        source_uid,
+                        Some(map_object.uid),
+                        Some(renderer.uid),
+                        true,
+                    );
+                    cuemol_lwview::RenderLWRendererSnapshot {
+                        name: if renderer.name.is_empty() {
+                            format!("({})", renderer.renderer_type)
+                        } else {
+                            renderer.name.clone()
+                        },
+                        visible: renderer.visible,
+                        snapshot,
+                    }
+                })
+                .collect();
+            render_objects.push(cuemol_lwview::RenderLWObjectSnapshot {
+                uid: map_object.uid,
+                name: map_object.name.clone(),
+                visible: map_object.visible,
+                renderers,
+            });
+        }
+
+        let mut lw_scene = cuemol_qsys::Scene::new(target_uid, "lightweight");
+        let mut manager = cuemol_lwview::LWViewerManager::new();
+        manager.conv_render_objects_to_lw_scene(&render_objects, &mut lw_scene);
+        let converted = lw_scene
+            .object_uids()
+            .into_iter()
+            .filter_map(|uid| lw_scene.object(uid))
+            .map(|object| {
+                let renderers = object
+                    .get_rend_array()
+                    .into_iter()
+                    .filter_map(|renderer| {
+                        renderer
+                            .property_str("data_id")
+                            .and_then(|value| value.parse::<i32>().ok())
+                            .map(|data_id| LoadedLWRenderer {
+                                name: renderer.name().to_string(),
+                                data_id,
+                                visible: renderer.is_visible(),
+                                xform: Matrix4::IDENTITY,
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                LoadedLWObject {
+                    uid: Uid::new(0),
+                    name: object.name().to_string(),
+                    srctype: "qdflwobj".to_string(),
+                    raw_data: cuemol_lwview::write_qdf_lwobj_bytes(object.data()),
+                    visible: object.is_visible(),
+                    xform: Matrix4::IDENTITY,
+                    renderers,
+                    qsc_node: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let count = converted.len();
+        let target = self
+            .scene_manager_mut()
+            .scene_mut(target_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", target_uid.get())))?;
+        for object in converted {
+            target.add_loaded_lw_object(object);
+        }
+        target.replace_cameras(
+            cameras
+                .into_iter()
+                .map(|mut camera| {
+                    camera.set_source("");
+                    camera
+                })
+                .collect(),
+        );
+        if animation.is_some() {
+            target.set_animation_node(animation)?;
+        }
+        Ok(count)
     }
 
     pub fn ensure_active_scene(&mut self) -> Uid {
@@ -3611,10 +4228,10 @@ impl DesktopAppState {
     ///
     /// - Logging (real names + legacy alias): `putLogMsg(msg)` / `println(msg)` /
     ///   `print(msg)`.
-    /// - Selection: `makeSel(expr)` VALIDATES a selector and returns its string (or
-    ///   `null`); `select(expr)` applies a selector to the current selection (returned to
-    ///   the front end).
-    /// - Colour: `makeColor(spec)` resolves a colour spec/name to `{r,g,b,a}` bytes;
+    /// - Selection: `makeSel(expr, scope)` validates a selector and returns a
+    ///   `SelCommand` (or `null`); `select(expr)` applies a selector to the current
+    ///   selection (returned to the front end).
+    /// - Colour: `makeColor(spec, scope)` resolves a colour spec/name to a `Color`;
     ///   `color(scheme)` applies rainbow/bfactor/element colouring to every object.
     /// - Flat scene mutations (buffered by name, resolved to Uids at apply time):
     ///   `setColoring(objName, scheme)`, `setRendererVisible(objName, rendName, bool)`,
@@ -3638,7 +4255,11 @@ impl DesktopAppState {
     #[cfg(feature = "scripting")]
     pub fn run_script_js(&mut self, source: &str) -> Result<(String, Option<String>)> {
         use boa_engine::object::{builtins::JsArray, FunctionObjectBuilder};
-        use boa_engine::{js_string, object::ObjectInitializer, property::Attribute};
+        use boa_engine::{
+            js_string,
+            object::ObjectInitializer,
+            property::{Attribute, PropertyDescriptor},
+        };
         use boa_engine::{
             Context, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source,
         };
@@ -3684,7 +4305,9 @@ impl DesktopAppState {
         }
 
         fn script_error(message: impl Into<String>) -> boa_engine::JsError {
-            JsNativeError::error().with_message(message.into()).into()
+            let message = message.into();
+            script_errors::set(message.clone());
+            JsNativeError::error().with_message(message).into()
         }
 
         // --- log/print commands (buffered, drained after eval) ---
@@ -3703,6 +4326,7 @@ impl DesktopAppState {
         // --- scene mutations (buffered by name; resolved to Uids at apply time) ---
         fn js_set_coloring(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             script_cmds::push(ScriptCmd::SetColoring {
+                object_uid: None,
                 object: arg0(args, ctx),
                 scheme: argn(args, 1, ctx),
             });
@@ -3733,6 +4357,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererVisible {
+                scene_uid: None,
                 object,
                 renderer,
                 visible,
@@ -3765,6 +4390,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererProp {
+                scene_uid: None,
                 object,
                 renderer,
                 key,
@@ -3777,9 +4403,27 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scheme = arg0(args, ctx);
+            let class_name = match scheme.to_ascii_lowercase().as_str() {
+                "rainbow" => "RainbowColoring",
+                "bfactor" | "bfac" => "BfacColoring",
+                _ => "SolidColoring",
+            };
+            let coloring = make_coloring(class_name, ctx);
+            if !pending_object_is_attached(this, ctx)? {
+                return pending_object_property_set(
+                    MoleculeProperty::Coloring,
+                    this,
+                    &[coloring],
+                    ctx,
+                );
+            }
+            let object_uid = object_proxy_uid(this, ctx)?;
+            object_coloring_set(object_uid, &coloring, ctx)?;
             script_cmds::push(ScriptCmd::SetColoring {
+                object_uid: Some(object_uid),
                 object: this_string_prop(this, "name", ctx),
-                scheme: arg0(args, ctx),
+                scheme,
             });
             Ok(JsValue::undefined())
         }
@@ -3788,49 +4432,19 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let uid_value = this
-                .as_object()
-                .and_then(|object| object.get(js_string!("uid"), ctx).ok());
-            if uid_value.as_ref().is_some_and(JsValue::is_number) {
+            if pending_object_is_attached(this, ctx)? {
                 let object_uid = object_proxy_uid(this, ctx)?;
                 let object = script_object(object_uid)?;
                 let renderer_type = arg0(args, ctx);
-                if !renderer_compatible_with_class(&renderer_type, &object.class) {
-                    return Err(script_error(format!(
-                        "Renderer {renderer_type} is not compatible with {}",
-                        object.class
-                    )));
-                }
-                let requested_name = argn(args, 1, ctx);
-                let name = if requested_name.trim().is_empty() {
-                    renderer_type.clone()
-                } else {
-                    requested_name
-                };
-                let next_uid = if object.scalar_map.is_some() {
-                    script_env::with(|env| {
-                        env.objects
-                            .iter()
-                            .flat_map(|object| object.renderers.iter())
-                            .map(|renderer| renderer.uid)
-                            .max()
-                            .unwrap_or(3_999_999_999)
-                            .max(3_999_999_999)
-                            .saturating_add(1)
-                    })
-                } else {
-                    object
-                        .renderers
-                        .iter()
-                        .map(|renderer| renderer.uid)
-                        .max()
-                        .unwrap_or_else(|| {
-                            let object_local = object_uid
-                                .saturating_sub(1_000_000_000 + object.scene_uid * 1_000_000);
-                            2_000_000_000 + object.scene_uid * 1_000_000 + object_local * 1_000
-                        })
-                        .saturating_add(1)
-                };
+                let requested_name = args
+                    .get(1)
+                    .filter(|value| !value.is_undefined())
+                    .map(|_| argn(args, 1, ctx))
+                    .unwrap_or_default();
+                let name = requested_name;
+                let next_uid = allocate_script_runtime_uid();
+                let mut attributes = BTreeMap::new();
+                attributes.insert("ui_order".to_string(), (next_uid as i32).to_string());
                 let renderer = ScriptRend {
                     uid: next_uid,
                     object_uid,
@@ -3838,8 +4452,9 @@ impl DesktopAppState {
                     name: name.clone(),
                     rtype: renderer_type.clone(),
                     visible: true,
-                    attributes: BTreeMap::new(),
+                    attributes,
                     children: Vec::new(),
+                    atom_intr_lines: Vec::new(),
                     multi_gradient: None,
                 };
                 script_env::with_mut(|env| {
@@ -3850,6 +4465,8 @@ impl DesktopAppState {
                     }
                 });
                 script_cmds::push(ScriptCmd::CreateRenderer {
+                    object_uid: Some(object_uid),
+                    renderer_uid: next_uid,
                     object: object.name.clone(),
                     renderer_type,
                     name,
@@ -3858,18 +4475,41 @@ impl DesktopAppState {
             }
             let object = this_string_prop(this, "name", ctx);
             let renderer_type = arg0(args, ctx);
-            let requested_name = argn(args, 1, ctx);
-            let name = if requested_name.trim().is_empty() {
-                renderer_type.clone()
-            } else {
-                requested_name
-            };
-            script_cmds::push(ScriptCmd::CreateRenderer {
-                object: object.clone(),
-                renderer_type: renderer_type.clone(),
-                name: name.clone(),
-            });
-            Ok(make_pending_renderer(&object, &renderer_type, &name, ctx))
+            let requested_name = args
+                .get(1)
+                .filter(|value| !value.is_undefined())
+                .map(|_| argn(args, 1, ctx))
+                .unwrap_or_default();
+            let name = requested_name;
+            let renderer = make_pending_renderer(&object, &renderer_type, &name, ctx);
+            let renderer_object = iterator_object(&renderer)?;
+            renderer_object.set(
+                js_string!("_pending_client_uid"),
+                object_proxy_uid(this, ctx)? as f64,
+                true,
+                ctx,
+            )?;
+            renderer_object.set(
+                js_string!("_pending_client_object"),
+                this.clone(),
+                true,
+                ctx,
+            )?;
+            let owner = this
+                .as_object()
+                .ok_or_else(|| script_error("Object receiver is not an object"))?;
+            let pending = owner.get(js_string!("_pending_renderers"), ctx)?;
+            let pending = pending
+                .as_object()
+                .ok_or_else(|| script_error("pending renderer list is not available"))?;
+            let length = pending.get(js_string!("length"), ctx)?.to_u32(ctx)?;
+            pending.set(
+                JsString::from(length.to_string()),
+                renderer.clone(),
+                true,
+                ctx,
+            )?;
+            Ok(renderer)
         }
         fn js_object_create_preset_renderer(
             this: &JsValue,
@@ -3877,7 +4517,6 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let object_uid = object_proxy_uid(this, ctx)?;
-            let object = script_object(object_uid)?;
             let preset_name = arg0(args, ctx);
             let group_name = argn(args, 1, ctx);
             let name_prefix = argn(args, 2, ctx);
@@ -3891,17 +4530,152 @@ impl DesktopAppState {
                     preset.type_name()
                 )));
             }
-            let next_uid = object
-                .renderers
-                .iter()
-                .map(|renderer| renderer.uid)
-                .max()
-                .unwrap_or_else(|| {
-                    let object_local =
-                        object_uid.saturating_sub(1_000_000_000 + object.scene_uid * 1_000_000);
-                    2_000_000_000 + object.scene_uid * 1_000_000 + object_local * 1_000
-                })
-                .saturating_add(1);
+            if !pending_object_is_attached(this, ctx)? {
+                let group = js_object_create_renderer(
+                    this,
+                    &[
+                        JsString::from("*group").into(),
+                        JsString::from(group_name.as_str()).into(),
+                    ],
+                    ctx,
+                )?;
+                for child in preset
+                    .children()
+                    .iter()
+                    .filter(|child| child.tag_name() == "renderer")
+                {
+                    let renderer_type = child.type_name();
+                    if renderer_type.is_empty() {
+                        continue;
+                    }
+                    let name = format!("{name_prefix}{renderer_type}");
+                    let renderer = js_object_create_renderer(
+                        this,
+                        &[
+                            JsString::from(renderer_type).into(),
+                            JsString::from(name.as_str()).into(),
+                        ],
+                        ctx,
+                    )?;
+                    let renderer_object = iterator_object(&renderer)?;
+                    for attribute in child.children().iter().filter(|node| node.is_attr()) {
+                        let key = attribute.tag_name();
+                        let value = attribute.value();
+                        match key {
+                            "name" | "group" => {}
+                            "visible" => {
+                                renderer_object.set(
+                                    js_string!("_pending_visible"),
+                                    qsc_bool(value),
+                                    true,
+                                    ctx,
+                                )?;
+                            }
+                            "locked" => {
+                                renderer_object.set(
+                                    js_string!("_pending_locked"),
+                                    qsc_bool(value),
+                                    true,
+                                    ctx,
+                                )?;
+                            }
+                            "style" => {
+                                renderer_object.set(
+                                    js_string!("_pending_style"),
+                                    JsString::from(value),
+                                    true,
+                                    ctx,
+                                )?;
+                            }
+                            "material" | "default_material" => {
+                                renderer_object.set(
+                                    js_string!("_pending_material"),
+                                    JsString::from(value),
+                                    true,
+                                    ctx,
+                                )?;
+                            }
+                            "alpha" | "default_alpha" => {
+                                renderer_object.set(
+                                    js_string!("_pending_alpha"),
+                                    value.parse::<f64>().unwrap_or(1.0),
+                                    true,
+                                    ctx,
+                                )?;
+                            }
+                            "xformMat" => {
+                                let matrix = Matrix4::from_script_string(value)
+                                    .map_err(|error| script_error(error.to_string()))?;
+                                renderer_object.set(
+                                    js_string!("_pending_xformMat"),
+                                    make_matrix(matrix, ctx),
+                                    true,
+                                    ctx,
+                                )?;
+                            }
+                            "ui_order" => {
+                                renderer_object.set(
+                                    js_string!("_pending_ui_order"),
+                                    value.parse::<i32>().unwrap_or_default(),
+                                    true,
+                                    ctx,
+                                )?;
+                            }
+                            "egtype" => {
+                                renderer_object.set(
+                                    js_string!("_pending_egtype"),
+                                    JsString::from(value),
+                                    true,
+                                    ctx,
+                                )?;
+                            }
+                            "eglinew" => {
+                                renderer_object.set(
+                                    js_string!("_pending_eglinew"),
+                                    value.parse::<f64>().unwrap_or(0.01),
+                                    true,
+                                    ctx,
+                                )?;
+                            }
+                            _ => {
+                                if let Some(property) = renderer_attr_properties(renderer_type)
+                                    .into_iter()
+                                    .find(|property| property.key == key)
+                                {
+                                    renderer_object.set(
+                                        pending_renderer_attr_key(property),
+                                        JsString::from(value),
+                                        true,
+                                        ctx,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                    for property in renderer_attr_properties(renderer_type) {
+                        let value = child.str_attr(property.key);
+                        if !value.is_empty() {
+                            renderer_object.set(
+                                pending_renderer_attr_key(property),
+                                JsString::from(value.as_str()),
+                                true,
+                                ctx,
+                            )?;
+                        }
+                    }
+                    renderer_object.set(
+                        js_string!("_pending_group"),
+                        JsString::from(group_name.as_str()),
+                        true,
+                        ctx,
+                    )?;
+                }
+                return Ok(group);
+            }
+            let object = script_object(object_uid)?;
+            let next_uid = allocate_script_runtime_uid();
+            let mut group_attributes = BTreeMap::new();
+            group_attributes.insert("ui_order".to_string(), (next_uid as i32).to_string());
             let group = ScriptRend {
                 uid: next_uid,
                 object_uid,
@@ -3909,16 +4683,16 @@ impl DesktopAppState {
                 name: group_name.clone(),
                 rtype: "*group".to_string(),
                 visible: true,
-                attributes: BTreeMap::new(),
+                attributes: group_attributes,
                 children: Vec::new(),
+                atom_intr_lines: Vec::new(),
                 multi_gradient: None,
             };
             let mut renderers = vec![group.clone()];
-            for (index, child) in preset
+            for child in preset
                 .children()
                 .iter()
                 .filter(|child| child.tag_name() == "renderer")
-                .enumerate()
             {
                 let renderer_type = child.type_name().to_string();
                 if renderer_type.is_empty() {
@@ -3935,19 +4709,19 @@ impl DesktopAppState {
                         )
                     })
                     .collect::<BTreeMap<_, _>>();
+                let child_uid = allocate_script_runtime_uid();
                 attributes
-                    .entry("group".to_string())
-                    .or_insert_with(|| group_name.clone());
-                let name = attributes
-                    .get("name")
-                    .cloned()
-                    .unwrap_or_else(|| format!("{name_prefix}{renderer_type}"));
+                    .entry("ui_order".to_string())
+                    .or_insert_with(|| (child_uid as i32).to_string());
+                attributes.insert("group".to_string(), group_name.clone());
+                attributes.remove("name");
+                let name = format!("{name_prefix}{renderer_type}");
                 let visible = !matches!(
                     attributes.get("visible").map(String::as_str),
                     Some("false" | "0" | "no" | "off")
                 );
                 renderers.push(ScriptRend {
-                    uid: next_uid + index as u64 + 1,
+                    uid: child_uid,
                     object_uid,
                     scene_uid: object.scene_uid,
                     name,
@@ -3960,21 +4734,51 @@ impl DesktopAppState {
                         .filter(|node| !node.is_attr())
                         .cloned()
                         .collect(),
+                    atom_intr_lines: Vec::new(),
                     multi_gradient: None,
                 });
             }
+            let created_renderers = renderers.clone();
             script_env::with_mut(|env| {
                 if let Some(object) = env.objects.iter_mut().find(|entry| entry.uid == object_uid) {
                     object.renderers.extend(renderers);
                     object.modified = true;
                 }
             });
-            script_cmds::push(ScriptCmd::CreatePresetRenderer {
-                object_uid,
-                preset_name,
-                group_name,
-                name_prefix,
-            });
+            for renderer in created_renderers {
+                script_cmds::push(ScriptCmd::CreateRenderer {
+                    object_uid: Some(object_uid),
+                    renderer_uid: renderer.uid,
+                    object: object.name.clone(),
+                    renderer_type: renderer.rtype.clone(),
+                    name: renderer.name.clone(),
+                });
+                if !renderer.children.is_empty() {
+                    script_cmds::push(ScriptCmd::SetRendererChildren {
+                        object_uid,
+                        object: object.name.clone(),
+                        renderer: renderer.name.clone(),
+                        children: renderer.children.clone(),
+                    });
+                }
+                for (key, value) in renderer.attributes {
+                    script_cmds::push(ScriptCmd::SetRendererProp {
+                        scene_uid: Some(object.scene_uid),
+                        object: object.name.clone(),
+                        renderer: renderer.name.clone(),
+                        key,
+                        value,
+                    });
+                }
+                if !renderer.visible {
+                    script_cmds::push(ScriptCmd::SetRendererVisible {
+                        scene_uid: Some(object.scene_uid),
+                        object: object.name.clone(),
+                        renderer: renderer.name,
+                        visible: false,
+                    });
+                }
+            }
             Ok(make_renderer_proxy(&object.name, group, ctx))
         }
         fn js_renderer_set_visible(
@@ -3982,14 +4786,11 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            if this.as_object().is_some_and(|object| {
-                object
-                    .get(js_string!("uid"), ctx)
-                    .is_ok_and(|value| value.is_number())
-            }) {
+            if pending_renderer_is_attached(this, ctx)? {
                 return renderer_property_set(RendererProperty::Visible, this, args, ctx);
             }
             script_cmds::push(ScriptCmd::SetRendererVisible {
+                scene_uid: None,
                 object: this_string_prop(this, "objectName", ctx),
                 renderer: this_string_prop(this, "name", ctx),
                 visible: args.first().map(JsValue::to_boolean).unwrap_or(true),
@@ -4001,11 +4802,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            if this.as_object().is_some_and(|object| {
-                object
-                    .get(js_string!("uid"), ctx)
-                    .is_ok_and(|value| value.is_number())
-            }) {
+            if pending_renderer_is_attached(this, ctx)? {
                 let uid = renderer_proxy_uid(this, ctx)?;
                 let renderer = script_renderer(uid)?;
                 let key = arg0(args, ctx);
@@ -4018,6 +4815,7 @@ impl DesktopAppState {
                     }
                 });
                 script_cmds::push(ScriptCmd::SetRendererProp {
+                    scene_uid: Some(renderer.scene_uid),
                     object: script_object(renderer.object_uid)?.name,
                     renderer: renderer.name,
                     key,
@@ -4026,6 +4824,7 @@ impl DesktopAppState {
                 return Ok(JsValue::undefined());
             }
             script_cmds::push(ScriptCmd::SetRendererProp {
+                scene_uid: None,
                 object: this_string_prop(this, "objectName", ctx),
                 renderer: this_string_prop(this, "name", ctx),
                 key: arg0(args, ctx),
@@ -5292,6 +6091,304 @@ impl DesktopAppState {
                 .build()
                 .into()
         }
+        #[derive(Clone, Copy)]
+        enum TextImageDimension {
+            Width,
+            Height,
+        }
+        fn text_image_dimension_name(dimension: TextImageDimension) -> &'static str {
+            match dimension {
+                TextImageDimension::Width => "_width",
+                TextImageDimension::Height => "_height",
+            }
+        }
+        fn text_image_resize(this: &JsValue, size: usize, ctx: &mut Context) -> JsResult<()> {
+            let object = iterator_object(this)?;
+            let old_size = object
+                .get(js_string!("_size"), ctx)?
+                .to_number(ctx)?
+                .max(0.0) as usize;
+            for index in old_size..size {
+                object.set(JsString::from(format!("_byte_{index}")), 0, true, ctx)?;
+            }
+            object.set(js_string!("_size"), size as f64, true, ctx)?;
+            Ok(())
+        }
+        fn text_image_dimension_get(
+            dimension: TextImageDimension,
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            iterator_object(this)?.get(JsString::from(text_image_dimension_name(dimension)), ctx)
+        }
+        fn text_image_dimension_set(
+            dimension: TextImageDimension,
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let value = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?
+                .max(0);
+            let object = iterator_object(this)?;
+            object.set(
+                JsString::from(text_image_dimension_name(dimension)),
+                value,
+                true,
+                ctx,
+            )?;
+            let width = object.get(js_string!("_width"), ctx)?.to_i32(ctx)?.max(0) as usize;
+            let height = object.get(js_string!("_height"), ctx)?.to_i32(ctx)?.max(0) as usize;
+            text_image_resize(this, width.saturating_mul(height), ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn text_image_index(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<usize> {
+            let index = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let size = iterator_object(this)?
+                .get(js_string!("_size"), ctx)?
+                .to_number(ctx)? as usize;
+            if index < 0 || index as usize >= size {
+                return Err(script_error("text image index out of bounds"));
+            }
+            Ok(index as usize)
+        }
+        fn js_text_image_resize(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let size = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            if size < 0 {
+                return Err(script_error("text image size must be non-negative"));
+            }
+            text_image_resize(this, size as usize, ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn js_text_image_set_at(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let index = text_image_index(this, args, ctx)?;
+            let value = args
+                .get(1)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)? as u8;
+            iterator_object(this)?.set(
+                JsString::from(format!("_byte_{index}")),
+                value,
+                true,
+                ctx,
+            )?;
+            Ok(JsValue::undefined())
+        }
+        fn js_text_image_get_at(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let index = text_image_index(this, args, ctx)?;
+            iterator_object(this)?.get(JsString::from(format!("_byte_{index}")), ctx)
+        }
+        fn text_image_index_2d(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<usize> {
+            let object = iterator_object(this)?;
+            let x = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let y = args
+                .get(1)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let width = object.get(js_string!("_width"), ctx)?.to_i32(ctx)?;
+            let height = object.get(js_string!("_height"), ctx)?.to_i32(ctx)?;
+            if x < 0 || y < 0 || x >= width || y >= height {
+                return Err(script_error("text image coordinates out of bounds"));
+            }
+            Ok(y as usize * width as usize + x as usize)
+        }
+        fn js_text_image_set_at_2d(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let index = text_image_index_2d(this, args, ctx)?;
+            let value = args
+                .get(2)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)? as u8;
+            iterator_object(this)?.set(
+                JsString::from(format!("_byte_{index}")),
+                value,
+                true,
+                ctx,
+            )?;
+            Ok(JsValue::undefined())
+        }
+        fn js_text_image_get_at_2d(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let index = text_image_index_2d(this, args, ctx)?;
+            iterator_object(this)?.get(JsString::from(format!("_byte_{index}")), ctx)
+        }
+        fn js_text_image_set_rgba(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let bytes = byte_array_from_value(args.first().unwrap_or(&JsValue::undefined()), ctx)?;
+            if bytes.length() % 4 != 0 {
+                return Err(script_error(
+                    "RGBA byte array length must be divisible by four",
+                ));
+            }
+            let size = bytes.length() / 4;
+            let current_size = iterator_object(this)?
+                .get(js_string!("_size"), ctx)?
+                .to_number(ctx)? as usize;
+            if current_size != size {
+                return Err(script_error(
+                    "RGBA byte array length must match text image size",
+                ));
+            }
+            for (index, rgba) in bytes.as_bytes().chunks_exact(4).enumerate() {
+                iterator_object(this)?.set(
+                    JsString::from(format!("_byte_{index}")),
+                    rgba[3],
+                    true,
+                    ctx,
+                )?;
+            }
+            Ok(JsValue::undefined())
+        }
+        fn make_text_image_buffer(ctx: &mut Context) -> JsValue {
+            let width_getter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_copy_closure(|this, args, ctx| {
+                    text_image_dimension_get(TextImageDimension::Width, this, args, ctx)
+                }),
+            )
+            .name(js_string!("get width"))
+            .length(0)
+            .constructor(false)
+            .build();
+            let width_setter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_copy_closure(|this, args, ctx| {
+                    text_image_dimension_set(TextImageDimension::Width, this, args, ctx)
+                }),
+            )
+            .name(js_string!("set width"))
+            .length(1)
+            .constructor(false)
+            .build();
+            let height_getter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_copy_closure(|this, args, ctx| {
+                    text_image_dimension_get(TextImageDimension::Height, this, args, ctx)
+                }),
+            )
+            .name(js_string!("get height"))
+            .length(0)
+            .constructor(false)
+            .build();
+            let height_setter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_copy_closure(|this, args, ctx| {
+                    text_image_dimension_set(TextImageDimension::Height, this, args, ctx)
+                }),
+            )
+            .name(js_string!("set height"))
+            .length(1)
+            .constructor(false)
+            .build();
+            ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("_class"),
+                    js_string!("TextImgBuf"),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("type"),
+                    js_string!("TextImgBuf"),
+                    Attribute::all(),
+                )
+                .property(js_string!("text"), js_string!(""), Attribute::all())
+                .property(js_string!("font"), js_string!(""), Attribute::all())
+                .property(js_string!("_width"), 0, Attribute::all())
+                .property(js_string!("_height"), 0, Attribute::all())
+                .property(js_string!("_size"), 0, Attribute::all())
+                .accessor(
+                    js_string!("width"),
+                    Some(width_getter),
+                    Some(width_setter),
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("height"),
+                    Some(height_getter),
+                    Some(height_setter),
+                    Attribute::all(),
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_text_image_resize),
+                    js_string!("resize"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_text_image_set_at),
+                    js_string!("setAt"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_text_image_get_at),
+                    js_string!("getAt"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_text_image_set_at_2d),
+                    js_string!("setAt2D"),
+                    3,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_text_image_get_at_2d),
+                    js_string!("getAt2D"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_text_image_set_rgba),
+                    js_string!("setDataFromRGBA"),
+                    1,
+                )
+                .build()
+                .into()
+        }
         fn quat_from_value(value: &JsValue, ctx: &mut Context) -> JsResult<cuemol_core::Quat> {
             Ok(cuemol_core::Quat::new(
                 object_number_prop(value, "x", ctx)?,
@@ -6107,6 +7204,7 @@ impl DesktopAppState {
             .build();
             ObjectInitializer::new(ctx)
                 .property(js_string!("type"), js_string!("Color"), Attribute::all())
+                .property(js_string!("_class"), js_string!("Color"), Attribute::all())
                 .property(
                     js_string!("_code"),
                     f64::from(value.code()),
@@ -6222,6 +7320,116 @@ impl DesktopAppState {
                 .build()
                 .into()
         }
+        fn js_color_reference_to_string(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let class_name = this_string_prop(this, "_class", ctx);
+            let mut text = if class_name == "MolColorRef" {
+                "$molcol".to_string()
+            } else {
+                this_string_prop(this, "name", ctx)
+            };
+            let material = this_string_prop(this, "material", ctx);
+            let alpha = object_number_prop(this, "alpha", ctx)?;
+            let mod_h = object_number_prop(this, "mod_h", ctx)?;
+            let mod_s = object_number_prop(this, "mod_s", ctx)?;
+            let mod_b = object_number_prop(this, "mod_b", ctx)?;
+            let mut modifiers = Vec::new();
+            if !material.is_empty() {
+                modifiers.push(format!("material={material}"));
+            }
+            if alpha >= -0.01 {
+                modifiers.push(format!("alpha={alpha}"));
+            }
+            if mod_h.abs() >= 1.0e-4 {
+                modifiers.push(format!("mod_h={mod_h}"));
+            }
+            if mod_s.abs() >= 1.0e-4 {
+                modifiers.push(format!("mod_s={mod_s}"));
+            }
+            if mod_b.abs() >= 1.0e-4 {
+                modifiers.push(format!("mod_b={mod_b}"));
+            }
+            if !modifiers.is_empty() {
+                text.push('{');
+                text.push_str(&modifiers.join(","));
+                text.push('}');
+            }
+            Ok(JsString::from(text).into())
+        }
+        fn make_color_reference(class_name: &str, name: &str, ctx: &mut Context) -> JsValue {
+            let code = if class_name == "MolColorRef" {
+                0x7f7f_7f7f
+            } else {
+                resolve_script_color(name).map_or(0, |rgba| {
+                    (u32::from(rgba.a) << 24)
+                        | (u32::from(rgba.r) << 16)
+                        | (u32::from(rgba.g) << 8)
+                        | u32::from(rgba.b)
+                })
+            };
+            ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("_class"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("type"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(js_string!("_code"), f64::from(code), Attribute::all())
+                .property(js_string!("name"), JsString::from(name), Attribute::all())
+                .property(js_string!("material"), js_string!(""), Attribute::all())
+                .property(js_string!("alpha"), -1.0, Attribute::all())
+                .property(js_string!("mod_h"), 0.0, Attribute::all())
+                .property(js_string!("mod_s"), 0.0, Attribute::all())
+                .property(js_string!("mod_b"), 0.0, Attribute::all())
+                .function(NativeFunction::from_fn_ptr(js_color_r), js_string!("r"), 0)
+                .function(NativeFunction::from_fn_ptr(js_color_g), js_string!("g"), 0)
+                .function(NativeFunction::from_fn_ptr(js_color_b), js_string!("b"), 0)
+                .function(NativeFunction::from_fn_ptr(js_color_a), js_string!("a"), 0)
+                .function(
+                    NativeFunction::from_fn_ptr(js_color_fr),
+                    js_string!("fr"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_color_fg),
+                    js_string!("fg"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_color_fb),
+                    js_string!("fb"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_color_fa),
+                    js_string!("fa"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_color_reference_to_string),
+                    js_string!("toString"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_color_get_dev_code),
+                    js_string!("getDevCode"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_color_is_in_gamut),
+                    js_string!("isInGamut"),
+                    1,
+                )
+                .build()
+                .into()
+        }
         fn gradient_from_value(
             value: &JsValue,
             ctx: &mut Context,
@@ -6304,7 +7512,9 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let value = args.first().cloned().unwrap_or(JsValue::undefined());
-            solid_color_from_script_value(&value, ctx)?;
+            if !value.is_null_or_undefined() {
+                solid_color_from_script_value(&value, ctx)?;
+            }
             iterator_object(this)?.set(JsString::from(name), value, true, ctx)?;
             Ok(JsValue::undefined())
         }
@@ -6394,8 +7604,6 @@ impl DesktopAppState {
             .length(1)
             .constructor(false)
             .build();
-            let col1 = make_color(cuemol_gfx::SolidColor::new(), ctx);
-            let col2 = make_color(cuemol_gfx::SolidColor::new(), ctx);
             ObjectInitializer::new(ctx)
                 .property(
                     js_string!("type"),
@@ -6403,8 +7611,8 @@ impl DesktopAppState {
                     Attribute::all(),
                 )
                 .property(js_string!("_rho"), 0.0, Attribute::all())
-                .property(js_string!("_col1"), col1, Attribute::all())
-                .property(js_string!("_col2"), col2, Attribute::all())
+                .property(js_string!("_col1"), JsValue::null(), Attribute::all())
+                .property(js_string!("_col2"), JsValue::null(), Attribute::all())
                 .accessor(
                     js_string!("_code"),
                     Some(code_getter.clone()),
@@ -6936,17 +8144,48 @@ impl DesktopAppState {
             script_env::with(|env| env.molecules.iter().find(|entry| entry.uid == uid).cloned())
                 .ok_or_else(|| script_error("MolCoord is not available in the active scene"))
         }
-        fn selector_from_script_value(value: &JsValue, ctx: &mut Context) -> JsResult<Selector> {
-            let expression = if value.is_string() {
+        fn selector_text_from_script_value(value: &JsValue, ctx: &mut Context) -> JsResult<String> {
+            Ok(if value.is_string() {
                 value.to_string(ctx)?.to_std_string_escaped()
             } else {
                 object_string_prop(value, "expression", ctx)
-            };
+            })
+        }
+        fn script_selection_scope(value: &JsValue, ctx: &mut Context) -> u64 {
+            if value.is_object() {
+                value
+                    .as_object()
+                    .and_then(|object| object.get(js_string!("_scope_id"), ctx).ok())
+                    .and_then(|value| value.as_number())
+                    .map(|value| value as u64)
+                    .unwrap_or_else(|| script_env::with(|env| env.scene_uid))
+            } else {
+                script_env::with(|env| env.scene_uid)
+            }
+        }
+        fn script_selection_registry(scope_id: u64) -> std::collections::HashMap<String, Selector> {
+            script_env::with(|env| {
+                env.styles
+                    .str_data_entries("sel", scope_id)
+                    .into_iter()
+                    .filter_map(|(name, expression)| {
+                        cuemol_molstr::parse_selector(&expression)
+                            .ok()
+                            .map(|selector| (name, selector))
+                    })
+                    .collect()
+            })
+        }
+        fn parse_script_selector(expression: &str, scope_id: u64) -> JsResult<Selector> {
+            cuemol_molstr::parse_named_selector(expression, &script_selection_registry(scope_id))
+                .map_err(|error| script_error(error.to_string()))
+        }
+        fn selector_from_script_value(value: &JsValue, ctx: &mut Context) -> JsResult<Selector> {
+            let expression = selector_text_from_script_value(value, ctx)?;
             if expression.is_empty() {
                 return Ok(Selector::All);
             }
-            cuemol_molstr::parse_selector(&expression)
-                .map_err(|error| script_error(error.to_string()))
+            parse_script_selector(&expression, script_selection_scope(value, ctx))
         }
         fn atom_proxy_position(value: &JsValue, ctx: &mut Context) -> JsResult<Vector4> {
             let position = value
@@ -6987,14 +8226,18 @@ impl DesktopAppState {
         ) -> JsResult<R> {
             let (uid, serial) = atom_proxy_identity(this, ctx)?;
             script_env::with_mut(|env| {
+                let atom = env
+                    .molecules
+                    .iter_mut()
+                    .find(|molecule| molecule.uid == uid)?
+                    .molecule
+                    .atom_mut_by_serial(serial)?;
+                let result = operation(atom);
                 if let Some(object) = env.objects.iter_mut().find(|object| object.uid == uid) {
                     object.modified = true;
                 }
-                env.molecules
-                    .iter_mut()
-                    .find(|molecule| molecule.uid == uid)
-                    .and_then(|molecule| molecule.molecule.atom_mut_by_serial(serial))
-                    .map(operation)
+                env.modified_molecule_uids.insert(uid);
+                Some(result)
             })
             .ok_or_else(|| script_error(format!("Atom {serial} is not available")))
         }
@@ -7364,6 +8607,40 @@ impl DesktopAppState {
                 .build();
             Ok(object.into())
         }
+        fn make_detached_mol_atom(ctx: &mut Context) -> JsResult<JsValue> {
+            let atom = cuemol_molstr::Atom {
+                serial: -1,
+                name: String::new(),
+                alt_loc: None,
+                res_name: String::new(),
+                chain_id: String::new(),
+                res_id: 0,
+                ins_code: None,
+                position: Vector4::ZERO,
+                occupancy: 1.0,
+                b_factor: 1.0,
+                element: String::new(),
+                formal_charge: None,
+                int_props: BTreeMap::new(),
+                real_props: BTreeMap::new(),
+            };
+            let parent_uid = script_env::with_mut(|env| {
+                let uid = env
+                    .molecules
+                    .iter()
+                    .map(|molecule| molecule.uid)
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                env.molecules.push(ScriptMol {
+                    uid,
+                    scene_uid: 0,
+                    molecule: cuemol_molstr::MolCoord::with_atoms(vec![atom.clone()]),
+                });
+                uid
+            });
+            make_mol_atom(parent_uid, &atom, ctx)
+        }
         fn molecule_from_parent(this: &JsValue, ctx: &mut Context) -> JsResult<ScriptMol> {
             let uid = object_number_prop(this, "parent_uid", ctx)? as u64;
             script_env::with(|env| env.molecules.iter().find(|entry| entry.uid == uid).cloned())
@@ -7393,6 +8670,22 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let (uid, chain, sindex) = residue_proxy_identity(this, ctx)?;
+            if uid == 0 {
+                return Ok(match property {
+                    ResidueProperty::Name => {
+                        JsString::from(this_string_prop(this, "_name", ctx)).into()
+                    }
+                    ResidueProperty::Type => {
+                        JsString::from(this_string_prop(this, "_type", ctx)).into()
+                    }
+                    ResidueProperty::StringIndex => JsString::from(sindex).into(),
+                    ResidueProperty::IntegerIndex => JsValue::new(
+                        cuemol_molstr::ResidIndex::parse(&sindex)
+                            .map_err(|error| script_error(error.to_string()))?
+                            .number,
+                    ),
+                });
+            }
             match property {
                 ResidueProperty::StringIndex => Ok(JsString::from(sindex).into()),
                 ResidueProperty::IntegerIndex => Ok(JsValue::new(
@@ -7441,6 +8734,38 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let (uid, chain, old_sindex) = residue_proxy_identity(this, ctx)?;
             let value = args.first().cloned().unwrap_or(JsValue::undefined());
+            if uid == 0 {
+                let (property_name, value): (&str, JsValue) = match property {
+                    ResidueProperty::Name => (
+                        "_name",
+                        JsString::from(value.to_string(ctx)?.to_std_string_escaped()).into(),
+                    ),
+                    ResidueProperty::Type => (
+                        "_type",
+                        JsString::from(value.to_string(ctx)?.to_std_string_escaped()).into(),
+                    ),
+                    ResidueProperty::StringIndex | ResidueProperty::IntegerIndex => {
+                        let new_sindex = if matches!(property, ResidueProperty::IntegerIndex) {
+                            let old = cuemol_molstr::ResidIndex::parse(&old_sindex)
+                                .map_err(|error| script_error(error.to_string()))?;
+                            cuemol_molstr::ResidIndex {
+                                number: value.to_i32(ctx)?,
+                                ins_code: old.ins_code,
+                            }
+                            .script_string()
+                        } else {
+                            value.to_string(ctx)?.to_std_string_escaped()
+                        };
+                        cuemol_molstr::ResidIndex::parse(&new_sindex)
+                            .map_err(|error| script_error(error.to_string()))?;
+                        ("_sindex", JsString::from(new_sindex).into())
+                    }
+                };
+                this.as_object()
+                    .ok_or_else(|| script_error("MolResidue receiver is not an object"))?
+                    .set(JsString::from(property_name), value, true, ctx)?;
+                return Ok(JsValue::undefined());
+            }
             match property {
                 ResidueProperty::Name => {
                     let name = value.to_string(ctx)?.to_std_string_escaped();
@@ -7527,6 +8852,9 @@ impl DesktopAppState {
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            if object_number_prop(this, "parent_uid", ctx)? == 0.0 {
+                return Ok(js_string!("[]").into());
+            }
             let (molecule, summary) = residue_summary_from_proxy(this, ctx)?;
             let entries = summary
                 .atom_indices
@@ -7547,6 +8875,9 @@ impl DesktopAppState {
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            if object_number_prop(this, "parent_uid", ctx)? == 0.0 {
+                return Ok(make_vector(Vector4::ZERO, ctx));
+            }
             let (molecule, summary) = residue_summary_from_proxy(this, ctx)?;
             let positions = summary
                 .atom_indices
@@ -7571,6 +8902,9 @@ impl DesktopAppState {
             with_alt: bool,
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            if object_number_prop(this, "parent_uid", ctx)? == 0.0 {
+                return Ok(JsValue::null());
+            }
             let molecule = molecule_from_parent(this, ctx)?;
             let chain = this_string_prop(this, "chainName", ctx);
             let sindex = this_string_prop(this, "sindex", ctx);
@@ -7641,6 +8975,11 @@ impl DesktopAppState {
             let mut proxy = ObjectInitializer::new(ctx);
             proxy
                 .property(
+                    js_string!("type"),
+                    js_string!("MolResidue"),
+                    Attribute::all(),
+                )
+                .property(
                     js_string!("_class"),
                     js_string!("MolResidue"),
                     Attribute::all(),
@@ -7660,6 +8999,12 @@ impl DesktopAppState {
                     JsString::from(residue.key.script_index()),
                     Attribute::all(),
                 )
+                .property(
+                    js_string!("_name"),
+                    JsString::from(residue.res_name.as_str()),
+                    Attribute::all(),
+                )
+                .property(js_string!("_type"), js_string!(""), Attribute::all())
                 .property(
                     js_string!("chainName"),
                     JsString::from(residue.key.chain_id.as_str()),
@@ -7707,6 +9052,17 @@ impl DesktopAppState {
                 .build()
                 .into()
         }
+        fn make_detached_mol_residue(ctx: &mut Context) -> JsValue {
+            make_mol_residue(
+                0,
+                &cuemol_molstr::ResidueSummary {
+                    key: cuemol_molstr::ResidueKey::new(String::new(), 0, None),
+                    res_name: String::new(),
+                    atom_indices: Vec::new(),
+                },
+                ctx,
+            )
+        }
         fn js_mol_chain_get_name(
             this: &JsValue,
             _args: &[JsValue],
@@ -7722,6 +9078,17 @@ impl DesktopAppState {
             let uid = object_number_prop(this, "parent_uid", ctx)? as u64;
             let old_name = this_string_prop(this, "_chain_name", ctx);
             let new_name = arg0(args, ctx);
+            if uid == 0 {
+                this.as_object()
+                    .ok_or_else(|| script_error("MolChain receiver is not an object"))?
+                    .set(
+                        js_string!("_chain_name"),
+                        JsString::from(new_name),
+                        true,
+                        ctx,
+                    )?;
+                return Ok(JsValue::undefined());
+            }
             let changed = with_script_molecule_mut(uid, |molecule| {
                 molecule.relabel_residue_keys(|atom| {
                     (atom.chain_id == old_name).then(|| {
@@ -7761,6 +9128,9 @@ impl DesktopAppState {
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            if object_number_prop(this, "parent_uid", ctx)? == 0.0 {
+                return Ok(js_string!("[]").into());
+            }
             let (molecule, summary) = chain_summary_from_proxy(this, ctx)?;
             let entries = summary
                 .residue_keys
@@ -7788,6 +9158,9 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            if object_number_prop(this, "parent_uid", ctx)? == 0.0 {
+                return Ok(JsValue::null());
+            }
             let molecule = molecule_from_parent(this, ctx)?;
             let chain = this_string_prop(this, "_chain_name", ctx);
             let index = arg0(args, ctx);
@@ -7825,6 +9198,7 @@ impl DesktopAppState {
             .constructor(false)
             .build();
             ObjectInitializer::new(ctx)
+                .property(js_string!("type"), js_string!("MolChain"), Attribute::all())
                 .property(
                     js_string!("_class"),
                     js_string!("MolChain"),
@@ -7863,6 +9237,9 @@ impl DesktopAppState {
                 )
                 .build()
                 .into()
+        }
+        fn make_detached_mol_chain(ctx: &mut Context) -> JsValue {
+            make_mol_chain(0, "", ctx)
         }
         fn iterator_object(this: &JsValue) -> JsResult<&boa_engine::object::JsObject> {
             this.as_object()
@@ -8111,7 +9488,6 @@ impl DesktopAppState {
             .length(1)
             .constructor(false)
             .build();
-            let selection = make_sel_command(ctx);
             ObjectInitializer::new(ctx)
                 .property(
                     js_string!("type"),
@@ -8119,7 +9495,7 @@ impl DesktopAppState {
                     Attribute::all(),
                 )
                 .property(js_string!("_target"), JsValue::null(), Attribute::all())
-                .property(js_string!("_sel"), selection, Attribute::all())
+                .property(js_string!("_sel"), JsValue::null(), Attribute::all())
                 .property(js_string!("_cursor"), 0, Attribute::all())
                 .accessor(
                     js_string!("target"),
@@ -8366,16 +9742,28 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let expression = arg0(args, ctx);
+            let scope_id = args
+                .get(1)
+                .filter(|value| !value.is_undefined())
+                .map(|value| value.to_number(ctx).map(|value| value as u64))
+                .transpose()?
+                .unwrap_or(0);
+            set_sel_prop(this, "_scope_id", scope_id as f64, ctx)?;
             if expression.is_empty() {
                 set_sel_prop(this, "expression", js_string!(""), ctx)?;
                 set_sel_prop(this, "dump", js_string!("(null)"), ctx)?;
                 set_sel_prop(this, "error_msg", js_string!(""), ctx)?;
                 return Ok(JsValue::new(true));
             }
-            match cuemol_molstr::parse_selector(&expression) {
-                Ok(selector) => {
+            match cuemol_molstr::parse_selector(&expression)
+                .and_then(|selector| selector.resolve_named(&script_selection_registry(scope_id)))
+            {
+                Ok(_) => {
+                    let dump = cuemol_molstr::parse_selector(&expression)
+                        .expect("validated selector remains parseable")
+                        .dump();
                     set_sel_prop(this, "expression", JsString::from(expression.as_str()), ctx)?;
-                    set_sel_prop(this, "dump", JsString::from(selector.dump()), ctx)?;
+                    set_sel_prop(this, "dump", JsString::from(dump), ctx)?;
                     set_sel_prop(this, "error_msg", js_string!(""), ctx)?;
                     Ok(JsValue::new(true))
                 }
@@ -8410,6 +9798,99 @@ impl DesktopAppState {
                 this_string_prop(this, "expression", ctx).is_empty(),
             ))
         }
+        fn selection_command_from_value(
+            value: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<cuemol_molstr::SelCommand> {
+            let mut selection = cuemol_molstr::SelCommand::new();
+            let scope_id = script_selection_scope(value, ctx);
+            selection
+                .compile_named_result(
+                    &this_string_prop(value, "expression", ctx),
+                    &script_selection_registry(scope_id),
+                )
+                .map_err(|error| script_error(error.to_string()))?;
+            Ok(selection)
+        }
+        fn js_sel_is_selected_mol(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let target = args.first().cloned().unwrap_or(JsValue::undefined());
+            let uid = object_proxy_uid(&target, ctx)?;
+            let molecule = script_env::with(|env| {
+                env.molecules
+                    .iter()
+                    .find(|entry| entry.uid == uid)
+                    .map(|entry| entry.molecule.clone())
+            })
+            .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
+            Ok(JsValue::new(
+                selection_command_from_value(this, ctx)?.is_selected_mol(&molecule),
+            ))
+        }
+        fn js_sel_is_selected_chain(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let target = args.first().cloned().unwrap_or(JsValue::undefined());
+            let uid = object_number_prop(&target, "parent_uid", ctx)? as u64;
+            let chain = this_string_prop(&target, "_chain_name", ctx);
+            let molecule = script_env::with(|env| {
+                env.molecules
+                    .iter()
+                    .find(|entry| entry.uid == uid)
+                    .map(|entry| entry.molecule.clone())
+            })
+            .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
+            Ok(JsValue::new(
+                selection_command_from_value(this, ctx)?
+                    .is_selected_chain_by_name(&molecule, &chain),
+            ))
+        }
+        fn js_sel_is_selected_residue(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let target = args.first().cloned().unwrap_or(JsValue::undefined());
+            let uid = object_number_prop(&target, "parent_uid", ctx)? as u64;
+            let chain = this_string_prop(&target, "_chain_name", ctx);
+            let sindex = this_string_prop(&target, "_sindex", ctx);
+            let molecule = script_env::with(|env| {
+                env.molecules
+                    .iter()
+                    .find(|entry| entry.uid == uid)
+                    .map(|entry| entry.molecule.clone())
+            })
+            .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
+            Ok(JsValue::new(
+                selection_command_from_value(this, ctx)?
+                    .is_selected_resid_by_name(&molecule, &chain, &sindex)
+                    .map_err(|error| script_error(error.to_string()))?,
+            ))
+        }
+        fn js_sel_is_selected_atom(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let target = args.first().cloned().unwrap_or(JsValue::undefined());
+            let uid = object_number_prop(&target, "parent_uid", ctx)? as u64;
+            let molecule = script_env::with(|env| {
+                env.molecules
+                    .iter()
+                    .find(|entry| entry.uid == uid)
+                    .map(|entry| entry.molecule.clone())
+            })
+            .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
+            let atom = script_atom(&target, ctx)?;
+            Ok(JsValue::new(
+                selection_command_from_value(this, ctx)?.is_selected_in_molecule(&molecule, &atom),
+            ))
+        }
         fn make_sel_command(ctx: &mut Context) -> JsValue {
             ObjectInitializer::new(ctx)
                 .property(
@@ -8420,6 +9901,7 @@ impl DesktopAppState {
                 .property(js_string!("expression"), js_string!(""), Attribute::all())
                 .property(js_string!("dump"), js_string!("(null)"), Attribute::all())
                 .property(js_string!("error_msg"), js_string!(""), Attribute::all())
+                .property(js_string!("_scope_id"), 0, Attribute::all())
                 .function(
                     NativeFunction::from_fn_ptr(js_sel_compile),
                     js_string!("compile"),
@@ -8440,15 +9922,26 @@ impl DesktopAppState {
                     js_string!("isEmpty"),
                     0,
                 )
-                .build()
-                .into()
-        }
-        fn make_color_value(r: u8, g: u8, b: u8, a: u8, ctx: &mut Context) -> JsValue {
-            ObjectInitializer::new(ctx)
-                .property(js_string!("r"), f64::from(r), Attribute::all())
-                .property(js_string!("g"), f64::from(g), Attribute::all())
-                .property(js_string!("b"), f64::from(b), Attribute::all())
-                .property(js_string!("a"), f64::from(a), Attribute::all())
+                .function(
+                    NativeFunction::from_fn_ptr(js_sel_is_selected_mol),
+                    js_string!("isSelectedMol"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_sel_is_selected_chain),
+                    js_string!("isSelectedChain"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_sel_is_selected_residue),
+                    js_string!("isSelectedResid"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_sel_is_selected_atom),
+                    js_string!("isSelected"),
+                    1,
+                )
                 .build()
                 .into()
         }
@@ -8642,15 +10135,23 @@ impl DesktopAppState {
                     ("col_X", (179, 179, 179)),
                 ]
                 .into_iter()
-                .map(|(name, color)| (name, make_color_value(color.0, color.1, color.2, 255, ctx)))
+                .map(|(name, color)| {
+                    (
+                        name,
+                        make_color(
+                            cuemol_gfx::SolidColor::from_rgb_u8(color.0, color.1, color.2),
+                            ctx,
+                        ),
+                    )
+                })
                 .collect::<Vec<_>>()
             } else {
                 Vec::new()
             };
             let bfac_colors = (class_name == "BfacColoring").then(|| {
                 (
-                    make_color_value(0, 0, 255, 255, ctx),
-                    make_color_value(255, 0, 0, 255, ctx),
+                    make_color(cuemol_gfx::SolidColor::from_rgb_u8(0, 0, 255), ctx),
+                    make_color(cuemol_gfx::SolidColor::from_rgb_u8(255, 0, 0), ctx),
                 )
             });
             let mut object = ObjectInitializer::new(ctx);
@@ -8745,14 +10246,541 @@ impl DesktopAppState {
             }
             object.build().into()
         }
+        type ScriptNativeCallback = fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>;
+
+        fn install_script_function(
+            value: &JsValue,
+            name: &str,
+            length: usize,
+            callback: ScriptNativeCallback,
+            ctx: &mut Context,
+        ) {
+            let Some(object) = value.as_object() else {
+                return;
+            };
+            if object
+                .has_property(JsString::from(name), ctx)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let function =
+                FunctionObjectBuilder::new(ctx.realm(), NativeFunction::from_fn_ptr(callback))
+                    .name(JsString::from(name))
+                    .length(length)
+                    .constructor(false)
+                    .build();
+            let _ = object.set(JsString::from(name), function, true, ctx);
+        }
+
+        fn install_script_property(
+            value: &JsValue,
+            name: &str,
+            initial: JsValue,
+            ctx: &mut Context,
+        ) {
+            let Some(object) = value.as_object() else {
+                return;
+            };
+            if object
+                .has_property(JsString::from(name), ctx)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            let _ = object.set(JsString::from(name), initial, true, ctx);
+        }
+
+        fn allocate_script_runtime_uid() -> u64 {
+            script_env::with_mut(|env| {
+                let mut uid = env.next_runtime_uid.max(1);
+                while env.allocated_runtime_uids.contains(&uid) {
+                    uid = uid.saturating_add(1);
+                }
+                assert!(uid <= i32::MAX as u64, "script runtime UID space exhausted");
+                env.allocated_runtime_uids.insert(uid);
+                env.next_runtime_uid = uid.saturating_add(1);
+                uid
+            })
+        }
+
+        fn pending_object_is_attached(this: &JsValue, ctx: &mut Context) -> JsResult<bool> {
+            let object = iterator_object(this)?;
+            let scene_uid = object.get(js_string!("scene_uid"), ctx)?.to_number(ctx)? as u64;
+            if scene_uid == 0 {
+                return Ok(false);
+            }
+            let uid = object.get(js_string!("uid"), ctx)?.to_number(ctx)? as u64;
+            Ok(script_env::with(|env| {
+                env.objects
+                    .iter()
+                    .any(|object| object.uid == uid && object.scene_uid == scene_uid)
+            }))
+        }
+
+        fn pending_object_renderer_values(
+            this: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<Vec<(u64, JsValue)>> {
+            let owner = iterator_object(this)?;
+            let pending = owner.get(js_string!("_pending_renderers"), ctx)?;
+            let pending = pending
+                .as_object()
+                .ok_or_else(|| script_error("pending renderer list is not available"))?;
+            let length = pending.get(js_string!("length"), ctx)?.to_u32(ctx)?;
+            let mut values = Vec::with_capacity(length as usize);
+            for index in 0..length {
+                let value = pending.get(JsString::from(index.to_string()), ctx)?;
+                values.push((renderer_proxy_uid(&value, ctx)?, value));
+            }
+            values.sort_by_key(|(uid, _)| *uid);
+            Ok(values)
+        }
+
+        fn js_pending_object_get_uid(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            iterator_object(this)?.get(js_string!("uid"), ctx)
+        }
+
+        fn js_pending_object_get_scene(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if pending_object_is_attached(this, ctx)? {
+                js_object_get_scene(this, args, ctx)
+            } else {
+                Ok(JsValue::null())
+            }
+        }
+        fn js_pending_object_force_embed(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let object = iterator_object(this)?;
+            if pending_object_is_attached(this, ctx)? {
+                return js_object_force_embed(this, args, ctx);
+            }
+            object.set(
+                JsString::from(pending_object_property_key(MoleculeProperty::Source)),
+                js_string!("datachunk:"),
+                true,
+                ctx,
+            )?;
+            object.set(
+                JsString::from(pending_object_property_key(MoleculeProperty::AltSource)),
+                js_string!(""),
+                true,
+                ctx,
+            )?;
+            object.set(
+                JsString::from(pending_object_property_key(MoleculeProperty::Modified)),
+                true,
+                true,
+                ctx,
+            )?;
+            Ok(JsValue::undefined())
+        }
+
+        fn pending_object_property_key(property: MoleculeProperty) -> &'static str {
+            match property {
+                MoleculeProperty::Name => "_pending_name",
+                MoleculeProperty::Visible => "_pending_visible",
+                MoleculeProperty::Locked => "_pending_locked",
+                MoleculeProperty::UiCollapsed => "_pending_ui_collapsed",
+                MoleculeProperty::UiOrder => "_pending_ui_order",
+                MoleculeProperty::Modified => "_pending_modified",
+                MoleculeProperty::Source => "_pending_src",
+                MoleculeProperty::AltSource => "_pending_alt_src",
+                MoleculeProperty::SourceType => "_pending_srctype",
+                MoleculeProperty::RendererUids => "_pending_rend_uids",
+                MoleculeProperty::Transform => "_pending_xformMat",
+                MoleculeProperty::Selection => "_pending_sel",
+                MoleculeProperty::DefaultColor => "_pending_defaultcolor",
+                MoleculeProperty::Coloring => "_pending_coloring",
+            }
+        }
+
+        fn pending_object_property_get(
+            property: MoleculeProperty,
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if pending_object_is_attached(this, ctx)? {
+                return molecule_property_get(property, this, args, ctx);
+            }
+            if matches!(property, MoleculeProperty::RendererUids) {
+                let mut renderers = Vec::new();
+                for (uid, value) in pending_object_renderer_values(this, ctx)? {
+                    let ui_order = iterator_object(&value)?
+                        .get(js_string!("ui_order"), ctx)?
+                        .to_i32(ctx)?;
+                    renderers.push((ui_order, uid));
+                }
+                renderers.sort_by_key(|(ui_order, _)| *ui_order);
+                return Ok(JsString::from(
+                    renderers
+                        .into_iter()
+                        .map(|(_, uid)| uid.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+                .into());
+            }
+            if matches!(property, MoleculeProperty::Modified) {
+                let uid = object_proxy_uid(this, ctx)?;
+                if script_env::with(|env| env.modified_molecule_uids.contains(&uid)) {
+                    return Ok(JsValue::new(true));
+                }
+            }
+            iterator_object(this)?.get(JsString::from(pending_object_property_key(property)), ctx)
+        }
+
+        fn pending_object_property_set(
+            property: MoleculeProperty,
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let object = iterator_object(this)?;
+            if pending_object_is_attached(this, ctx)? {
+                return molecule_property_set(property, this, args, ctx);
+            }
+            let input = args.first().cloned().unwrap_or(JsValue::undefined());
+            let value = match property {
+                MoleculeProperty::Name => {
+                    JsString::from(input.to_string(ctx)?.to_std_string_escaped()).into()
+                }
+                MoleculeProperty::Visible
+                | MoleculeProperty::Locked
+                | MoleculeProperty::UiCollapsed => JsValue::new(input.to_boolean()),
+                MoleculeProperty::UiOrder => JsValue::new(input.to_i32(ctx)?),
+                MoleculeProperty::Transform => {
+                    matrix_from_value(&input, ctx)?;
+                    input
+                }
+                MoleculeProperty::Selection => {
+                    selector_from_script_value(&input, ctx)?;
+                    input
+                }
+                MoleculeProperty::DefaultColor => {
+                    solid_color_from_script_value(&input, ctx)?;
+                    input
+                }
+                MoleculeProperty::Coloring => {
+                    coloring_node_from_script(&input, ctx)?;
+                    input
+                }
+                MoleculeProperty::Modified
+                | MoleculeProperty::Source
+                | MoleculeProperty::AltSource
+                | MoleculeProperty::SourceType
+                | MoleculeProperty::RendererUids => {
+                    return Err(script_error("Object property is read-only"));
+                }
+            };
+            object.set(
+                JsString::from(pending_object_property_key(property)),
+                value,
+                true,
+                ctx,
+            )?;
+            Ok(JsValue::undefined())
+        }
+
+        fn install_pending_object_property(
+            value: &JsValue,
+            name: &'static str,
+            property: MoleculeProperty,
+            initial: JsValue,
+            writable: bool,
+            ctx: &mut Context,
+        ) {
+            let Some(object) = value.as_object() else {
+                return;
+            };
+            let current = object
+                .get(JsString::from(name), ctx)
+                .unwrap_or(JsValue::undefined());
+            let initial = if current.is_undefined() {
+                initial
+            } else {
+                current
+            };
+            let _ = object.define_property_or_throw(
+                JsString::from(pending_object_property_key(property)),
+                PropertyDescriptor::builder()
+                    .value(initial)
+                    .writable(true)
+                    .enumerable(false)
+                    .configurable(true),
+                ctx,
+            );
+            let getter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_copy_closure(move |this, args, ctx| {
+                    pending_object_property_get(property, this, args, ctx)
+                }),
+            )
+            .name(JsString::from(format!("get {name}")))
+            .length(0)
+            .constructor(false)
+            .build();
+            let setter = writable.then(|| {
+                FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_copy_closure(move |this, args, ctx| {
+                        pending_object_property_set(property, this, args, ctx)
+                    }),
+                )
+                .name(JsString::from(format!("set {name}")))
+                .length(1)
+                .constructor(false)
+                .build()
+            });
+            let descriptor = PropertyDescriptor::builder()
+                .get(getter)
+                .maybe_set(setter)
+                .enumerable(true)
+                .configurable(true);
+            let _ = object.define_property_or_throw(JsString::from(name), descriptor, ctx);
+        }
+
+        fn install_pending_object_api(value: &JsValue, class_name: &str, ctx: &mut Context) {
+            let uid = allocate_script_runtime_uid();
+            if let Some(object) = value.as_object() {
+                let _ = object.set(js_string!("uid"), uid as f64, true, ctx);
+            }
+            if matches!(class_name, "MolCoord" | "MorphMol") {
+                script_env::with_mut(|env| {
+                    env.molecules.push(ScriptMol {
+                        uid,
+                        scene_uid: 0,
+                        molecule: MolCoord::new(),
+                    });
+                    if class_name == "MorphMol" {
+                        env.morphs.insert(uid, MorphMol::new());
+                    }
+                });
+            }
+            install_script_property(value, "scene_uid", JsValue::new(0), ctx);
+            let base_properties = [
+                ("name", MoleculeProperty::Name, js_string!("").into(), true),
+                (
+                    "visible",
+                    MoleculeProperty::Visible,
+                    JsValue::new(true),
+                    true,
+                ),
+                (
+                    "locked",
+                    MoleculeProperty::Locked,
+                    JsValue::new(false),
+                    true,
+                ),
+                (
+                    "ui_collapsed",
+                    MoleculeProperty::UiCollapsed,
+                    JsValue::new(false),
+                    true,
+                ),
+                (
+                    "ui_order",
+                    MoleculeProperty::UiOrder,
+                    JsValue::new(uid as i32),
+                    true,
+                ),
+                (
+                    "modified",
+                    MoleculeProperty::Modified,
+                    JsValue::new(false),
+                    false,
+                ),
+                (
+                    "src",
+                    MoleculeProperty::Source,
+                    js_string!("").into(),
+                    false,
+                ),
+                (
+                    "alt_src",
+                    MoleculeProperty::AltSource,
+                    js_string!("").into(),
+                    false,
+                ),
+                (
+                    "srctype",
+                    MoleculeProperty::SourceType,
+                    js_string!("").into(),
+                    false,
+                ),
+                (
+                    "rend_uids",
+                    MoleculeProperty::RendererUids,
+                    js_string!("").into(),
+                    false,
+                ),
+            ];
+            for (name, property, initial, writable) in base_properties {
+                install_pending_object_property(value, name, property, initial, writable, ctx);
+            }
+            let transform = make_matrix(Matrix4::IDENTITY, ctx);
+            install_pending_object_property(
+                value,
+                "xformMat",
+                MoleculeProperty::Transform,
+                transform,
+                true,
+                ctx,
+            );
+            let pending_renderers = JsArray::from_iter(std::iter::empty::<JsValue>(), ctx).into();
+            install_script_property(value, "_pending_renderers", pending_renderers, ctx);
+
+            for (name, length, callback) in [
+                (
+                    "getUID",
+                    0,
+                    js_pending_object_get_uid as ScriptNativeCallback,
+                ),
+                ("getScene", 0, js_pending_object_get_scene),
+                ("getExtData", 1, js_object_get_ext_data),
+                ("forceEmbed", 0, js_pending_object_force_embed),
+                ("getRenderer", 1, js_object_get_renderer_uid),
+                ("getRendererByType", 1, js_object_get_renderer_type),
+                ("getRendererByName", 1, js_object_get_renderer_name),
+                ("getRendererByNameType", 2, js_object_get_renderer_name),
+                ("destroyRenderer", 1, js_object_destroy_renderer),
+                (
+                    "searchCompatibleRendererNames",
+                    0,
+                    js_object_compatible_renderers,
+                ),
+                ("getRendCount", 0, js_object_renderer_count),
+                ("getRendererByIndex", 1, js_object_renderer_index),
+                ("createRenderer", 2, js_object_create_renderer),
+                ("createPresetRenderer", 3, js_object_create_preset_renderer),
+                ("attachRenderer", 1, js_object_attach_renderer),
+            ] {
+                install_script_function(value, name, length, callback, ctx);
+            }
+
+            if matches!(class_name, "MolCoord" | "MorphMol") {
+                let selection = make_sel_command(ctx);
+                install_pending_object_property(
+                    value,
+                    "sel",
+                    MoleculeProperty::Selection,
+                    selection,
+                    true,
+                    ctx,
+                );
+                let default_color =
+                    make_color(cuemol_gfx::SolidColor::from_rgb(1.0, 1.0, 1.0), ctx);
+                install_pending_object_property(
+                    value,
+                    "defaultcolor",
+                    MoleculeProperty::DefaultColor,
+                    default_color,
+                    true,
+                    ctx,
+                );
+                let coloring = make_coloring("SolidColoring", ctx);
+                install_pending_object_property(
+                    value,
+                    "coloring",
+                    MoleculeProperty::Coloring,
+                    coloring,
+                    true,
+                    ctx,
+                );
+                for (name, length, callback) in [
+                    (
+                        "getAtomByID",
+                        1,
+                        js_object_get_atom_by_id as ScriptNativeCallback,
+                    ),
+                    ("getAtom", 3, js_object_get_atom),
+                    ("getResidue", 2, js_object_get_residue),
+                    ("getChain", 1, js_object_get_chain),
+                    ("getAtomSize", 0, js_object_atom_size),
+                    ("getAtomSelSize", 1, js_object_atom_size),
+                    ("getBondSize", 0, js_object_bond_size),
+                    ("encodeModelInChain", 2, js_object_encode_model),
+                    ("getChainsJSON", 0, js_object_chains_json),
+                    ("getCenterPos", 1, js_object_center),
+                    ("getBoundBoxMin", 1, js_object_bound_min),
+                    ("getBoundBoxMax", 1, js_object_bound_max),
+                    ("fitView", 2, js_object_fit_view),
+                    ("fitView2", 2, js_object_fit_view_selection),
+                    ("getChainNameCandsJSON", 0, js_object_chain_candidates),
+                    ("getResidNameCandsJSON", 0, js_object_residue_candidates),
+                    ("getAtomNameCandsJSON", 0, js_object_atom_candidates),
+                    ("getElemNameCandsJSON", 0, js_object_element_candidates),
+                    ("copyAtoms", 2, js_object_copy_atoms),
+                    ("deleteAtoms", 1, js_object_delete_atoms),
+                    ("xformByMat", 2, js_object_xform_atoms),
+                    ("appendAtom1", 4, js_object_append_atom),
+                    ("fireAtomsMoved", 0, js_object_fire_atoms_moved),
+                    ("applyTopology", 0, js_object_apply_topology),
+                    ("calcBasePair", 2, js_object_calc_base_pair),
+                    ("getCrdArray", 0, js_object_crd_array),
+                    ("getPropArray", 1, js_object_prop_array),
+                    ("getSelArray", 1, js_object_sel_array),
+                ] {
+                    install_script_function(value, name, length, callback, ctx);
+                }
+            }
+
+            if class_name == "MorphMol" {
+                install_morph_property(value, "frame", MorphProperty::Frame, true, ctx);
+                install_morph_property(value, "scale_frame", MorphProperty::ScaleFrame, true, ctx);
+                install_morph_property(value, "nframe", MorphProperty::FrameCount, false, ctx);
+                for (name, length, callback) in [
+                    (
+                        "insertBefore",
+                        2,
+                        js_morph_insert_before as ScriptNativeCallback,
+                    ),
+                    ("removeFrame", 1, js_morph_remove_frame),
+                    ("getFrameInfoJSON", 0, js_morph_frame_info),
+                    ("appendThisFrame", 0, js_morph_append_this_frame),
+                ] {
+                    install_script_function(value, name, length, callback, ctx);
+                }
+            }
+        }
+
         fn make_molcoord(class_name: &str, ctx: &mut Context) -> JsValue {
-            ObjectInitializer::new(ctx)
+            let pending_renderers = JsArray::from_iter(std::iter::empty::<JsValue>(), ctx);
+            let value = ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("_class"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
                 .property(
                     js_string!("type"),
                     JsString::from(class_name),
                     Attribute::all(),
                 )
                 .property(js_string!("name"), js_string!(""), Attribute::all())
+                .property(js_string!("_pdb_data"), js_string!(""), Attribute::all())
+                .property(js_string!("_sdf_data"), js_string!(""), Attribute::all())
+                .property(
+                    js_string!("_pending_renderers"),
+                    pending_renderers,
+                    Attribute::all(),
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_pending_molecule_atom_count),
+                    js_string!("getAtomCount"),
+                    0,
+                )
                 .function(
                     NativeFunction::from_fn_ptr(js_object_set_name),
                     js_string!("setName"),
@@ -8779,7 +10807,62 @@ impl DesktopAppState {
                     1,
                 )
                 .build()
-                .into()
+                .into();
+            install_pending_object_api(&value, class_name, ctx);
+            value
+        }
+        fn js_pending_molecule_atom_count(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let uid = object_number_prop(this, "uid", ctx)? as u64;
+            if let Some(count) = script_env::with(|env| {
+                env.molecules
+                    .iter()
+                    .find(|entry| entry.uid == uid)
+                    .map(|entry| entry.molecule.atom_count())
+            }) {
+                return Ok(JsValue::new(count as f64));
+            }
+            let pdb = this_string_prop(this, "_pdb_data", ctx);
+            let molecule = if pdb.is_empty() {
+                let sdf = this_string_prop(this, "_sdf_data", ctx);
+                if sdf.is_empty() {
+                    MolCoord::new()
+                } else {
+                    read_sdf_str(&sdf).map_err(|error| script_error(error.to_string()))?
+                }
+            } else {
+                read_pdb_str(&pdb).map_err(|error| script_error(error.to_string()))?
+            };
+            Ok(JsValue::new(molecule.atom_count() as f64))
+        }
+
+        fn set_script_molecule_value(
+            value: &JsValue,
+            molecule: MolCoord,
+            ctx: &mut Context,
+        ) -> JsResult<()> {
+            let uid = object_number_prop(value, "uid", ctx)? as u64;
+            let pdb = write_pdb_string(&molecule);
+            let sdf = write_sdf_string(&molecule);
+            script_env::with_mut(|env| {
+                env.modified_molecule_uids.remove(&uid);
+                if let Some(entry) = env.molecules.iter_mut().find(|entry| entry.uid == uid) {
+                    entry.molecule = molecule;
+                } else {
+                    env.molecules.push(ScriptMol {
+                        uid,
+                        scene_uid: 0,
+                        molecule,
+                    });
+                }
+            });
+            let object = iterator_object(value)?;
+            object.set(js_string!("_pdb_data"), JsString::from(pdb), true, ctx)?;
+            object.set(js_string!("_sdf_data"), JsString::from(sdf), true, ctx)?;
+            Ok(())
         }
         fn molsurf_from_value(this: &JsValue, ctx: &mut Context) -> JsResult<MolSurfObj> {
             let mut surface = MolSurfObj::new();
@@ -8823,7 +10906,7 @@ impl DesktopAppState {
                 .as_number()
                 .map(|value| value as u64)
                 .unwrap_or_default();
-            if uid != 0 {
+            if pending_object_is_attached(this, ctx)? {
                 script_env::with_mut(|env| {
                     if let Some(entry) = env.objects.iter_mut().find(|entry| entry.uid == uid) {
                         entry.surface = Some(surface.clone());
@@ -8833,6 +10916,20 @@ impl DesktopAppState {
                         entry.source_type = "obj".to_string();
                     }
                 });
+            } else {
+                object.set(
+                    JsString::from(pending_object_property_key(MoleculeProperty::Source)),
+                    js_string!("datachunk:"),
+                    true,
+                    ctx,
+                )?;
+                object.set(
+                    JsString::from(pending_object_property_key(MoleculeProperty::Modified)),
+                    true,
+                    true,
+                    ctx,
+                )?;
+                object.set(js_string!("_force_embed"), true, true, ctx)?;
             }
             Ok(())
         }
@@ -8964,21 +11061,21 @@ impl DesktopAppState {
         }
         fn js_molsurf_force_embed(
             this: &JsValue,
-            _args: &[JsValue],
+            args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let object = iterator_object(this)?;
-            object.set(js_string!("src"), js_string!("datachunk:"), true, ctx)?;
-            object.set(js_string!("alt_src"), js_string!(""), true, ctx)?;
-            object.set(js_string!("modified"), true, true, ctx)?;
-            object.set(js_string!("_force_embed"), true, true, ctx)?;
-            Ok(JsValue::undefined())
+            js_pending_object_force_embed(this, args, ctx)
         }
         fn make_molsurf(ctx: &mut Context) -> JsValue {
             let selection = make_sel_command(ctx);
-            ObjectInitializer::new(ctx)
+            let value = ObjectInitializer::new(ctx)
                 .property(
                     js_string!("type"),
+                    js_string!("MolSurfObj"),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_class"),
                     js_string!("MolSurfObj"),
                     Attribute::all(),
                 )
@@ -8987,14 +11084,10 @@ impl DesktopAppState {
                 .property(js_string!("orig_sel"), selection, Attribute::all())
                 .property(js_string!("orig_den"), 0.0, Attribute::all())
                 .property(js_string!("orig_prad"), 0.0, Attribute::all())
-                .property(
-                    js_string!("src"),
-                    js_string!("datachunk:"),
-                    Attribute::all(),
-                )
+                .property(js_string!("src"), js_string!(""), Attribute::all())
                 .property(js_string!("alt_src"), js_string!(""), Attribute::all())
-                .property(js_string!("modified"), true, Attribute::all())
-                .property(js_string!("_force_embed"), true, Attribute::all())
+                .property(js_string!("modified"), false, Attribute::all())
+                .property(js_string!("_force_embed"), false, Attribute::all())
                 .property(js_string!("_source_uid"), 0, Attribute::all())
                 .property(js_string!("_mesh_data"), js_string!(""), Attribute::all())
                 .function(
@@ -9036,6 +11129,100 @@ impl DesktopAppState {
                     NativeFunction::from_fn_ptr(js_molsurf_create_hole),
                     js_string!("createHoleTest1"),
                     3,
+                )
+                .build()
+                .into();
+            install_pending_object_api(&value, "MolSurfObj", ctx);
+            value
+        }
+        fn js_hole_surf_builder_result(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            iterator_object(this)?.get(js_string!("_result"), ctx)
+        }
+        fn js_hole_surf_builder_run(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let object = iterator_object(this)?;
+            let molecule_value = object.get(js_string!("target_mol"), ctx)?;
+            let molecule = script_molecule(&molecule_value, ctx)?;
+            let selection =
+                selector_from_script_value(&object.get(js_string!("target_sel"), ctx)?, ctx)?;
+            let direction = vector_from_value(&object.get(js_string!("dirnorm"), ctx)?, ctx)?;
+            let start = vector_from_value(&object.get(js_string!("startpos"), ctx)?, ctx)?;
+            let density = object.get(js_string!("surf_den"), ctx)?.to_number(ctx)?;
+            let probe_radius = object
+                .get(js_string!("surf_probe_r"), ctx)?
+                .to_number(ctx)?;
+            let mut builder = cuemol_surface::HoleSurfBuilder::new();
+            builder.set_target_mol(&molecule.molecule);
+            builder.set_target_sel(&selection);
+            builder.set_dir_norm(direction);
+            builder.set_start_pos(start);
+            builder.set_surf_den(density);
+            builder.set_surf_probe_r(probe_radius);
+            builder
+                .doit()
+                .map_err(|error| script_error(error.to_string()))?;
+            let mut surface = builder
+                .result()
+                .cloned()
+                .ok_or_else(|| script_error("HoleSurfBuilder produced no result"))?;
+            surface.set_orig_mol(object_string_prop(&molecule_value, "name", ctx));
+            let result = make_molsurf(ctx);
+            set_molsurf(&result, &surface, ctx)?;
+            iterator_object(&result)?.set(
+                js_string!("_source_uid"),
+                molecule.uid as f64,
+                true,
+                ctx,
+            )?;
+            object.set(js_string!("_result"), result, true, ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn make_hole_surf_builder(ctx: &mut Context) -> JsValue {
+            let result_getter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_fn_ptr(js_hole_surf_builder_result),
+            )
+            .name(js_string!("get result"))
+            .length(0)
+            .constructor(false)
+            .build();
+            let direction = make_vector(Vector4::ZERO, ctx);
+            let start = make_vector(Vector4::ZERO, ctx);
+            ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("_class"),
+                    js_string!("HoleSurfBuilder"),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("type"),
+                    js_string!("HoleSurfBuilder"),
+                    Attribute::all(),
+                )
+                .property(js_string!("target_mol"), JsValue::null(), Attribute::all())
+                .property(js_string!("target_sel"), JsValue::null(), Attribute::all())
+                .property(js_string!("dirnorm"), direction, Attribute::all())
+                .property(js_string!("startpos"), start, Attribute::all())
+                .property(js_string!("surf_den"), 2.0, Attribute::all())
+                .property(js_string!("surf_probe_r"), 1.4, Attribute::all())
+                .property(js_string!("_result"), JsValue::null(), Attribute::all())
+                .accessor(
+                    js_string!("result"),
+                    Some(result_getter),
+                    None,
+                    Attribute::all(),
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_hole_surf_builder_run),
+                    js_string!("doit"),
+                    0,
                 )
                 .build()
                 .into()
@@ -10031,11 +12218,13 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let scene_uid = with_script_view(this, ctx, |view| view.scene_uid().get())?;
-            Ok(if script_env::with(|env| env.scene_uid == scene_uid) {
-                make_scene_proxy(ctx)
-            } else {
-                JsValue::null()
-            })
+            Ok(
+                if script_env::with(|env| env.scenes.iter().any(|scene| scene.uid == scene_uid)) {
+                    make_scene_proxy_for(scene_uid, ctx)
+                } else {
+                    JsValue::null()
+                },
+            )
         }
         fn draw_object_enabled(
             this: &JsValue,
@@ -10070,6 +12259,237 @@ impl DesktopAppState {
             })
             .ok_or_else(|| script_error("DrawObj is not available"))?;
             Ok(JsValue::undefined())
+        }
+        fn detached_draw_enabled(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            iterator_object(this)?.get(js_string!("_enabled"), ctx)
+        }
+        fn detached_draw_set_enabled(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let enabled = args.first().is_some_and(JsValue::to_boolean);
+            let object = iterator_object(this)?;
+            object.set(js_string!("_enabled"), enabled, true, ctx)?;
+            if !enabled {
+                object.set(js_string!("_started"), false, true, ctx)?;
+                object.set(js_string!("_append_count"), 0, true, ctx)?;
+            }
+            Ok(JsValue::undefined())
+        }
+        fn detached_rect_bound(
+            this: &JsValue,
+            axis: usize,
+            size: bool,
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let object = iterator_object(this)?;
+            let start_name = if axis == 0 { "_start_x" } else { "_start_y" };
+            let end_name = if axis == 0 { "_end_x" } else { "_end_y" };
+            let start = object.get(JsString::from(start_name), ctx)?.to_i32(ctx)?;
+            let end = object.get(JsString::from(end_name), ctx)?.to_i32(ctx)?;
+            Ok(JsValue::new(if size {
+                (start - end).abs()
+            } else {
+                start.min(end)
+            }))
+        }
+        fn detached_rect_left(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            detached_rect_bound(this, 0, false, ctx)
+        }
+        fn detached_rect_top(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            detached_rect_bound(this, 1, false, ctx)
+        }
+        fn detached_rect_width(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            detached_rect_bound(this, 0, true, ctx)
+        }
+        fn detached_rect_height(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            detached_rect_bound(this, 1, true, ctx)
+        }
+        fn detached_rect_start(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if args.len() != 2 {
+                return Err(script_error("RectSelDrawObj.start: invalid arguments"));
+            }
+            let x = args[0].to_i32(ctx)?;
+            let y = args[1].to_i32(ctx)?;
+            let object = iterator_object(this)?;
+            for (name, value) in [
+                ("_start_x", x),
+                ("_start_y", y),
+                ("_end_x", x),
+                ("_end_y", y),
+            ] {
+                object.set(JsString::from(name), value, true, ctx)?;
+            }
+            object.set(js_string!("_started"), true, true, ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn detached_rect_move(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if args.len() != 2 {
+                return Err(script_error("RectSelDrawObj.move: invalid arguments"));
+            }
+            let object = iterator_object(this)?;
+            object.set(js_string!("_end_x"), args[0].to_i32(ctx)?, true, ctx)?;
+            object.set(js_string!("_end_y"), args[1].to_i32(ctx)?, true, ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn detached_rect_end(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            iterator_object(this)?.set(js_string!("_started"), false, true, ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn detached_dist_append(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if args.len() != 2 {
+                return Err(script_error("DistPickDrawObj.append: invalid arguments"));
+            }
+            let molecule_uid = args[0].to_number(ctx)? as u64;
+            let atom_id = args[1].to_i32(ctx)?;
+            let exists = script_env::with(|env| {
+                env.molecules
+                    .iter()
+                    .find(|entry| entry.uid == molecule_uid)
+                    .is_some_and(|entry| {
+                        entry
+                            .molecule
+                            .atoms()
+                            .iter()
+                            .any(|atom| atom.serial == atom_id)
+                    })
+            });
+            if exists {
+                let object = iterator_object(this)?;
+                let count = object.get(js_string!("_append_count"), ctx)?.to_i32(ctx)?;
+                object.set(js_string!("_append_count"), count + 1, true, ctx)?;
+            }
+            Ok(JsValue::undefined())
+        }
+        fn make_detached_draw_object(class_name: &str, ctx: &mut Context) -> JsValue {
+            fn getter(
+                ctx: &mut Context,
+                name: &'static str,
+                callback: fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>,
+            ) -> boa_engine::object::builtins::JsFunction {
+                FunctionObjectBuilder::new(ctx.realm(), NativeFunction::from_fn_ptr(callback))
+                    .name(JsString::from(format!("get {name}")))
+                    .length(0)
+                    .constructor(false)
+                    .build()
+            }
+            let enabled_getter = getter(ctx, "enabled", detached_draw_enabled);
+            let enabled_setter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_fn_ptr(detached_draw_set_enabled),
+            )
+            .name(js_string!("set enabled"))
+            .length(1)
+            .constructor(false)
+            .build();
+            let color = if class_name == "DistPickDrawObj" {
+                make_color(cuemol_gfx::SolidColor::from_rgba(1.0, 1.0, 1.0, 0.5), ctx)
+            } else {
+                make_color(cuemol_gfx::SolidColor::from_rgb(0.2, 0.8, 1.0), ctx)
+            };
+            let rect_getters = (class_name == "RectSelDrawObj").then(|| {
+                (
+                    getter(ctx, "left", detached_rect_left),
+                    getter(ctx, "top", detached_rect_top),
+                    getter(ctx, "width", detached_rect_width),
+                    getter(ctx, "height", detached_rect_height),
+                )
+            });
+            let mut object = ObjectInitializer::new(ctx);
+            object
+                .property(
+                    js_string!("type"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_class"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(js_string!("_enabled"), false, Attribute::all())
+                .property(js_string!("_started"), false, Attribute::all())
+                .property(js_string!("_append_count"), 0, Attribute::all())
+                .property(js_string!("color"), color, Attribute::all())
+                .accessor(
+                    js_string!("enabled"),
+                    Some(enabled_getter),
+                    Some(enabled_setter),
+                    Attribute::all(),
+                );
+            if class_name == "DistPickDrawObj" {
+                object
+                    .property(js_string!("width"), 4.0, Attribute::all())
+                    .function(
+                        NativeFunction::from_fn_ptr(detached_dist_append),
+                        js_string!("append"),
+                        2,
+                    );
+            } else {
+                let (left, top, width, height) =
+                    rect_getters.expect("rectangle getters were created");
+                for name in ["_start_x", "_start_y", "_end_x", "_end_y"] {
+                    object.property(JsString::from(name), 0, Attribute::all());
+                }
+                object
+                    .accessor(js_string!("left"), Some(left), None, Attribute::all())
+                    .accessor(js_string!("top"), Some(top), None, Attribute::all())
+                    .accessor(js_string!("width"), Some(width), None, Attribute::all())
+                    .accessor(js_string!("height"), Some(height), None, Attribute::all())
+                    .function(
+                        NativeFunction::from_fn_ptr(detached_rect_start),
+                        js_string!("start"),
+                        2,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(detached_rect_move),
+                        js_string!("move"),
+                        2,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(detached_rect_end),
+                        js_string!("end"),
+                        0,
+                    );
+            }
+            object.build().into()
         }
         fn make_draw_object(view_uid: Uid, class_name: &str, ctx: &mut Context) -> JsValue {
             let getter = FunctionObjectBuilder::new(
@@ -10156,6 +12576,113 @@ impl DesktopAppState {
             Ok(JsValue::new(with_script_view_mut(this, ctx, |view| {
                 view.remove_style_regex(&expression)
             })?))
+        }
+        fn view_input_position(
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<(f64, f64, f64, f64, i32)> {
+            Ok((
+                args.first()
+                    .cloned()
+                    .unwrap_or(JsValue::undefined())
+                    .to_number(ctx)?,
+                args.get(1)
+                    .cloned()
+                    .unwrap_or(JsValue::undefined())
+                    .to_number(ctx)?,
+                args.get(2)
+                    .cloned()
+                    .unwrap_or(JsValue::undefined())
+                    .to_number(ctx)?,
+                args.get(3)
+                    .cloned()
+                    .unwrap_or(JsValue::undefined())
+                    .to_number(ctx)?,
+                args.get(4)
+                    .cloned()
+                    .unwrap_or(JsValue::undefined())
+                    .to_i32(ctx)?,
+            ))
+        }
+        fn js_view_mouse_down(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let (client_x, client_y, screen_x, screen_y, modifier) =
+                view_input_position(args, ctx)?;
+            with_script_view_mut(this, ctx, |view| {
+                view.on_mouse_down(client_x, client_y, screen_x, screen_y, modifier)
+            })?;
+            Ok(JsValue::undefined())
+        }
+        fn js_view_mouse_up(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let (client_x, client_y, screen_x, screen_y, modifier) =
+                view_input_position(args, ctx)?;
+            with_script_view_mut(this, ctx, |view| {
+                view.on_mouse_up(client_x, client_y, screen_x, screen_y, modifier)
+            })?;
+            Ok(JsValue::undefined())
+        }
+        fn js_view_mouse_move(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let (client_x, client_y, screen_x, screen_y, modifier) =
+                view_input_position(args, ctx)?;
+            with_script_view_mut(this, ctx, |view| {
+                view.on_mouse_move(client_x, client_y, screen_x, screen_y, modifier)
+            })?;
+            Ok(JsValue::undefined())
+        }
+        fn js_view_wheel(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            let (client_x, client_y, screen_x, screen_y, modifier) =
+                view_input_position(args, ctx)?;
+            let delta_x = args
+                .get(5)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)?;
+            let delta_y = args
+                .get(6)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)?;
+            with_script_view_mut(this, ctx, |view| {
+                view.on_wheel(
+                    client_x, client_y, screen_x, screen_y, modifier, delta_x, delta_y,
+                )
+            })?;
+            Ok(JsValue::undefined())
+        }
+        fn js_view_gesture(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let (client_x, client_y, screen_x, screen_y, modifier) =
+                view_input_position(args, ctx)?;
+            let axis_id = args
+                .get(5)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let delta = args
+                .get(6)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)?;
+            with_script_view_mut(this, ctx, |view| {
+                view.on_gesture(
+                    client_x, client_y, screen_x, screen_y, modifier, axis_id, delta,
+                )
+            })?;
+            Ok(JsValue::undefined())
         }
         fn make_view_proxy(view_uid: Uid, ctx: &mut Context) -> JsValue {
             fn accessor(
@@ -10385,6 +12912,31 @@ impl DesktopAppState {
                     js_string!("removeStyleRegex"),
                     1,
                 )
+                .function(
+                    NativeFunction::from_fn_ptr(js_view_mouse_down),
+                    js_string!("onMouseDown"),
+                    5,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_view_mouse_up),
+                    js_string!("onMouseUp"),
+                    5,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_view_mouse_move),
+                    js_string!("onMouseMove"),
+                    5,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_view_wheel),
+                    js_string!("onWheel"),
+                    7,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_view_gesture),
+                    js_string!("onGesture"),
+                    7,
+                )
                 .build()
                 .into()
         }
@@ -10402,16 +12954,40 @@ impl DesktopAppState {
                 },
             )
         }
-        fn js_get_view_by_name(
-            _this: &JsValue,
+        fn js_scene_get_view(
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
+            let uid = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)? as u64;
+            Ok(
+                if script_env::with(|env| {
+                    env.views
+                        .iter()
+                        .any(|view| view.uid().get() == uid && view.scene_uid().get() == scene_uid)
+                }) {
+                    make_view_proxy(Uid::new(uid), ctx)
+                } else {
+                    JsValue::null()
+                },
+            )
+        }
+        fn js_get_view_by_name(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let name = arg0(args, ctx);
             let uid = script_env::with(|env| {
                 env.views
                     .iter()
-                    .find(|view| view.name() == name)
+                    .find(|view| view.scene_uid().get() == scene_uid && view.name() == name)
                     .map(cuemol_qsys::View::uid)
             });
             Ok(uid
@@ -10419,11 +12995,12 @@ impl DesktopAppState {
                 .unwrap_or_else(JsValue::null))
         }
         fn js_scene_create_view(
-            _this: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let (uid, scene_uid) = script_env::with_mut(|env| {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
+            let uid = script_env::with_mut(|env| {
                 let uid = env
                     .views
                     .iter()
@@ -10431,11 +13008,9 @@ impl DesktopAppState {
                     .max()
                     .unwrap_or(3_000_000_000)
                     .saturating_add(1);
-                env.views.push(cuemol_qsys::View::new(
-                    Uid::new(uid),
-                    Uid::new(env.scene_uid),
-                ));
-                (uid, env.scene_uid)
+                env.views
+                    .push(cuemol_qsys::View::new(Uid::new(uid), Uid::new(scene_uid)));
+                uid
             });
             if scene_uid == 0 {
                 return Err(script_error("Scene is not available"));
@@ -10443,10 +13018,11 @@ impl DesktopAppState {
             Ok(make_view_proxy(Uid::new(uid), ctx))
         }
         fn js_scene_destroy_view(
-            _this: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let uid = args
                 .first()
                 .cloned()
@@ -10454,17 +13030,17 @@ impl DesktopAppState {
                 .to_number(ctx)? as u64;
             Ok(JsValue::new(script_env::with_mut(|env| {
                 let previous = env.views.len();
-                env.views.retain(|view| {
-                    view.uid().get() != uid || view.scene_uid().get() != env.scene_uid
-                });
+                env.views
+                    .retain(|view| view.uid().get() != uid || view.scene_uid().get() != scene_uid);
                 previous != env.views.len()
             })))
         }
         fn js_scene_set_active_view(
-            _this: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let uid = args
                 .first()
                 .cloned()
@@ -10474,12 +13050,11 @@ impl DesktopAppState {
                 let has_view = env
                     .views
                     .iter()
-                    .any(|view| view.uid().get() == uid && view.scene_uid().get() == env.scene_uid);
+                    .any(|view| view.uid().get() == uid && view.scene_uid().get() == scene_uid);
                 if has_view {
-                    for view in &mut env.views {
-                        if view.scene_uid().get() == env.scene_uid {
-                            view.set_active(view.uid().get() == uid);
-                        }
+                    if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid)
+                    {
+                        scene.active_view_uid = Some(uid);
                     }
                 }
                 has_view
@@ -10489,64 +13064,127 @@ impl DesktopAppState {
             }
             Ok(JsValue::undefined())
         }
-        fn scene_camera(name: &str) -> Option<cuemol_qsys::Camera> {
+        fn scene_camera(scene_uid: u64, name: &str) -> Option<cuemol_qsys::Camera> {
             script_env::with(|env| {
-                env.cameras
+                env.scenes
                     .iter()
-                    .find(|camera| camera.name() == name)
-                    .cloned()
+                    .find(|scene| scene.uid == scene_uid)
+                    .and_then(|scene| {
+                        scene
+                            .cameras
+                            .iter()
+                            .find(|camera| camera.name() == name)
+                            .cloned()
+                    })
             })
         }
         fn js_scene_get_camera(
-            _this: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let name = arg0(args, ctx);
-            match scene_camera(&name) {
+            match scene_camera(scene_uid, &name) {
                 Some(camera) => make_camera_from_core(&camera, ctx),
                 None => Ok(JsValue::null()),
             }
         }
-        fn js_scene_has_camera(
-            _this: &JsValue,
+        fn js_scene_get_camera_ref(
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            Ok(JsValue::new(scene_camera(&arg0(args, ctx)).is_some()))
+            let scene_uid = scene_proxy_uid(this, ctx)?;
+            let name = arg0(args, ctx);
+            if let Some(object) = script_env::with(|env| {
+                env.camera_refs
+                    .iter()
+                    .find(|(uid, camera_name, _)| *uid == scene_uid && camera_name == &name)
+                    .map(|(_, _, object)| object.clone())
+            }) {
+                return Ok(object.into());
+            }
+            let Some(camera) = scene_camera(scene_uid, &name) else {
+                return Ok(JsValue::null());
+            };
+            let value = make_camera_from_core(&camera, ctx)?;
+            if let Some(object) = value.as_object() {
+                script_env::with_mut(|env| {
+                    env.camera_refs.push((scene_uid, name, object.clone()));
+                });
+            }
+            Ok(value)
+        }
+        fn js_scene_has_camera(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsValue::new(
+                scene_camera(scene_proxy_uid(this, ctx)?, &arg0(args, ctx)).is_some(),
+            ))
         }
         fn js_scene_set_camera(
-            _this: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let name = arg0(args, ctx);
             let mut camera =
                 camera_from_value(&args.get(1).cloned().unwrap_or(JsValue::undefined()), ctx)?;
             camera.set_name(name.clone());
+            let command_camera = camera.clone();
             script_env::with_mut(|env| {
-                env.cameras.retain(|entry| entry.name() != name);
-                env.cameras.push(camera);
+                if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) {
+                    scene.cameras.retain(|entry| entry.name() != name);
+                    scene.cameras.push(camera.clone());
+                }
+                if env.scene_uid == scene_uid {
+                    env.cameras.retain(|entry| entry.name() != name);
+                    env.cameras.push(camera);
+                }
+            });
+            script_cmds::push(ScriptCmd::SetSceneCamera {
+                scene_uid,
+                camera: command_camera,
             });
             Ok(JsValue::undefined())
         }
         fn js_scene_destroy_camera(
-            _this: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let name = arg0(args, ctx);
-            Ok(JsValue::new(script_env::with_mut(|env| {
-                let previous = env.cameras.len();
-                env.cameras.retain(|camera| camera.name() != name);
-                previous != env.cameras.len()
-            })))
+            let removed = script_env::with_mut(|env| {
+                let removed = env
+                    .scenes
+                    .iter_mut()
+                    .find(|scene| scene.uid == scene_uid)
+                    .is_some_and(|scene| {
+                        let previous = scene.cameras.len();
+                        scene.cameras.retain(|camera| camera.name() != name);
+                        previous != scene.cameras.len()
+                    });
+                if env.scene_uid == scene_uid {
+                    env.cameras.retain(|camera| camera.name() != name);
+                }
+                removed
+            });
+            if removed {
+                script_cmds::push(ScriptCmd::DestroySceneCamera { scene_uid, name });
+            }
+            Ok(JsValue::new(removed))
         }
         fn js_scene_save_view_camera(
-            _this: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let uid = args
                 .first()
                 .cloned()
@@ -10556,36 +13194,48 @@ impl DesktopAppState {
             let camera = script_env::with(|env| {
                 env.views
                     .iter()
-                    .find(|view| view.uid().get() == uid)
+                    .find(|view| view.uid().get() == uid && view.scene_uid().get() == scene_uid)
                     .map(cuemol_qsys::View::camera)
             });
             let Some(mut camera) = camera else {
                 return Ok(JsValue::new(false));
             };
             camera.set_name(name.clone());
+            let command_camera = camera.clone();
             script_env::with_mut(|env| {
-                env.cameras.retain(|entry| entry.name() != name);
-                env.cameras.push(camera);
+                if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) {
+                    scene.cameras.retain(|entry| entry.name() != name);
+                    scene.cameras.push(camera.clone());
+                }
+                if env.scene_uid == scene_uid {
+                    env.cameras.retain(|entry| entry.name() != name);
+                    env.cameras.push(camera);
+                }
+            });
+            script_cmds::push(ScriptCmd::SetSceneCamera {
+                scene_uid,
+                camera: command_camera,
             });
             Ok(JsValue::new(true))
         }
         fn js_scene_load_view_camera(
-            _this: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let uid = args
                 .first()
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_number(ctx)? as u64;
             let name = argn(args, 1, ctx);
-            let camera = scene_camera(&name)
+            let camera = scene_camera(scene_uid, &name)
                 .ok_or_else(|| script_error(format!("Camera {name} is not available")))?;
             let loaded = script_env::with_mut(|env| {
                 env.views
                     .iter_mut()
-                    .find(|view| view.uid().get() == uid)
+                    .find(|view| view.uid().get() == uid && view.scene_uid().get() == scene_uid)
                     .map(|view| view.set_camera(&camera))
                     .is_some()
             });
@@ -10595,14 +13245,18 @@ impl DesktopAppState {
             Ok(JsValue::undefined())
         }
         fn js_scene_camera_info(
-            _this: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
-            _ctx: &mut Context,
+            ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let json = script_env::with(|env| {
                 let entries = env
-                    .cameras
+                    .scenes
                     .iter()
+                    .find(|scene| scene.uid == scene_uid)
+                    .into_iter()
+                    .flat_map(|scene| &scene.cameras)
                     .map(|camera| {
                         format!(
                             "{{\"name\":\"{}\",\"vis_size\":{},\"src\":\"{}\"}}",
@@ -10618,13 +13272,14 @@ impl DesktopAppState {
             Ok(JsString::from(json).into())
         }
         fn js_scene_save_camera_file(
-            _this: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let name = arg0(args, ctx);
             let path = argn(args, 1, ctx);
-            let Some(camera) = scene_camera(&name) else {
+            let Some(camera) = scene_camera(scene_uid, &name) else {
                 return Ok(JsValue::new(false));
             };
             let saved = std::fs::write(&path, camera.to_xml_string()).is_ok();
@@ -10842,6 +13497,11 @@ impl DesktopAppState {
                             .iter()
                             .find_map(|scene| scene.animation.motion_by_uid(Uid::new(uid)).cloned())
                     })
+                    .or_else(|| {
+                        env.detached_animation_managers
+                            .values()
+                            .find_map(|animation| animation.motion_by_uid(Uid::new(uid)).cloned())
+                    })
                     .or_else(|| env.pending_animations.get(&uid).cloned())
             })
             .ok_or_else(|| script_error(format!("AnimObj {uid} is not available")))
@@ -10861,6 +13521,13 @@ impl DesktopAppState {
                 {
                     return Some(operation(motion));
                 }
+                if let Some(motion) = env
+                    .detached_animation_managers
+                    .values_mut()
+                    .find_map(|animation| animation.motion_by_uid_mut(Uid::new(uid)))
+                {
+                    return Some(operation(motion));
+                }
                 env.pending_animations.get_mut(&uid).map(operation)
             })
             .ok_or_else(|| script_error(format!("AnimObj {uid} is not available")))
@@ -10869,6 +13536,9 @@ impl DesktopAppState {
             script_env::with(|env| {
                 if scene_uid == env.scene_uid {
                     return Some(env.animation.clone());
+                }
+                if let Some(animation) = env.detached_animation_managers.get(&scene_uid) {
+                    return Some(animation.clone());
                 }
                 env.scenes
                     .iter()
@@ -10884,6 +13554,9 @@ impl DesktopAppState {
             script_env::with_mut(|env| {
                 if scene_uid == env.scene_uid {
                     return Some(operation(&mut env.animation));
+                }
+                if let Some(animation) = env.detached_animation_managers.get_mut(&scene_uid) {
+                    return Some(operation(animation));
                 }
                 env.scenes
                     .iter_mut()
@@ -11426,6 +14099,15 @@ impl DesktopAppState {
         }
         fn new_script_anim_motion(class_name: &str, ctx: &mut Context) -> JsResult<JsValue> {
             let motion = match class_name {
+                "AnimObj" => {
+                    let mut node = LDom2Node::new();
+                    node.set_tag_name("motion");
+                    node.set_type_name("AnimObj");
+                    AnimMotion::Unknown {
+                        node,
+                        base: cuemol_anim::AnimObj::new(),
+                    }
+                }
                 "NoopAnimObj" => AnimMotion::Noop(NoopAnimObj::new()),
                 "CamMotion" => AnimMotion::Camera(CamMotion::new()),
                 "RealPropAnim" => AnimMotion::RealProperty(RealPropAnim::new()),
@@ -11835,6 +14517,15 @@ impl DesktopAppState {
                 .build()
                 .into()
         }
+        fn make_detached_anim_manager(ctx: &mut Context) -> JsValue {
+            let id = script_env::with_mut(|env| {
+                let id = env.next_detached_animation_manager_id.max(1);
+                env.next_detached_animation_manager_id = id.saturating_add(1);
+                env.detached_animation_managers.insert(id, AnimMgr::new());
+                id
+            });
+            make_anim_manager(id, ctx)
+        }
         fn js_scene_get_anim_manager(
             this: &JsValue,
             _args: &[JsValue],
@@ -11842,9 +14533,2211 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             Ok(make_anim_manager(scene_proxy_uid(this, ctx)?, ctx))
         }
-        fn js_create_obj(
+        #[derive(Clone, Copy)]
+        enum NativeSceneExporterProperty {
+            Camera,
+            Width,
+            Height,
+            Resolution,
+            Alpha,
+            Depth,
+            Interlace,
+            PngCompress,
+            Perspective,
+            MakeRelIncPath,
+            UseClipZ,
+            UsePostBlend,
+            BlendTable,
+            ShowEdgeLines,
+            CreaseLimit,
+            EdgeRise,
+            UsePixImgs,
+            ImgFileNames,
+            GradSteps,
+            Scale,
+            HaltSpp,
+            OutputBase,
+            FilmOpts,
+            BgMode,
+            Path,
+            HandlerCompress,
+            Base64,
+        }
+        fn native_scene_exporter_proxy_id(this: &JsValue, ctx: &mut Context) -> JsResult<u64> {
+            Ok(object_number_prop(this, "_native_exporter_id", ctx)? as u64)
+        }
+        fn with_script_native_scene_exporter<R>(
+            id: u64,
+            operation: impl FnOnce(&ScriptNativeSceneExporter) -> R,
+        ) -> JsResult<R> {
+            script_env::with(|env| env.native_scene_exporters.get(&id).map(operation))
+                .ok_or_else(|| script_error("SceneExporter is not available"))
+        }
+        fn with_script_native_scene_exporter_mut<R>(
+            id: u64,
+            operation: impl FnOnce(&mut ScriptNativeSceneExporter) -> R,
+        ) -> JsResult<R> {
+            script_env::with_mut(|env| env.native_scene_exporters.get_mut(&id).map(operation))
+                .ok_or_else(|| script_error("SceneExporter is not available"))
+        }
+        fn native_scene_exporter_property_get(
+            property: NativeSceneExporterProperty,
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let id = native_scene_exporter_proxy_id(this, ctx)?;
+            with_script_native_scene_exporter(id, |exporter| match (property, exporter) {
+                (NativeSceneExporterProperty::Camera, _) => {
+                    Some(JsString::from(exporter.camera_name()).into())
+                }
+                (NativeSceneExporterProperty::Width, _) => {
+                    Some(JsValue::new(exporter.base().width()))
+                }
+                (NativeSceneExporterProperty::Height, _) => {
+                    Some(JsValue::new(exporter.base().height()))
+                }
+                (
+                    NativeSceneExporterProperty::Resolution,
+                    ScriptNativeSceneExporter::Png(exporter),
+                ) => Some(JsValue::new(exporter.resolution_dpi())),
+                (NativeSceneExporterProperty::Alpha, ScriptNativeSceneExporter::Png(exporter)) => {
+                    Some(JsValue::new(exporter.use_alpha()))
+                }
+                (NativeSceneExporterProperty::Depth, ScriptNativeSceneExporter::Png(exporter)) => {
+                    Some(JsValue::new(exporter.use_depth()))
+                }
+                (
+                    NativeSceneExporterProperty::Interlace,
+                    ScriptNativeSceneExporter::Png(exporter),
+                ) => Some(JsValue::new(exporter.interlace())),
+                (
+                    NativeSceneExporterProperty::PngCompress,
+                    ScriptNativeSceneExporter::Png(exporter),
+                ) => Some(JsValue::new(exporter.compress())),
+                (
+                    NativeSceneExporterProperty::Perspective,
+                    ScriptNativeSceneExporter::Pov(exporter),
+                ) => Some(JsValue::new(exporter.perspective())),
+                (
+                    NativeSceneExporterProperty::Perspective,
+                    ScriptNativeSceneExporter::Mqo(exporter),
+                ) => Some(JsValue::new(exporter.perspective())),
+                (
+                    NativeSceneExporterProperty::MakeRelIncPath,
+                    ScriptNativeSceneExporter::Pov(exporter),
+                ) => Some(JsValue::new(exporter.make_rel_inc_path())),
+                (
+                    NativeSceneExporterProperty::UseClipZ,
+                    ScriptNativeSceneExporter::Pov(exporter),
+                ) => Some(JsValue::new(exporter.use_clip_z())),
+                (
+                    NativeSceneExporterProperty::UseClipZ,
+                    ScriptNativeSceneExporter::Mqo(exporter),
+                ) => Some(JsValue::new(exporter.use_clip_z())),
+                (
+                    NativeSceneExporterProperty::UseClipZ,
+                    ScriptNativeSceneExporter::Wbp(exporter),
+                ) => Some(JsValue::new(exporter.use_clip_z())),
+                (
+                    NativeSceneExporterProperty::UsePostBlend,
+                    ScriptNativeSceneExporter::Pov(exporter),
+                ) => Some(JsValue::new(exporter.use_post_blend())),
+                (
+                    NativeSceneExporterProperty::BlendTable,
+                    ScriptNativeSceneExporter::Pov(exporter),
+                ) => Some(JsString::from(exporter.blend_table()).into()),
+                (
+                    NativeSceneExporterProperty::ShowEdgeLines,
+                    ScriptNativeSceneExporter::Pov(exporter),
+                ) => Some(JsValue::new(exporter.show_edge_lines())),
+                (
+                    NativeSceneExporterProperty::CreaseLimit,
+                    ScriptNativeSceneExporter::Pov(exporter),
+                ) => Some(JsValue::new(exporter.crease_limit())),
+                (
+                    NativeSceneExporterProperty::EdgeRise,
+                    ScriptNativeSceneExporter::Pov(exporter),
+                ) => Some(JsValue::new(exporter.edge_rise())),
+                (
+                    NativeSceneExporterProperty::UsePixImgs,
+                    ScriptNativeSceneExporter::Pov(exporter),
+                ) => Some(JsValue::new(exporter.use_pix_imgs())),
+                (
+                    NativeSceneExporterProperty::ImgFileNames,
+                    ScriptNativeSceneExporter::Pov(exporter),
+                ) => Some(JsString::from(exporter.img_file_names()).into()),
+                (
+                    NativeSceneExporterProperty::GradSteps,
+                    ScriptNativeSceneExporter::Mqo(exporter),
+                ) => Some(JsValue::new(exporter.grad_steps())),
+                (
+                    NativeSceneExporterProperty::GradSteps,
+                    ScriptNativeSceneExporter::Wbp(exporter),
+                ) => Some(JsValue::new(exporter.grad_steps())),
+                (NativeSceneExporterProperty::Scale, ScriptNativeSceneExporter::Stl(exporter)) => {
+                    Some(JsValue::new(exporter.scale()))
+                }
+                (
+                    NativeSceneExporterProperty::HaltSpp,
+                    ScriptNativeSceneExporter::LuxRend(exporter),
+                ) => Some(JsValue::new(exporter.halt_spp())),
+                (
+                    NativeSceneExporterProperty::HaltSpp,
+                    ScriptNativeSceneExporter::LuxCore(exporter),
+                ) => Some(JsValue::new(exporter.halt_spp())),
+                (
+                    NativeSceneExporterProperty::OutputBase,
+                    ScriptNativeSceneExporter::LuxRend(exporter),
+                ) => Some(JsString::from(exporter.output_base()).into()),
+                (
+                    NativeSceneExporterProperty::FilmOpts,
+                    ScriptNativeSceneExporter::LuxRend(exporter),
+                ) => Some(JsString::from(exporter.film_opts()).into()),
+                (
+                    NativeSceneExporterProperty::FilmOpts,
+                    ScriptNativeSceneExporter::LuxCore(exporter),
+                ) => Some(JsString::from(exporter.film_opts()).into()),
+                (
+                    NativeSceneExporterProperty::BgMode,
+                    ScriptNativeSceneExporter::LuxRend(exporter),
+                ) => Some(
+                    JsString::from(lux_background_mode_name(exporter.bg_mode().as_i32())).into(),
+                ),
+                (
+                    NativeSceneExporterProperty::BgMode,
+                    ScriptNativeSceneExporter::LuxCore(exporter),
+                ) => Some(
+                    JsString::from(lux_background_mode_name(exporter.bg_mode().as_i32())).into(),
+                ),
+                (NativeSceneExporterProperty::Path, _) => {
+                    Some(JsString::from(exporter.handler().path()).into())
+                }
+                (NativeSceneExporterProperty::HandlerCompress, _) => Some(
+                    JsString::from(compress_mode_name(exporter.handler().compress_mode())).into(),
+                ),
+                (NativeSceneExporterProperty::Base64, _) => {
+                    Some(JsValue::new(exporter.handler().base64_flag()))
+                }
+                _ => None,
+            })?
+            .ok_or_else(|| script_error("SceneExporter property is not supported"))
+        }
+        fn native_scene_exporter_property_set(
+            property: NativeSceneExporterProperty,
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let id = native_scene_exporter_proxy_id(this, ctx)?;
+            let value = args.first().cloned().unwrap_or(JsValue::undefined());
+            let string_value = matches!(
+                property,
+                NativeSceneExporterProperty::Camera
+                    | NativeSceneExporterProperty::BlendTable
+                    | NativeSceneExporterProperty::ImgFileNames
+                    | NativeSceneExporterProperty::OutputBase
+                    | NativeSceneExporterProperty::FilmOpts
+                    | NativeSceneExporterProperty::Path
+            )
+            .then(|| {
+                value
+                    .to_string(ctx)
+                    .map(|value| value.to_std_string_escaped())
+            })
+            .transpose()?;
+            let integer_value = matches!(
+                property,
+                NativeSceneExporterProperty::Width
+                    | NativeSceneExporterProperty::Height
+                    | NativeSceneExporterProperty::PngCompress
+                    | NativeSceneExporterProperty::GradSteps
+                    | NativeSceneExporterProperty::HaltSpp
+            )
+            .then(|| value.to_i32(ctx))
+            .transpose()?;
+            let background_mode = matches!(property, NativeSceneExporterProperty::BgMode)
+                .then(|| lux_background_mode_from_value(&value, ctx))
+                .transpose()?;
+            let compress_mode = matches!(property, NativeSceneExporterProperty::HandlerCompress)
+                .then(|| compress_mode_from_value(&value, ctx))
+                .transpose()?;
+            let real_value = matches!(
+                property,
+                NativeSceneExporterProperty::Resolution
+                    | NativeSceneExporterProperty::CreaseLimit
+                    | NativeSceneExporterProperty::EdgeRise
+                    | NativeSceneExporterProperty::Scale
+            )
+            .then(|| value.to_number(ctx))
+            .transpose()?;
+            let supported =
+                with_script_native_scene_exporter_mut(id, |exporter| match (property, exporter) {
+                    (NativeSceneExporterProperty::Camera, exporter) => {
+                        exporter.set_camera_name(string_value.clone().unwrap_or_default());
+                        true
+                    }
+                    (NativeSceneExporterProperty::Width, exporter) => {
+                        exporter
+                            .base_mut()
+                            .set_width(integer_value.unwrap_or_default());
+                        true
+                    }
+                    (NativeSceneExporterProperty::Height, exporter) => {
+                        exporter
+                            .base_mut()
+                            .set_height(integer_value.unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::Resolution,
+                        ScriptNativeSceneExporter::Png(exporter),
+                    ) => {
+                        exporter.set_resolution_dpi(real_value.unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::Alpha,
+                        ScriptNativeSceneExporter::Png(exporter),
+                    ) => {
+                        exporter.set_use_alpha(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::Depth,
+                        ScriptNativeSceneExporter::Png(exporter),
+                    ) => {
+                        exporter.set_use_depth(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::Interlace,
+                        ScriptNativeSceneExporter::Png(exporter),
+                    ) => {
+                        exporter.set_interlace(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::PngCompress,
+                        ScriptNativeSceneExporter::Png(exporter),
+                    ) => {
+                        exporter.set_compress(integer_value.unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::Perspective,
+                        ScriptNativeSceneExporter::Pov(exporter),
+                    ) => {
+                        exporter.set_perspective(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::Perspective,
+                        ScriptNativeSceneExporter::Mqo(exporter),
+                    ) => {
+                        exporter.set_perspective(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::MakeRelIncPath,
+                        ScriptNativeSceneExporter::Pov(exporter),
+                    ) => {
+                        exporter.set_make_rel_inc_path(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::UseClipZ,
+                        ScriptNativeSceneExporter::Pov(exporter),
+                    ) => {
+                        exporter.set_use_clip_z(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::UseClipZ,
+                        ScriptNativeSceneExporter::Mqo(exporter),
+                    ) => {
+                        exporter.set_use_clip_z(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::UseClipZ,
+                        ScriptNativeSceneExporter::Wbp(exporter),
+                    ) => {
+                        exporter.set_use_clip_z(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::UsePostBlend,
+                        ScriptNativeSceneExporter::Pov(exporter),
+                    ) => {
+                        exporter.set_use_post_blend(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::BlendTable,
+                        ScriptNativeSceneExporter::Pov(exporter),
+                    ) => {
+                        exporter.set_blend_table(string_value.clone().unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::ShowEdgeLines,
+                        ScriptNativeSceneExporter::Pov(exporter),
+                    ) => {
+                        exporter.set_show_edge_lines(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::CreaseLimit,
+                        ScriptNativeSceneExporter::Pov(exporter),
+                    ) => {
+                        exporter.set_crease_limit(real_value.unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::EdgeRise,
+                        ScriptNativeSceneExporter::Pov(exporter),
+                    ) => {
+                        exporter.set_edge_rise(real_value.unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::UsePixImgs,
+                        ScriptNativeSceneExporter::Pov(exporter),
+                    ) => {
+                        exporter.set_use_pix_imgs(value.to_boolean());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::ImgFileNames,
+                        ScriptNativeSceneExporter::Pov(exporter),
+                    ) => {
+                        exporter.set_img_file_names(string_value.clone().unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::GradSteps,
+                        ScriptNativeSceneExporter::Mqo(exporter),
+                    ) => {
+                        exporter.set_grad_steps(integer_value.unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::GradSteps,
+                        ScriptNativeSceneExporter::Wbp(exporter),
+                    ) => {
+                        exporter.set_grad_steps(integer_value.unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::Scale,
+                        ScriptNativeSceneExporter::Stl(exporter),
+                    ) => {
+                        exporter.set_scale(real_value.unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::HaltSpp,
+                        ScriptNativeSceneExporter::LuxRend(exporter),
+                    ) => {
+                        exporter.set_halt_spp(integer_value.unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::HaltSpp,
+                        ScriptNativeSceneExporter::LuxCore(exporter),
+                    ) => {
+                        exporter.set_halt_spp(integer_value.unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::OutputBase,
+                        ScriptNativeSceneExporter::LuxRend(exporter),
+                    ) => {
+                        exporter.set_output_base(string_value.clone().unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::FilmOpts,
+                        ScriptNativeSceneExporter::LuxRend(exporter),
+                    ) => {
+                        exporter.set_film_opts(string_value.clone().unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::FilmOpts,
+                        ScriptNativeSceneExporter::LuxCore(exporter),
+                    ) => {
+                        exporter.set_film_opts(string_value.clone().unwrap_or_default());
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::BgMode,
+                        ScriptNativeSceneExporter::LuxRend(exporter),
+                    ) => {
+                        let Some(mode) = cuemol_render::LuxBackgroundMode::from_i32(
+                            background_mode.unwrap_or_default(),
+                        ) else {
+                            return false;
+                        };
+                        exporter.set_bg_mode(mode);
+                        true
+                    }
+                    (
+                        NativeSceneExporterProperty::BgMode,
+                        ScriptNativeSceneExporter::LuxCore(exporter),
+                    ) => {
+                        let Some(mode) = cuemol_render::LuxBackgroundMode::from_i32(
+                            background_mode.unwrap_or_default(),
+                        ) else {
+                            return false;
+                        };
+                        exporter.set_bg_mode(mode);
+                        true
+                    }
+                    (NativeSceneExporterProperty::Path, exporter) => {
+                        exporter
+                            .handler_mut()
+                            .set_path(string_value.clone().unwrap_or_default());
+                        true
+                    }
+                    (NativeSceneExporterProperty::HandlerCompress, exporter) => {
+                        exporter
+                            .handler_mut()
+                            .set_compress_mode(compress_mode.unwrap_or_default());
+                        true
+                    }
+                    (NativeSceneExporterProperty::Base64, exporter) => {
+                        exporter.handler_mut().set_base64_flag(value.to_boolean());
+                        true
+                    }
+                    _ => false,
+                })?;
+            if !supported {
+                return Err(script_error(
+                    "SceneExporter property value or class is not supported",
+                ));
+            }
+            Ok(JsValue::undefined())
+        }
+        fn js_native_scene_exporter_attach(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let scene = args.first().cloned().unwrap_or(JsValue::undefined());
+            let scene_uid = object_number_prop(&scene, "uid", ctx)? as u64;
+            if !script_env::with(|env| env.render_scenes.contains_key(&scene_uid)) {
+                return Err(script_error(format!("Scene {scene_uid} is not available")));
+            }
+            with_script_native_scene_exporter_mut(
+                native_scene_exporter_proxy_id(this, ctx)?,
+                |exporter| exporter.base_mut().attach(Uid::new(scene_uid)),
+            )?;
+            Ok(JsValue::undefined())
+        }
+        fn js_native_scene_exporter_detach(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let detached = with_script_native_scene_exporter_mut(
+                native_scene_exporter_proxy_id(this, ctx)?,
+                |exporter| exporter.base_mut().detach(),
+            )?;
+            Ok(detached
+                .map(|uid| make_scene_proxy_for(uid.get(), ctx))
+                .unwrap_or_else(JsValue::null))
+        }
+        fn js_native_scene_exporter_set_path(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let path = arg0(args, ctx);
+            with_script_native_scene_exporter_mut(
+                native_scene_exporter_proxy_id(this, ctx)?,
+                |exporter| exporter.handler_mut().set_path(path),
+            )?;
+            Ok(JsValue::undefined())
+        }
+        fn js_native_scene_exporter_set_sub_path(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let key = arg0(args, ctx);
+            let path = argn(args, 1, ctx);
+            with_script_native_scene_exporter_mut(
+                native_scene_exporter_proxy_id(this, ctx)?,
+                |exporter| exporter.base_mut().set_sub_path(key, path),
+            )?;
+            Ok(JsValue::undefined())
+        }
+        fn js_native_scene_exporter_write(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let id = native_scene_exporter_proxy_id(this, ctx)?;
+            let (render_scene, scene_name, camera) = script_env::with(|env| {
+                let exporter = env.native_scene_exporters.get(&id)?;
+                let scene_uid = exporter.base().client_scene()?.get();
+                let render_scene = env.render_scenes.get(&scene_uid)?.clone();
+                let camera_name = exporter.camera_name();
+                let camera = if camera_name.is_empty() {
+                    Some(render_scene.default_camera.clone())
+                } else {
+                    env.scenes
+                        .iter()
+                        .find(|scene| scene.uid == scene_uid)?
+                        .cameras
+                        .iter()
+                        .find(|camera| camera.name() == camera_name)
+                        .cloned()
+                }?;
+                let scene_name = env
+                    .scenes
+                    .iter()
+                    .find(|scene| scene.uid == scene_uid)
+                    .map(|scene| scene.name.clone())
+                    .unwrap_or_else(|| "scene".to_string());
+                Some((render_scene, scene_name, camera))
+            })
+            .ok_or_else(|| {
+                script_error("SceneExporter requires an attached scene and an available camera")
+            })?;
+            let mut exporter = script_env::with_mut(|env| env.native_scene_exporters.remove(&id))
+                .ok_or_else(|| script_error("SceneExporter is not available"))?;
+            let mesh = cuemol_render::tessellate_snapshot(&render_scene.snapshot);
+            let result = match &mut exporter {
+                ScriptNativeSceneExporter::Png(exporter) => {
+                    #[cfg(feature = "offscreen")]
+                    {
+                        let width = u32::try_from(exporter.width())
+                            .ok()
+                            .filter(|value| *value > 0)
+                            .ok_or_else(|| {
+                                CueMolError::invalid_argument("PNG width must be positive")
+                            });
+                        let height = u32::try_from(exporter.height())
+                            .ok()
+                            .filter(|value| *value > 0)
+                            .ok_or_else(|| {
+                                CueMolError::invalid_argument("PNG height must be positive")
+                            });
+                        width.and_then(|width| {
+                            height.and_then(|height| {
+                                let aspect = width as f64 / height as f64;
+                                let rgba = if exporter.use_depth() {
+                                    crate::offscreen::render_snapshot_depth_offscreen(
+                                        &render_scene.snapshot,
+                                        &camera,
+                                        width,
+                                        height,
+                                    )
+                                } else {
+                                    let mvp = crate::offscreen::camera_mvp(&camera, aspect);
+                                    crate::offscreen::render_snapshot_supersampled_offscreen(
+                                        &render_scene.snapshot,
+                                        mvp,
+                                        width,
+                                        height,
+                                        [
+                                            0.1,
+                                            0.1,
+                                            0.12,
+                                            if exporter.use_alpha() { 0.0 } else { 1.0 },
+                                        ],
+                                        5,
+                                    )
+                                }
+                                .ok_or_else(|| {
+                                    CueMolError::invalid_argument(
+                                        "no GPU adapter for offscreen render",
+                                    )
+                                })?;
+                                let png = crate::offscreen::encode_png(
+                                    &rgba,
+                                    width,
+                                    height,
+                                    exporter.use_alpha(),
+                                    exporter.resolution_dpi(),
+                                );
+                                fs::write(exporter.handler().path(), png)?;
+                                exporter.write();
+                                Ok(())
+                            })
+                        })
+                    }
+                    #[cfg(not(feature = "offscreen"))]
+                    {
+                        let _ = exporter;
+                        Err(CueMolError::invalid_argument(
+                            "PNG export requires the offscreen feature",
+                        ))
+                    }
+                }
+                ScriptNativeSceneExporter::Pov(exporter) => exporter.write_scene_file(
+                    &mesh,
+                    camera.center(),
+                    (camera.zoom() / 1.2).max(1.0),
+                    exporter.perspective(),
+                ),
+                ScriptNativeSceneExporter::Mqo(exporter) => {
+                    exporter.write_mesh_file(&scene_name, &mesh)
+                }
+                ScriptNativeSceneExporter::Wbp(exporter) => {
+                    exporter.write_scene_files(&scene_name, &mesh)
+                }
+                ScriptNativeSceneExporter::Stl(exporter) => exporter.write_mesh_file(&mesh),
+                ScriptNativeSceneExporter::LuxRend(exporter) => exporter.write_scene_file(
+                    &mesh,
+                    camera.center(),
+                    (camera.zoom() / 1.2).max(1.0),
+                    camera.is_perspective(),
+                ),
+                ScriptNativeSceneExporter::LuxCore(exporter) => exporter.write_scene_files(
+                    &scene_name,
+                    &mesh,
+                    exporter.base().width(),
+                    exporter.base().height(),
+                ),
+            };
+            script_env::with_mut(|env| {
+                env.native_scene_exporters.insert(id, exporter);
+            });
+            result.map_err(|error| script_error(error.to_string()))?;
+            Ok(JsValue::undefined())
+        }
+        fn make_native_scene_exporter(class_name: &str, ctx: &mut Context) -> JsResult<JsValue> {
+            fn accessor(
+                name: &str,
+                property: NativeSceneExporterProperty,
+                ctx: &mut Context,
+            ) -> (
+                JsString,
+                boa_engine::object::builtins::JsFunction,
+                boa_engine::object::builtins::JsFunction,
+            ) {
+                let getter = FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_copy_closure(move |this, args, ctx| {
+                        native_scene_exporter_property_get(property, this, args, ctx)
+                    }),
+                )
+                .name(JsString::from(format!("get {name}")))
+                .length(0)
+                .constructor(false)
+                .build();
+                let setter = FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_copy_closure(move |this, args, ctx| {
+                        native_scene_exporter_property_set(property, this, args, ctx)
+                    }),
+                )
+                .name(JsString::from(format!("set {name}")))
+                .length(1)
+                .constructor(false)
+                .build();
+                (JsString::from(name), getter, setter)
+            }
+
+            let exporter = ScriptNativeSceneExporter::new(class_name)
+                .ok_or_else(|| script_error(format!("{class_name} is not available")))?;
+            let name = exporter.handler().name().to_string();
+            let type_descr = exporter.handler().type_descr().to_string();
+            let file_ext = exporter.handler().file_ext().to_string();
+            let id = script_env::with_mut(|env| {
+                let id = env.next_native_scene_exporter_id.max(1);
+                env.next_native_scene_exporter_id = id.saturating_add(1);
+                env.native_scene_exporters.insert(id, exporter);
+                id
+            });
+            let mut properties = vec![
+                ("camera", NativeSceneExporterProperty::Camera),
+                ("width", NativeSceneExporterProperty::Width),
+                ("height", NativeSceneExporterProperty::Height),
+                ("path", NativeSceneExporterProperty::Path),
+                ("base64", NativeSceneExporterProperty::Base64),
+            ];
+            if class_name == "PngSceneExporter" {
+                properties.extend([
+                    ("resoln", NativeSceneExporterProperty::Resolution),
+                    ("alpha", NativeSceneExporterProperty::Alpha),
+                    ("depth", NativeSceneExporterProperty::Depth),
+                    ("interlace", NativeSceneExporterProperty::Interlace),
+                    ("compress", NativeSceneExporterProperty::PngCompress),
+                ]);
+            } else {
+                properties.push(("compress", NativeSceneExporterProperty::HandlerCompress));
+            }
+            match class_name {
+                "PovSceneExporter" => properties.extend([
+                    ("perspective", NativeSceneExporterProperty::Perspective),
+                    (
+                        "makeRelIncPath",
+                        NativeSceneExporterProperty::MakeRelIncPath,
+                    ),
+                    ("useClipZ", NativeSceneExporterProperty::UseClipZ),
+                    ("usePostBlend", NativeSceneExporterProperty::UsePostBlend),
+                    ("blendTable", NativeSceneExporterProperty::BlendTable),
+                    ("showEdgeLines", NativeSceneExporterProperty::ShowEdgeLines),
+                    ("creaseLimit", NativeSceneExporterProperty::CreaseLimit),
+                    ("edgeRise", NativeSceneExporterProperty::EdgeRise),
+                    ("usePixImgs", NativeSceneExporterProperty::UsePixImgs),
+                    ("imgFileNames", NativeSceneExporterProperty::ImgFileNames),
+                ]),
+                "MqoSceneExporter" => properties.extend([
+                    ("perspective", NativeSceneExporterProperty::Perspective),
+                    ("useClipZ", NativeSceneExporterProperty::UseClipZ),
+                    ("gradSteps", NativeSceneExporterProperty::GradSteps),
+                ]),
+                "WbpSceneExporter" => properties.extend([
+                    ("useClipZ", NativeSceneExporterProperty::UseClipZ),
+                    ("gradSteps", NativeSceneExporterProperty::GradSteps),
+                ]),
+                "StlSceneExporter" => {
+                    properties.push(("scale", NativeSceneExporterProperty::Scale));
+                }
+                "LuxRendSceneExporter" => properties.extend([
+                    ("haltspp", NativeSceneExporterProperty::HaltSpp),
+                    ("outputbase", NativeSceneExporterProperty::OutputBase),
+                    ("filmopts", NativeSceneExporterProperty::FilmOpts),
+                    ("bgmode", NativeSceneExporterProperty::BgMode),
+                ]),
+                "LuxCoreSceneExporter" => properties.extend([
+                    ("haltspp", NativeSceneExporterProperty::HaltSpp),
+                    ("filmopts", NativeSceneExporterProperty::FilmOpts),
+                    ("bgmode", NativeSceneExporterProperty::BgMode),
+                ]),
+                _ => {}
+            }
+            let accessors = properties
+                .into_iter()
+                .map(|(name, property)| accessor(name, property, ctx))
+                .collect::<Vec<_>>();
+            let mut object = ObjectInitializer::new(ctx);
+            object
+                .property(
+                    js_string!("_class"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("type"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_native_exporter_id"),
+                    id as f64,
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("name"),
+                    JsString::from(name),
+                    Attribute::ENUMERABLE,
+                )
+                .property(
+                    js_string!("typedescr"),
+                    JsString::from(type_descr),
+                    Attribute::ENUMERABLE,
+                )
+                .property(
+                    js_string!("fileext"),
+                    JsString::from(file_ext),
+                    Attribute::ENUMERABLE,
+                );
+            for (name, getter, setter) in accessors {
+                object.accessor(name, Some(getter), Some(setter), Attribute::all());
+            }
+            Ok(object
+                .function(
+                    NativeFunction::from_fn_ptr(js_native_scene_exporter_attach),
+                    js_string!("attach"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_native_scene_exporter_detach),
+                    js_string!("detach"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_native_scene_exporter_set_path),
+                    js_string!("setPath"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_native_scene_exporter_set_sub_path),
+                    js_string!("setSubPath"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_native_scene_exporter_write),
+                    js_string!("write"),
+                    0,
+                )
+                .build()
+                .into())
+        }
+        #[derive(Clone, Copy)]
+        enum UmbreonProperty {
+            Camera,
+            Width,
+            Height,
+            Perspective,
+            UseClipZ,
+            Supersample,
+            AoSamples,
+            AoDistance,
+            AoIntensity,
+            Shadows,
+            ShadowSamples,
+            LightRadius,
+            ShowEdgeLines,
+            CreaseLimit,
+            EdgeRise,
+            TransparentBackground,
+            UseGi,
+            GiSamples,
+            GiIntensity,
+            GiEnvIntensity,
+            GiDenoise,
+            Denoiser,
+            Path,
+            Compress,
+            Base64,
+        }
+        fn umbreon_proxy_id(this: &JsValue, ctx: &mut Context) -> JsResult<u64> {
+            Ok(object_number_prop(this, "_exporter_id", ctx)? as u64)
+        }
+        fn with_script_umbreon<R>(
+            id: u64,
+            operation: impl FnOnce(&UmbreonSceneExporter) -> R,
+        ) -> JsResult<R> {
+            script_env::with(|env| env.umbreon_exporters.get(&id).map(operation))
+                .ok_or_else(|| script_error("UmbreonSceneExporter is not available"))
+        }
+        fn with_script_umbreon_mut<R>(
+            id: u64,
+            operation: impl FnOnce(&mut UmbreonSceneExporter) -> R,
+        ) -> JsResult<R> {
+            script_env::with_mut(|env| env.umbreon_exporters.get_mut(&id).map(operation))
+                .ok_or_else(|| script_error("UmbreonSceneExporter is not available"))
+        }
+        fn umbreon_property_get(
+            property: UmbreonProperty,
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let id = umbreon_proxy_id(this, ctx)?;
+            with_script_umbreon(id, |exporter| match property {
+                UmbreonProperty::Camera => JsString::from(exporter.scene().camera_name()).into(),
+                UmbreonProperty::Width => JsValue::new(exporter.width()),
+                UmbreonProperty::Height => JsValue::new(exporter.height()),
+                UmbreonProperty::Perspective => JsValue::new(exporter.perspective()),
+                UmbreonProperty::UseClipZ => JsValue::new(exporter.use_clip_z()),
+                UmbreonProperty::Supersample => JsValue::new(exporter.supersample()),
+                UmbreonProperty::AoSamples => JsValue::new(exporter.ao_samples()),
+                UmbreonProperty::AoDistance => JsValue::new(exporter.ao_distance()),
+                UmbreonProperty::AoIntensity => JsValue::new(exporter.ao_intensity()),
+                UmbreonProperty::Shadows => JsValue::new(exporter.shadows()),
+                UmbreonProperty::ShadowSamples => JsValue::new(exporter.shadow_samples()),
+                UmbreonProperty::LightRadius => JsValue::new(exporter.light_radius()),
+                UmbreonProperty::ShowEdgeLines => JsValue::new(exporter.show_edge_lines()),
+                UmbreonProperty::CreaseLimit => JsValue::new(exporter.crease_limit()),
+                UmbreonProperty::EdgeRise => JsValue::new(exporter.edge_rise()),
+                UmbreonProperty::TransparentBackground => {
+                    JsValue::new(exporter.transparent_background())
+                }
+                UmbreonProperty::UseGi => JsValue::new(exporter.use_gi()),
+                UmbreonProperty::GiSamples => JsValue::new(exporter.gi_samples()),
+                UmbreonProperty::GiIntensity => JsValue::new(exporter.gi_intensity()),
+                UmbreonProperty::GiEnvIntensity => JsValue::new(exporter.gi_env_intensity()),
+                UmbreonProperty::GiDenoise => JsValue::new(exporter.gi_denoise()),
+                UmbreonProperty::Denoiser => JsValue::new(exporter.denoiser()),
+                UmbreonProperty::Path => JsString::from(exporter.handler().path()).into(),
+                UmbreonProperty::Compress => {
+                    JsString::from(compress_mode_name(exporter.handler().compress_mode())).into()
+                }
+                UmbreonProperty::Base64 => JsValue::new(exporter.handler().base64_flag()),
+            })
+        }
+        fn umbreon_property_set(
+            property: UmbreonProperty,
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let id = umbreon_proxy_id(this, ctx)?;
+            let value = args.first().cloned().unwrap_or(JsValue::undefined());
+            match property {
+                UmbreonProperty::Camera => {
+                    let value = value.to_string(ctx)?.to_std_string_escaped();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.scene_mut().set_camera_name(value)
+                    })?;
+                }
+                UmbreonProperty::Width => {
+                    let value = value.to_i32(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_width(value))?;
+                }
+                UmbreonProperty::Height => {
+                    let value = value.to_i32(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_height(value))?;
+                }
+                UmbreonProperty::Perspective => {
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.set_perspective(value.to_boolean())
+                    })?;
+                }
+                UmbreonProperty::UseClipZ => {
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.set_use_clip_z(value.to_boolean())
+                    })?;
+                }
+                UmbreonProperty::Supersample => {
+                    let value = value.to_i32(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_supersample(value))?;
+                }
+                UmbreonProperty::AoSamples => {
+                    let value = value.to_i32(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_ao_samples(value))?;
+                }
+                UmbreonProperty::AoDistance => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_ao_distance(value))?;
+                }
+                UmbreonProperty::AoIntensity => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_ao_intensity(value))?;
+                }
+                UmbreonProperty::Shadows => {
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.set_shadows(value.to_boolean())
+                    })?;
+                }
+                UmbreonProperty::ShadowSamples => {
+                    let value = value.to_i32(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_shadow_samples(value))?;
+                }
+                UmbreonProperty::LightRadius => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_light_radius(value))?;
+                }
+                UmbreonProperty::ShowEdgeLines => {
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.set_show_edge_lines(value.to_boolean())
+                    })?;
+                }
+                UmbreonProperty::CreaseLimit => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_crease_limit(value))?;
+                }
+                UmbreonProperty::EdgeRise => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_edge_rise(value))?;
+                }
+                UmbreonProperty::TransparentBackground => {
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.set_transparent_background(value.to_boolean())
+                    })?;
+                }
+                UmbreonProperty::UseGi => {
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.set_use_gi(value.to_boolean())
+                    })?;
+                }
+                UmbreonProperty::GiSamples => {
+                    let value = value.to_i32(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_gi_samples(value))?;
+                }
+                UmbreonProperty::GiIntensity => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_gi_intensity(value))?;
+                }
+                UmbreonProperty::GiEnvIntensity => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_gi_env_intensity(value))?;
+                }
+                UmbreonProperty::GiDenoise => {
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.set_gi_denoise(value.to_boolean())
+                    })?;
+                }
+                UmbreonProperty::Denoiser => {
+                    let value = value.to_i32(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.set_denoiser(value))?;
+                }
+                UmbreonProperty::Path => {
+                    let value = value.to_string(ctx)?.to_std_string_escaped();
+                    with_script_umbreon_mut(id, |exporter| exporter.handler_mut().set_path(value))?;
+                }
+                UmbreonProperty::Compress => {
+                    let value = compress_mode_from_value(&value, ctx)?;
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.handler_mut().set_compress_mode(value)
+                    })?;
+                }
+                UmbreonProperty::Base64 => {
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.handler_mut().set_base64_flag(value.to_boolean())
+                    })?;
+                }
+            }
+            Ok(JsValue::undefined())
+        }
+        fn prepare_script_umbreon(id: u64) -> JsResult<()> {
+            let prepared = script_env::with_mut(|env| {
+                let exporter = env.umbreon_exporters.get(&id)?;
+                let scene_uid = exporter.scene().client_scene()?.get();
+                let camera_name = exporter.scene().camera_name().to_string();
+                let render_scene = env.render_scenes.get(&scene_uid)?.clone();
+                let camera = if camera_name.is_empty() {
+                    Some(render_scene.default_camera)
+                } else {
+                    env.scenes
+                        .iter()
+                        .find(|scene| scene.uid == scene_uid)
+                        .and_then(|scene| {
+                            scene
+                                .cameras
+                                .iter()
+                                .find(|camera| camera.name() == camera_name)
+                                .cloned()
+                        })
+                }?;
+                let background = env
+                    .scenes
+                    .iter()
+                    .find(|scene| scene.uid == scene_uid)
+                    .and_then(|scene| scene.attributes.get("bgcolor"))
+                    .and_then(|value| {
+                        resolve_script_color_with_styles(value, &env.styles, scene_uid)
+                    })
+                    .map(|color| {
+                        [
+                            f32::from(color.r) / 255.0,
+                            f32::from(color.g) / 255.0,
+                            f32::from(color.b) / 255.0,
+                            f32::from(color.a) / 255.0,
+                        ]
+                    })
+                    .unwrap_or([0.1, 0.1, 0.12, 1.0]);
+                env.umbreon_exporters.get_mut(&id)?.set_render_input(
+                    render_scene.snapshot,
+                    camera,
+                    background,
+                );
+                Some(())
+            });
+            prepared.ok_or_else(|| {
+                script_error(
+                    "UmbreonSceneExporter requires an attached scene and an available camera",
+                )
+            })
+        }
+        fn js_umbreon_attach(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let scene = args.first().cloned().unwrap_or(JsValue::undefined());
+            let scene_uid = object_number_prop(&scene, "uid", ctx)? as u64;
+            if !script_env::with(|env| env.render_scenes.contains_key(&scene_uid)) {
+                return Err(script_error(format!("Scene {scene_uid} is not available")));
+            }
+            with_script_umbreon_mut(umbreon_proxy_id(this, ctx)?, |exporter| {
+                exporter.scene_mut().attach(Uid::new(scene_uid))
+            })?;
+            Ok(JsValue::undefined())
+        }
+        fn js_umbreon_detach(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let detached = with_script_umbreon_mut(umbreon_proxy_id(this, ctx)?, |exporter| {
+                exporter.scene_mut().detach()
+            })?;
+            Ok(detached
+                .map(|uid| make_scene_proxy_for(uid.get(), ctx))
+                .unwrap_or_else(JsValue::null))
+        }
+        fn js_umbreon_set_path(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let path = arg0(args, ctx);
+            with_script_umbreon_mut(umbreon_proxy_id(this, ctx)?, |exporter| {
+                exporter.handler_mut().set_path(path)
+            })?;
+            Ok(JsValue::undefined())
+        }
+        fn js_umbreon_set_sub_path(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let key = arg0(args, ctx);
+            let path = argn(args, 1, ctx);
+            with_script_umbreon_mut(umbreon_proxy_id(this, ctx)?, |exporter| {
+                exporter.scene_mut().set_sub_path(key, path)
+            })?;
+            Ok(JsValue::undefined())
+        }
+        fn js_umbreon_write(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let id = umbreon_proxy_id(this, ctx)?;
+            prepare_script_umbreon(id)?;
+            with_script_umbreon_mut(id, UmbreonSceneExporter::write)?
+                .map_err(|error| script_error(error.to_string()))?;
+            Ok(JsValue::undefined())
+        }
+        fn js_umbreon_begin_render(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let id = umbreon_proxy_id(this, ctx)?;
+            prepare_script_umbreon(id)?;
+            with_script_umbreon_mut(id, UmbreonSceneExporter::begin_render)?
+                .map_err(|error| script_error(error.to_string()))?;
+            Ok(JsValue::undefined())
+        }
+        fn js_umbreon_progress(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsValue::new(with_script_umbreon(
+                umbreon_proxy_id(this, ctx)?,
+                UmbreonSceneExporter::get_render_progress,
+            )?))
+        }
+        fn js_umbreon_phase(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsString::from(with_script_umbreon(
+                umbreon_proxy_id(this, ctx)?,
+                UmbreonSceneExporter::get_render_phase_name,
+            )?)
+            .into())
+        }
+        fn js_umbreon_done(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsValue::new(with_script_umbreon(
+                umbreon_proxy_id(this, ctx)?,
+                UmbreonSceneExporter::is_render_done,
+            )?))
+        }
+        fn js_umbreon_cancel(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            with_script_umbreon(
+                umbreon_proxy_id(this, ctx)?,
+                UmbreonSceneExporter::cancel_render,
+            )?;
+            Ok(JsValue::undefined())
+        }
+        fn js_umbreon_end_render(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            with_script_umbreon_mut(
+                umbreon_proxy_id(this, ctx)?,
+                UmbreonSceneExporter::end_render,
+            )?
+            .map_err(|error| script_error(error.to_string()))?;
+            Ok(JsValue::undefined())
+        }
+        fn js_umbreon_was_cancelled(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsValue::new(with_script_umbreon(
+                umbreon_proxy_id(this, ctx)?,
+                UmbreonSceneExporter::was_render_cancelled,
+            )?))
+        }
+        fn make_umbreon_exporter(ctx: &mut Context) -> JsValue {
+            fn accessor(
+                name: &str,
+                property: UmbreonProperty,
+                ctx: &mut Context,
+            ) -> (
+                JsString,
+                boa_engine::object::builtins::JsFunction,
+                boa_engine::object::builtins::JsFunction,
+            ) {
+                let getter = FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_copy_closure(move |this, args, ctx| {
+                        umbreon_property_get(property, this, args, ctx)
+                    }),
+                )
+                .name(JsString::from(format!("get {name}")))
+                .length(0)
+                .constructor(false)
+                .build();
+                let setter = FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_copy_closure(move |this, args, ctx| {
+                        umbreon_property_set(property, this, args, ctx)
+                    }),
+                )
+                .name(JsString::from(format!("set {name}")))
+                .length(1)
+                .constructor(false)
+                .build();
+                (JsString::from(name), getter, setter)
+            }
+            let exporter_id = script_env::with_mut(|env| {
+                let id = env.next_umbreon_exporter_id.max(1);
+                env.next_umbreon_exporter_id = id.saturating_add(1);
+                env.umbreon_exporters
+                    .insert(id, UmbreonSceneExporter::new());
+                id
+            });
+            let properties = [
+                ("camera", UmbreonProperty::Camera),
+                ("width", UmbreonProperty::Width),
+                ("height", UmbreonProperty::Height),
+                ("perspective", UmbreonProperty::Perspective),
+                ("useClipZ", UmbreonProperty::UseClipZ),
+                ("supersample", UmbreonProperty::Supersample),
+                ("aoSamples", UmbreonProperty::AoSamples),
+                ("aoDistance", UmbreonProperty::AoDistance),
+                ("aoIntensity", UmbreonProperty::AoIntensity),
+                ("shadows", UmbreonProperty::Shadows),
+                ("shadowSamples", UmbreonProperty::ShadowSamples),
+                ("lightRadius", UmbreonProperty::LightRadius),
+                ("showEdgeLines", UmbreonProperty::ShowEdgeLines),
+                ("creaseLimit", UmbreonProperty::CreaseLimit),
+                ("edgeRise", UmbreonProperty::EdgeRise),
+                (
+                    "transparentBackground",
+                    UmbreonProperty::TransparentBackground,
+                ),
+                ("useGI", UmbreonProperty::UseGi),
+                ("giSamples", UmbreonProperty::GiSamples),
+                ("giIntensity", UmbreonProperty::GiIntensity),
+                ("giEnvIntensity", UmbreonProperty::GiEnvIntensity),
+                ("giDenoise", UmbreonProperty::GiDenoise),
+                ("denoiser", UmbreonProperty::Denoiser),
+                ("path", UmbreonProperty::Path),
+                ("compress", UmbreonProperty::Compress),
+                ("base64", UmbreonProperty::Base64),
+            ];
+            let accessors = properties
+                .into_iter()
+                .map(|(name, property)| accessor(name, property, ctx))
+                .collect::<Vec<_>>();
+            let mut object = ObjectInitializer::new(ctx);
+            object
+                .property(
+                    js_string!("_class"),
+                    js_string!("UmbreonSceneExporter"),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("type"),
+                    js_string!("UmbreonSceneExporter"),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_exporter_id"),
+                    exporter_id as f64,
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("name"),
+                    js_string!("umbreon"),
+                    Attribute::ENUMERABLE,
+                )
+                .property(
+                    js_string!("typedescr"),
+                    js_string!("Umbreon ray-traced image (*.png)"),
+                    Attribute::ENUMERABLE,
+                )
+                .property(
+                    js_string!("fileext"),
+                    js_string!("*.png"),
+                    Attribute::ENUMERABLE,
+                );
+            for (name, getter, setter) in accessors {
+                object.accessor(name, Some(getter), Some(setter), Attribute::all());
+            }
+            object
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_attach),
+                    js_string!("attach"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_detach),
+                    js_string!("detach"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_set_path),
+                    js_string!("setPath"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_set_sub_path),
+                    js_string!("setSubPath"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_write),
+                    js_string!("write"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_begin_render),
+                    js_string!("beginRender"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_progress),
+                    js_string!("getRenderProgress"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_phase),
+                    js_string!("getRenderPhaseName"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_done),
+                    js_string!("isRenderDone"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_cancel),
+                    js_string!("cancelRender"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_end_render),
+                    js_string!("endRender"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_was_cancelled),
+                    js_string!("wasRenderCancelled"),
+                    0,
+                )
+                .build()
+                .into()
+        }
+        fn js_test_class_foo(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let integer = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let string = argn(args, 1, ctx);
+            let real = args
+                .get(2)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)?;
+            let object = iterator_object(this)?;
+            object.set(
+                js_string!("strprop"),
+                JsString::from(format!("value is {integer} and {string}")),
+                true,
+                ctx,
+            )?;
+            object.set(js_string!("realprop"), real, true, ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn js_test_class_noop(
+            _this: &JsValue,
+            _args: &[JsValue],
+            _ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsValue::undefined())
+        }
+        fn js_test_class_foo3(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            iterator_object(this)?.get(js_string!("prop3"), ctx)
+        }
+        fn js_test_class_to_string(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let class_name = this_string_prop(this, "_class", ctx);
+            let prop1 = object_number_prop(this, "prop1", ctx)? as i32;
+            let strprop = this_string_prop(this, "strprop", ctx);
+            let base = format!("ClassA({prop1}, {strprop})");
+            Ok(JsString::from(if class_name == "ClassB" {
+                format!("ClassB ({base})")
+            } else {
+                base
+            })
+            .into())
+        }
+        fn make_test_class(class_name: &str, ctx: &mut Context) -> JsValue {
+            let vecprop = make_vector(Vector4::ZERO, ctx);
+            ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("type"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_class"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(js_string!("prop0"), false, Attribute::all())
+                .property(js_string!("prop1"), 246, Attribute::all())
+                .property(js_string!("realprop"), 345.678, Attribute::all())
+                .property(js_string!("strprop"), js_string!("abcd"), Attribute::all())
+                .property(js_string!("vecprop"), vecprop, Attribute::all())
+                .property(js_string!("prop3"), JsValue::null(), Attribute::all())
+                .property(js_string!("prop4"), 123, Attribute::all())
+                .property(js_string!("enumprop"), js_string!("bar"), Attribute::all())
+                .function(
+                    NativeFunction::from_fn_ptr(js_test_class_foo),
+                    js_string!("foo"),
+                    3,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_test_class_noop),
+                    js_string!("foo2"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_test_class_foo3),
+                    js_string!("foo3"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_test_class_to_string),
+                    js_string!("toString"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_test_class_noop),
+                    js_string!("bar"),
+                    1,
+                )
+                .build()
+                .into()
+        }
+        fn js_class_s_to_string(
+            _this: &JsValue,
+            _args: &[JsValue],
+            _ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(js_string!("ClassS").into())
+        }
+        fn make_class_s(ctx: &mut Context) -> JsValue {
+            ObjectInitializer::new(ctx)
+                .property(js_string!("type"), js_string!("ClassS"), Attribute::all())
+                .property(js_string!("_class"), js_string!("ClassS"), Attribute::all())
+                .function(
+                    NativeFunction::from_fn_ptr(js_class_s_to_string),
+                    js_string!("toString"),
+                    0,
+                )
+                .build()
+                .into()
+        }
+        fn command_name_for_class(class_name: &str) -> Option<&'static str> {
+            match class_name {
+                "NewSceneCommand" => Some("new_scene"),
+                "NewRendererCommand" => Some("new_renderer"),
+                "LoadSceneCommand" => Some("load_scene"),
+                "LoadObjectCommand" => Some("load_object"),
+                _ => None,
+            }
+        }
+        fn command_class_for_name(name: &str) -> Option<&'static str> {
+            match name {
+                "new_scene" => Some("NewSceneCommand"),
+                "new_renderer" => Some("NewRendererCommand"),
+                "load_scene" => Some("LoadSceneCommand"),
+                "load_object" => Some("LoadObjectCommand"),
+                _ => None,
+            }
+        }
+        fn js_command_to_string(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsString::from(this_string_prop(this, "_command_name", ctx)).into())
+        }
+        fn js_command_get_uid(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            iterator_object(this)?.get(js_string!("_command_uid"), ctx)
+        }
+        fn js_load_object_set_target_scene(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            iterator_object(this)?.set(
+                js_string!("target_scene"),
+                args.first().cloned().unwrap_or(JsValue::null()),
+                true,
+                ctx,
+            )?;
+            Ok(JsValue::undefined())
+        }
+        fn command_generated_scene_name() -> String {
+            script_env::with(|env| {
+                for index in 1.. {
+                    let name = format!("Untitled {index}");
+                    if !env.scenes.iter().any(|scene| scene.name == name) {
+                        return name;
+                    }
+                }
+                unreachable!("the scene-name search is unbounded")
+            })
+        }
+        fn command_create_scene(
+            this: &JsValue,
+            name: String,
+            create_view: bool,
+            activate: bool,
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let name = if name.trim().is_empty() {
+                command_generated_scene_name()
+            } else {
+                name
+            };
+            let (scene_uid, view_uid) = script_env::with_mut(|env| {
+                let scene_uid = env.next_scene_uid;
+                env.next_scene_uid = env.next_scene_uid.saturating_add(1);
+                env.scenes.push(ScriptSceneInfo {
+                    uid: scene_uid,
+                    name: name.clone(),
+                    attributes: BTreeMap::new(),
+                    active_object_uid: None,
+                    active_renderer_uid: None,
+                    active_view_uid: None,
+                    cameras: Vec::new(),
+                    animation: AnimMgr::new(),
+                    qsc_options: None,
+                    next_object_uid: cuemol_molstr::MolScene::first_object_uid(Uid::new(scene_uid))
+                        .get(),
+                    undo_descriptions: Vec::new(),
+                    redo_descriptions: Vec::new(),
+                    undo_active: None,
+                });
+                let view_uid = create_view.then(|| {
+                    let uid = env
+                        .views
+                        .iter()
+                        .map(|view| view.uid().get())
+                        .max()
+                        .unwrap_or(3_000_000_000)
+                        .saturating_add(1);
+                    let mut view = cuemol_qsys::View::new(Uid::new(uid), Uid::new(scene_uid));
+                    view.set_name("0");
+                    env.views.push(view);
+                    uid
+                });
+                if activate {
+                    if let Some(view_uid) = view_uid {
+                        if let Some(scene) =
+                            env.scenes.iter_mut().find(|scene| scene.uid == scene_uid)
+                        {
+                            scene.active_view_uid = Some(view_uid);
+                        }
+                    }
+                }
+                if activate {
+                    if let Some(current) = env
+                        .scenes
+                        .iter_mut()
+                        .find(|scene| scene.uid == env.scene_uid)
+                    {
+                        current.name = env.scene_name.clone();
+                        current.attributes = env.scene_attributes.clone();
+                        current.cameras = env.cameras.clone();
+                        current.animation = env.animation.clone();
+                    }
+                    env.scene_uid = scene_uid;
+                    env.scene_name = name.clone();
+                    env.scene_attributes.clear();
+                    env.cameras.clear();
+                    env.animation = AnimMgr::new();
+                }
+                (scene_uid, view_uid)
+            });
+            script_cmds::push(ScriptCmd::CreateScene {
+                expected_uid: scene_uid,
+                name,
+                // The scripted view was persisted with the runtime snapshot.
+                create_view: false,
+                activate,
+            });
+            let result_scene = make_scene_proxy_for(scene_uid, ctx);
+            let result_view = view_uid
+                .map(|uid| make_view_proxy(Uid::new(uid), ctx))
+                .unwrap_or_else(JsValue::null);
+            let command = iterator_object(this)?;
+            command.set(js_string!("result_scene"), result_scene.clone(), true, ctx)?;
+            command.set(js_string!("result_view"), result_view, true, ctx)?;
+            Ok(result_scene)
+        }
+        fn command_reader_info(
+            path: &str,
+            requested_format: &str,
+            content_first: bool,
+            max_sniff_bytes: u64,
+        ) -> JsResult<(String, cuemol_molstr::StreamHandlerInfo)> {
+            let manager = StreamManager::new();
+            let format = if content_first {
+                let names = manager
+                    .handlers()
+                    .iter()
+                    .filter(|handler| handler.category == cuemol_molstr::HandlerCategory::ObjReader)
+                    .map(|handler| handler.nickname.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                manager.search_reader_by_content(
+                    path,
+                    &names,
+                    cuemol_molstr::HandlerCategory::ObjReader,
+                    true,
+                    max_sniff_bytes,
+                )
+            } else if requested_format.trim().is_empty() {
+                guess_path_format(Path::new(path), &manager)
+                    .map(str::to_string)
+                    .map_err(|error| script_error(error.to_string()))?
+            } else {
+                requested_format.to_string()
+            };
+            if format.is_empty() {
+                return Err(script_error("cannot guess file type"));
+            }
+            let handler = manager
+                .handler_by_nickname(&format, cuemol_molstr::HandlerCategory::ObjReader)
+                .cloned()
+                .ok_or_else(|| script_error(format!("object reader {format} is not available")))?;
+            Ok((format, handler))
+        }
+        fn command_run_load_object(this: &JsValue, ctx: &mut Context) -> JsResult<JsValue> {
+            let target_scene = iterator_object(this)?.get(js_string!("target_scene"), ctx)?;
+            if !target_scene.is_object() {
+                return Err(script_error("LoadObjectCommand.target_scene is required"));
+            }
+            let target_scene_uid = object_number_prop(&target_scene, "uid", ctx)? as u64;
+            let path = this_string_prop(this, "file_path", ctx);
+            if path.trim().is_empty() {
+                return Err(script_error("LoadObjectCommand.file_path is required"));
+            }
+            let requested_format = this_string_prop(this, "file_format", ctx);
+            let content_first = iterator_object(this)?
+                .get(js_string!("content_first"), ctx)?
+                .to_boolean();
+            let max_sniff_bytes = object_number_prop(this, "max_sniff_bytes", ctx)?.max(0.0) as u64;
+            let (format, handler_info) =
+                command_reader_info(&path, &requested_format, content_first, max_sniff_bytes)?;
+            let class_name = handler_info
+                .abi_name
+                .rsplit("::")
+                .next()
+                .unwrap_or("ObjReader");
+            let handler = make_script_stream_handler(class_name, &handler_info, ctx);
+            iterator_object(&handler)?.set(
+                js_string!("path"),
+                JsString::from(path.as_str()),
+                true,
+                ctx,
+            )?;
+            if class_name == "MSMSFileReader" {
+                let path = Path::new(&path);
+                let vertex_path = if effective_extension(path) == "face" {
+                    path.with_extension("vert")
+                } else {
+                    path.to_path_buf()
+                };
+                iterator_object(&handler)?.set(
+                    js_string!("vertex_file"),
+                    JsString::from(vertex_path.to_string_lossy().as_ref()),
+                    true,
+                    ctx,
+                )?;
+            }
+            let target = js_handler_create_default_object(&handler, &[], ctx)?;
+            js_handler_attach(&handler, std::slice::from_ref(&target), ctx)?;
+            js_handler_read(&handler, &[], ctx)?;
+            js_handler_detach(&handler, &[], ctx)?;
+            let name = {
+                let requested = this_string_prop(this, "object_name", ctx);
+                if requested.trim().is_empty() {
+                    default_object_name(Path::new(&path))
+                } else {
+                    requested
+                }
+            };
+            iterator_object(&target)?.set(
+                js_string!("name"),
+                JsString::from(name.as_str()),
+                true,
+                ctx,
+            )?;
+            iterator_object(this)?.set(
+                js_string!("file_format"),
+                JsString::from(format.as_str()),
+                true,
+                ctx,
+            )?;
+            iterator_object(this)?.set(js_string!("result_object"), target.clone(), true, ctx)?;
+            script_cmds::push(ScriptCmd::LoadObjectCommand {
+                target_scene: target_scene_uid,
+                path,
+                name,
+                format,
+            });
+            Ok(target)
+        }
+        fn command_run_load_scene(this: &JsValue, ctx: &mut Context) -> JsResult<JsValue> {
+            let path = this_string_prop(this, "file_path", ctx);
+            if path.trim().is_empty() {
+                return Err(script_error("LoadSceneCommand.file_path is required"));
+            }
+            let requested_format = this_string_prop(this, "file_format", ctx);
+            let format = if requested_format.trim().is_empty() {
+                guess_path_format(Path::new(&path), &StreamManager::new())
+                    .map(str::to_string)
+                    .map_err(|error| script_error(error.to_string()))?
+            } else {
+                requested_format
+            };
+            let class_name = match format.as_str() {
+                "qsc_xml" | "qsc" | "qsl" => "SceneXMLReader",
+                "pse" => "PSEFileReader",
+                _ => {
+                    return Err(script_error(format!(
+                        "scene reader {format} is not available"
+                    )))
+                }
+            };
+            let target = iterator_object(this)?.get(js_string!("target_scene"), ctx)?;
+            let result_scene = if target.is_object() {
+                target
+            } else {
+                command_create_scene(
+                    this,
+                    this_string_prop(this, "scene_name", ctx),
+                    false,
+                    false,
+                    ctx,
+                )?
+            };
+            let target_scene = object_number_prop(&result_scene, "uid", ctx)? as u64;
+            iterator_object(this)?.set(
+                js_string!("file_format"),
+                JsString::from(format),
+                true,
+                ctx,
+            )?;
+            iterator_object(this)?.set(
+                js_string!("result_scene"),
+                result_scene.clone(),
+                true,
+                ctx,
+            )?;
+            script_cmds::push(ScriptCmd::LoadScene {
+                class_name: class_name.to_string(),
+                path,
+                target_scene,
+            });
+            Ok(result_scene)
+        }
+        fn js_command_run(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            match this_string_prop(this, "_class", ctx).as_str() {
+                "NewSceneCommand" => {
+                    let result = command_create_scene(
+                        this,
+                        this_string_prop(this, "scene_name", ctx),
+                        iterator_object(this)?
+                            .get(js_string!("create_view"), ctx)?
+                            .to_boolean(),
+                        iterator_object(this)?
+                            .get(js_string!("activate"), ctx)?
+                            .to_boolean(),
+                        ctx,
+                    )?;
+                    Ok(result)
+                }
+                "NewRendererCommand" => {
+                    let target = iterator_object(this)?.get(js_string!("target_object"), ctx)?;
+                    if !target.is_object() {
+                        return Err(script_error("NewRendererCommand.target_object is required"));
+                    }
+                    let renderer_type = this_string_prop(this, "renderer_type", ctx);
+                    if renderer_type.trim().is_empty() {
+                        return Err(script_error("NewRendererCommand.renderer_type is required"));
+                    }
+                    let renderer_name = this_string_prop(this, "renderer_name", ctx);
+                    let result = js_object_create_renderer(
+                        &target,
+                        &[
+                            JsString::from(renderer_type).into(),
+                            JsString::from(renderer_name).into(),
+                        ],
+                        ctx,
+                    )?;
+                    let style = this_string_prop(this, "default_style_name", ctx);
+                    if !style.is_empty() {
+                        let uid = object_number_prop(&result, "uid", ctx)? as u64;
+                        let renderer = script_renderer(uid)?;
+                        let object_name = script_object(renderer.object_uid)?.name;
+                        let renderer_name = renderer.name.clone();
+                        script_env::with_mut(|env| {
+                            if let Some(renderer) = env.objects.iter_mut().find_map(|object| {
+                                object
+                                    .renderers
+                                    .iter_mut()
+                                    .find(|renderer| renderer.uid == uid)
+                            }) {
+                                renderer
+                                    .attributes
+                                    .insert("styles".to_string(), style.clone());
+                            }
+                        });
+                        script_cmds::push(ScriptCmd::SetRendererProp {
+                            scene_uid: Some(renderer.scene_uid),
+                            object: object_name,
+                            renderer: renderer_name,
+                            key: "styles".to_string(),
+                            value: style,
+                        });
+                    }
+                    iterator_object(this)?.set(
+                        js_string!("result_renderer"),
+                        result.clone(),
+                        true,
+                        ctx,
+                    )?;
+                    Ok(result)
+                }
+                "LoadObjectCommand" => command_run_load_object(this, ctx),
+                "LoadSceneCommand" => command_run_load_scene(this, ctx),
+                _ => Err(script_error("Command class is not runnable")),
+            }
+        }
+        fn make_command_proxy(class_name: &str, ctx: &mut Context) -> JsResult<JsValue> {
+            let command_name = command_name_for_class(class_name)
+                .ok_or_else(|| script_error(format!("unknown command class {class_name}")))?;
+            let command_uid = script_env::with_mut(|env| {
+                let uid = env.next_command_uid.max(1);
+                env.next_command_uid = uid.saturating_add(1);
+                uid
+            });
+            let mut object = ObjectInitializer::new(ctx);
+            object
+                .property(
+                    js_string!("type"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_class"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_command_name"),
+                    JsString::from(command_name),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_command_uid"),
+                    command_uid as f64,
+                    Attribute::all(),
+                );
+            match class_name {
+                "NewSceneCommand" => {
+                    object
+                        .property(js_string!("scene_name"), js_string!(""), Attribute::all())
+                        .property(js_string!("create_view"), true, Attribute::all())
+                        .property(js_string!("activate"), false, Attribute::all())
+                        .property(
+                            js_string!("result_scene"),
+                            JsValue::null(),
+                            Attribute::all(),
+                        )
+                        .property(js_string!("result_view"), JsValue::null(), Attribute::all());
+                }
+                "NewRendererCommand" => {
+                    object
+                        .property(
+                            js_string!("target_object"),
+                            JsValue::null(),
+                            Attribute::all(),
+                        )
+                        .property(
+                            js_string!("renderer_type"),
+                            js_string!(""),
+                            Attribute::all(),
+                        )
+                        .property(
+                            js_string!("renderer_name"),
+                            js_string!(""),
+                            Attribute::all(),
+                        )
+                        .property(js_string!("recenter_view"), false, Attribute::all())
+                        .property(
+                            js_string!("default_style_name"),
+                            js_string!(""),
+                            Attribute::all(),
+                        )
+                        .property(
+                            js_string!("result_renderer"),
+                            JsValue::null(),
+                            Attribute::all(),
+                        );
+                }
+                "LoadObjectCommand" => {
+                    object
+                        .property(
+                            js_string!("target_scene"),
+                            JsValue::null(),
+                            Attribute::all(),
+                        )
+                        .property(js_string!("file_path"), js_string!(""), Attribute::all())
+                        .property(js_string!("object_name"), js_string!(""), Attribute::all())
+                        .property(js_string!("file_format"), js_string!(""), Attribute::all())
+                        .property(js_string!("content_first"), false, Attribute::all())
+                        .property(js_string!("max_sniff_bytes"), 0, Attribute::all())
+                        .property(
+                            js_string!("result_object"),
+                            JsValue::null(),
+                            Attribute::all(),
+                        )
+                        .function(
+                            NativeFunction::from_fn_ptr(js_load_object_set_target_scene),
+                            js_string!("setTargetScene"),
+                            1,
+                        );
+                }
+                "LoadSceneCommand" => {
+                    object
+                        .property(js_string!("file_path"), js_string!(""), Attribute::all())
+                        .property(js_string!("scene_name"), js_string!(""), Attribute::all())
+                        .property(js_string!("file_format"), js_string!(""), Attribute::all())
+                        .property(
+                            js_string!("target_scene"),
+                            JsValue::null(),
+                            Attribute::all(),
+                        )
+                        .property(js_string!("set_camera"), true, Attribute::all())
+                        .property(
+                            js_string!("result_scene"),
+                            JsValue::null(),
+                            Attribute::all(),
+                        );
+                }
+                _ => unreachable!(),
+            }
+            Ok(object
+                .function(
+                    NativeFunction::from_fn_ptr(js_command_to_string),
+                    js_string!("toString"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_command_get_uid),
+                    js_string!("getUID"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_command_run),
+                    js_string!("run"),
+                    0,
+                )
+                .build()
+                .into())
+        }
+        fn js_cmd_mgr_get(
             _this: &JsValue,
             args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let name = arg0(args, ctx);
+            match command_class_for_name(&name) {
+                Some(class_name) => make_command_proxy(class_name, ctx),
+                None => Ok(JsValue::null()),
+            }
+        }
+        fn apply_command_args(
+            command: &JsValue,
+            args: &JsValue,
+            class_name: &str,
+            ctx: &mut Context,
+        ) -> JsResult<()> {
+            let Some(source) = args.as_object() else {
+                return Err(script_error("command arguments must be an object"));
+            };
+            let names: &[&str] = match class_name {
+                "NewSceneCommand" => &["scene_name", "create_view", "activate"],
+                "NewRendererCommand" => &[
+                    "target_object",
+                    "renderer_type",
+                    "renderer_name",
+                    "recenter_view",
+                    "default_style_name",
+                ],
+                "LoadObjectCommand" => &[
+                    "target_scene",
+                    "file_path",
+                    "object_name",
+                    "file_format",
+                    "content_first",
+                    "max_sniff_bytes",
+                ],
+                "LoadSceneCommand" => &[
+                    "file_path",
+                    "scene_name",
+                    "file_format",
+                    "target_scene",
+                    "set_camera",
+                ],
+                _ => &[],
+            };
+            for name in names {
+                let value = source.get(JsString::from(*name), ctx)?;
+                if !value.is_undefined() {
+                    iterator_object(command)?.set(JsString::from(*name), value, true, ctx)?;
+                }
+            }
+            Ok(())
+        }
+        fn js_cmd_mgr_run(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let name = arg0(args, ctx);
+            let class_name = command_class_for_name(&name)
+                .ok_or_else(|| script_error(format!("command {name} is not registered")))?;
+            let command = make_command_proxy(class_name, ctx)?;
+            js_command_run(&command, &[], ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn js_cmd_mgr_run_args(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let name = arg0(args, ctx);
+            let class_name = command_class_for_name(&name)
+                .ok_or_else(|| script_error(format!("command {name} is not registered")))?;
+            let command = make_command_proxy(class_name, ctx)?;
+            apply_command_args(
+                &command,
+                &args.get(1).cloned().unwrap_or(JsValue::undefined()),
+                class_name,
+                ctx,
+            )?;
+            js_command_run(&command, &[], ctx)?;
+            let result = match class_name {
+                "NewSceneCommand" => {
+                    let scene = iterator_object(&command)?.get(js_string!("result_scene"), ctx)?;
+                    let view = iterator_object(&command)?.get(js_string!("result_view"), ctx)?;
+                    ObjectInitializer::new(ctx)
+                        .property(js_string!("result_scene"), scene, Attribute::all())
+                        .property(js_string!("result_view"), view, Attribute::all())
+                        .build()
+                        .into()
+                }
+                "NewRendererCommand" => {
+                    let renderer =
+                        iterator_object(&command)?.get(js_string!("result_renderer"), ctx)?;
+                    ObjectInitializer::new(ctx)
+                        .property(js_string!("result_renderer"), renderer, Attribute::all())
+                        .build()
+                        .into()
+                }
+                "LoadObjectCommand" => {
+                    let object =
+                        iterator_object(&command)?.get(js_string!("result_object"), ctx)?;
+                    ObjectInitializer::new(ctx)
+                        .property(js_string!("result_object"), object, Attribute::all())
+                        .build()
+                        .into()
+                }
+                "LoadSceneCommand" => {
+                    let scene = iterator_object(&command)?.get(js_string!("result_scene"), ctx)?;
+                    ObjectInitializer::new(ctx)
+                        .property(js_string!("result_scene"), scene, Attribute::all())
+                        .build()
+                        .into()
+                }
+                _ => JsValue::null(),
+            };
+            Ok(result)
+        }
+        fn make_cmd_manager(ctx: &mut Context) -> JsValue {
+            ObjectInitializer::new(ctx)
+                .property(js_string!("type"), js_string!("CmdMgr"), Attribute::all())
+                .property(js_string!("_class"), js_string!("CmdMgr"), Attribute::all())
+                .function(
+                    NativeFunction::from_fn_ptr(js_cmd_mgr_get),
+                    js_string!("getCmd"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_cmd_mgr_run),
+                    js_string!("runCmd"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_cmd_mgr_run_args),
+                    js_string!("runCmdArgs"),
+                    2,
+                )
+                .build()
+                .into()
+        }
+        fn js_create_obj_impl(
+            _this: &JsValue,
+            args: &[JsValue],
+            force_string_conversion: bool,
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             if args.is_empty() || args.len() > 2 {
@@ -11852,17 +16745,38 @@ impl DesktopAppState {
             }
             let class_name = arg0(args, ctx);
             let initial = match args.get(1) {
-                Some(value) if !value.is_undefined() => {
+                Some(value) if force_string_conversion || value.to_boolean() => {
                     Some(value.to_string(ctx)?.to_std_string_escaped())
                 }
                 _ => None,
             };
             match class_name.as_str() {
+                "ClassA" | "ClassB" if initial.is_none() => Ok(make_test_class(&class_name, ctx)),
+                "NewSceneCommand" | "NewRendererCommand" | "LoadSceneCommand"
+                | "LoadObjectCommand"
+                    if initial.is_none() =>
+                {
+                    make_command_proxy(&class_name, ctx)
+                }
+                "AnimMgr" if initial.is_none() => Ok(make_detached_anim_manager(ctx)),
+                "StyleSet" if initial.is_none() => Ok(make_detached_style_set(ctx)),
                 "MolCoord" | "MorphMol" if initial.is_none() => Ok(make_molcoord(&class_name, ctx)),
+                "Object" if initial.is_none() => Ok(make_molcoord("Object", ctx)),
+                "Scene" if initial.is_none() => {
+                    js_scene_manager_create_scene(&JsValue::undefined(), &[], ctx)
+                }
+                "MolAtom" if initial.is_none() => make_detached_mol_atom(ctx),
+                "MolResidue" if initial.is_none() => Ok(make_detached_mol_residue(ctx)),
+                "MolChain" if initial.is_none() => Ok(make_detached_mol_chain(ctx)),
                 "MolSurfObj" if initial.is_none() => Ok(make_molsurf(ctx)),
+                "HoleSurfBuilder" if initial.is_none() => Ok(make_hole_surf_builder(ctx)),
+                "DensityMap" | "ElePotMap" if initial.is_none() => {
+                    Ok(make_pending_density_map(&class_name, ctx))
+                }
+                "LWObject" if initial.is_none() => Ok(make_pending_lw_object(ctx)),
                 "Camera" if initial.is_none() => Ok(make_camera(ctx)),
-                "NoopAnimObj" | "CamMotion" | "RealPropAnim" | "MolAnim" | "RendXformAnim"
-                | "ShowHideAnim" | "SimpleSpin" | "SlideInOutAnim"
+                "AnimObj" | "NoopAnimObj" | "CamMotion" | "RealPropAnim" | "MolAnim"
+                | "RendXformAnim" | "ShowHideAnim" | "SimpleSpin" | "SlideInOutAnim"
                     if initial.is_none() =>
                 {
                     new_script_anim_motion(&class_name, ctx)
@@ -11891,6 +16805,7 @@ impl DesktopAppState {
                     Ok(make_range_set(value, ctx))
                 }
                 "ByteArray" if initial.is_none() => Ok(make_byte_array(ctx)),
+                "TextImgBuf" if initial.is_none() => Ok(make_text_image_buffer(ctx)),
                 "AtomIterator" | "ResidIterator" | "ChainIterator" if initial.is_none() => {
                     Ok(make_molecule_iterator(&class_name, ctx))
                 }
@@ -11922,7 +16837,7 @@ impl DesktopAppState {
                 "Color" => {
                     let color = match initial {
                         Some(text) => {
-                            let rgba = resolve_script_color(&text)
+                            let rgba = resolve_script_color_in_scope(&text, 0)
                                 .ok_or_else(|| script_error("empty Color string"))?;
                             cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a)
                         }
@@ -11930,10 +16845,30 @@ impl DesktopAppState {
                     };
                     Ok(make_color(color, ctx))
                 }
+                "NamedColor" => Ok(make_color_reference(
+                    "NamedColor",
+                    initial.as_deref().unwrap_or_default(),
+                    ctx,
+                )),
+                "MolColorRef" if initial.is_none() => {
+                    Ok(make_color_reference("MolColorRef", "", ctx))
+                }
                 "GradientColor" if initial.is_none() => Ok(make_gradient_color(ctx)),
                 "MultiGradient" if initial.is_none() => Ok(make_multi_gradient(ctx)),
                 "CrystalInfo" if initial.is_none() => Ok(make_crystal_info(ctx)),
                 "ResidRangeSet" if initial.is_none() => Ok(make_resid_range_set(ctx)),
+                "UmbreonSceneExporter" if initial.is_none() => Ok(make_umbreon_exporter(ctx)),
+                "PngSceneExporter"
+                | "PovSceneExporter"
+                | "MqoSceneExporter"
+                | "WbpSceneExporter"
+                | "StlSceneExporter"
+                | "LuxRendSceneExporter"
+                | "LuxCoreSceneExporter"
+                    if initial.is_none() =>
+                {
+                    make_native_scene_exporter(&class_name, ctx)
+                }
                 "TubeSection" if initial.is_none() => Ok(make_renderer_child_value(
                     RendererChildKind::TubeSection,
                     ctx,
@@ -11941,6 +16876,10 @@ impl DesktopAppState {
                 "JctTable" if initial.is_none() => {
                     Ok(make_renderer_child_value(RendererChildKind::Junction, ctx))
                 }
+                "DistPickDrawObj" | "RectSelDrawObj" if initial.is_none() => {
+                    Ok(make_detached_draw_object(&class_name, ctx))
+                }
+                "XmlRpcConn" if initial.is_none() => Ok(make_xmlrpc_connection("", ctx)),
                 "SelCommand" => {
                     let value = make_sel_command(ctx);
                     if let Some(text) = initial {
@@ -11958,6 +16897,41 @@ impl DesktopAppState {
                 {
                     Ok(make_coloring(&class_name, ctx))
                 }
+                _ if initial.is_none()
+                    && renderer_type_for_runtime_class(&class_name).is_some() =>
+                {
+                    let renderer_type = renderer_type_for_runtime_class(&class_name)
+                        .expect("renderer class checked above");
+                    let value = make_pending_renderer("", renderer_type, "", ctx);
+                    let object = value
+                        .as_object()
+                        .expect("pending renderer is always an object");
+                    object.set(
+                        js_string!("type"),
+                        JsString::from(class_name.as_str()),
+                        true,
+                        ctx,
+                    )?;
+                    object.set(
+                        js_string!("_class"),
+                        JsString::from(class_name.as_str()),
+                        true,
+                        ctx,
+                    )?;
+                    if class_name == "CPKRenderer" {
+                        let detail = renderer_attr_properties(renderer_type)
+                            .into_iter()
+                            .find(|property| property.name == "detail")
+                            .expect("CPK renderer has a detail property");
+                        object.set(pending_renderer_attr_key(detail), 3, true, ctx)?;
+                    }
+                    Ok(value)
+                }
+                _ if initial.is_none() && stream_handler_info_for_class(&class_name).is_some() => {
+                    let handler = stream_handler_info_for_class(&class_name)
+                        .expect("stream handler checked above");
+                    Ok(make_script_stream_handler(&class_name, &handler, ctx))
+                }
                 _ if initial.is_some() => Err(script_error(format!(
                     "createObj({class_name}) failed: class has no string conversion"
                 ))),
@@ -11965,6 +16939,19 @@ impl DesktopAppState {
                     "createObj({class_name}) failed: class is not constructible"
                 ))),
             }
+        }
+        fn js_create_obj(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            js_create_obj_impl(this, args, false, ctx)
+        }
+        fn js_create_from_string(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if args.len() != 2 {
+                return Err(script_error("createFromString: invalid arguments"));
+            }
+            js_create_obj_impl(this, args, true, ctx)
         }
         fn js_new_obj(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             if args.len() != 1 {
@@ -11980,57 +16967,534 @@ impl DesktopAppState {
             js_create_obj(this, &[JsString::from("MolCoord").into()], ctx)
         }
         fn js_scene_add_object(
-            _this: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let target_scene = scene_proxy_uid(this, ctx)?;
             let value = args.first().cloned().unwrap_or(JsValue::undefined());
             let class_name = object_string_prop(&value, "type", ctx);
-            let name = object_string_prop(&value, "name", ctx);
+            if !runtime_implements(&class_name, "Object") {
+                return Err(script_error(format!(
+                    "{class_name} does not implement Object"
+                )));
+            }
+            if pending_object_is_attached(&value, ctx)? {
+                return Ok(JsValue::new(0));
+            }
+            let reserved_uid = object_number_prop(&value, "uid", ctx)? as u64;
+            if reserved_uid == 0 {
+                return Err(script_error("Object UID is not available"));
+            }
+            let requested_name = object_string_prop(&value, "name", ctx);
+            let density_object = matches!(class_name.as_str(), "DensityMap" | "ElePotMap");
+            let (expected_uid, name) = script_env::with_mut(|env| {
+                let object_index = env
+                    .scenes
+                    .iter()
+                    .position(|scene| scene.uid == target_scene)?;
+                let name = if requested_name.trim().is_empty() {
+                    match class_name.as_str() {
+                        "MolSurfObj" => format!(
+                            "surface{}",
+                            env.objects
+                                .iter()
+                                .filter(|object| {
+                                    object.scene_uid == target_scene && object.class == "MolSurfObj"
+                                })
+                                .count()
+                                + 1
+                        ),
+                        "DensityMap" | "ElePotMap" => {
+                            format!(
+                                "map{}",
+                                env.objects
+                                    .iter()
+                                    .filter(|object| object.scalar_map.is_some())
+                                    .count()
+                                    + 1
+                            )
+                        }
+                        "LWObject" => format!(
+                            "lwobject{}",
+                            env.objects
+                                .iter()
+                                .filter(|object| {
+                                    object.scene_uid == target_scene && object.lw_object
+                                })
+                                .count()
+                                + 1
+                        ),
+                        _ => format!(
+                            "object{}",
+                            env.objects
+                                .iter()
+                                .filter(|object| {
+                                    object.scene_uid == target_scene
+                                        && matches!(
+                                            object.class.as_str(),
+                                            "Object" | "MolCoord" | "MorphMol"
+                                        )
+                                })
+                                .count()
+                                + 1
+                        ),
+                    }
+                } else {
+                    requested_name.clone()
+                };
+                let uid = reserved_uid;
+                env.scenes[object_index].next_object_uid = env.scenes[object_index]
+                    .next_object_uid
+                    .max(uid.saturating_add(1));
+                if density_object {
+                    env.next_density_map_uid = env.next_density_map_uid.max(uid.saturating_add(1));
+                }
+                Some((uid, name))
+            })
+            .ok_or_else(|| script_error(format!("Scene {target_scene} is not available")))?;
+            let mut scalar_map = None;
+            let mut surface = None;
+            let mut lw_object = false;
+            let mut molecule = None;
+            let mut source_type = "qdfpdb".to_string();
             if class_name == "MolSurfObj" {
                 let data = object_string_prop(&value, "_mesh_data", ctx);
                 if data.is_empty() {
                     return Err(script_error("MolSurfObj has no surface geometry"));
                 }
-                script_cmds::push(ScriptCmd::CreateSurface { name, data });
+                surface = Some(molsurf_from_value(&value, ctx)?);
+                source_type = "obj".to_string();
+                script_cmds::push(ScriptCmd::CreateSurface {
+                    target_scene,
+                    expected_uid,
+                    name: name.clone(),
+                    data,
+                });
             } else if matches!(class_name.as_str(), "MolCoord" | "MorphMol") {
-                let data = object_optional_string_prop(&value, "_sdf_data", ctx);
-                if data.as_deref().is_none_or(str::is_empty) {
-                    script_cmds::push(ScriptCmd::CreateObject { class_name, name });
-                } else {
-                    script_cmds::push(ScriptCmd::CreateMolecule {
-                        name,
-                        data: data.unwrap_or_default(),
-                    });
-                }
+                let pending = script_env::with(|env| {
+                    env.molecules
+                        .iter()
+                        .find(|entry| entry.uid == expected_uid)
+                        .map(|entry| entry.molecule.clone())
+                })
+                .ok_or_else(|| script_error("pending MolCoord is not available"))?;
+                molecule = Some(pending.clone());
+                script_cmds::push(ScriptCmd::CreateMolecule {
+                    target_scene,
+                    expected_uid,
+                    class_name: class_name.clone(),
+                    name: name.clone(),
+                    molecule: pending,
+                });
+            } else if matches!(class_name.as_str(), "DensityMap" | "ElePotMap") {
+                let map_id = object_number_prop(&value, "_pending_map_id", ctx)? as u64;
+                let map = script_env::with(|env| env.pending_density_maps.get(&map_id).cloned())
+                    .ok_or_else(|| script_error("pending DensityMap is not available"))?;
+                scalar_map = Some(map.clone());
+                source_type = object_string_prop(&value, "_format", ctx);
+                script_cmds::push(ScriptCmd::CreateDensityMap {
+                    target_scene,
+                    expected_uid,
+                    class_name: class_name.clone(),
+                    name: name.clone(),
+                    format: source_type.clone(),
+                    source: object_string_prop(&value, "_source", ctx),
+                    map,
+                });
+            } else if class_name == "LWObject" {
+                let object_id = object_number_prop(&value, "_pending_lw_id", ctx)? as u64;
+                let object =
+                    script_env::with(|env| env.pending_lw_objects.get(&object_id).cloned())
+                        .ok_or_else(|| script_error("pending LWObject is not available"))?;
+                lw_object = true;
+                source_type = "qdflwobj".to_string();
+                script_env::with_mut(|env| {
+                    env.lw_objects.insert(expected_uid, object.clone());
+                });
+                script_cmds::push(ScriptCmd::CreateLWObject {
+                    target_scene,
+                    expected_uid,
+                    name: name.clone(),
+                    object,
+                });
             } else {
-                script_cmds::push(ScriptCmd::CreateObject { class_name, name });
+                molecule = Some(MolCoord::new());
+                script_cmds::push(ScriptCmd::CreateObject {
+                    target_scene,
+                    expected_uid,
+                    class_name: class_name.clone(),
+                    name: name.clone(),
+                });
             }
-            fire_scene_script_event(cuemol_qsys::SceneEvent::SCE_OBJ_ADDED, 0, "", ctx)?;
-            Ok(JsValue::new(0))
+            let mut renderers = Vec::new();
+            let pending = value
+                .as_object()
+                .and_then(|object| object.get(js_string!("_pending_renderers"), ctx).ok())
+                .and_then(|value| value.as_object().cloned());
+            if let Some(pending) = pending {
+                let length = pending.get(js_string!("length"), ctx)?.to_u32(ctx)?;
+                for index in 0..length {
+                    let renderer_value = pending.get(JsString::from(index.to_string()), ctx)?;
+                    let renderer_type = this_string_prop(&renderer_value, "_renderer_type", ctx);
+                    let renderer_name = this_string_prop(&renderer_value, "name", ctx);
+                    let renderer_uid = renderer_proxy_uid(&renderer_value, ctx)?;
+                    if renderer_uid == 0 {
+                        return Err(script_error("Renderer UID is not available"));
+                    }
+                    let mut attributes = pending_renderer_base_attributes(&renderer_value, ctx)?;
+                    for property in renderer_attr_properties(&renderer_type) {
+                        let value = renderer_value
+                            .as_object()
+                            .expect("pending renderer is an object")
+                            .get(pending_renderer_attr_key(property), ctx)?;
+                        let value = if value.is_undefined() {
+                            property.default.to_string()
+                        } else {
+                            value.to_string(ctx)?.to_std_string_escaped()
+                        };
+                        attributes.insert(property.key.to_string(), value);
+                    }
+                    for (map_name, map_property, writable) in
+                        map_renderer_properties(&renderer_type)
+                    {
+                        if !writable {
+                            continue;
+                        }
+                        let fallback = map_renderer_fallback_property(
+                            &renderer_type,
+                            map_name,
+                            map_property,
+                            writable,
+                        );
+                        let value = renderer_value
+                            .as_object()
+                            .expect("pending renderer is an object")
+                            .get(pending_renderer_attr_key(fallback), ctx)?;
+                        if !value.is_undefined() {
+                            attributes.insert(
+                                fallback.key.to_string(),
+                                value.to_string(ctx)?.to_std_string_escaped(),
+                            );
+                        }
+                    }
+                    let visible = renderer_value
+                        .as_object()
+                        .expect("pending renderer is an object")
+                        .get(js_string!("_pending_visible"), ctx)?
+                        .to_boolean();
+                    let mut children = Vec::new();
+                    if renderer_supports_coloring(&renderer_type) {
+                        let coloring = renderer_value
+                            .as_object()
+                            .expect("pending renderer is an object")
+                            .get(js_string!("_pending_coloring"), ctx)?;
+                        children.push(coloring_node_from_script(&coloring, ctx)?);
+                    }
+                    for (child_name, kind) in renderer_child_properties(&renderer_type) {
+                        let child_value = renderer_value
+                            .as_object()
+                            .expect("pending renderer is an object")
+                            .get(JsString::from(child_name), ctx)?;
+                        let mut child = LDom2Node::new();
+                        child.set_tag_name(child_name);
+                        let child_specs = match kind {
+                            RendererChildKind::TubeSection => vec![
+                                ("width", RendererAttrKind::Real),
+                                ("tuber", RendererAttrKind::Real),
+                                ("sharp", RendererAttrKind::Real),
+                                ("type", RendererAttrKind::String),
+                                ("detail", RendererAttrKind::Integer),
+                            ],
+                            RendererChildKind::Junction => vec![
+                                ("type", RendererAttrKind::String),
+                                ("gamma", RendererAttrKind::Real),
+                                ("basw", RendererAttrKind::Real),
+                                ("arrow", RendererAttrKind::Real),
+                            ],
+                        };
+                        for (property_name, property_kind) in child_specs {
+                            let property_value = iterator_object(&child_value)?
+                                .get(JsString::from(property_name), ctx)?;
+                            let property_value = match property_kind {
+                                RendererAttrKind::Integer => {
+                                    property_value.to_i32(ctx)?.to_string()
+                                }
+                                RendererAttrKind::Real => {
+                                    property_value.to_number(ctx)?.to_string()
+                                }
+                                RendererAttrKind::String => {
+                                    property_value.to_string(ctx)?.to_std_string_escaped()
+                                }
+                                _ => unreachable!(),
+                            };
+                            child.set_str_attr(property_name, property_value);
+                        }
+                        iterator_object(&child_value)?.set(
+                            js_string!("_renderer_uid"),
+                            renderer_uid as f64,
+                            true,
+                            ctx,
+                        )?;
+                        children.push(child);
+                    }
+                    let renderer_children = children.clone();
+                    let atom_intr_lines = take_pending_atom_intr_lines(&renderer_value, ctx)?;
+                    let renderer_atom_intr_lines = atom_intr_lines.clone();
+                    renderers.push(ScriptRend {
+                        uid: renderer_uid,
+                        object_uid: expected_uid,
+                        scene_uid: target_scene,
+                        name: renderer_name.clone(),
+                        rtype: renderer_type.clone(),
+                        visible,
+                        attributes: attributes.clone(),
+                        children,
+                        atom_intr_lines,
+                        multi_gradient: None,
+                    });
+                    script_cmds::push(ScriptCmd::CreateRenderer {
+                        object_uid: Some(expected_uid),
+                        renderer_uid,
+                        object: name.clone(),
+                        renderer_type,
+                        name: renderer_name.clone(),
+                    });
+                    if !renderer_atom_intr_lines.is_empty() {
+                        script_cmds::push(ScriptCmd::SetAtomIntrLines {
+                            object_uid: expected_uid,
+                            renderer_uid,
+                            lines: renderer_atom_intr_lines,
+                        });
+                    }
+                    if !renderer_children.is_empty() {
+                        script_cmds::push(ScriptCmd::SetRendererChildren {
+                            object_uid: expected_uid,
+                            object: name.clone(),
+                            renderer: renderer_name.clone(),
+                            children: renderer_children,
+                        });
+                    }
+                    for (key, value) in attributes {
+                        script_cmds::push(ScriptCmd::SetRendererProp {
+                            scene_uid: Some(target_scene),
+                            object: name.clone(),
+                            renderer: renderer_name.clone(),
+                            key,
+                            value,
+                        });
+                    }
+                    if !visible {
+                        script_cmds::push(ScriptCmd::SetRendererVisible {
+                            scene_uid: Some(target_scene),
+                            object: name.clone(),
+                            renderer: renderer_name.clone(),
+                            visible,
+                        });
+                    }
+                    let renderer = renderer_value
+                        .as_object()
+                        .expect("pending renderer is an object");
+                    renderer.set(js_string!("uid"), renderer_uid as f64, true, ctx)?;
+                    renderer.set(
+                        js_string!("_object_name"),
+                        JsString::from(name.as_str()),
+                        true,
+                        ctx,
+                    )?;
+                    renderer.set(
+                        js_string!("_renderer_name"),
+                        JsString::from(renderer_name.as_str()),
+                        true,
+                        ctx,
+                    )?;
+                }
+            }
+            let visible = iterator_object(&value)?
+                .get(js_string!("visible"), ctx)?
+                .to_boolean();
+            let locked = iterator_object(&value)?
+                .get(js_string!("locked"), ctx)?
+                .to_boolean();
+            let ui_collapsed = iterator_object(&value)?
+                .get(js_string!("ui_collapsed"), ctx)?
+                .to_boolean();
+            let ui_order = iterator_object(&value)?
+                .get(js_string!("ui_order"), ctx)?
+                .to_i32(ctx)?;
+            let modified = iterator_object(&value)?
+                .get(js_string!("modified"), ctx)?
+                .to_boolean();
+            let mut source = object_string_prop(&value, "src", ctx);
+            if density_object && source.is_empty() {
+                source = object_string_prop(&value, "_source", ctx);
+            }
+            let alt_source = object_string_prop(&value, "alt_src", ctx);
+            let explicit_source_type = object_string_prop(&value, "srctype", ctx);
+            if !explicit_source_type.is_empty() {
+                source_type = explicit_source_type;
+            }
+            let xform = matrix_from_value(
+                &iterator_object(&value)?.get(js_string!("xformMat"), ctx)?,
+                ctx,
+            )?;
+            let selection = if matches!(class_name.as_str(), "MolCoord" | "MorphMol") {
+                selector_from_script_value(
+                    &iterator_object(&value)?.get(js_string!("sel"), ctx)?,
+                    ctx,
+                )?
+                .to_string()
+            } else {
+                String::new()
+            };
+            let coloring = if matches!(class_name.as_str(), "MolCoord" | "MorphMol") {
+                Some(coloring_node_from_script(
+                    &iterator_object(&value)?.get(js_string!("coloring"), ctx)?,
+                    ctx,
+                )?)
+            } else {
+                None
+            };
+            let default_color = if matches!(class_name.as_str(), "MolCoord" | "MorphMol") {
+                Some(solid_color_from_script_value(
+                    &iterator_object(&value)?.get(js_string!("defaultcolor"), ctx)?,
+                    ctx,
+                )?)
+            } else {
+                None
+            };
+            if matches!(class_name.as_str(), "MolCoord" | "MorphMol") {
+                if let Some(molecule) = molecule.as_mut() {
+                    molecule
+                        .set_selection_text(&selection)
+                        .map_err(|error| script_error(error.to_string()))?;
+                    if let Some(default_color) = default_color.clone() {
+                        molecule.set_default_color(default_color);
+                    }
+                }
+            }
+            let object = ScriptObj {
+                uid: expected_uid,
+                scene_uid: target_scene,
+                name: name.clone(),
+                class: class_name.clone(),
+                visible,
+                locked,
+                ui_collapsed,
+                ui_order,
+                modified,
+                source,
+                alt_source,
+                source_type,
+                xform,
+                selection: selection.clone(),
+                coloring: coloring.clone(),
+                renderers,
+                scalar_map,
+                surface,
+                surface_mesh_modified: false,
+                lw_object,
+            };
+            script_env::with_mut(|env| {
+                env.objects.push(object);
+                if let Some(molecule) = molecule {
+                    if let Some(entry) = env
+                        .molecules
+                        .iter_mut()
+                        .find(|entry| entry.uid == expected_uid)
+                    {
+                        entry.scene_uid = target_scene;
+                        entry.molecule = molecule;
+                    } else {
+                        env.molecules.push(ScriptMol {
+                            uid: expected_uid,
+                            scene_uid: target_scene,
+                            molecule,
+                        });
+                    }
+                }
+                if class_name == "MorphMol" {
+                    env.morphs.entry(expected_uid).or_insert_with(MorphMol::new);
+                }
+            });
+            if let Some(object) = value.as_object() {
+                object.set(js_string!("uid"), expected_uid as f64, true, ctx)?;
+                object.set(js_string!("scene_uid"), target_scene as f64, true, ctx)?;
+                object.set(js_string!("name"), JsString::from(name.as_str()), true, ctx)?;
+            }
+            script_cmds::push(ScriptCmd::SyncObjectState {
+                uid: expected_uid,
+                scene_uid: target_scene,
+                visible,
+                locked,
+                ui_collapsed,
+                ui_order,
+                modified,
+                source: object_string_prop(&value, "src", ctx),
+                alt_source: object_string_prop(&value, "alt_src", ctx),
+                xform,
+                selection,
+                default_color,
+                coloring: if matches!(class_name.as_str(), "MolCoord" | "MorphMol") {
+                    Some(coloring_node_from_script(
+                        &iterator_object(&value)?.get(js_string!("coloring"), ctx)?,
+                        ctx,
+                    )?)
+                } else {
+                    None
+                },
+            });
+            if !visible {
+                script_cmds::push(ScriptCmd::SetObjectVisible {
+                    uid: expected_uid,
+                    visible,
+                });
+            }
+            if xform != Matrix4::IDENTITY {
+                script_cmds::push(ScriptCmd::SetObjectTransform {
+                    uid: expected_uid,
+                    matrix: xform,
+                });
+            }
+            fire_scene_script_event_for(
+                target_scene,
+                cuemol_qsys::SceneEvent::SCE_OBJ_ADDED,
+                expected_uid,
+                "",
+                ctx,
+            )?;
+            Ok(JsValue::new(expected_uid as f64))
         }
         // --- pure builders (validate + return, no host mutation) ---
         fn js_make_sel(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             let expr = arg0(args, ctx);
-            match cuemol_molstr::parse_selector(&expr) {
-                Ok(_) => Ok(JsString::from(expr.as_str()).into()),
-                Err(_) => Ok(JsValue::null()),
+            let scope_id = color_arg(args, 1, 0.0, ctx)? as u64;
+            let value = make_sel_command(ctx);
+            if expr.is_empty() {
+                return Ok(value);
+            }
+            let compiled = js_sel_compile(
+                &value,
+                &[
+                    JsString::from(expr.as_str()).into(),
+                    JsValue::new(scope_id as f64),
+                ],
+                ctx,
+            )?;
+            if compiled.to_boolean() {
+                Ok(value)
+            } else {
+                Ok(JsValue::null())
             }
         }
         fn js_make_color(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             let spec = arg0(args, ctx);
-            match resolve_script_color(&spec) {
-                Some(rgba) => {
-                    let obj = ObjectInitializer::new(ctx)
-                        .property(js_string!("r"), f64::from(rgba.r), Attribute::all())
-                        .property(js_string!("g"), f64::from(rgba.g), Attribute::all())
-                        .property(js_string!("b"), f64::from(rgba.b), Attribute::all())
-                        .property(js_string!("a"), f64::from(rgba.a), Attribute::all())
-                        .build();
-                    Ok(obj.into())
-                }
-                None => Ok(JsValue::null()),
+            if spec.trim().is_empty() {
+                return Ok(JsValue::null());
             }
+            let scope_id = color_arg(args, 1, 0.0, ctx)? as u64;
+            let color = script_env::with(|env| env.styles.compile_color(&spec, scope_id));
+            Ok(make_color(color, ctx))
         }
         // --- structural queries (read the pre-built read-only snapshot) ---
         fn js_get_object_names(
@@ -12101,180 +17565,35 @@ impl DesktopAppState {
             }
         }
         fn runtime_implements(class_name: &str, interface_name: &str) -> bool {
-            if class_name == interface_name {
+            fn has_ancestor(class_name: &str, target: &str) -> bool {
+                let mut current = class_name;
+                for _ in 0..=SCRIPT_RUNTIME_CLASS_PARENTS.len() {
+                    if current == target {
+                        return true;
+                    }
+                    let Some(parent) = SCRIPT_RUNTIME_CLASS_PARENTS
+                        .iter()
+                        .find_map(|(class, parent)| (*class == current).then_some(*parent))
+                    else {
+                        return false;
+                    };
+                    current = parent;
+                }
+                false
+            }
+
+            if has_ancestor(class_name, interface_name) {
                 return true;
             }
-            match class_name {
-                "MolCoord" => matches!(interface_name, "MolObject" | "Object"),
-                "MorphMol" => {
-                    matches!(interface_name, "MolCoord" | "MolObject" | "Object")
-                }
-                "DensityMap" | "ElePotMap" => {
-                    matches!(interface_name, "ScalarObject" | "Object")
-                }
-                "MolSurfObj" => interface_name == "Object",
-                "LWObject" => interface_name == "Object",
-                "MapRenderer" => interface_name == "Renderer",
-                "MapMeshRenderer"
-                | "GLSLMapMeshRenderer"
-                | "GLSLMapMeshRenderer2"
-                | "MapSurfRenderer"
-                | "GLSLMapVolRenderer" => {
-                    matches!(interface_name, "MapRenderer" | "Renderer")
-                }
-                "MolRenderer" => interface_name == "Renderer",
-                "SimpleRenderer"
-                | "BallStickRenderer"
-                | "CPKRenderer"
-                | "CPK2Renderer"
-                | "DisoRenderer"
-                | "SelectionRenderer"
-                | "DirectSurfRenderer"
-                | "DirectSurfRenderer2" => {
-                    matches!(interface_name, "MolRenderer" | "Renderer")
-                }
-                "MainChainRenderer" => {
-                    matches!(interface_name, "MolRenderer" | "Renderer")
-                }
-                "TraceRenderer" | "SplineRenderer" | "Ribbon2Renderer" => {
-                    matches!(
-                        interface_name,
-                        "MainChainRenderer" | "MolRenderer" | "Renderer"
-                    )
-                }
-                "RibbonRenderer" | "TubeRenderer" => {
-                    matches!(
-                        interface_name,
-                        "SplineRenderer" | "MainChainRenderer" | "MolRenderer" | "Renderer"
-                    )
-                }
-                "NARenderer" => {
-                    matches!(
-                        interface_name,
-                        "TubeRenderer"
-                            | "SplineRenderer"
-                            | "MainChainRenderer"
-                            | "MolRenderer"
-                            | "Renderer"
-                    )
-                }
-                "AnIsoURenderer" => {
-                    matches!(
-                        interface_name,
-                        "BallStickRenderer" | "MolRenderer" | "Renderer"
-                    )
-                }
-                "NameLabelRenderer" | "AtomIntrRenderer" | "MolSurfRenderer" | "SymmRenderer"
-                | "UnitCellRenderer" | "LWRenderer" | "RendGroup" => interface_name == "Renderer",
-                "Color" | "GradientColor" => interface_name == "AbstractColor",
-                "NoopAnimObj" | "CamMotion" | "RealPropAnim" | "MolAnim" | "RendXformAnim"
-                | "ShowHideAnim" | "SimpleSpin" | "SlideInOutAnim" => interface_name == "AnimObj",
-                "CPKColoring" | "BfacColoring" | "RainbowColoring" | "SolidColoring"
-                | "PaintColoring" | "ScriptColoring" | "AtomPropColoring" => {
-                    matches!(
-                        interface_name,
-                        "ColoringScheme" | "Coloring" | "MolColoring"
-                    )
-                }
-                _ if class_name.ends_with("Renderer") => interface_name == "Renderer",
-                _ => false,
-            }
+
+            // Preserve legacy script interface aliases that are absent from QIF.
+            (interface_name == "MolObject" && has_ancestor(class_name, "MolCoord"))
+                || (matches!(interface_name, "Coloring" | "MolColoring")
+                    && has_ancestor(class_name, "ColoringScheme"))
+                || (interface_name == "Renderer" && class_name.ends_with("Renderer"))
         }
         fn runtime_has_class(class_name: &str) -> bool {
-            matches!(
-                class_name,
-                "AtomIterator"
-                    | "AnimMgr"
-                    | "AnimObj"
-                    | "AnIsoURenderer"
-                    | "AtomIntrRenderer"
-                    | "AtomPropColoring"
-                    | "BallStickRenderer"
-                    | "BfacColoring"
-                    | "ByteArray"
-                    | "CPK2Renderer"
-                    | "CPKRenderer"
-                    | "CPKColoring"
-                    | "Camera"
-                    | "CamMotion"
-                    | "ChainIterator"
-                    | "Color"
-                    | "CrystalInfo"
-                    | "DrawObj"
-                    | "DensityMap"
-                    | "DirectSurfRenderer"
-                    | "DirectSurfRenderer2"
-                    | "DisoRenderer"
-                    | "ElePotMap"
-                    | "GradientColor"
-                    | "GLSLMapMeshRenderer"
-                    | "GLSLMapMeshRenderer2"
-                    | "GLSLMapVolRenderer"
-                    | "MapMeshRenderer"
-                    | "MapRenderer"
-                    | "MapSurfRenderer"
-                    | "MainChainRenderer"
-                    | "Matrix"
-                    | "JctTable"
-                    | "LWObject"
-                    | "LWRenderer"
-                    | "MolAnlManager"
-                    | "MolAtom"
-                    | "MolChain"
-                    | "MolClientManager"
-                    | "MolCoord"
-                    | "MolAnim"
-                    | "MolRenderer"
-                    | "MorphMol"
-                    | "MolResidue"
-                    | "MolSurfObj"
-                    | "MolSurfRenderer"
-                    | "MsgLog"
-                    | "MultiGradient"
-                    | "PaintColoring"
-                    | "NARenderer"
-                    | "NameLabelRenderer"
-                    | "NoopAnimObj"
-                    | "ProcessManager"
-                    | "PythonBridge"
-                    | "Quat"
-                    | "RealPropAnim"
-                    | "RainbowColoring"
-                    | "RangeSet"
-                    | "RegExpr"
-                    | "RendGroup"
-                    | "RendXformAnim"
-                    | "ResidIterator"
-                    | "ResidRangeSet"
-                    | "Ribbon2Renderer"
-                    | "RibbonRenderer"
-                    | "SceneManager"
-                    | "ScrEventManager"
-                    | "Scene"
-                    | "ScriptColoring"
-                    | "SelCommand"
-                    | "SelectionRenderer"
-                    | "ShowHideAnim"
-                    | "SimpleRenderer"
-                    | "SimpleSpin"
-                    | "SplineRenderer"
-                    | "SolidColoring"
-                    | "StyleSet"
-                    | "SlideInOutAnim"
-                    | "StreamManager"
-                    | "StyleManager"
-                    | "SymmRenderer"
-                    | "SymmOpManager"
-                    | "TimeValue"
-                    | "TraceRenderer"
-                    | "TubeRenderer"
-                    | "TubeSection"
-                    | "UnitCellRenderer"
-                    | "Vector"
-                    | "View"
-                    | "ViewInputConfig"
-                    | "XmlRpcConn"
-            )
+            SCRIPT_RUNTIME_CLASS_NAMES.contains(&class_name)
         }
         fn js_has_class(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             Ok(JsValue::new(runtime_has_class(&arg0(args, ctx))))
@@ -12297,7 +17616,7 @@ impl DesktopAppState {
             if !args.is_empty() {
                 return Err(script_error("getErrMsg: invalid arguments"));
             }
-            Ok(js_string!("").into())
+            Ok(JsString::from(script_errors::get()).into())
         }
         fn js_impl_iface(
             _this: &JsValue,
@@ -12361,6 +17680,215 @@ impl DesktopAppState {
                 .set(JsString::from(name), new_value, true, ctx)?;
             Ok(JsValue::undefined())
         }
+        fn reset_view_property(value: &JsValue, name: &str, ctx: &mut Context) -> JsResult<bool> {
+            let defaults = cuemol_qsys::View::new(Uid::new(0), Uid::new(0));
+            let (scope_id, style_names) = with_script_view(value, ctx, |view| {
+                (view.scene_uid().get(), view.style().to_string())
+            })?;
+            let styled = (!style_names.is_empty())
+                .then(|| {
+                    script_env::with(|env| {
+                        env.styles.resolve_style_attr(scope_id, &style_names, name)
+                    })
+                })
+                .flatten();
+            let default = match name {
+                "name" => JsString::from(styled.as_deref().unwrap_or(defaults.name())).into(),
+                "active" => JsValue::new(
+                    styled
+                        .as_deref()
+                        .map(qsc_bool)
+                        .unwrap_or_else(|| defaults.active()),
+                ),
+                "zoom" => JsValue::new(
+                    styled
+                        .as_deref()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_else(|| defaults.zoom()),
+                ),
+                "distance" => JsValue::new(
+                    styled
+                        .as_deref()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_else(|| defaults.distance()),
+                ),
+                "slab" => JsValue::new(
+                    styled
+                        .as_deref()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_else(|| defaults.slab()),
+                ),
+                "center" => make_vector(
+                    styled
+                        .as_deref()
+                        .and_then(|value| Vector4::from_script_string(value).ok())
+                        .unwrap_or_else(|| defaults.center()),
+                    ctx,
+                ),
+                "rotation" => {
+                    let rotation = styled
+                        .as_deref()
+                        .and_then(|value| Vector4::from_script_string(value).ok())
+                        .map(|value| cuemol_core::Quat::new(value.x, value.y, value.z, value.w))
+                        .unwrap_or_else(|| defaults.rotation());
+                    make_quat(rotation, ctx)
+                }
+                "perspective" => JsValue::new(
+                    styled
+                        .as_deref()
+                        .map(qsc_bool)
+                        .unwrap_or_else(|| defaults.perspective()),
+                ),
+                "trans_mms" => JsValue::new(
+                    styled
+                        .as_deref()
+                        .map(qsc_bool)
+                        .unwrap_or_else(|| defaults.trans_mms()),
+                ),
+                "rot_mms" => JsValue::new(
+                    styled
+                        .as_deref()
+                        .map(qsc_bool)
+                        .unwrap_or_else(|| defaults.rot_mms()),
+                ),
+                "stereoMode" => JsString::from(
+                    styled
+                        .as_deref()
+                        .unwrap_or_else(|| stereo_mode_name(defaults.stereo_mode())),
+                )
+                .into(),
+                "stereoDist" => JsValue::new(
+                    styled
+                        .as_deref()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or_else(|| defaults.stereo_dist()),
+                ),
+                "swapStereoEyes" => JsValue::new(
+                    styled
+                        .as_deref()
+                        .map(qsc_bool)
+                        .unwrap_or_else(|| defaults.swap_stereo_eyes()),
+                ),
+                "centerMark" => JsString::from(
+                    styled
+                        .as_deref()
+                        .unwrap_or_else(|| center_mark_name(defaults.center_mark())),
+                )
+                .into(),
+                _ => return Ok(false),
+            };
+            iterator_object(value)?.set(JsString::from(name), default, true, ctx)?;
+            Ok(true)
+        }
+        fn reset_scene_property(value: &JsValue, name: &str, ctx: &mut Context) -> JsResult<bool> {
+            let scene_uid = scene_proxy_uid(value, ctx)?;
+            if matches!(name, "activeObjID" | "activeRendID" | "activeViewID") {
+                script_env::with_mut(|env| {
+                    if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid)
+                    {
+                        match name {
+                            "activeObjID" => scene.active_object_uid = None,
+                            "activeRendID" => scene.active_renderer_uid = None,
+                            "activeViewID" => scene.active_view_uid = None,
+                            _ => unreachable!(),
+                        }
+                    }
+                });
+                return Ok(true);
+            }
+            let default = match name {
+                "bgcolor" => make_color(cuemol_gfx::SolidColor::from_rgba_u8(0, 0, 0, 255), ctx),
+                "aoEnabled" | "aoHalfRes" | "use_colproof" => JsValue::new(false),
+                "aoRadius" => JsValue::new(4.0),
+                "aoIntensity" => JsValue::new(2.2),
+                "aoSlices" => JsValue::new(9),
+                "aoSteps" => JsValue::new(3),
+                "aa_method" => js_string!("fxaa").into(),
+                "aaJitterLevel" => JsValue::new(0),
+                "onload" | "icc_filename" => js_string!("").into(),
+                "icc_intent" => js_string!("perceptual").into(),
+                _ => return Ok(false),
+            };
+            iterator_object(value)?.set(JsString::from(name), default, true, ctx)?;
+            Ok(true)
+        }
+        fn reset_attached_renderer_property(
+            value: &JsValue,
+            name: &str,
+            ctx: &mut Context,
+        ) -> JsResult<bool> {
+            let uid = renderer_proxy_uid(value, ctx)?;
+            if !pending_renderer_is_attached(value, ctx)? {
+                return Ok(false);
+            }
+            let renderer = script_renderer(uid)?;
+            if name == "coloring" {
+                let children = script_env::with_mut(|env| {
+                    let renderer = env.objects.iter_mut().find_map(|object| {
+                        object
+                            .renderers
+                            .iter_mut()
+                            .find(|renderer| renderer.uid == uid)
+                    })?;
+                    renderer
+                        .children
+                        .retain(|child| child.tag_name() != "coloring");
+                    Some(renderer.children.clone())
+                });
+                if let Some(children) = children {
+                    script_cmds::push(ScriptCmd::SetRendererChildren {
+                        object_uid: renderer.object_uid,
+                        object: script_object(renderer.object_uid)?.name,
+                        renderer: renderer.name,
+                        children,
+                    });
+                    return Ok(true);
+                }
+            }
+            let key = renderer_attr_properties(&renderer.rtype)
+                .into_iter()
+                .find(|property| property.name == name && property.writable)
+                .map(|property| property.key)
+                .or_else(|| {
+                    map_renderer_properties(&renderer.rtype)
+                        .into_iter()
+                        .find(|(property_name, _, writable)| *property_name == name && *writable)
+                        .map(|(property_name, property, writable)| {
+                            map_renderer_fallback_property(
+                                &renderer.rtype,
+                                property_name,
+                                property,
+                                writable,
+                            )
+                            .key
+                        })
+                })
+                .or(match name {
+                    "locked" | "material" | "alpha" | "xformMat" | "ui_order" | "group"
+                    | "egtype" | "eglinew" | "egcolor" => Some(name),
+                    _ => None,
+                });
+            let Some(key) = key else {
+                return Ok(false);
+            };
+            script_env::with_mut(|env| {
+                if let Some(renderer) = env.objects.iter_mut().find_map(|object| {
+                    object
+                        .renderers
+                        .iter_mut()
+                        .find(|renderer| renderer.uid == uid)
+                }) {
+                    renderer.attributes.remove(key);
+                }
+            });
+            script_cmds::push(ScriptCmd::ResetRendererProp {
+                scene_uid: renderer.scene_uid,
+                object: script_object(renderer.object_uid)?.name,
+                renderer: renderer.name,
+                key: key.to_string(),
+            });
+            Ok(true)
+        }
         fn js_reset_property(
             _this: &JsValue,
             args: &[JsValue],
@@ -12368,10 +17896,52 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let value = args.first().cloned().unwrap_or(JsValue::undefined());
             let name = argn(args, 1, ctx);
-            value
+            let object = value
                 .as_object()
-                .ok_or_else(|| script_error("resetProp target is not an object"))?
-                .set(JsString::from(name), JsValue::undefined(), true, ctx)?;
+                .ok_or_else(|| script_error("resetProp target is not an object"))?;
+            let class_name = object_optional_string_prop(&value, "_class", ctx)
+                .or_else(|| object_optional_string_prop(&value, "type", ctx))
+                .filter(|class_name| runtime_has_class(class_name));
+            let Some(class_name) = class_name else {
+                object.delete_property_or_throw(JsString::from(name), ctx)?;
+                return Ok(JsValue::undefined());
+            };
+            if class_name == "Scene" {
+                if reset_scene_property(&value, &name, ctx)? {
+                    return Ok(JsValue::undefined());
+                }
+                return Err(script_error(format!(
+                    "{class_name}.{name} is not resettable"
+                )));
+            }
+            if matches!(class_name.as_str(), "View" | "GUIView") {
+                if reset_view_property(&value, &name, ctx)? {
+                    return Ok(JsValue::undefined());
+                }
+                return Err(script_error(format!(
+                    "{class_name}.{name} is not resettable"
+                )));
+            }
+            if runtime_implements(&class_name, "Renderer")
+                && reset_attached_renderer_property(&value, &name, ctx)?
+            {
+                return Ok(JsValue::undefined());
+            }
+            let defaults = js_create_obj(
+                &JsValue::undefined(),
+                &[JsString::from(class_name.as_str()).into()],
+                ctx,
+            )?;
+            let default_value = defaults
+                .as_object()
+                .ok_or_else(|| script_error(format!("{class_name} has no default instance")))?
+                .get(JsString::from(name.as_str()), ctx)?;
+            if default_value.is_undefined() {
+                return Err(script_error(format!(
+                    "{class_name}.{name} is not resettable"
+                )));
+            }
+            object.set(JsString::from(name), default_value, true, ctx)?;
             Ok(JsValue::undefined())
         }
         #[derive(Clone, Copy)]
@@ -12393,10 +17963,10 @@ impl DesktopAppState {
         }
         #[derive(Clone, Copy)]
         enum SurfaceProperty {
-            OriginMolecule,
-            OriginSelection,
-            OriginDensity,
-            OriginProbeRadius,
+            Molecule,
+            Selection,
+            Density,
+            ProbeRadius,
         }
         fn object_proxy_uid(this: &JsValue, ctx: &mut Context) -> JsResult<u64> {
             Ok(object_number_prop(this, "uid", ctx)? as u64)
@@ -12410,13 +17980,16 @@ impl DesktopAppState {
             operation: impl FnOnce(&mut cuemol_molstr::MolCoord) -> R,
         ) -> JsResult<R> {
             script_env::with_mut(|env| {
+                let molecule = env
+                    .molecules
+                    .iter_mut()
+                    .find(|molecule| molecule.uid == uid)?;
+                let result = operation(&mut molecule.molecule);
                 if let Some(object) = env.objects.iter_mut().find(|object| object.uid == uid) {
                     object.modified = true;
                 }
-                env.molecules
-                    .iter_mut()
-                    .find(|molecule| molecule.uid == uid)
-                    .map(|molecule| operation(&mut molecule.molecule))
+                env.modified_molecule_uids.insert(uid);
+                Some(result)
             })
             .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))
         }
@@ -12441,15 +18014,24 @@ impl DesktopAppState {
                 MoleculeProperty::SourceType => {
                     Ok(JsString::from(script_object(uid)?.source_type).into())
                 }
-                MoleculeProperty::RendererUids => Ok(JsString::from(
-                    script_object(uid)?
-                        .renderers
-                        .iter()
-                        .map(|renderer| renderer.uid.to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                )
-                .into()),
+                MoleculeProperty::RendererUids => {
+                    let mut renderers = script_object(uid)?.renderers;
+                    renderers.sort_by_key(|renderer| {
+                        renderer
+                            .attributes
+                            .get("ui_order")
+                            .and_then(|value| value.parse::<i32>().ok())
+                            .unwrap_or(renderer.uid as i32)
+                    });
+                    Ok(JsString::from(
+                        renderers
+                            .into_iter()
+                            .map(|renderer| renderer.uid.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    )
+                    .into())
+                }
                 MoleculeProperty::Transform => Ok(make_matrix(script_object(uid)?.xform, ctx)),
                 MoleculeProperty::Selection => {
                     let selection = make_sel_command(ctx);
@@ -12552,17 +18134,19 @@ impl DesktopAppState {
                     script_cmds::push(ScriptCmd::SetObjectTransform { uid, matrix });
                 }
                 MoleculeProperty::Selection => {
-                    let selector = selector_from_script_value(&value, ctx)?;
-                    let expression = selector.to_string();
+                    let expression = selector_text_from_script_value(&value, ctx)?;
+                    selector_from_script_value(&value, ctx)?;
                     script_env::with_mut(|env| {
                         if let Some(object) =
                             env.objects.iter_mut().find(|object| object.uid == uid)
                         {
-                            object.selection = expression;
+                            object.selection = expression.clone();
                         }
                     });
                     with_script_molecule_mut(uid, |molecule| {
-                        molecule.set_selection(selector);
+                        molecule
+                            .set_selection_text(expression)
+                            .expect("validated selection remains valid");
                     })?;
                 }
                 MoleculeProperty::DefaultColor => {
@@ -12598,8 +18182,8 @@ impl DesktopAppState {
                 .surface
                 .ok_or_else(|| script_error(format!("MolSurfObj {uid} is not available")))?;
             Ok(match property {
-                SurfaceProperty::OriginMolecule => JsString::from(surface.orig_mol()).into(),
-                SurfaceProperty::OriginSelection => {
+                SurfaceProperty::Molecule => JsString::from(surface.orig_mol()).into(),
+                SurfaceProperty::Selection => {
                     let selection = make_sel_command(ctx);
                     js_sel_compile(
                         &selection,
@@ -12608,8 +18192,8 @@ impl DesktopAppState {
                     )?;
                     selection
                 }
-                SurfaceProperty::OriginDensity => JsValue::new(surface.orig_den()),
-                SurfaceProperty::OriginProbeRadius => JsValue::new(surface.orig_prad()),
+                SurfaceProperty::Density => JsValue::new(surface.orig_den()),
+                SurfaceProperty::ProbeRadius => JsValue::new(surface.orig_prad()),
             })
         }
         fn surface_property_set(
@@ -12622,10 +18206,10 @@ impl DesktopAppState {
             let value = args.first().cloned().unwrap_or(JsValue::undefined());
             let string_value = matches!(
                 property,
-                SurfaceProperty::OriginMolecule | SurfaceProperty::OriginSelection
+                SurfaceProperty::Molecule | SurfaceProperty::Selection
             )
             .then(|| {
-                if matches!(property, SurfaceProperty::OriginSelection) {
+                if matches!(property, SurfaceProperty::Selection) {
                     selector_from_script_value(&value, ctx).map(|selection| selection.to_string())
                 } else {
                     value
@@ -12636,7 +18220,7 @@ impl DesktopAppState {
             .transpose()?;
             let number_value = matches!(
                 property,
-                SurfaceProperty::OriginDensity | SurfaceProperty::OriginProbeRadius
+                SurfaceProperty::Density | SurfaceProperty::ProbeRadius
             )
             .then(|| value.to_number(ctx))
             .transpose()?;
@@ -12648,16 +18232,16 @@ impl DesktopAppState {
                     return false;
                 };
                 match property {
-                    SurfaceProperty::OriginMolecule => {
+                    SurfaceProperty::Molecule => {
                         surface.set_orig_mol(string_value.unwrap_or_default())
                     }
-                    SurfaceProperty::OriginSelection => {
+                    SurfaceProperty::Selection => {
                         surface.set_orig_sel(string_value.unwrap_or_default())
                     }
-                    SurfaceProperty::OriginDensity => {
+                    SurfaceProperty::Density => {
                         surface.set_orig_den(number_value.unwrap_or_default())
                     }
-                    SurfaceProperty::OriginProbeRadius => {
+                    SurfaceProperty::ProbeRadius => {
                         surface.set_orig_prad(number_value.unwrap_or_default())
                     }
                 }
@@ -12701,8 +18285,10 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let object = script_object(object_proxy_uid(this, ctx)?)?;
             Ok(
-                if script_env::with(|env| env.scene_uid == object.scene_uid) {
-                    make_scene_proxy(ctx)
+                if script_env::with(|env| {
+                    env.scenes.iter().any(|scene| scene.uid == object.scene_uid)
+                }) {
+                    make_scene_proxy_for(object.scene_uid, ctx)
                 } else {
                     JsValue::null()
                 },
@@ -12764,12 +18350,12 @@ impl DesktopAppState {
             ctx: &mut Context,
             predicate: impl Fn(&ScriptRend) -> bool,
         ) -> JsResult<JsValue> {
-            let object = script_object(object_proxy_uid(this, ctx)?)?;
+            let mut object = script_object(object_proxy_uid(this, ctx)?)?;
+            object.renderers.sort_by_key(|renderer| renderer.uid);
             Ok(object
                 .renderers
-                .iter()
+                .into_iter()
                 .find(|renderer| predicate(renderer))
-                .cloned()
                 .map(|renderer| make_renderer_proxy(&object.name, renderer, ctx))
                 .unwrap_or_else(JsValue::null))
         }
@@ -12783,6 +18369,12 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_number(ctx)? as u64;
+            if !pending_object_is_attached(this, ctx)? {
+                return Ok(pending_object_renderer_values(this, ctx)?
+                    .into_iter()
+                    .find_map(|(renderer_uid, value)| (renderer_uid == uid).then_some(value))
+                    .unwrap_or_else(JsValue::null));
+            }
             object_renderer_query(this, ctx, |renderer| renderer.uid == uid)
         }
         fn js_object_get_renderer_type(
@@ -12791,6 +18383,14 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let type_name = arg0(args, ctx);
+            if !pending_object_is_attached(this, ctx)? {
+                for (_, value) in pending_object_renderer_values(this, ctx)? {
+                    if this_string_prop(&value, "_renderer_type", ctx) == type_name {
+                        return Ok(value);
+                    }
+                }
+                return Ok(JsValue::null());
+            }
             object_renderer_query(this, ctx, |renderer| renderer.rtype == type_name)
         }
         fn js_object_get_renderer_name(
@@ -12803,6 +18403,20 @@ impl DesktopAppState {
                 .get(1)
                 .filter(|value| !value.is_undefined())
                 .map(|_| argn(args, 1, ctx));
+            if !pending_object_is_attached(this, ctx)? {
+                for (_, value) in pending_object_renderer_values(this, ctx)? {
+                    let renderer_name = this_string_prop(&value, "name", ctx);
+                    let renderer_type = this_string_prop(&value, "_renderer_type", ctx);
+                    if renderer_name == name
+                        && type_name
+                            .as_ref()
+                            .is_none_or(|type_name| renderer_type == *type_name)
+                    {
+                        return Ok(value);
+                    }
+                }
+                return Ok(JsValue::null());
+            }
             object_renderer_query(this, ctx, |renderer| {
                 renderer.name == name
                     && type_name
@@ -12821,6 +18435,9 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_number(ctx)? as u64;
+            if !pending_object_is_attached(this, ctx)? {
+                return Ok(JsValue::new(false));
+            }
             let removed = script_env::with_mut(|env| {
                 env.objects
                     .iter_mut()
@@ -12849,48 +18466,241 @@ impl DesktopAppState {
             let target_uid = object_proxy_uid(this, ctx)?;
             let renderer_value = args.first().cloned().unwrap_or(JsValue::undefined());
             let renderer_uid = renderer_proxy_uid(&renderer_value, ctx)?;
-            let moved = script_env::with_mut(|env| {
-                let source_index = env.objects.iter().position(|object| {
-                    object
-                        .renderers
-                        .iter()
-                        .any(|renderer| renderer.uid == renderer_uid)
-                });
-                let target_index = env
-                    .objects
-                    .iter()
-                    .position(|object| object.uid == target_uid);
-                let (Some(source_index), Some(target_index)) = (source_index, target_index) else {
-                    return false;
-                };
-                if source_index == target_index {
-                    return false;
+            if !pending_object_is_attached(this, ctx)? {
+                let client_uid = pending_renderer_get_client_id(&renderer_value, &[], ctx)?
+                    .to_number(ctx)? as u64;
+                if client_uid != 0 {
+                    return Err(script_error(format!(
+                        "Renderer {renderer_uid} is already attached"
+                    )));
                 }
-                let renderer_index = env.objects[source_index]
-                    .renderers
-                    .iter()
-                    .position(|renderer| renderer.uid == renderer_uid)
-                    .expect("renderer index was located");
-                let mut renderer = env.objects[source_index].renderers.remove(renderer_index);
-                renderer.object_uid = target_uid;
-                env.objects[target_index].renderers.push(renderer);
-                env.objects[source_index].modified = true;
-                env.objects[target_index].modified = true;
-                true
-            });
-            if moved {
-                script_cmds::push(ScriptCmd::AttachRenderer {
-                    target_uid,
-                    renderer_uid,
-                });
+                let owner = iterator_object(this)?;
+                let pending = owner.get(js_string!("_pending_renderers"), ctx)?;
+                let pending = pending
+                    .as_object()
+                    .ok_or_else(|| script_error("pending renderer list is not available"))?;
+                let length = pending.get(js_string!("length"), ctx)?.to_u32(ctx)?;
+                pending.set(
+                    JsString::from(length.to_string()),
+                    renderer_value.clone(),
+                    true,
+                    ctx,
+                )?;
+                let renderer = iterator_object(&renderer_value)?;
+                renderer.set(
+                    js_string!("_pending_client_uid"),
+                    target_uid as f64,
+                    true,
+                    ctx,
+                )?;
+                renderer.set(
+                    js_string!("_pending_client_object"),
+                    this.clone(),
+                    true,
+                    ctx,
+                )?;
+                renderer.set(
+                    js_string!("_object_name"),
+                    owner.get(js_string!("name"), ctx)?,
+                    true,
+                    ctx,
+                )?;
+                return Ok(JsValue::undefined());
             }
-            Ok(JsValue::undefined())
+            if pending_renderer_is_attached(&renderer_value, ctx)? {
+                return Err(script_error(format!(
+                    "Renderer {renderer_uid} is already attached"
+                )));
+            }
+            {
+                let target = script_object(target_uid)?;
+                let renderer_type = this_string_prop(&renderer_value, "_renderer_type", ctx);
+                let requested_name = this_string_prop(&renderer_value, "name", ctx);
+                let name = requested_name;
+                let mut attributes = pending_renderer_base_attributes(&renderer_value, ctx)?;
+                for property in renderer_attr_properties(&renderer_type) {
+                    let value = renderer_value
+                        .as_object()
+                        .expect("pending renderer is an object")
+                        .get(pending_renderer_attr_key(property), ctx)?;
+                    let value = if value.is_undefined() {
+                        property.default.to_string()
+                    } else {
+                        value.to_string(ctx)?.to_std_string_escaped()
+                    };
+                    attributes.insert(property.key.to_string(), value);
+                }
+                for (map_name, map_property, writable) in map_renderer_properties(&renderer_type) {
+                    if !writable {
+                        continue;
+                    }
+                    let fallback = map_renderer_fallback_property(
+                        &renderer_type,
+                        map_name,
+                        map_property,
+                        writable,
+                    );
+                    let value = renderer_value
+                        .as_object()
+                        .expect("pending renderer is an object")
+                        .get(pending_renderer_attr_key(fallback), ctx)?;
+                    if !value.is_undefined() {
+                        attributes.insert(
+                            fallback.key.to_string(),
+                            value.to_string(ctx)?.to_std_string_escaped(),
+                        );
+                    }
+                }
+                let visible = renderer_value
+                    .as_object()
+                    .expect("pending renderer is an object")
+                    .get(js_string!("_pending_visible"), ctx)?
+                    .to_boolean();
+                let next_uid = renderer_uid;
+                let mut children = Vec::new();
+                if renderer_supports_coloring(&renderer_type) {
+                    let coloring = renderer_value
+                        .as_object()
+                        .expect("pending renderer is an object")
+                        .get(js_string!("_pending_coloring"), ctx)?;
+                    children.push(coloring_node_from_script(&coloring, ctx)?);
+                }
+                for (child_name, kind) in renderer_child_properties(&renderer_type) {
+                    let child_value = renderer_value
+                        .as_object()
+                        .expect("pending renderer is an object")
+                        .get(JsString::from(child_name), ctx)?;
+                    let mut child = LDom2Node::new();
+                    child.set_tag_name(child_name);
+                    let child_specs = match kind {
+                        RendererChildKind::TubeSection => vec![
+                            ("width", RendererAttrKind::Real),
+                            ("tuber", RendererAttrKind::Real),
+                            ("sharp", RendererAttrKind::Real),
+                            ("type", RendererAttrKind::String),
+                            ("detail", RendererAttrKind::Integer),
+                        ],
+                        RendererChildKind::Junction => vec![
+                            ("type", RendererAttrKind::String),
+                            ("gamma", RendererAttrKind::Real),
+                            ("basw", RendererAttrKind::Real),
+                            ("arrow", RendererAttrKind::Real),
+                        ],
+                    };
+                    for (property_name, property_kind) in child_specs {
+                        let property_value = iterator_object(&child_value)?
+                            .get(JsString::from(property_name), ctx)?;
+                        let property_value = match property_kind {
+                            RendererAttrKind::Integer => property_value.to_i32(ctx)?.to_string(),
+                            RendererAttrKind::Real => property_value.to_number(ctx)?.to_string(),
+                            RendererAttrKind::String => {
+                                property_value.to_string(ctx)?.to_std_string_escaped()
+                            }
+                            _ => unreachable!(),
+                        };
+                        child.set_str_attr(property_name, property_value);
+                    }
+                    iterator_object(&child_value)?.set(
+                        js_string!("_renderer_uid"),
+                        next_uid as f64,
+                        true,
+                        ctx,
+                    )?;
+                    children.push(child);
+                }
+                let atom_intr_lines = take_pending_atom_intr_lines(&renderer_value, ctx)?;
+                let renderer = ScriptRend {
+                    uid: next_uid,
+                    object_uid: target_uid,
+                    scene_uid: target.scene_uid,
+                    name: name.clone(),
+                    rtype: renderer_type.clone(),
+                    visible,
+                    attributes: attributes.clone(),
+                    children,
+                    atom_intr_lines,
+                    multi_gradient: None,
+                };
+                let renderer_children = renderer.children.clone();
+                let renderer_atom_intr_lines = renderer.atom_intr_lines.clone();
+                script_env::with_mut(|env| {
+                    if let Some(object) = env
+                        .objects
+                        .iter_mut()
+                        .find(|object| object.uid == target_uid)
+                    {
+                        object.renderers.push(renderer);
+                        object.modified = true;
+                    }
+                });
+                script_cmds::push(ScriptCmd::CreateRenderer {
+                    object_uid: Some(target_uid),
+                    renderer_uid: next_uid,
+                    object: target.name.clone(),
+                    renderer_type,
+                    name: name.clone(),
+                });
+                if !renderer_atom_intr_lines.is_empty() {
+                    script_cmds::push(ScriptCmd::SetAtomIntrLines {
+                        object_uid: target_uid,
+                        renderer_uid: next_uid,
+                        lines: renderer_atom_intr_lines,
+                    });
+                }
+                if !renderer_children.is_empty() {
+                    script_cmds::push(ScriptCmd::SetRendererChildren {
+                        object_uid: target_uid,
+                        object: target.name.clone(),
+                        renderer: name.clone(),
+                        children: renderer_children,
+                    });
+                }
+                for (key, value) in attributes {
+                    script_cmds::push(ScriptCmd::SetRendererProp {
+                        scene_uid: Some(target.scene_uid),
+                        object: target.name.clone(),
+                        renderer: name.clone(),
+                        key,
+                        value,
+                    });
+                }
+                if !visible {
+                    script_cmds::push(ScriptCmd::SetRendererVisible {
+                        scene_uid: Some(target.scene_uid),
+                        object: target.name.clone(),
+                        renderer: name.clone(),
+                        visible,
+                    });
+                }
+                let object = renderer_value
+                    .as_object()
+                    .expect("pending renderer is an object");
+                object.set(js_string!("uid"), next_uid as f64, true, ctx)?;
+                object.set(
+                    js_string!("_object_name"),
+                    JsString::from(target.name),
+                    true,
+                    ctx,
+                )?;
+                object.set(
+                    js_string!("_renderer_name"),
+                    JsString::from(name),
+                    true,
+                    ctx,
+                )?;
+                Ok(JsValue::undefined())
+            }
         }
         fn js_object_renderer_count(
             this: &JsValue,
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            if !pending_object_is_attached(this, ctx)? {
+                return Ok(JsValue::new(
+                    pending_object_renderer_values(this, ctx)?.len(),
+                ));
+            }
             Ok(JsValue::new(
                 script_object(object_proxy_uid(this, ctx)?)?.renderers.len(),
             ))
@@ -12908,11 +18718,18 @@ impl DesktopAppState {
             if index < 0 {
                 return Ok(JsValue::null());
             }
-            let object = script_object(object_proxy_uid(this, ctx)?)?;
+            if !pending_object_is_attached(this, ctx)? {
+                return Ok(pending_object_renderer_values(this, ctx)?
+                    .get(index as usize)
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_else(JsValue::null));
+            }
+            let mut object = script_object(object_proxy_uid(this, ctx)?)?;
+            object.renderers.sort_by_key(|renderer| renderer.uid);
             Ok(object
                 .renderers
-                .get(index as usize)
-                .cloned()
+                .into_iter()
+                .nth(index as usize)
                 .map(|renderer| make_renderer_proxy(&object.name, renderer, ctx))
                 .unwrap_or_else(JsValue::null))
         }
@@ -12921,8 +18738,12 @@ impl DesktopAppState {
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let object = script_object(object_proxy_uid(this, ctx)?)?;
-            let names = match object.class.as_str() {
+            let class_name = if pending_object_is_attached(this, ctx)? {
+                script_object(object_proxy_uid(this, ctx)?)?.class
+            } else {
+                object_string_prop(this, "type", ctx)
+            };
+            let names = match class_name.as_str() {
                 "MolSurfObj" | "MolSurf" => "molsurf",
                 "LWObject" => "lwrend",
                 "DensityMap" | "ElePotMap" => "isosurf,gpu_mapmesh,gpu_mapvol",
@@ -13524,6 +19345,158 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             Ok(js_string!("contour,gpu_mapmesh,gpu_mapvol,isosurf").into())
         }
+        fn pending_density_map(this: &JsValue, ctx: &mut Context) -> JsResult<DensityMap> {
+            let id = object_number_prop(this, "_pending_map_id", ctx)? as u64;
+            script_env::with(|env| env.pending_density_maps.get(&id).cloned())
+                .ok_or_else(|| script_error("pending DensityMap is not available"))
+        }
+        fn js_pending_density_histogram(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let min = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)?;
+            let max = args
+                .get(1)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)?;
+            let bins = args
+                .get(2)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            if bins <= 0 {
+                return Err(script_error("Histogram bin count must be positive"));
+            }
+            Ok(
+                JsString::from(pending_density_map(this, ctx)?.get_histogram_json(
+                    min,
+                    max,
+                    bins as usize,
+                ))
+                .into(),
+            )
+        }
+        fn js_pending_density_get_uid(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            js_pending_object_get_uid(this, &[], ctx)
+        }
+        fn make_pending_density_map(class_name: &str, ctx: &mut Context) -> JsValue {
+            let id = script_env::with_mut(|env| {
+                let id = env.next_pending_density_map_id.max(1);
+                env.next_pending_density_map_id = id.saturating_add(1);
+                env.pending_density_maps.insert(id, DensityMap::new());
+                if class_name == "ElePotMap" {
+                    env.pending_potential_maps
+                        .insert(id, cuemol_surface::ElePotMap::new());
+                }
+                id
+            });
+            let value = ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("_class"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("type"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(js_string!("name"), js_string!(""), Attribute::all())
+                .property(js_string!("_pending_map_id"), id as f64, Attribute::all())
+                .property(
+                    js_string!("_format"),
+                    js_string!("synthetic"),
+                    Attribute::all(),
+                )
+                .property(js_string!("_source"), js_string!(""), Attribute::all())
+                .property(js_string!("den_sigma"), 0.0, Attribute::all())
+                .property(js_string!("den_min"), 0.0, Attribute::all())
+                .property(js_string!("den_max"), 0.0, Attribute::all())
+                .property(js_string!("den_mean"), 0.0, Attribute::all())
+                .function(
+                    NativeFunction::from_fn_ptr(js_object_set_name),
+                    js_string!("setName"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_object_create_renderer),
+                    js_string!("createRenderer"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_pending_density_get_uid),
+                    js_string!("getUID"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_scalar_map_compatible_renderers),
+                    js_string!("searchCompatibleRendererNames"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_pending_density_histogram),
+                    js_string!("getHistogramJSON"),
+                    3,
+                )
+                .build()
+                .into();
+            install_pending_object_api(&value, class_name, ctx);
+            install_script_function(&value, "fitView", 2, js_scalar_map_fit_view, ctx);
+            value
+        }
+        fn make_pending_lw_object(ctx: &mut Context) -> JsValue {
+            let id = script_env::with_mut(|env| {
+                let id = env.next_pending_lw_object_id.max(1);
+                env.next_pending_lw_object_id = id.saturating_add(1);
+                env.pending_lw_objects
+                    .insert(id, cuemol_lwview::LWObject::new());
+                id
+            });
+            let value = ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("_class"),
+                    js_string!("LWObject"),
+                    Attribute::all(),
+                )
+                .property(js_string!("type"), js_string!("LWObject"), Attribute::all())
+                .property(js_string!("name"), js_string!(""), Attribute::all())
+                .property(js_string!("_pending_lw_id"), id as f64, Attribute::all())
+                .property(js_string!("_draw_count"), 0, Attribute::all())
+                .function(
+                    NativeFunction::from_fn_ptr(js_object_set_name),
+                    js_string!("setName"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_object_create_renderer),
+                    js_string!("createRenderer"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_pending_density_get_uid),
+                    js_string!("getUID"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_object_compatible_renderers),
+                    js_string!("searchCompatibleRendererNames"),
+                    0,
+                )
+                .build()
+                .into();
+            install_pending_object_api(&value, "LWObject", ctx);
+            value
+        }
         fn make_density_map_proxy(object: ScriptObj, ctx: &mut Context) -> JsValue {
             fn object_accessor(
                 ctx: &mut Context,
@@ -13743,6 +19716,48 @@ impl DesktopAppState {
             ScaleFrame,
             FrameCount,
         }
+        fn install_morph_property(
+            value: &JsValue,
+            name: &'static str,
+            property: MorphProperty,
+            writable: bool,
+            ctx: &mut Context,
+        ) {
+            let Some(object) = value.as_object() else {
+                return;
+            };
+            let getter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_copy_closure(move |this, args, ctx| {
+                    morph_property_get(property, this, args, ctx)
+                }),
+            )
+            .name(JsString::from(format!("get {name}")))
+            .length(0)
+            .constructor(false)
+            .build();
+            let setter = writable.then(|| {
+                FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_copy_closure(move |this, args, ctx| {
+                        morph_property_set(property, this, args, ctx)
+                    }),
+                )
+                .name(JsString::from(format!("set {name}")))
+                .length(1)
+                .constructor(false)
+                .build()
+            });
+            let _ = object.define_property_or_throw(
+                JsString::from(name),
+                PropertyDescriptor::builder()
+                    .get(getter)
+                    .maybe_set(setter)
+                    .enumerable(true)
+                    .configurable(true),
+                ctx,
+            );
+        }
         fn morph_property_get(
             property: MorphProperty,
             this: &JsValue,
@@ -13799,21 +19814,17 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
-            let (source, source_object) = script_env::with(|env| {
-                let source = env
-                    .molecules
-                    .iter()
-                    .find(|molecule| molecule.uid == source_uid)?
-                    .molecule
-                    .clone();
-                let source_object = env
-                    .objects
-                    .iter()
-                    .find(|object| object.uid == source_uid)?
-                    .clone();
-                Some((source, source_object))
+            let source_value = args.first().cloned().unwrap_or(JsValue::undefined());
+            let source = script_env::with(|env| {
+                Some(
+                    env.molecules
+                        .iter()
+                        .find(|molecule| molecule.uid == source_uid)?
+                        .molecule
+                        .clone(),
+                )
             })
-            .ok_or_else(|| script_error("MorphMol source or target is not available"))?;
+            .ok_or_else(|| script_error("MorphMol source is not available"))?;
             let positions = script_env::with(|env| {
                 env.morphs
                     .get(&uid)
@@ -13821,9 +19832,9 @@ impl DesktopAppState {
             })
             .ok_or_else(|| script_error(format!("MorphMol {uid} is not available")))?;
             let frame = MorphFrame::new(
-                source_object.name,
-                source_object.source,
-                source_object.source_type,
+                object_string_prop(&source_value, "name", ctx),
+                object_string_prop(&source_value, "src", ctx),
+                object_string_prop(&source_value, "srctype", ctx),
                 positions,
             );
             script_env::with_mut(|env| {
@@ -14001,10 +20012,10 @@ impl DesktopAppState {
             })
             .collect::<Vec<_>>();
             let surface_accessors = [
-                ("orig_mol", SurfaceProperty::OriginMolecule),
-                ("orig_sel", SurfaceProperty::OriginSelection),
-                ("orig_den", SurfaceProperty::OriginDensity),
-                ("orig_prad", SurfaceProperty::OriginProbeRadius),
+                ("orig_mol", SurfaceProperty::Molecule),
+                ("orig_sel", SurfaceProperty::Selection),
+                ("orig_den", SurfaceProperty::Density),
+                ("orig_prad", SurfaceProperty::ProbeRadius),
             ]
             .into_iter()
             .map(|(name, property)| {
@@ -14437,21 +20448,21 @@ impl DesktopAppState {
                     (name, getter, setter)
                 })
                 .collect::<Vec<_>>();
-            let morph_accessors = is_morph
-                .then(|| {
-                    [
-                        ("frame", MorphProperty::Frame, true),
-                        ("scale_frame", MorphProperty::ScaleFrame, true),
-                        ("nframe", MorphProperty::FrameCount, false),
-                    ]
-                    .into_iter()
-                    .map(|(name, property, writable)| {
-                        let (getter, setter) = morph_accessor(ctx, name, property, writable);
-                        (name, getter, setter)
-                    })
-                    .collect::<Vec<_>>()
+            let morph_accessors = if is_morph {
+                [
+                    ("frame", MorphProperty::Frame, true),
+                    ("scale_frame", MorphProperty::ScaleFrame, true),
+                    ("nframe", MorphProperty::FrameCount, false),
+                ]
+                .into_iter()
+                .map(|(name, property, writable)| {
+                    let (getter, setter) = morph_accessor(ctx, name, property, writable);
+                    (name, getter, setter)
                 })
-                .unwrap_or_default();
+                .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let mut proxy = ObjectInitializer::new(ctx);
             proxy
                 .property(js_string!("uid"), object.uid as f64, Attribute::all())
@@ -14770,6 +20781,27 @@ impl DesktopAppState {
                 .map(|object| make_object_proxy(object, ctx))
                 .unwrap_or_else(JsValue::null))
         }
+        fn js_scene_get_object_by_uid(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
+            let uid = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)? as u64;
+            let found = script_env::with(|env| {
+                env.objects
+                    .iter()
+                    .find(|object| object.scene_uid == scene_uid && object.uid == uid)
+                    .cloned()
+            });
+            Ok(found
+                .map(|object| make_object_proxy(object, ctx))
+                .unwrap_or_else(JsValue::null))
+        }
         fn js_get_object_by_uid(
             _t: &JsValue,
             args: &[JsValue],
@@ -14803,6 +20835,51 @@ impl DesktopAppState {
                             .iter()
                             .map(|renderer| JsString::from(renderer.name.as_str()).into())
                             .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            Ok(JsArray::from_iter(names, ctx).into())
+        }
+        fn js_get_renderer_name_list(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let value = args.first().cloned().unwrap_or(JsValue::undefined());
+            let uid = value
+                .is_object()
+                .then(|| object_proxy_uid(&value, ctx))
+                .transpose()?;
+            let name = if value.is_string() {
+                Some(value.to_string(ctx)?.to_std_string_escaped())
+            } else {
+                None
+            };
+            let renderer_types = args
+                .iter()
+                .skip(1)
+                .map(|value| {
+                    value
+                        .to_string(ctx)
+                        .map(|value| value.to_std_string_escaped())
+                })
+                .collect::<JsResult<Vec<_>>>()?;
+            let names = script_env::with(|env| {
+                env.objects
+                    .iter()
+                    .find(|object| {
+                        uid.is_some_and(|uid| object.uid == uid)
+                            || name.as_ref().is_some_and(|name| {
+                                object.scene_uid == env.scene_uid && object.name == *name
+                            })
+                    })
+                    .map(|object| {
+                        object
+                            .renderers
+                            .iter()
+                            .filter(|renderer| renderer_types.contains(&renderer.rtype))
+                            .map(|renderer| JsString::from(renderer.name.as_str()).into())
+                            .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
             });
@@ -14874,11 +20951,13 @@ impl DesktopAppState {
                     | "dsurface"
                     | "directsurf"
                     | "dsurf2"
+                    | "ms2test"
             ) {
-                add("sel", Selection, "*");
+                add("sel", Selection, "");
                 add("defaultcolor", Color, "#ffffff");
             }
             match renderer_type {
+                "test" => add("color1", Color, "#00ffff"),
                 "simple" => {
                     add("width", Real, "1.2");
                     add("valbond", Boolean, "true");
@@ -14980,7 +21059,7 @@ impl DesktopAppState {
                     add("pivotatom", Text, "");
                     add("axialdetail", Integer, "8");
                     add("smoothcolor", Boolean, "false");
-                    add("anchor_sel", Selection, "*");
+                    add("anchor_sel", Selection, "");
                     add("anchor_weight", Real, "10");
                     add("helix_ribbon", Boolean, "false");
                     add("helix_smooth", Real, "3");
@@ -15043,7 +21122,7 @@ impl DesktopAppState {
                     add("cullface", Boolean, "false");
                     add("drawmode", Text, "fill");
                     add("width", Real, "1.2");
-                    add("showsel", Selection, "*");
+                    add("showsel", Selection, "");
                     for (name, default) in [
                         ("vdwr_H", "1.2"),
                         ("vdwr_C", "1.7"),
@@ -15082,8 +21161,8 @@ impl DesktopAppState {
                     add("color_mapname", Text, "");
                     add("ramp_above", Boolean, "false");
                     add("ramp_value", Real, "1.4");
-                    add("sel", Selection, "*");
-                    add("showsel", Selection, "*");
+                    add("sel", Selection, "");
+                    add("showsel", Selection, "");
                 }
                 "symm" => {
                     add("maxop", Integer, "1000");
@@ -15109,9 +21188,22 @@ impl DesktopAppState {
         fn pending_renderer_attr_get(
             property: RendererAttrProperty,
             this: &JsValue,
-            _args: &[JsValue],
+            args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            if pending_renderer_is_attached(this, ctx)? {
+                return renderer_attr_property_get(property, this, args, ctx);
+            }
+            if property.name == "sel"
+                && matches!(
+                    this_string_prop(this, "_renderer_type", ctx).as_str(),
+                    "*selection" | "selection"
+                )
+            {
+                return Err(script_error(
+                    "SelectionRenderer is not attached to a molecule",
+                ));
+            }
             let value = iterator_object(this)?.get(pending_renderer_attr_key(property), ctx)?;
             let value = if value.is_undefined() {
                 property.default.to_string()
@@ -15133,12 +21225,13 @@ impl DesktopAppState {
                     selection
                 }
                 RendererAttrKind::Color => {
-                    let rgba = resolve_script_color(&value).unwrap_or(cuemol_gfx::Rgba8 {
-                        r: 255,
-                        g: 255,
-                        b: 255,
-                        a: 255,
-                    });
+                    let rgba =
+                        resolve_script_color_in_scope(&value, 0).unwrap_or(cuemol_gfx::Rgba8 {
+                            r: 255,
+                            g: 255,
+                            b: 255,
+                            a: 255,
+                        });
                     make_color(
                         cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a),
                         ctx,
@@ -15157,6 +21250,9 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            if pending_renderer_is_attached(this, ctx)? {
+                return renderer_attr_property_set(property, this, args, ctx);
+            }
             if !property.writable {
                 return Err(script_error(format!(
                     "Renderer property {} is read-only",
@@ -15182,6 +21278,7 @@ impl DesktopAppState {
                 ctx,
             )?;
             script_cmds::push(ScriptCmd::SetRendererProp {
+                scene_uid: None,
                 object: this_string_prop(this, "_object_name", ctx),
                 renderer: this_string_prop(this, "_renderer_name", ctx),
                 key: property.key.to_string(),
@@ -15191,24 +21288,264 @@ impl DesktopAppState {
         }
         fn pending_renderer_visible_get(
             this: &JsValue,
-            _args: &[JsValue],
+            args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            Ok(iterator_object(this)?.get(js_string!("_pending_visible"), ctx)?)
+            if pending_renderer_is_attached(this, ctx)? {
+                return renderer_property_get(RendererProperty::Visible, this, args, ctx);
+            }
+            iterator_object(this)?.get(js_string!("_pending_visible"), ctx)
         }
         fn pending_renderer_visible_set(
             this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            if pending_renderer_is_attached(this, ctx)? {
+                return renderer_property_set(RendererProperty::Visible, this, args, ctx);
+            }
             let visible = args.first().is_none_or(JsValue::to_boolean);
             iterator_object(this)?.set(js_string!("_pending_visible"), visible, true, ctx)?;
-            script_cmds::push(ScriptCmd::SetRendererVisible {
-                object: this_string_prop(this, "_object_name", ctx),
-                renderer: this_string_prop(this, "_renderer_name", ctx),
-                visible,
-            });
             Ok(JsValue::undefined())
+        }
+        fn pending_renderer_property_key(property: RendererProperty) -> &'static str {
+            match property {
+                RendererProperty::Name => "_pending_name",
+                RendererProperty::Visible => "_pending_visible",
+                RendererProperty::Locked => "_pending_locked",
+                RendererProperty::Material => "_pending_material",
+                RendererProperty::Alpha => "_pending_alpha",
+                RendererProperty::Transform => "_pending_xformMat",
+                RendererProperty::UiOrder => "_pending_ui_order",
+                RendererProperty::Group => "_pending_group",
+                RendererProperty::Style => "_pending_style",
+                RendererProperty::EdgeType => "_pending_egtype",
+                RendererProperty::EdgeWidth => "_pending_eglinew",
+                RendererProperty::EdgeColor => "_pending_egcolor",
+            }
+        }
+        fn pending_renderer_property_get(
+            property: RendererProperty,
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if pending_renderer_is_attached(this, ctx)? {
+                return renderer_property_get(property, this, args, ctx);
+            }
+            iterator_object(this)?.get(JsString::from(pending_renderer_property_key(property)), ctx)
+        }
+        fn pending_renderer_property_set(
+            property: RendererProperty,
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if pending_renderer_is_attached(this, ctx)? {
+                return renderer_property_set(property, this, args, ctx);
+            }
+            if matches!(property, RendererProperty::Style) {
+                return Err(script_error("Renderer style is read-only"));
+            }
+            let input = args.first().cloned().unwrap_or(JsValue::undefined());
+            let value = match property {
+                RendererProperty::Name | RendererProperty::Material | RendererProperty::Group => {
+                    JsString::from(input.to_string(ctx)?.to_std_string_escaped()).into()
+                }
+                RendererProperty::Locked | RendererProperty::Visible => {
+                    JsValue::new(input.to_boolean())
+                }
+                RendererProperty::Alpha => JsValue::new(input.to_number(ctx)?.clamp(0.0, 1.0)),
+                RendererProperty::Transform => {
+                    matrix_from_value(&input, ctx)?;
+                    input
+                }
+                RendererProperty::UiOrder => JsValue::new(input.to_i32(ctx)?),
+                RendererProperty::EdgeType => {
+                    let value = input.to_string(ctx)?.to_std_string_escaped();
+                    if !matches!(value.as_str(), "none" | "edges" | "silhouette") {
+                        return Err(script_error(format!("unknown renderer egtype {value}")));
+                    }
+                    JsString::from(value).into()
+                }
+                RendererProperty::EdgeWidth => JsValue::new(input.to_number(ctx)?.max(0.0)),
+                RendererProperty::EdgeColor => {
+                    solid_color_from_script_value(&input, ctx)?;
+                    input
+                }
+                RendererProperty::Style => unreachable!(),
+            };
+            let object = iterator_object(this)?;
+            object.set(
+                JsString::from(pending_renderer_property_key(property)),
+                value,
+                true,
+                ctx,
+            )?;
+            if matches!(property, RendererProperty::Name) {
+                object.set(
+                    js_string!("_renderer_name"),
+                    object.get(js_string!("_pending_name"), ctx)?,
+                    true,
+                    ctx,
+                )?;
+            }
+            Ok(JsValue::undefined())
+        }
+        fn pending_renderer_scene_uid(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsValue::new(if pending_renderer_is_attached(this, ctx)? {
+                script_renderer(renderer_proxy_uid(this, ctx)?)?.scene_uid as f64
+            } else {
+                0.0
+            }))
+        }
+        fn pending_renderer_center(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if !pending_renderer_is_attached(this, ctx)? {
+                Ok(JsValue::null())
+            } else {
+                js_renderer_get_center(this, args, ctx)
+            }
+        }
+        fn pending_renderer_has_center(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsValue::new(
+                !pending_renderer_center(this, args, ctx)?.is_null(),
+            ))
+        }
+        fn pending_renderer_get_client_id(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if !pending_renderer_is_attached(this, ctx)? {
+                iterator_object(this)?.get(js_string!("_pending_client_uid"), ctx)
+            } else {
+                js_renderer_get_client_id(this, args, ctx)
+            }
+        }
+        fn pending_renderer_get_client_object(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if !pending_renderer_is_attached(this, ctx)? {
+                let client_uid = iterator_object(this)?
+                    .get(js_string!("_pending_client_uid"), ctx)?
+                    .to_number(ctx)? as u64;
+                if client_uid == 0 {
+                    Ok(JsValue::null())
+                } else {
+                    iterator_object(this)?.get(js_string!("_pending_client_object"), ctx)
+                }
+            } else {
+                js_renderer_get_client_object(this, args, ctx)
+            }
+        }
+        fn pending_renderer_get_scene(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if !pending_renderer_is_attached(this, ctx)? {
+                Ok(JsValue::null())
+            } else {
+                js_renderer_get_scene(this, args, ctx)
+            }
+        }
+        fn pending_renderer_apply_styles(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if pending_renderer_is_attached(this, ctx)? {
+                return js_renderer_apply_styles(this, args, ctx);
+            }
+            iterator_object(this)?.set(
+                js_string!("_pending_style"),
+                JsString::from(arg0(args, ctx)),
+                true,
+                ctx,
+            )?;
+            Ok(JsValue::undefined())
+        }
+        fn pending_renderer_reapply_style(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if !pending_renderer_is_attached(this, ctx)? {
+                Ok(JsValue::undefined())
+            } else {
+                js_renderer_reapply_style(this, args, ctx)
+            }
+        }
+        fn pending_renderer_base_attributes(
+            value: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<BTreeMap<String, String>> {
+            let object = value
+                .as_object()
+                .ok_or_else(|| script_error("renderer value is not an object"))?;
+            let mut attributes = BTreeMap::new();
+            attributes.insert(
+                "locked".to_string(),
+                object
+                    .get(js_string!("locked"), ctx)?
+                    .to_boolean()
+                    .to_string(),
+            );
+            for name in ["style", "material", "group", "egtype"] {
+                attributes.insert(
+                    name.to_string(),
+                    object
+                        .get(JsString::from(name), ctx)?
+                        .to_string(ctx)?
+                        .to_std_string_escaped(),
+                );
+            }
+            attributes.insert(
+                "alpha".to_string(),
+                object
+                    .get(js_string!("alpha"), ctx)?
+                    .to_number(ctx)?
+                    .to_string(),
+            );
+            attributes.insert(
+                "xformMat".to_string(),
+                matrix_from_value(&object.get(js_string!("xformMat"), ctx)?, ctx)?
+                    .to_script_string(),
+            );
+            attributes.insert(
+                "ui_order".to_string(),
+                object
+                    .get(js_string!("ui_order"), ctx)?
+                    .to_i32(ctx)?
+                    .to_string(),
+            );
+            attributes.insert(
+                "eglinew".to_string(),
+                object
+                    .get(js_string!("eglinew"), ctx)?
+                    .to_number(ctx)?
+                    .to_string(),
+            );
+            attributes.insert(
+                "egcolor".to_string(),
+                solid_color_from_script_value(&object.get(js_string!("egcolor"), ctx)?, ctx)?
+                    .script_string(),
+            );
+            Ok(attributes)
         }
         fn pending_renderer_is_compatible(
             this: &JsValue,
@@ -15238,11 +21575,61 @@ impl DesktopAppState {
             .into())
         }
         fn pending_renderer_get_uid(
-            _this: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
-            _ctx: &mut Context,
+            ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            Ok(JsValue::new(0))
+            Ok(JsValue::new(object_number_prop(this, "uid", ctx)?))
+        }
+        fn pending_renderer_coloring_get(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if pending_renderer_is_attached(this, ctx)? {
+                return renderer_coloring_get(this, args, ctx);
+            }
+            iterator_object(this)?.get(js_string!("_pending_coloring"), ctx)
+        }
+        fn pending_renderer_coloring_set(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if pending_renderer_is_attached(this, ctx)? {
+                return renderer_coloring_set(this, args, ctx);
+            }
+            let value = args.first().cloned().unwrap_or(JsValue::undefined());
+            coloring_node_from_script(&value, ctx)?;
+            iterator_object(this)?.set(js_string!("_pending_coloring"), value, true, ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn pending_map_renderer_property_get(
+            property: MapRendererProperty,
+            fallback: RendererAttrProperty,
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if pending_renderer_is_attached(this, ctx)? {
+                return map_renderer_property_get(property, this, args, ctx);
+            }
+            if matches!(property, MapRendererProperty::MultiGradient) {
+                return Ok(JsValue::null());
+            }
+            pending_renderer_attr_get(fallback, this, args, ctx)
+        }
+        fn pending_map_renderer_property_set(
+            property: MapRendererProperty,
+            fallback: RendererAttrProperty,
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if pending_renderer_is_attached(this, ctx)? {
+                return map_renderer_property_set(property, this, args, ctx);
+            }
+            pending_renderer_attr_set(fallback, this, args, ctx)
         }
         fn make_pending_renderer(
             object_name: &str,
@@ -15250,6 +21637,46 @@ impl DesktopAppState {
             name: &str,
             ctx: &mut Context,
         ) -> JsValue {
+            let base_accessors = [
+                ("name", RendererProperty::Name, true),
+                ("locked", RendererProperty::Locked, true),
+                ("style", RendererProperty::Style, false),
+                ("material", RendererProperty::Material, true),
+                ("alpha", RendererProperty::Alpha, true),
+                ("xformMat", RendererProperty::Transform, true),
+                ("ui_order", RendererProperty::UiOrder, true),
+                ("group", RendererProperty::Group, true),
+                ("egtype", RendererProperty::EdgeType, true),
+                ("eglinew", RendererProperty::EdgeWidth, true),
+                ("egcolor", RendererProperty::EdgeColor, true),
+            ]
+            .into_iter()
+            .map(|(name, property, writable)| {
+                let getter = FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_copy_closure(move |this, args, ctx| {
+                        pending_renderer_property_get(property, this, args, ctx)
+                    }),
+                )
+                .name(JsString::from(format!("get {name}")))
+                .length(0)
+                .constructor(false)
+                .build();
+                let setter = writable.then(|| {
+                    FunctionObjectBuilder::new(
+                        ctx.realm(),
+                        NativeFunction::from_copy_closure(move |this, args, ctx| {
+                            pending_renderer_property_set(property, this, args, ctx)
+                        }),
+                    )
+                    .name(JsString::from(format!("set {name}")))
+                    .length(1)
+                    .constructor(false)
+                    .build()
+                });
+                (name, getter, setter)
+            })
+            .collect::<Vec<_>>();
             let accessors = renderer_attr_properties(renderer_type)
                 .into_iter()
                 .map(|property| {
@@ -15278,6 +21705,61 @@ impl DesktopAppState {
                     (property.name, getter, setter)
                 })
                 .collect::<Vec<_>>();
+            let map_accessors = map_renderer_properties(renderer_type)
+                .into_iter()
+                .map(|(name, property, writable)| {
+                    let fallback =
+                        map_renderer_fallback_property(renderer_type, name, property, writable);
+                    let getter = FunctionObjectBuilder::new(
+                        ctx.realm(),
+                        NativeFunction::from_copy_closure(move |this, args, ctx| {
+                            pending_map_renderer_property_get(property, fallback, this, args, ctx)
+                        }),
+                    )
+                    .name(JsString::from(format!("get {name}")))
+                    .length(0)
+                    .constructor(false)
+                    .build();
+                    let setter = writable.then(|| {
+                        FunctionObjectBuilder::new(
+                            ctx.realm(),
+                            NativeFunction::from_copy_closure(move |this, args, ctx| {
+                                pending_map_renderer_property_set(
+                                    property, fallback, this, args, ctx,
+                                )
+                            }),
+                        )
+                        .name(JsString::from(format!("set {name}")))
+                        .length(1)
+                        .constructor(false)
+                        .build()
+                    });
+                    (name, getter, setter)
+                })
+                .collect::<Vec<_>>();
+            let coloring_accessor = renderer_supports_coloring(renderer_type).then(|| {
+                let getter = FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_fn_ptr(pending_renderer_coloring_get),
+                )
+                .name(js_string!("get coloring"))
+                .length(0)
+                .constructor(false)
+                .build();
+                let setter = FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_fn_ptr(pending_renderer_coloring_set),
+                )
+                .name(js_string!("set coloring"))
+                .length(1)
+                .constructor(false)
+                .build();
+                (getter, setter)
+            });
+            let child_values = renderer_child_properties(renderer_type)
+                .into_iter()
+                .map(|(name, kind)| (name, make_renderer_child_proxy(0, name, kind, ctx)))
+                .collect::<Vec<_>>();
             let visible_getter = FunctionObjectBuilder::new(
                 ctx.realm(),
                 NativeFunction::from_fn_ptr(pending_renderer_visible_get),
@@ -15294,10 +21776,59 @@ impl DesktopAppState {
             .length(1)
             .constructor(false)
             .build();
+            let scene_uid_getter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_fn_ptr(pending_renderer_scene_uid),
+            )
+            .name(js_string!("get scene_uid"))
+            .length(0)
+            .constructor(false)
+            .build();
+            let center_getter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_fn_ptr(pending_renderer_center),
+            )
+            .name(js_string!("get center"))
+            .length(0)
+            .constructor(false)
+            .build();
+            let has_center_getter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_fn_ptr(pending_renderer_has_center),
+            )
+            .name(js_string!("get has_center"))
+            .length(0)
+            .constructor(false)
+            .build();
             let runtime_class = renderer_runtime_class(renderer_type);
+            let uid = allocate_script_runtime_uid();
+            let transform = make_matrix(Matrix4::IDENTITY, ctx);
+            let edge_color = make_color(cuemol_gfx::SolidColor::from_rgb(0.0, 0.0, 0.0), ctx);
+            let coloring = make_coloring("SolidColoring", ctx);
+            let pending_atom_intr_id = if renderer_type == "atomintr" {
+                script_env::with_mut(|env| {
+                    let id = env.next_pending_atom_intr_id.max(1);
+                    env.next_pending_atom_intr_id = id.saturating_add(1);
+                    env.pending_atom_intr_lines.insert(id, Vec::new());
+                    id
+                })
+            } else {
+                0
+            };
             let mut object = ObjectInitializer::new(ctx);
             object
-                .property(js_string!("uid"), 0, Attribute::all())
+                .property(js_string!("uid"), uid as f64, Attribute::all())
+                .property(
+                    js_string!("_pending_atom_intr_id"),
+                    pending_atom_intr_id as f64,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("scene_uid"),
+                    Some(scene_uid_getter),
+                    None,
+                    Attribute::all(),
+                )
                 .property(
                     js_string!("type"),
                     JsString::from(runtime_class),
@@ -15313,7 +21844,11 @@ impl DesktopAppState {
                     JsString::from(renderer_type),
                     Attribute::all(),
                 )
-                .property(js_string!("name"), JsString::from(name), Attribute::all())
+                .property(
+                    js_string!("_pending_name"),
+                    JsString::from(name),
+                    Attribute::all(),
+                )
                 .property(
                     js_string!("_object_name"),
                     JsString::from(object_name),
@@ -15329,15 +21864,153 @@ impl DesktopAppState {
                     JsString::from(renderer_type),
                     Attribute::all(),
                 )
+                .property(js_string!("_pending_client_uid"), 0, Attribute::all())
+                .property(
+                    js_string!("_pending_client_object"),
+                    JsValue::null(),
+                    Attribute::all(),
+                )
                 .property(js_string!("_pending_visible"), true, Attribute::all())
+                .property(js_string!("_pending_locked"), false, Attribute::all())
+                .property(
+                    js_string!("_pending_style"),
+                    js_string!(""),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_pending_material"),
+                    js_string!(""),
+                    Attribute::all(),
+                )
+                .property(js_string!("_pending_alpha"), 1.0, Attribute::all())
+                .property(js_string!("_pending_xformMat"), transform, Attribute::all())
+                .property(
+                    js_string!("_pending_ui_order"),
+                    uid as i32,
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_pending_group"),
+                    js_string!(""),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_pending_egtype"),
+                    js_string!("none"),
+                    Attribute::all(),
+                )
+                .property(js_string!("_pending_eglinew"), 0.01, Attribute::all())
+                .property(js_string!("_pending_egcolor"), edge_color, Attribute::all())
+                .property(js_string!("_pending_coloring"), coloring, Attribute::all())
+                .accessor(
+                    js_string!("center"),
+                    Some(center_getter),
+                    None,
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("has_center"),
+                    Some(has_center_getter),
+                    None,
+                    Attribute::all(),
+                )
                 .accessor(
                     js_string!("visible"),
                     Some(visible_getter),
                     Some(visible_setter),
                     Attribute::all(),
                 );
+            for (name, getter, setter) in base_accessors {
+                object.accessor(JsString::from(name), Some(getter), setter, Attribute::all());
+            }
             for (name, getter, setter) in accessors {
                 object.accessor(JsString::from(name), Some(getter), setter, Attribute::all());
+            }
+            for (name, getter, setter) in map_accessors {
+                object.accessor(JsString::from(name), Some(getter), setter, Attribute::all());
+            }
+            if let Some((getter, setter)) = coloring_accessor {
+                object.accessor(
+                    js_string!("coloring"),
+                    Some(getter),
+                    Some(setter),
+                    Attribute::all(),
+                );
+            }
+            for (name, value) in child_values {
+                object.property(JsString::from(name), value, Attribute::ENUMERABLE);
+            }
+            if is_map_renderer_type(renderer_type) || renderer_type == "molsurf" {
+                object.function(
+                    NativeFunction::from_fn_ptr(js_map_renderer_get_color_map_object),
+                    js_string!("getColorMapObj"),
+                    0,
+                );
+                if matches!(renderer_type, "isosurf" | "MapSurfRenderer") {
+                    object.function(
+                        NativeFunction::from_fn_ptr(js_map_surf_generate_surface),
+                        js_string!("generateSurfObj"),
+                        0,
+                    );
+                }
+            }
+            if matches!(renderer_type, "*namelabel" | "name_label") {
+                object
+                    .function(
+                        NativeFunction::from_fn_ptr(renderer_add_label),
+                        js_string!("addLabel"),
+                        1,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(renderer_remove_label),
+                        js_string!("removeLabel"),
+                        1,
+                    );
+            }
+            if renderer_type == "symm" {
+                object.function(
+                    NativeFunction::from_fn_ptr(renderer_symmetry_xform),
+                    js_string!("getXformMatrix"),
+                    1,
+                );
+            }
+            if renderer_type == "atomintr" {
+                object
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append),
+                        js_string!("append"),
+                        2,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_by_id),
+                        js_string!("appendById"),
+                        4,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_by_vectors),
+                        js_string!("appendBy2Vecs"),
+                        2,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_angle_by_id),
+                        js_string!("appendAngleById"),
+                        5,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_torsion_by_id),
+                        js_string!("appendTorsionById"),
+                        7,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_remove),
+                        js_string!("remove"),
+                        1,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_get_defs_json),
+                        js_string!("getDefsJSON"),
+                        0,
+                    );
             }
             object
                 .function(
@@ -15356,6 +22029,36 @@ impl DesktopAppState {
                     0,
                 )
                 .function(
+                    NativeFunction::from_fn_ptr(pending_renderer_center),
+                    js_string!("getCenter"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(pending_renderer_get_client_id),
+                    js_string!("getClientObjID"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(pending_renderer_get_client_object),
+                    js_string!("getClientObj"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(pending_renderer_get_scene),
+                    js_string!("getScene"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(pending_renderer_apply_styles),
+                    js_string!("applyStyles"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(pending_renderer_reapply_style),
+                    js_string!("reapplyStyle"),
+                    0,
+                )
+                .function(
                     NativeFunction::from_fn_ptr(pending_renderer_is_compatible),
                     js_string!("isCompatibleObj"),
                     1,
@@ -15365,6 +22068,14 @@ impl DesktopAppState {
         }
         fn renderer_proxy_uid(this: &JsValue, ctx: &mut Context) -> JsResult<u64> {
             Ok(object_number_prop(this, "uid", ctx)? as u64)
+        }
+        fn pending_renderer_is_attached(this: &JsValue, ctx: &mut Context) -> JsResult<bool> {
+            let uid = renderer_proxy_uid(this, ctx)?;
+            Ok(script_env::with(|env| {
+                env.objects
+                    .iter()
+                    .any(|object| object.renderers.iter().any(|renderer| renderer.uid == uid))
+            }))
         }
         fn script_renderer(uid: u64) -> JsResult<ScriptRend> {
             script_env::with(|env| {
@@ -15385,6 +22096,26 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or_else(|| default.to_string())
         }
+        fn renderer_effective_attr(renderer: &ScriptRend, name: &str, default: &str) -> String {
+            if let Some(value) = renderer
+                .attributes
+                .get(name)
+                .filter(|value| !value.is_empty())
+            {
+                return value.clone();
+            }
+            renderer
+                .attributes
+                .get("style")
+                .filter(|styles| !styles.is_empty())
+                .and_then(|styles| {
+                    script_env::with(|env| {
+                        env.styles
+                            .resolve_style_attr(renderer.scene_uid, styles, name)
+                    })
+                })
+                .unwrap_or_else(|| default.to_string())
+        }
         fn renderer_attr_property_get(
             property: RendererAttrProperty,
             this: &JsValue,
@@ -15392,7 +22123,19 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let renderer = script_renderer(renderer_proxy_uid(this, ctx)?)?;
-            let value = renderer_attr(&renderer, property.key, property.default);
+            let value = if property.name == "sel"
+                && matches!(renderer.rtype.as_str(), "*selection" | "selection")
+            {
+                script_object(renderer.object_uid).map(|object| {
+                    if object.selection.is_empty() {
+                        "!*".to_string()
+                    } else {
+                        object.selection
+                    }
+                })?
+            } else {
+                renderer_effective_attr(&renderer, property.key, property.default)
+            };
             Ok(match property.kind {
                 RendererAttrKind::Boolean => JsValue::new(qsc_bool(&value)),
                 RendererAttrKind::Integer => JsValue::new(value.parse::<i32>().unwrap_or_default()),
@@ -15408,12 +22151,14 @@ impl DesktopAppState {
                     selection
                 }
                 RendererAttrKind::Color => {
-                    let rgba = resolve_script_color(&value).unwrap_or(cuemol_gfx::Rgba8 {
-                        r: 255,
-                        g: 255,
-                        b: 255,
-                        a: 255,
-                    });
+                    let rgba = resolve_script_color_in_scope(&value, renderer.scene_uid).unwrap_or(
+                        cuemol_gfx::Rgba8 {
+                            r: 255,
+                            g: 255,
+                            b: 255,
+                            a: 255,
+                        },
+                    );
                     make_color(
                         cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a),
                         ctx,
@@ -15464,6 +22209,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererProp {
+                scene_uid: Some(renderer.scene_uid),
                 object: script_object(renderer.object_uid)?.name,
                 renderer: renderer.name,
                 key: property.key.to_string(),
@@ -15530,6 +22276,30 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let (uid, child_tag) = renderer_child_proxy_info(this, ctx)?;
+            if uid == 0 {
+                let value = iterator_object(this)?
+                    .get(JsString::from(format!("_pending_{}", property.key)), ctx)?
+                    .to_string(ctx)?
+                    .to_std_string_escaped();
+                return Ok(match property.kind {
+                    RendererAttrKind::Integer => {
+                        JsValue::new(value.parse::<i32>().unwrap_or_default())
+                    }
+                    RendererAttrKind::Real => {
+                        JsValue::new(value.parse::<f64>().unwrap_or_default())
+                    }
+                    RendererAttrKind::String => JsString::from(value).into(),
+                    _ => {
+                        return Err(script_error(format!(
+                            "invalid {} child property",
+                            match kind {
+                                RendererChildKind::TubeSection => "TubeSection",
+                                RendererChildKind::Junction => "JctTable",
+                            }
+                        )));
+                    }
+                });
+            }
             let renderer = script_renderer(uid)?;
             let value = renderer_child_attr(&renderer, &child_tag, property.key, property.default);
             Ok(match property.kind {
@@ -15561,6 +22331,15 @@ impl DesktopAppState {
                 RendererAttrKind::String => input.to_string(ctx)?.to_std_string_escaped(),
                 _ => return Err(script_error("invalid renderer child property type")),
             };
+            if uid == 0 {
+                iterator_object(this)?.set(
+                    JsString::from(format!("_pending_{}", property.key)),
+                    JsString::from(value),
+                    true,
+                    ctx,
+                )?;
+                return Ok(JsValue::undefined());
+            }
             script_env::with_mut(|env| {
                 let Some(renderer) = env.objects.iter_mut().find_map(|object| {
                     object
@@ -15584,6 +22363,13 @@ impl DesktopAppState {
                     }
                 };
                 child.set_str_attr(property.key, value);
+            });
+            let renderer = script_renderer(uid)?;
+            script_cmds::push(ScriptCmd::SetRendererChildren {
+                object_uid: renderer.object_uid,
+                object: script_object(renderer.object_uid)?.name,
+                renderer: renderer.name,
+                children: renderer.children,
             });
             Ok(JsValue::undefined())
         }
@@ -15613,7 +22399,8 @@ impl DesktopAppState {
                 ],
             };
             let accessors = specs
-                .into_iter()
+                .iter()
+                .copied()
                 .map(|(name, property_kind, default)| {
                     let property = RendererAttrProperty {
                         name,
@@ -15662,6 +22449,13 @@ impl DesktopAppState {
                     JsString::from(class_name),
                     Attribute::all(),
                 );
+            for (name, _, default) in &specs {
+                proxy.property(
+                    JsString::from(format!("_pending_{name}")),
+                    JsString::from(*default),
+                    Attribute::all(),
+                );
+            }
             for (name, getter, setter) in accessors {
                 proxy.accessor(
                     JsString::from(name),
@@ -15758,11 +22552,23 @@ impl DesktopAppState {
             }
             properties
         }
-        fn renderer_coloring_class(renderer: &ScriptRend) -> String {
+        fn renderer_coloring_node(renderer: &ScriptRend) -> Option<LDom2Node> {
             renderer
                 .children
                 .iter()
                 .find(|child| child.tag_name() == "coloring")
+                .cloned()
+                .or_else(|| {
+                    let style_names = renderer.attributes.get("style")?;
+                    script_env::with(|env| {
+                        env.styles
+                            .resolve_style_child_node(renderer.scene_uid, style_names, "coloring")
+                            .cloned()
+                    })
+                })
+        }
+        fn renderer_coloring_class(renderer: &ScriptRend) -> String {
+            renderer_coloring_node(renderer)
                 .map(|child| {
                     if child.type_name().is_empty() {
                         child.str_attr("type").to_string()
@@ -15774,10 +22580,7 @@ impl DesktopAppState {
                 .unwrap_or_else(|| "SolidColoring".to_string())
         }
         fn coloring_node_attr(renderer: &ScriptRend, name: &str, default: &str) -> String {
-            renderer
-                .children
-                .iter()
-                .find(|child| child.tag_name() == "coloring")
+            renderer_coloring_node(renderer)
                 .map(|child| child.str_attr(name).to_string())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| default.to_string())
@@ -15826,6 +22629,16 @@ impl DesktopAppState {
                 };
                 action(node);
             });
+            if let Ok(renderer) = script_renderer(uid) {
+                if let Ok(object) = script_object(renderer.object_uid) {
+                    script_cmds::push(ScriptCmd::SetRendererChildren {
+                        object_uid: renderer.object_uid,
+                        object: object.name,
+                        renderer: renderer.name,
+                        children: renderer.children,
+                    });
+                }
+            }
         }
         fn renderer_coloring_property_get(
             property: RendererAttrProperty,
@@ -15840,12 +22653,14 @@ impl DesktopAppState {
                 RendererAttrKind::Real => JsValue::new(value.parse::<f64>().unwrap_or_default()),
                 RendererAttrKind::String => JsString::from(value).into(),
                 RendererAttrKind::Color => {
-                    let rgba = resolve_script_color(&value).unwrap_or(cuemol_gfx::Rgba8 {
-                        r: 255,
-                        g: 255,
-                        b: 255,
-                        a: 255,
-                    });
+                    let rgba = resolve_script_color_in_scope(&value, renderer.scene_uid).unwrap_or(
+                        cuemol_gfx::Rgba8 {
+                            r: 255,
+                            g: 255,
+                            b: 255,
+                            a: 255,
+                        },
+                    );
                     make_color(
                         cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a),
                         ctx,
@@ -15878,10 +22693,7 @@ impl DesktopAppState {
         }
         fn renderer_paint_entries(uid: u64) -> JsResult<Vec<(String, String)>> {
             let renderer = script_renderer(uid)?;
-            Ok(renderer
-                .children
-                .iter()
-                .find(|child| child.tag_name() == "coloring")
+            Ok(renderer_coloring_node(&renderer)
                 .filter(|child| {
                     child.type_name() == "PaintColoring"
                         || (child.type_name().is_empty()
@@ -15998,7 +22810,8 @@ impl DesktopAppState {
             else {
                 return Ok(JsValue::null());
             };
-            let rgba = resolve_script_color(spec)
+            let scope_id = script_renderer(uid)?.scene_uid;
+            let rgba = resolve_script_color_in_scope(spec, scope_id)
                 .ok_or_else(|| script_error(format!("invalid PaintColoring color value {spec}")))?;
             Ok(make_color(
                 cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a),
@@ -16298,6 +23111,13 @@ impl DesktopAppState {
                     renderer.children.push(node);
                 }
             });
+            let renderer = script_renderer(uid)?;
+            script_cmds::push(ScriptCmd::SetRendererChildren {
+                object_uid: renderer.object_uid,
+                object: script_object(renderer.object_uid)?.name,
+                renderer: renderer.name,
+                children: renderer.children,
+            });
             Ok(JsValue::undefined())
         }
         fn object_coloring_class(uid: u64) -> JsResult<String> {
@@ -16353,16 +23173,19 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let uid = object_number_prop(this, "_object_uid", ctx)? as u64;
             let value = object_coloring_attr(uid, property.key, property.default)?;
+            let scope_id = script_object(uid)?.scene_uid;
             Ok(match property.kind {
                 RendererAttrKind::Real => JsValue::new(value.parse::<f64>().unwrap_or_default()),
                 RendererAttrKind::String => JsString::from(value).into(),
                 RendererAttrKind::Color => {
-                    let rgba = resolve_script_color(&value).unwrap_or(cuemol_gfx::Rgba8 {
-                        r: 255,
-                        g: 255,
-                        b: 255,
-                        a: 255,
-                    });
+                    let rgba = resolve_script_color_in_scope(&value, scope_id).unwrap_or(
+                        cuemol_gfx::Rgba8 {
+                            r: 255,
+                            g: 255,
+                            b: 255,
+                            a: 255,
+                        },
+                    );
                     make_color(
                         cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a),
                         ctx,
@@ -16495,7 +23318,8 @@ impl DesktopAppState {
             else {
                 return Ok(JsValue::null());
             };
-            let rgba = resolve_script_color(spec)
+            let scope_id = script_object(uid)?.scene_uid;
+            let rgba = resolve_script_color_in_scope(spec, scope_id)
                 .ok_or_else(|| script_error(format!("invalid PaintColoring color value {spec}")))?;
             Ok(make_color(
                 cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a),
@@ -16815,18 +23639,20 @@ impl DesktopAppState {
             let molecule_center = molecule
                 .center_pos(None)
                 .unwrap_or(cuemol_core::Vector4::ZERO);
-            let transforms = if qsc_bool(&renderer_attr(&renderer, "unitcell", "true")) {
+            let transforms = if qsc_bool(&renderer_effective_attr(&renderer, "unitcell", "true")) {
                 cuemol_symm::symm_mates_by_cell(molecule_center, &crystal, operators)
             } else {
-                let view_center = renderer
-                    .attributes
-                    .get("center")
-                    .and_then(|value| Vector4::from_script_string(value).ok())
-                    .unwrap_or(Vector4::ZERO);
-                let extent = renderer_attr(&renderer, "extent", "50")
+                let view_center = Vector4::from_script_string(&renderer_effective_attr(
+                    &renderer,
+                    "center",
+                    "(0,0,0,0)",
+                ))
+                .ok()
+                .unwrap_or(Vector4::ZERO);
+                let extent = renderer_effective_attr(&renderer, "extent", "50")
                     .parse::<f64>()
                     .unwrap_or(50.0);
-                let max_ops = renderer_attr(&renderer, "maxop", "1000")
+                let max_ops = renderer_effective_attr(&renderer, "maxop", "1000")
                     .parse::<usize>()
                     .unwrap_or(1000);
                 cuemol_symm::symm_mates_by_extent(
@@ -16861,13 +23687,13 @@ impl DesktopAppState {
                 RendererProperty::Name => Ok(JsString::from(renderer.name).into()),
                 RendererProperty::Visible => Ok(JsValue::new(renderer.visible)),
                 RendererProperty::Locked => Ok(JsValue::new(
-                    renderer_attr(&renderer, "locked", "false") == "true",
+                    renderer_effective_attr(&renderer, "locked", "false") == "true",
                 )),
                 RendererProperty::Material => {
-                    Ok(JsString::from(renderer_attr(&renderer, "material", "")).into())
+                    Ok(JsString::from(renderer_effective_attr(&renderer, "material", "")).into())
                 }
                 RendererProperty::Alpha => Ok(JsValue::new(
-                    renderer_attr(&renderer, "alpha", "1")
+                    renderer_effective_attr(&renderer, "alpha", "1")
                         .parse::<f64>()
                         .unwrap_or(1.0),
                 )),
@@ -16880,32 +23706,34 @@ impl DesktopAppState {
                     ctx,
                 )),
                 RendererProperty::UiOrder => Ok(JsValue::new(
-                    renderer_attr(&renderer, "ui_order", "0")
+                    renderer_effective_attr(&renderer, "ui_order", "0")
                         .parse::<i32>()
                         .unwrap_or(0),
                 )),
                 RendererProperty::Group => {
-                    Ok(JsString::from(renderer_attr(&renderer, "group", "")).into())
+                    Ok(JsString::from(renderer_effective_attr(&renderer, "group", "")).into())
                 }
                 RendererProperty::Style => {
                     Ok(JsString::from(renderer_attr(&renderer, "style", "")).into())
                 }
                 RendererProperty::EdgeType => {
-                    Ok(JsString::from(renderer_attr(&renderer, "egtype", "none")).into())
+                    Ok(JsString::from(renderer_effective_attr(&renderer, "egtype", "none")).into())
                 }
                 RendererProperty::EdgeWidth => Ok(JsValue::new(
-                    renderer_attr(&renderer, "eglinew", "0.01")
+                    renderer_effective_attr(&renderer, "eglinew", "0.01")
                         .parse::<f64>()
                         .unwrap_or(0.01),
                 )),
                 RendererProperty::EdgeColor => {
-                    let spec = renderer_attr(&renderer, "egcolor", "#000000");
-                    let rgba = resolve_script_color(&spec).unwrap_or(cuemol_gfx::Rgba8 {
-                        r: 0,
-                        g: 0,
-                        b: 0,
-                        a: 255,
-                    });
+                    let spec = renderer_effective_attr(&renderer, "egcolor", "#000000");
+                    let rgba = resolve_script_color_in_scope(&spec, renderer.scene_uid).unwrap_or(
+                        cuemol_gfx::Rgba8 {
+                            r: 0,
+                            g: 0,
+                            b: 0,
+                            a: 255,
+                        },
+                    );
                     Ok(make_color(
                         cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a),
                         ctx,
@@ -16948,6 +23776,7 @@ impl DesktopAppState {
                     }
                 });
                 script_cmds::push(ScriptCmd::SetRendererVisible {
+                    scene_uid: Some(renderer.scene_uid),
                     object: script_object(renderer.object_uid)?.name,
                     renderer: renderer.name,
                     visible,
@@ -16996,6 +23825,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererProp {
+                scene_uid: Some(renderer.scene_uid),
                 object: script_object(renderer.object_uid)?.name,
                 renderer: renderer.name,
                 key: key.to_string(),
@@ -17033,6 +23863,175 @@ impl DesktopAppState {
             OmpThreads,
             XferFunctionType,
         }
+        fn map_renderer_properties(
+            renderer_type: &str,
+        ) -> Vec<(&'static str, MapRendererProperty, bool)> {
+            if renderer_type == "molsurf" {
+                return vec![("multi_grad", MapRendererProperty::MultiGradient, false)];
+            }
+            if !is_map_renderer_type(renderer_type) {
+                return Vec::new();
+            }
+            let mut properties = vec![
+                ("maxLevel", MapRendererProperty::MaxLevel, false),
+                ("minLevel", MapRendererProperty::MinLevel, false),
+                ("colormode", MapRendererProperty::ColorMode, true),
+                ("color", MapRendererProperty::Color, true),
+                ("defaultcolor", MapRendererProperty::Color, true),
+                ("siglevel", MapRendererProperty::SigLevel, true),
+                ("extent", MapRendererProperty::Extent, true),
+                ("center", MapRendererProperty::Center, true),
+                ("level", MapRendererProperty::Level, true),
+                ("use_pbc", MapRendererProperty::UsePbc, true),
+                ("use_abslevel", MapRendererProperty::UseAbsLevel, true),
+                ("bndry_rng", MapRendererProperty::BoundaryRange, true),
+                ("bndry_molname", MapRendererProperty::BoundaryMolecule, true),
+                ("bndry_sel", MapRendererProperty::BoundarySelection, true),
+                ("multi_grad", MapRendererProperty::MultiGradient, false),
+                ("color_mapname", MapRendererProperty::ColorMapName, true),
+                ("maxExtent", MapRendererProperty::MaxExtent, false),
+                ("autoupdate", MapRendererProperty::AutoUpdate, true),
+                ("dragupdate", MapRendererProperty::DragUpdate, true),
+            ];
+            if matches!(renderer_type, "isosurf" | "MapSurfRenderer") {
+                properties.extend([
+                    ("cullface", MapRendererProperty::CullFace, true),
+                    ("drawmode", MapRendererProperty::DrawMode, true),
+                    ("width", MapRendererProperty::Width, true),
+                    ("binning", MapRendererProperty::Binning, true),
+                    ("max_grids", MapRendererProperty::MaxGrids, true),
+                    ("glrender_mode", MapRendererProperty::GlRenderMode, true),
+                    ("omp_thr", MapRendererProperty::OmpThreads, true),
+                ]);
+            } else if matches!(renderer_type, "gpu_mapvol" | "GLSLMapVolRenderer") {
+                properties.push(("xferfn_type", MapRendererProperty::XferFunctionType, true));
+            } else {
+                properties.extend([
+                    ("width", MapRendererProperty::Width, true),
+                    ("bufsize", MapRendererProperty::BufferSize, true),
+                ]);
+            }
+            properties
+        }
+        fn map_renderer_fallback_property(
+            renderer_type: &str,
+            name: &'static str,
+            property: MapRendererProperty,
+            writable: bool,
+        ) -> RendererAttrProperty {
+            use RendererAttrKind::{
+                Boolean, Color, Integer, Real, Selection, String as Text, Vector,
+            };
+            let (key, kind, default) = match property {
+                MapRendererProperty::MaxLevel => ("maxLevel", Real, "0"),
+                MapRendererProperty::MinLevel => ("minLevel", Real, "0"),
+                MapRendererProperty::ColorMode => ("colormode", Text, "solid"),
+                MapRendererProperty::Color => (
+                    "color",
+                    Color,
+                    if matches!(
+                        renderer_type,
+                        "gpu_mapmesh"
+                            | "gpu_mapmesh2"
+                            | "gpu_mapvol"
+                            | "GLSLMapMeshRenderer"
+                            | "GLSLMapMeshRenderer2"
+                            | "GLSLMapVolRenderer"
+                    ) {
+                        "#00ff00"
+                    } else {
+                        "#0000ff"
+                    },
+                ),
+                MapRendererProperty::SigLevel => ("siglevel", Real, "1.1"),
+                MapRendererProperty::Extent => ("extent", Real, "15"),
+                MapRendererProperty::Center => ("center", Vector, "(0,0,0,0)"),
+                MapRendererProperty::Level => ("siglevel", Real, "1.1"),
+                MapRendererProperty::UsePbc => ("use_pbc", Boolean, "true"),
+                MapRendererProperty::UseAbsLevel => ("use_abslevel", Boolean, "false"),
+                MapRendererProperty::BoundaryRange => ("bndry_rng", Real, "5"),
+                MapRendererProperty::BoundaryMolecule => ("bndry_molname", Text, ""),
+                MapRendererProperty::BoundarySelection => ("bndry_sel", Selection, ""),
+                MapRendererProperty::MultiGradient => ("multi_grad", Text, ""),
+                MapRendererProperty::ColorMapName => ("color_mapname", Text, ""),
+                MapRendererProperty::MaxExtent => ("maxExtent", Real, "0"),
+                MapRendererProperty::Width => (
+                    "width",
+                    Real,
+                    if matches!(renderer_type, "isosurf" | "MapSurfRenderer") {
+                        "1.2"
+                    } else {
+                        "1"
+                    },
+                ),
+                MapRendererProperty::BufferSize => ("bufsize", Integer, "100"),
+                MapRendererProperty::AutoUpdate => ("autoupdate", Boolean, "true"),
+                MapRendererProperty::DragUpdate => (
+                    "dragupdate",
+                    Boolean,
+                    if matches!(
+                        renderer_type,
+                        "gpu_mapmesh"
+                            | "gpu_mapmesh2"
+                            | "gpu_mapvol"
+                            | "GLSLMapMeshRenderer"
+                            | "GLSLMapMeshRenderer2"
+                            | "GLSLMapVolRenderer"
+                    ) {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                ),
+                MapRendererProperty::CullFace => ("cullface", Boolean, "false"),
+                MapRendererProperty::DrawMode => ("drawmode", Text, "fill"),
+                MapRendererProperty::Binning => ("binning", Integer, "1"),
+                MapRendererProperty::MaxGrids => ("max_grids", Integer, "100"),
+                MapRendererProperty::GlRenderMode => ("glrender_mode", Text, "displist"),
+                MapRendererProperty::OmpThreads => ("omp_thr", Integer, "-1"),
+                MapRendererProperty::XferFunctionType => ("xferfn_type", Text, "rainbow1"),
+            };
+            RendererAttrProperty {
+                name,
+                key,
+                kind,
+                default,
+                writable,
+            }
+        }
+        fn renderer_type_for_runtime_class(class_name: &str) -> Option<&'static str> {
+            match class_name {
+                "SimpleRenderer" => Some("simple"),
+                "BallStickRenderer" => Some("ballstick"),
+                "CPKRenderer" | "CPK2Renderer" => Some("cpk"),
+                "TraceRenderer" => Some("trace"),
+                "SplineRenderer" => Some("spline"),
+                "TubeRenderer" => Some("tube"),
+                "RibbonRenderer" => Some("ribbon"),
+                "Ribbon2Renderer" => Some("cartoon"),
+                "NARenderer" => Some("nucl"),
+                "AnIsoURenderer" => Some("anisou"),
+                "DisoRenderer" => Some("disorder"),
+                "AtomIntrRenderer" => Some("atomintr"),
+                "RendGroup" => Some("*group"),
+                "NameLabelRenderer" => Some("*namelabel"),
+                "SelectionRenderer" => Some("*selection"),
+                "DirectSurfRenderer" => Some("directsurf"),
+                "DirectSurfRenderer2" => Some("dsurf2"),
+                "MolSurfRenderer" => Some("molsurf"),
+                "SymmRenderer" => Some("symm"),
+                "UnitCellRenderer" => Some("unitcell"),
+                "LWRenderer" => Some("lwrend"),
+                "MapMeshRenderer" => Some("contour"),
+                "GLSLMapMeshRenderer" => Some("gpu_mapmesh"),
+                "GLSLMapMeshRenderer2" => Some("gpu_mapmesh"),
+                "GLSLMapVolRenderer" => Some("gpu_mapvol"),
+                "MapSurfRenderer" => Some("isosurf"),
+                "TestRenderer" => Some("test"),
+                "MS2TestRenderer" => Some("ms2test"),
+                _ => None,
+            }
+        }
         fn renderer_runtime_class(renderer_type: &str) -> &str {
             match renderer_type {
                 "simple" => "SimpleRenderer",
@@ -17060,6 +24059,8 @@ impl DesktopAppState {
                 "gpu_mapmesh" => "GLSLMapMeshRenderer",
                 "gpu_mapvol" => "GLSLMapVolRenderer",
                 "isosurf" => "MapSurfRenderer",
+                "test" => "TestRenderer",
+                "ms2test" => "MS2TestRenderer",
                 value => value,
             }
         }
@@ -17099,7 +24100,8 @@ impl DesktopAppState {
                 | "NameLabelRenderer"
                 | "AtomIntrRenderer"
                 | "SymmRenderer"
-                | "UnitCellRenderer" => matches!(class_name, "MolCoord" | "MorphMol"),
+                | "UnitCellRenderer"
+                | "MS2TestRenderer" => matches!(class_name, "MolCoord" | "MorphMol"),
                 _ => !class_name.is_empty(),
             }
         }
@@ -17118,18 +24120,18 @@ impl DesktopAppState {
             )
         }
         fn map_renderer_number(renderer: &ScriptRend, name: &str, default: f64) -> f64 {
-            renderer
-                .attributes
-                .get(name)
-                .and_then(|value| value.parse::<f64>().ok())
+            renderer_effective_attr(renderer, name, "")
+                .parse::<f64>()
+                .ok()
                 .unwrap_or(default)
         }
         fn map_renderer_bool(renderer: &ScriptRend, name: &str, default: bool) -> bool {
-            renderer
-                .attributes
-                .get(name)
-                .map(|value| qsc_bool(value))
-                .unwrap_or(default)
+            let value = renderer_effective_attr(renderer, name, "");
+            if value.is_empty() {
+                default
+            } else {
+                qsc_bool(&value)
+            }
         }
         fn map_renderer_property_get(
             property: MapRendererProperty,
@@ -17160,7 +24162,10 @@ impl DesktopAppState {
                     })))
                 }
                 MapRendererProperty::ColorMode => {
-                    Ok(JsString::from(renderer_attr(&renderer, "colormode", "solid")).into())
+                    Ok(
+                        JsString::from(renderer_effective_attr(&renderer, "colormode", "solid"))
+                            .into(),
+                    )
                 }
                 MapRendererProperty::Color => {
                     let default = if matches!(
@@ -17175,13 +24180,15 @@ impl DesktopAppState {
                     } else {
                         "#0000ff"
                     };
-                    let spec = renderer_attr(&renderer, "color", default);
-                    let rgba = resolve_script_color(&spec).unwrap_or(cuemol_gfx::Rgba8 {
-                        r: 0,
-                        g: 0,
-                        b: 255,
-                        a: 255,
-                    });
+                    let spec = renderer_effective_attr(&renderer, "color", default);
+                    let rgba = resolve_script_color_in_scope(&spec, renderer.scene_uid).unwrap_or(
+                        cuemol_gfx::Rgba8 {
+                            r: 0,
+                            g: 0,
+                            b: 255,
+                            a: 255,
+                        },
+                    );
                     Ok(make_color(
                         cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a),
                         ctx,
@@ -17194,11 +24201,13 @@ impl DesktopAppState {
                     Ok(JsValue::new(map_renderer_number(&renderer, "extent", 15.0)))
                 }
                 MapRendererProperty::Center => {
-                    let center = renderer
-                        .attributes
-                        .get("center")
-                        .and_then(|value| Vector4::from_script_string(value).ok())
-                        .unwrap_or(Vector4::ZERO);
+                    let center = Vector4::from_script_string(&renderer_effective_attr(
+                        &renderer,
+                        "center",
+                        "(0,0,0,0)",
+                    ))
+                    .ok()
+                    .unwrap_or(Vector4::ZERO);
                     Ok(make_vector(center, ctx))
                 }
                 MapRendererProperty::Level => {
@@ -17222,15 +24231,17 @@ impl DesktopAppState {
                     "bndry_rng",
                     5.0,
                 ))),
-                MapRendererProperty::BoundaryMolecule => {
-                    Ok(JsString::from(renderer_attr(&renderer, "bndry_molname", "")).into())
-                }
+                MapRendererProperty::BoundaryMolecule => Ok(JsString::from(
+                    renderer_effective_attr(&renderer, "bndry_molname", ""),
+                )
+                .into()),
                 MapRendererProperty::BoundarySelection => {
                     let selection = make_sel_command(ctx);
                     js_sel_compile(
                         &selection,
                         &[
-                            JsString::from(renderer_attr(&renderer, "bndry_sel", "*")).into(),
+                            JsString::from(renderer_effective_attr(&renderer, "bndry_sel", ""))
+                                .into(),
                             JsValue::new(0),
                         ],
                         ctx,
@@ -17269,7 +24280,10 @@ impl DesktopAppState {
                     Ok(gradient)
                 }
                 MapRendererProperty::ColorMapName => {
-                    Ok(JsString::from(renderer_attr(&renderer, "color_mapname", "")).into())
+                    Ok(
+                        JsString::from(renderer_effective_attr(&renderer, "color_mapname", ""))
+                            .into(),
+                    )
                 }
                 MapRendererProperty::MaxExtent => {
                     let map = script_object(renderer.object_uid)?.scalar_map;
@@ -17332,9 +24346,10 @@ impl DesktopAppState {
                 MapRendererProperty::CullFace => Ok(JsValue::new(map_renderer_bool(
                     &renderer, "cullface", false,
                 ))),
-                MapRendererProperty::DrawMode => {
-                    Ok(JsString::from(renderer_attr(&renderer, "drawmode", "fill")).into())
-                }
+                MapRendererProperty::DrawMode => Ok(JsString::from(renderer_effective_attr(
+                    &renderer, "drawmode", "fill",
+                ))
+                .into()),
                 MapRendererProperty::Binning => Ok(JsValue::new(map_renderer_number(
                     &renderer, "binning", 1.0,
                 ) as i32)),
@@ -17343,18 +24358,19 @@ impl DesktopAppState {
                     "max_grids",
                     100.0,
                 ))),
-                MapRendererProperty::GlRenderMode => {
-                    Ok(
-                        JsString::from(renderer_attr(&renderer, "glrender_mode", "displist"))
-                            .into(),
-                    )
-                }
+                MapRendererProperty::GlRenderMode => Ok(JsString::from(renderer_effective_attr(
+                    &renderer,
+                    "glrender_mode",
+                    "displist",
+                ))
+                .into()),
                 MapRendererProperty::OmpThreads => Ok(JsValue::new(map_renderer_number(
                     &renderer, "omp_thr", -1.0,
                 ) as i32)),
-                MapRendererProperty::XferFunctionType => {
-                    Ok(JsString::from(renderer_attr(&renderer, "xferfn_type", "rainbow1")).into())
-                }
+                MapRendererProperty::XferFunctionType => Ok(JsString::from(
+                    renderer_effective_attr(&renderer, "xferfn_type", "rainbow1"),
+                )
+                .into()),
             }
         }
         fn map_renderer_property_set(
@@ -17466,6 +24482,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererProp {
+                scene_uid: Some(renderer.scene_uid),
                 object: script_object(renderer.object_uid)?.name,
                 renderer: renderer.name,
                 key: key.to_string(),
@@ -17479,7 +24496,7 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let renderer = script_renderer(renderer_proxy_uid(this, ctx)?)?;
-            let name = renderer_attr(&renderer, "color_mapname", "");
+            let name = renderer_effective_attr(&renderer, "color_mapname", "");
             let object = script_env::with(|env| {
                 env.objects
                     .iter()
@@ -17502,12 +24519,13 @@ impl DesktopAppState {
             let map = script_object(renderer.object_uid)?
                 .scalar_map
                 .ok_or_else(|| script_error("Density map is unavailable"))?;
-            let selector = renderer
-                .attributes
-                .get("bndry_sel")
-                .and_then(|value| parse_selector(value).ok())
-                .unwrap_or(Selector::All);
-            let boundary_name = renderer_attr(&renderer, "bndry_molname", "");
+            let selector = parse_script_selector(
+                &renderer_effective_attr(&renderer, "bndry_sel", ""),
+                renderer.scene_uid,
+            )
+            .ok()
+            .unwrap_or(Selector::All);
+            let boundary_name = renderer_effective_attr(&renderer, "bndry_molname", "");
             let boundary_points = (!boundary_name.is_empty())
                 .then(|| {
                     script_env::with(|env| {
@@ -17640,8 +24658,12 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let renderer = script_renderer(renderer_proxy_uid(this, ctx)?)?;
             Ok(
-                if script_env::with(|env| env.scene_uid == renderer.scene_uid) {
-                    make_scene_proxy(ctx)
+                if script_env::with(|env| {
+                    env.scenes
+                        .iter()
+                        .any(|scene| scene.uid == renderer.scene_uid)
+                }) {
+                    make_scene_proxy_for(renderer.scene_uid, ctx)
                 } else {
                     JsValue::null()
                 },
@@ -17665,6 +24687,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererProp {
+                scene_uid: Some(renderer.scene_uid),
                 object: script_object(renderer.object_uid)?.name,
                 renderer: renderer.name,
                 key: "style".to_string(),
@@ -17699,6 +24722,410 @@ impl DesktopAppState {
                 &renderer.rtype,
                 &class_name,
             )))
+        }
+        fn atom_intr_renderer(this: &JsValue, ctx: &mut Context) -> JsResult<ScriptRend> {
+            let renderer = script_renderer(renderer_proxy_uid(this, ctx)?)?;
+            if renderer.rtype != "atomintr" {
+                return Err(script_error("Receiver is not an AtomIntrRenderer"));
+            }
+            Ok(renderer)
+        }
+        fn pending_atom_intr_storage_id(this: &JsValue, ctx: &mut Context) -> JsResult<u64> {
+            if this_string_prop(this, "_renderer_type", ctx) != "atomintr" {
+                return Err(script_error("Receiver is not an AtomIntrRenderer"));
+            }
+            let id = object_number_prop(this, "_pending_atom_intr_id", ctx)? as u64;
+            if id == 0 {
+                return Err(script_error("AtomIntrRenderer storage is not available"));
+            }
+            Ok(id)
+        }
+        fn take_pending_atom_intr_lines(
+            this: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<Vec<AtomIntrLine>> {
+            if this_string_prop(this, "_renderer_type", ctx) != "atomintr" {
+                return Ok(Vec::new());
+            }
+            let id = pending_atom_intr_storage_id(this, ctx)?;
+            script_env::with_mut(|env| env.pending_atom_intr_lines.remove(&id))
+                .ok_or_else(|| script_error("AtomIntrRenderer storage is not available"))
+        }
+        fn append_atom_intr_line(
+            this: &JsValue,
+            line: AtomIntrLine,
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if !pending_renderer_is_attached(this, ctx)? {
+                let storage_id = pending_atom_intr_storage_id(this, ctx)?;
+                let id = script_env::with_mut(|env| {
+                    env.pending_atom_intr_lines
+                        .get_mut(&storage_id)
+                        .map(|lines| {
+                            let id = lines.len();
+                            lines.push(line);
+                            id
+                        })
+                })
+                .ok_or_else(|| script_error("AtomIntrRenderer storage is not available"))?;
+                return Ok(JsValue::new(id as f64));
+            }
+            let renderer = atom_intr_renderer(this, ctx)?;
+            let id = script_env::with_mut(|env| {
+                env.objects
+                    .iter_mut()
+                    .find(|object| object.uid == renderer.object_uid)
+                    .and_then(|object| {
+                        object
+                            .renderers
+                            .iter_mut()
+                            .find(|entry| entry.uid == renderer.uid)
+                    })
+                    .map(|entry| {
+                        let id = entry.atom_intr_lines.len();
+                        entry.atom_intr_lines.push(line.clone());
+                        id
+                    })
+            })
+            .ok_or_else(|| script_error("AtomIntrRenderer is not available"))?;
+            script_cmds::push(ScriptCmd::AppendAtomIntr {
+                object_uid: renderer.object_uid,
+                renderer_uid: renderer.uid,
+                line,
+            });
+            Ok(JsValue::new(id as f64))
+        }
+        fn atom_intr_atom(molecule_uid: u64, atom_id: i32) -> JsResult<(Vector4, String, String)> {
+            script_env::with(|env| {
+                let object = env
+                    .objects
+                    .iter()
+                    .find(|object| object.uid == molecule_uid)?;
+                let atom = env
+                    .molecules
+                    .iter()
+                    .find(|molecule| molecule.uid == molecule_uid)?
+                    .molecule
+                    .get_atom_by_id(atom_id)?;
+                let insertion = atom
+                    .ins_code
+                    .map_or_else(String::new, |value| value.to_string());
+                let label = format!(
+                    "{} {} {}{} {}",
+                    atom.chain_id, atom.res_name, atom.res_id, insertion, atom.name
+                );
+                let position = object.xform.mulvec(Vector4::new4(
+                    atom.position.x,
+                    atom.position.y,
+                    atom.position.z,
+                    1.0,
+                ));
+                Some((position, label, object.name.clone()))
+            })
+            .ok_or_else(|| {
+                script_error(format!(
+                    "Atom {atom_id} in molecule {molecule_uid} is not available"
+                ))
+            })
+        }
+        fn atom_intr_owner_positions(
+            owner_uid: u64,
+            world_positions: Vec<Vector4>,
+        ) -> JsResult<Vec<Vector4>> {
+            let owner_xform = script_object(owner_uid)?.xform;
+            let inverse = owner_xform
+                .invert()
+                .map_err(|error| script_error(error.to_string()))?;
+            Ok(world_positions
+                .into_iter()
+                .map(|position| inverse.mulvec(position))
+                .collect())
+        }
+        fn atom_intr_by_ids(
+            this: &JsValue,
+            kind: AtomIntrKind,
+            molecule_atom_ids: &[(u64, i32)],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let renderer = atom_intr_renderer(this, ctx)?;
+            let atoms = molecule_atom_ids
+                .iter()
+                .map(|(molecule_uid, atom_id)| atom_intr_atom(*molecule_uid, *atom_id))
+                .collect::<JsResult<Vec<_>>>()?;
+            let labels = atoms
+                .iter()
+                .map(|(_, label, _)| label.clone())
+                .collect::<Vec<_>>();
+            if molecule_atom_ids
+                .iter()
+                .all(|(molecule_uid, _)| *molecule_uid == renderer.object_uid)
+            {
+                let aids = script_env::with(|env| {
+                    let molecule = env
+                        .molecules
+                        .iter()
+                        .find(|molecule| molecule.uid == renderer.object_uid)?;
+                    molecule_atom_ids
+                        .iter()
+                        .map(|(_, atom_id)| {
+                            let aid = molecule.molecule.to_str_aid(*atom_id);
+                            (!aid.is_empty()).then_some(aid)
+                        })
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| script_error("AtomIntr atom reference is not available"))?;
+                return append_atom_intr_line(
+                    this,
+                    AtomIntrLine::from_atom_references(kind, aids, labels),
+                    ctx,
+                );
+            }
+            let positions = atom_intr_owner_positions(
+                renderer.object_uid,
+                atoms
+                    .iter()
+                    .map(|(position, _, _)| *position)
+                    .collect::<Vec<_>>(),
+            )?;
+            append_atom_intr_line(
+                this,
+                AtomIntrLine::from_positions_with_labels(kind, positions, labels),
+                ctx,
+            )
+        }
+        fn js_atom_intr_append(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let renderer_uid = renderer_proxy_uid(this, ctx)?;
+            let scope_id = script_renderer(renderer_uid)
+                .map(|renderer| renderer.scene_uid)
+                .unwrap_or_else(|_| script_env::with(|env| env.scene_uid));
+            let selections = [arg0(args, ctx), argn(args, 1, ctx)]
+                .into_iter()
+                .map(|selection| {
+                    parse_script_selector(&selection, scope_id).map(|selector| selector.to_string())
+                })
+                .collect::<JsResult<Vec<_>>>();
+            let Ok(selections) = selections else {
+                return Ok(JsValue::new(-1));
+            };
+            append_atom_intr_line(
+                this,
+                AtomIntrLine::from_selections(AtomIntrKind::Distance, selections),
+                ctx,
+            )
+        }
+        fn js_atom_intr_append_by_vectors(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let positions = vec![
+                vector_from_value(args.first().unwrap_or(&JsValue::undefined()), ctx)?,
+                vector_from_value(args.get(1).unwrap_or(&JsValue::undefined()), ctx)?,
+            ];
+            append_atom_intr_line(
+                this,
+                AtomIntrLine::from_positions(AtomIntrKind::Distance, positions),
+                ctx,
+            )
+        }
+        fn js_atom_intr_append_by_id(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let renderer = atom_intr_renderer(this, ctx)?;
+            let aid1 = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let molecule_uid2 = args
+                .get(1)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)? as u64;
+            let aid2 = args
+                .get(2)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            if renderer.object_uid == molecule_uid2 && aid1 == aid2 {
+                return Err(script_error(format!(
+                    "Cannot append degenerated distlabel for {}:{aid1}",
+                    renderer.object_uid
+                )));
+            }
+            let atom1 = atom_intr_atom(renderer.object_uid, aid1)?;
+            let atom2 = atom_intr_atom(molecule_uid2, aid2)?;
+            let result = atom_intr_by_ids(
+                this,
+                AtomIntrKind::Distance,
+                &[(renderer.object_uid, aid1), (molecule_uid2, aid2)],
+                ctx,
+            )?;
+            if args.get(3).is_some_and(JsValue::to_boolean) {
+                let distance = (atom1.0 - atom2.0).length3d();
+                script_cmds::push(ScriptCmd::LogWrite {
+                    message: format!(
+                        "Distance [{}] {} <--> [{}] {}: {distance} angstrom",
+                        atom1.2, atom1.1, atom2.2, atom2.1
+                    ),
+                    newline: true,
+                });
+            }
+            Ok(result)
+        }
+        fn js_atom_intr_append_angle_by_id(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let renderer = atom_intr_renderer(this, ctx)?;
+            let values = [
+                (
+                    renderer.object_uid,
+                    args.first()
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_i32(ctx)?,
+                ),
+                (
+                    args.get(1)
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_number(ctx)? as u64,
+                    args.get(2)
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_i32(ctx)?,
+                ),
+                (
+                    args.get(3)
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_number(ctx)? as u64,
+                    args.get(4)
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_i32(ctx)?,
+                ),
+            ];
+            atom_intr_by_ids(this, AtomIntrKind::Angle, &values, ctx)
+        }
+        fn js_atom_intr_append_torsion_by_id(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let renderer = atom_intr_renderer(this, ctx)?;
+            let values = [
+                (
+                    renderer.object_uid,
+                    args.first()
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_i32(ctx)?,
+                ),
+                (
+                    args.get(1)
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_number(ctx)? as u64,
+                    args.get(2)
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_i32(ctx)?,
+                ),
+                (
+                    args.get(3)
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_number(ctx)? as u64,
+                    args.get(4)
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_i32(ctx)?,
+                ),
+                (
+                    args.get(5)
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_number(ctx)? as u64,
+                    args.get(6)
+                        .cloned()
+                        .unwrap_or(JsValue::undefined())
+                        .to_i32(ctx)?,
+                ),
+            ];
+            atom_intr_by_ids(this, AtomIntrKind::Torsion, &values, ctx)
+        }
+        fn js_atom_intr_remove(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let id = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)? as usize;
+            if !pending_renderer_is_attached(this, ctx)? {
+                let storage_id = pending_atom_intr_storage_id(this, ctx)?;
+                let removed = script_env::with_mut(|env| {
+                    env.pending_atom_intr_lines
+                        .get_mut(&storage_id)
+                        .and_then(|lines| lines.get_mut(id))
+                        .is_some_and(AtomIntrLine::deactivate)
+                });
+                return Ok(JsValue::new(removed));
+            }
+            let renderer = atom_intr_renderer(this, ctx)?;
+            let removed = script_env::with_mut(|env| {
+                env.objects
+                    .iter_mut()
+                    .find(|object| object.uid == renderer.object_uid)
+                    .and_then(|object| {
+                        object
+                            .renderers
+                            .iter_mut()
+                            .find(|entry| entry.uid == renderer.uid)
+                    })
+                    .and_then(|entry| entry.atom_intr_lines.get_mut(id))
+                    .is_some_and(AtomIntrLine::deactivate)
+            });
+            if removed {
+                script_cmds::push(ScriptCmd::RemoveAtomIntr {
+                    object_uid: renderer.object_uid,
+                    renderer_uid: renderer.uid,
+                    id,
+                });
+            }
+            Ok(JsValue::new(removed))
+        }
+        fn js_atom_intr_get_defs_json(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if !pending_renderer_is_attached(this, ctx)? {
+                let storage_id = pending_atom_intr_storage_id(this, ctx)?;
+                let json = script_env::with(|env| {
+                    env.pending_atom_intr_lines
+                        .get(&storage_id)
+                        .map(|lines| cuemol_molstr::atom_intr_defs_json(lines))
+                })
+                .ok_or_else(|| script_error("AtomIntrRenderer storage is not available"))?;
+                return Ok(JsString::from(json).into());
+            }
+            let renderer = atom_intr_renderer(this, ctx)?;
+            Ok(JsString::from(cuemol_molstr::atom_intr_defs_json(
+                &renderer.atom_intr_lines,
+            ))
+            .into())
         }
         fn make_renderer_proxy(
             object_name: &str,
@@ -17889,17 +25316,17 @@ impl DesktopAppState {
                     ("bufsize", MapRendererProperty::BufferSize, true),
                 ]);
             }
-            let mut map_accessors = is_map_renderer
-                .then(|| {
-                    map_properties
-                        .into_iter()
-                        .map(|(name, property, writable)| {
-                            let (getter, setter) = map_accessor(ctx, name, property, writable);
-                            (name, getter, setter)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let mut map_accessors = if is_map_renderer {
+                map_properties
+                    .into_iter()
+                    .map(|(name, property, writable)| {
+                        let (getter, setter) = map_accessor(ctx, name, property, writable);
+                        (name, getter, setter)
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             if renderer.rtype == "molsurf" {
                 let (getter, setter) =
                     map_accessor(ctx, "multi_grad", MapRendererProperty::MultiGradient, false);
@@ -18014,6 +25441,44 @@ impl DesktopAppState {
                     1,
                 );
             }
+            if renderer.rtype == "atomintr" {
+                proxy
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append),
+                        js_string!("append"),
+                        2,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_by_id),
+                        js_string!("appendById"),
+                        4,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_by_vectors),
+                        js_string!("appendBy2Vecs"),
+                        2,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_angle_by_id),
+                        js_string!("appendAngleById"),
+                        5,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_torsion_by_id),
+                        js_string!("appendTorsionById"),
+                        7,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_remove),
+                        js_string!("remove"),
+                        1,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_get_defs_json),
+                        js_string!("getDefsJSON"),
+                        0,
+                    );
+            }
             let obj = proxy
                 .function(
                     NativeFunction::from_fn_ptr(js_renderer_set_visible),
@@ -18119,6 +25584,34 @@ impl DesktopAppState {
                 .map(|(name, renderer)| make_renderer_proxy(&name, renderer, ctx))
                 .unwrap_or_else(JsValue::null))
         }
+        fn js_scene_get_renderer_by_uid(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
+            let uid = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)? as u64;
+            let found = script_env::with(|env| {
+                env.objects
+                    .iter()
+                    .filter(|object| object.scene_uid == scene_uid)
+                    .find_map(|object| {
+                        object
+                            .renderers
+                            .iter()
+                            .find(|renderer| renderer.uid == uid)
+                            .cloned()
+                            .map(|renderer| (object.name.clone(), renderer))
+                    })
+            });
+            Ok(found
+                .map(|(name, renderer)| make_renderer_proxy(&name, renderer, ctx))
+                .unwrap_or_else(JsValue::null))
+        }
         fn js_scene_get_rend_by_name(
             this: &JsValue,
             args: &[JsValue],
@@ -18163,17 +25656,19 @@ impl DesktopAppState {
             }
             Err(script_error("listener object is not callable"))
         }
-        fn fire_scene_script_event(
+        fn fire_scene_script_event_for(
+            scene_uid: u64,
             event_type: i32,
             target_uid: u64,
             description: &str,
             ctx: &mut Context,
         ) -> JsResult<()> {
-            let (scene_uid, listeners) = script_env::with(|env| {
-                (
-                    env.scene_uid,
-                    env.scene_listeners.values().cloned().collect::<Vec<_>>(),
-                )
+            let listeners = script_env::with(|env| {
+                env.scene_listeners
+                    .values()
+                    .filter(|(listener_scene_uid, _)| *listener_scene_uid == scene_uid)
+                    .map(|(_, callback)| callback.clone())
+                    .collect::<Vec<_>>()
             });
             let args = [
                 JsString::from("sceneChanged").into(),
@@ -18223,86 +25718,115 @@ impl DesktopAppState {
             Ok(())
         }
         fn js_scene_start_undo(
-            _t: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let description = arg0(args, ctx);
             script_env::with_mut(|env| {
-                if let Some((_, nesting)) = env.undo_active.as_mut() {
-                    *nesting = nesting.saturating_add(1);
-                } else {
-                    env.undo_active = Some((description.clone(), 1));
+                if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) {
+                    if let Some((_, nesting)) = scene.undo_active.as_mut() {
+                        *nesting = nesting.saturating_add(1);
+                    } else {
+                        scene.undo_active = Some((description.clone(), 1));
+                    }
                 }
             });
-            script_cmds::push(ScriptCmd::StartUndoTxn { description });
+            script_cmds::push(ScriptCmd::StartUndoTxn {
+                scene_uid,
+                description,
+            });
             Ok(JsValue::undefined())
         }
         fn js_scene_commit_undo(
-            _t: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            script_env::with_mut(|env| {
-                let Some((description, nesting)) = env.undo_active.take() else {
-                    return;
+            let scene_uid = scene_proxy_uid(this, ctx)?;
+            let changed = script_env::with_mut(|env| {
+                let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) else {
+                    return false;
+                };
+                let Some((description, nesting)) = scene.undo_active.take() else {
+                    return false;
                 };
                 if nesting > 1 {
-                    env.undo_active = Some((description, nesting - 1));
+                    scene.undo_active = Some((description, nesting - 1));
                 } else {
-                    env.undo_descriptions.insert(0, description);
-                    env.redo_descriptions.clear();
+                    scene.undo_descriptions.insert(0, description);
+                    scene.redo_descriptions.clear();
                 }
+                true
             });
-            script_cmds::push(ScriptCmd::CommitUndoTxn);
-            let scene_uid = script_env::with(|env| env.scene_uid);
-            fire_scene_script_event(
-                cuemol_qsys::SceneEvent::SCE_SCENE_UNDOINFO,
-                scene_uid,
-                "",
-                ctx,
-            )?;
+            if changed {
+                script_cmds::push(ScriptCmd::CommitUndoTxn { scene_uid });
+                fire_scene_script_event_for(
+                    scene_uid,
+                    cuemol_qsys::SceneEvent::SCE_SCENE_UNDOINFO,
+                    scene_uid,
+                    "",
+                    ctx,
+                )?;
+            }
             Ok(JsValue::undefined())
         }
         fn js_scene_rollback_undo(
-            _t: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
-            _ctx: &mut Context,
+            ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            script_env::with_mut(|env| {
-                let Some((description, nesting)) = env.undo_active.take() else {
-                    return;
+            let scene_uid = scene_proxy_uid(this, ctx)?;
+            let changed = script_env::with_mut(|env| {
+                let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) else {
+                    return false;
+                };
+                let Some((description, nesting)) = scene.undo_active.take() else {
+                    return false;
                 };
                 if nesting > 1 {
-                    env.undo_active = Some((description, nesting - 1));
+                    scene.undo_active = Some((description, nesting - 1));
                 }
+                true
             });
-            script_cmds::push(ScriptCmd::RollbackUndoTxn);
+            if changed {
+                script_cmds::push(ScriptCmd::RollbackUndoTxn { scene_uid });
+            }
             Ok(JsValue::undefined())
         }
         fn js_scene_is_undoable(
-            _t: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
-            _ctx: &mut Context,
+            ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             Ok(JsValue::new(script_env::with(|env| {
-                !env.undo_descriptions.is_empty()
+                env.scenes
+                    .iter()
+                    .find(|scene| scene.uid == scene_uid)
+                    .is_some_and(|scene| !scene.undo_descriptions.is_empty())
             })))
         }
         fn js_scene_is_redoable(
-            _t: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
-            _ctx: &mut Context,
+            ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             Ok(JsValue::new(script_env::with(|env| {
-                !env.redo_descriptions.is_empty()
+                env.scenes
+                    .iter()
+                    .find(|scene| scene.uid == scene_uid)
+                    .is_some_and(|scene| !scene.redo_descriptions.is_empty())
             })))
         }
         fn js_scene_undo_desc(
-            _t: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let index = args
                 .first()
                 .cloned()
@@ -18312,8 +25836,10 @@ impl DesktopAppState {
                 String::new()
             } else {
                 script_env::with(|env| {
-                    env.undo_descriptions
-                        .get(index as usize)
+                    env.scenes
+                        .iter()
+                        .find(|scene| scene.uid == scene_uid)
+                        .and_then(|scene| scene.undo_descriptions.get(index as usize))
                         .cloned()
                         .unwrap_or_default()
                 })
@@ -18321,10 +25847,11 @@ impl DesktopAppState {
             Ok(JsString::from(description.as_str()).into())
         }
         fn js_scene_redo_desc(
-            _t: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let index = args
                 .first()
                 .cloned()
@@ -18334,8 +25861,10 @@ impl DesktopAppState {
                 String::new()
             } else {
                 script_env::with(|env| {
-                    env.redo_descriptions
-                        .get(index as usize)
+                    env.scenes
+                        .iter()
+                        .find(|scene| scene.uid == scene_uid)
+                        .and_then(|scene| scene.redo_descriptions.get(index as usize))
                         .cloned()
                         .unwrap_or_default()
                 })
@@ -18343,24 +25872,33 @@ impl DesktopAppState {
             Ok(JsString::from(description.as_str()).into())
         }
         fn js_scene_undo_size(
-            _t: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
-            _ctx: &mut Context,
+            ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             Ok(JsValue::new(script_env::with(|env| {
-                env.undo_descriptions.len() as f64
+                env.scenes
+                    .iter()
+                    .find(|scene| scene.uid == scene_uid)
+                    .map_or(0.0, |scene| scene.undo_descriptions.len() as f64)
             })))
         }
         fn js_scene_redo_size(
-            _t: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
-            _ctx: &mut Context,
+            ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             Ok(JsValue::new(script_env::with(|env| {
-                env.redo_descriptions.len() as f64
+                env.scenes
+                    .iter()
+                    .find(|scene| scene.uid == scene_uid)
+                    .map_or(0.0, |scene| scene.redo_descriptions.len() as f64)
             })))
         }
-        fn js_scene_undo(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+        fn js_scene_undo(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let index = args
                 .first()
                 .cloned()
@@ -18371,21 +25909,25 @@ impl DesktopAppState {
             }
             let index = index as usize;
             let changed = script_env::with_mut(|env| {
-                if env.undo_descriptions.len() <= index {
+                let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) else {
+                    return false;
+                };
+                if scene.undo_descriptions.len() <= index {
                     return false;
                 }
                 for _ in 0..=index {
-                    let description = env.undo_descriptions.remove(0);
-                    env.redo_descriptions.insert(0, description);
+                    let description = scene.undo_descriptions.remove(0);
+                    scene.redo_descriptions.insert(0, description);
                 }
                 true
             });
             if changed {
-                script_cmds::push(ScriptCmd::UndoScene { index });
+                script_cmds::push(ScriptCmd::UndoScene { scene_uid, index });
             }
             Ok(JsValue::new(changed))
         }
-        fn js_scene_redo(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+        fn js_scene_redo(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let index = args
                 .first()
                 .cloned()
@@ -18396,36 +25938,43 @@ impl DesktopAppState {
             }
             let index = index as usize;
             let changed = script_env::with_mut(|env| {
-                if env.redo_descriptions.len() <= index {
+                let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) else {
+                    return false;
+                };
+                if scene.redo_descriptions.len() <= index {
                     return false;
                 }
                 for _ in 0..=index {
-                    let description = env.redo_descriptions.remove(0);
-                    env.undo_descriptions.insert(0, description);
+                    let description = scene.redo_descriptions.remove(0);
+                    scene.undo_descriptions.insert(0, description);
                 }
                 true
             });
             if changed {
-                script_cmds::push(ScriptCmd::RedoScene { index });
+                script_cmds::push(ScriptCmd::RedoScene { scene_uid, index });
             }
             Ok(JsValue::new(changed))
         }
         fn js_scene_clear_undo(
-            _t: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let changed = script_env::with_mut(|env| {
+                let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) else {
+                    return false;
+                };
                 let changed =
-                    !env.undo_descriptions.is_empty() || !env.redo_descriptions.is_empty();
-                env.undo_descriptions.clear();
-                env.redo_descriptions.clear();
+                    !scene.undo_descriptions.is_empty() || !scene.redo_descriptions.is_empty();
+                scene.undo_descriptions.clear();
+                scene.redo_descriptions.clear();
                 changed
             });
-            script_cmds::push(ScriptCmd::ClearUndoData);
+            script_cmds::push(ScriptCmd::ClearUndoData { scene_uid });
             if changed {
-                let scene_uid = script_env::with(|env| env.scene_uid);
-                fire_scene_script_event(
+                fire_scene_script_event_for(
+                    scene_uid,
                     cuemol_qsys::SceneEvent::SCE_SCENE_UNDOINFO,
                     scene_uid,
                     "",
@@ -18439,7 +25988,27 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            js_exec(this, args, ctx)?;
+            let scene_uid = scene_proxy_uid(this, ctx)?;
+            let path = arg0(args, ctx);
+            let path = if Path::new(&path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                let base_path = scene_attr_for(scene_uid, "basePath", "");
+                if base_path.is_empty() {
+                    PathBuf::from(path)
+                } else {
+                    Path::new(&base_path).join(path)
+                }
+            };
+            let source = Source::from_filepath(&path).map_err(|error| {
+                script_error(format!("execJSFile({}) failed: {error}", path.display()))
+            })?;
+            let global = ctx.global_object().clone();
+            let previous = global.get(js_string!("scene"), ctx)?;
+            global.set(js_string!("scene"), this.clone(), true, ctx)?;
+            let result = ctx.eval(source);
+            global.set(js_string!("scene"), previous, true, ctx)?;
+            result?;
             Ok(JsValue::new(true))
         }
         #[derive(Clone, Copy)]
@@ -18462,20 +26031,12 @@ impl DesktopAppState {
             ActiveObject,
             ActiveRenderer,
             ActiveView,
+            ObjectNames,
+            ObjectUids,
+            ViewUids,
             UseColorProof,
             IccFilename,
             IccIntent,
-        }
-        fn scene_attr(name: &str, default: &str) -> String {
-            script_env::with(|env| {
-                env.scene_attributes
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_else(|| default.to_string())
-            })
-        }
-        fn scene_attr_bool(name: &str, default: bool) -> bool {
-            scene_attr(name, if default { "true" } else { "false" }).eq_ignore_ascii_case("true")
         }
         fn scene_proxy_uid(this: &JsValue, ctx: &mut Context) -> JsResult<u64> {
             this.as_object()
@@ -18514,16 +26075,50 @@ impl DesktopAppState {
             let scene_uid = scene_proxy_uid(this, ctx)?;
             if matches!(property, SceneProperty::BackgroundColor) {
                 let spec = scene_attr_for(scene_uid, "bgcolor", "#000000");
-                let rgba = resolve_script_color(&spec).unwrap_or(cuemol_gfx::Rgba8 {
-                    r: 0,
-                    g: 0,
-                    b: 0,
-                    a: 255,
-                });
+                let rgba =
+                    resolve_script_color_in_scope(&spec, scene_uid).unwrap_or(cuemol_gfx::Rgba8 {
+                        r: 0,
+                        g: 0,
+                        b: 0,
+                        a: 255,
+                    });
                 return Ok(make_color(
                     cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a),
                     ctx,
                 ));
+            }
+            if matches!(property, SceneProperty::ObjectNames) {
+                let names = script_env::with(|env| {
+                    env.objects
+                        .iter()
+                        .filter(|object| object.scene_uid == scene_uid)
+                        .map(|object| JsString::from(object.name.as_str()).into())
+                        .collect::<Vec<JsValue>>()
+                });
+                return Ok(JsArray::from_iter(names, ctx).into());
+            }
+            if matches!(
+                property,
+                SceneProperty::ObjectUids | SceneProperty::ViewUids
+            ) {
+                let value = script_env::with(|env| match property {
+                    SceneProperty::ObjectUids => env
+                        .objects
+                        .iter()
+                        .filter(|object| object.scene_uid == scene_uid)
+                        .map(|object| object.uid.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    SceneProperty::ViewUids => env
+                        .views
+                        .iter()
+                        .filter(|view| view.scene_uid().get() == scene_uid)
+                        .map(|view| view.uid().get().to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    _ => unreachable!(),
+                });
+                return Ok(JsString::from(value).into());
             }
             Ok(match property {
                 SceneProperty::Modified => {
@@ -18587,28 +26182,30 @@ impl DesktopAppState {
                 SceneProperty::OnLoad => {
                     JsString::from(scene_attr_for(scene_uid, "onload", "")).into()
                 }
-                SceneProperty::ActiveObject => JsValue::new(
-                    scene_attr_for(scene_uid, "activeObjID", "0")
-                        .parse::<u64>()
-                        .unwrap_or(0) as f64,
-                ),
-                SceneProperty::ActiveRenderer => JsValue::new(
-                    scene_attr_for(scene_uid, "activeRendID", "0")
-                        .parse::<u64>()
-                        .unwrap_or(0) as f64,
-                ),
-                SceneProperty::ActiveView => JsValue::new(script_env::with(|env| {
-                    env.views
+                SceneProperty::ActiveObject => JsValue::new(script_env::with(|env| {
+                    env.scenes
                         .iter()
-                        .filter(|view| view.scene_uid().get() == scene_uid)
-                        .find(|view| view.active())
-                        .or_else(|| {
-                            env.views
-                                .iter()
-                                .find(|view| view.scene_uid().get() == scene_uid)
-                        })
-                        .map_or(0.0, |view| view.uid().get() as f64)
+                        .find(|scene| scene.uid == scene_uid)
+                        .and_then(|scene| scene.active_object_uid)
+                        .unwrap_or(0) as f64
                 })),
+                SceneProperty::ActiveRenderer => JsValue::new(script_env::with(|env| {
+                    env.scenes
+                        .iter()
+                        .find(|scene| scene.uid == scene_uid)
+                        .and_then(|scene| scene.active_renderer_uid)
+                        .unwrap_or(0) as f64
+                })),
+                SceneProperty::ActiveView => JsValue::new(script_env::with(|env| {
+                    env.scenes
+                        .iter()
+                        .find(|scene| scene.uid == scene_uid)
+                        .and_then(|scene| scene.active_view_uid)
+                        .unwrap_or(0) as f64
+                })),
+                SceneProperty::ObjectNames
+                | SceneProperty::ObjectUids
+                | SceneProperty::ViewUids => unreachable!(),
                 SceneProperty::UseColorProof => {
                     JsValue::new(scene_attr_bool_for(scene_uid, "use_colproof", false))
                 }
@@ -18655,9 +26252,47 @@ impl DesktopAppState {
                     ("aaJitterLevel", value.to_i32(ctx)?.clamp(0, 5).to_string())
                 }
                 SceneProperty::OnLoad => ("onload", value.to_string(ctx)?.to_std_string_escaped()),
-                SceneProperty::ActiveObject => ("activeObjID", value.to_number(ctx)?.to_string()),
+                SceneProperty::ActiveObject => {
+                    let uid = value.to_number(ctx)? as u64;
+                    let selected = script_env::with_mut(|env| {
+                        let exists = env
+                            .objects
+                            .iter()
+                            .any(|object| object.scene_uid == scene_uid && object.uid == uid);
+                        if exists {
+                            if let Some(scene) =
+                                env.scenes.iter_mut().find(|scene| scene.uid == scene_uid)
+                            {
+                                scene.active_object_uid = Some(uid);
+                            }
+                        }
+                        exists
+                    });
+                    if !selected {
+                        return Err(script_error(format!("Object {uid} is not in the scene")));
+                    }
+                    return Ok(JsValue::undefined());
+                }
                 SceneProperty::ActiveRenderer => {
-                    ("activeRendID", value.to_number(ctx)?.to_string())
+                    let uid = value.to_number(ctx)? as u64;
+                    let selected = script_env::with_mut(|env| {
+                        let exists = env.objects.iter().any(|object| {
+                            object.scene_uid == scene_uid
+                                && object.renderers.iter().any(|renderer| renderer.uid == uid)
+                        });
+                        if exists {
+                            if let Some(scene) =
+                                env.scenes.iter_mut().find(|scene| scene.uid == scene_uid)
+                            {
+                                scene.active_renderer_uid = Some(uid);
+                            }
+                        }
+                        exists
+                    });
+                    if !selected {
+                        return Err(script_error(format!("Renderer {uid} is not in the scene")));
+                    }
+                    return Ok(JsValue::undefined());
                 }
                 SceneProperty::ActiveView => {
                     return js_scene_set_active_view(this, args, ctx);
@@ -18684,7 +26319,10 @@ impl DesktopAppState {
                 | SceneProperty::Name
                 | SceneProperty::Source
                 | SceneProperty::SourceType
-                | SceneProperty::BasePath => {
+                | SceneProperty::BasePath
+                | SceneProperty::ObjectNames
+                | SceneProperty::ObjectUids
+                | SceneProperty::ViewUids => {
                     return Err(script_error("Scene property is read-only"));
                 }
             };
@@ -18706,7 +26344,8 @@ impl DesktopAppState {
                 name: name.to_string(),
                 value,
             });
-            fire_scene_script_event(
+            fire_scene_script_event_for(
+                scene_uid,
                 cuemol_qsys::SceneEvent::SCE_SCENE_PROPCHG,
                 scene_uid,
                 name,
@@ -18738,7 +26377,8 @@ impl DesktopAppState {
                 uid: scene_uid,
                 name,
             });
-            fire_scene_script_event(
+            fire_scene_script_event_for(
+                scene_uid,
                 cuemol_qsys::SceneEvent::SCE_SCENE_PROPCHG,
                 scene_uid,
                 "name",
@@ -18747,14 +26387,26 @@ impl DesktopAppState {
             Ok(JsValue::undefined())
         }
         fn js_scene_is_just_created(
-            _this: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
-            _ctx: &mut Context,
+            ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             Ok(JsValue::new(script_env::with(|env| {
-                env.objects.is_empty()
-                    && env.cameras.is_empty()
-                    && !scene_attr_bool("_script_modified", false)
+                env.objects
+                    .iter()
+                    .all(|object| object.scene_uid != scene_uid)
+                    && env
+                        .scenes
+                        .iter()
+                        .find(|scene| scene.uid == scene_uid)
+                        .is_some_and(|scene| {
+                            scene.cameras.is_empty()
+                                && !scene
+                                    .attributes
+                                    .get("_script_modified")
+                                    .is_some_and(|value| qsc_bool(value))
+                        })
             })))
         }
         fn js_scene_get_uid(
@@ -18765,10 +26417,11 @@ impl DesktopAppState {
             Ok(JsValue::new(scene_proxy_uid(this, ctx)? as f64))
         }
         fn js_scene_destroy_object(
-            _this: &JsValue,
+            this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let uid = args
                 .first()
                 .cloned()
@@ -18776,29 +26429,46 @@ impl DesktopAppState {
                 .to_number(ctx)? as u64;
             let exists = script_env::with_mut(|env| {
                 let previous = env.objects.len();
-                env.objects.retain(|object| object.uid != uid);
-                env.molecules.retain(|molecule| molecule.uid != uid);
+                env.objects
+                    .retain(|object| object.uid != uid || object.scene_uid != scene_uid);
+                env.molecules
+                    .retain(|molecule| molecule.uid != uid || molecule.scene_uid != scene_uid);
                 previous != env.objects.len()
             });
             if exists {
-                fire_scene_script_event(cuemol_qsys::SceneEvent::SCE_OBJ_REMOVING, uid, "", ctx)?;
-                script_cmds::push(ScriptCmd::DestroyObject { uid });
+                fire_scene_script_event_for(
+                    scene_uid,
+                    cuemol_qsys::SceneEvent::SCE_OBJ_REMOVING,
+                    uid,
+                    "",
+                    ctx,
+                )?;
+                script_cmds::push(ScriptCmd::DestroyObject { scene_uid, uid });
             }
             Ok(JsValue::new(exists))
         }
         fn js_scene_clear_data(
-            _this: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             script_env::with_mut(|env| {
-                env.objects.clear();
-                env.molecules.clear();
-                env.cameras.clear();
+                env.objects.retain(|object| object.scene_uid != scene_uid);
+                env.molecules
+                    .retain(|molecule| molecule.scene_uid != scene_uid);
+                if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) {
+                    scene.cameras.clear();
+                    scene.animation = AnimMgr::new();
+                }
+                if env.scene_uid == scene_uid {
+                    env.cameras.clear();
+                    env.animation = AnimMgr::new();
+                }
             });
-            script_cmds::push(ScriptCmd::ClearScene);
-            let scene_uid = script_env::with(|env| env.scene_uid);
-            fire_scene_script_event(
+            script_cmds::push(ScriptCmd::ClearScene { scene_uid });
+            fire_scene_script_event_for(
+                scene_uid,
                 cuemol_qsys::SceneEvent::SCE_SCENE_CLEARALL,
                 scene_uid,
                 "",
@@ -18865,14 +26535,21 @@ impl DesktopAppState {
             .into())
         }
         fn js_scene_dump(
-            _this: &JsValue,
+            this: &JsValue,
             _args: &[JsValue],
-            _ctx: &mut Context,
+            ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let scene_uid = scene_proxy_uid(this, ctx)?;
             let dump = script_env::with(|env| {
+                let scene_name = env
+                    .scenes
+                    .iter()
+                    .find(|scene| scene.uid == scene_uid)
+                    .map_or("", |scene| scene.name.as_str());
                 let objects = env
                     .objects
                     .iter()
+                    .filter(|object| object.scene_uid == scene_uid)
                     .map(|object| {
                         format!(
                             "  {}(name={}, UID={})",
@@ -18883,7 +26560,7 @@ impl DesktopAppState {
                     .join("\n");
                 format!(
                     "SCENE DUMP:\nScene : {{\n  name = <{}>\n  uid = <{}>\n{}\n}}\nSCENE DUMP END.",
-                    env.scene_name, env.scene_uid, objects
+                    scene_name, scene_uid, objects
                 )
             });
             script_cmds::push(ScriptCmd::Print(dump));
@@ -18955,6 +26632,9 @@ impl DesktopAppState {
                 ("activeObjID", SceneProperty::ActiveObject, true),
                 ("activeRendID", SceneProperty::ActiveRenderer, true),
                 ("activeViewID", SceneProperty::ActiveView, true),
+                ("objectNames", SceneProperty::ObjectNames, false),
+                ("obj_uids", SceneProperty::ObjectUids, false),
+                ("view_uids", SceneProperty::ViewUids, false),
                 ("use_colproof", SceneProperty::UseColorProof, true),
                 ("icc_filename", SceneProperty::IccFilename, true),
                 ("icc_intent", SceneProperty::IccIntent, true),
@@ -18966,48 +26646,10 @@ impl DesktopAppState {
                     (name, getter, setter)
                 })
                 .collect::<Vec<_>>();
-            let (object_names, object_uids, view_uids) = script_env::with(|env| {
-                let views = env
-                    .views
-                    .iter()
-                    .filter(|view| view.scene_uid().get() == scene_uid)
-                    .collect::<Vec<_>>();
-                let view_uids = views
-                    .iter()
-                    .map(|view| view.uid().get().to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                (
-                    env.objects
-                        .iter()
-                        .filter(|object| object.scene_uid == scene_uid)
-                        .map(|object| JsString::from(object.name.as_str()).into())
-                        .collect::<Vec<JsValue>>(),
-                    env.objects
-                        .iter()
-                        .filter(|object| object.scene_uid == scene_uid)
-                        .map(|object| object.uid.to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    view_uids,
-                )
-            });
-            let names_array = JsArray::from_iter(object_names, ctx);
             let mut object = ObjectInitializer::new(ctx);
             object
                 .property(js_string!("_class"), js_string!("Scene"), Attribute::all())
-                .property(js_string!("uid"), scene_uid as f64, Attribute::all())
-                .property(js_string!("objectNames"), names_array, Attribute::all())
-                .property(
-                    js_string!("obj_uids"),
-                    JsString::from(object_uids),
-                    Attribute::all(),
-                )
-                .property(
-                    js_string!("view_uids"),
-                    JsString::from(view_uids),
-                    Attribute::all(),
-                );
+                .property(js_string!("uid"), scene_uid as f64, Attribute::all());
             for (name, getter, setter) in accessors {
                 object.accessor(JsString::from(name), Some(getter), setter, Attribute::all());
             }
@@ -19038,7 +26680,7 @@ impl DesktopAppState {
                     1,
                 )
                 .function(
-                    NativeFunction::from_fn_ptr(js_get_object_by_uid),
+                    NativeFunction::from_fn_ptr(js_scene_get_object_by_uid),
                     js_string!("getObject"),
                     1,
                 )
@@ -19068,12 +26710,12 @@ impl DesktopAppState {
                     1,
                 )
                 .function(
-                    NativeFunction::from_fn_ptr(js_get_renderer_by_uid),
+                    NativeFunction::from_fn_ptr(js_scene_get_renderer_by_uid),
                     js_string!("getRenderer"),
                     1,
                 )
                 .function(
-                    NativeFunction::from_fn_ptr(js_get_view),
+                    NativeFunction::from_fn_ptr(js_scene_get_view),
                     js_string!("getView"),
                     1,
                 )
@@ -19108,7 +26750,7 @@ impl DesktopAppState {
                     1,
                 )
                 .function(
-                    NativeFunction::from_fn_ptr(js_scene_get_camera),
+                    NativeFunction::from_fn_ptr(js_scene_get_camera_ref),
                     js_string!("getCameraRef"),
                     1,
                 )
@@ -19345,12 +26987,25 @@ impl DesktopAppState {
                     uid,
                     name: String::new(),
                     attributes: BTreeMap::new(),
+                    active_object_uid: None,
+                    active_renderer_uid: None,
+                    active_view_uid: None,
                     cameras: Vec::new(),
                     animation: AnimMgr::new(),
+                    qsc_options: None,
+                    next_object_uid: cuemol_molstr::MolScene::first_object_uid(Uid::new(uid)).get(),
+                    undo_descriptions: Vec::new(),
+                    redo_descriptions: Vec::new(),
+                    undo_active: None,
                 });
                 uid
             });
-            script_cmds::push(ScriptCmd::CreateScene { expected_uid: uid });
+            script_cmds::push(ScriptCmd::CreateScene {
+                expected_uid: uid,
+                name: String::new(),
+                create_view: false,
+                activate: false,
+            });
             Ok(make_scene_proxy_for(uid, ctx))
         }
         fn js_scene_manager_destroy_scene(
@@ -19595,6 +27250,444 @@ impl DesktopAppState {
                 .search_readers_by_content(path, &nicknames, category, compressed, max_bytes);
             Ok(JsString::from(found).into())
         }
+        fn qsys_renderer_from_script(renderer: &ScriptRend) -> cuemol_qsys::Renderer {
+            let mut value =
+                cuemol_qsys::Renderer::with_uid(&renderer.rtype, Uid::new(renderer.uid));
+            value.set_name(renderer.name.clone());
+            value.set_visible(renderer.visible);
+            value.set_ui_locked(
+                renderer
+                    .attributes
+                    .get("locked")
+                    .is_some_and(|value| qsc_bool(value)),
+            );
+            if let Some(group) = renderer.attributes.get("group") {
+                value.set_group_name(group.clone());
+            }
+            if let Some(style) = renderer.attributes.get("style") {
+                value.set_style_names(style.clone());
+            }
+            if let Some(material) = renderer.attributes.get("material") {
+                value.set_default_material(material.clone());
+            }
+            if let Some(alpha) = renderer
+                .attributes
+                .get("alpha")
+                .and_then(|value| value.parse::<f64>().ok())
+            {
+                value.set_default_alpha(alpha);
+            }
+            if let Some(matrix) = renderer
+                .attributes
+                .get("xformMat")
+                .and_then(|value| Matrix4::from_script_string(value).ok())
+            {
+                value.set_xform_matrix(matrix);
+            }
+            if let Some(order) = renderer
+                .attributes
+                .get("ui_order")
+                .and_then(|value| value.parse::<i32>().ok())
+            {
+                value.set_ui_order(order);
+            }
+            value.set_edge_line_type(
+                match renderer.attributes.get("egtype").map(String::as_str) {
+                    Some("edges") => 1,
+                    Some("silhouette") => 2,
+                    _ => 0,
+                },
+            );
+            value.set_edge_line_width(
+                renderer
+                    .attributes
+                    .get("eglinew")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .unwrap_or(0.01),
+            );
+            if let Some(color) = renderer
+                .attributes
+                .get("egcolor")
+                .and_then(|value| resolve_script_color_in_scope(value, renderer.scene_uid))
+            {
+                value.set_edge_line_color(cuemol_gfx::SolidColor::from_rgba_u8(
+                    color.r, color.g, color.b, color.a,
+                ));
+            }
+            for (name, property) in &renderer.attributes {
+                value.set_property_str(name.clone(), property.clone());
+            }
+            value
+        }
+        fn qsys_renderer_from_script_value(
+            value: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<cuemol_qsys::Renderer> {
+            let uid = object_number_prop(value, "uid", ctx)? as u64;
+            if pending_renderer_is_attached(value, ctx)? {
+                return Ok(qsys_renderer_from_script(&script_renderer(uid)?));
+            }
+            let renderer_type = this_string_prop(value, "_renderer_type", ctx);
+            if renderer_type.is_empty() {
+                return Err(script_error("renderer value is not available"));
+            }
+            let mut renderer = cuemol_qsys::Renderer::new(renderer_type.clone());
+            renderer.set_name(this_string_prop(value, "name", ctx));
+            renderer.set_visible(
+                value
+                    .as_object()
+                    .ok_or_else(|| script_error("renderer value is not an object"))?
+                    .get(js_string!("_pending_visible"), ctx)?
+                    .to_boolean(),
+            );
+            let base = pending_renderer_base_attributes(value, ctx)?;
+            renderer.set_ui_locked(base.get("locked").is_some_and(|value| qsc_bool(value)));
+            renderer.set_style_names(base.get("style").cloned().unwrap_or_default());
+            renderer.set_default_material(base.get("material").cloned().unwrap_or_default());
+            renderer.set_default_alpha(
+                base.get("alpha")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .unwrap_or(1.0),
+            );
+            renderer.set_xform_matrix(
+                base.get("xformMat")
+                    .and_then(|value| Matrix4::from_script_string(value).ok())
+                    .unwrap_or(Matrix4::IDENTITY),
+            );
+            renderer.set_ui_order(
+                base.get("ui_order")
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or_default(),
+            );
+            renderer.set_group_name(base.get("group").cloned().unwrap_or_default());
+            renderer.set_edge_line_type(match base.get("egtype").map(String::as_str) {
+                Some("edges") => 1,
+                Some("silhouette") => 2,
+                _ => 0,
+            });
+            renderer.set_edge_line_width(
+                base.get("eglinew")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .unwrap_or(0.01),
+            );
+            renderer.set_edge_line_color(solid_color_from_script_value(
+                &value
+                    .as_object()
+                    .expect("renderer value was checked")
+                    .get(js_string!("egcolor"), ctx)?,
+                ctx,
+            )?);
+            for property in renderer_attr_properties(&renderer_type) {
+                let property_value = value
+                    .as_object()
+                    .expect("renderer value was checked")
+                    .get(pending_renderer_attr_key(property), ctx)?;
+                let property_value = if property_value.is_undefined() {
+                    property.default.to_string()
+                } else {
+                    property_value.to_string(ctx)?.to_std_string_escaped()
+                };
+                renderer.set_property_str(property.key, property_value);
+            }
+            Ok(renderer)
+        }
+        fn pending_renderer_from_qsys(
+            renderer: &cuemol_qsys::Renderer,
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let value = make_pending_renderer("", renderer.type_name(), renderer.name(), ctx);
+            let object = value
+                .as_object()
+                .ok_or_else(|| script_error("renderer proxy creation failed"))?;
+            object.set(
+                js_string!("_pending_visible"),
+                renderer.is_visible(),
+                true,
+                ctx,
+            )?;
+            for (name, value) in [
+                ("_pending_locked", JsValue::new(renderer.is_ui_locked())),
+                (
+                    "_pending_style",
+                    JsString::from(renderer.style_names()).into(),
+                ),
+                (
+                    "_pending_material",
+                    JsString::from(renderer.default_material()).into(),
+                ),
+                ("_pending_alpha", JsValue::new(renderer.default_alpha())),
+                ("_pending_ui_order", JsValue::new(renderer.ui_order())),
+                (
+                    "_pending_group",
+                    JsString::from(renderer.group_name()).into(),
+                ),
+                (
+                    "_pending_egtype",
+                    JsString::from(match renderer.edge_line_type() {
+                        1 => "edges",
+                        2 => "silhouette",
+                        _ => "none",
+                    })
+                    .into(),
+                ),
+                ("_pending_eglinew", JsValue::new(renderer.edge_line_width())),
+            ] {
+                object.set(JsString::from(name), value, true, ctx)?;
+            }
+            object.set(
+                js_string!("_pending_xformMat"),
+                make_matrix(renderer.xform_matrix(), ctx),
+                true,
+                ctx,
+            )?;
+            object.set(
+                js_string!("_pending_egcolor"),
+                make_color(renderer.edge_line_color().clone(), ctx),
+                true,
+                ctx,
+            )?;
+            for property in renderer_attr_properties(renderer.type_name()) {
+                if let Some(property_value) = renderer.property_str(property.key) {
+                    object.set(
+                        pending_renderer_attr_key(property),
+                        JsString::from(property_value),
+                        true,
+                        ctx,
+                    )?;
+                }
+            }
+            Ok(value)
+        }
+        fn script_array_values(value: &JsValue, ctx: &mut Context) -> JsResult<Vec<JsValue>> {
+            let object = value
+                .as_object()
+                .ok_or_else(|| script_error("array argument is not an object"))?;
+            let length = object.get(js_string!("length"), ctx)?.to_i32(ctx)?;
+            if length < 0 {
+                return Err(script_error("array length is out of range"));
+            }
+            (0..length)
+                .map(|index| object.get(index as u32, ctx))
+                .collect()
+        }
+        fn stream_xml_byte_array(bytes: ByteArray, ctx: &mut Context) -> JsResult<JsValue> {
+            let value = make_byte_array(ctx);
+            set_byte_array(&value, &bytes, ctx)?;
+            Ok(value)
+        }
+        fn js_stream_to_xml(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let value = args.first().cloned().unwrap_or(JsValue::undefined());
+            let class_name = object_optional_string_prop(&value, "_class", ctx)
+                .or_else(|| object_optional_string_prop(&value, "type", ctx))
+                .unwrap_or_default();
+            let manager = StreamManager::new();
+            if class_name == "Camera" {
+                return stream_xml_byte_array(
+                    manager.to_xml(&camera_from_value(&value, ctx)?),
+                    ctx,
+                );
+            }
+            stream_xml_byte_array(
+                manager.to_xml(&qsys_renderer_from_script_value(&value, ctx)?),
+                ctx,
+            )
+        }
+        fn js_stream_to_xml2(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let value = args.first().cloned().unwrap_or(JsValue::undefined());
+            let type_override = argn(args, 1, ctx);
+            let class_name = object_optional_string_prop(&value, "_class", ctx)
+                .or_else(|| object_optional_string_prop(&value, "type", ctx))
+                .unwrap_or_default();
+            let manager = StreamManager::new();
+            if class_name == "Camera" {
+                return stream_xml_byte_array(
+                    manager.to_xml_2(&camera_from_value(&value, ctx)?, &type_override),
+                    ctx,
+                );
+            }
+            stream_xml_byte_array(
+                manager.to_xml_2(
+                    &qsys_renderer_from_script_value(&value, ctx)?,
+                    &type_override,
+                ),
+                ctx,
+            )
+        }
+        fn stream_renderer_array_to_xml(
+            args: &[JsValue],
+            with_group: bool,
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let renderers =
+                script_array_values(args.first().unwrap_or(&JsValue::undefined()), ctx)?
+                    .iter()
+                    .map(|value| qsys_renderer_from_script_value(value, ctx))
+                    .collect::<JsResult<Vec<_>>>()?;
+            let manager = StreamManager::new();
+            let bytes = if with_group {
+                manager.rend_grp_to_xml(&renderers, &argn(args, 1, ctx))
+            } else {
+                manager.array_to_xml(&renderers)
+            };
+            stream_xml_byte_array(bytes, ctx)
+        }
+        fn js_stream_array_to_xml(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            stream_renderer_array_to_xml(args, false, ctx)
+        }
+        fn js_stream_renderer_group_to_xml(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            stream_renderer_array_to_xml(args, true, ctx)
+        }
+        fn js_stream_from_xml(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let bytes = byte_array_from_value(args.first().unwrap_or(&JsValue::undefined()), ctx)?;
+            let scene_id = args
+                .get(1)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let manager = StreamManager::new();
+            if let Ok(renderer) = manager.renderer_from_xml(&bytes, scene_id) {
+                return pending_renderer_from_qsys(&renderer, ctx);
+            }
+            if let Ok(camera) = manager.camera_from_xml(&bytes, scene_id) {
+                return make_camera_from_core(&camera, ctx);
+            }
+            Ok(JsValue::null())
+        }
+        fn js_stream_renderer_array_from_xml(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let bytes = byte_array_from_value(args.first().unwrap_or(&JsValue::undefined()), ctx)?;
+            let scene_id = args
+                .get(1)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let (group, renderers) = StreamManager::new()
+                .renderer_array_from_xml(&bytes, scene_id)
+                .map_err(|error| script_error(error.to_string()))?;
+            let mut values = Vec::with_capacity(renderers.len() + 1);
+            values.push(JsString::from(group).into());
+            values.extend(
+                renderers
+                    .iter()
+                    .map(|renderer| pending_renderer_from_qsys(renderer, ctx))
+                    .collect::<JsResult<Vec<_>>>()?,
+            );
+            Ok(JsArray::from_iter(values, ctx).into())
+        }
+        fn js_stream_load_async(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let reader = args.first().cloned().unwrap_or(JsValue::undefined());
+            let reader_name = object_string_prop(&reader, "name", ctx);
+            if reader_name.is_empty() {
+                return Err(script_error("loadObjectAsync requires an ObjReader"));
+            }
+            let id = script_env::with_mut(|env| env.stream_manager.load_object_async(&reader_name));
+            Ok(JsValue::new(id))
+        }
+        fn js_stream_supply_async(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let id = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let bytes = byte_array_from_value(args.get(1).unwrap_or(&JsValue::undefined()), ctx)?;
+            let length = args
+                .get(2)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            script_env::with_mut(|env| {
+                env.stream_manager
+                    .supply_data_async(id, bytes.as_bytes(), length);
+            });
+            Ok(JsValue::undefined())
+        }
+        fn js_stream_wait_async(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let id = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let loaded = script_env::with_mut(|env| env.stream_manager.wait_load_object_async(id))
+                .map_err(|error| script_error(error.to_string()))?;
+            let Some(loaded) = loaded else {
+                return Ok(JsValue::null());
+            };
+            match loaded {
+                cuemol_molstr::AsyncLoadedObject::Molecule(molecule) => {
+                    let value = make_molcoord("MolCoord", ctx);
+                    set_script_molecule_value(&value, molecule, ctx)?;
+                    Ok(value)
+                }
+                cuemol_molstr::AsyncLoadedObject::GridMap(grid) => {
+                    let map = DensityMap::from_grid_map(grid);
+                    let value = make_pending_density_map("DensityMap", ctx);
+                    let map_id = object_number_prop(&value, "_pending_map_id", ctx)? as u64;
+                    script_env::with_mut(|env| {
+                        env.pending_density_maps.insert(map_id, map.clone());
+                    });
+                    let object = value.as_object().expect("DensityMap proxy is an object");
+                    for (name, number) in [
+                        ("den_sigma", map.den_sigma()),
+                        ("den_min", map.den_min()),
+                        ("den_max", map.den_max()),
+                        ("den_mean", map.den_mean()),
+                    ] {
+                        object.set(JsString::from(name), number, true, ctx)?;
+                    }
+                    Ok(value)
+                }
+                cuemol_molstr::AsyncLoadedObject::Buffered { reader_type, data } => {
+                    let bytes = make_byte_array(ctx);
+                    set_byte_array(&bytes, &data, ctx)?;
+                    Ok(ObjectInitializer::new(ctx)
+                        .property(js_string!("type"), js_string!("Object"), Attribute::all())
+                        .property(js_string!("_class"), js_string!("Object"), Attribute::all())
+                        .property(
+                            js_string!("reader_type"),
+                            JsString::from(reader_type),
+                            Attribute::all(),
+                        )
+                        .property(js_string!("data"), bytes, Attribute::all())
+                        .build()
+                        .into())
+                }
+            }
+        }
         fn js_handler_set_path(
             this: &JsValue,
             args: &[JsValue],
@@ -19623,6 +27716,1037 @@ impl DesktopAppState {
             }
             Ok(JsValue::undefined())
         }
+        fn js_handler_attach(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let target = args.first().cloned().unwrap_or(JsValue::undefined());
+            if !target.is_object() {
+                return Err(script_error("attach target is not an object"));
+            }
+            this.as_object()
+                .ok_or_else(|| script_error("handler is not an object"))?
+                .set(js_string!("_target"), target, true, ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn js_handler_detach(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let object = this
+                .as_object()
+                .ok_or_else(|| script_error("handler is not an object"))?;
+            let target = object.get(js_string!("_target"), ctx)?;
+            object.set(js_string!("_target"), JsValue::null(), true, ctx)?;
+            Ok(target)
+        }
+        fn handler_is_molecule_reader(class_name: &str) -> bool {
+            matches!(
+                class_name,
+                "PDBFileReader"
+                    | "QdfPdbReader"
+                    | "QdfMolReader"
+                    | "MmcifMolReader"
+                    | "SDFMolReader"
+                    | "MOL2MolReader"
+                    | "GROFileReader"
+                    | "PsfReader"
+                    | "AmberPrmtopReader"
+                    | "NAMDCoorReader"
+            )
+        }
+        fn handler_is_density_map_reader(class_name: &str) -> bool {
+            matches!(
+                class_name,
+                "BrixMapReader"
+                    | "CCP4MapReader"
+                    | "MmcifMapReader"
+                    | "MTZ2MapReader"
+                    | "OpenDXPotReader"
+                    | "XplorMapReader"
+                    | "QdfDenMapReader"
+                    | "QdfPotReader"
+            )
+        }
+        fn handler_is_surface_reader(class_name: &str) -> bool {
+            matches!(
+                class_name,
+                "MSMSFileReader" | "PLYFileReader" | "QdfSurfReader"
+            )
+        }
+        fn handler_is_lw_reader(class_name: &str) -> bool {
+            class_name == "QdfLWObjReader"
+        }
+        fn js_handler_create_default_object(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let class_name = this_string_prop(this, "_class", ctx);
+            if handler_is_molecule_reader(&class_name) {
+                return Ok(make_molcoord("MolCoord", ctx));
+            }
+            if handler_is_density_map_reader(&class_name) {
+                let map_class = if matches!(class_name.as_str(), "OpenDXPotReader" | "QdfPotReader")
+                {
+                    "ElePotMap"
+                } else {
+                    "DensityMap"
+                };
+                return Ok(make_pending_density_map(map_class, ctx));
+            }
+            if handler_is_surface_reader(&class_name) {
+                return Ok(make_molsurf(ctx));
+            }
+            if handler_is_lw_reader(&class_name) {
+                return Ok(make_pending_lw_object(ctx));
+            }
+            Err(script_error(format!(
+                "{class_name}.createDefaultObj is not supported"
+            )))
+        }
+        fn compress_mode_name(value: i32) -> &'static str {
+            match value {
+                cuemol_qsys::InOutHandler::COMP_GZIP => "gzip",
+                cuemol_qsys::InOutHandler::COMP_BZIP2 => "bzip2",
+                cuemol_qsys::InOutHandler::COMP_XZIP => "xzip",
+                _ => "none",
+            }
+        }
+        fn compress_mode_from_value(value: &JsValue, ctx: &mut Context) -> JsResult<i32> {
+            if value.is_number() {
+                return value.to_i32(ctx);
+            }
+            match value.to_string(ctx)?.to_std_string_escaped().as_str() {
+                "none" => Ok(cuemol_qsys::InOutHandler::COMP_NONE),
+                "gzip" => Ok(cuemol_qsys::InOutHandler::COMP_GZIP),
+                "bzip2" => Ok(cuemol_qsys::InOutHandler::COMP_BZIP2),
+                "xzip" => Ok(cuemol_qsys::InOutHandler::COMP_XZIP),
+                name => Err(script_error(format!("unknown compression mode {name}"))),
+            }
+        }
+        fn lux_background_mode_name(value: i32) -> &'static str {
+            match value {
+                cuemol_render::LuxBackgroundMode::BG_WALL => "wall",
+                cuemol_render::LuxBackgroundMode::BG_BOX => "box",
+                _ => "transp",
+            }
+        }
+        fn lux_background_mode_from_value(value: &JsValue, ctx: &mut Context) -> JsResult<i32> {
+            if value.is_number() {
+                return value.to_i32(ctx);
+            }
+            match value.to_string(ctx)?.to_std_string_escaped().as_str() {
+                "transp" => Ok(cuemol_render::LuxBackgroundMode::BG_TRANSP),
+                "wall" => Ok(cuemol_render::LuxBackgroundMode::BG_WALL),
+                "box" => Ok(cuemol_render::LuxBackgroundMode::BG_BOX),
+                name => Err(script_error(format!("unknown Lux background mode {name}"))),
+            }
+        }
+        fn handler_compress_mode_prop(
+            this: &JsValue,
+            name: &str,
+            default: i32,
+            ctx: &mut Context,
+        ) -> JsResult<i32> {
+            let Some(value) = this
+                .as_object()
+                .and_then(|object| object.get(JsString::from(name), ctx).ok())
+                .filter(|value| !value.is_undefined())
+            else {
+                return Ok(default);
+            };
+            compress_mode_from_value(&value, ctx)
+        }
+        fn handler_bool_prop(this: &JsValue, name: &str, default: bool, ctx: &mut Context) -> bool {
+            this.as_object()
+                .and_then(|object| object.get(JsString::from(name), ctx).ok())
+                .filter(|value| !value.is_undefined())
+                .map_or(default, |value| value.to_boolean())
+        }
+        fn handler_i32_prop(
+            this: &JsValue,
+            name: &str,
+            default: i32,
+            ctx: &mut Context,
+        ) -> JsResult<i32> {
+            let Some(value) = this
+                .as_object()
+                .and_then(|object| object.get(JsString::from(name), ctx).ok())
+                .filter(|value| !value.is_undefined())
+            else {
+                return Ok(default);
+            };
+            value.to_i32(ctx)
+        }
+        fn handler_f64_prop(
+            this: &JsValue,
+            name: &str,
+            default: f64,
+            ctx: &mut Context,
+        ) -> JsResult<f64> {
+            let Some(value) = this
+                .as_object()
+                .and_then(|object| object.get(JsString::from(name), ctx).ok())
+                .filter(|value| !value.is_undefined())
+            else {
+                return Ok(default);
+            };
+            value.to_number(ctx)
+        }
+        fn script_handler_io(
+            this: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<cuemol_qsys::InOutHandler> {
+            let name = this_string_prop(this, "name", ctx);
+            let type_descr = this_string_prop(this, "typedescr", ctx);
+            let file_ext = this_string_prop(this, "fileext", ctx);
+            let category = handler_i32_prop(
+                this,
+                "category",
+                cuemol_molstr::HandlerCategory::OBJ_READER,
+                ctx,
+            )?;
+            let mut handler = cuemol_qsys::InOutHandler::new(name, type_descr, file_ext, category);
+            handler.set_path(this_string_prop(this, "path", ctx));
+            handler.set_compress_mode(handler_compress_mode_prop(this, "compress", 0, ctx)?);
+            handler.set_base64_flag(handler_bool_prop(this, "base64", false, ctx));
+            Ok(handler)
+        }
+        fn script_handler_target(this: &JsValue, ctx: &mut Context) -> JsResult<JsValue> {
+            let target = this
+                .as_object()
+                .ok_or_else(|| script_error("handler is not an object"))?
+                .get(js_string!("_target"), ctx)?;
+            if !target.is_object() {
+                return Err(script_error("handler is not attached"));
+            }
+            Ok(target)
+        }
+        fn density_map_from_electrostatic_map(map: &cuemol_surface::ElePotMap) -> DensityMap {
+            let counts = [map.col_no(), map.row_no(), map.sec_no()];
+            let intervals = counts.map(|count| count.max(1));
+            let delta = [
+                Vector4::new3(map.col_grid_size(), 0.0, 0.0),
+                Vector4::new3(0.0, map.row_grid_size(), 0.0),
+                Vector4::new3(0.0, 0.0, map.sec_grid_size()),
+            ];
+            let mut density = DensityMap::new();
+            density.set_map_float_array(
+                map.values(),
+                counts,
+                [0, 0, 0],
+                intervals,
+                map.origin(),
+                delta,
+            );
+            density
+        }
+        fn js_handler_read_density_map(
+            this: &JsValue,
+            class_name: &str,
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let handler = script_handler_io(this, ctx)?;
+            let bytes = handler
+                .read_bytes()
+                .map_err(|error| script_error(error.to_string()))?;
+            let mut potential_map = None;
+            let map = match class_name {
+                "BrixMapReader" => BrixMapReader::new().read_density_map_bytes(&bytes),
+                "CCP4MapReader" => {
+                    let mut reader = Ccp4MapReader::new();
+                    reader.set_normalize(handler_bool_prop(this, "normalize", false, ctx));
+                    reader.set_truncate_min(handler_bool_prop(this, "truncate_min", false, ctx));
+                    reader.set_min(handler_f64_prop(this, "min", 0.0, ctx)?);
+                    reader.set_truncate_max(handler_bool_prop(this, "truncate_max", false, ctx));
+                    reader.set_max(handler_f64_prop(this, "max", 5.0, ctx)?);
+                    reader.read_density_map_bytes(&bytes)
+                }
+                "MmcifMapReader" => {
+                    let input = std::str::from_utf8(&bytes).map_err(|error| {
+                        script_error(format!("mmCIF map is not UTF-8: {error}"))
+                    })?;
+                    let mut reader = cuemol_xtal::MmcifMapReader::new();
+                    reader.set_resolution(handler_f64_prop(this, "resolution", -1.0, ctx)?);
+                    reader.set_grid_size(handler_f64_prop(this, "gridsize", 0.33, ctx)?);
+                    reader.build_density_map_from_str(input)
+                }
+                "MTZ2MapReader" => {
+                    let mut reader = Mtz2MapReader::new();
+                    reader.set_resolution(handler_f64_prop(this, "resolution", -1.0, ctx)?);
+                    reader.set_grid_size(handler_f64_prop(this, "gridsize", 0.33, ctx)?);
+                    reader.set_column_f(this_string_prop(this, "clmn_F", ctx));
+                    reader.set_column_phi(this_string_prop(this, "clmn_PHI", ctx));
+                    reader.set_column_weight(this_string_prop(this, "clmn_WT", ctx));
+                    reader.read_bytes(&bytes).and_then(|()| {
+                        let object = iterator_object(this)
+                            .map_err(|error| CueMolError::invalid_argument(error.to_string()))?;
+                        object
+                            .set(js_string!("min_res"), reader.min_res(), true, ctx)
+                            .map_err(|error| CueMolError::invalid_argument(error.to_string()))?;
+                        object
+                            .set(js_string!("max_res"), reader.max_res(), true, ctx)
+                            .map_err(|error| CueMolError::invalid_argument(error.to_string()))?;
+                        object
+                            .set(
+                                js_string!("_column_info"),
+                                JsString::from(reader.column_info_json()),
+                                true,
+                                ctx,
+                            )
+                            .map_err(|error| CueMolError::invalid_argument(error.to_string()))?;
+                        reader.build_density_map()
+                    })
+                }
+                "OpenDXPotReader" => {
+                    let input = std::str::from_utf8(&bytes).map_err(|error| {
+                        script_error(format!("OpenDX map is not UTF-8: {error}"))
+                    })?;
+                    let mut reader = cuemol_surface::OpenDxPotReader::new();
+                    reader.set_smooth(handler_f64_prop(this, "smooth", -1.0, ctx)?);
+                    reader.read_str(input).map(|map| {
+                        potential_map = Some(map.clone());
+                        density_map_from_electrostatic_map(&map)
+                    })
+                }
+                "XplorMapReader" => {
+                    let input = std::str::from_utf8(&bytes).map_err(|error| {
+                        script_error(format!("XPLOR map is not UTF-8: {error}"))
+                    })?;
+                    XplorMapReader::new().read_density_map_str(input)
+                }
+                "QdfDenMapReader" => QdfDenMapReader::new().read_bytes(&bytes),
+                "QdfPotReader" => {
+                    cuemol_surface::QdfPotReader::new()
+                        .read_bytes(&bytes)
+                        .map(|map| {
+                            potential_map = Some(map.clone());
+                            density_map_from_electrostatic_map(&map)
+                        })
+                }
+                _ => unreachable!(),
+            }
+            .map_err(|error| script_error(error.to_string()))?;
+            let target = script_handler_target(this, ctx)?;
+            let map_id = object_number_prop(&target, "_pending_map_id", ctx)? as u64;
+            script_env::with_mut(|env| {
+                env.pending_density_maps.insert(map_id, map.clone());
+                if let Some(potential_map) = potential_map {
+                    env.pending_potential_maps.insert(map_id, potential_map);
+                }
+            });
+            let target = target
+                .as_object()
+                .ok_or_else(|| script_error("map reader target is not an object"))?;
+            for (name, value) in [
+                ("den_sigma", map.den_sigma()),
+                ("den_min", map.den_min()),
+                ("den_max", map.den_max()),
+                ("den_mean", map.den_mean()),
+            ] {
+                target.set(JsString::from(name), value, true, ctx)?;
+            }
+            target.set(
+                js_string!("_format"),
+                JsString::from(this_string_prop(this, "name", ctx)),
+                true,
+                ctx,
+            )?;
+            target.set(
+                js_string!("_source"),
+                JsString::from(this_string_prop(this, "path", ctx)),
+                true,
+                ctx,
+            )?;
+            Ok(JsValue::undefined())
+        }
+        fn js_handler_read_surface(
+            this: &JsValue,
+            class_name: &str,
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let handler = script_handler_io(this, ctx)?;
+            let mesh = match class_name {
+                "PLYFileReader" => {
+                    let bytes = handler
+                        .read_bytes()
+                        .map_err(|error| script_error(error.to_string()))?;
+                    cuemol_surface::PlyFileReader::new().read_bytes(&bytes)
+                }
+                "MSMSFileReader" => {
+                    let face_input = handler
+                        .read_string()
+                        .map_err(|error| script_error(error.to_string()))?;
+                    let vertex_path = this_string_prop(this, "vertex_file", ctx);
+                    if vertex_path.trim().is_empty() {
+                        return Err(script_error("MSMS vertex_file is not configured"));
+                    }
+                    let vertex_input = cuemol_molstr::read_text_maybe_compressed(
+                        std::path::Path::new(&vertex_path),
+                    )
+                    .map_err(|error| script_error(error.to_string()))?;
+                    cuemol_surface::read_msms_surface_str(&vertex_input, &face_input)
+                }
+                "QdfSurfReader" => {
+                    let bytes = handler
+                        .read_bytes()
+                        .map_err(|error| script_error(error.to_string()))?;
+                    cuemol_surface::QdfSurfReader::new()
+                        .read_bytes(&bytes)
+                        .map(|surface| surface.mesh().clone())
+                }
+                _ => unreachable!(),
+            }
+            .map_err(|error| script_error(error.to_string()))?;
+            let mut surface = MolSurfObj::new();
+            *surface.mesh_mut() = mesh;
+            let target = script_handler_target(this, ctx)?;
+            set_molsurf(&target, &surface, ctx)?;
+            let target = target
+                .as_object()
+                .ok_or_else(|| script_error("surface reader target is not an object"))?;
+            let source = this_string_prop(this, "path", ctx);
+            target.set(
+                JsString::from(pending_object_property_key(MoleculeProperty::Source)),
+                JsString::from(source.as_str()),
+                true,
+                ctx,
+            )?;
+            target.set(
+                JsString::from(pending_object_property_key(MoleculeProperty::Modified)),
+                false,
+                true,
+                ctx,
+            )?;
+            if let Some(uid) = target
+                .get(js_string!("uid"), ctx)?
+                .as_number()
+                .map(|value| value as u64)
+            {
+                script_env::with_mut(|env| {
+                    if let Some(object) = env.objects.iter_mut().find(|object| object.uid == uid) {
+                        object.source = source;
+                        object.modified = false;
+                    }
+                });
+            }
+            Ok(JsValue::undefined())
+        }
+        fn js_handler_read_lw_object(this: &JsValue, ctx: &mut Context) -> JsResult<JsValue> {
+            let bytes = script_handler_io(this, ctx)?
+                .read_bytes()
+                .map_err(|error| script_error(error.to_string()))?;
+            let object = cuemol_lwview::read_qdf_lwobj_bytes(&bytes)
+                .map_err(|error| script_error(error.to_string()))?;
+            let target = script_handler_target(this, ctx)?;
+            let object_id = object_number_prop(&target, "_pending_lw_id", ctx)? as u64;
+            let draw_count = object.draw_elements().len();
+            script_env::with_mut(|env| {
+                env.pending_lw_objects.insert(object_id, object);
+            });
+            target
+                .as_object()
+                .ok_or_else(|| script_error("LWObject reader target is not an object"))?
+                .set(js_string!("_draw_count"), draw_count as f64, true, ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn js_handler_read(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let class_name = this_string_prop(this, "_class", ctx);
+            if handler_is_density_map_reader(&class_name) {
+                return js_handler_read_density_map(this, &class_name, ctx);
+            }
+            if handler_is_surface_reader(&class_name) {
+                return js_handler_read_surface(this, &class_name, ctx);
+            }
+            if handler_is_lw_reader(&class_name) {
+                return js_handler_read_lw_object(this, ctx);
+            }
+            if !handler_is_molecule_reader(&class_name) {
+                return Err(script_error(format!("{class_name}.read is not supported")));
+            }
+            let handler = script_handler_io(this, ctx)?;
+            let molecule = if matches!(class_name.as_str(), "QdfMolReader" | "NAMDCoorReader") {
+                let input = handler
+                    .read_bytes()
+                    .map_err(|error| script_error(error.to_string()))?;
+                if class_name == "QdfMolReader" {
+                    read_qdf_mol_bytes(&input).map_err(|error| script_error(error.to_string()))?
+                } else {
+                    let topology_path = this_string_prop(this, "subPath_topo", ctx);
+                    if topology_path.trim().is_empty() {
+                        return Err(script_error(
+                            "NAMDCoorReader topology path is not configured",
+                        ));
+                    }
+                    let topology = cuemol_molstr::read_text_maybe_compressed(std::path::Path::new(
+                        &topology_path,
+                    ))
+                    .map_err(|error| script_error(error.to_string()))?;
+                    cuemol_mdtools::read_namd_coor_with_psf_bytes(&input, &topology)
+                        .map(|load| load.molecule)
+                        .map_err(|error| script_error(error.to_string()))?
+                }
+            } else {
+                let input = handler
+                    .read_string()
+                    .map_err(|error| script_error(error.to_string()))?;
+                match class_name.as_str() {
+                    "PDBFileReader" => {
+                        let options = cuemol_molstr::PdbReadOptions {
+                            load_model: handler_bool_prop(this, "loadmodel", false, ctx),
+                            load_anisou: handler_bool_prop(this, "loadanisou", true, ctx),
+                            load_alt_conf: handler_bool_prop(this, "loadaltconf", true, ctx),
+                            build_secondary: handler_bool_prop(this, "build2ndry", true, ctx),
+                            load_seg_id: handler_bool_prop(this, "loadsegid", false, ctx),
+                            auto_topo_gen: handler_bool_prop(this, "autoTopoGen", true, ctx),
+                        };
+                        cuemol_molstr::read_pdb_str_with_options(&input, options)
+                    }
+                    "QdfPdbReader" => cuemol_molstr::read_qdfpdb_str(&input),
+                    "MmcifMolReader" => {
+                        let options = cuemol_molstr::MmcifReadOptions {
+                            load_model: handler_bool_prop(this, "loadmodel", false, ctx),
+                            load_anisou: handler_bool_prop(this, "loadanisou", true, ctx),
+                            load_alt_conf: handler_bool_prop(this, "loadaltconf", true, ctx),
+                            load_secstr: handler_bool_prop(this, "loadsecstr", false, ctx),
+                            auto_topo_gen: handler_bool_prop(this, "autoTopoGen", true, ctx),
+                        };
+                        cuemol_molstr::read_mmcif_str_with_options(&input, options)
+                    }
+                    "SDFMolReader" => {
+                        let options = cuemol_molstr::SdfReadOptions {
+                            load_compound_id: handler_i32_prop(this, "load_cmpd_id", -1, ctx)?,
+                            load_as_chain: handler_bool_prop(this, "load_as_chain", false, ctx),
+                            chain_name: this_string_prop(this, "chain_name", ctx),
+                            residue_index: handler_i32_prop(this, "resid_index", 1, ctx)?,
+                        };
+                        cuemol_molstr::read_sdf_str_with_options(&input, &options)
+                    }
+                    "MOL2MolReader" => {
+                        let options = cuemol_molstr::Mol2ReadOptions {
+                            load_compound_id: handler_i32_prop(this, "load_cmpd_id", -1, ctx)?,
+                            load_as_chain: true,
+                            chain_name: this_string_prop(this, "chain_name", ctx),
+                            residue_index: handler_i32_prop(this, "resid_index", 1, ctx)?,
+                        };
+                        cuemol_molstr::read_mol2_str_with_options(&input, &options)
+                    }
+                    "GROFileReader" => cuemol_mdtools::read_gro_str(&input),
+                    "PsfReader" => cuemol_mdtools::read_psf_str(&input),
+                    "AmberPrmtopReader" => cuemol_mdtools::read_amber_prmtop_str(&input),
+                    _ => unreachable!(),
+                }
+                .map_err(|error| script_error(error.to_string()))?
+            };
+            let target = script_handler_target(this, ctx)?;
+            set_script_molecule_value(&target, molecule, ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn js_handler_get_column_info(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            this.as_object()
+                .ok_or_else(|| script_error("MTZ2MapReader is not an object"))?
+                .get(js_string!("_column_info"), ctx)
+        }
+        fn js_scene_handler_read(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let target = script_handler_target(this, ctx)?;
+            let target_scene = object_number_prop(&target, "uid", ctx)? as u64;
+            script_cmds::push(ScriptCmd::LoadScene {
+                class_name: this_string_prop(this, "_class", ctx),
+                path: this_string_prop(this, "path", ctx),
+                target_scene,
+            });
+            Ok(JsValue::undefined())
+        }
+        fn js_scene_handler_write(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let target = script_handler_target(this, ctx)?;
+            script_cmds::push(ScriptCmd::WriteScene {
+                path: this_string_prop(this, "path", ctx),
+                scene_uid: object_number_prop(&target, "uid", ctx)? as u64,
+                version: this_string_prop(this, "version", ctx),
+                compress: handler_compress_mode_prop(this, "compress", 0, ctx)?,
+                base64: handler_bool_prop(this, "base64", false, ctx),
+            });
+            Ok(JsValue::undefined())
+        }
+        fn js_scene_writer_set_default_opts(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let scene = args.first().cloned().unwrap_or(JsValue::undefined());
+            let scene_uid = object_number_prop(&scene, "uid", ctx)? as u64;
+            let options = script_env::with(|env| {
+                env.scenes
+                    .iter()
+                    .find(|scene| scene.uid == scene_uid)
+                    .and_then(|scene| scene.qsc_options.clone())
+            });
+            let Some(options) = options else {
+                return Ok(JsValue::undefined());
+            };
+            let mut writer = cuemol_qsys::SceneXMLWriter::new();
+            writer.set_default_opts(&options);
+            let object = iterator_object(this)?;
+            object.set(
+                js_string!("version"),
+                JsString::from(writer.version()),
+                true,
+                ctx,
+            )?;
+            object.set(
+                js_string!("compress"),
+                JsString::from(compress_mode_name(writer.compress_mode())),
+                true,
+                ctx,
+            )?;
+            object.set(js_string!("base64"), writer.base64_flag(), true, ctx)?;
+            Ok(JsValue::undefined())
+        }
+        fn js_scene_reader_from_byte_array(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let bytes = byte_array_from_value(args.first().unwrap_or(&JsValue::undefined()), ctx)?;
+            let text = String::from_utf8(bytes.as_bytes().to_vec())
+                .map_err(|error| script_error(error.to_string()))?;
+            Ok(JsString::from(text).into())
+        }
+        fn script_target_molecule(
+            target: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<cuemol_molstr::MolCoord> {
+            if let Ok(uid) = object_number_prop(target, "uid", ctx) {
+                if let Some(molecule) = script_env::with(|env| {
+                    env.molecules
+                        .iter()
+                        .find(|molecule| molecule.uid == uid as u64)
+                        .map(|molecule| molecule.molecule.clone())
+                }) {
+                    return Ok(molecule);
+                }
+            }
+            let pdb = object_string_prop(target, "_pdb_data", ctx);
+            if !pdb.is_empty() {
+                return read_pdb_str(&pdb).map_err(|error| script_error(error.to_string()));
+            }
+            let sdf = object_string_prop(target, "_sdf_data", ctx);
+            read_sdf_str(&sdf).map_err(|error| script_error(error.to_string()))
+        }
+        fn script_target_density_map(target: &JsValue, ctx: &mut Context) -> JsResult<DensityMap> {
+            let object = target
+                .as_object()
+                .ok_or_else(|| script_error("density-map target is not an object"))?;
+            if let Some(map_id) = object
+                .get(js_string!("_pending_map_id"), ctx)?
+                .as_number()
+                .map(|value| value as u64)
+            {
+                if let Some(map) =
+                    script_env::with(|env| env.pending_density_maps.get(&map_id).cloned())
+                {
+                    return Ok(map);
+                }
+            }
+            if let Some(uid) = object
+                .get(js_string!("uid"), ctx)?
+                .as_number()
+                .map(|value| value as u64)
+            {
+                if let Some(map) = script_env::with(|env| {
+                    env.objects
+                        .iter()
+                        .find(|entry| entry.uid == uid)
+                        .and_then(|entry| entry.scalar_map.clone())
+                }) {
+                    return Ok(map);
+                }
+            }
+            Err(script_error("density-map target is unavailable"))
+        }
+        fn electrostatic_map_from_density_map(map: &DensityMap) -> cuemol_surface::ElePotMap {
+            let counts = [map.col_no(), map.row_no(), map.sec_no()];
+            let mut values = Vec::with_capacity(
+                counts[0]
+                    .saturating_mul(counts[1])
+                    .saturating_mul(counts[2]),
+            );
+            for sec in 0..counts[2] {
+                for row in 0..counts[1] {
+                    for col in 0..counts[0] {
+                        values.push(map.at_float(col as isize, row as isize, sec as isize));
+                    }
+                }
+            }
+            let mut potential = cuemol_surface::ElePotMap::new();
+            potential.set_map_float_array(
+                &values,
+                counts,
+                [
+                    map.col_grid_size(),
+                    map.row_grid_size(),
+                    map.sec_grid_size(),
+                ],
+                map.conv_to_orth(Vector4::ZERO),
+            );
+            potential
+        }
+        fn script_target_potential_map(
+            target: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<cuemol_surface::ElePotMap> {
+            let object = target
+                .as_object()
+                .ok_or_else(|| script_error("electrostatic-map target is not an object"))?;
+            if let Some(map_id) = object
+                .get(js_string!("_pending_map_id"), ctx)?
+                .as_number()
+                .map(|value| value as u64)
+            {
+                if let Some(map) =
+                    script_env::with(|env| env.pending_potential_maps.get(&map_id).cloned())
+                {
+                    return Ok(map);
+                }
+            }
+            Ok(electrostatic_map_from_density_map(
+                &script_target_density_map(target, ctx)?,
+            ))
+        }
+        fn script_target_lw_object(
+            target: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<cuemol_lwview::LWObject> {
+            let object_id = object_number_prop(target, "_pending_lw_id", ctx)? as u64;
+            if let Some(object) =
+                script_env::with(|env| env.pending_lw_objects.get(&object_id).cloned())
+            {
+                return Ok(object);
+            }
+            let uid = object_number_prop(target, "uid", ctx)? as u64;
+            script_env::with(|env| env.lw_objects.get(&uid).cloned())
+                .ok_or_else(|| script_error("LWObject target is unavailable"))
+        }
+        fn js_handler_write(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let class_name = this_string_prop(this, "_class", ctx);
+            let target = script_handler_target(this, ctx)?;
+            let selection = matches!(
+                class_name.as_str(),
+                "PDBFileWriter" | "PQRFileWriter" | "XYZRFileWriter"
+            )
+            .then(|| {
+                let value = iterator_object(this)?.get(js_string!("sel"), ctx)?;
+                selector_from_script_value(&value, ctx)
+            })
+            .transpose()?;
+            let output = match class_name.as_str() {
+                "PDBFileWriter" => write_pdb_string_with_selection(
+                    &script_target_molecule(&target, ctx)?,
+                    selection.as_ref(),
+                )
+                .into_bytes(),
+                "SDFMolWriter" => {
+                    write_sdf_string(&script_target_molecule(&target, ctx)?).into_bytes()
+                }
+                "PQRFileWriter" => {
+                    let mut writer = PqrFileWriter::new();
+                    writer.set_selection(selection.clone());
+                    writer.set_use_h(handler_bool_prop(this, "use_H", false, ctx));
+                    writer.set_namespace(this_string_prop(this, "ns", ctx));
+                    writer
+                        .write_string(&script_target_molecule(&target, ctx)?)
+                        .into_bytes()
+                }
+                "XYZRFileWriter" => {
+                    let mut writer = XyzrFileWriter::new();
+                    writer.set_selection(selection);
+                    writer
+                        .write_string(&script_target_molecule(&target, ctx)?)
+                        .into_bytes()
+                }
+                "QdfMolWriter" => write_qdf_mol_bytes(&script_target_molecule(&target, ctx)?),
+                "QdfSurfWriter" => cuemol_surface::QdfSurfWriter::new()
+                    .write_bytes(&molsurf_from_value(&target, ctx)?),
+                "QdfDenMapWriter" => cuemol_xtal::QdfDenMapWriter::new()
+                    .write_bytes(&script_target_density_map(&target, ctx)?),
+                "QdfPotWriter" => cuemol_surface::QdfPotWriter::new()
+                    .write_bytes(&script_target_potential_map(&target, ctx)?),
+                "QdfLWObjWriter" => {
+                    cuemol_lwview::write_qdf_lwobj_bytes(&script_target_lw_object(&target, ctx)?)
+                }
+                _ => return Err(script_error(format!("{class_name}.write is not supported"))),
+            };
+            script_handler_io(this, ctx)?
+                .write_bytes(&output)
+                .map_err(|error| script_error(error.to_string()))?;
+            Ok(JsValue::undefined())
+        }
+        fn stream_handler_info_for_class(
+            class_name: &str,
+        ) -> Option<cuemol_molstr::StreamHandlerInfo> {
+            StreamManager::new()
+                .handlers()
+                .iter()
+                .find(|handler| {
+                    handler
+                        .abi_name
+                        .rsplit("::")
+                        .next()
+                        .is_some_and(|name| name == class_name)
+                })
+                .cloned()
+        }
+        fn make_script_stream_handler(
+            class_name: &str,
+            handler: &cuemol_molstr::StreamHandlerInfo,
+            ctx: &mut Context,
+        ) -> JsValue {
+            let writer_selection = matches!(
+                class_name,
+                "PDBFileWriter" | "PQRFileWriter" | "SDFMolWriter" | "XYZRFileWriter"
+            )
+            .then(|| {
+                if matches!(class_name, "PDBFileWriter" | "SDFMolWriter") {
+                    make_sel_command(ctx)
+                } else {
+                    JsValue::null()
+                }
+            });
+            let mut object = ObjectInitializer::new(ctx);
+            object
+                .property(
+                    js_string!("_class"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("type"),
+                    JsString::from(class_name),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("name"),
+                    JsString::from(handler.nickname.as_str()),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("typedescr"),
+                    JsString::from(handler.descr.as_str()),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("fileext"),
+                    JsString::from(handler.fext.as_str()),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("category"),
+                    handler.category.code(),
+                    Attribute::all(),
+                )
+                .property(js_string!("compress"), js_string!("none"), Attribute::all())
+                .property(js_string!("base64"), false, Attribute::all())
+                .property(js_string!("path"), js_string!(""), Attribute::all())
+                .property(js_string!("_target"), JsValue::null(), Attribute::all())
+                .function(
+                    NativeFunction::from_fn_ptr(js_handler_set_path),
+                    js_string!("setPath"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_handler_set_sub_path),
+                    js_string!("setSubPath"),
+                    2,
+                );
+            if matches!(
+                handler.category,
+                cuemol_molstr::HandlerCategory::ObjReader
+                    | cuemol_molstr::HandlerCategory::ObjWriter
+                    | cuemol_molstr::HandlerCategory::SceneReader
+                    | cuemol_molstr::HandlerCategory::SceneWriter
+            ) {
+                object
+                    .function(
+                        NativeFunction::from_fn_ptr(js_handler_attach),
+                        js_string!("attach"),
+                        1,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_handler_detach),
+                        js_string!("detach"),
+                        0,
+                    );
+            }
+            if handler.category == cuemol_molstr::HandlerCategory::ObjReader {
+                object
+                    .function(
+                        NativeFunction::from_fn_ptr(js_handler_create_default_object),
+                        js_string!("createDefaultObj"),
+                        0,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_handler_read),
+                        js_string!("read"),
+                        0,
+                    );
+            }
+            if handler.category == cuemol_molstr::HandlerCategory::ObjWriter {
+                object
+                    .property(js_string!("convToLink"), false, Attribute::all())
+                    .function(
+                        NativeFunction::from_fn_ptr(js_handler_write),
+                        js_string!("write"),
+                        0,
+                    );
+                if let Some(selection) = writer_selection {
+                    object.property(js_string!("sel"), selection, Attribute::all());
+                }
+            }
+            if handler.category == cuemol_molstr::HandlerCategory::SceneReader {
+                object.function(
+                    NativeFunction::from_fn_ptr(js_scene_handler_read),
+                    js_string!("read"),
+                    0,
+                );
+            }
+            if handler.category == cuemol_molstr::HandlerCategory::SceneWriter {
+                object.function(
+                    NativeFunction::from_fn_ptr(js_scene_handler_write),
+                    js_string!("write"),
+                    0,
+                );
+            }
+            match class_name {
+                "PDBFileReader" => {
+                    object
+                        .property(js_string!("loadmodel"), false, Attribute::all())
+                        .property(js_string!("loadanisou"), true, Attribute::all())
+                        .property(js_string!("loadaltconf"), true, Attribute::all())
+                        .property(js_string!("build2ndry"), true, Attribute::all())
+                        .property(js_string!("loadsegid"), false, Attribute::all())
+                        .property(js_string!("autoTopoGen"), true, Attribute::all());
+                }
+                "QdfPdbReader" | "QdfMolReader" => {
+                    object
+                        .property(js_string!("loadmodel"), false, Attribute::all())
+                        .property(js_string!("loadanisou"), true, Attribute::all())
+                        .property(js_string!("loadaltconf"), true, Attribute::all())
+                        .property(js_string!("build2ndry"), false, Attribute::all())
+                        .property(js_string!("loadsegid"), false, Attribute::all())
+                        .property(js_string!("autoTopoGen"), true, Attribute::all());
+                }
+                "MmcifMolReader" => {
+                    object
+                        .property(js_string!("loadmodel"), false, Attribute::all())
+                        .property(js_string!("loadanisou"), true, Attribute::all())
+                        .property(js_string!("loadaltconf"), true, Attribute::all())
+                        .property(js_string!("loadsecstr"), false, Attribute::all())
+                        .property(js_string!("autoTopoGen"), true, Attribute::all());
+                }
+                "SDFMolReader" => {
+                    object
+                        .property(js_string!("load_cmpd_id"), -1, Attribute::all())
+                        .property(js_string!("load_as_chain"), false, Attribute::all())
+                        .property(js_string!("chain_name"), js_string!("_"), Attribute::all())
+                        .property(js_string!("resid_index"), 1, Attribute::all());
+                }
+                "MOL2MolReader" => {
+                    object
+                        .property(js_string!("load_cmpd_id"), -1, Attribute::all())
+                        .property(js_string!("chain_name"), js_string!("_"), Attribute::all())
+                        .property(js_string!("resid_index"), 1, Attribute::all());
+                }
+                "CCP4MapReader" => {
+                    object
+                        .property(js_string!("normalize"), false, Attribute::all())
+                        .property(js_string!("truncate_min"), false, Attribute::all())
+                        .property(js_string!("min"), 0.0, Attribute::all())
+                        .property(js_string!("truncate_max"), false, Attribute::all())
+                        .property(js_string!("max"), 5.0, Attribute::all());
+                }
+                "MmcifMapReader" => {
+                    object
+                        .property(js_string!("resolution"), -1.0, Attribute::all())
+                        .property(js_string!("gridsize"), 0.33, Attribute::all());
+                }
+                "MTZ2MapReader" => {
+                    object
+                        .property(js_string!("resolution"), -1.0, Attribute::all())
+                        .property(js_string!("min_res"), 0.0, Attribute::all())
+                        .property(js_string!("max_res"), 0.0, Attribute::all())
+                        .property(js_string!("gridsize"), 0.33, Attribute::all())
+                        .property(js_string!("clmn_F"), js_string!(""), Attribute::all())
+                        .property(js_string!("clmn_PHI"), js_string!(""), Attribute::all())
+                        .property(js_string!("clmn_WT"), js_string!(""), Attribute::all())
+                        .property(
+                            js_string!("_column_info"),
+                            js_string!("[]"),
+                            Attribute::all(),
+                        )
+                        .function(
+                            NativeFunction::from_fn_ptr(js_handler_get_column_info),
+                            js_string!("getColumnInfoJSON"),
+                            0,
+                        );
+                }
+                "OpenDXPotReader" => {
+                    object.property(js_string!("smooth"), -1.0, Attribute::all());
+                }
+                "MSMSFileReader" => {
+                    object.property(js_string!("vertex_file"), js_string!(""), Attribute::all());
+                }
+                "SceneXMLReader" => {
+                    object
+                        .property(js_string!("error"), js_string!(""), Attribute::all())
+                        .property(js_string!("bufsize"), 1024 * 1024, Attribute::all())
+                        .function(
+                            NativeFunction::from_fn_ptr(js_scene_reader_from_byte_array),
+                            js_string!("fromByteArray"),
+                            1,
+                        );
+                }
+                "SceneXMLWriter" => {
+                    object
+                        .property(js_string!("embedAll"), false, Attribute::all())
+                        .property(js_string!("version"), js_string!("QDF0"), Attribute::all())
+                        .function(
+                            NativeFunction::from_fn_ptr(js_scene_writer_set_default_opts),
+                            js_string!("setDefaultOpts"),
+                            1,
+                        );
+                }
+                "PQRFileWriter" => {
+                    object
+                        .property(js_string!("use_H"), false, Attribute::all())
+                        .property(js_string!("ns"), js_string!(""), Attribute::all());
+                }
+                _ => {}
+            }
+            object.build().into()
+        }
         fn js_stream_create_handler(
             _t: &JsValue,
             args: &[JsValue],
@@ -19634,41 +28758,21 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
+            let category_value = cuemol_molstr::HandlerCategory::from_code(category)
+                .map_err(|error| script_error(error.to_string()))?;
             let handler = StreamManager::new()
-                .create_handler(&name, category)
+                .handlers()
+                .iter()
+                .find(|handler| handler.nickname == name && handler.category == category_value)
+                .cloned()
                 .ok_or_else(|| script_error(format!("createHandler({name}, {category}) failed")))?;
-            let proxy = ObjectInitializer::new(ctx)
-                .property(
-                    js_string!("name"),
-                    JsString::from(handler.name()),
-                    Attribute::all(),
-                )
-                .property(
-                    js_string!("typedescr"),
-                    JsString::from(handler.type_descr()),
-                    Attribute::all(),
-                )
-                .property(
-                    js_string!("fileext"),
-                    JsString::from(handler.file_ext()),
-                    Attribute::all(),
-                )
-                .property(js_string!("category"), category, Attribute::all())
-                .property(js_string!("compress"), 0, Attribute::all())
-                .property(js_string!("base64"), false, Attribute::all())
-                .property(js_string!("path"), js_string!(""), Attribute::all())
-                .function(
-                    NativeFunction::from_fn_ptr(js_handler_set_path),
-                    js_string!("setPath"),
-                    1,
-                )
-                .function(
-                    NativeFunction::from_fn_ptr(js_handler_set_sub_path),
-                    js_string!("setSubPath"),
-                    2,
-                )
-                .build();
-            Ok(proxy.into())
+            let class_name = handler
+                .abi_name
+                .rsplit("::")
+                .next()
+                .unwrap_or("InOutHandler")
+                .to_string();
+            Ok(make_script_stream_handler(&class_name, &handler, ctx))
         }
         fn js_symm_sg_names(
             _t: &JsValue,
@@ -19818,10 +28922,9 @@ impl DesktopAppState {
             let reference =
                 reference.ok_or_else(|| script_error("reference MolCoord is not available"))?;
             let moving = moving.ok_or_else(|| script_error("moving MolCoord is not available"))?;
-            let reference_selector = cuemol_molstr::parse_selector(&reference_selection)
-                .map_err(|error| script_error(error.to_string()))?;
-            let moving_selector = cuemol_molstr::parse_selector(&moving_selection)
-                .map_err(|error| script_error(error.to_string()))?;
+            let reference_selector =
+                parse_script_selector(&reference_selection, reference.scene_uid)?;
+            let moving_selector = parse_script_selector(&moving_selection, moving.scene_uid)?;
             let matrix = MolAnlManager::new()
                 .superpose_ssm_matrix(
                     &reference.molecule,
@@ -20551,6 +29654,11 @@ impl DesktopAppState {
             .build();
             ObjectInitializer::new(ctx)
                 .property(js_string!("type"), js_string!("StyleSet"), Attribute::all())
+                .property(
+                    js_string!("_class"),
+                    js_string!("StyleSet"),
+                    Attribute::all(),
+                )
                 .property(js_string!("_uid"), uid as f64, Attribute::all())
                 .accessor(js_string!("uid"), Some(uid_getter), None, Attribute::all())
                 .accessor(
@@ -20644,6 +29752,10 @@ impl DesktopAppState {
                 )
                 .build()
                 .into()
+        }
+        fn make_detached_style_set(ctx: &mut Context) -> JsValue {
+            let uid = script_env::with_mut(|env| env.styles.create_style_set(String::new(), 0));
+            make_style_set_proxy(uid, ctx)
         }
         fn js_style_default_dir(
             _this: &JsValue,
@@ -21518,10 +30630,11 @@ impl DesktopAppState {
                 return Err(script_error("listener object is not callable"));
             }
             if object_string_prop(this, "_class", ctx) == "Scene" {
+                let scene_uid = scene_proxy_uid(this, ctx)?;
                 let id = script_env::with_mut(|env| {
                     let id = env.next_scene_listener_id;
                     env.next_scene_listener_id = env.next_scene_listener_id.saturating_add(1);
-                    env.scene_listeners.insert(id, callback);
+                    env.scene_listeners.insert(id, (scene_uid, callback));
                     id
                 });
                 Ok(JsValue::new(id))
@@ -21541,7 +30654,19 @@ impl DesktopAppState {
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
             let removed = if object_string_prop(this, "_class", ctx) == "Scene" {
-                script_env::with_mut(|env| env.scene_listeners.remove(&id).is_some())
+                let scene_uid = scene_proxy_uid(this, ctx)?;
+                script_env::with_mut(|env| {
+                    if env
+                        .scene_listeners
+                        .get(&id)
+                        .is_some_and(|(listener_scene_uid, _)| *listener_scene_uid == scene_uid)
+                    {
+                        env.scene_listeners.remove(&id);
+                        true
+                    } else {
+                        false
+                    }
+                })
             } else {
                 script_env::with_mut(|env| env.event_listener.take().is_some())
             };
@@ -21871,19 +30996,18 @@ impl DesktopAppState {
                 .mol_from_smiles(&smiles)
                 .map_err(|error| script_error(error.to_string()))?;
             let value = make_molcoord("MolCoord", ctx);
-            let object = iterator_object(&value)?;
-            object.set(
-                js_string!("_sdf_data"),
-                JsString::from(cuemol_molstr::write_sdf_string(&molecule)),
-                true,
-                ctx,
-            )?;
+            set_script_molecule_value(&value, molecule, ctx)?;
             Ok(value)
         }
         fn make_xmlrpc_connection(endpoint: &str, ctx: &mut Context) -> JsValue {
             ObjectInitializer::new(ctx)
                 .property(
                     js_string!("type"),
+                    js_string!("XmlRpcConn"),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_class"),
                     js_string!("XmlRpcConn"),
                     Attribute::all(),
                 )
@@ -21926,15 +31050,64 @@ impl DesktopAppState {
                 .build()
                 .into()
         }
+        fn js_lwviewer_convert(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if args.len() != 2 {
+                return Err(script_error(
+                    "LWViewerManager.convToLWScene: invalid arguments",
+                ));
+            }
+            let source_scene = object_number_prop(&args[0], "uid", ctx)? as u64;
+            let target_scene = object_number_prop(&args[1], "uid", ctx)? as u64;
+            if !script_env::with(|env| {
+                env.scenes.iter().any(|scene| scene.uid == source_scene)
+                    && env.scenes.iter().any(|scene| scene.uid == target_scene)
+            }) {
+                return Err(script_error(
+                    "LWViewerManager.convToLWScene: scene not found",
+                ));
+            }
+            script_cmds::push(ScriptCmd::ConvertToLWScene {
+                source_scene,
+                target_scene,
+            });
+            Ok(JsValue::undefined())
+        }
+        fn make_lwviewer_manager(ctx: &mut Context) -> JsValue {
+            ObjectInitializer::new(ctx)
+                .property(
+                    js_string!("type"),
+                    js_string!("LWViewerManager"),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_class"),
+                    js_string!("LWViewerManager"),
+                    Attribute::all(),
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_lwviewer_convert),
+                    js_string!("convToLWScene"),
+                    2,
+                )
+                .build()
+                .into()
+        }
         fn js_get_service(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             let class_name = arg0(args, ctx);
             match class_name.as_str() {
+                "ClassS" => return Ok(make_class_s(ctx)),
+                "CmdMgr" => return Ok(make_cmd_manager(ctx)),
                 "MsgLog" => return Ok(make_msg_log(ctx)),
                 "ProcessManager" => return Ok(make_process_manager(ctx)),
                 "PythonBridge" => return Ok(make_python_bridge(ctx)),
                 "ScrEventManager" => return Ok(make_event_manager(ctx)),
                 "ViewInputConfig" => return Ok(make_view_input_config(ctx)),
                 "MolClientManager" => return Ok(make_mol_client_manager(ctx)),
+                "LWViewerManager" => return Ok(make_lwviewer_manager(ctx)),
                 _ => {}
             }
             if class_name == "SceneManager" {
@@ -22128,6 +31301,51 @@ impl DesktopAppState {
                         NativeFunction::from_fn_ptr(js_stream_search_readers),
                         js_string!("searchReadersByContent"),
                         5,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_stream_load_async),
+                        js_string!("loadObjectAsync"),
+                        1,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_stream_supply_async),
+                        js_string!("supplyDataAsync"),
+                        3,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_stream_wait_async),
+                        js_string!("waitLoadAsync"),
+                        1,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_stream_to_xml),
+                        js_string!("toXML"),
+                        1,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_stream_to_xml2),
+                        js_string!("toXML2"),
+                        2,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_stream_array_to_xml),
+                        js_string!("arrayToXML"),
+                        1,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_stream_renderer_group_to_xml),
+                        js_string!("rendGrpToXML"),
+                        2,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_stream_from_xml),
+                        js_string!("fromXML"),
+                        2,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_stream_renderer_array_from_xml),
+                        js_string!("rendArrayFromXML"),
+                        2,
                     )
                     .build();
                 return Ok(service.into());
@@ -22435,6 +31653,13 @@ impl DesktopAppState {
                 "getSingletonObj({class_name}) failed"
             )))
         }
+        fn js_scene_manager_service(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            js_get_service(this, &[JsString::from("SceneManager").into()], ctx)
+        }
         fn js_exec(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             let path = arg0(args, ctx);
             let source = Source::from_filepath(Path::new(&path))
@@ -22456,20 +31681,12 @@ impl DesktopAppState {
             if !args.is_empty() {
                 return Err(script_error("getAllClassNamesJSON: invalid arguments"));
             }
-            Ok(JsString::from(
-                "[\"AnimMgr\",\"AnimObj\",\"AtomIterator\",\"AtomPropColoring\",\"BfacColoring\",\
-                 \"ByteArray\",\"CPKColoring\",\"Camera\",\"CamMotion\",\"ChainIterator\",\
-                 \"Color\",\"CrystalInfo\",\"JctTable\",\"Matrix\",\
-                 \"DensityMap\",\"ElePotMap\",\"GLSLMapMeshRenderer\",\
-                 \"GLSLMapMeshRenderer2\",\"GLSLMapVolRenderer\",\"GradientColor\",\
-                 \"LWObject\",\"LWRenderer\",\"MapMeshRenderer\",\"MapRenderer\",\"MapSurfRenderer\",\"MolAnim\",\
-                 \"MolCoord\",\"MolSurfObj\",\"MorphMol\",\"MultiGradient\",\"NoopAnimObj\",\"PaintColoring\",\
-                 \"Quat\",\"RainbowColoring\",\"RangeSet\",\"RealPropAnim\",\"RegExpr\",\
-                 \"RendXformAnim\",\"ResidRangeSet\",\"ResidIterator\",\"ScriptColoring\",\
-                 \"SelCommand\",\"ShowHideAnim\",\"SimpleSpin\",\"SlideInOutAnim\",\
-                 \"SolidColoring\",\"TimeValue\",\"TubeSection\",\"Vector\"]",
-            )
-            .into())
+            let names = SCRIPT_RUNTIME_CLASS_NAMES
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            Ok(JsString::from(format!("[{names}]")).into())
         }
         fn js_get_cmd_args(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             if args.len() != 1 {
@@ -22509,10 +31726,25 @@ impl DesktopAppState {
         }
 
         let _ = script_cmds::drain(); // clear any stale buffer
+        script_errors::clear();
         let script_run_start = self.capture_script_scene_snapshot();
         script_env::set(self.build_script_env());
         let mut context = Context::default();
+        let scene_manager_getter = FunctionObjectBuilder::new(
+            context.realm(),
+            NativeFunction::from_fn_ptr(js_scene_manager_service),
+        )
+        .name(js_string!("get sceMgr"))
+        .length(0)
+        .constructor(false)
+        .build();
         let cuemol = ObjectInitializer::new(&mut context)
+            .accessor(
+                js_string!("sceMgr"),
+                Some(scene_manager_getter),
+                None,
+                Attribute::all(),
+            )
             .function(
                 NativeFunction::from_fn_ptr(js_print),
                 js_string!("print"),
@@ -22569,7 +31801,7 @@ impl DesktopAppState {
                 2,
             )
             .function(
-                NativeFunction::from_fn_ptr(js_create_obj),
+                NativeFunction::from_fn_ptr(js_create_from_string),
                 js_string!("createFromString"),
                 2,
             )
@@ -22695,6 +31927,11 @@ impl DesktopAppState {
                 1,
             )
             .function(
+                NativeFunction::from_fn_ptr(js_get_renderer_name_list),
+                js_string!("getRendNameList"),
+                1,
+            )
+            .function(
                 NativeFunction::from_fn_ptr(js_measure),
                 js_string!("measure"),
                 1,
@@ -22704,7 +31941,7 @@ impl DesktopAppState {
         let outcome = context
             .register_global_property(js_string!("cuemol"), cuemol, Attribute::all())
             .and_then(|()| {
-                context.register_global_property(js_string!("scene"), scene, Attribute::ENUMERABLE)
+                context.register_global_property(js_string!("scene"), scene, Attribute::all())
             })
             .and_then(|()| {
                 context.register_global_builtin_callable(
@@ -22760,13 +31997,42 @@ impl DesktopAppState {
                     "(function () { \
                        JSON.parse(getAllClassNamesJSON()).forEach(function (name) { \
                          if (!(name in cuemol)) { \
-                           cuemol[name] = function () { return newObj(name); }; \
+                           cuemol[name] = function (value) { \
+                             return arguments.length === 0 ? newObj(name) : cuemol.createObj(name, value); \
+                           }; \
                          } \
                        }); \
                      })();",
                 ))
             })
             .and_then(|_| context.eval(Source::from_bytes(source)));
+        if outcome.is_ok() {
+            let camera_refs = script_env::with(|env| env.camera_refs.clone());
+            for (scene_uid, name, object) in camera_refs {
+                let value: JsValue = object.into();
+                let mut camera = match camera_from_value(&value, &mut context) {
+                    Ok(camera) => camera,
+                    Err(error) => {
+                        script_env::clear();
+                        return Err(CueMolError::invalid_argument(format!(
+                            "script camera reference error: {error}"
+                        )));
+                    }
+                };
+                camera.set_name(name.clone());
+                script_env::with_mut(|env| {
+                    if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid)
+                    {
+                        scene.cameras.retain(|entry| entry.name() != name);
+                        scene.cameras.push(camera.clone());
+                    }
+                    if env.scene_uid == scene_uid {
+                        env.cameras.retain(|entry| entry.name() != name);
+                        env.cameras.push(camera.clone());
+                    }
+                });
+            }
+        }
         let updated_runtime = outcome.as_ref().ok().map(|_| {
             script_env::with(|env| {
                 let mut scenes = env.scenes.clone();
@@ -22794,28 +32060,39 @@ impl DesktopAppState {
         script_env::clear();
         outcome.map_err(|error| CueMolError::invalid_argument(format!("script error: {error}")))?;
 
-        let mut updated_scene_animations = Vec::new();
+        let existing_scene_uids = self
+            .scene_manager()
+            .scenes()
+            .iter()
+            .map(|scene| scene.uid().get())
+            .collect::<Vec<_>>();
+        let mut updated_scene_states = Vec::new();
         if let Some((
-            runtime_scene_uid,
+            _runtime_scene_uid,
             updated_views,
-            cameras,
+            _cameras,
             molecules,
             morphs,
             objects,
-            scene_name,
-            scene_attributes,
+            _scene_name,
+            _scene_attributes,
             styles,
             view_input_config,
             scene_states,
         )) = updated_runtime
         {
-            updated_scene_animations = scene_states
-                .into_iter()
-                .map(|scene| (scene.uid, scene.animation))
-                .collect();
-            for (scene_uid, animation) in &updated_scene_animations {
-                if let Some(scene) = self.scene_manager_mut().scene_mut(Uid::new(*scene_uid)) {
-                    scene.set_animation_node(Some(animation.to_ldom2_node()))?;
+            updated_scene_states = scene_states;
+            for state in &updated_scene_states {
+                if existing_scene_uids.contains(&state.uid) {
+                    if let Some(scene) = self.scene_manager_mut().scene_mut(Uid::new(state.uid)) {
+                        scene.set_name(state.name.clone());
+                        scene.replace_scene_attributes(state.attributes.clone());
+                        scene.set_active_object_uid(state.active_object_uid.map(Uid::new));
+                        scene.set_active_renderer_uid(state.active_renderer_uid.map(Uid::new));
+                        scene.set_active_view_uid(state.active_view_uid.map(Uid::new));
+                        scene.replace_cameras(state.cameras.clone());
+                        scene.set_animation_node(Some(state.animation.to_ldom2_node()))?;
+                    }
                 }
             }
             self.command_manager_mut().replace_views(updated_views);
@@ -22884,6 +32161,8 @@ impl DesktopAppState {
                                 previous
                                     .iter()
                                     .find(|entry| entry.uid.get() == renderer.uid),
+                                &styles,
+                                renderer.scene_uid,
                             )
                         })
                         .collect();
@@ -22906,26 +32185,12 @@ impl DesktopAppState {
                 .into_iter()
                 .map(|(uid, morph)| (Uid::new(uid), morph))
                 .collect();
-            if runtime_scene_uid != 0 {
-                let scene_uid = Uid::new(runtime_scene_uid);
-                if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
-                    scene.replace_cameras(cameras);
-                    scene.set_name(scene_name);
-                    scene.replace_scene_attributes(scene_attributes);
-                }
-                self.script_styles.insert(scene_uid.get(), styles);
-            }
+            self.script_styles = styles;
             self.script_view_input_config = view_input_config;
         }
 
         let mut log = String::new();
         let mut selection = None;
-        let existing_scene_uids = self
-            .scene_manager()
-            .scenes()
-            .iter()
-            .map(|scene| scene.uid().get())
-            .collect::<Vec<_>>();
         for cmd in script_cmds::drain() {
             match cmd {
                 ScriptCmd::Print(message) => {
@@ -22940,22 +32205,35 @@ impl DesktopAppState {
                 }
                 ScriptCmd::Select(expr) => selection = Some(expr),
                 ScriptCmd::Color(scheme) => self.apply_script_color(&scheme),
-                ScriptCmd::SetColoring { object, scheme } => {
-                    if let Some(uid) = self.object_uid_by_name(&object) {
+                ScriptCmd::SetColoring {
+                    object_uid,
+                    object,
+                    scheme,
+                } => {
+                    let uid = object_uid.map(Uid::new).or_else(|| {
+                        self.scene_manager()
+                            .scenes()
+                            .iter()
+                            .find_map(|scene| scene.object_by_name(&object).map(MolObject::uid))
+                    });
+                    if let Some(uid) = uid {
                         let (coloring_type, attrs) = coloring_for_scheme(&scheme);
                         let _ = self.set_object_coloring(uid, coloring_type, attrs);
                     }
                 }
                 ScriptCmd::SetRendererVisible {
+                    scene_uid,
                     object,
                     renderer,
                     visible,
                 } => {
-                    if let Some((obj_uid, rend_uid)) = self.renderer_uid_by_name(&object, &renderer)
-                    {
+                    let target_scene = scene_uid.map(Uid::new).or(self.active_scene());
+                    if let Some((obj_uid, rend_uid)) = target_scene.and_then(|scene_uid| {
+                        self.renderer_uid_by_name_in_scene(scene_uid, &object, &renderer)
+                    }) {
                         let _ = self.set_renderer_visible(obj_uid, rend_uid, visible);
                     } else {
-                        let surface_updated = self.active_scene().is_some_and(|scene_uid| {
+                        let surface_updated = target_scene.is_some_and(|scene_uid| {
                             self.scene_manager_mut()
                                 .scene_mut(scene_uid)
                                 .and_then(|scene| {
@@ -22967,9 +32245,15 @@ impl DesktopAppState {
                                 .and_then(|surface| surface.qsc_node.as_mut())
                                 .and_then(|node| {
                                     node.children_mut().iter_mut().find(|child| {
-                                        child.tag_name() == "renderer"
-                                            && !child.is_attr()
-                                            && child.str_attr("name").as_str() == renderer
+                                        if child.tag_name() != "renderer" || child.is_attr() {
+                                            return false;
+                                        }
+                                        let name = child.str_attr("name");
+                                        name.as_str() == renderer
+                                            || (name.is_empty()
+                                                && (child.type_name() == renderer
+                                                    || format!("({})", child.type_name())
+                                                        == renderer))
                                     })
                                 })
                                 .is_some_and(|node| {
@@ -22985,7 +32269,9 @@ impl DesktopAppState {
                             if let Some(config) = self
                                 .density_maps
                                 .values_mut()
-                                .find(|map| map.name == object)
+                                .find(|map| {
+                                    Some(map.scene_uid) == target_scene && map.name == object
+                                })
                                 .and_then(|map| {
                                     map.renderers
                                         .iter_mut()
@@ -22998,16 +32284,19 @@ impl DesktopAppState {
                     }
                 }
                 ScriptCmd::SetRendererProp {
+                    scene_uid,
                     object,
                     renderer,
                     key,
                     value,
                 } => {
-                    if let Some((obj_uid, rend_uid)) = self.renderer_uid_by_name(&object, &renderer)
-                    {
+                    let target_scene = scene_uid.map(Uid::new).or(self.active_scene());
+                    if let Some((obj_uid, rend_uid)) = target_scene.and_then(|scene_uid| {
+                        self.renderer_uid_by_name_in_scene(scene_uid, &object, &renderer)
+                    }) {
                         let _ = self.set_renderer_property(obj_uid, rend_uid, key, value);
                     } else {
-                        let surface_updated = self.active_scene().is_some_and(|scene_uid| {
+                        let surface_updated = target_scene.is_some_and(|scene_uid| {
                             self.scene_manager_mut()
                                 .scene_mut(scene_uid)
                                 .and_then(|scene| {
@@ -23030,10 +32319,13 @@ impl DesktopAppState {
                                 })
                         });
                         if !surface_updated {
+                            let styles = self.script_styles.clone();
                             let replacement = self
                                 .density_maps
                                 .values()
-                                .find(|map| map.name == object)
+                                .find(|map| {
+                                    Some(map.scene_uid) == target_scene && map.name == object
+                                })
                                 .and_then(|map| {
                                     map.renderers
                                         .iter()
@@ -23048,6 +32340,83 @@ impl DesktopAppState {
                                                 density_renderer_from_script(
                                                     &scripted,
                                                     Some(config),
+                                                    &styles,
+                                                    scripted.scene_uid,
+                                                ),
+                                            )
+                                        })
+                                });
+                            if let Some((map_uid, renderer_uid, Some(replacement))) = replacement {
+                                if let Some(config) =
+                                    self.density_maps.get_mut(&map_uid).and_then(|map| {
+                                        map.renderers
+                                            .iter_mut()
+                                            .find(|config| config.uid == renderer_uid)
+                                    })
+                                {
+                                    *config = replacement;
+                                }
+                            }
+                        }
+                    }
+                }
+                ScriptCmd::ResetRendererProp {
+                    scene_uid,
+                    object,
+                    renderer,
+                    key,
+                } => {
+                    let target_scene = Uid::new(scene_uid);
+                    if let Some((obj_uid, rend_uid)) =
+                        self.renderer_uid_by_name_in_scene(target_scene, &object, &renderer)
+                    {
+                        self.reset_renderer_property(obj_uid, rend_uid, &key)?;
+                    } else {
+                        let surface_updated = self
+                            .scene_manager_mut()
+                            .scene_mut(target_scene)
+                            .and_then(|scene| {
+                                scene
+                                    .loaded_surfaces_mut()
+                                    .iter_mut()
+                                    .find(|surface| surface.name == object)
+                            })
+                            .and_then(|surface| surface.qsc_node.as_mut())
+                            .and_then(|node| {
+                                node.children_mut().iter_mut().find(|child| {
+                                    if child.tag_name() != "renderer" || child.is_attr() {
+                                        return false;
+                                    }
+                                    let name = child.str_attr("name");
+                                    name.as_str() == renderer
+                                        || (name.is_empty()
+                                            && (child.type_name() == renderer
+                                                || format!("({})", child.type_name()) == renderer))
+                                })
+                            })
+                            .is_some_and(|node| node.remove_child(&key));
+                        if !surface_updated {
+                            let styles = self.script_styles.clone();
+                            let replacement = self
+                                .density_maps
+                                .values()
+                                .find(|map| map.scene_uid == target_scene && map.name == object)
+                                .and_then(|map| {
+                                    map.renderers
+                                        .iter()
+                                        .find(|config| config.name == renderer)
+                                        .map(|config| {
+                                            let mut scripted =
+                                                density_renderer_to_script(map, config);
+                                            scripted.attributes.remove(&key);
+                                            (
+                                                map.uid,
+                                                config.uid,
+                                                density_renderer_from_script(
+                                                    &scripted,
+                                                    Some(config),
+                                                    &styles,
+                                                    scripted.scene_uid,
                                                 ),
                                             )
                                         })
@@ -23086,6 +32455,45 @@ impl DesktopAppState {
                     if let Some(object) = self.scene_manager_mut().object_mut(Uid::new(object_uid))
                     {
                         object.destroy_renderer(Uid::new(renderer_uid));
+                    }
+                }
+                ScriptCmd::AppendAtomIntr {
+                    object_uid,
+                    renderer_uid,
+                    line,
+                } => {
+                    if let Some(renderer) = self
+                        .scene_manager_mut()
+                        .object_mut(Uid::new(object_uid))
+                        .and_then(|object| object.renderer_mut(Uid::new(renderer_uid)))
+                    {
+                        renderer.append_atom_intr_line(line)?;
+                    }
+                }
+                ScriptCmd::SetAtomIntrLines {
+                    object_uid,
+                    renderer_uid,
+                    lines,
+                } => {
+                    if let Some(renderer) = self
+                        .scene_manager_mut()
+                        .object_mut(Uid::new(object_uid))
+                        .and_then(|object| object.renderer_mut(Uid::new(renderer_uid)))
+                    {
+                        renderer.set_atom_intr_lines(lines);
+                    }
+                }
+                ScriptCmd::RemoveAtomIntr {
+                    object_uid,
+                    renderer_uid,
+                    id,
+                } => {
+                    if let Some(renderer) = self
+                        .scene_manager_mut()
+                        .object_mut(Uid::new(object_uid))
+                        .and_then(|object| object.renderer_mut(Uid::new(renderer_uid)))
+                    {
+                        renderer.remove_atom_intr(id);
                     }
                 }
                 ScriptCmd::SetVisibilityByUid {
@@ -23131,43 +32539,283 @@ impl DesktopAppState {
                     }
                 }
                 ScriptCmd::RenameObject { uid, name } => {
-                    if let Some(object) = self.scene_manager_mut().object_mut(Uid::new(uid)) {
+                    let uid = Uid::new(uid);
+                    if let Some(object) = self.scene_manager_mut().object_mut(uid) {
                         object.set_name(name);
-                    }
-                }
-                ScriptCmd::SetObjectVisible { uid, visible } => {
-                    if let Some(object) = self.scene_manager_mut().object_mut(Uid::new(uid)) {
-                        object.set_visible(visible);
-                    }
-                }
-                ScriptCmd::SetObjectTransform { uid, matrix } => {
-                    if let Some(object) = self.scene_manager_mut().object_mut(Uid::new(uid)) {
-                        object.set_xform_matrix(matrix);
-                    }
-                }
-                ScriptCmd::CreateObject { class_name, name } => {
-                    if class_name.eq_ignore_ascii_case("MolCoord")
-                        || class_name.eq_ignore_ascii_case("MorphMol")
-                    {
-                        let scene_uid = self.ensure_active_scene();
-                        let name = if name.trim().is_empty() {
-                            format!("object{}", self.active_object_summaries().len() + 1)
-                        } else {
-                            name
-                        };
-                        let object_uid = self
-                            .scene_manager_mut()
-                            .scene_mut(scene_uid)
-                            .map(|scene| scene.add_molecule(name, MolCoord::new()));
-                        if class_name.eq_ignore_ascii_case("MorphMol") {
-                            if let Some(object_uid) = object_uid {
-                                self.morphs.insert(object_uid, MorphMol::new());
+                    } else if let Some(map) = self.density_maps.get_mut(&uid) {
+                        map.name = name;
+                        map.modified = true;
+                    } else {
+                        for scene_uid in self
+                            .scene_manager()
+                            .scenes()
+                            .iter()
+                            .map(|scene| scene.uid())
+                            .collect::<Vec<_>>()
+                        {
+                            let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) else {
+                                continue;
+                            };
+                            if let Some(object) = scene
+                                .loaded_lw_objects_mut()
+                                .iter_mut()
+                                .find(|object| object.uid == uid)
+                            {
+                                object.name = name.clone();
+                                if let Some(node) = object.qsc_node.as_mut() {
+                                    node.set_str_attr("name", &name);
+                                }
+                                break;
+                            }
+                            if let Some(surface) = scene
+                                .loaded_surfaces_mut()
+                                .iter_mut()
+                                .find(|surface| surface.uid == uid)
+                            {
+                                surface.name = name.clone();
+                                if let Some(node) = surface.qsc_node.as_mut() {
+                                    node.set_str_attr("name", &name);
+                                }
+                                break;
                             }
                         }
                     }
                 }
-                ScriptCmd::CreateSurface { name, data } => {
-                    let scene_uid = self.ensure_active_scene();
+                ScriptCmd::SetObjectVisible { uid, visible } => {
+                    let uid = Uid::new(uid);
+                    if let Some(object) = self.scene_manager_mut().object_mut(uid) {
+                        object.set_visible(visible);
+                    } else if let Some(map) = self.density_maps.get_mut(&uid) {
+                        map.visible = visible;
+                        map.modified = true;
+                    } else {
+                        for scene_uid in self
+                            .scene_manager()
+                            .scenes()
+                            .iter()
+                            .map(|scene| scene.uid())
+                            .collect::<Vec<_>>()
+                        {
+                            let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) else {
+                                continue;
+                            };
+                            if let Some(object) = scene
+                                .loaded_lw_objects_mut()
+                                .iter_mut()
+                                .find(|object| object.uid == uid)
+                            {
+                                object.visible = visible;
+                                break;
+                            }
+                            if let Some(node) = scene
+                                .loaded_surfaces_mut()
+                                .iter_mut()
+                                .find(|surface| surface.uid == uid)
+                                .and_then(|surface| surface.qsc_node.as_mut())
+                            {
+                                if visible {
+                                    node.remove_child("visible");
+                                } else {
+                                    node.set_str_attr("visible", "false");
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                ScriptCmd::SetObjectTransform { uid, matrix } => {
+                    let uid = Uid::new(uid);
+                    if let Some(object) = self.scene_manager_mut().object_mut(uid) {
+                        object.set_xform_matrix(matrix);
+                    } else if let Some(map) = self.density_maps.get_mut(&uid) {
+                        map.xform = matrix;
+                        map.modified = true;
+                    } else {
+                        for scene_uid in self
+                            .scene_manager()
+                            .scenes()
+                            .iter()
+                            .map(|scene| scene.uid())
+                            .collect::<Vec<_>>()
+                        {
+                            let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) else {
+                                continue;
+                            };
+                            if let Some(object) = scene
+                                .loaded_lw_objects_mut()
+                                .iter_mut()
+                                .find(|object| object.uid == uid)
+                            {
+                                object.xform = matrix;
+                                break;
+                            }
+                            if let Some(node) = scene
+                                .loaded_surfaces_mut()
+                                .iter_mut()
+                                .find(|surface| surface.uid == uid)
+                                .and_then(|surface| surface.qsc_node.as_mut())
+                            {
+                                if matrix == Matrix4::IDENTITY {
+                                    node.remove_child("xformMat");
+                                } else {
+                                    node.set_str_attr("xformMat", matrix.to_script_string());
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                ScriptCmd::SyncObjectState {
+                    uid,
+                    scene_uid,
+                    visible,
+                    locked,
+                    ui_collapsed,
+                    ui_order,
+                    modified,
+                    source,
+                    alt_source,
+                    xform,
+                    selection,
+                    default_color,
+                    coloring,
+                } => {
+                    let uid = Uid::new(uid);
+                    if let Some(object) = self.scene_manager_mut().object_mut(uid) {
+                        object.set_visible(visible);
+                        object.set_ui_locked(locked);
+                        object.set_ui_collapsed(ui_collapsed);
+                        object.set_ui_order(ui_order);
+                        object.set_source(source);
+                        object.set_alt_source(alt_source);
+                        object.set_xform_matrix(xform);
+                        object.set_qsc_coloring_node(coloring);
+                        let _ = object.mol_mut().set_selection_text(selection);
+                        if let Some(default_color) = default_color {
+                            object.mol_mut().set_default_color(default_color);
+                        }
+                        object.set_modified(modified);
+                    } else if let Some(map) = self.density_maps.get_mut(&uid) {
+                        map.visible = visible;
+                        map.locked = locked;
+                        map.ui_collapsed = ui_collapsed;
+                        map.ui_order = ui_order;
+                        map.modified = modified;
+                        map.source = source;
+                        map.alt_source = alt_source;
+                        map.xform = xform;
+                    } else if let Some(scene) =
+                        self.scene_manager_mut().scene_mut(Uid::new(scene_uid))
+                    {
+                        if let Some(object) = scene
+                            .loaded_lw_objects_mut()
+                            .iter_mut()
+                            .find(|object| object.uid == uid)
+                        {
+                            object.visible = visible;
+                            object.xform = xform;
+                            let name = object.name.clone();
+                            let srctype = object.srctype.clone();
+                            let node = object.qsc_node.get_or_insert_with(|| {
+                                let mut node = LDom2Node::new();
+                                node.set_tag_name("object");
+                                node.set_type_name("LWObject");
+                                node.set_str_attr("name", name);
+                                node.set_str_attr("srctype", srctype);
+                                node
+                            });
+                            sync_object_metadata_node(
+                                node,
+                                ScriptObjectMetadata {
+                                    visible,
+                                    locked,
+                                    ui_collapsed,
+                                    ui_order,
+                                    modified,
+                                    source: &source,
+                                    alt_source: &alt_source,
+                                    xform,
+                                },
+                            );
+                        } else if let Some(surface) = scene
+                            .loaded_surfaces_mut()
+                            .iter_mut()
+                            .find(|surface| surface.uid == uid)
+                        {
+                            let name = surface.name.clone();
+                            let srctype = surface.srctype.clone();
+                            let node = surface.qsc_node.get_or_insert_with(|| {
+                                let mut node = LDom2Node::new();
+                                node.set_tag_name("object");
+                                node.set_type_name("MolSurfObj");
+                                node.set_str_attr("name", name);
+                                node.set_str_attr("srctype", srctype);
+                                node
+                            });
+                            sync_object_metadata_node(
+                                node,
+                                ScriptObjectMetadata {
+                                    visible,
+                                    locked,
+                                    ui_collapsed,
+                                    ui_order,
+                                    modified,
+                                    source: &source,
+                                    alt_source: &alt_source,
+                                    xform,
+                                },
+                            );
+                        }
+                    }
+                }
+                ScriptCmd::CreateObject {
+                    target_scene,
+                    expected_uid,
+                    class_name,
+                    name,
+                } => {
+                    if class_name.eq_ignore_ascii_case("MolCoord")
+                        || class_name.eq_ignore_ascii_case("MorphMol")
+                        || class_name.eq_ignore_ascii_case("Object")
+                    {
+                        let scene_uid = Uid::new(target_scene);
+                        let name = if name.trim().is_empty() {
+                            self.scene_manager().scene(scene_uid).map_or_else(
+                                || "object1".to_string(),
+                                |scene| format!("object{}", scene.objects().len() + 1),
+                            )
+                        } else {
+                            name
+                        };
+                        let object_uid =
+                            self.scene_manager_mut()
+                                .scene_mut(scene_uid)
+                                .and_then(|scene| {
+                                    scene.add_molecule_with_uid(
+                                        Uid::new(expected_uid),
+                                        name,
+                                        MolCoord::new(),
+                                    )
+                                });
+                        if let Some(object_uid) = object_uid {
+                            if let Some(object) = self.scene_manager_mut().object_mut(object_uid) {
+                                object.set_object_type(class_name.clone());
+                            }
+                        }
+                        if class_name.eq_ignore_ascii_case("MorphMol") {
+                            if let Some(object_uid) = object_uid {
+                                self.morphs.entry(object_uid).or_default();
+                            }
+                        }
+                    }
+                }
+                ScriptCmd::CreateSurface {
+                    target_scene,
+                    expected_uid,
+                    name,
+                    data,
+                } => {
+                    let scene_uid = Uid::new(target_scene);
                     let name = if name.trim().is_empty() {
                         format!(
                             "surface{}",
@@ -23180,7 +32828,7 @@ impl DesktopAppState {
                     };
                     if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
                         scene.add_loaded_surface(LoadedSurface {
-                            uid: Uid::new(0),
+                            uid: Uid::new(expected_uid),
                             name,
                             object_type: "MolSurfObj".to_string(),
                             srctype: "obj".to_string(),
@@ -23190,32 +32838,292 @@ impl DesktopAppState {
                         });
                     }
                 }
-                ScriptCmd::CreateMolecule { name, data } => {
-                    if let Ok(molecule) = cuemol_molstr::read_sdf_str(&data) {
-                        let scene_uid = self.ensure_active_scene();
-                        let name = if name.trim().is_empty() {
-                            format!("object{}", self.active_object_summaries().len() + 1)
-                        } else {
-                            name
-                        };
-                        if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
-                            scene.add_molecule(name, molecule);
+                ScriptCmd::CreateMolecule {
+                    target_scene,
+                    expected_uid,
+                    class_name,
+                    name,
+                    molecule,
+                } => {
+                    let scene_uid = Uid::new(target_scene);
+                    let name = if name.trim().is_empty() {
+                        self.scene_manager().scene(scene_uid).map_or_else(
+                            || "object1".to_string(),
+                            |scene| format!("object{}", scene.objects().len() + 1),
+                        )
+                    } else {
+                        name
+                    };
+                    let object_uid =
+                        self.scene_manager_mut()
+                            .scene_mut(scene_uid)
+                            .and_then(|scene| {
+                                scene.add_molecule_with_uid(Uid::new(expected_uid), name, molecule)
+                            });
+                    if let Some(object_uid) = object_uid {
+                        if let Some(object) = self.scene_manager_mut().object_mut(object_uid) {
+                            object.set_object_type(class_name.clone());
+                        }
+                    }
+                    if class_name.eq_ignore_ascii_case("MorphMol") {
+                        if let Some(object_uid) = object_uid {
+                            self.morphs.entry(object_uid).or_default();
                         }
                     }
                 }
+                ScriptCmd::CreateDensityMap {
+                    target_scene,
+                    expected_uid,
+                    class_name,
+                    name,
+                    format,
+                    source,
+                    map,
+                } => {
+                    let scene_uid = Uid::new(target_scene);
+                    let name = if name.trim().is_empty() {
+                        format!("map{}", self.density_maps.len() + 1)
+                    } else {
+                        name
+                    };
+                    let uid = self.add_density_map_with_uid(
+                        Uid::new(expected_uid),
+                        scene_uid,
+                        name,
+                        map.clone(),
+                    );
+                    let storage_index =
+                        self.density_maps.get(&uid).map(|state| state.storage_index);
+                    if let Some(state) = self.density_maps.get_mut(&uid) {
+                        state.class_name = class_name.clone();
+                        state.format = format.clone();
+                        state.source = source;
+                        state.modified = false;
+                    }
+                    if let Some(storage_index) = storage_index {
+                        if let Some(loaded) = self
+                            .scene_manager_mut()
+                            .scene_mut(scene_uid)
+                            .and_then(|scene| {
+                                scene.loaded_density_maps_mut().get_mut(storage_index)
+                            })
+                        {
+                            loaded.object_type = class_name.clone();
+                            loaded.srctype = "qdfmap".to_string();
+                        }
+                    }
+                    if class_name == "ElePotMap" {
+                        self.surface_potential = Some(map);
+                    }
+                }
+                ScriptCmd::CreateLWObject {
+                    target_scene,
+                    expected_uid,
+                    name,
+                    object,
+                } => {
+                    let scene_uid = Uid::new(target_scene);
+                    let name = if name.trim().is_empty() {
+                        self.scene_manager().scene(scene_uid).map_or_else(
+                            || "lwobject1".to_string(),
+                            |scene| format!("lwobject{}", scene.loaded_lw_objects().len() + 1),
+                        )
+                    } else {
+                        name
+                    };
+                    let data_ids = object
+                        .draw_elements()
+                        .iter()
+                        .map(cuemol_lwview::LWDrawElement::data_id)
+                        .filter(|data_id| *data_id != 0)
+                        .collect::<BTreeSet<_>>();
+                    let renderers = data_ids
+                        .into_iter()
+                        .map(|data_id| LoadedLWRenderer {
+                            name: format!("lwrend_{data_id}"),
+                            data_id,
+                            visible: true,
+                            xform: Matrix4::IDENTITY,
+                        })
+                        .collect();
+                    if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
+                        scene.add_loaded_lw_object(LoadedLWObject {
+                            uid: Uid::new(expected_uid),
+                            name,
+                            srctype: "qdflwobj".to_string(),
+                            raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&object),
+                            visible: true,
+                            xform: Matrix4::IDENTITY,
+                            renderers,
+                            qsc_node: None,
+                        });
+                    }
+                }
+                ScriptCmd::LoadObjectCommand {
+                    target_scene,
+                    path,
+                    name,
+                    format,
+                } => {
+                    let scene_uid = Uid::new(target_scene);
+                    let path = Path::new(&path);
+                    let _ = if is_density_map_format(&format) {
+                        self.load_density_map(scene_uid, path, name, &format)
+                            .map(|_| ())
+                    } else if is_surface_format(&format) {
+                        self.load_surface_object(scene_uid, path, name, &format)
+                    } else if format == "qdflwobj" {
+                        self.load_lw_object(scene_uid, path, name)
+                    } else if is_desktop_extension_format(&format) {
+                        self.load_extension_object(scene_uid, path, name, &format)
+                            .map(|_| ())
+                    } else {
+                        self.load_object(scene_uid, path, name, &format).map(|_| ())
+                    };
+                }
+                ScriptCmd::LoadScene {
+                    class_name,
+                    path,
+                    target_scene,
+                } => {
+                    let target_scene = if target_scene == 0 {
+                        self.ensure_active_scene()
+                    } else {
+                        Uid::new(target_scene)
+                    };
+                    if class_name == "SceneXMLReader" {
+                        let _ = self.load_qsc_file_into(Path::new(&path), Some(target_scene));
+                    } else if class_name == "PSEFileReader" {
+                        self.active_scene = Some(target_scene);
+                        let object_name = default_object_name(Path::new(&path));
+                        let _ = self.load_pse_objects(target_scene, Path::new(&path), &object_name);
+                    }
+                }
+                ScriptCmd::WriteScene {
+                    path,
+                    scene_uid,
+                    version,
+                    compress,
+                    base64,
+                } => {
+                    let scene_uid = if scene_uid == 0 {
+                        self.ensure_active_scene()
+                    } else {
+                        Uid::new(scene_uid)
+                    };
+                    if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
+                        let mut options = scene.qsc_options().cloned().unwrap_or_default();
+                        options.set_tag_name("qsc_opts");
+                        options.set_type_name("qsc_opts");
+                        if !version.is_empty() {
+                            options.set_str_attr("version", version);
+                        }
+                        options.set_str_attr(
+                            "compress",
+                            match compress {
+                                1 => "gzip",
+                                2 => "bzip2",
+                                3 => "xzip",
+                                _ => "none",
+                            },
+                        );
+                        options.set_str_attr("base64", base64.to_string());
+                        let _ = scene.set_qsc_options(Some(options));
+                    }
+                    let _ = self
+                        .scene_manager()
+                        .write_qsc_file(scene_uid, Path::new(&path));
+                }
                 ScriptCmd::CreateRenderer {
+                    object_uid,
+                    renderer_uid,
                     object,
                     renderer_type,
                     name,
                 } => {
-                    let name = if name.trim().is_empty() {
-                        renderer_type.clone()
+                    let target_uid = object_uid
+                        .map(Uid::new)
+                        .or_else(|| {
+                            self.scene_manager()
+                                .scenes()
+                                .iter()
+                                .find_map(|scene| scene.object_by_name(&object).map(MolObject::uid))
+                        })
+                        .or_else(|| self.object_uid_by_name(&object));
+                    let molecule_scene = target_uid.and_then(|target_uid| {
+                        self.scene_manager().scenes().iter().find_map(|scene| {
+                            scene.object(target_uid).map(|_| (scene.uid(), target_uid))
+                        })
+                    });
+                    if let Some((_scene_uid, target_uid)) = molecule_scene {
+                        if let Some(object) = self.scene_manager_mut().object_mut(target_uid) {
+                            let _ = object.add_renderer_with_uid(
+                                Uid::new(renderer_uid),
+                                renderer_type,
+                                name,
+                            );
+                        }
                     } else {
-                        name
-                    };
-                    if let Some(uid) = self.object_uid_by_name(&object) {
-                        let _ = self.new_renderer_in_active_scene(uid, renderer_type, name);
-                    } else if let Some(scene_uid) = self.active_scene() {
+                        if let Some(map_uid) =
+                            target_uid.filter(|uid| self.density_maps.contains_key(uid))
+                        {
+                            if self.density_maps.get(&map_uid).is_some_and(|map| {
+                                map.renderers
+                                    .iter()
+                                    .any(|renderer| renderer.uid.get() == renderer_uid)
+                            }) {
+                                continue;
+                            }
+                            self.next_density_renderer_uid = self
+                                .next_density_renderer_uid
+                                .max(renderer_uid.saturating_add(1));
+                            let map = self
+                                .density_maps
+                                .get(&map_uid)
+                                .expect("density map target was checked");
+                            let renderer = ScriptRend {
+                                uid: renderer_uid,
+                                object_uid: map_uid.get(),
+                                scene_uid: map.scene_uid.get(),
+                                name,
+                                rtype: renderer_type,
+                                visible: true,
+                                attributes: BTreeMap::new(),
+                                children: Vec::new(),
+                                atom_intr_lines: Vec::new(),
+                                multi_gradient: None,
+                            };
+                            let styles = self.script_styles.clone();
+                            if let Some(config) = density_renderer_from_script(
+                                &renderer,
+                                None,
+                                &styles,
+                                renderer.scene_uid,
+                            ) {
+                                self.density_maps
+                                    .get_mut(&map_uid)
+                                    .expect("density map target was checked")
+                                    .renderers
+                                    .push(config);
+                            }
+                            continue;
+                        }
+                        let surface_scene =
+                            self.scene_manager().scenes().iter().find_map(|scene| {
+                                scene
+                                    .loaded_surfaces()
+                                    .iter()
+                                    .find(|surface| {
+                                        target_uid.map_or_else(
+                                            || Some(scene.uid()) == self.active_scene(),
+                                            |uid| surface.uid == uid,
+                                        ) && surface.name == object
+                                    })
+                                    .map(|_| scene.uid())
+                            });
+                        let Some(scene_uid) = surface_scene else {
+                            continue;
+                        };
                         if let Some(surface) = self
                             .scene_manager_mut()
                             .scene_mut(scene_uid)
@@ -23251,69 +33159,68 @@ impl DesktopAppState {
                         }
                     }
                 }
-                ScriptCmd::CreatePresetRenderer {
+                ScriptCmd::SetRendererChildren {
                     object_uid,
-                    preset_name,
-                    group_name,
-                    name_prefix,
+                    object,
+                    renderer,
+                    children,
                 } => {
-                    let styles = self
-                        .active_scene()
-                        .and_then(|scene_uid| self.script_styles.get(&scene_uid.get()).cloned())
-                        .or_else(|| {
-                            self.active_scene()
-                                .and_then(|scene_uid| self.scene_manager().scene(scene_uid))
-                                .map(scene_style_manager)
-                        })
-                        .unwrap_or_else(cuemol_molvis::default_style_manager);
-                    if let Some(object) = self.scene_manager_mut().object_mut(Uid::new(object_uid))
-                    {
-                        let _ = object.create_preset_renderer_with_style(
-                            &styles,
-                            0,
-                            &preset_name,
-                            &group_name,
-                            &name_prefix,
-                        );
-                    }
-                }
-                ScriptCmd::AttachRenderer {
-                    target_uid,
-                    renderer_uid,
-                } => {
-                    if let Some(scene_uid) = self.active_scene() {
-                        let source_uid = self.scene_manager().scene(scene_uid).and_then(|scene| {
-                            scene.objects().iter().find_map(|object| {
-                                object
-                                    .renderer(Uid::new(renderer_uid))
-                                    .is_some()
-                                    .then_some(object.uid())
+                    let object_uid = Uid::new(object_uid);
+                    let renderer_uid = self
+                        .scene_manager()
+                        .object(object_uid)
+                        .and_then(|object| object.renderer_by_name(&renderer))
+                        .map(MolRenderer::uid);
+                    let applied = renderer_uid.is_some_and(|renderer_uid| {
+                        self.scene_manager_mut()
+                            .object_mut(object_uid)
+                            .and_then(|object| object.renderer_mut(renderer_uid))
+                            .is_some_and(|target| {
+                                target.set_qsc_children(children.clone());
+                                true
                             })
-                        });
-                        if let Some(source_uid) = source_uid.filter(|uid| uid.get() != target_uid) {
-                            let renderer = self
+                    });
+                    if !applied {
+                        let scene_uid = self
+                            .scene_manager()
+                            .scenes()
+                            .iter()
+                            .find(|scene| {
+                                scene.loaded_surfaces().iter().any(|surface| {
+                                    surface.uid == object_uid || surface.name == object
+                                })
+                            })
+                            .map(|scene| scene.uid());
+                        if let Some(scene_uid) = scene_uid {
+                            let Some(surface) = self
                                 .scene_manager_mut()
                                 .scene_mut(scene_uid)
-                                .and_then(|scene| scene.object_mut(source_uid))
-                                .and_then(|object| object.detach_renderer(Uid::new(renderer_uid)));
-                            if let Some(renderer) = renderer {
-                                let attached = self
-                                    .scene_manager_mut()
-                                    .object_mut(Uid::new(target_uid))
-                                    .is_some_and(|object| object.attach_renderer(renderer.clone()));
-                                if !attached {
-                                    if let Some(source) =
-                                        self.scene_manager_mut().object_mut(source_uid)
-                                    {
-                                        source.attach_renderer(renderer);
-                                    }
+                                .and_then(|scene| {
+                                    scene.loaded_surfaces_mut().iter_mut().find(|surface| {
+                                        surface.uid == object_uid || surface.name == object
+                                    })
+                                })
+                            else {
+                                continue;
+                            };
+                            if let Some(target) = surface.qsc_node.as_mut().and_then(|node| {
+                                node.children_mut().iter_mut().find(|child| {
+                                    child.tag_name() == "renderer"
+                                        && !child.is_attr()
+                                        && child.str_attr("name").as_str() == renderer
+                                })
+                            }) {
+                                target.retain_children(LDom2Node::is_attr);
+                                for child in children {
+                                    target.append_child_node(child);
                                 }
                             }
                         }
                     }
                 }
-                ScriptCmd::DestroyObject { uid } => {
-                    if let Some(scene_uid) = self.active_scene() {
+                ScriptCmd::DestroyObject { scene_uid, uid } => {
+                    let scene_uid = Uid::new(scene_uid);
+                    if self.scene_manager().scene(scene_uid).is_some() {
                         let uid = Uid::new(uid);
                         let destroyed = self
                             .scene_manager_mut()
@@ -23336,13 +33243,24 @@ impl DesktopAppState {
                         }
                     }
                 }
-                ScriptCmd::ClearScene => {
-                    if let Some(scene_uid) = self.active_scene() {
+                ScriptCmd::ClearScene { scene_uid } => {
+                    let scene_uid = Uid::new(scene_uid);
+                    if self.scene_manager().scene(scene_uid).is_some() {
                         if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
                             scene.clear_all_data();
                         }
                         self.density_maps
                             .retain(|_, map| map.scene_uid != scene_uid);
+                    }
+                }
+                ScriptCmd::SetSceneCamera { scene_uid, camera } => {
+                    if let Some(scene) = self.scene_manager_mut().scene_mut(Uid::new(scene_uid)) {
+                        scene.set_camera(camera);
+                    }
+                }
+                ScriptCmd::DestroySceneCamera { scene_uid, name } => {
+                    if let Some(scene) = self.scene_manager_mut().scene_mut(Uid::new(scene_uid)) {
+                        scene.destroy_camera(&name);
                     }
                 }
                 ScriptCmd::ChangeCrystalInfo {
@@ -23476,25 +33394,42 @@ impl DesktopAppState {
                         );
                     }
                 }
-                ScriptCmd::StartUndoTxn { description } => {
-                    self.script_scene_start_undo(description, script_run_start.clone());
+                ScriptCmd::StartUndoTxn {
+                    scene_uid,
+                    description,
+                } => {
+                    self.script_scene_start_undo(
+                        Uid::new(scene_uid),
+                        description,
+                        script_run_start.clone(),
+                    );
                 }
-                ScriptCmd::CommitUndoTxn => {
-                    self.script_scene_commit_undo();
+                ScriptCmd::CommitUndoTxn { scene_uid } => {
+                    self.script_scene_commit_undo(Uid::new(scene_uid));
                 }
-                ScriptCmd::RollbackUndoTxn => {
-                    self.script_scene_rollback_undo();
+                ScriptCmd::RollbackUndoTxn { scene_uid } => {
+                    self.script_scene_rollback_undo(Uid::new(scene_uid));
                 }
-                ScriptCmd::UndoScene { index } => {
-                    self.script_scene_undo(index);
+                ScriptCmd::UndoScene { scene_uid, index } => {
+                    self.script_scene_undo(Uid::new(scene_uid), index);
                 }
-                ScriptCmd::RedoScene { index } => {
-                    self.script_scene_redo(index);
+                ScriptCmd::RedoScene { scene_uid, index } => {
+                    self.script_scene_redo(Uid::new(scene_uid), index);
                 }
-                ScriptCmd::ClearUndoData => self.script_scene_clear_undo(),
-                ScriptCmd::CreateScene { expected_uid } => {
-                    let created = self.command_manager.new_scene_command("", false);
+                ScriptCmd::ClearUndoData { scene_uid } => {
+                    self.script_scene_clear_undo(Uid::new(scene_uid));
+                }
+                ScriptCmd::CreateScene {
+                    expected_uid,
+                    name,
+                    create_view,
+                    activate,
+                } => {
+                    let created = self.command_manager.new_scene_command(name, create_view);
                     debug_assert_eq!(created.result_scene.get(), expected_uid);
+                    if activate {
+                        self.active_scene = Some(created.result_scene);
+                    }
                 }
                 ScriptCmd::DestroyScene { uid } => {
                     self.destroy_scene(Uid::new(uid));
@@ -23514,12 +33449,35 @@ impl DesktopAppState {
                         scene.set_scene_attribute("_script_modified", "true");
                     }
                 }
+                ScriptCmd::ConvertToLWScene {
+                    source_scene,
+                    target_scene,
+                } => {
+                    self.convert_scene_to_lw(Uid::new(source_scene), Uid::new(target_scene))?;
+                }
             }
         }
-        for (scene_uid, animation) in updated_scene_animations {
-            if !existing_scene_uids.contains(&scene_uid) {
-                if let Some(scene) = self.scene_manager_mut().scene_mut(Uid::new(scene_uid)) {
-                    scene.set_animation_node(Some(animation.to_ldom2_node()))?;
+        for state in updated_scene_states {
+            if existing_scene_uids.contains(&state.uid) {
+                continue;
+            }
+            if let Some(scene) = self.scene_manager_mut().scene_mut(Uid::new(state.uid)) {
+                if !state.name.is_empty() {
+                    scene.set_name(state.name);
+                }
+                if !state.attributes.is_empty() {
+                    scene.replace_scene_attributes(state.attributes);
+                }
+                scene.set_active_object_uid(state.active_object_uid.map(Uid::new));
+                scene.set_active_renderer_uid(state.active_renderer_uid.map(Uid::new));
+                scene.set_active_view_uid(state.active_view_uid.map(Uid::new));
+                if !state.cameras.is_empty() {
+                    scene.replace_cameras(state.cameras);
+                }
+                if scene.animation_node().is_none()
+                    && (state.animation.size() > 0 || state.animation.length() > 0)
+                {
+                    scene.set_animation_node(Some(state.animation.to_ldom2_node()))?;
                 }
             }
         }
@@ -23575,12 +33533,13 @@ impl DesktopAppState {
     #[cfg(feature = "scripting")]
     fn script_scene_start_undo(
         &mut self,
+        scene_uid: Uid,
         description: String,
         run_start: DesktopSceneSnapshot,
     ) -> bool {
-        let Some(scene_uid) = self.active_scene else {
+        if self.scene_manager().scene(scene_uid).is_none() {
             return false;
-        };
+        }
         let state = self.script_scene_undo.entry(scene_uid.get()).or_default();
         if let Some(active) = state.active.as_mut() {
             active.nesting = active.nesting.saturating_add(1);
@@ -23595,10 +33554,10 @@ impl DesktopAppState {
     }
 
     #[cfg(feature = "scripting")]
-    fn script_scene_commit_undo(&mut self) -> bool {
-        let Some(scene_uid) = self.active_scene else {
+    fn script_scene_commit_undo(&mut self, scene_uid: Uid) -> bool {
+        if self.scene_manager().scene(scene_uid).is_none() {
             return false;
-        };
+        }
         let key = scene_uid.get();
         let Some(mut state) = self.script_scene_undo.remove(&key) else {
             return false;
@@ -23628,10 +33587,10 @@ impl DesktopAppState {
     }
 
     #[cfg(feature = "scripting")]
-    fn script_scene_rollback_undo(&mut self) -> bool {
-        let Some(scene_uid) = self.active_scene else {
+    fn script_scene_rollback_undo(&mut self, scene_uid: Uid) -> bool {
+        if self.scene_manager().scene(scene_uid).is_none() {
             return false;
-        };
+        }
         let key = scene_uid.get();
         let Some(mut state) = self.script_scene_undo.remove(&key) else {
             return false;
@@ -23651,10 +33610,10 @@ impl DesktopAppState {
     }
 
     #[cfg(feature = "scripting")]
-    fn script_scene_undo(&mut self, index: usize) -> bool {
-        let Some(scene_uid) = self.active_scene else {
+    fn script_scene_undo(&mut self, scene_uid: Uid, index: usize) -> bool {
+        if self.scene_manager().scene(scene_uid).is_none() {
             return false;
-        };
+        }
         let key = scene_uid.get();
         let Some(mut state) = self.script_scene_undo.remove(&key) else {
             return false;
@@ -23672,10 +33631,10 @@ impl DesktopAppState {
     }
 
     #[cfg(feature = "scripting")]
-    fn script_scene_redo(&mut self, index: usize) -> bool {
-        let Some(scene_uid) = self.active_scene else {
+    fn script_scene_redo(&mut self, scene_uid: Uid, index: usize) -> bool {
+        if self.scene_manager().scene(scene_uid).is_none() {
             return false;
-        };
+        }
         let key = scene_uid.get();
         let Some(mut state) = self.script_scene_undo.remove(&key) else {
             return false;
@@ -23693,10 +33652,10 @@ impl DesktopAppState {
     }
 
     #[cfg(feature = "scripting")]
-    fn script_scene_clear_undo(&mut self) {
-        let Some(scene_uid) = self.active_scene else {
+    fn script_scene_clear_undo(&mut self, scene_uid: Uid) {
+        if self.scene_manager().scene(scene_uid).is_none() {
             return;
-        };
+        }
         if let Some(state) = self.script_scene_undo.get_mut(&scene_uid.get()) {
             state.undo.clear();
             state.redo.clear();
@@ -23721,6 +33680,7 @@ impl DesktopAppState {
                         visible: renderer.is_visible(),
                         attributes: renderer.qsc_attrs().clone(),
                         children: renderer.qsc_children().to_vec(),
+                        atom_intr_lines: renderer.atom_intr_lines().to_vec(),
                         multi_gradient: (renderer.renderer_type() == "molsurf")
                             .then(|| renderer_multi_gradient(renderer, &styles)),
                     })
@@ -23732,7 +33692,7 @@ impl DesktopAppState {
                     class: if self.morphs.contains_key(&object.uid()) {
                         "MorphMol".to_string()
                     } else {
-                        "MolCoord".to_string()
+                        object.object_type().to_string()
                     },
                     visible: object.is_visible(),
                     locked: object.is_ui_locked(),
@@ -23743,7 +33703,7 @@ impl DesktopAppState {
                     alt_source: object.alt_source().to_string(),
                     source_type: object.source_type().to_string(),
                     xform: object.xform_matrix(),
-                    selection: object.mol().selection().to_string(),
+                    selection: object.mol().selection_text().to_string(),
                     coloring: mol_object_coloring_node(object),
                     renderers,
                     scalar_map: None,
@@ -23878,61 +33838,160 @@ impl DesktopAppState {
                 })
             })
             .collect();
-        let styles = self
-            .active_scene()
-            .and_then(|uid| self.script_styles.get(&uid.get()).cloned())
-            .or_else(|| {
-                self.active_scene()
-                    .and_then(|uid| self.scene_manager().scene(uid))
-                    .map(scene_style_manager)
-            })
-            .unwrap_or_else(cuemol_molvis::default_style_manager);
-        let undo_state = self
-            .active_scene()
-            .and_then(|uid| self.script_scene_undo.get(&uid.get()));
-        let scenes = self
+        let mut styles = self.script_styles.clone();
+        for scene in self.scene_manager().scenes() {
+            let scope_id = scene.uid().get();
+            for (index, loaded) in scene.loaded_styles().iter().enumerate() {
+                let id = loaded.node.str_attr("id");
+                let name = if id.is_empty() {
+                    format!("scene-style-{index}")
+                } else {
+                    id.to_string()
+                };
+                if styles.has_style_set(&name, scope_id) != 0 {
+                    continue;
+                }
+                let read_only = loaded.node.str_attr("readonly").equals_ignore_case("true");
+                styles.load_style_set_from_xml(scope_id, name, &loaded.data, read_only);
+            }
+        }
+        let scenes: Vec<ScriptSceneInfo> = self
             .scene_manager()
             .scenes()
             .iter()
-            .map(|scene| ScriptSceneInfo {
-                uid: scene.uid().get(),
-                name: scene.name().to_string(),
-                attributes: scene.scene_attributes().clone(),
-                cameras: scene.cameras().to_vec(),
-                animation: scene
-                    .animation_node()
-                    .map(AnimMgr::from_ldom2_node)
-                    .transpose()
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default(),
+            .map(|scene| {
+                let undo_state = self.script_scene_undo.get(&scene.uid().get());
+                ScriptSceneInfo {
+                    uid: scene.uid().get(),
+                    name: scene.name().to_string(),
+                    attributes: scene.scene_attributes().clone(),
+                    active_object_uid: scene.active_object_uid().map(Uid::get),
+                    active_renderer_uid: scene.active_renderer_uid().map(Uid::get),
+                    active_view_uid: scene.active_view_uid().map(Uid::get),
+                    cameras: scene.cameras().to_vec(),
+                    animation: scene
+                        .animation_node()
+                        .map(AnimMgr::from_ldom2_node)
+                        .transpose()
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default(),
+                    qsc_options: scene.qsc_options().cloned(),
+                    next_object_uid: scene.next_object_uid_hint().get(),
+                    undo_descriptions: undo_state
+                        .map(|state| {
+                            state
+                                .undo
+                                .iter()
+                                .rev()
+                                .map(|entry| entry.description.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    redo_descriptions: undo_state
+                        .map(|state| {
+                            state
+                                .redo
+                                .iter()
+                                .rev()
+                                .map(|entry| entry.description.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    undo_active: undo_state
+                        .and_then(|state| state.active.as_ref())
+                        .map(|active| (active.description.clone(), active.nesting)),
+                }
             })
             .collect();
         let animation = self
             .active_scene()
             .and_then(|uid| self.scene_animation(uid).ok().flatten())
             .unwrap_or_default();
+        let render_scenes = self
+            .scene_manager()
+            .scenes()
+            .iter()
+            .filter_map(|scene| {
+                let snapshot = self.render_snapshot(scene.uid(), "").ok()?;
+                let camera = scene
+                    .camera_by_name("__current")
+                    .or_else(|| scene.cameras().first())
+                    .cloned()
+                    .unwrap_or_else(|| auto_frame_camera(&snapshot));
+                Some((
+                    scene.uid().get(),
+                    ScriptRenderScene {
+                        snapshot,
+                        default_camera: camera,
+                    },
+                ))
+            })
+            .collect();
+        let mut allocated_runtime_uids = BTreeSet::new();
+        allocated_runtime_uids.extend(scenes.iter().map(|scene| scene.uid));
+        allocated_runtime_uids.extend(
+            self.command_manager()
+                .views()
+                .iter()
+                .map(|view| view.uid().get()),
+        );
+        for object in &objects {
+            allocated_runtime_uids.insert(object.uid);
+            allocated_runtime_uids.extend(object.renderers.iter().map(|renderer| renderer.uid));
+        }
         ScriptEnv {
             scene_uid,
             scene_name,
             scene_attributes,
             scenes,
             next_scene_uid: self.scene_manager().next_scene_uid_hint().get(),
+            next_command_uid: 9_000_000_000_000,
+            next_runtime_uid: 1_900_000_000,
+            allocated_runtime_uids,
             objects,
             molecules,
+            modified_molecule_uids: BTreeSet::new(),
             morphs: self
                 .morphs
                 .iter()
                 .map(|(uid, morph)| (uid.get(), morph.clone()))
                 .collect(),
+            lw_objects: self
+                .scene_manager()
+                .scenes()
+                .iter()
+                .flat_map(|scene| scene.loaded_lw_objects())
+                .filter_map(|object| {
+                    cuemol_lwview::read_qdf_lwobj_bytes(&object.raw_data)
+                        .ok()
+                        .map(|parsed| (object.uid.get(), parsed))
+                })
+                .collect(),
             views: self.command_manager().views().to_vec(),
+            camera_refs: Vec::new(),
             cameras: self
                 .active_scene()
                 .and_then(|uid| self.scene_manager().scene(uid))
                 .map(|scene| scene.cameras().to_vec())
                 .unwrap_or_default(),
             animation,
+            detached_animation_managers: BTreeMap::new(),
+            next_detached_animation_manager_id: 8_000_000_000_000,
             pending_animations: BTreeMap::new(),
+            pending_density_maps: BTreeMap::new(),
+            pending_potential_maps: BTreeMap::new(),
+            next_density_map_uid: self.next_density_map_uid,
+            next_pending_density_map_id: 1,
+            pending_atom_intr_lines: BTreeMap::new(),
+            next_pending_atom_intr_id: 1,
+            pending_lw_objects: BTreeMap::new(),
+            next_pending_lw_object_id: 1,
+            render_scenes,
+            native_scene_exporters: BTreeMap::new(),
+            next_native_scene_exporter_id: 1,
+            umbreon_exporters: BTreeMap::new(),
+            next_umbreon_exporter_id: 1,
             styles,
             msg_log: cuemol_core::LMsgLog::new(),
             process_manager: cuemol_core::ProcessManager::new(),
@@ -23940,29 +33999,7 @@ impl DesktopAppState {
             event_manager: cuemol_qsys::ScrEventManager::new(),
             view_input_config: self.script_view_input_config.clone(),
             mol_client_manager: cuemol_molclient::MolClientManager::new(),
-            undo_descriptions: undo_state
-                .map(|state| {
-                    state
-                        .undo
-                        .iter()
-                        .rev()
-                        .map(|entry| entry.description.clone())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            redo_descriptions: undo_state
-                .map(|state| {
-                    state
-                        .redo
-                        .iter()
-                        .rev()
-                        .map(|entry| entry.description.clone())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            undo_active: undo_state
-                .and_then(|state| state.active.as_ref())
-                .map(|active| (active.description.clone(), active.nesting)),
+            stream_manager: StreamManager::new(),
             scene_listeners: BTreeMap::new(),
             next_scene_listener_id: 0,
             event_listener: None,
@@ -23994,16 +34031,19 @@ impl DesktopAppState {
             .map(|object| object.uid)
     }
 
-    /// Resolve an (object Uid, renderer Uid) pair from their names.
     #[cfg(feature = "scripting")]
-    fn renderer_uid_by_name(&self, object: &str, renderer: &str) -> Option<(Uid, Uid)> {
-        let object_uid = self.object_uid_by_name(object)?;
-        let renderer_uid = self
-            .renderer_summaries(object_uid)
-            .into_iter()
-            .find(|summary| summary.name == renderer)
-            .map(|summary| summary.uid)?;
-        Some((object_uid, renderer_uid))
+    fn renderer_uid_by_name_in_scene(
+        &self,
+        scene_uid: Uid,
+        object: &str,
+        renderer: &str,
+    ) -> Option<(Uid, Uid)> {
+        let object = self
+            .scene_manager()
+            .scene(scene_uid)?
+            .object_by_name(object)?;
+        let renderer_uid = object.renderer_by_name(renderer)?.uid();
+        Some((object.uid(), renderer_uid))
     }
 }
 
@@ -24061,19 +34101,28 @@ enum ScriptCmd {
     Select(String),
     Color(String),
     SetColoring {
+        object_uid: Option<u64>,
         object: String,
         scheme: String,
     },
     SetRendererVisible {
+        scene_uid: Option<u64>,
         object: String,
         renderer: String,
         visible: bool,
     },
     SetRendererProp {
+        scene_uid: Option<u64>,
         object: String,
         renderer: String,
         key: String,
         value: String,
+    },
+    ResetRendererProp {
+        scene_uid: u64,
+        object: String,
+        renderer: String,
+        key: String,
     },
     RenameRenderer {
         object_uid: u64,
@@ -24083,6 +34132,21 @@ enum ScriptCmd {
     DestroyRenderer {
         object_uid: u64,
         renderer_uid: u64,
+    },
+    AppendAtomIntr {
+        object_uid: u64,
+        renderer_uid: u64,
+        line: AtomIntrLine,
+    },
+    SetAtomIntrLines {
+        object_uid: u64,
+        renderer_uid: u64,
+        lines: Vec<AtomIntrLine>,
+    },
+    RemoveAtomIntr {
+        object_uid: u64,
+        renderer_uid: u64,
+        id: usize,
     },
     SetVisibilityByUid {
         uid: u64,
@@ -24101,37 +34165,101 @@ enum ScriptCmd {
         uid: u64,
         matrix: Matrix4,
     },
+    SyncObjectState {
+        uid: u64,
+        scene_uid: u64,
+        visible: bool,
+        locked: bool,
+        ui_collapsed: bool,
+        ui_order: i32,
+        modified: bool,
+        source: String,
+        alt_source: String,
+        xform: Matrix4,
+        selection: String,
+        default_color: Option<cuemol_gfx::SolidColor>,
+        coloring: Option<LDom2Node>,
+    },
     CreateObject {
+        target_scene: u64,
+        expected_uid: u64,
         class_name: String,
         name: String,
     },
     CreateSurface {
+        target_scene: u64,
+        expected_uid: u64,
         name: String,
         data: String,
     },
     CreateMolecule {
+        target_scene: u64,
+        expected_uid: u64,
+        class_name: String,
         name: String,
-        data: String,
+        molecule: MolCoord,
+    },
+    CreateDensityMap {
+        target_scene: u64,
+        expected_uid: u64,
+        class_name: String,
+        name: String,
+        format: String,
+        source: String,
+        map: DensityMap,
+    },
+    CreateLWObject {
+        target_scene: u64,
+        expected_uid: u64,
+        name: String,
+        object: cuemol_lwview::LWObject,
+    },
+    LoadObjectCommand {
+        target_scene: u64,
+        path: String,
+        name: String,
+        format: String,
+    },
+    LoadScene {
+        class_name: String,
+        path: String,
+        target_scene: u64,
+    },
+    WriteScene {
+        path: String,
+        scene_uid: u64,
+        version: String,
+        compress: i32,
+        base64: bool,
     },
     CreateRenderer {
+        object_uid: Option<u64>,
+        renderer_uid: u64,
         object: String,
         renderer_type: String,
         name: String,
     },
-    CreatePresetRenderer {
+    SetRendererChildren {
         object_uid: u64,
-        preset_name: String,
-        group_name: String,
-        name_prefix: String,
-    },
-    AttachRenderer {
-        target_uid: u64,
-        renderer_uid: u64,
+        object: String,
+        renderer: String,
+        children: Vec<LDom2Node>,
     },
     DestroyObject {
+        scene_uid: u64,
         uid: u64,
     },
-    ClearScene,
+    ClearScene {
+        scene_uid: u64,
+    },
+    SetSceneCamera {
+        scene_uid: u64,
+        camera: cuemol_qsys::Camera,
+    },
+    DestroySceneCamera {
+        scene_uid: u64,
+        name: String,
+    },
     ChangeCrystalInfo {
         object_uid: u64,
         a: f64,
@@ -24184,19 +34312,31 @@ enum ScriptCmd {
         secondary_type: i32,
     },
     StartUndoTxn {
+        scene_uid: u64,
         description: String,
     },
-    CommitUndoTxn,
-    RollbackUndoTxn,
+    CommitUndoTxn {
+        scene_uid: u64,
+    },
+    RollbackUndoTxn {
+        scene_uid: u64,
+    },
     UndoScene {
+        scene_uid: u64,
         index: usize,
     },
     RedoScene {
+        scene_uid: u64,
         index: usize,
     },
-    ClearUndoData,
+    ClearUndoData {
+        scene_uid: u64,
+    },
     CreateScene {
         expected_uid: u64,
+        name: String,
+        create_view: bool,
+        activate: bool,
     },
     DestroyScene {
         uid: u64,
@@ -24214,6 +34354,31 @@ enum ScriptCmd {
         name: String,
         value: String,
     },
+    ConvertToLWScene {
+        source_scene: u64,
+        target_scene: u64,
+    },
+}
+
+#[cfg(feature = "scripting")]
+mod script_errors {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static LAST_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+
+    pub(super) fn set(message: String) {
+        LAST_ERROR.with(|last| *last.borrow_mut() = message);
+    }
+
+    pub(super) fn get() -> String {
+        LAST_ERROR.with(|last| last.borrow().clone())
+    }
+
+    pub(super) fn clear() {
+        LAST_ERROR.with(|last| last.borrow_mut().clear());
+    }
 }
 
 #[cfg(feature = "scripting")]
@@ -24252,6 +34417,23 @@ fn resolve_script_color(spec: &str) -> Option<cuemol_gfx::Rgba8> {
     )
 }
 
+#[cfg(feature = "scripting")]
+fn resolve_script_color_with_styles(
+    spec: &str,
+    styles: &StyleManager,
+    scope_id: u64,
+) -> Option<cuemol_gfx::Rgba8> {
+    styles
+        .get_color(spec.trim(), scope_id)
+        .map(cuemol_gfx::SolidColor::rgba8)
+        .or_else(|| resolve_script_color(spec))
+}
+
+#[cfg(feature = "scripting")]
+fn resolve_script_color_in_scope(spec: &str, scope_id: u64) -> Option<cuemol_gfx::Rgba8> {
+    script_env::with(|env| resolve_script_color_with_styles(spec, &env.styles, scope_id))
+}
+
 /// Read-only snapshot of the active scene handed to the `cuemol` script queries
 /// (`getScene`/`getObject`/...). Populated once before `eval`; boa's native closures
 /// read it (they can't borrow `&self`), mirroring the [`ScriptCmd`] mutation bridge.
@@ -24263,16 +34445,37 @@ struct ScriptEnv {
     scene_attributes: BTreeMap<String, String>,
     scenes: Vec<ScriptSceneInfo>,
     next_scene_uid: u64,
+    next_command_uid: u64,
+    next_runtime_uid: u64,
+    allocated_runtime_uids: BTreeSet<u64>,
     objects: Vec<ScriptObj>,
     /// Clones of the active scene's molecules — enough for `cuemol.measure(sel)` to
     /// evaluate an arbitrary selector and compute a distance/angle/torsion LIVE during
     /// eval (the frozen structural snapshot alone can't). Read-only; cloned once per run.
     molecules: Vec<ScriptMol>,
+    modified_molecule_uids: BTreeSet<u64>,
     morphs: BTreeMap<u64, MorphMol>,
+    lw_objects: BTreeMap<u64, cuemol_lwview::LWObject>,
     views: Vec<cuemol_qsys::View>,
+    camera_refs: Vec<(u64, String, boa_engine::JsObject)>,
     cameras: Vec<cuemol_qsys::Camera>,
     animation: AnimMgr,
+    detached_animation_managers: BTreeMap<u64, AnimMgr>,
+    next_detached_animation_manager_id: u64,
     pending_animations: BTreeMap<u64, AnimMotion>,
+    pending_density_maps: BTreeMap<u64, DensityMap>,
+    pending_potential_maps: BTreeMap<u64, cuemol_surface::ElePotMap>,
+    next_density_map_uid: u64,
+    next_pending_density_map_id: u64,
+    pending_atom_intr_lines: BTreeMap<u64, Vec<AtomIntrLine>>,
+    next_pending_atom_intr_id: u64,
+    pending_lw_objects: BTreeMap<u64, cuemol_lwview::LWObject>,
+    next_pending_lw_object_id: u64,
+    render_scenes: BTreeMap<u64, ScriptRenderScene>,
+    native_scene_exporters: BTreeMap<u64, ScriptNativeSceneExporter>,
+    next_native_scene_exporter_id: u64,
+    umbreon_exporters: BTreeMap<u64, UmbreonSceneExporter>,
+    next_umbreon_exporter_id: u64,
     styles: StyleManager,
     msg_log: cuemol_core::LMsgLog,
     process_manager: cuemol_core::ProcessManager,
@@ -24280,12 +34483,95 @@ struct ScriptEnv {
     event_manager: cuemol_qsys::ScrEventManager,
     view_input_config: cuemol_qsys::ViewInputConfig,
     mol_client_manager: cuemol_molclient::MolClientManager,
-    undo_descriptions: Vec<String>,
-    redo_descriptions: Vec<String>,
-    undo_active: Option<(String, usize)>,
-    scene_listeners: BTreeMap<i32, boa_engine::JsObject>,
+    stream_manager: StreamManager,
+    scene_listeners: BTreeMap<i32, (u64, boa_engine::JsObject)>,
     next_scene_listener_id: i32,
     event_listener: Option<boa_engine::JsObject>,
+}
+
+#[cfg(feature = "scripting")]
+#[derive(Clone)]
+struct ScriptRenderScene {
+    snapshot: RenderSceneSnapshot,
+    default_camera: cuemol_qsys::Camera,
+}
+
+#[cfg(feature = "scripting")]
+#[derive(Clone)]
+enum ScriptNativeSceneExporter {
+    Png(PngSceneExporter),
+    Pov(PovSceneExporter),
+    Mqo(cuemol_render::MqoSceneExporter),
+    Wbp(cuemol_render::WbpSceneExporter),
+    Stl(cuemol_render::StlSceneExporter),
+    LuxRend(cuemol_render::LuxRendSceneExporter),
+    LuxCore(cuemol_render::LuxCoreSceneExporter),
+}
+
+#[cfg(feature = "scripting")]
+impl ScriptNativeSceneExporter {
+    fn new(class_name: &str) -> Option<Self> {
+        match class_name {
+            "PngSceneExporter" => Some(Self::Png(PngSceneExporter::new())),
+            "PovSceneExporter" => Some(Self::Pov(PovSceneExporter::new())),
+            "MqoSceneExporter" => Some(Self::Mqo(cuemol_render::MqoSceneExporter::new())),
+            "WbpSceneExporter" => Some(Self::Wbp(cuemol_render::WbpSceneExporter::new())),
+            "StlSceneExporter" => Some(Self::Stl(cuemol_render::StlSceneExporter::new())),
+            "LuxRendSceneExporter" => {
+                Some(Self::LuxRend(cuemol_render::LuxRendSceneExporter::new()))
+            }
+            "LuxCoreSceneExporter" => {
+                Some(Self::LuxCore(cuemol_render::LuxCoreSceneExporter::new()))
+            }
+            _ => None,
+        }
+    }
+
+    fn base(&self) -> &cuemol_qsys::SceneExporter {
+        match self {
+            Self::Png(exporter) => exporter.scene(),
+            Self::Pov(exporter) => exporter.base(),
+            Self::Mqo(exporter) => exporter.base(),
+            Self::Wbp(exporter) => exporter.base(),
+            Self::Stl(exporter) => exporter.base(),
+            Self::LuxRend(exporter) => exporter.base(),
+            Self::LuxCore(exporter) => exporter.base(),
+        }
+    }
+
+    fn base_mut(&mut self) -> &mut cuemol_qsys::SceneExporter {
+        match self {
+            Self::Png(exporter) => exporter.scene_mut(),
+            Self::Pov(exporter) => exporter.base_mut(),
+            Self::Mqo(exporter) => exporter.base_mut(),
+            Self::Wbp(exporter) => exporter.base_mut(),
+            Self::Stl(exporter) => exporter.base_mut(),
+            Self::LuxRend(exporter) => exporter.base_mut(),
+            Self::LuxCore(exporter) => exporter.base_mut(),
+        }
+    }
+
+    fn handler(&self) -> &cuemol_qsys::InOutHandler {
+        self.base().handler()
+    }
+
+    fn handler_mut(&mut self) -> &mut cuemol_qsys::InOutHandler {
+        self.base_mut().handler_mut()
+    }
+
+    fn camera_name(&self) -> &str {
+        match self {
+            Self::Wbp(exporter) => exporter.camera(),
+            _ => self.base().camera_name(),
+        }
+    }
+
+    fn set_camera_name(&mut self, value: String) {
+        match self {
+            Self::Wbp(exporter) => exporter.set_camera(value),
+            _ => self.base_mut().set_camera_name(value),
+        }
+    }
 }
 
 #[cfg(feature = "scripting")]
@@ -24294,8 +34580,16 @@ struct ScriptSceneInfo {
     uid: u64,
     name: String,
     attributes: BTreeMap<String, String>,
+    active_object_uid: Option<u64>,
+    active_renderer_uid: Option<u64>,
+    active_view_uid: Option<u64>,
     cameras: Vec<cuemol_qsys::Camera>,
     animation: AnimMgr,
+    qsc_options: Option<LDom2Node>,
+    next_object_uid: u64,
+    undo_descriptions: Vec<String>,
+    redo_descriptions: Vec<String>,
+    undo_active: Option<(String, usize)>,
 }
 
 #[cfg(feature = "scripting")]
@@ -24342,6 +34636,7 @@ struct ScriptRend {
     visible: bool,
     attributes: BTreeMap<String, String>,
     children: Vec<LDom2Node>,
+    atom_intr_lines: Vec<AtomIntrLine>,
     multi_gradient: Option<MultiGradient>,
 }
 
@@ -24433,6 +34728,7 @@ fn script_surface_renderers(
                     .filter(|child| !child.is_attr())
                     .cloned()
                     .collect(),
+                atom_intr_lines: Vec::new(),
                 multi_gradient: (rtype == "molsurf")
                     .then(|| density_multi_gradient(&style_node, styles)),
             }
@@ -24463,6 +34759,68 @@ fn script_surface_renderer_node(renderer: &ScriptRend) -> LDom2Node {
         node.append_child_node(child);
     }
     node
+}
+
+#[cfg(feature = "scripting")]
+struct ScriptObjectMetadata<'a> {
+    visible: bool,
+    locked: bool,
+    ui_collapsed: bool,
+    ui_order: i32,
+    modified: bool,
+    source: &'a str,
+    alt_source: &'a str,
+    xform: Matrix4,
+}
+
+#[cfg(feature = "scripting")]
+fn sync_object_metadata_node(node: &mut LDom2Node, metadata: ScriptObjectMetadata<'_>) {
+    let ScriptObjectMetadata {
+        visible,
+        locked,
+        ui_collapsed,
+        ui_order,
+        modified,
+        source,
+        alt_source,
+        xform,
+    } = metadata;
+    if visible {
+        node.remove_child("visible");
+    } else {
+        node.set_str_attr("visible", "false");
+    }
+    for (name, value) in [
+        ("locked", locked),
+        ("ui_collapsed", ui_collapsed),
+        ("modified", modified),
+    ] {
+        if value {
+            node.set_str_attr(name, "true");
+        } else {
+            node.remove_child(name);
+        }
+    }
+    if ui_order == 0 {
+        node.remove_child("ui_order");
+    } else {
+        node.set_str_attr("ui_order", ui_order.to_string());
+    }
+    if source.is_empty() {
+        node.remove_child("src");
+    } else {
+        node.set_str_attr("src", source);
+    }
+    if alt_source.is_empty() {
+        node.remove_child("alt_src");
+    } else {
+        node.set_str_attr("alt_src", alt_source);
+    }
+    if xform == Matrix4::IDENTITY {
+        node.remove_child("xformMat");
+    } else {
+        node.set_str_attr("xformMat", xform.to_script_string());
+    }
 }
 
 #[cfg(feature = "scripting")]
@@ -24574,6 +34932,7 @@ fn script_lw_renderers(object: &LoadedLWObject, scene_uid: Uid) -> Vec<ScriptRen
                     .filter(|child| !child.is_attr())
                     .cloned()
                     .collect(),
+                atom_intr_lines: Vec::new(),
                 multi_gradient: None,
             }
         })
@@ -24726,7 +35085,7 @@ fn surface_mesh_render_mesh(
     };
     let atom_colors = cuemol_molvis::resolve_atom_colors(object.mol(), &options);
     // The surface-generating atom subset: position + resolved [f32;4] colour.
-    let palette: Vec<(cuemol_core::Vector4, [f32; 4])> = object
+    let palette: Vec<(u32, cuemol_core::Vector4, [f32; 4])> = object
         .mol()
         .select_indices(selector)
         .into_iter()
@@ -24744,7 +35103,7 @@ fn surface_mesh_render_mesh(
                     ]
                 })
                 .unwrap_or(GREY);
-            Some((atom.position, rgba))
+            Some((atom.serial as u32, atom.position, rgba))
         })
         .collect();
     let vertices = mesh
@@ -24753,12 +35112,15 @@ fn surface_mesh_render_mesh(
         .map(|vertex| {
             let color = palette
                 .iter()
-                .min_by(|(a, _), (b, _)| {
-                    let da = a.sub(vertex.position).sqlen3d();
-                    let db = b.sub(vertex.position).sqlen3d();
-                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                .find(|(id, _, _)| vertex.info != 0 && *id == vertex.info)
+                .or_else(|| {
+                    palette.iter().min_by(|(_, a, _), (_, b, _)| {
+                        let da = a.sub(vertex.position).sqlen3d();
+                        let db = b.sub(vertex.position).sqlen3d();
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    })
                 })
-                .map(|(_, color)| *color)
+                .map(|(_, _, color)| *color)
                 .unwrap_or(GREY);
             cuemol_render::MeshVertex {
                 position: vertex.position,
@@ -24796,23 +35158,36 @@ fn filter_surface_mesh_by_atom_selection(
         .zip(render_mesh.vertices)
         .enumerate()
     {
-        let nearest = map_atoms.iter().copied().min_by(|lhs, rhs| {
-            let lhs_distance = object
-                .mol()
-                .atoms()
-                .get(*lhs)
-                .map(|atom| atom.position.sub(surface_vertex.position).sqlen3d())
-                .unwrap_or(f64::INFINITY);
-            let rhs_distance = object
-                .mol()
-                .atoms()
-                .get(*rhs)
-                .map(|atom| atom.position.sub(surface_vertex.position).sqlen3d())
-                .unwrap_or(f64::INFINITY);
-            lhs_distance
-                .partial_cmp(&rhs_distance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let nearest = map_atoms
+            .iter()
+            .copied()
+            .find(|&atom_index| {
+                surface_vertex.info != 0
+                    && object
+                        .mol()
+                        .atoms()
+                        .get(atom_index)
+                        .is_some_and(|atom| atom.serial as u32 == surface_vertex.info)
+            })
+            .or_else(|| {
+                map_atoms.iter().copied().min_by(|lhs, rhs| {
+                    let lhs_distance = object
+                        .mol()
+                        .atoms()
+                        .get(*lhs)
+                        .map(|atom| atom.position.sub(surface_vertex.position).sqlen3d())
+                        .unwrap_or(f64::INFINITY);
+                    let rhs_distance = object
+                        .mol()
+                        .atoms()
+                        .get(*rhs)
+                        .map(|atom| atom.position.sub(surface_vertex.position).sqlen3d())
+                        .unwrap_or(f64::INFINITY);
+                    lhs_distance
+                        .partial_cmp(&rhs_distance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            });
         if nearest.is_none_or(|atom| shown_atoms.contains(&atom)) {
             remap[index] = Some(vertices.len() as u32);
             vertices.push(render_vertex);
@@ -24974,6 +35349,7 @@ fn append_object_snapshot(
     object: &MolObject,
     selector: Option<&cuemol_molstr::Selector>,
     styles: &StyleManager,
+    style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
 ) {
     let selected_indices = selector
@@ -24999,6 +35375,7 @@ fn append_object_snapshot(
             None,
             &selected_indices,
             styles,
+            style_scope_id,
             surface_potential,
         );
         return;
@@ -25010,6 +35387,7 @@ fn append_object_snapshot(
             Some(renderer),
             &selected_indices,
             styles,
+            style_scope_id,
             surface_potential,
         );
     }
@@ -25021,10 +35399,17 @@ fn append_object_renderer_snapshot(
     renderer: Option<&MolRenderer>,
     selected_indices: &[usize],
     styles: &StyleManager,
+    style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
 ) {
     let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
-    let mut options = renderer_render_options(object.uid(), renderer, selected_indices, styles);
+    let mut options = renderer_render_options(
+        object.uid(),
+        renderer,
+        selected_indices,
+        styles,
+        style_scope_id,
+    );
     // Per-renderer `sel="..."`: restrict the atom/bond geometry to the renderer's
     // own selection (e.g. a ballstick renderer scoped to a ligand). `*`/empty/all
     // means no restriction; a parse failure falls back to drawing everything.
@@ -25033,7 +35418,7 @@ fn append_object_renderer_snapshot(
         .map(str::trim)
         .filter(|sel| !sel.is_empty() && *sel != "*")
     {
-        if let Ok(selector) = parse_selector(sel) {
+        if let Ok(selector) = parse_selector_with_styles(sel, styles, style_scope_id) {
             options.draw_indices = Some(object.mol().select_indices(&selector));
         }
     }
@@ -25073,7 +35458,7 @@ fn append_object_renderer_snapshot(
         ("disorder", renderer) => {
             let resolved = |name: &str, default: f64| {
                 renderer
-                    .and_then(|renderer| renderer.resolved_attr(name, styles, DEFAULT_STYLE_SCOPE))
+                    .and_then(|renderer| renderer.resolved_attr(name, styles, style_scope_id))
                     .and_then(|value| value.trim().parse::<f64>().ok())
                     .unwrap_or(default)
             };
@@ -25090,8 +35475,7 @@ fn append_object_renderer_snapshot(
         // mainchain ribbon alone omits).
         ("nucl", renderer) => {
             let resolved = |name: &str| {
-                renderer
-                    .and_then(|renderer| renderer.resolved_attr(name, styles, DEFAULT_STYLE_SCOPE))
+                renderer.and_then(|renderer| renderer.resolved_attr(name, styles, style_scope_id))
             };
             let show_tube = resolved("show_tube")
                 .as_deref()
@@ -25141,8 +35525,20 @@ fn append_object_renderer_snapshot(
             snapshot
         }
         ("dsurface" | "directsurf" | "dsurf2", Some(renderer)) => {
-            direct_surface_snapshot(object, renderer, styles, surface_potential)
+            direct_surface_snapshot(object, renderer, styles, style_scope_id, surface_potential)
         }
+        ("ms2test", _) => {
+            let mesh = cuemol_surface::Ms2TestRenderer::new().render_mesh(object.mol());
+            let mut snapshot = RenderSceneSnapshot::empty();
+            if !mesh.triangles().is_empty() {
+                snapshot
+                    .meshes
+                    .push(surface_mesh_render_mesh(object, &Selector::All, &mesh));
+                snapshot.recompute_bounds();
+            }
+            snapshot
+        }
+        ("test", renderer) => test_renderer_snapshot(renderer, styles, style_scope_id),
         (rtype, _) if is_mainchain_trace_renderer(rtype) => {
             ribbon_mesh_snapshot(object.mol(), &options)
         }
@@ -25167,20 +35563,122 @@ fn append_object_renderer_snapshot(
     target.meshes.extend(snapshot.meshes);
 }
 
+fn test_renderer_snapshot(
+    renderer: Option<&MolRenderer>,
+    styles: &StyleManager,
+    style_scope_id: u64,
+) -> RenderSceneSnapshot {
+    let color1 = renderer
+        .and_then(|renderer| renderer.resolved_attr("color1", styles, style_scope_id))
+        .and_then(|value| resolve_qsc_color(&value, styles))
+        .map(|color| {
+            [
+                f32::from(color.r) / 255.0,
+                f32::from(color.g) / 255.0,
+                f32::from(color.b) / 255.0,
+                f32::from(color.a) / 255.0,
+            ]
+        })
+        .unwrap_or([0.0, 1.0, 1.0, 1.0]);
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let green = [0.0, 1.0, 0.0, 1.0];
+    let blue = [0.0, 0.0, 1.0, 1.0];
+    let yellow = [1.0, 1.0, 0.0, 1.0];
+    let d = 5.0;
+    let faces = [
+        (
+            Vector4::new3(0.0, 0.0, 1.0),
+            [
+                (Vector4::new3(d, d, d), color1),
+                (Vector4::new3(-d, d, d), blue),
+                (Vector4::new3(-d, -d, d), green),
+                (Vector4::new3(d, -d, d), color1),
+            ],
+        ),
+        (
+            Vector4::new3(0.0, 0.0, -1.0),
+            [
+                (Vector4::new3(-d, d, -d), yellow),
+                (Vector4::new3(d, d, -d), red),
+                (Vector4::new3(d, -d, -d), blue),
+                (Vector4::new3(-d, -d, -d), color1),
+            ],
+        ),
+        (
+            Vector4::new3(1.0, 0.0, 0.0),
+            [
+                (Vector4::new3(d, d, d), red),
+                (Vector4::new3(d, -d, d), yellow),
+                (Vector4::new3(d, -d, -d), color1),
+                (Vector4::new3(d, d, -d), blue),
+            ],
+        ),
+        (
+            Vector4::new3(-1.0, 0.0, 0.0),
+            [
+                (Vector4::new3(-d, d, -d), red),
+                (Vector4::new3(-d, -d, -d), color1),
+                (Vector4::new3(-d, -d, d), yellow),
+                (Vector4::new3(-d, d, d), blue),
+            ],
+        ),
+        (
+            Vector4::new3(0.0, 1.0, 0.0),
+            [
+                (Vector4::new3(d, d, d), color1),
+                (Vector4::new3(d, d, -d), yellow),
+                (Vector4::new3(-d, d, -d), red),
+                (Vector4::new3(-d, d, d), blue),
+            ],
+        ),
+        (
+            Vector4::new3(0.0, -1.0, 0.0),
+            [
+                (Vector4::new3(-d, -d, d), red),
+                (Vector4::new3(-d, -d, -d), yellow),
+                (Vector4::new3(d, -d, -d), blue),
+                (Vector4::new3(d, -d, d), color1),
+            ],
+        ),
+    ];
+    let mut mesh = cuemol_render::RenderMesh {
+        vertices: Vec::with_capacity(24),
+        indices: Vec::with_capacity(36),
+    };
+    for (normal, face) in faces {
+        let base = mesh.vertices.len() as u32;
+        mesh.vertices.extend(
+            face.into_iter()
+                .map(|(position, color)| cuemol_render::MeshVertex {
+                    position,
+                    normal,
+                    color,
+                }),
+        );
+        mesh.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    let mut snapshot = RenderSceneSnapshot::empty();
+    snapshot.meshes.push(mesh);
+    snapshot.recompute_bounds();
+    snapshot
+}
+
 fn direct_surface_snapshot(
     object: &MolObject,
     renderer: &MolRenderer,
     styles: &StyleManager,
+    style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
 ) -> RenderSceneSnapshot {
     let resolved = |name: &str| {
         renderer
-            .resolved_attr(name, styles, DEFAULT_STYLE_SCOPE)
+            .resolved_attr(name, styles, style_scope_id)
             .map(|value| value.trim().to_string())
     };
     let selector = resolved("sel")
         .filter(|value| !value.is_empty() && value != "*")
-        .and_then(|value| parse_selector(&value).ok())
+        .and_then(|value| parse_selector_with_styles(&value, styles, style_scope_id).ok())
         .unwrap_or(Selector::All);
     let mut surface_renderer = cuemol_surface::DirectSurfRenderer::new();
     surface_renderer.set_selection(selector.clone());
@@ -25215,7 +35713,13 @@ fn direct_surface_snapshot(
         }
     }
 
-    let mesh = surface_renderer.render_mesh(object.mol());
+    let mesh = if renderer.renderer_type() == "dsurf2" {
+        let mut renderer2 = cuemol_surface::DirectSurfRenderer2::new();
+        *renderer2.as_renderer_mut() = surface_renderer;
+        renderer2.render_mesh(object.mol())
+    } else {
+        surface_renderer.render_mesh(object.mol())
+    };
     let use_potential =
         resolved("colormode").is_some_and(|value| matches!(value.as_str(), "potential" | "1"));
     let mut render_mesh = if use_potential {
@@ -25260,7 +35764,7 @@ fn direct_surface_snapshot(
     .unwrap_or_else(|| surface_mesh_render_mesh(object, &selector, &mesh));
     if let Some(show_selection) = resolved("showsel")
         .filter(|value| !value.is_empty() && value != "*")
-        .and_then(|value| parse_selector(&value).ok())
+        .and_then(|value| parse_selector_with_styles(&value, styles, style_scope_id).ok())
     {
         render_mesh = filter_surface_mesh_by_atom_selection(
             render_mesh,
@@ -25610,7 +36114,9 @@ fn density_renderer_configs(
             let bndry_molname = attr("bndry_molname").unwrap_or_default();
             let bndry_sel = attr("bndry_sel")
                 .filter(|value| !value.trim().is_empty())
-                .and_then(|value| parse_selector(&value).ok())
+                .and_then(|value| {
+                    parse_selector_with_styles(&value, styles, DEFAULT_STYLE_SCOPE).ok()
+                })
                 .unwrap_or(Selector::All);
             let color_mode = match attr("colormode").as_deref().unwrap_or("solid") {
                 "multigrad" | "4" => MapColorMode::MultiGradient,
@@ -25912,6 +36418,7 @@ fn renderer_render_options(
     renderer: Option<&MolRenderer>,
     selected_indices: &[usize],
     styles: &StyleManager,
+    style_scope_id: u64,
 ) -> MoleculeRenderOptions {
     let mut options = MoleculeRenderOptions {
         object_uid: Some(object_uid.get()),
@@ -25952,10 +36459,10 @@ fn renderer_render_options(
     // styled scenes change. `sphere_detail` is carried on each atom and honoured
     // by `tessellate_snapshot`.
     if let Some(renderer) = renderer {
-        apply_renderer_styles(&mut options, renderer, styles, DEFAULT_STYLE_SCOPE);
+        apply_renderer_styles(&mut options, renderer, styles, style_scope_id);
         if renderer_type == "simple" {
             if renderer
-                .resolved_attr("valbond", styles, DEFAULT_STYLE_SCOPE)
+                .resolved_attr("valbond", styles, style_scope_id)
                 .as_deref()
                 .is_some_and(|value| !qsc_bool(value))
             {
@@ -25963,7 +36470,7 @@ fn renderer_render_options(
             }
             for (index, name) in ["vb_scl1", "vb_scl2"].into_iter().enumerate() {
                 if let Some(value) = renderer
-                    .resolved_attr(name, styles, DEFAULT_STYLE_SCOPE)
+                    .resolved_attr(name, styles, style_scope_id)
                     .and_then(|value| value.trim().parse().ok())
                 {
                     options.simple_bond_offsets[index] = value;
@@ -25971,7 +36478,7 @@ fn renderer_render_options(
             }
         } else if renderer_type == "ballstick"
             && renderer
-                .resolved_attr("valbond_mode", styles, DEFAULT_STYLE_SCOPE)
+                .resolved_attr("valbond_mode", styles, style_scope_id)
                 .as_deref()
                 .is_some_and(|value| matches!(value.trim(), "type1" | "1"))
         {
@@ -26040,11 +36547,57 @@ fn merge_bounds(
 fn pse_atom_selector(atom_indices: &[usize]) -> Selector {
     let mut ranges = RangeSet::new();
     for &index in atom_indices {
-        if let Ok(index) = i32::try_from(index) {
-            ranges.insert_value(index);
+        // CueMol's PSE atom IDs are zero-based, while Rust MolCoord serials start at one.
+        if let Some(serial) = index
+            .checked_add(1)
+            .and_then(|value| i32::try_from(value).ok())
+        {
+            ranges.insert_value(serial);
         }
     }
     Selector::Aid(ranges)
+}
+
+fn pse_surface_object(
+    molecule_name: &str,
+    molecule: &MolCoord,
+    atom_indices: &[usize],
+) -> LoadedSurface {
+    let mut surface = MolSurfObj::new();
+    surface.create_ses_from_mol(molecule, Selector::All, 1.0, 1.4);
+    surface.set_orig_mol(molecule_name);
+    let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
+
+    let mut object_node = LDom2Node::new();
+    object_node.set_tag_name("object");
+    object_node.set_type_name("MolSurfObj");
+    object_node.set_str_attr("name", format!("{molecule_name}_surf"));
+    object_node.set_str_attr("src", "datachunk:00000");
+    object_node.set_str_attr("srctype", "qdfsurf");
+    object_node.set_str_attr("orig_mol", molecule_name);
+    object_node.set_str_attr("orig_sel", "*");
+    object_node.set_str_attr("orig_den", "1");
+    object_node.set_str_attr("orig_prad", "1.4");
+
+    let mut renderer_node = LDom2Node::new();
+    renderer_node.set_tag_name("renderer");
+    renderer_node.set_type_name("molsurf");
+    renderer_node.set_str_attr("target", molecule_name);
+    renderer_node.set_str_attr("sel", "*");
+    renderer_node.set_str_attr("showsel", pse_atom_selector(atom_indices).to_string());
+    renderer_node.set_str_attr("colormode", "molecule");
+    renderer_node.append_child_node(pse_atom_coloring_node());
+    object_node.append_child_node(renderer_node);
+
+    LoadedSurface {
+        uid: Uid::new(0),
+        name: format!("{molecule_name}_surf"),
+        object_type: "MolSurfObj".to_string(),
+        srctype: "qdfsurf".to_string(),
+        data: String::from_utf8_lossy(&raw_data).into_owned(),
+        raw_data,
+        qsc_node: Some(object_node),
+    }
 }
 
 fn pse_atom_coloring_node() -> LDom2Node {
@@ -26088,7 +36641,25 @@ fn parse_gui_selector(selection_text: &str) -> Result<Option<cuemol_molstr::Sele
     if trimmed.is_empty() {
         return Ok(None);
     }
-    Ok(Some(parse_selector(trimmed)?))
+    let styles = cuemol_molvis::default_style_manager();
+    Ok(Some(parse_selector_with_styles(trimmed, &styles, 0)?))
+}
+
+fn parse_selector_with_styles(
+    selection_text: &str,
+    styles: &StyleManager,
+    scope_id: u64,
+) -> Result<cuemol_molstr::Selector> {
+    let registry = styles
+        .str_data_entries("sel", scope_id)
+        .into_iter()
+        .filter_map(|(name, expression)| {
+            parse_selector(&expression)
+                .ok()
+                .map(|selector| (name, selector))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    cuemol_molstr::parse_named_selector(selection_text, &registry)
 }
 
 /// CueMol2 AtomIntr measurement from atom positions: 2 → distance, 3 → angle, 4 →
@@ -26249,6 +36820,7 @@ fn density_renderer_to_script(
         visible: renderer.visible,
         attributes,
         children: Vec::new(),
+        atom_intr_lines: Vec::new(),
         multi_gradient: Some(renderer.multi_grad.clone()),
     }
 }
@@ -26257,6 +36829,8 @@ fn density_renderer_to_script(
 fn density_renderer_from_script(
     renderer: &ScriptRend,
     previous: Option<&GuiDensityRenderer>,
+    styles: &StyleManager,
+    style_scope_id: u64,
 ) -> Option<GuiDensityRenderer> {
     let kind = match renderer.rtype.as_str() {
         "contour"
@@ -26292,7 +36866,23 @@ fn density_renderer_from_script(
     let color = renderer
         .attributes
         .get("color")
-        .and_then(|value| cuemol_gfx::parse_color(value).ok())
+        .and_then(|value| {
+            styles
+                .get_color(value, style_scope_id)
+                .map(|color| {
+                    let rgba = color.rgba8();
+                    cuemol_gfx::ColorSpec {
+                        base: cuemol_gfx::ColorBase::Html {
+                            r: rgba.r,
+                            g: rgba.g,
+                            b: rgba.b,
+                            a: rgba.a,
+                        },
+                        modifiers: Vec::new(),
+                    }
+                })
+                .or_else(|| cuemol_gfx::parse_color(value).ok())
+        })
         .or_else(|| previous.map(|renderer| renderer.color.clone()))
         .unwrap_or_else(|| {
             let default = if matches!(
@@ -26348,7 +36938,7 @@ fn density_renderer_from_script(
         bndry_sel: renderer
             .attributes
             .get("bndry_sel")
-            .and_then(|value| parse_selector(value).ok())
+            .and_then(|value| parse_selector_with_styles(value, styles, style_scope_id).ok())
             .unwrap_or(Selector::All),
         bndry_rng: real_attr("bndry_rng", 5.0),
         color_mode: match string_attr("colormode", "solid").as_str() {
@@ -26823,6 +37413,2824 @@ mod tests {
 
     #[cfg(feature = "scripting")]
     #[test]
+    fn script_runtime_registry_matches_the_reference_qif_class_set() {
+        assert_eq!(SCRIPT_RUNTIME_CLASS_NAMES.len(), 154);
+        assert!(SCRIPT_RUNTIME_CLASS_NAMES
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]));
+        assert!(SCRIPT_RUNTIME_CLASS_PARENTS
+            .windows(2)
+            .all(|pair| pair[0].0 < pair[1].0));
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "var names = JSON.parse(getAllClassNamesJSON()); \
+                 print('registry=' + names.length + ':' + \
+                       cuemol.hasClass('AmberPrmtopReader') + ':' + \
+                       cuemol.hasClass('PngSceneExporter') + ':' + \
+                       cuemol.hasClass('UmbreonSceneExporter') + ':' + \
+                       cuemol.hasClass('Unknown'));",
+            )
+            .unwrap();
+        assert_eq!(log.trim(), "registry=154:true:true:true:false");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_runtime_inheritance_matches_qif_transitively() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "print('reader=' + \
+                       cuemol.implIface('QdfMolReader', 'PDBFileReader') + ':' + \
+                       cuemol.implIface('QdfMolReader', 'ObjReader') + ':' + \
+                       cuemol.implIface('QdfMolReader', 'InOutHandler')); \
+                 print('exporter=' + \
+                       cuemol.implIface('PngSceneExporter', 'ImgSceneExporter') + ':' + \
+                       cuemol.implIface('PngSceneExporter', 'SceneExporter') + ':' + \
+                       cuemol.implIface('PngSceneExporter', 'InOutHandler')); \
+                 print('renderer=' + \
+                       cuemol.implIface('NARenderer', 'TubeRenderer') + ':' + \
+                       cuemol.implIface('NARenderer', 'SplineRenderer') + ':' + \
+                       cuemol.implIface('NARenderer', 'MainChainRenderer') + ':' + \
+                       cuemol.implIface('NARenderer', 'MolRenderer') + ':' + \
+                       cuemol.implIface('NARenderer', 'Renderer')); \
+                 print('misc=' + \
+                       cuemol.implIface('GUIView', 'View') + ':' + \
+                       cuemol.implIface('SelCommand', 'MolSelection') + ':' + \
+                       cuemol.implIface('ClassB', 'ClassA') + ':' + \
+                       cuemol.implIface('QdfMolReader', 'Renderer')); \
+                 var png = {_class: 'PngSceneExporter'}; \
+                 print('object=' + cuemol.implIface2(png, 'InOutHandler') + ':' + \
+                       cuemol.instanceOf(png, 'SceneExporter'));",
+            )
+            .unwrap();
+        assert_eq!(
+            log,
+            "reader=true:true:true\n\
+             exporter=true:true:true\n\
+             renderer=true:true:true:true:true\n\
+             misc=true:true:true:false\n\
+             object=true:true\n"
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_runtime_members_cover_reference_qif_declarations() {
+        #[derive(Default)]
+        struct QifApi {
+            parent: Option<String>,
+            methods: BTreeSet<String>,
+            properties: BTreeSet<String>,
+            singleton: bool,
+        }
+
+        fn declaration_name(statement: &str, property: bool) -> Option<String> {
+            if property {
+                return statement
+                    .strip_prefix("property ")?
+                    .split_whitespace()
+                    .nth(1)
+                    .map(|name| name.trim_end_matches([';', '(', '=']).to_string());
+            }
+            statement
+                .split_once('(')?
+                .0
+                .split_whitespace()
+                .last()
+                .map(ToString::to_string)
+        }
+
+        fn inherited_members(
+            name: &str,
+            apis: &BTreeMap<String, QifApi>,
+            methods: &mut BTreeSet<String>,
+            properties: &mut BTreeSet<String>,
+        ) {
+            let Some(api) = apis.get(name) else {
+                return;
+            };
+            if let Some(parent) = api.parent.as_deref() {
+                inherited_members(parent, apis, methods, properties);
+            }
+            methods.extend(api.methods.iter().cloned());
+            properties.extend(api.properties.iter().cloned());
+        }
+
+        let reference = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let source_root = reference.join("src");
+        if !source_root.exists() {
+            return;
+        }
+        let output = std::process::Command::new("rg")
+            .args(["--files", source_root.to_string_lossy().as_ref()])
+            .output()
+            .expect("rg lists reference QIF files");
+        assert!(output.status.success());
+        let mut apis = BTreeMap::<String, QifApi>::new();
+        for path in String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter(|path| path.ends_with(".qif"))
+        {
+            let text = fs::read_to_string(path).unwrap();
+            let mut class_name = None::<String>;
+            let mut declaration = None::<(bool, String)>;
+            for raw_line in text.lines() {
+                let line = raw_line
+                    .split_once("//")
+                    .map_or(raw_line, |(prefix, _)| prefix)
+                    .trim();
+                if line.starts_with("runtime_class ") {
+                    let words = line.split_whitespace().collect::<Vec<_>>();
+                    let name = words[1].to_string();
+                    let parent = words
+                        .iter()
+                        .position(|word| *word == "extends")
+                        .and_then(|index| words.get(index + 1))
+                        .map(|name| name.trim_end_matches('{').to_string());
+                    apis.entry(name.clone()).or_default().parent = parent;
+                    class_name = Some(name);
+                    declaration = None;
+                    continue;
+                }
+                let Some(name) = class_name.as_deref() else {
+                    continue;
+                };
+                if line.contains("singleton;") {
+                    apis.entry(name.to_string()).or_default().singleton = true;
+                }
+                if let Some((is_property, statement)) = declaration.as_mut() {
+                    if !line.is_empty() {
+                        statement.push(' ');
+                        statement.push_str(line);
+                    }
+                    if statement.contains(';') {
+                        if let Some(member) = declaration_name(statement, *is_property) {
+                            let api = apis.entry(name.to_string()).or_default();
+                            if *is_property {
+                                api.properties.insert(member);
+                            } else {
+                                api.methods.insert(member);
+                            }
+                        }
+                        declaration = None;
+                    }
+                    continue;
+                }
+                let is_property = line.starts_with("property ");
+                let is_method = [
+                    "void ", "boolean ", "integer ", "real ", "string ", "array ", "dict ",
+                    "object<",
+                ]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+                    && !is_property;
+                if !is_property && !is_method {
+                    continue;
+                }
+                if line.contains(';') {
+                    if let Some(member) = declaration_name(line, is_property) {
+                        let api = apis.entry(name.to_string()).or_default();
+                        if is_property {
+                            api.properties.insert(member);
+                        } else {
+                            api.methods.insert(member);
+                        }
+                    }
+                } else {
+                    declaration = Some((is_property, line.to_string()));
+                }
+            }
+        }
+        assert_eq!(apis.len(), 154);
+
+        let specs = apis
+            .keys()
+            .map(|name| {
+                let mut methods = BTreeSet::new();
+                let mut properties = BTreeSet::new();
+                inherited_members(name, &apis, &mut methods, &mut properties);
+                let methods = methods.into_iter().collect::<Vec<_>>();
+                let properties = properties.into_iter().collect::<Vec<_>>();
+                format!(
+                    "[{name:?},{methods:?},{properties:?},{}]",
+                    apis[name].singleton
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let mut app = DesktopAppState::new();
+        let created = app.new_scene("qif-audit", true);
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\n",
+        )
+        .unwrap();
+        app.scene_manager_mut()
+            .scene_mut(created.result_scene)
+            .unwrap()
+            .add_molecule("qif-molecule", molecule);
+        let source = format!(
+            "var molecule = cuemol.getObject('qif-molecule'); \
+             var view = cuemol.getView({view_uid}); \
+             var substitutions = {{ \
+               AbstractColor:'Color', AnimObj:'NoopAnimObj', ColoringScheme:'SolidColoring', \
+               Command:'NewSceneCommand', DrawObj:'RectSelDrawObj', \
+               ImgSceneExporter:'PngSceneExporter', InOutHandler:'PDBFileReader', \
+               LScrObject:'ClassA', MainChainRenderer:'TraceRenderer', \
+               MapRenderer:'MapSurfRenderer', MolRenderer:'SimpleRenderer', \
+               MolSelection:'SelCommand', ObjReader:'PDBFileReader', \
+               ObjWriter:'PDBFileWriter', Renderer:'SimpleRenderer', \
+               ScalarObject:'DensityMap', SceneExporter:'PngSceneExporter' \
+             }}; \
+             function instance(name, singleton) {{ \
+               if (singleton) return getService(name); \
+               if (name === 'Scene') return scene; \
+               if (name === 'View' || name === 'GUIView') return view; \
+               if (name === 'MolAtom') return molecule.getAtomByID(1); \
+               if (name === 'MolResidue') return molecule.getResidue('A', '1'); \
+               if (name === 'MolChain') return molecule.getChain('A'); \
+               if (name === 'LScrCallBack') return {{}}; \
+               return cuemol[substitutions[name] || name](); \
+             }} \
+             var failures = []; \
+             [{specs}].forEach(function(spec) {{ \
+               var object; \
+               try {{ object = instance(spec[0], spec[3]); }} \
+               catch (error) {{ failures.push(spec[0] + ':construct'); return; }} \
+               spec[1].forEach(function(name) {{ \
+                 if (typeof object[name] !== 'function') \
+                   failures.push(spec[0] + ':method:' + name); \
+               }}); \
+               spec[2].forEach(function(name) {{ \
+                 if (!(name in object)) failures.push(spec[0] + ':property:' + name); \
+               }}); \
+             }}); \
+             print(JSON.stringify(failures));",
+            view_uid = created.result_view.unwrap().get(),
+        );
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log, "[]\n", "QIF member gaps: {log}");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_runtime_scalar_defaults_match_reference_qif_declarations() {
+        #[derive(Default)]
+        struct QifDefaults {
+            parent: Option<String>,
+            values: BTreeMap<String, String>,
+            singleton: bool,
+        }
+
+        fn inherited_defaults(
+            name: &str,
+            apis: &BTreeMap<String, QifDefaults>,
+            values: &mut BTreeMap<String, String>,
+        ) {
+            let Some(api) = apis.get(name) else {
+                return;
+            };
+            if let Some(parent) = api.parent.as_deref() {
+                inherited_defaults(parent, apis, values);
+            }
+            values.extend(api.values.clone());
+        }
+
+        let reference = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let source_root = reference.join("src");
+        if !source_root.exists() {
+            return;
+        }
+        let output = std::process::Command::new("rg")
+            .args(["--files", source_root.to_string_lossy().as_ref()])
+            .output()
+            .expect("rg lists reference QIF files");
+        assert!(output.status.success());
+        let mut apis = BTreeMap::<String, QifDefaults>::new();
+        for path in String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter(|path| path.ends_with(".qif"))
+        {
+            let text = fs::read_to_string(path).unwrap();
+            let mut class_name = None::<String>;
+            for raw_line in text.lines() {
+                let line = raw_line
+                    .split_once("//")
+                    .map_or(raw_line, |(prefix, _)| prefix)
+                    .trim();
+                if line.starts_with("runtime_class ") {
+                    let words = line.split_whitespace().collect::<Vec<_>>();
+                    let name = words[1].to_string();
+                    let parent = words
+                        .iter()
+                        .position(|word| *word == "extends")
+                        .and_then(|index| words.get(index + 1))
+                        .map(|name| name.trim_end_matches('{').to_string());
+                    apis.entry(name.clone()).or_default().parent = parent;
+                    class_name = Some(name);
+                    continue;
+                }
+                let Some(name) = class_name.as_deref() else {
+                    continue;
+                };
+                if line.contains("singleton;") {
+                    apis.entry(name.to_string()).or_default().singleton = true;
+                }
+                let Some(default) = line.strip_prefix("default ") else {
+                    continue;
+                };
+                let Some((property, value)) = default.split_once('=') else {
+                    continue;
+                };
+                let value = value.trim().trim_end_matches(';').trim();
+                let scalar = value == "true"
+                    || value == "false"
+                    || value.parse::<f64>().is_ok()
+                    || (value.starts_with('"')
+                        && value.ends_with('"')
+                        && !value[1..value.len() - 1].contains('\\'));
+                if scalar {
+                    apis.entry(name.to_string())
+                        .or_default()
+                        .values
+                        .insert(property.trim().to_string(), value.to_string());
+                }
+            }
+        }
+        assert_eq!(apis.len(), 154);
+
+        let specs = SCRIPT_RUNTIME_CLASS_NAMES
+            .iter()
+            .filter_map(|name| {
+                let api = apis.get(*name)?;
+                let mut values = BTreeMap::new();
+                inherited_defaults(name, &apis, &mut values);
+                let values = values
+                    .into_iter()
+                    .filter(|(property, _)| !(*name == "Color" && property == "alpha"))
+                    .map(|(property, value)| {
+                        let kind = if value == "true" || value == "false" {
+                            "boolean"
+                        } else if value.parse::<f64>().is_ok() {
+                            "number"
+                        } else {
+                            "string"
+                        };
+                        format!("[{property:?},{kind:?},{value}]")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Some(format!("[{name:?},[{}],{}]", values, api.singleton))
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            "var failures = []; \
+             [{specs}].forEach(function(spec) {{ \
+               var object; \
+               try {{ object = spec[2] ? getService(spec[0]) : cuemol.createObj(spec[0]); }} \
+               catch (error) {{ return; }} \
+               if (object === null) return; \
+               spec[1].forEach(function(value) {{ \
+                 var actual = object[value[0]], expected = value[2]; \
+                 if (typeof actual !== value[1] || \
+                     (value[1] === 'number' \
+                       ? Math.abs(actual - expected) > 1.0e-9 \
+                       : actual !== expected)) \
+                   failures.push(spec[0] + '.' + value[0] + '=' + \
+                                 String(actual) + ' expected ' + String(expected)); \
+               }}); \
+             }}); \
+             print(JSON.stringify(failures));"
+        );
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log, "[]\n", "QIF scalar default gaps: {log}");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_runtime_color_defaults_match_reference_qif_declarations() {
+        #[derive(Default)]
+        struct QifDefaults {
+            parent: Option<String>,
+            values: BTreeMap<String, [u8; 4]>,
+            singleton: bool,
+        }
+
+        fn inherited_defaults(
+            name: &str,
+            apis: &BTreeMap<String, QifDefaults>,
+            values: &mut BTreeMap<String, [u8; 4]>,
+        ) {
+            let Some(api) = apis.get(name) else {
+                return;
+            };
+            if let Some(parent) = api.parent.as_deref() {
+                inherited_defaults(parent, apis, values);
+            }
+            values.extend(api.values.clone());
+        }
+
+        fn parse_number(value: &str) -> Option<f64> {
+            let value = value.trim();
+            if let Some((numerator, denominator)) = value.split_once('/') {
+                return Some(
+                    numerator.trim().parse::<f64>().ok()?
+                        / denominator.trim().parse::<f64>().ok()?,
+                );
+            }
+            value.parse().ok()
+        }
+
+        fn parse_color(value: &str) -> Option<[u8; 4]> {
+            let args = value
+                .strip_prefix("gfx::SolidColor::createRGB(")?
+                .strip_suffix(')')?
+                .split(',')
+                .map(parse_number)
+                .collect::<Option<Vec<_>>>()?;
+            if !(args.len() == 3 || args.len() == 4) {
+                return None;
+            }
+            let component = |value: f64| (value.clamp(0.0, 1.0) * 255.0 + 0.5).floor() as u8;
+            Some([
+                component(args[0]),
+                component(args[1]),
+                component(args[2]),
+                component(args.get(3).copied().unwrap_or(1.0)),
+            ])
+        }
+
+        let reference = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let source_root = reference.join("src");
+        if !source_root.exists() {
+            return;
+        }
+        let output = std::process::Command::new("rg")
+            .args(["--files", source_root.to_string_lossy().as_ref()])
+            .output()
+            .expect("rg lists reference QIF files");
+        assert!(output.status.success());
+        let mut apis = BTreeMap::<String, QifDefaults>::new();
+        for path in String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter(|path| path.ends_with(".qif"))
+        {
+            let text = fs::read_to_string(path).unwrap();
+            let mut class_name = None::<String>;
+            for raw_line in text.lines() {
+                let line = raw_line
+                    .split_once("//")
+                    .map_or(raw_line, |(prefix, _)| prefix)
+                    .trim();
+                if line.starts_with("runtime_class ") {
+                    let words = line.split_whitespace().collect::<Vec<_>>();
+                    let name = words[1].to_string();
+                    let parent = words
+                        .iter()
+                        .position(|word| *word == "extends")
+                        .and_then(|index| words.get(index + 1))
+                        .map(|name| name.trim_end_matches('{').to_string());
+                    apis.entry(name.clone()).or_default().parent = parent;
+                    class_name = Some(name);
+                    continue;
+                }
+                let Some(name) = class_name.as_deref() else {
+                    continue;
+                };
+                if line.contains("singleton;") {
+                    apis.entry(name.to_string()).or_default().singleton = true;
+                }
+                let Some(default) = line.strip_prefix("default ") else {
+                    continue;
+                };
+                let Some((property, value)) = default.split_once('=') else {
+                    continue;
+                };
+                let Some(color) = parse_color(value.trim().trim_end_matches(';').trim()) else {
+                    continue;
+                };
+                apis.entry(name.to_string())
+                    .or_default()
+                    .values
+                    .insert(property.trim().to_string(), color);
+            }
+        }
+        assert_eq!(apis.len(), 154);
+
+        let specs = SCRIPT_RUNTIME_CLASS_NAMES
+            .iter()
+            .filter_map(|name| {
+                let api = apis.get(*name)?;
+                let mut values = BTreeMap::new();
+                inherited_defaults(name, &apis, &mut values);
+                let values = values
+                    .into_iter()
+                    .map(|(property, rgba)| {
+                        format!(
+                            "[{property:?},{},{},{},{}]",
+                            rgba[0], rgba[1], rgba[2], rgba[3]
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Some(format!("[{name:?},[{}],{}]", values, api.singleton))
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            "var failures = []; \
+             [{specs}].forEach(function(spec) {{ \
+               var object; \
+               try {{ object = spec[2] ? getService(spec[0]) : cuemol.createObj(spec[0]); }} \
+               catch (error) {{ return; }} \
+               if (object === null) return; \
+               spec[1].forEach(function(value) {{ \
+                 var actual = object[value[0]]; \
+                 if (actual === null || typeof actual !== 'object' || \
+                     typeof actual.r !== 'function' || actual.r() !== value[1] || \
+                     actual.g() !== value[2] || actual.b() !== value[3] || \
+                     actual.a() !== value[4]) \
+                   failures.push(spec[0] + '.' + value[0] + '=' + String(actual) + \
+                                 ' expected rgba(' + value.slice(1).join(',') + ')'); \
+               }}); \
+             }}); \
+             print(JSON.stringify(failures));"
+        );
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log, "[]\n", "QIF color default gaps: {log}");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_runtime_object_defaults_match_reference_qif_declarations() {
+        #[derive(Clone)]
+        enum ObjectDefault {
+            EmptySelection,
+            IdentityMatrix,
+            SolidColoring,
+            Vector([f64; 4]),
+        }
+
+        #[derive(Default)]
+        struct QifDefaults {
+            parent: Option<String>,
+            values: BTreeMap<String, ObjectDefault>,
+            declared_properties: BTreeSet<String>,
+            singleton: bool,
+        }
+
+        fn inherited_defaults(
+            name: &str,
+            apis: &BTreeMap<String, QifDefaults>,
+            values: &mut BTreeMap<String, ObjectDefault>,
+        ) {
+            let Some(api) = apis.get(name) else {
+                return;
+            };
+            if let Some(parent) = api.parent.as_deref() {
+                inherited_defaults(parent, apis, values);
+            }
+            for property in &api.declared_properties {
+                values.remove(property);
+            }
+            values.extend(api.values.clone());
+        }
+
+        fn parse_vector(value: &str) -> Option<[f64; 4]> {
+            if value == "qlib::Vector4D()" {
+                return Some([0.0; 4]);
+            }
+            let args = value
+                .strip_prefix("qlib::LScrVector4D(")?
+                .strip_suffix(')')?
+                .split(',')
+                .map(|part| part.trim().parse::<f64>())
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .ok()?;
+            (args.len() == 4).then(|| [args[0], args[1], args[2], args[3]])
+        }
+
+        let reference = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let source_root = reference.join("src");
+        if !source_root.exists() {
+            return;
+        }
+        let output = std::process::Command::new("rg")
+            .args(["--files", source_root.to_string_lossy().as_ref()])
+            .output()
+            .expect("rg lists reference QIF files");
+        assert!(output.status.success());
+        let mut apis = BTreeMap::<String, QifDefaults>::new();
+        for path in String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter(|path| path.ends_with(".qif"))
+        {
+            let text = fs::read_to_string(path).unwrap();
+            let mut class_name = None::<String>;
+            for raw_line in text.lines() {
+                let line = raw_line
+                    .split_once("//")
+                    .map_or(raw_line, |(prefix, _)| prefix)
+                    .trim();
+                if line.starts_with("runtime_class ") {
+                    let words = line.split_whitespace().collect::<Vec<_>>();
+                    let name = words[1].to_string();
+                    let parent = words
+                        .iter()
+                        .position(|word| *word == "extends")
+                        .and_then(|index| words.get(index + 1))
+                        .map(|name| name.trim_end_matches('{').to_string());
+                    apis.entry(name.clone()).or_default().parent = parent;
+                    class_name = Some(name);
+                    continue;
+                }
+                let Some(name) = class_name.as_deref() else {
+                    continue;
+                };
+                if line.contains("singleton;") {
+                    apis.entry(name.to_string()).or_default().singleton = true;
+                }
+                if let Some(property) = line
+                    .strip_prefix("property ")
+                    .and_then(|declaration| declaration.split("=>").next())
+                    .and_then(|declaration| declaration.split_whitespace().last())
+                {
+                    apis.entry(name.to_string())
+                        .or_default()
+                        .declared_properties
+                        .insert(property.to_string());
+                }
+                let Some(default) = line.strip_prefix("default ") else {
+                    continue;
+                };
+                let Some((property, value)) = default.split_once('=') else {
+                    continue;
+                };
+                let value = value.trim().trim_end_matches(';').trim();
+                let parsed = if value == "molstr::SelectionPtr(new molstr::SelCommand())" {
+                    Some(ObjectDefault::EmptySelection)
+                } else if value == "qlib::Matrix4D()" {
+                    Some(ObjectDefault::IdentityMatrix)
+                } else if value == "molstr::ColoringScheme::createDefaultS()" {
+                    Some(ObjectDefault::SolidColoring)
+                } else {
+                    parse_vector(value).map(ObjectDefault::Vector)
+                };
+                if let Some(parsed) = parsed {
+                    apis.entry(name.to_string())
+                        .or_default()
+                        .values
+                        .insert(property.trim().to_string(), parsed);
+                }
+            }
+        }
+        assert_eq!(apis.len(), 154);
+
+        let specs = SCRIPT_RUNTIME_CLASS_NAMES
+            .iter()
+            .filter_map(|name| {
+                let api = apis.get(*name)?;
+                let mut values = BTreeMap::new();
+                inherited_defaults(name, &apis, &mut values);
+                let values = values
+                    .into_iter()
+                    .map(|(property, value)| match value {
+                        ObjectDefault::EmptySelection => {
+                            format!("[{property:?},'selection']")
+                        }
+                        ObjectDefault::IdentityMatrix => {
+                            format!("[{property:?},'matrix']")
+                        }
+                        ObjectDefault::SolidColoring => {
+                            format!("[{property:?},'coloring']")
+                        }
+                        ObjectDefault::Vector(vector) => format!(
+                            "[{property:?},'vector',{},{},{},{}]",
+                            vector[0], vector[1], vector[2], vector[3]
+                        ),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Some(format!("[{name:?},[{}],{}]", values, api.singleton))
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            "var failures = []; \
+             [{specs}].forEach(function(spec) {{ \
+               var object; \
+               try {{ object = spec[2] ? getService(spec[0]) : cuemol.createObj(spec[0]); }} \
+               catch (error) {{ return; }} \
+               if (object === null) return; \
+               spec[1].forEach(function(value) {{ \
+                 var actual = object[value[0]], ok = actual !== null && typeof actual === 'object'; \
+                 if (ok && value[1] === 'selection') \
+                   ok = typeof actual.isEmpty === 'function' && actual.isEmpty() && \
+                        typeof actual.toString === 'function' && actual.toString() === ''; \
+                 else if (ok && value[1] === 'matrix') \
+                   ok = typeof actual.isIdent === 'function' && actual.isIdent(); \
+                 else if (ok && value[1] === 'coloring') \
+                   ok = actual.type === 'SolidColoring' || actual._class === 'SolidColoring'; \
+                 else if (ok && value[1] === 'vector') \
+                   ok = actual.x === value[2] && actual.y === value[3] && \
+                        actual.z === value[4] && actual.w === value[5]; \
+                 if (!ok) failures.push(spec[0] + '.' + value[0] + '=' + String(actual) + \
+                                        ' expected ' + value[1]); \
+               }}); \
+             }}); \
+             print(JSON.stringify(failures));"
+        );
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log, "[]\n", "QIF object default gaps: {log}");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_attached_molecule_preserves_default_and_explicit_all_selection_text() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        app.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("selection-text", MolCoord::new());
+
+        let (log, _) = app
+            .run_script_js(
+                "var mol = cuemol.getObject('selection-text'); \
+                 print('default=' + mol.sel.toString() + ':' + mol.sel.isEmpty()); \
+                 mol.sel = cuemol.makeSel('*');",
+            )
+            .unwrap();
+        assert_eq!(log, "default=:true\n");
+
+        let (log, _) = app
+            .run_script_js(
+                "var mol = cuemol.getObject('selection-text'); \
+                 print('all=' + mol.sel.toString() + ':' + mol.sel.isEmpty()); \
+                 mol.sel = cuemol.makeSel('');",
+            )
+            .unwrap();
+        assert_eq!(log, "all=*:false\n");
+
+        let (log, _) = app
+            .run_script_js(
+                "var mol = cuemol.getObject('selection-text'); \
+                 print('empty=' + mol.sel.toString() + ':' + mol.sel.isEmpty());",
+            )
+            .unwrap();
+        assert_eq!(log, "empty=:true\n");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_runtime_enum_properties_round_trip_reference_qif_values() {
+        #[derive(Default)]
+        struct QifEnums {
+            parent: Option<String>,
+            definitions: BTreeMap<String, Vec<String>>,
+            enum_properties: BTreeMap<String, String>,
+            non_enum_properties: BTreeSet<String>,
+            readonly_properties: BTreeSet<String>,
+            singleton: bool,
+        }
+
+        fn inherited_properties(
+            name: &str,
+            apis: &BTreeMap<String, QifEnums>,
+            values: &mut BTreeMap<String, Vec<String>>,
+        ) {
+            let Some(api) = apis.get(name) else {
+                return;
+            };
+            if let Some(parent) = api.parent.as_deref() {
+                inherited_properties(parent, apis, values);
+            }
+            for property in &api.non_enum_properties {
+                values.remove(property);
+            }
+            for property in &api.readonly_properties {
+                values.remove(property);
+            }
+            for (property, definition) in &api.enum_properties {
+                if api.readonly_properties.contains(property) {
+                    continue;
+                }
+                if let Some(items) = api.definitions.get(definition) {
+                    values.insert(property.clone(), items.clone());
+                }
+            }
+        }
+
+        let reference = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let source_root = reference.join("src");
+        if !source_root.exists() {
+            return;
+        }
+        let output = std::process::Command::new("rg")
+            .args(["--files", source_root.to_string_lossy().as_ref()])
+            .output()
+            .expect("rg lists reference QIF files");
+        assert!(output.status.success());
+        let mut apis = BTreeMap::<String, QifEnums>::new();
+        for path in String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter(|path| path.ends_with(".qif"))
+        {
+            let text = fs::read_to_string(path).unwrap();
+            let mut class_name = None::<String>;
+            let mut enum_name = None::<String>;
+            for raw_line in text.lines() {
+                let line = raw_line
+                    .split_once("//")
+                    .map_or(raw_line, |(prefix, _)| prefix)
+                    .trim();
+                if line.starts_with("runtime_class ") {
+                    let words = line.split_whitespace().collect::<Vec<_>>();
+                    let name = words[1].to_string();
+                    let parent = words
+                        .iter()
+                        .position(|word| *word == "extends")
+                        .and_then(|index| words.get(index + 1))
+                        .map(|name| name.trim_end_matches('{').to_string());
+                    apis.entry(name.clone()).or_default().parent = parent;
+                    class_name = Some(name);
+                    enum_name = None;
+                    continue;
+                }
+                let Some(name) = class_name.as_deref() else {
+                    continue;
+                };
+                if line.contains("singleton;") {
+                    apis.entry(name.to_string()).or_default().singleton = true;
+                }
+                if let Some(definition) = line
+                    .strip_prefix("enumdef ")
+                    .and_then(|value| value.split_whitespace().next())
+                {
+                    let definition = definition.trim_end_matches('{').to_string();
+                    apis.entry(name.to_string())
+                        .or_default()
+                        .definitions
+                        .entry(definition.clone())
+                        .or_default();
+                    enum_name = Some(definition);
+                    continue;
+                }
+                if let Some(definition) = enum_name.as_deref() {
+                    if line.starts_with('}') {
+                        enum_name = None;
+                    } else if let Some((item, _)) = line.split_once('=') {
+                        let item = item.trim();
+                        if !item.is_empty() {
+                            apis.entry(name.to_string())
+                                .or_default()
+                                .definitions
+                                .entry(definition.to_string())
+                                .or_default()
+                                .push(item.to_string());
+                        }
+                    }
+                    continue;
+                }
+                let Some(property_decl) = line.strip_prefix("property ") else {
+                    continue;
+                };
+                let words = property_decl.split_whitespace().collect::<Vec<_>>();
+                let Some(property_type) = words.first().copied() else {
+                    continue;
+                };
+                let Some(property) = words.get(1).copied() else {
+                    continue;
+                };
+                let property = property.trim_end_matches(';').to_string();
+                let api = apis.entry(name.to_string()).or_default();
+                if line.contains("(readonly)") {
+                    api.readonly_properties.insert(property.clone());
+                }
+                if property_type == "enum" {
+                    api.enum_properties
+                        .insert(property.clone(), property.clone());
+                } else {
+                    api.non_enum_properties.insert(property);
+                }
+            }
+        }
+        assert_eq!(apis.len(), 154);
+
+        let specs = SCRIPT_RUNTIME_CLASS_NAMES
+            .iter()
+            .filter_map(|name| {
+                let api = apis.get(*name)?;
+                let mut properties = BTreeMap::new();
+                inherited_properties(name, &apis, &mut properties);
+                if properties.is_empty() {
+                    return None;
+                }
+                let properties = properties
+                    .into_iter()
+                    .map(|(property, values)| {
+                        let values = values
+                            .into_iter()
+                            .map(|value| format!("{value:?}"))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!("[{property:?},[{values}]]")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Some(format!("[{name:?},[{properties}],{}]", api.singleton))
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            "var failures = []; \
+             [{specs}].forEach(function(spec) {{ \
+               var object; \
+               try {{ object = spec[2] ? getService(spec[0]) : cuemol.createObj(spec[0]); }} \
+               catch (error) {{ return; }} \
+               if (object === null) return; \
+               spec[1].forEach(function(property) {{ \
+                 property[1].forEach(function(value) {{ \
+                   try {{ \
+                     object[property[0]] = value; \
+                     if (object[property[0]] !== value) \
+                       failures.push(spec[0] + '.' + property[0] + '=' + \
+                                     String(object[property[0]]) + ' expected ' + value); \
+                   }} catch (error) {{ \
+                     failures.push(spec[0] + '.' + property[0] + ':' + value + ':throw'); \
+                   }} \
+                 }}); \
+               }}); \
+             }}); \
+             print(JSON.stringify(failures));"
+        );
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log, "[]\n", "QIF enum round-trip gaps: {log}");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_all_concrete_non_singleton_runtime_classes_are_constructible() {
+        const ABSTRACT_OR_SINGLETON: &[&str] = &[
+            "AbstractColor",
+            "ClassS",
+            "CmdMgr",
+            "ColoringScheme",
+            "Command",
+            "DrawObj",
+            "GUIView",
+            "ImgSceneExporter",
+            "InOutHandler",
+            "LScrCallBack",
+            "LScrObject",
+            "LWViewerManager",
+            "MainChainRenderer",
+            "MapRenderer",
+            "MolAnlManager",
+            "MolClientManager",
+            "MolRenderer",
+            "MolSelection",
+            "MsgLog",
+            "ObjReader",
+            "ObjWriter",
+            "ProcessManager",
+            "PythonBridge",
+            "Renderer",
+            "ScalarObject",
+            "SceneExporter",
+            "SceneManager",
+            "ScrEventManager",
+            "StreamManager",
+            "StyleManager",
+            "SymmOpManager",
+            "View",
+            "ViewInputConfig",
+        ];
+        let names = SCRIPT_RUNTIME_CLASS_NAMES
+            .iter()
+            .filter(|name| !ABSTRACT_OR_SINGLETON.contains(name))
+            .map(|name| format!("{name:?}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source = format!(
+            "var failures = []; [{names}].forEach(function(name) {{ \
+               try {{ if (cuemol.createObj(name) === null) failures.push(name + ':null'); }} \
+               catch (error) {{ failures.push(name + ':' + error); }} \
+             }}); print(JSON.stringify(failures));"
+        );
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log, "[]\n");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_native_scene_exporters_expose_qif_properties_and_write_files() {
+        let dir =
+            std::env::temp_dir().join(format!("cuemol-script-exporters-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let paths = [
+            ("PovSceneExporter", dir.join("scene.pov")),
+            ("MqoSceneExporter", dir.join("scene.mqo")),
+            ("WbpSceneExporter", dir.join("scene.wbp")),
+            ("StlSceneExporter", dir.join("scene.stl")),
+            ("LuxRendSceneExporter", dir.join("scene.lxs")),
+            ("LuxCoreSceneExporter", dir.join("scene.cfg")),
+        ];
+        let writes = paths
+            .iter()
+            .map(|(class_name, path)| {
+                format!(
+                    "var e = cuemol.{class_name}(); \
+                     e.attach(scene); e.setPath({path:?}); \
+                     e.width = 320; e.height = 240; e.write();",
+                    path = path.to_string_lossy(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let source = format!(
+            "var png = cuemol.PngSceneExporter(); \
+             png.width = 640; png.height = 360; png.resoln = 144; \
+             png.alpha = true; png.depth = true; png.interlace = true; png.compress = 9; \
+             print('png=' + png.name + ':' + png.fileext + ':' + png.width + ':' + \
+                   png.height + ':' + png.resoln + ':' + png.alpha + ':' + png.depth + ':' + \
+                   png.interlace + ':' + png.compress); \
+             var pov = cuemol.PovSceneExporter(); \
+             pov.perspective = false; pov.makeRelIncPath = false; pov.useClipZ = true; \
+             pov.usePostBlend = true; pov.blendTable = 'blend'; pov.showEdgeLines = false; \
+             pov.creaseLimit = 0.25; pov.edgeRise = 0.75; pov.usePixImgs = true; \
+             pov.imgFileNames = 'images'; pov.compress = 'bzip2'; pov.base64 = true; \
+             print('pov=' + pov.perspective + ':' + pov.makeRelIncPath + ':' + \
+                   pov.useClipZ + ':' + pov.usePostBlend + ':' + pov.blendTable + ':' + \
+                   pov.showEdgeLines + ':' + pov.creaseLimit + ':' + pov.edgeRise + ':' + \
+                   pov.usePixImgs + ':' + pov.imgFileNames + ':' + pov.compress + ':' + pov.base64); \
+             var lux = cuemol.LuxCoreSceneExporter(); \
+             lux.haltspp = 20; lux.filmopts = 'TONEMAP'; lux.bgmode = 'box'; \
+             print('lux=' + lux.haltspp + ':' + lux.filmopts + ':' + lux.bgmode); \
+             {writes}"
+        );
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(
+            log,
+            "png=png:*.png:640:360:144:true:true:true:9\n\
+             pov=false:false:true:true:blend:false:0.25:0.75:true:images:bzip2:true\n\
+             lux=20:TONEMAP:box\n"
+        );
+        for (_, path) in &paths {
+            assert!(path.is_file(), "missing {}", path.display());
+            assert!(fs::metadata(path).unwrap().len() > 0);
+        }
+        assert!(dir.join("scene.scn").is_file());
+        assert!(dir.join("scene.ply").is_file());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_object_handlers_construct_and_round_trip_molecules() {
+        let dir =
+            std::env::temp_dir().join(format!("cuemol-script-handlers-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let pdb_path = dir.join("input.pdb");
+        let sdf_path = dir.join("output.sdf");
+        fs::write(
+            &pdb_path,
+            "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let source = format!(
+            "var reader = cuemol.PDBFileReader(); \
+             print('reader=' + reader.type + ':' + reader.name + ':' + reader.loadmodel + ':' + \
+                   reader.loadanisou + ':' + reader.build2ndry + ':' + \
+                   cuemol.implIface2(reader, 'ObjReader')); \
+             var mol = reader.createDefaultObj(); reader.attach(mol); \
+             reader.setPath({pdb_path:?}); reader.read(); \
+             print('molecule=' + mol.getAtomCount() + ':' + reader.detach().type); \
+             var writer = cuemol.SDFMolWriter(); writer.attach(mol); \
+             writer.setPath({sdf_path:?}); writer.write(); \
+             print('writer=' + writer.name + ':' + writer.convToLink + ':' + \
+                   cuemol.implIface2(writer, 'ObjWriter')); \
+             var streamReader = cuemol.getService('StreamManager').createHandler( \
+                 'pdb', cuemol.getService('StreamManager').OBJECT_READER); \
+             print('stream=' + streamReader.type + ':' + \
+                   cuemol.implIface2(streamReader, 'InOutHandler'));",
+            pdb_path = pdb_path.to_string_lossy(),
+            sdf_path = sdf_path.to_string_lossy(),
+        );
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(
+            log,
+            "reader=PDBFileReader:pdb:false:true:true:true\n\
+             molecule=1:MolCoord\n\
+             writer=sdf:false:true\n\
+             stream=PDBFileReader:true\n"
+        );
+        let sdf = fs::read_to_string(&sdf_path).unwrap();
+        assert!(sdf.contains("V2000"));
+        assert!(sdf.contains("$$$$"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_detached_molcoord_keeps_native_state_when_attached() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-script-detached-molecule-{}.pdb",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let source = format!(
+            "var reader = cuemol.PDBFileReader(); \
+             var mol = reader.createDefaultObj(); reader.attach(mol); \
+             reader.setPath({path:?}); reader.read(); \
+             var atom = mol.getAtomByID(1); atom.bfac = 42.5; \
+             atom.setAtomPropInt('pending_flag', 17); \
+             print('detached=' + mol.getAtomSize() + ':' + mol.getBondSize() + ':' + \
+                   mol.getAtom('A', '1', 'CA').bfac + ':' + mol.getChain('A').name + ':' + \
+                   mol.getCrdArray().elemCount + ':' + mol.modified); \
+             mol.name = 'pending-molecule'; scene.addObject(mol); \
+             print('attached=' + mol.getScene().uid + ':' + mol.getAtomByID(1).bfac + ':' + \
+                   mol.getAtomByID(1).getAtomPropInt('pending_flag'));",
+            path = path.to_string_lossy(),
+        );
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let result = app.run_script_js(&source);
+        let _ = fs::remove_file(&path);
+        let (log, _) = result.unwrap();
+        assert!(
+            log.contains("detached=1:0:42.5:A:3:true")
+                && log.contains(&format!("attached={}:42.5:17", scene_uid.get())),
+            "{log:?}"
+        );
+        let object = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .object_by_name("pending-molecule")
+            .unwrap();
+        let atom = object.mol().get_atom_by_id(1).unwrap();
+        assert_eq!(atom.b_factor, 42.5);
+        assert_eq!(atom.int_prop("pending_flag"), Some(17));
+        assert!(object.modified());
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_coordinate_writers_apply_their_selection() {
+        let dir =
+            std::env::temp_dir().join(format!("cuemol-writer-selection-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let pdb_path = dir.join("selected.pdb");
+        let pqr_path = dir.join("selected.pqr");
+        let xyzr_path = dir.join("selected.xyzr");
+        let molecule = read_pdb_str(
+            "ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00 10.00           N  \n\
+             ATOM      2  CA  GLY A   1       1.400   0.000   0.000  1.00 10.00           C  \n\
+             END\n",
+        )
+        .unwrap();
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        app.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("writer-selection", molecule);
+        let source = format!(
+            "var mol = cuemol.getObject('writer-selection'); \
+             var selection = cuemol.makeSel('name CA'); \
+             var pdb = cuemol.PDBFileWriter(); \
+             var sdf = cuemol.SDFMolWriter(); \
+             var pqr = cuemol.PQRFileWriter(); \
+             var xyzr = cuemol.XYZRFileWriter(); \
+             print('defaults=' + pdb.sel.isEmpty() + ':' + sdf.sel.isEmpty() + ':' + \
+                   (pqr.sel === null) + ':' + (xyzr.sel === null)); \
+             pdb.sel = selection; \
+             pdb.attach(mol); pdb.setPath({pdb_path:?}); pdb.write(); \
+             pqr.sel = selection; \
+             pqr.attach(mol); pqr.setPath({pqr_path:?}); pqr.write(); \
+             xyzr.sel = selection; \
+             xyzr.attach(mol); xyzr.setPath({xyzr_path:?}); xyzr.write();",
+            pdb_path = pdb_path.to_string_lossy(),
+            pqr_path = pqr_path.to_string_lossy(),
+            xyzr_path = xyzr_path.to_string_lossy(),
+        );
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log, "defaults=true:true:true:true\n");
+
+        let pdb = fs::read_to_string(&pdb_path).unwrap();
+        let pdb_atoms = pdb.lines().filter(|line| line.starts_with("ATOM")).count();
+        assert_eq!(pdb_atoms, 1);
+        assert!(pdb.lines().any(|line| {
+            line.starts_with("ATOM") && line.get(12..16).is_some_and(|name| name.trim() == "CA")
+        }));
+        assert_eq!(
+            fs::read_to_string(&pqr_path)
+                .unwrap()
+                .lines()
+                .filter(|line| line.starts_with("ATOM"))
+                .count(),
+            1
+        );
+        assert_eq!(fs::read_to_string(&xyzr_path).unwrap().lines().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_stream_xml_async_and_gui_view_qif_methods_work() {
+        let mut app = DesktopAppState::new();
+        let created = app.new_scene("stream", true);
+        let view_uid = created.result_view.unwrap();
+        let pdb =
+            "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n";
+        let source = format!(
+            "var sm = cuemol.getService('StreamManager'); \
+             var camera = cuemol.Camera(); camera.name = 'saved'; camera.zoom = 37; \
+             camera.center = cuemol.Vector('(1,2,3)'); \
+             var camera2 = sm.fromXML(sm.toXML(camera), scene.uid); \
+             print('camera=' + camera2.type + ':' + camera2.name + ':' + camera2.zoom + ':' + \
+                   camera2.center); \
+             var first = cuemol.SimpleRenderer(); first.name = 'first'; first.visible = false; \
+             var second = cuemol.CPKRenderer(); second.name = 'second'; \
+             var renderer = sm.fromXML(sm.toXML2(first, 'simple'), scene.uid); \
+             print('renderer=' + renderer.type_name + ':' + renderer.name + ':' + renderer.visible); \
+             var grouped = sm.rendArrayFromXML(sm.rendGrpToXML([first, second], 'copied'), scene.uid); \
+             var empty = sm.rendArrayFromXML(sm.arrayToXML([]), scene.uid); \
+             print('array=' + grouped.length + ':' + grouped[0] + ':' + grouped[1].name + ':' + \
+                   grouped[2].type_name + ':' + empty.length + ':' + empty[0]); \
+             var reader = sm.createHandler('pdb', sm.OBJECT_READER); \
+             var loadID = sm.loadObjectAsync(reader); \
+             var text = {pdb:?}; var bytes = cuemol.ByteArray(); \
+             bytes.init(bytes.UINT8, text.length); \
+             for (var index = 0; index < text.length; ++index) \
+               bytes.setAt(index, text.charCodeAt(index)); \
+             sm.supplyDataAsync(loadID, bytes, bytes.length); \
+             var loaded = sm.waitLoadAsync(loadID); \
+             print('async=' + loaded.type + ':' + loaded.getAtomCount() + ':' + \
+                   (sm.waitLoadAsync(loadID) === null)); \
+             var view = cuemol.getView({view_id}); \
+             view.onMouseDown(10, 20, 100, 200, 1); \
+             view.onMouseMove(20, 30, 110, 210, 1); \
+             view.onMouseUp(20, 30, 110, 210, 0); \
+             view.onWheel(20, 30, 110, 210, 0, 1, -2); \
+             view.onGesture(20, 30, 110, 210, 0, 2, 0.5); \
+             print('view=' + view.uid + ':' + view.getScene().uid);",
+            view_id = view_uid.get(),
+        );
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(
+            log,
+            format!(
+                "camera=Camera:saved:37:(1,2,3)\n\
+                 renderer=simple:first:false\n\
+                 array=3:copied:first:cpk:1:\n\
+                 async=MolCoord:1:true\n\
+                 view={}:{}\n",
+                view_uid.get(),
+                created.result_scene.get()
+            )
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_map_readers_load_opendx_and_expose_qif_properties() {
+        let dir =
+            std::env::temp_dir().join(format!("cuemol-script-map-reader-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let dx_path = dir.join("potential.dx");
+        fs::write(
+            &dx_path,
+            "\
+object 1 class gridpositions counts 2 2 2
+origin -1 -2 -3
+delta 0.5 0 0
+delta 0 1 0
+delta 0 0 2
+object 2 class gridconnections counts 2 2 2
+object 3 class array type double rank 0 items 8 data follows
+0 1 2 3 4 5 6 7
+attribute \"dep\" string \"positions\"
+",
+        )
+        .unwrap();
+        let source = format!(
+            "var reader = cuemol.OpenDXPotReader(); \
+             var map = reader.createDefaultObj(); \
+             reader.attach(map); reader.setPath({dx_path:?}); reader.read(); \
+             map.name = 'potential'; \
+             print('map=' + map.type + ':' + reader.name + ':' + reader.smooth + ':' + \
+                   map.den_min + ':' + map.den_max + ':' + map.den_mean + ':' + \
+                   cuemol.implIface2(map, 'ScalarObject')); \
+             print('hist=' + JSON.parse(map.getHistogramJSON(0, 7, 7)).histo.length); \
+             cuemol.getScene().addObject(map); \
+             var ccp4 = cuemol.CCP4MapReader(); \
+             var cif = cuemol.MmcifMapReader(); \
+             var mtz = cuemol.MTZ2MapReader(); \
+             print('options=' + ccp4.normalize + ':' + ccp4.truncate_min + ':' + \
+                   ccp4.min + ':' + ccp4.truncate_max + ':' + ccp4.max + ':' + \
+                   cif.resolution + ':' + cif.gridsize + ':' + mtz.resolution + ':' + \
+                   mtz.gridsize + ':' + mtz.getColumnInfoJSON());",
+            dx_path = dx_path.to_string_lossy(),
+        );
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(
+            log,
+            "map=ElePotMap:apbs:-1:0:7:3.5:true\n\
+             hist=7\n\
+             options=false:false:0:false:5:-1:0.33:-1:0.33:[]\n"
+        );
+        let maps = app.active_density_map_summaries();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].name, "potential");
+        assert_eq!(maps[0].format, "apbs");
+        assert_eq!(maps[0].counts, [2, 2, 2]);
+        let state = app.density_maps.get(&maps[0].uid).unwrap();
+        assert_eq!(state.class_name, "ElePotMap");
+        assert_eq!(state.source, dx_path.to_string_lossy());
+        assert!(app.surface_potential.is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_surface_readers_load_ply_and_msms_meshes() {
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-script-surface-reader-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let ply_path = dir.join("triangle.ply");
+        let face_path = dir.join("triangle.face");
+        let vertex_path = dir.join("triangle.vert");
+        fs::write(
+            &ply_path,
+            "\
+ply
+format ascii 1.0
+element vertex 3
+property float x
+property float y
+property float z
+element face 1
+property list uchar int vertex_indices
+end_header
+0 0 0
+1 0 0
+0 1 0
+3 0 1 2
+",
+        )
+        .unwrap();
+        fs::write(
+            &vertex_path,
+            "\
+# MSMS vertex
+# generated
+3
+0 0 0 0 0 1
+1 0 0 0 0 1
+0 1 0 0 0 1
+",
+        )
+        .unwrap();
+        fs::write(
+            &face_path,
+            "\
+# MSMS face
+# generated
+1
+1 2 3
+",
+        )
+        .unwrap();
+        let source = format!(
+            "var plyReader = cuemol.PLYFileReader(); \
+             var ply = plyReader.createDefaultObj(); plyReader.attach(ply); \
+             plyReader.setPath({ply_path:?}); plyReader.read(); ply.name = 'ply'; \
+             print('ply=' + ply.type + ':' + cuemol.implIface2(plyReader, 'ObjReader') + ':' + \
+                   ply._mesh_data.includes('\\nf ')); \
+             cuemol.getScene().addObject(ply); \
+             var msmsReader = cuemol.MSMSFileReader(); \
+             msmsReader.vertex_file = {vertex_path:?}; \
+             var msms = msmsReader.createDefaultObj(); msmsReader.attach(msms); \
+             msmsReader.setPath({face_path:?}); msmsReader.read(); msms.name = 'msms'; \
+             print('msms=' + msmsReader.vertex_file + ':' + \
+                   msms._mesh_data.includes('\\nv ') + ':' + msms._mesh_data.includes('\\nf ')); \
+             cuemol.getScene().addObject(msms);",
+            ply_path = ply_path.to_string_lossy(),
+            vertex_path = vertex_path.to_string_lossy(),
+            face_path = face_path.to_string_lossy(),
+        );
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(
+            log,
+            format!(
+                "ply=MolSurfObj:true:true\nmsms={}:true:true\n",
+                vertex_path.to_string_lossy()
+            )
+        );
+        let surfaces = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_surfaces();
+        assert_eq!(surfaces.len(), 2);
+        assert_eq!(surfaces[0].name, "ply");
+        assert_eq!(surfaces[1].name, "msms");
+        for surface in surfaces {
+            let mesh = cuemol_surface::read_obj_str(&surface.data).unwrap();
+            assert_eq!(mesh.vertex_count(), 3);
+            assert_eq!(mesh.triangle_count(), 1);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_qdf_handlers_round_trip_molecule_map_potential_and_surface() {
+        let dir =
+            std::env::temp_dir().join(format!("cuemol-script-qdf-handlers-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let pdb_path = dir.join("input.pdb");
+        let dx_path = dir.join("input.dx");
+        let ply_path = dir.join("input.ply");
+        let qdf_mol_path = dir.join("molecule.qdf");
+        let qdf_map_path = dir.join("density.qdf");
+        let qdf_pot_path = dir.join("potential.qdf");
+        let qdf_surf_path = dir.join("surface.qdf");
+        let qdf_lw_input_path = dir.join("lw-input.qdf");
+        let qdf_lw_output_path = dir.join("lw-output.qdf");
+        fs::write(
+            &pdb_path,
+            "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        fs::write(
+            &dx_path,
+            "\
+object 1 class gridpositions counts 2 2 2
+origin 0 0 0
+delta 1 0 0
+delta 0 1 0
+delta 0 0 1
+object 2 class gridconnections counts 2 2 2
+object 3 class array type double rank 0 items 8 data follows
+0 1 2 3 4 5 6 7
+attribute \"dep\" string \"positions\"
+",
+        )
+        .unwrap();
+        fs::write(
+            &ply_path,
+            "\
+ply
+format ascii 1.0
+element vertex 3
+property float x
+property float y
+property float z
+element face 1
+property list uchar int vertex_indices
+end_header
+0 0 0
+1 0 0
+0 1 0
+3 0 1 2
+",
+        )
+        .unwrap();
+        let mut lw_object = cuemol_lwview::LWObject::new();
+        lw_object.add_draw_element(cuemol_lwview::LWDrawElement::new(
+            7,
+            1,
+            1.0,
+            [255, 0, 0, 255],
+            cuemol_lwview::LWDrawData::Vertices(vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]),
+        ));
+        fs::write(
+            &qdf_lw_input_path,
+            cuemol_lwview::write_qdf_lwobj_bytes(&lw_object),
+        )
+        .unwrap();
+        let source = format!(
+            "var sm = cuemol.getService('StreamManager'); \
+             var pdb = sm.createHandler('pdb', sm.OBJECT_READER); \
+             var mol = pdb.createDefaultObj(); pdb.attach(mol); \
+             pdb.setPath({pdb_path:?}); pdb.read(); \
+             var molw = sm.createHandler('qdfmol', sm.OBJECT_WRITER); \
+             molw.attach(mol); molw.setPath({qdf_mol_path:?}); molw.write(); \
+             var molr = sm.createHandler('qdfmol', sm.OBJECT_READER); \
+             var mol2 = molr.createDefaultObj(); molr.attach(mol2); \
+             molr.setPath({qdf_mol_path:?}); molr.read(); \
+             print('mol=' + mol2.getAtomCount()); \
+             var dx = sm.createHandler('apbs', sm.OBJECT_READER); \
+             var map = dx.createDefaultObj(); dx.attach(map); \
+             dx.setPath({dx_path:?}); dx.read(); \
+             var mapw = sm.createHandler('qdfmap', sm.OBJECT_WRITER); \
+             mapw.attach(map); mapw.setPath({qdf_map_path:?}); mapw.write(); \
+             var mapr = sm.createHandler('qdfmap', sm.OBJECT_READER); \
+             var map2 = mapr.createDefaultObj(); mapr.attach(map2); \
+             mapr.setPath({qdf_map_path:?}); mapr.read(); \
+             print('map=' + map2.den_min + ':' + map2.den_max); \
+             var potw = sm.createHandler('qdfpot', sm.OBJECT_WRITER); \
+             potw.attach(map); potw.setPath({qdf_pot_path:?}); potw.write(); \
+             var potr = sm.createHandler('qdfpot', sm.OBJECT_READER); \
+             var pot2 = potr.createDefaultObj(); potr.attach(pot2); \
+             potr.setPath({qdf_pot_path:?}); potr.read(); \
+             print('pot=' + pot2.type + ':' + pot2.den_min + ':' + pot2.den_max); \
+             var ply = sm.createHandler('ply', sm.OBJECT_READER); \
+             var surf = ply.createDefaultObj(); ply.attach(surf); \
+             ply.setPath({ply_path:?}); ply.read(); \
+             var surfw = sm.createHandler('qdfsurf', sm.OBJECT_WRITER); \
+             surfw.attach(surf); surfw.setPath({qdf_surf_path:?}); surfw.write(); \
+             var surfr = sm.createHandler('qdfsurf', sm.OBJECT_READER); \
+             var surf2 = surfr.createDefaultObj(); surfr.attach(surf2); \
+             surfr.setPath({qdf_surf_path:?}); surfr.read(); \
+             print('surf=' + surf2._mesh_data.includes('\\nf ')); \
+             var lwr = sm.createHandler('qdflwobj', sm.OBJECT_READER); \
+             var lw = lwr.createDefaultObj(); lwr.attach(lw); \
+             lwr.setPath({qdf_lw_input_path:?}); lwr.read(); lw.name = 'lw'; \
+             var lww = sm.createHandler('qdflwobj', sm.OBJECT_WRITER); \
+             lww.attach(lw); lww.setPath({qdf_lw_output_path:?}); lww.write(); \
+             print('lw=' + lw.type + ':' + lw._draw_count); \
+             cuemol.getScene().addObject(lw);",
+            pdb_path = pdb_path.to_string_lossy(),
+            dx_path = dx_path.to_string_lossy(),
+            ply_path = ply_path.to_string_lossy(),
+            qdf_mol_path = qdf_mol_path.to_string_lossy(),
+            qdf_map_path = qdf_map_path.to_string_lossy(),
+            qdf_pot_path = qdf_pot_path.to_string_lossy(),
+            qdf_surf_path = qdf_surf_path.to_string_lossy(),
+            qdf_lw_input_path = qdf_lw_input_path.to_string_lossy(),
+            qdf_lw_output_path = qdf_lw_output_path.to_string_lossy(),
+        );
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(
+            log,
+            "mol=1\nmap=0:7\npot=ElePotMap:0:7\nsurf=true\nlw=LWObject:1\n"
+        );
+        for (path, file_type) in [
+            (&qdf_mol_path, "MOL2"),
+            (&qdf_map_path, "MAP1"),
+            (&qdf_pot_path, "POT1"),
+            (&qdf_surf_path, "SRF1"),
+            (&qdf_lw_output_path, "LWO3"),
+        ] {
+            assert_eq!(
+                cuemol_qsys::qdf_file_type(&fs::read(path).unwrap()).as_deref(),
+                Some(file_type)
+            );
+        }
+        let lw_objects = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_lw_objects();
+        assert_eq!(lw_objects.len(), 1);
+        assert_eq!(lw_objects[0].name, "lw");
+        assert_eq!(lw_objects[0].renderers[0].data_id, 7);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_scene_xml_handlers_write_and_read_attached_scene() {
+        let dir =
+            std::env::temp_dir().join(format!("cuemol-script-scene-io-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let qsc_path = dir.join("scene.qsc");
+        let mut writer_app = DesktopAppState::new();
+        let scene_uid = writer_app.new_scene("script-scene", false).result_scene;
+        writer_app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule(
+                "molecule",
+                cuemol_molstr::read_pdb_str(
+                    "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+            )
+                .unwrap(),
+            );
+        let mut options = LDom2Node::new();
+        options.set_tag_name("qsc_opts");
+        options.set_str_attr("version", "QDF3");
+        options.set_str_attr("compress", "xzip");
+        options.set_str_attr("base64", "true");
+        writer_app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .set_qsc_options(Some(options))
+            .unwrap();
+        let source = format!(
+            "var writer = cuemol.SceneXMLWriter(); \
+             writer.setDefaultOpts(cuemol.getScene()); \
+             print('defaults=' + writer.version + ':' + writer.compress + ':' + writer.base64); \
+             writer.attach(cuemol.getScene()); writer.setPath({qsc_path:?}); \
+             writer.embedAll = true; writer.version = 'QDF2'; \
+             writer.compress = 'none'; writer.base64 = false; \
+             print('writer=' + writer.name + ':' + writer.embedAll + ':' + writer.version + ':' + \
+                   cuemol.implIface2(writer, 'InOutHandler')); \
+             writer.write();",
+            qsc_path = qsc_path.to_string_lossy(),
+        );
+        let (log, _) = writer_app.run_script_js(&source).unwrap();
+        assert_eq!(
+            log,
+            "defaults=QDF3:xzip:true\nwriter=qsc_xml:true:QDF2:true\n"
+        );
+        let qsc = fs::read_to_string(&qsc_path).unwrap();
+        assert!(qsc.contains("<scene"));
+        assert!(qsc.contains("name=\"molecule\""));
+        assert!(qsc.contains("version=\"QDF2\""));
+
+        let mut reader_app = DesktopAppState::new();
+        let target_scene = reader_app.new_scene("target", false).result_scene;
+        let source = format!(
+            "var reader = cuemol.SceneXMLReader(); \
+             reader.attach(cuemol.getScene()); reader.setPath({qsc_path:?}); \
+             print('reader=' + reader.name + ':' + reader.bufsize + ':' + reader.error); \
+             reader.read();",
+            qsc_path = qsc_path.to_string_lossy(),
+        );
+        let (log, _) = reader_app.run_script_js(&source).unwrap();
+        assert_eq!(log, "reader=qsc_xml:1048576:\n");
+        assert_eq!(reader_app.active_scene(), Some(target_scene));
+        let objects = reader_app.object_summaries(target_scene);
+        assert_eq!(objects.len(), 1);
+        assert_eq!(objects[0].name, "molecule");
+        assert_eq!(objects[0].atom_count, 1);
+
+        let pse_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../cuemol-importers/tests/fixtures/mol3.pse");
+        let mut pse_app = DesktopAppState::new();
+        let pse_scene = pse_app.new_scene("pse-target", false).result_scene;
+        let source = format!(
+            "var reader = cuemol.PSEFileReader(); \
+             reader.attach(cuemol.getScene()); reader.setPath({pse_path:?}); reader.read();",
+            pse_path = pse_path.to_string_lossy(),
+        );
+        pse_app.run_script_js(&source).unwrap();
+        assert_eq!(pse_app.active_scene(), Some(pse_scene));
+        assert!(!pse_app.object_summaries(pse_scene).is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_text_image_and_reference_colors_match_qif_surface() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "var image = cuemol.TextImgBuf(); \
+                 image.text = 'A'; image.font = 'sans'; image.width = 2; image.height = 2; \
+                 image.setAt2D(1, 1, 200); \
+                 var rgba = cuemol.ByteArray(); rgba.init(rgba.UINT8, 16); \
+                 rgba.setAt(3, 10); rgba.setAt(7, 20); rgba.setAt(11, 30); rgba.setAt(15, 40); \
+                 image.setDataFromRGBA(rgba); \
+                 print('image=' + image.type + ':' + image.text + ':' + image.font + ':' + \
+                       image.width + ':' + image.height + ':' + image.getAt(0) + ':' + \
+                       image.getAt2D(1, 1)); \
+                 var named = cuemol.createObj('NamedColor', 'red'); \
+                 named.material = 'matte'; named.mod_h = 0.1; \
+                 print('named=' + named.type + ':' + named.r() + ':' + named.g() + ':' + \
+                       named.material + ':' + named.mod_h + ':' + \
+                       cuemol.implIface2(named, 'AbstractColor')); \
+                 var molref = cuemol.MolColorRef(); molref.alpha = 0.5; \
+                 print('molref=' + molref.r() + ':' + molref.g() + ':' + molref.b() + ':' + \
+                       molref.a() + ':' + molref.alpha + ':' + molref.toString()); \
+                 var gradient = cuemol.GradientColor(); \
+                 var gradientDefaults = gradient.col1 === null && gradient.col2 === null; \
+                 gradient.col1 = cuemol.createObj('Color', '#FF0000'); \
+                 gradient.col2 = cuemol.createObj('Color', '#0000FF'); gradient.rho = 0.25; \
+                 var gradientColors = gradient.col1.r() + ':' + gradient.col2.b(); \
+                 gradient.col2 = null; \
+                 print('gradient=' + gradientDefaults + ':' + gradientColors + ':' + \
+                       gradient.rho + ':' + (gradient.col2 === null));",
+            )
+            .unwrap();
+        assert_eq!(
+            log,
+            "image=TextImgBuf:A:sans:2:2:10:40\n\
+             named=NamedColor:255:0:matte:0.1:true\n\
+             molref=127:127:127:127:0.5:$molcol{alpha=0.5}\n\
+             gradient=true:255:255:0.25:true\n"
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_detached_molecular_elements_match_qif_surface() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "var atom = cuemol.MolAtom(); \
+                 atom.name = 'CA'; atom.element = 'C'; atom.bfac = 12.5; atom.occ = 0.75; \
+                 atom.confid = 'B'; atom.pos = cuemol.Vector('(1,2,3,0)'); \
+                 atom.setU(0, 2, 1.25); atom.setAtomPropInt('flag', 4); \
+                 print('atom=' + atom.type + ':' + atom.id + ':' + atom.name + ':' + \
+                       atom.element + ':' + atom.bfac + ':' + atom.occ + ':' + atom.confid + ':' + \
+                       atom.pos + ':' + atom.getU(2, 0) + ':' + atom.getAtomPropInt('flag') + ':' + \
+                       cuemol.implIface2(atom, 'MolAtom')); \
+                 var residue = cuemol.MolResidue(); residue.name = 'GLY'; residue.type = 'protein'; \
+                 residue.sindex = '7A'; residue.index = 9; \
+                 print('residue=' + residue.type + ':' + residue.name + ':' + residue.sindex + ':' + \
+                       residue.index + ':' + residue.chainName + ':' + residue.getAtomsJSON() + ':' + \
+                       residue.getPivotPos() + ':' + (residue.getAtom('CA') === null) + ':' + \
+                       cuemol.implIface2(residue, 'MolResidue')); \
+                 var chain = cuemol.MolChain(); chain.name = 'X'; \
+                 print('chain=' + chain.type + ':' + chain.name + ':' + chain.getResidsJSON() + ':' + \
+                       (chain.getResidue('1') === null) + ':' + chain.toString() + ':' + \
+                       cuemol.implIface2(chain, 'MolChain'));",
+            )
+            .unwrap();
+        assert_eq!(
+            log,
+            "atom=MolAtom:-1:CA:C:12.5:0.75:B:(1,2,3):1.25:4:true\n\
+             residue=protein:GLY:9A:9::[]:(0,0,0):true:true\n\
+             chain=MolChain:X:[]:true:X:true\n"
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_reference_test_classes_match_qif_surface() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "var a = cuemol.ClassA(); var b = cuemol.ClassB(); \
+                 print('defaults=' + a.prop0 + ':' + a.prop1 + ':' + a.realprop + ':' + \
+                       a.strprop + ':' + a.vecprop + ':' + (a.prop3 === null) + ':' + \
+                       a.prop4 + ':' + a.enumprop + ':' + a); \
+                 a.foo(12, 'xyz', 9.25); a.prop3 = b; a.foo2(b, b); \
+                 b.prop1 = 7; b.strprop = 'child'; b.bar(1.5); \
+                 print('methods=' + a.strprop + ':' + a.realprop + ':' + \
+                       (a.foo3() === b) + ':' + b + ':' + \
+                       cuemol.implIface2(b, 'ClassA')); \
+                 var singleton = getService('ClassS'); \
+                 print('singleton=' + singleton.type + ':' + singleton + ':' + \
+                       cuemol.implIface2(singleton, 'ClassS'));",
+            )
+            .unwrap();
+        assert_eq!(
+            log,
+            "defaults=false:246:345.678:abcd:(0,0,0):true:123:bar:ClassA(246, abcd)\n\
+             methods=value is 12 and xyz:9.25:true:ClassB (ClassA(7, child)):true\n\
+             singleton=ClassS:ClassS:true\n"
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_detached_animation_manager_and_style_set_are_stateful() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "var manager = cuemol.AnimMgr(); manager.startcam = 'start'; manager.loop = true; \
+                 var motion = cuemol.NoopAnimObj(); motion.name = 'step'; manager.append(motion); \
+                 manager.length = cuemol.TimeValue('2.5'); \
+                 print('anim=' + manager.size + ':' + manager.length + ':' + manager.startcam + ':' + \
+                       manager.loop + ':' + manager.getByName('step').name + ':' + \
+                       cuemol.implIface2(manager, 'AnimMgr')); \
+                 var styles = cuemol.StyleSet(); styles.name = 'local'; \
+                 var color = cuemol.Color('#123456'); styles.setColor('accent', color); \
+                 styles.setStrData('ui', 'label', 'value'); \
+                 print('style=' + styles.type + ':' + styles.name + ':' + styles.modified + ':' + \
+                       styles.hasColor('accent') + ':' + styles.getColor('accent').toString() + ':' + \
+                       styles.getStrData('ui', 'label') + ':' + \
+                       JSON.parse(styles.getColorDefsJSON())[0] + ':' + \
+                       cuemol.implIface2(styles, 'StyleSet'));",
+            )
+            .unwrap();
+        assert_eq!(
+            log,
+            "anim=1:2.5:start:true:step:true\n\
+             style=StyleSet:local:true:true:#123456:value:accent:true\n"
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_detached_draw_objects_match_qif_state() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "var rect = cuemol.RectSelDrawObj(); \
+                 rect.enabled = true; rect.start(20, 30); rect.move(5, 50); \
+                 print('rect=' + rect.type + ':' + rect.enabled + ':' + rect.left + ':' + \
+                       rect.top + ':' + rect.width + ':' + rect.height + ':' + \
+                       rect.color + ':' + cuemol.implIface2(rect, 'DrawObj')); \
+                 rect.end(); rect.enabled = false; \
+                 var dist = cuemol.DistPickDrawObj(); dist.enabled = true; \
+                 dist.width = 2.5; dist.append(999, 1); \
+                 print('dist=' + dist.type + ':' + dist.enabled + ':' + dist.width + ':' + \
+                       dist.color + ':' + cuemol.implIface2(dist, 'DrawObj'));",
+            )
+            .unwrap();
+        assert_eq!(
+            log,
+            "rect=RectSelDrawObj:true:5:30:15:20:#33CCFF:true\n\
+             dist=DistPickDrawObj:true:2.5:rgba(1,1,1,0.501960784314):true\n"
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_atom_intr_and_selection_qif_methods_update_native_state() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 10.00           N\n\
+             ATOM      2  CA  ALA A   1       1.000   0.000   0.000  1.00 10.00           C\n\
+             ATOM      3  C   ALA A   1       1.000   1.000   0.000  1.00 10.00           C\n\
+             ATOM      4  O   ALA A   1       1.000   1.000   1.000  1.00 10.00           O\n\
+             ATOM      5  CA  GLY B   2       3.000   0.000   0.000  1.00 10.00           C\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let renderer_uid = app
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_atom_intr_renderer_defs("measure", &[])
+            .unwrap();
+
+        let (log, _) = app
+            .run_script_js(
+                "var mol = cuemol.getObject('mol'); \
+                 var selection = cuemol.SelCommand(); \
+                 selection.compile('chain A and name CA'); \
+                 print('selected=' + selection.isSelectedMol(mol) + ':' + \
+                       selection.isSelectedChain(mol.getChain('A')) + ':' + \
+                       selection.isSelectedResid(mol.getResidue('A', '1')) + ':' + \
+                       selection.isSelected(mol.getAtomByID(2)) + ':' + \
+                       selection.isSelected(mol.getAtomByID(1))); \
+                 var renderer = mol.getRendererByName('measure'); \
+                 var ids = [renderer.append('name N', 'name CA'), \
+                            renderer.appendById(1, mol.uid, 2, false), \
+                            renderer.appendAngleById(1, mol.uid, 2, mol.uid, 3), \
+                            renderer.appendTorsionById(1, mol.uid, 2, mol.uid, 3, mol.uid, 4), \
+                            renderer.appendBy2Vecs(cuemol.Vector('(5,0,0)'), \
+                                                  cuemol.Vector('(6,0,0)'))]; \
+                 var before = JSON.parse(renderer.getDefsJSON()); \
+                 var removed = renderer.remove(1); \
+                 var after = JSON.parse(renderer.getDefsJSON()); \
+                 print('intr=' + ids.join(',') + ':' + before.length + ':' + \
+                       before.map(function(value) { return value.mode; }).join(',') + ':' + \
+                       removed + ':' + after.map(function(value) { return value.id; }).join(','));",
+            )
+            .unwrap();
+        assert_eq!(
+            log,
+            "selected=2:1:2:true:false\n\
+             intr=0,1,2,3,4:5:1,1,2,3,1:true:0,2,3,4\n"
+        );
+
+        let object = app.scene_manager().object(object_uid).unwrap();
+        let renderer = object.renderer(renderer_uid).unwrap();
+        assert_eq!(renderer.atom_intr_lines().len(), 5);
+        assert!(!renderer.atom_intr_lines()[1].is_active());
+        assert_eq!(object.atom_intr_segments(renderer).len(), 7);
+        let qsc = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .write_qsc_string();
+        assert!(qsc.contains("sel1=\"name N\""));
+        assert_eq!(qsc.matches("<line ").count(), 2);
+        assert_eq!(qsc.matches("<angle ").count(), 1);
+        assert_eq!(qsc.matches("<torsion ").count(), 1);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_detached_atom_intr_lines_keep_ids_when_attached() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 10.00           N\n\
+             ATOM      2  CA  ALA A   1       1.000   0.000   0.000  1.00 10.00           C\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", molecule);
+
+        let (log, _) = app
+            .run_script_js(
+                "var mol = cuemol.getObject('mol'); \
+                 var renderer = cuemol.AtomIntrRenderer(); renderer.name = 'detached'; \
+                 var id0 = renderer.appendBy2Vecs(cuemol.Vector('(0,0,0)'), \
+                                                   cuemol.Vector('(1,0,0)')); \
+                 var id1 = renderer.append('name CA', 'name N'); \
+                 var removed = renderer.remove(id0); \
+                 var before = JSON.parse(renderer.getDefsJSON()); \
+                 mol.attachRenderer(renderer); \
+                 var after = JSON.parse(renderer.getDefsJSON()); \
+                 print('direct=' + id0 + ':' + id1 + ':' + removed + ':' + \
+                       before.map(function(value) { return value.id; }).join(',') + ':' + \
+                       after.map(function(value) { return value.id; }).join(',') + ':' + \
+                       (renderer.uid !== 0)); \
+                 var pending = cuemol.MolCoord(); pending.name = 'pending'; \
+                 var pendingRenderer = pending.createRenderer('atomintr', 'pending-measure'); \
+                 pendingRenderer.appendBy2Vecs(cuemol.Vector('(2,0,0)'), \
+                                                cuemol.Vector('(3,0,0)')); \
+                 cuemol.getScene().addObject(pending); \
+                 print('pending=' + JSON.parse(pendingRenderer.getDefsJSON()).length + ':' + \
+                       (pendingRenderer.uid !== 0));",
+            )
+            .unwrap();
+        assert_eq!(log, "direct=0:1:true:1:1:true\npending=1:true\n");
+
+        let object = app.scene_manager().object(object_uid).unwrap();
+        let renderer = object.renderer_by_name("detached").unwrap();
+        assert_eq!(renderer.atom_intr_lines().len(), 2);
+        assert!(!renderer.atom_intr_lines()[0].is_active());
+        assert!(renderer.atom_intr_lines()[1].is_active());
+
+        let pending = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .object_by_name("pending")
+            .unwrap();
+        let renderer = pending.renderer_by_name("pending-measure").unwrap();
+        assert_eq!(renderer.atom_intr_lines().len(), 1);
+        assert!(renderer.atom_intr_lines()[0].is_active());
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_direct_scene_and_base_object_attach_to_the_requested_scene() {
+        let mut app = DesktopAppState::new();
+        let active_uid = app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "var direct = cuemol.Scene(); direct.setName('direct-scene'); \
+                 var object = cuemol.Object(); object.name = 'generic-object'; \
+                 var added = direct.addObject(object); \
+                 print('added=' + added + ':' + direct.getObject(added).name + ':' + \
+                       (direct.getObjectByName('generic-object').uid === added)); \
+                 print('created=' + direct.uid + ':' + direct.name + ':' + \
+                       cuemol.implIface2(direct, 'Scene') + ':' + \
+                       cuemol.implIface2(object, 'Object'));",
+            )
+            .unwrap();
+        assert!(log.contains("direct-scene:true:true"), "scene log: {log:?}");
+        let direct = app
+            .scene_manager()
+            .scenes()
+            .iter()
+            .find(|scene| scene.name() == "direct-scene")
+            .unwrap();
+        assert_ne!(direct.uid(), active_uid);
+        let object = direct.object_by_name("generic-object").unwrap();
+        assert_eq!(object.object_type(), "Object");
+        assert!(
+            log.contains(&format!("added={}:generic-object:true", object.uid().get())),
+            "scene addObject log: {log:?}"
+        );
+        assert!(app
+            .scene_manager()
+            .scene(active_uid)
+            .unwrap()
+            .object_by_name("generic-object")
+            .is_none());
+
+        let source = format!(
+            "var object = cuemol.getScene({}).getObjectByName('generic-object'); \
+             print(object.type + ':' + object.name + ':' + \
+                   cuemol.implIface2(object, 'Object') + ':' + \
+                   cuemol.implIface2(object, 'MolCoord'));",
+            direct.uid().get(),
+        );
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log, "Object:generic-object:true:false\n");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_scene_add_object_returns_allocated_uids_immediately() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "var scene = cuemol.getScene(); \
+                 var first = cuemol.MolCoord(); first.name = 'first'; \
+                 var second = cuemol.Object(); second.name = 'second'; \
+                 var surface = cuemol.MolSurfObj(); surface.name = 'surface'; \
+                 surface._mesh_data = 'v 0 0 0\\nv 1 0 0\\nv 0 1 0\\nf 1 2 3\\n'; \
+                 var map = cuemol.DensityMap(); map.name = 'map'; \
+                 var lightweight = cuemol.LWObject(); lightweight.name = 'lightweight'; \
+                 var objects = [first, second, surface, map, lightweight]; \
+                 var before = objects.map(function(object) { return object.uid; }); \
+                 print('defaults=' + objects.every(function(object) { \
+                     return object.uid > 0 && object.ui_order === object.uid && !object.modified; \
+                 }) + ':' + (new Set(before).size === before.length)); \
+                 print('details=' + objects.map(function(object) { \
+                     return object.type + ':' + (object.ui_order === object.uid) + ':' + \
+                            object.modified; \
+                 }).join(',')); \
+                 var ids = [scene.addObject(first), scene.addObject(second), \
+                            scene.addObject(surface), scene.addObject(map), \
+                            scene.addObject(lightweight)]; \
+                 print('uids=' + ids.every(function(uid) { \
+                     var object = scene.getObject(uid); \
+                     return uid > 0 && object !== null && object.uid === uid && \
+                            before.indexOf(uid) >= 0; \
+                 }) + ':' + (new Set(ids).size === ids.length)); \
+                 try { scene.addObject(cuemol.Vector()); print('invalid=false'); } \
+                 catch (error) { print('invalid=true'); }",
+            )
+            .unwrap();
+        assert_eq!(
+            log,
+            "defaults=true:true\ndetails=MolCoord:true:false,Object:true:false,\
+             MolSurfObj:true:false,DensityMap:true:false,LWObject:true:false\n\
+             uids=true:true\ninvalid=true\n"
+        );
+        let scene = app.scene_manager().scene(scene_uid).unwrap();
+        assert_eq!(scene.objects().len(), 2);
+        assert_eq!(scene.loaded_surfaces().len(), 1);
+        assert_eq!(scene.loaded_lw_objects().len(), 1);
+        assert_eq!(
+            app.density_maps
+                .values()
+                .filter(|map| map.scene_uid == scene_uid)
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_command_objects_and_manager_execute_live_operations() {
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let pdb_path = root.join("1CRN.pdb");
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("target", MolCoord::new());
+        let source = format!(
+            "var target = cuemol.getObject('target'); \
+             var rendererCmd = cuemol.NewRendererCommand(); \
+             rendererCmd.target_object = target; rendererCmd.renderer_type = 'simple'; \
+             rendererCmd.renderer_name = 'from-command'; \
+             rendererCmd.default_style_name = 'DefaultSimple'; rendererCmd.run(); \
+             print('renderer=' + rendererCmd + ':' + rendererCmd.getUID() + ':' + \
+                   rendererCmd.result_renderer.name + ':' + \
+                   rendererCmd.result_renderer.type_name + ':' + \
+                   cuemol.implIface2(rendererCmd, 'Command')); \
+             var loadCmd = getService('CmdMgr').getCmd('load_object'); \
+             loadCmd.setTargetScene(cuemol.getScene()); loadCmd.file_path = {pdb_path:?}; \
+             loadCmd.object_name = 'loaded-command'; loadCmd.run(); \
+             print('load=' + loadCmd.file_format + ':' + loadCmd.result_object.name + ':' + \
+                   loadCmd.result_object.getAtomCount()); \
+             var sceneCmd = cuemol.NewSceneCommand(); sceneCmd.scene_name = 'command-scene'; \
+             sceneCmd.create_view = true; sceneCmd.activate = true; sceneCmd.run(); \
+             print('scene=' + sceneCmd.result_scene.name + ':' + sceneCmd.result_view.name + ':' + \
+                   sceneCmd.result_scene.uid + ':' + sceneCmd.result_view.uid); \
+             var result = getService('CmdMgr').runCmdArgs('new_scene', \
+               {{scene_name:'dict-scene', create_view:false, activate:false}}); \
+             print('manager=' + result.result_scene.name + ':' + \
+                   (result.result_view === null) + ':' + \
+                   (getService('CmdMgr').getCmd('unknown') === null));",
+            pdb_path = pdb_path.to_string_lossy(),
+        );
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert!(
+            log.contains("renderer=new_renderer:9000000000000:from-command:simple:true")
+                && log.contains("load=pdb:loaded-command:327")
+                && log.contains("scene=command-scene:0:")
+                && log.contains("manager=dict-scene:true:true"),
+            "command API log: {log:?}"
+        );
+        let target = app.scene_manager().object(object_uid).unwrap();
+        let renderer = target.renderer_by_name("from-command").unwrap();
+        assert_eq!(renderer.qsc_attr("styles"), Some("DefaultSimple"));
+        assert!(app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .object_by_name("loaded-command")
+            .is_some());
+        assert!(app.scene_manager().scene_uids().iter().any(|uid| app
+            .scene_manager()
+            .scene(*uid)
+            .is_some_and(|scene| scene.name() == "command-scene")));
+        assert!(app.scene_manager().scene_uids().iter().any(|uid| app
+            .scene_manager()
+            .scene(*uid)
+            .is_some_and(|scene| scene.name() == "dict-scene")));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_load_scene_command_loads_into_its_result_scene() {
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let qsc_path = root.join("number_chain_atomintr1.qsc");
+        let mut app = DesktopAppState::new();
+        let source = format!(
+            "var command = cuemol.LoadSceneCommand(); \
+             command.file_path = {qsc_path:?}; command.scene_name = 'loaded-by-command'; \
+             command.run(); \
+             print('result=' + command.file_format + ':' + command.result_scene.name + ':' + \
+                   JSON.parse(command.result_scene.getObjectTreeJSON()).length + ':' + \
+                   cuemol.implIface2(command, 'Command'));",
+            qsc_path = qsc_path.to_string_lossy(),
+        );
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log, "result=qsc_xml:loaded-by-command:0:true\n");
+        let scene_uid = app.active_scene().unwrap();
+        let scene = app.scene_manager().scene(scene_uid).unwrap();
+        assert_eq!(scene.name(), "loaded-by-command");
+        assert!(!scene.objects().is_empty());
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_lwviewer_manager_converts_rendered_scene_data() {
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        let source_uid = match app.open_path(root.join("1CRN.pdb")).unwrap() {
+            GuiLoadedPath::Object { scene_uid, .. } => scene_uid,
+            _ => panic!("expected molecule load"),
+        };
+        let (first_uid, first_name, molecule, first_renderer_count) = {
+            let scene = app.scene_manager().scene(source_uid).unwrap();
+            let object = &scene.objects()[0];
+            (
+                object.uid(),
+                object.name().to_string(),
+                object.mol().clone(),
+                object.renderers().len(),
+            )
+        };
+        let mut source_lw_data = cuemol_lwview::LWObject::new();
+        source_lw_data.add_draw_element(cuemol_lwview::LWDrawElement::new(
+            7,
+            cuemol_gfx::AbstDrawElem::DRAW_TRIANGLES as i8,
+            1.0,
+            [255, 0, 255, 255],
+            cuemol_lwview::LWDrawData::Vertices(vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]),
+        ));
+        {
+            let scene = app.scene_manager_mut().scene_mut(source_uid).unwrap();
+            let hidden_uid = scene
+                .object_mut(first_uid)
+                .unwrap()
+                .add_renderer("line", "hidden-line");
+            scene
+                .object_mut(first_uid)
+                .unwrap()
+                .renderer_mut(hidden_uid)
+                .unwrap()
+                .set_visible(false);
+            let second_uid = scene.add_molecule("second-hidden", molecule);
+            let second = scene.object_mut(second_uid).unwrap();
+            second.set_visible(false);
+            second.add_renderer("cpk", "second-cpk");
+            scene.add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "source-surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".to_string(),
+                raw_data: Vec::new(),
+                qsc_node: None,
+            });
+            scene.add_loaded_lw_object(LoadedLWObject {
+                uid: Uid::new(0),
+                name: "source-lightweight".to_string(),
+                srctype: "qdflwobj".to_string(),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&source_lw_data),
+                visible: true,
+                xform: Matrix4::IDENTITY,
+                renderers: vec![LoadedLWRenderer {
+                    name: "source-lwrend".to_string(),
+                    data_id: 7,
+                    visible: true,
+                    xform: Matrix4::IDENTITY,
+                }],
+                qsc_node: None,
+            });
+        }
+        let density_uid = app.add_density_map(
+            source_uid,
+            "source-density",
+            DensityMap::from_grid_map(cuemol_xtal::GridMap {
+                counts: [2, 2, 2],
+                origin: Vector4::new3(0.0, 0.0, 0.0),
+                delta: [
+                    Vector4::new3(1.0, 0.0, 0.0),
+                    Vector4::new3(0.0, 1.0, 0.0),
+                    Vector4::new3(0.0, 0.0, 1.0),
+                ],
+                values: vec![0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            }),
+        );
+        app.run_script_js(
+            "var map = cuemol.getObject('source-density'); \
+             var renderer = map.createRenderer('isosurf', 'source-isosurf'); \
+             renderer.siglevel = 0;",
+        )
+        .unwrap();
+        assert_eq!(
+            app.density_maps.get(&density_uid).unwrap().renderers.len(),
+            1
+        );
+        let mut camera = cuemol_qsys::Camera::new();
+        camera.set_name("saved");
+        camera.set_source("camera.xml");
+        app.scene_manager_mut()
+            .scene_mut(source_uid)
+            .unwrap()
+            .set_camera(camera);
+        let mut animation = LDom2Node::new();
+        animation.set_tag_name("animation");
+        app.scene_manager_mut()
+            .scene_mut(source_uid)
+            .unwrap()
+            .set_animation_node(Some(animation))
+            .unwrap();
+        let target_uid = app.new_scene("lightweight", false).result_scene;
+
+        let source = format!(
+            "var manager = getService('LWViewerManager'); \
+             manager.convToLWScene(cuemol.getScene({}), cuemol.getScene({})); \
+             print(manager.type + ':' + cuemol.implIface2(manager, 'LWViewerManager'));",
+            source_uid.get(),
+            target_uid.get(),
+        );
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log, "LWViewerManager:true\n");
+
+        let target = app.scene_manager().scene(target_uid).unwrap();
+        assert_eq!(target.loaded_lw_objects().len(), 5);
+        let first = target
+            .loaded_lw_objects()
+            .iter()
+            .find(|object| object.name == first_name)
+            .unwrap();
+        let first_data = cuemol_lwview::read_qdf_lwobj_bytes(&first.raw_data).unwrap();
+        assert_eq!(first.renderers.len(), first_renderer_count + 1);
+        assert_eq!(first_data.draw_elements().len(), first_renderer_count + 1);
+        assert!(
+            !first
+                .renderers
+                .iter()
+                .find(|renderer| renderer.name == "hidden-line")
+                .unwrap()
+                .visible
+        );
+        let second = target
+            .loaded_lw_objects()
+            .iter()
+            .find(|object| object.name == "second-hidden")
+            .unwrap();
+        assert!(!second.visible);
+        assert_eq!(second.renderers.len(), 1);
+        assert!(!cuemol_lwview::read_qdf_lwobj_bytes(&second.raw_data)
+            .unwrap()
+            .draw_elements()
+            .is_empty());
+        let surface = target
+            .loaded_lw_objects()
+            .iter()
+            .find(|object| object.name == "source-surface")
+            .unwrap();
+        assert_eq!(surface.renderers[0].name, "(molsurf)");
+        assert_eq!(
+            cuemol_lwview::read_qdf_lwobj_bytes(&surface.raw_data)
+                .unwrap()
+                .draw_elements()
+                .len(),
+            1
+        );
+        let lightweight = target
+            .loaded_lw_objects()
+            .iter()
+            .find(|object| object.name == "source-lightweight")
+            .unwrap();
+        assert_eq!(lightweight.renderers[0].name, "source-lwrend");
+        let density = target
+            .loaded_lw_objects()
+            .iter()
+            .find(|object| object.name == "source-density")
+            .unwrap();
+        assert_eq!(density.renderers[0].name, "source-isosurf");
+        assert_eq!(target.camera_by_name("saved").unwrap().source(), "");
+        assert!(target.animation_node().is_some());
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_renderer_constructors_attach_live_renderers() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("direct-renderer", MolCoord::new());
+        let (log, _) = app
+            .run_script_js(
+                "var mol = cuemol.getObject('direct-renderer'); \
+                 var renderer = cuemol.SimpleRenderer(); \
+                 var detachedUID = renderer.getUID(); \
+                 var defaultOrder = renderer.ui_order === detachedUID; \
+                 renderer.name = 'created-directly'; renderer.width = 2.5; \
+                 renderer.visible = false; renderer.locked = true; \
+                 renderer.material = 'matte'; renderer.alpha = 0.4; \
+                 renderer.ui_order = 7; renderer.group = 'group-a'; \
+                 renderer.egtype = 'edges'; renderer.eglinew = 0.25; \
+                 renderer.egcolor = cuemol.Color('#123456'); \
+                 var move = cuemol.Matrix(); move.setTranslate(cuemol.Vector('(1,2,3)')); \
+                 renderer.xformMat = move; renderer.applyStyles('DefaultSimple'); \
+                 print('before=' + renderer.type + ':' + renderer.type_name + ':' + \
+                       (detachedUID > 0) + ':' + defaultOrder + ':' + \
+                       cuemol.implIface2(renderer, 'MolRenderer') + ':' + \
+                       (renderer.getCenter() === null) + ':' + \
+                       (renderer.getClientObj() === null) + ':' + (renderer.getScene() === null) + ':' + \
+                       renderer.style); \
+                 mol.attachRenderer(renderer); \
+                 print('after=' + (renderer.getUID() === detachedUID) + ':' + mol.getRendCount() + ':' + \
+                       renderer.width + ':' + renderer.locked + ':' + renderer.material + ':' + \
+                       renderer.alpha + ':' + renderer.ui_order + ':' + renderer.group + ':' + \
+                       renderer.egtype + ':' + renderer.eglinew + ':' + renderer.egcolor + ':' + \
+                       renderer.xformMat.getAt(1, 4) + ':' + \
+                       (renderer.getClientObjID() === mol.uid) + ':' + \
+                       (renderer.getClientObj().uid === mol.uid) + ':' + \
+                       (renderer.getScene().uid === scene.uid)); \
+                 var legacy = cuemol.CPKRenderer(); \
+                 print('legacy=' + legacy.type + ':' + legacy.type_name + ':' + \
+                       cuemol.implIface2(legacy, 'MolRenderer')); \
+                 var measure = cuemol.AtomIntrRenderer(); measure.name = 'measure'; \
+                 print('measureMethods=' + (typeof measure.append === 'function') + ':' + \
+                       (typeof measure.getDefsJSON === 'function')); \
+                 mol.attachRenderer(measure); \
+                 var measurementID = measure.appendBy2Vecs(cuemol.Vector('(0,0,0)'), \
+                                                           cuemol.Vector('(1,0,0)')); \
+                 print('measure=' + measurementID + ':' + \
+                       JSON.parse(measure.getDefsJSON()).length); \
+                 var selectionRenderer = cuemol.SelectionRenderer(); \
+                 try { selectionRenderer.sel; print('detachedSel=false'); } \
+                 catch (error) { print('detachedSel=true'); } \
+                 mol.attachRenderer(selectionRenderer); \
+                 var fallbackSel = selectionRenderer.sel.toString(); \
+                 mol.sel = cuemol.makeSel('name CA'); \
+                 print('selectionSel=' + fallbackSel + ':' + \
+                       selectionRenderer.sel.toString());",
+            )
+            .unwrap();
+        assert!(
+            log.contains(
+                "before=SimpleRenderer:simple:true:true:true:true:true:true:DefaultSimple"
+            ) && log.contains(
+                "after=true:1:2.5:true:matte:0.4:7:group-a:edges:0.25:#123456:1:true:true:true"
+            ) && log.contains("legacy=CPKRenderer:cpk:true")
+                && log.contains("measureMethods=true:true")
+                && log.contains("measure=0:1"),
+            "renderer constructor log: {log:?}"
+        );
+        assert!(
+            log.contains("detachedSel=true\nselectionSel=!*:name CA"),
+            "renderer constructor log: {log:?}"
+        );
+        let renderer = app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer_by_name("created-directly")
+            .expect("direct renderer was attached");
+        assert_eq!(renderer.renderer_type(), "simple");
+        assert!(renderer.uid().get() > 0);
+        assert!(!renderer.is_visible());
+        assert_eq!(renderer.qsc_attr("locked"), Some("true"));
+        assert_eq!(renderer.qsc_attr("style"), Some("DefaultSimple"));
+        assert_eq!(renderer.qsc_attr("material"), Some("matte"));
+        assert_eq!(renderer.qsc_attr("alpha"), Some("0.4"));
+        assert_eq!(renderer.qsc_attr("ui_order"), Some("7"));
+        assert_eq!(renderer.qsc_attr("group"), Some("group-a"));
+        assert_eq!(renderer.qsc_attr("egtype"), Some("edges"));
+        assert_eq!(renderer.qsc_attr("eglinew"), Some("0.25"));
+        assert_eq!(renderer.qsc_attr("egcolor"), Some("#123456"));
+        assert_eq!(renderer.qsc_attr("width"), Some("2.5"));
+        let measure = app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer_by_name("measure")
+            .unwrap();
+        assert_eq!(measure.atom_intr_lines().len(), 1);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_detached_objects_own_and_query_renderers() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "var scene = cuemol.getScene(); \
+                 var mol = cuemol.MolCoord(); mol.name = 'detached-renderers'; \
+                 var first = mol.createRenderer('simple', 'first'); \
+                 var second = cuemol.CPKRenderer(); second.name = 'second'; \
+                 mol.attachRenderer(second); second.ui_order = 1; first.ui_order = 2; \
+                 print('detached=' + mol.getRendCount() + ':' + \
+                       (mol.getRenderer(first.uid) === first) + ':' + \
+                       (mol.getRendererByIndex(0) === first) + ':' + \
+                       (mol.getRendererByType('cpk') === second) + ':' + \
+                       (mol.getRendererByName('second') === second) + ':' + \
+                       (mol.getRendererByNameType('second', 'cpk') === second) + ':' + \
+                       (first.getClientObjID() === mol.uid) + ':' + \
+                       (first.getClientObj() === mol) + ':' + \
+                       (first.getScene() === null) + ':' + \
+                       (mol.rend_uids === second.uid + ',' + first.uid) + ':' + \
+                       (mol.destroyRenderer(first.uid) === false) + ':' + mol.getRendCount()); \
+                 scene.addObject(mol); \
+                 var other = cuemol.MolCoord(); other.name = 'other-renderer-target'; \
+                 scene.addObject(other); \
+                 var rejected = false; \
+                 try { other.attachRenderer(first); } catch (error) { rejected = true; } \
+                 print('attached=' + mol.getRendCount() + ':' + \
+                       (mol.getRenderer(first.uid).name === 'first') + ':' + \
+                       (first.getClientObjID() === mol.uid) + ':' + \
+                       (first.getScene().uid === scene.uid) + ':' + \
+                       (mol.rend_uids === second.uid + ',' + first.uid) + ':' + rejected);",
+            )
+            .expect("detached object renderer API runs");
+        assert!(
+            log.contains("detached=2:true:true:true:true:true:true:true:true:true:true:2")
+                && log.contains("attached=2:true:true:true:true:true"),
+            "detached renderer log: {log:?}"
+        );
+        let object_uid = app
+            .object_uid_by_name("detached-renderers")
+            .expect("detached object was attached");
+        assert_eq!(
+            app.renderer_summaries(object_uid)
+                .into_iter()
+                .map(|renderer| renderer.name)
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_detached_object_creates_reference_preset_renderers() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "var scene = cuemol.getScene(); \
+                 var mol = cuemol.MolCoord(); mol.name = 'detached-preset'; \
+                 var group = mol.createPresetRenderer('Default1RendPreset', 'preset', 'p_'); \
+                 var ribbon = mol.getRendererByName('p_ribbon'); \
+                 print('detachedPreset=' + mol.getRendCount() + ':' + group.type_name + ':' + \
+                       group.name + ':' + (group.getClientObj() === mol) + ':' + \
+                       ribbon.group + ':' + ribbon.style + ':' + ribbon.sel); \
+                 scene.addObject(mol); \
+                 ribbon = mol.getRendererByName('p_ribbon'); \
+                 print('attachedPreset=' + mol.getRendCount() + ':' + ribbon.name + ':' + \
+                       ribbon.group + ':' + ribbon.style + ':' + ribbon.sel);",
+            )
+            .expect("detached preset renderer creation runs");
+        assert!(
+            log.contains(
+                "detachedPreset=4:*group:preset:true:preset:DefaultRibbon,DefaultHSCPaint:protein"
+            ) && log
+                .contains("attachedPreset=4:p_ribbon:preset:DefaultRibbon,DefaultHSCPaint:protein"),
+            "detached preset log: {log:?}"
+        );
+        let object_uid = app
+            .object_uid_by_name("detached-preset")
+            .expect("preset object was attached");
+        let ribbon = app
+            .renderer_summaries(object_uid)
+            .into_iter()
+            .find(|renderer| renderer.name == "p_ribbon")
+            .expect("preset ribbon exists");
+        assert_eq!(
+            app.renderer_property(object_uid, ribbon.uid, "style")
+                .as_deref(),
+            Some("DefaultRibbon,DefaultHSCPaint")
+        );
+        assert_eq!(
+            app.renderer_property(object_uid, ribbon.uid, "sel")
+                .as_deref(),
+            Some("protein")
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_pending_objects_and_renderer_children_remain_live_after_attachment() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let molecule_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("child-target", MolCoord::new());
+        let (log, _) = app
+            .run_script_js(
+                "var scene = cuemol.getScene(); \
+                 var mol = cuemol.getObject('child-target'); \
+                 var ribbon = cuemol.RibbonRenderer(); ribbon.name = 'pending-ribbon'; \
+                 ribbon.helix.width = 1.75; ribbon.coloring = cuemol.CPKColoring(); \
+                 mol.attachRenderer(ribbon); \
+                 ribbon.helix.width = 2.25; \
+                 var map = cuemol.DensityMap(); map.name = 'pending-map'; \
+                 var mapUID = map.getUID(); var mapDefaultOrder = map.ui_order === mapUID; \
+                 map.visible = false; map.locked = true; map.ui_order = 9; \
+                 var move = cuemol.Matrix(); move.setTranslate(cuemol.Vector('(4,5,6)')); \
+                 map.xformMat = move; \
+                 var contour = map.createRenderer('contour', 'pending-contour'); \
+                 contour.siglevel = 2.2; contour.width = 3.5; \
+                 contour.center = cuemol.Vector('(1,2,3)'); \
+                 scene.addObject(map); contour.siglevel = 3.3; map.visible = true; \
+                 print('ribbon=' + ribbon.helix.width + ':' + ribbon.coloring.type + ':' + \
+                       ribbon.getClientObjID()); \
+                 print('map=' + (map.getUID() === mapUID) + ':' + (mapUID > 0) + ':' + \
+                       mapDefaultOrder + ':' + map.scene_uid + ':' + \
+                       map.getRendCount() + ':' + map.visible + ':' + map.locked + ':' + \
+                       map.ui_order + ':' + map.xformMat.getAt(1,4) + ':' + \
+                       contour.siglevel + ':' + contour.width + ':' + contour.center.x + ':' + \
+                       (contour.getScene().uid === scene.uid));",
+            )
+            .unwrap();
+        assert!(
+            log.contains(&format!("ribbon=2.25:CPKColoring:{}\n", molecule_uid.get()))
+                && log.contains("map=true:true:true:1:1:true:true:9:4:3.3:3.5:1:true\n"),
+            "pending object log: {log:?}"
+        );
+        let ribbon = app
+            .scene_manager()
+            .object(molecule_uid)
+            .unwrap()
+            .renderer_by_name("pending-ribbon")
+            .unwrap();
+        let ribbon_children = ribbon
+            .qsc_children()
+            .iter()
+            .map(|node| {
+                (
+                    node.tag_name().to_string(),
+                    node.str_attr("width").to_string(),
+                    node.type_name().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ribbon_children
+                .iter()
+                .find(|(name, _, _)| name == "helix")
+                .map(|(_, width, _)| width.as_str()),
+            Some("2.25"),
+            "ribbon children: {ribbon_children:?}"
+        );
+        assert_eq!(
+            ribbon
+                .qsc_children()
+                .iter()
+                .find(|node| node.tag_name() == "coloring")
+                .map(cuemol_core::LDom2Node::type_name),
+            Some("CPKColoring")
+        );
+        let map = app
+            .density_maps
+            .values()
+            .find(|map| map.name == "pending-map")
+            .unwrap();
+        assert!(map.visible);
+        assert!(map.locked);
+        assert_eq!(map.ui_order, 9);
+        assert_eq!(map.xform.get_at(1, 4).unwrap(), 4.0);
+        let contour = map
+            .renderers
+            .iter()
+            .find(|renderer| renderer.name == "pending-contour")
+            .unwrap();
+        assert_eq!(contour.siglevel, 3.3);
+        assert_eq!(contour.width, 3.5);
+        assert_eq!(contour.center.x, 1.0);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_pending_object_renderers_attach_in_order_to_the_target_scene() {
+        let mut app = DesktopAppState::new();
+        let first = app.new_scene("first", true).result_scene;
+        let second = app.new_scene("second", true).result_scene;
+        let (log, _) = app
+            .run_script_js(&format!(
+                "var first = cuemol.getScene({}); \
+                 var object = cuemol.MolCoord(); object.name = 'prebuilt'; \
+                 var renderer = object.createRenderer('simple', 'prebuilt-renderer'); \
+                 renderer.width = 3.25; renderer.visible = false; \
+                 var objectUID = first.addObject(object); \
+                 var attached = first.getObject(objectUID).getRendererByName('prebuilt-renderer'); \
+                 print(objectUID + ':' + renderer.getUID() + ':' + attached.getUID() + ':' + \
+                       attached.width + ':' + attached.visible);",
+                first.get(),
+            ))
+            .unwrap();
+        let object = app
+            .scene_manager()
+            .scene(first)
+            .unwrap()
+            .object_by_name("prebuilt")
+            .unwrap();
+        let renderer = object.renderer_by_name("prebuilt-renderer").unwrap();
+        assert_eq!(
+            log,
+            format!(
+                "{}:{}:{}:3.25:false\n",
+                object.uid().get(),
+                renderer.uid().get(),
+                renderer.uid().get()
+            )
+        );
+        assert_eq!(renderer.qsc_attr("width"), Some("3.25"));
+        assert!(!renderer.is_visible());
+        assert!(app
+            .scene_manager()
+            .scene(second)
+            .unwrap()
+            .object_by_name("prebuilt")
+            .is_none());
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_test_renderers_construct_and_emit_native_geometry() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        app.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("renderer-tests", MolCoord::new());
+        let (log, _) = app
+            .run_script_js(
+                "var object = cuemol.getObject('renderer-tests'); \
+                 var test = cuemol.TestRenderer(); test.name = 'cube'; \
+                 test.color1 = cuemol.Color('#123456'); object.attachRenderer(test); \
+                 var surface = cuemol.MS2TestRenderer(); \
+                 print(test.type + ':' + test.type_name + ':' + test.color1 + ':' + \
+                       surface.type + ':' + surface.type_name + ':' + surface.sel + ':' + \
+                       surface.defaultcolor + ':' + \
+                       cuemol.implIface2(surface, 'MolRenderer'));",
+            )
+            .unwrap();
+        assert_eq!(
+            log,
+            "TestRenderer:test:#123456:MS2TestRenderer:ms2test::#FFFFFF:true\n"
+        );
+        let snapshot = app.render_snapshot(scene_uid, "").unwrap();
+        assert_eq!(snapshot.meshes.len(), 1);
+        assert_eq!(snapshot.meshes[0].vertices.len(), 24);
+        assert_eq!(snapshot.meshes[0].indices.len(), 36);
+        assert_eq!(
+            snapshot.meshes[0].vertices[0].color,
+            [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0, 1.0]
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_hole_surface_builder_generates_result_surface() {
+        let mut molecule = MolCoord::new();
+        let mut serial = 1;
+        for z in [-2.0, 0.0, 2.0, 4.0, 6.0] {
+            for division in 0..12 {
+                let angle = division as f64 * std::f64::consts::TAU / 12.0;
+                molecule.push_atom(cuemol_molstr::Atom {
+                    serial,
+                    name: "C".to_string(),
+                    alt_loc: None,
+                    res_name: "LIG".to_string(),
+                    chain_id: "A".to_string(),
+                    res_id: 1,
+                    ins_code: None,
+                    position: Vector4::new3(4.0 * angle.cos(), 4.0 * angle.sin(), z),
+                    occupancy: 1.0,
+                    b_factor: 0.0,
+                    element: "C".to_string(),
+                    formal_charge: None,
+                    int_props: BTreeMap::new(),
+                    real_props: BTreeMap::new(),
+                });
+                serial += 1;
+            }
+        }
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        app.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("channel", molecule);
+        let (log, _) = app
+            .run_script_js(
+                "var builder = cuemol.HoleSurfBuilder(); \
+                 var defaultNull = builder.target_mol === null && builder.target_sel === null && \
+                                   builder.result === null; \
+                 builder.target_mol = cuemol.getObject('channel'); \
+                 builder.target_sel = cuemol.createObj('SelCommand', '*'); \
+                 builder.dirnorm = cuemol.createObj('Vector', '(0,0,1,0)'); \
+                 builder.startpos = cuemol.createObj('Vector', '(0,0,0,0)'); \
+                 builder.surf_den = 1.5; builder.surf_probe_r = 1.2; \
+                 builder.doit(); \
+                 print('hole=' + builder.type + ':' + builder.surf_den + ':' + \
+                       builder.surf_probe_r + ':' + builder.result.type + ':' + \
+                       (builder.result._mesh_data.length > 0) + ':' + \
+                       cuemol.implIface2(builder.result, 'Object') + ':' + defaultNull);",
+            )
+            .unwrap();
+        assert_eq!(
+            log.trim(),
+            "hole=HoleSurfBuilder:1.5:1.2:MolSurfObj:true:true:true"
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
     fn run_script_js_exposes_original_internal_globals() {
         let mut app = DesktopAppState::new();
         let scene_uid = app.ensure_active_scene();
@@ -26833,6 +40241,7 @@ mod tests {
                  print('argc=' + getCmdArgs(-1)); \
                  var sm = getService('SceneManager'); \
                  print('active=' + sm.activeSceneID + ':' + sm.getScene(sm.activeSceneID).uid); \
+                 print('sceMgr=' + cuemol.sceMgr.activeSceneID); \
                  print('uidApi=' + sm.getUIDObj(sm.activeSceneID).uid + ':' + \
                        cuemol.getUIDObj(scene.uid).uid + ':' + cuemol.getScene(scene.uid).uid + ':' + \
                        (cuemol.getScene(scene.uid + 1) === null)); \
@@ -26851,6 +40260,9 @@ mod tests {
                  var propSet = cuemol.hasProp(propObj, 'a') + ':' + propObj.a; \
                  cuemol.resetProp(propObj, 'a'); \
                  print('props=' + propSet + ':' + cuemol.hasProp(propObj, 'a')); \
+                 var resetCamera = cuemol.Camera(); resetCamera.zoom = 12; \
+                 cuemol.resetProp(resetCamera, 'zoom'); \
+                 print('reset=' + resetCamera.zoom); \
                  print('vector=' + v.toString() + ':' + v.length() + ':' + v.add(u)); \
                  print('vector2=' + v.cross(u) + ':' + v.dot(u) + ':' + v.sub(u)); \
                  print('vector3=' + v.scale(2) + ':' + v.divide(2) + ':' + v.normalize().length()); \
@@ -26897,9 +40309,9 @@ mod tests {
                  var gi2 = grad.insert(-1, cuemol.makeColor('blue')); \
                  var gi3 = grad.insert(-1, cuemol.makeColor('green')); \
                  print('gradient=' + gi1 + ':' + gi2 + ':' + gi3 + ':' + grad.size + ':' + \
-                       grad.getValueAt(0) + ':' + grad.getColorAt(0).b); \
+                       grad.getValueAt(0) + ':' + grad.getColorAt(0).b()); \
                  print('gradientChange=' + grad.changeAt(1, 0, cuemol.makeColor('green')) + ':' + \
-                       grad.getValueAt(1) + ':' + grad.getColorAt(1).g); \
+                       grad.getValueAt(1) + ':' + grad.getColorAt(1).g()); \
                  var grad2 = cuemol.MultiGradient(); grad2.copyFrom(grad); \
                  print('gradientCopy=' + grad2.size + ':' + grad2.removeAt(0) + ':' + grad2.size); \
                  grad2.clear(); print('gradientClear=' + grad2.size); \
@@ -26956,8 +40368,8 @@ mod tests {
                  var paint = cuemol.PaintColoring(); \
                  paint.append(paintSel, cuemol.makeColor('red')); \
                  paint.insertBefore(0, paintSel, cuemol.makeColor('blue')); \
-                 print('paint=' + paint.size + ':' + paint.getColorAt(0).b + ':' + paint.getSelAt(1)); \
-                 print('paintRemove=' + paint.removeAt(0) + ':' + paint.size + ':' + paint.getColorAt(0).r); \
+                 print('paint=' + paint.size + ':' + paint.getColorAt(0).b() + ':' + paint.getSelAt(1)); \
+                 print('paintRemove=' + paint.removeAt(0) + ':' + paint.size + ':' + paint.getColorAt(0).r()); \
                  var symm = getService('SymmOpManager'); \
                  print('symm=' + symm.getCName(1) + ':' + symm.getName(1) + ':' + \
                        JSON.parse(symm.getSgNamesJSON('TRICLINIC')).length); \
@@ -27003,6 +40415,9 @@ mod tests {
                  remote.name = 'from-smiles'; scene.addObject(remote); \
                  var obj = newObj('MolCoord'); obj.name = 'from-global'; scene.addObject(obj); \
                  var obj2 = cuemol.MolCoord(); obj2.name = 'from-constructor'; scene.addObject(obj2); \
+                 obj2.createRenderer('simple', 'simple-one'); \
+                 obj2.createRenderer('ribbon', 'ribbon-one'); \
+                 print('rendNames=' + cuemol.getRendNameList(obj2, 'simple').join(',')); \
                  callGC();",
             )
             .expect("original internal globals run");
@@ -27011,6 +40426,7 @@ mod tests {
         assert!(log.contains("\"Vector\""));
         assert!(log.contains("argc=0"));
         assert!(log.contains(&format!("active={0}:{0}", scene_uid.get())));
+        assert!(log.contains(&format!("sceMgr={}", scene_uid.get())));
         assert!(log.contains(&format!("uidApi={0}:{0}:{0}:true", scene_uid.get())));
         assert!(log.contains("handler=pdb:input.pdb"));
         assert!(log.contains("handlers=42"));
@@ -27019,6 +40435,7 @@ mod tests {
                 && log.contains("props=true:2:false"),
             "runtime API log: {log:?}"
         );
+        assert!(log.contains("reset=50") && log.contains("rendNames=simple-one"));
         assert!(
             log.contains("vector=(3,4,0):5:(4,6,3)"),
             "vector API log: {log:?}"
@@ -27175,6 +40592,80 @@ mod tests {
 
     #[cfg(feature = "scripting")]
     #[test]
+    fn script_create_obj_matches_wrapper_truthiness() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                "var empty = cuemol.createObj('Vector', ''); \
+                 var zero = cuemol.Vector(0); \
+                 var forced = false; \
+                 try { cuemol.createFromString('Vector', ''); } catch (error) { forced = true; } \
+                 print('truthy=' + empty.isZero() + ':' + zero.isZero() + ':' + forced + ':' + \
+                       (cuemol.getErrMsg().length > 0));",
+            )
+            .unwrap();
+        assert_eq!(log.trim(), "truthy=true:true:true:true");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_reset_prop_restores_scene_view_and_renderer_styles() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("styled", molecule);
+        let (log, _) = app
+            .run_script_js(
+                "var view = cuemol.getView(scene.activeViewID); \
+                 view.zoom = 12; view.center = cuemol.Vector('(1,2,3,0)'); \
+                 scene.aoRadius = 12; scene.bgcolor = cuemol.makeColor('red'); \
+                 cuemol.resetProp(view, 'zoom'); cuemol.resetProp(view, 'center'); \
+                 cuemol.resetProp(scene, 'aoRadius'); cuemol.resetProp(scene, 'bgcolor'); \
+                 print('runtime=' + view.zoom + ':' + view.center + ':' + \
+                       scene.aoRadius + ':' + scene.bgcolor.r()); \
+                 var rend = cuemol.getObject('styled').createRenderer('simple', 'styled-rend'); \
+                 var styles = getService('StyleManager'); \
+                 var styleID = styles.createStyleSet('named-style', scene.uid); \
+                 styles.getStyleSet(styleID).setColor('accent', cuemol.makeColor('#123456')); \
+                 styles.setStyleValue(scene.uid, 'named-style', \
+                                      'NamedRenderer.defaultcolor', 'accent'); \
+                 rend.applyStyles('DefaultSimple,DefaultCPKColoring,NamedRenderer'); \
+                 print('styleBefore=' + rend.width + ':' + rend.coloring.type + ':' + \
+                       rend.defaultcolor.r()); \
+                 rend.width = 9; rend.coloring = cuemol.RainbowColoring(); \
+                 cuemol.resetProp(rend, 'width'); cuemol.resetProp(rend, 'coloring'); \
+                 print('styleAfter=' + rend.width + ':' + rend.coloring.type);",
+            )
+            .unwrap();
+        assert!(log.contains("runtime=50:(0,0,0):4:0"), "{log}");
+        assert!(
+            log.contains("styleBefore=1.2:CPKColoring:18")
+                && log.contains("styleAfter=1.2:CPKColoring"),
+            "{log}"
+        );
+        let renderer = app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer_by_name("styled-rend")
+            .unwrap();
+        assert!(renderer.qsc_attr("width").is_none());
+        assert!(renderer
+            .qsc_children()
+            .iter()
+            .all(|child| child.tag_name() != "coloring"));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
     fn run_script_js_exec_loads_a_script_file() {
         let mut app = DesktopAppState::new();
         app.ensure_active_scene();
@@ -27277,6 +40768,10 @@ mod tests {
             .run_script_js(&format!(
                 "var map = cuemol.getObject('map'); var view = cuemol.getView({}); \
                  view.sizeChanged(200, 100); map.fitView(view, false); \
+                 var scene = cuemol.getScene(); var styles = cuemol.getService('StyleManager'); \
+                 var styleID = styles.createStyleSet('map-style', scene.uid); \
+                 styles.setColor('map-accent', cuemol.makeColor('#123456'), scene.uid, styleID); \
+                 styles.setStrData('sel', 'map_focus', 'name CA', scene.uid, styleID); \
                  var hist = JSON.parse(map.getHistogramJSON(-1, 1, 4)); \
                  var potential = cuemol.getObject('potential'); \
                  print('potential=' + cuemol.getClassName(potential) + ':' + \
@@ -27290,10 +40785,11 @@ mod tests {
                  var rend = map.createRenderer('isosurf'); rend.name = 'surface'; \
                  rend.visible = false; rend.siglevel = 2.25; rend.extent = 9; \
                  rend.width = 1.75; rend.binning = 2; rend.max_grids = 55; \
-                 rend.drawmode = 'line'; rend.color = cuemol.makeColor('#123456'); \
+                 rend.drawmode = 'line'; rend.color = cuemol.makeColor('map-accent', scene.uid); \
                  rend.center = cuemol.createObj('Vector', '(2,3,4)'); \
                  rend.use_pbc = false; rend.bndry_rng = 6.5; \
-                 rend.bndry_molname = 'clip'; rend.bndry_sel = cuemol.makeSel('name CA'); \
+                 rend.bndry_molname = 'clip'; \
+                 rend.bndry_sel = cuemol.makeSel('map_focus', scene.uid); \
                  var grad = rend.multi_grad; \
                  grad.insert(-1, cuemol.makeColor('red')); \
                  grad.insert(1, cuemol.makeColor('blue')); \
@@ -27301,10 +40797,13 @@ mod tests {
                  var volume = map.createRenderer('gpu_mapvol', 'volume'); \
                  volume.xferfn_type = 'auto2'; volume.autoupdate = false; \
                  volume.dragupdate = true; \
-                 print('mapRend=' + map.getRendCount() + ':' + map.rend_uids + ':' + \
-                       map.getRendererByType('isosurf').uid + ':' + \
-                       map.getRendererByName('surface').uid + ':' + \
-                       cuemol.getRenderer('map', 'surface').uid + ':' + \
+                 var surfaceID = rend.uid; var volumeID = volume.uid; \
+                 print('mapRend=' + map.getRendCount() + ':' + \
+                       (map.rend_uids === surfaceID + ',' + volumeID) + ':' + \
+                       (map.getRendererByType('isosurf').uid === surfaceID) + ':' + \
+                       (map.getRendererByName('surface').uid === surfaceID) + ':' + \
+                       (cuemol.getRenderer('map', 'surface').uid === surfaceID) + ':' + \
+                       (rend.ui_order === surfaceID) + ':' + \
                        cuemol.getClassName(rend) + ':' + \
                        cuemol.implIface2(rend, 'MapRenderer') + ':' + rend.type_name + ':' + \
                        rend.siglevel + ':' + rend.extent + ':' + rend.drawmode + ':' + \
@@ -27337,7 +40836,7 @@ mod tests {
         );
         assert!(
             log.contains(
-                "mapRend=2:4000000000,4000000001:4000000000:4000000000:4000000000:\
+                "mapRend=2:true:true:true:true:true:\
                  MapSurfRenderer:true:isosurf:2.25:9:line:18:(2,3,4):(2,3,4):-2:2:110:2"
             ) && log.contains(
                 "mapVol=GLSLMapVolRenderer:true:gpu_mapvol:auto2:false:true:255:true:false"
@@ -27355,13 +40854,22 @@ mod tests {
         assert_eq!(live_map.xform.get_at(1, 4).unwrap(), 1.0);
         assert_eq!(live_map.xform.get_at(2, 4).unwrap(), 2.0);
         assert_eq!(live_map.xform.get_at(3, 4).unwrap(), 3.0);
-        assert_eq!(live_map.renderers.len(), 2);
+        assert_eq!(
+            live_map.renderers.len(),
+            2,
+            "density renderers: {:?}",
+            live_map
+                .renderers
+                .iter()
+                .map(|renderer| (&renderer.name, renderer.uid))
+                .collect::<Vec<_>>()
+        );
         let renderer = live_map
             .renderers
             .iter()
             .find(|renderer| renderer.name == "surface")
             .expect("surface renderer remains available");
-        assert_eq!(renderer.uid, Uid::new(4_000_000_000));
+        assert!(renderer.uid.get() > 0);
         assert_eq!(renderer.name, "surface");
         assert!(!renderer.visible);
         assert_eq!(renderer.siglevel, 2.25);
@@ -27528,6 +41036,19 @@ mod tests {
         assert_eq!(live_scene.scene_attribute("aoRadius"), Some("7.5"));
         assert_eq!(live_scene.cameras().len(), 1);
         assert_eq!(app.command_manager().views().len(), 2);
+        let extra_view = app
+            .command_manager()
+            .views()
+            .iter()
+            .find(|view| view.uid() != initial_view)
+            .expect("extra view")
+            .uid();
+        assert_eq!(live_scene.active_view_uid(), Some(extra_view));
+        assert!(app
+            .command_manager()
+            .views()
+            .iter()
+            .all(|view| view.active()));
         assert_eq!(
             app.command_manager()
                 .view(initial_view)
@@ -27543,11 +41064,54 @@ mod tests {
                  print('singletonPersist=' + \
                        (styles.hasStyleSet('persistent-style', scene.uid) > 0) + ':' + \
                        input.conf_rotx + ':' + input.tbrad + ':' + input.hitprec + ':' + \
-                       scene.name + ':' + scene.getViewCount() + ':' + scene.hasCamera('stored'));",
+                       scene.name + ':' + scene.getViewCount() + ':' + scene.hasCamera('stored') + ':' + \
+                       scene.activeViewID);",
             )
             .expect("persistent singleton state is queryable");
+        assert!(persistent_log.contains(&format!(
+            "singletonPersist=true:RBUTTON|MOUSE_X:1.25:6:after:2:true:{}",
+            extra_view.get()
+        )));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_scene_active_ids_are_validated_and_persist_independently() {
+        let mut app = DesktopAppState::new();
+        app.new_scene("active IDs", true);
+        let (log, _) = app
+            .run_script_js(
+                "print('initial=' + scene.activeObjID + ':' + scene.activeRendID + ':' + \
+                       (scene.activeViewID > 0)); \
+                 var object = cuemol.MolCoord(); object.name = 'target'; \
+                 var objectID = scene.addObject(object); \
+                 var renderer = object.createRenderer('simple'); \
+                 scene.activeObjID = objectID; scene.activeRendID = renderer.uid; \
+                 try { scene.activeObjID = 0; print('badObj=false'); } \
+                 catch (error) { print('badObj=true'); } \
+                 try { scene.activeRendID = 0; print('badRend=false'); } \
+                 catch (error) { print('badRend=true'); } \
+                 try { scene.activeViewID = 0; print('badView=false'); } \
+                 catch (error) { print('badView=true'); } \
+                 print('selected=' + scene.activeObjID + ':' + scene.activeRendID);",
+            )
+            .expect("active IDs are accepted");
+        assert!(log.contains("initial=0:0:true"), "active ID log: {log:?}");
         assert!(
-            persistent_log.contains("singletonPersist=true:RBUTTON|MOUSE_X:1.25:6:after:2:true")
+            log.contains("badObj=true\nbadRend=true\nbadView=true"),
+            "active ID validation log: {log:?}"
+        );
+
+        let scene_uid = app.active_scene().expect("active scene");
+        let scene = app.scene_manager().scene(scene_uid).expect("scene");
+        let object_uid = scene.active_object_uid().expect("active object");
+        let renderer_uid = scene.active_renderer_uid().expect("active renderer");
+        let (persistent_log, _) = app
+            .run_script_js("print(scene.activeObjID + ':' + scene.activeRendID);")
+            .expect("active IDs persist");
+        assert_eq!(
+            persistent_log,
+            format!("{}:{}\n", object_uid.get(), renderer_uid.get())
         );
     }
 
@@ -28095,6 +41659,61 @@ mod tests {
 
     #[cfg(feature = "scripting")]
     #[test]
+    fn run_script_js_detached_morph_mol_preserves_frames_when_attached() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-detached-morph-{}.pdb", std::process::id()));
+        std::fs::write(
+            &path,
+            "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("detached-morph", true).result_scene;
+        let source = format!(
+            "var reader = cuemol.PDBFileReader(); \
+             var source = reader.createDefaultObj(); reader.attach(source); \
+             reader.setPath({path:?}); reader.read(); source.name = 'source'; \
+             var morph = cuemol.MorphMol(); morph.name = 'morph'; \
+             morph.copyAtoms(source, cuemol.makeSel('*')); morph.appendThisFrame(); \
+             source.getAtomByID(1).pos = cuemol.createObj('Vector', '(9,2,3)'); \
+             morph.insertBefore(source, -1); morph.scale_frame = true; morph.frame = 1; \
+             print('detachedMorph=' + morph.nframe + ':' + morph.scale_frame + ':' + \
+                   morph.getAtomByID(1).pos.x); \
+             scene.addObject(morph); \
+             print('attachedMorph=' + morph.nframe + ':' + morph.getScene().uid);",
+            path = path.to_string_lossy(),
+        );
+        let result = app.run_script_js(&source);
+        let _ = std::fs::remove_file(&path);
+        let (log, _) = result.unwrap();
+        assert!(
+            log.contains("detachedMorph=2:true:9")
+                && log.contains(&format!("attachedMorph=2:{}", scene_uid.get())),
+            "{log:?}"
+        );
+        let object_uid = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .object_by_name("morph")
+            .unwrap()
+            .uid();
+        assert_eq!(app.morphs[&object_uid].frame_size(), 2);
+        assert_eq!(
+            app.scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .mol()
+                .get_atom_by_id(1)
+                .unwrap()
+                .position
+                .x,
+            9.0
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
     fn run_script_js_reports_renderer_runtime_classes_and_inheritance() {
         let mut app = DesktopAppState::new();
         let created = app.new_scene("renderer-classes", true);
@@ -28520,6 +42139,40 @@ mod tests {
 
     #[cfg(feature = "scripting")]
     #[test]
+    fn script_scene_undo_is_scoped_to_a_non_active_receiver() {
+        let mut app = DesktopAppState::new();
+        let first = app.new_scene("first", true).result_scene;
+        let second = app.new_scene("second", true).result_scene;
+        let (commit_log, _) = app
+            .run_script_js(&format!(
+                "var first = cuemol.getScene({}); var second = cuemol.getScene({}); \
+                 first.startUndoTxn('rename first'); first.setName('changed'); \
+                 first.commitUndoTxn(); \
+                 print(first.isUndoable() + ':' + second.isUndoable() + ':' + \
+                       first.getUndoDesc(0));",
+                first.get(),
+                second.get(),
+            ))
+            .unwrap();
+        assert_eq!(commit_log, "true:false:rename first\n");
+        assert_eq!(app.scene_manager().scene(first).unwrap().name(), "changed");
+
+        let (undo_log, _) = app
+            .run_script_js(&format!(
+                "var first = cuemol.getScene({}); var second = cuemol.getScene({}); \
+                 print(first.undo(0) + ':' + first.isRedoable() + ':' + \
+                       second.isRedoable());",
+                first.get(),
+                second.get(),
+            ))
+            .unwrap();
+        assert_eq!(undo_log, "true:true:false\n");
+        assert_eq!(app.scene_manager().scene(first).unwrap().name(), "first");
+        assert_eq!(app.active_scene(), Some(second));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
     fn run_script_js_scene_listener_receives_scene_events() {
         let mut app = DesktopAppState::new();
         let scene_uid = app.ensure_active_scene();
@@ -28545,6 +42198,37 @@ mod tests {
             )),
             "Scene listener log: {log:?}"
         );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_scene_listener_and_dump_are_scoped_to_the_receiver() {
+        let mut app = DesktopAppState::new();
+        let first = app.new_scene("first", true).result_scene;
+        let second = app.new_scene("second", true).result_scene;
+        app.scene_manager_mut()
+            .scene_mut(first)
+            .unwrap()
+            .add_molecule("first-object", MolCoord::new());
+        app.scene_manager_mut()
+            .scene_mut(second)
+            .unwrap()
+            .add_molecule("second-object", MolCoord::new());
+        let (log, _) = app
+            .run_script_js(&format!(
+                "var first = cuemol.getScene({}); var second = cuemol.getScene({}); \
+                 var count = 0; var id = first.addListener(function() {{ count++; }}); \
+                 second.setName('second-changed'); first.setName('first-changed'); \
+                 print('listener=' + count + ':' + second.removeListener(id) + ':' + \
+                       first.removeListener(id)); first.dump();",
+                first.get(),
+                second.get(),
+            ))
+            .unwrap();
+        assert!(log.starts_with("listener=1:false:true\n"));
+        assert!(log.contains("name = <first-changed>"));
+        assert!(log.contains("first-object"));
+        assert!(!log.contains("second-object"));
     }
 
     #[cfg(feature = "scripting")]
@@ -28702,6 +42386,215 @@ mod tests {
 
     #[cfg(feature = "scripting")]
     #[test]
+    fn script_style_manager_is_shared_across_scene_switches() {
+        let mut app = DesktopAppState::new();
+        let first = app.new_scene("first", true).result_scene;
+        let second = app.new_scene("second", true).result_scene;
+        let (log, _) = app
+            .run_script_js(&format!(
+                "var styles = cuemol.getService('StyleManager'); \
+                 var setID = styles.createStyleSet('first-local', {first}); \
+                 styles.setStrData('sel', 'focus', 'name CA', {first}, setID); \
+                 styles.setColor('accent', cuemol.makeColor('#112233'), {first}, setID); \
+                 var sel = cuemol.makeSel('focus', {first}); \
+                 var color = cuemol.makeColor('accent', {first}); \
+                 print('nonactive=' + cuemol.getClassName(sel) + ':' + sel + ':' + \
+                       color.r() + ':' + color.g() + ':' + color.b());",
+                first = first.get(),
+            ))
+            .unwrap();
+        assert!(log.contains("nonactive=SelCommand:focus:17:34:51"));
+
+        assert!(app.set_active_scene(Some(first)));
+        let (log, _) = app
+            .run_script_js(&format!(
+                "var styles = cuemol.getService('StyleManager'); \
+                 print('switched=' + styles.getStrData('sel', 'focus', {first}) + ':' + \
+                       cuemol.makeColor('accent', {first}).toString());",
+                first = first.get(),
+            ))
+            .unwrap();
+        assert!(log.contains("switched=name CA:#112233"));
+
+        assert!(app.destroy_scene(first));
+        assert_eq!(app.active_scene(), Some(second));
+        let (log, _) = app
+            .run_script_js(&format!(
+                "print('removed=' + \
+                       cuemol.getService('StyleManager').getStrData('sel', 'focus', {first}));",
+                first = first.get(),
+            ))
+            .unwrap();
+        assert!(log.contains("removed=\n"));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_scene_methods_are_scoped_to_the_receiver_scene() {
+        let mut app = DesktopAppState::new();
+        let first = app.new_scene("first", true).result_scene;
+        let second = app.new_scene("second", true).result_scene;
+        let first_object = app
+            .scene_manager_mut()
+            .scene_mut(first)
+            .unwrap()
+            .add_molecule("first-object", MolCoord::new());
+        let first_renderer = app
+            .scene_manager_mut()
+            .scene_mut(first)
+            .unwrap()
+            .object_mut(first_object)
+            .unwrap()
+            .add_renderer("line", "first-renderer");
+        let second_object = app
+            .scene_manager_mut()
+            .scene_mut(second)
+            .unwrap()
+            .add_molecule("second-object", MolCoord::new());
+        let (log, _) = app
+            .run_script_js(&format!(
+                "var first = cuemol.getScene({first}); \
+                 var second = cuemol.getScene({second}); \
+                 var firstView = first.createView(); \
+                 var secondView = second.createView(); \
+                 var camera = cuemol.Camera(); first.setCamera('first-camera', camera); \
+                 var temporary = cuemol.Object(); temporary.name = 'temporary'; \
+                 var temporaryID = first.addObject(temporary); \
+                 print('objects=' + (first.getObject({second_object}) === null) + ':' + \
+                       (second.getObject(temporaryID) === null) + ':' + \
+                       (first.getObject(temporaryID).name === 'temporary')); \
+                 print('views=' + (first.getView(secondView.uid) === null) + ':' + \
+                       (second.getView(firstView.uid) === null) + ':' + \
+                       first.getViewCount() + ':' + second.getViewCount()); \
+                 print('parents=' + (firstView.getScene().uid === first.uid) + ':' + \
+                       (first.getObject({first_object}).getScene().uid === first.uid) + ':' + \
+                       (cuemol.getRenderer({first_renderer}).getScene().uid === first.uid)); \
+                 print('dynamic=' + first.obj_uids.split(',').includes(String(temporaryID)) + ':' + \
+                       first.objectNames.join(',').includes('temporary') + ':' + \
+                       first.view_uids.split(',').includes(String(firstView.uid))); \
+                 print('camera=' + first.hasCamera('first-camera') + ':' + \
+                       second.hasCamera('first-camera')); \
+                 print('destroy=' + first.destroyObject({second_object}) + ':' + \
+                       first.destroyObject({first_object})); \
+                 first.clearAllData(); first.setCamera('after-clear', camera);",
+                first = first.get(),
+                second = second.get(),
+                first_object = first_object.get(),
+                first_renderer = first_renderer.get(),
+                second_object = second_object.get(),
+            ))
+            .unwrap();
+        assert_eq!(
+            log,
+            "objects=true:true:true\n\
+             views=true:true:2:2\n\
+             parents=true:true:true\n\
+             dynamic=true:true:true\n\
+             camera=true:false\n\
+             destroy=false:true\n"
+        );
+        let first_scene = app.scene_manager().scene(first).unwrap();
+        assert!(first_scene.objects().is_empty());
+        assert!(first_scene.camera_by_name("first-camera").is_none());
+        assert!(first_scene.camera_by_name("after-clear").is_some());
+        let second_scene = app.scene_manager().scene(second).unwrap();
+        assert!(second_scene.object(second_object).is_some());
+        assert!(second_scene.camera_by_name("after-clear").is_none());
+        assert_eq!(
+            app.command_manager()
+                .views()
+                .iter()
+                .filter(|view| view.scene_uid() == first)
+                .count(),
+            2
+        );
+        assert_eq!(
+            app.command_manager()
+                .views()
+                .iter()
+                .filter(|view| view.scene_uid() == second)
+                .count(),
+            2
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_scene_camera_copy_and_reference_have_distinct_semantics() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("camera-ref", true).result_scene;
+        let mut camera = cuemol_qsys::Camera::new();
+        camera.set_name("saved");
+        camera.set_zoom(50.0);
+        camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
+        app.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .set_camera(camera);
+
+        app.run_script_js(
+            "var copy = scene.getCamera('saved'); copy.zoom = 90; copy.center.x = 9;",
+        )
+        .unwrap();
+        let stored = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .camera_by_name("saved")
+            .unwrap();
+        assert_eq!(stored.zoom(), 50.0);
+        assert_eq!(stored.center().x, 1.0);
+
+        app.run_script_js(
+            "var camera = scene.getCameraRef('saved'); \
+             camera.zoom = 80; camera.center.x = 8; \
+             var same = scene.getCameraRef('saved'); \
+             if (same !== camera || same.zoom !== 80 || same.center.x !== 8) \
+               throw new Error('camera reference identity was not preserved');",
+        )
+        .unwrap();
+        let stored = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .camera_by_name("saved")
+            .unwrap();
+        assert_eq!(stored.zoom(), 80.0);
+        assert_eq!(stored.center().x, 8.0);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_scene_exec_file_binds_the_receiver_scene() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-scene-exec-{}.js", std::process::id()));
+        std::fs::write(&path, "scene.setName('from-file');").unwrap();
+        let mut app = DesktopAppState::new();
+        let first = app.new_scene("first", true).result_scene;
+        let second = app.new_scene("second", true).result_scene;
+        let escaped_path = path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'");
+        let (log, _) = app
+            .run_script_js(&format!(
+                "var first = cuemol.getScene({}); \
+                 print(first.execJSFile('{}') + ':' + scene.uid);",
+                first.get(),
+                escaped_path,
+            ))
+            .unwrap();
+        assert_eq!(log, format!("true:{}\n", second.get()));
+        assert_eq!(
+            app.scene_manager().scene(first).unwrap().name(),
+            "from-file"
+        );
+        assert_eq!(app.scene_manager().scene(second).unwrap().name(), "second");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
     fn run_script_js_residue_range_set_uses_scene_molecule() {
         let path =
             std::env::temp_dir().join(format!("cuemol-js-ranges-{}.pdb", std::process::id()));
@@ -28772,6 +42665,32 @@ mod tests {
         assert!(
             ext_log.contains("crystalExt=11:12:13:90:91:92:19:"),
             "CrystalInfo extension log: {ext_log:?}"
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_molecule_iterator_defaults_match_reference_constructors() {
+        let mut app = DesktopAppState::new();
+        let (log, _) = app
+            .run_script_js(
+                "for (var name of ['AtomIterator', 'ResidIterator', 'ChainIterator']) { \
+                   var iter = cuemol.createObj(name); \
+                   print(name + '=' + (iter.target === null) + ':' + (iter.sel === null)); \
+                 }",
+            )
+            .expect("iterator defaults are queryable");
+        assert!(
+            log.contains("AtomIterator=true:true"),
+            "iterator log: {log:?}"
+        );
+        assert!(
+            log.contains("ResidIterator=true:true"),
+            "iterator log: {log:?}"
+        );
+        assert!(
+            log.contains("ChainIterator=true:true"),
+            "iterator log: {log:?}"
         );
     }
 
@@ -28986,7 +42905,7 @@ mod tests {
                    target.getAtomSize() + ':' + target.getAtomByID(appended).chainName + ':' + \
                    target.getAtomByID(appended).residName + ':' + view.center); \
              var preset = mol.createPresetRenderer('Default1RendPreset', 'preset', 'p_'); \
-             target.attachRenderer(preset); preset.ui_collapsed = true; \
+             preset.ui_collapsed = true; \
              mol.forceEmbed(); \
              print('objectOps=' + preset.type_name + ':' + preset.name + ':' + \
                    preset.getClientObj().name + ':' + mol.getRendCount() + ':' + \
@@ -29010,7 +42929,7 @@ mod tests {
                 && log.contains(":true:true:17:true:true::pdb:")
                 && log.contains("molEdit=true:1:true:1:1:Z:NEW:(8,2,0)")
                 && log.contains(
-                    "objectOps=*group:preset:mol-target:4:1:true:datachunk:::RendGroup:true:true"
+                    "objectOps=*group:preset:mol-renamed:5:0:true:datachunk:::RendGroup:true:true"
                 ),
             "MolCoord API log: {log:?}"
         );
@@ -29062,14 +42981,14 @@ mod tests {
         assert_eq!(appended.res_id, 9);
         assert_eq!(appended.res_name, "NEW");
         assert_eq!(
-            target
+            object
                 .renderer_by_name("preset")
                 .expect("attached preset group")
                 .renderer_type(),
             "*group"
         );
         assert_eq!(
-            target
+            object
                 .renderer_by_name("preset")
                 .and_then(|renderer| renderer.qsc_attr("ui_collapsed")),
             Some("true")
@@ -29134,15 +43053,21 @@ mod tests {
                  surf.getRendererByName('initial').visible = false; \
                  var rend = surf.createRenderer('molsurf', 'surface'); \
                  rend.drawmode = 'line'; rend.width = 2.5; \
+                 rend.colormode = 'multigrad'; \
+                 rend.color_mapname = 'density-target'; \
+                 rend.elepot = 'potential-target'; \
                  surf.visible = false; surf.locked = true; surf.orig_den = 3; \
                  print('surfaceLive=' + cuemol.getClassName(surf) + ':' + \
                        cuemol.implIface2(surf, 'Object') + ':' + \
                        surf.searchCompatibleRendererNames() + ':' + \
-                       rend.isCompatibleObj(surf) + ':' + rend.drawmode + ':' + surf.orig_den);",
+                       rend.isCompatibleObj(surf) + ':' + rend.drawmode + ':' + surf.orig_den + ':' + \
+                       rend.color_mapname + ':' + rend.elepot);",
             )
             .expect("attached MolSurfObj is scriptable");
         assert!(
-            live_log.contains("surfaceLive=MolSurfObj:true:molsurf:true:line:3"),
+            live_log.contains(
+                "surfaceLive=MolSurfObj:true:molsurf:true:line:3:density-target:potential-target"
+            ),
             "{live_log:?}"
         );
         let qsc = app
@@ -29155,6 +43080,8 @@ mod tests {
         assert!(qsc.contains("<renderer type=\"molsurf\""));
         assert!(qsc.contains("name=\"surface\""));
         assert!(qsc.contains("drawmode=\"line\""));
+        assert!(qsc.contains("color_mapname=\"density-target\""));
+        assert!(qsc.contains("elepot=\"potential-target\""));
 
         let qsc_path = std::env::temp_dir().join(format!(
             "cuemol-js-molsurf-roundtrip-{}.qsc",
@@ -29172,11 +43099,14 @@ mod tests {
                  var rend = surf.getRendererByName('surface'); \
                  print('surfaceReload=' + surf.type + ':' + surf.visible + ':' + \
                        surf.locked + ':' + surf.orig_den + ':' + rend.type + ':' + \
-                       rend.drawmode + ':' + rend.width);",
+                       rend.drawmode + ':' + rend.width + ':' + rend.color_mapname + ':' + \
+                       rend.elepot);",
             )
             .expect("reloaded MolSurfObj is scriptable");
         assert!(
-            reload_log.contains("surfaceReload=MolSurfObj:false:true:3:MolSurfRenderer:line:2.5"),
+            reload_log.contains(
+                "surfaceReload=MolSurfObj:false:true:3:MolSurfRenderer:line:2.5:density-target:potential-target"
+            ),
             "{reload_log:?}"
         );
         assert!(reloaded.active_scene_surface_meshes().is_empty());
@@ -29399,15 +43329,27 @@ mod tests {
         let (log, _selection) = app
             .run_script_js(
                 "var c = cuemol.makeColor('red'); \
-                 cuemol.putLogMsg('red=' + c.r + ',' + c.g + ',' + c.b + ',' + c.a); \
+                 cuemol.putLogMsg('red=' + c.r() + ',' + c.g() + ',' + c.b() + ',' + c.a()); \
                  var g = cuemol.makeColor('#00ff00'); \
-                 cuemol.println('green=' + g.r + ',' + g.g + ',' + g.b); \
+                 cuemol.println('green=' + g.r() + ',' + g.g() + ',' + g.b()); \
+                 var scene = cuemol.getScene(); var styles = cuemol.getService('StyleManager'); \
+                 var setID = styles.createStyleSet('builders', scene.uid); \
+                 styles.setColor('accent', g, scene.uid, setID); \
+                 styles.setStrData('sel', 'focus', 'name CA', scene.uid, setID); \
+                 var accent = cuemol.makeColor('accent', scene.uid); \
+                 var focus = cuemol.makeSel('focus', scene.uid); \
+                 cuemol.print('scoped=' + cuemol.getClassName(accent) + ':' + accent.g() + ':' + \
+                              cuemol.getClassName(focus) + ':' + focus); \
                  cuemol.print('sel=' + cuemol.makeSel('resid 3')); \
                  cuemol.print('bad=' + cuemol.makeSel('('));",
             )
             .expect("script runs");
         assert!(log.contains("red=255,0,0,255"), "named red → RGBA: {log:?}");
         assert!(log.contains("green=0,255,0"), "hex #00ff00 → RGB: {log:?}");
+        assert!(
+            log.contains("scoped=Color:255:SelCommand:focus"),
+            "scoped colour and selector resolve: {log:?}"
+        );
         assert!(
             log.contains("sel=resid 3"),
             "valid selector round-trips: {log:?}"
@@ -29523,14 +43465,19 @@ mod tests {
     fn run_script_js_create_obj_and_live_proxies_mutate_the_scene() {
         let mut app = DesktopAppState::new();
         app.ensure_active_scene();
-        app.run_script_js(
-            "var o = cuemol.createObj('MolCoord'); \
+        let (log, _) = app
+            .run_script_js(
+                "var o = cuemol.createObj('MolCoord'); \
              o.setName('made'); \
-             cuemol.getScene().addObject(o); \
              o.setColoring('rainbow'); \
+             print('detached=' + o.coloring.type); \
+             cuemol.getScene().addObject(o); \
+             print('attached=' + o.coloring.type); \
              o.createRenderer('simple', 'r1');",
-        )
-        .expect("createObj proxy runs");
+            )
+            .expect("createObj proxy runs");
+        assert!(log.contains("detached=RainbowColoring"));
+        assert!(log.contains("attached=RainbowColoring"));
 
         let object = app
             .object_uid_by_name("made")
@@ -29910,6 +43857,56 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn scriptable_umbreon_exporter_runs_async_render_lifecycle() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("umbreon-script", false).result_scene;
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00\n",
+        )
+        .unwrap();
+        app.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let path = std::env::temp_dir().join(format!(
+            "cuemol2-rs-script-umbreon-{}.png",
+            std::process::id()
+        ));
+        let escaped_path = path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'");
+        let source = format!(
+            "var exporter = cuemol.UmbreonSceneExporter(); \
+             print('runtime=' + cuemol.hasClass('UmbreonSceneExporter') + ':' + \
+                   cuemol.implIface2(exporter, 'SceneExporter')); \
+             exporter.attach(scene); exporter.setPath('{escaped_path}'); \
+             exporter.width = 12; exporter.height = 10; exporter.supersample = 1; \
+             exporter.showEdgeLines = false; exporter.giDenoise = false; exporter.denoiser = 1; \
+             print('props=' + exporter.width + ':' + exporter.height + ':' + \
+                   exporter.giDenoise + ':' + exporter.denoiser + ':' + exporter.path); \
+             exporter.beginRender(); \
+             print('poll=' + exporter.isRenderDone() + ':' + exporter.getRenderPhaseName() + ':' + \
+                   exporter.getRenderProgress()); \
+             exporter.endRender(); \
+             print('end=' + exporter.isRenderDone() + ':' + exporter.getRenderPhaseName() + ':' + \
+                   exporter.getRenderProgress() + ':' + exporter.wasRenderCancelled());"
+        );
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert!(log.contains("runtime=true:true"), "{log}");
+        assert!(
+            log.contains(&format!("props=12:10:false:1:{}", path.to_string_lossy())),
+            "{log}"
+        );
+        assert!(log.contains("end=true:Idle:0:false"), "{log}");
+        assert!(std::fs::read(&path)
+            .unwrap()
+            .starts_with(b"\x89PNG\r\n\x1a\n"));
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn desktop_app_state_exposes_command_and_stream_facades() {
         let mut app = DesktopAppState::new();
@@ -30066,6 +44063,44 @@ mod tests {
     }
 
     #[test]
+    fn surface_vertex_atom_id_takes_precedence_over_nearest_position() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("surface", false).result_scene;
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00 10.00           N\n\
+             ATOM      2  O   GLY A   1      10.000   0.000   0.000  1.00 10.00           O\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let object = app.scene_manager().object(object_uid).unwrap();
+        let mut mesh = cuemol_surface::SurfaceMesh::new();
+        for position in [
+            Vector4::new3(0.0, 0.0, 0.0),
+            Vector4::new3(0.1, 0.0, 0.0),
+            Vector4::new3(0.0, 0.1, 0.0),
+        ] {
+            mesh.push_vertex(cuemol_surface::SurfaceVertex::with_info(
+                position,
+                Vector4::new3(0.0, 0.0, 1.0),
+                2,
+            ));
+        }
+        mesh.push_triangle([0, 1, 2]);
+
+        let rendered = surface_mesh_render_mesh(object, &Selector::All, &mesh);
+        assert!(rendered.vertices.iter().all(|vertex| {
+            [0.92, 0.12, 0.12]
+                .iter()
+                .enumerate()
+                .all(|(channel, expected)| (vertex.color[channel] - expected).abs() < 0.02)
+        }));
+    }
+
+    #[test]
     fn load_mesh_surface_reads_an_obj_into_a_flat_render_mesh() {
         // The import path is molecule-independent: an OBJ (here written by hand,
         // the same shape the surface crate's OBJ writer emits) loads into a
@@ -30088,9 +44123,8 @@ mod tests {
     #[test]
     fn qsc_with_an_obj_text_surface_loads_as_a_display_mesh() {
         // End-to-end library slice: a `.qsc` carrying an OBJ-text MolSurf object loads,
-        // and active_scene_surface_meshes() converts it into a flat render mesh for the
-        // surface display. The `.qsc` base is the real writer's output with an OBJ
-        // surface + datachunk spliced in (the independent oracle).
+        // and the shared render snapshot contains its flat mesh. The `.qsc` base is
+        // the real writer's output with an OBJ surface + datachunk spliced in.
         let mut builder = MolSceneManager::new();
         let bscene = builder.new_scene("s");
         let mol = cuemol_molstr::read_pdb_str(
@@ -30118,6 +44152,9 @@ mod tests {
         assert_eq!(meshes[0].vertices.len(), 3);
         assert_eq!(meshes[0].indices.len(), 3, "one triangle -> three indices");
         assert_eq!(meshes[0].vertices[0].color, [0.45, 0.65, 0.95, 1.0]);
+        let snapshot = app.active_render_snapshot("").unwrap();
+        assert_eq!(snapshot.mesh_count(), 1);
+        assert_eq!(snapshot.meshes[0], meshes[0]);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -30134,6 +44171,7 @@ mod tests {
                 .push_vertex(cuemol_surface::SurfaceVertex {
                     position,
                     normal: cuemol_core::Vector4::new3(0.0, 0.0, 1.0),
+                    info: 0,
                 });
         }
         surface.mesh_mut().push_triangle([0, 1, 2]);
@@ -30159,6 +44197,7 @@ mod tests {
         assert_eq!(meshes.len(), 1);
         assert_eq!(meshes[0].vertices.len(), 3);
         assert_eq!(meshes[0].indices, vec![0, 1, 2]);
+        assert_eq!(app.active_render_snapshot("").unwrap().mesh_count(), 1);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -30551,6 +44590,7 @@ mod tests {
             mesh.push_vertex(cuemol_surface::SurfaceVertex {
                 position: Vector4::ZERO,
                 normal: Vector4::new3(1.0, 0.0, 0.0),
+                info: 0,
             });
         }
         mesh.push_triangle([0, 1, 2]);
@@ -30991,6 +45031,43 @@ mod tests {
     }
 
     #[test]
+    fn dsurf2_renderer_uses_the_distance_field_surface_path() {
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        app.new_scene("surface", false);
+        let object = app
+            .load_object_into_active_scene(root.join("1CRN.pdb"), "crambin", "pdb")
+            .unwrap()
+            .result_object;
+        let renderer_uid = app
+            .new_renderer_in_active_scene(object, "dsurf2", "surface")
+            .unwrap()
+            .result_renderer;
+        let renderer = app
+            .scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap();
+        renderer.set_qsc_attr("sel", "resid 1");
+        renderer.set_qsc_attr("surftype", "ses");
+        renderer.set_qsc_attr("detail", "2");
+
+        let snapshot = app.active_render_snapshot("").unwrap();
+        let mut reference = cuemol_surface::DirectSurfRenderer2::new();
+        reference.set_selection(parse_selector("resid 1").unwrap());
+        reference.set_surface_type(cuemol_surface::DirectSurfRenderer2::DS_SES);
+        reference.set_detail(2);
+        let reference = reference.render_mesh(app.scene_manager().object(object).unwrap().mol());
+        assert_eq!(snapshot.atom_count(), 0);
+        assert_eq!(snapshot.bond_count(), 0);
+        assert_eq!(snapshot.mesh_count(), 1);
+        assert_eq!(snapshot.mesh_triangle_count(), reference.triangle_count());
+    }
+
+    #[test]
     fn disorder_renderer_draws_gap_lines_not_the_whole_molecule() {
         // A "disorder" renderer draws dotted Bézier lines bridging unbonded chain
         // gaps, NOT a sphere per atom. On 1CRN (a single fully-bonded chain) it
@@ -31132,6 +45209,39 @@ mod tests {
             expected,
             "ballstick must draw only its sel'd atoms"
         );
+
+        let styles = scene_style_manager(
+            app.scene_manager()
+                .scene(app.active_scene.unwrap())
+                .unwrap(),
+        );
+        let molecule = app.scene_manager().object(object).unwrap().mol();
+        assert_eq!(
+            molecule
+                .select_indices(&parse_selector_with_styles("ligand", &styles, 0).unwrap())
+                .len(),
+            0
+        );
+        assert_eq!(
+            molecule
+                .select_indices(&parse_selector_with_styles("protein", &styles, 0).unwrap())
+                .len(),
+            327
+        );
+        app.scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer)
+            .unwrap()
+            .set_qsc_attr("sel", "ligand");
+        assert_eq!(app.active_render_snapshot("").unwrap().atom_count(), 0);
+        app.scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer)
+            .unwrap()
+            .set_qsc_attr("sel", "protein");
+        assert_eq!(app.active_render_snapshot("").unwrap().atom_count(), 327);
     }
 
     #[test]
@@ -32382,6 +46492,7 @@ attribute \"dep\" string \"positions\"
                 .push_vertex(cuemol_surface::SurfaceVertex {
                     position,
                     normal: Vector4::new3(0.0, 0.0, 1.0),
+                    info: 0,
                 });
         }
         surface.mesh_mut().push_triangle([0, 1, 2]);
@@ -32428,7 +46539,7 @@ attribute \"dep\" string \"positions\"
             app.active_render_snapshot("")
                 .unwrap()
                 .mesh_triangle_count(),
-            1
+            4
         );
 
         for path in [
@@ -32499,6 +46610,9 @@ attribute \"dep\" string \"positions\"
             vec!["ballstick", "ribbon"]
         );
         assert!(object.renderers().iter().all(|renderer| {
+            object.mol().select_indices(renderer.selection()).len() == object.mol().atom_count()
+        }));
+        assert!(object.renderers().iter().all(|renderer| {
             renderer.resolved_child_type("coloring", &default_style_manager(), DEFAULT_STYLE_SCOPE)
                 == Some("AtomPropColoring".to_string())
         }));
@@ -32510,6 +46624,30 @@ attribute \"dep\" string \"positions\"
             .unwrap();
         assert!(camera.zoom().is_finite());
         assert!(camera.slab_depth() > 0.0);
+    }
+
+    #[test]
+    fn pse_surface_representation_creates_reference_molsurf_object() {
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  C   GLY A   1       0.000   0.000   0.000  1.00 10.00           C\n",
+        )
+        .unwrap();
+        let loaded = pse_surface_object("mol", &molecule, &[0]);
+        assert_eq!(loaded.name, "mol_surf");
+        assert_eq!(loaded.srctype, "qdfsurf");
+        let surface = cuemol_surface::qdf::read_qdf_surface_bytes(&loaded.raw_data).unwrap();
+        assert!(surface.mesh().vertex_count() > 0);
+        let object_node = loaded.qsc_node.unwrap();
+        assert_eq!(object_node.str_attr("orig_mol").to_string(), "mol");
+        let renderer = object_node
+            .children()
+            .iter()
+            .find(|node| node.tag_name() == "renderer")
+            .unwrap();
+        assert_eq!(renderer.type_name(), "molsurf");
+        assert_eq!(renderer.str_attr("target").to_string(), "mol");
+        assert_eq!(renderer.str_attr("showsel").to_string(), "aid 1");
+        assert_eq!(renderer.str_attr("colormode").to_string(), "molecule");
     }
 
     #[test]

@@ -71,6 +71,7 @@ fn read_vertices(input: &str, mesh: &mut SurfaceMesh) -> Result<()> {
         mesh.push_vertex(SurfaceVertex {
             position: Vector4::new3(fields[0], fields[1], fields[2]),
             normal: Vector4::new3(fields[3], fields[4], fields[5]),
+            info: 0,
         });
         if mesh.vertex_count() != index + 1 {
             return Err(CueMolError::parse("failed to append MSMS vertex"));

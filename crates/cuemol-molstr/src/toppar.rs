@@ -2261,6 +2261,15 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
                         templated.insert(j);
                     }
                 }
+                let residue_type = top.residue_type();
+                if !residue_type.is_empty() {
+                    let _ = mol.set_residue_prop_str(
+                        &summary.key.chain_id,
+                        &summary.key.script_index(),
+                        "type",
+                        residue_type,
+                    );
+                }
                 top.group.clone()
             }
             Some(top) if allow_autogen => top.group.clone(),
@@ -2435,6 +2444,10 @@ mod tests {
         molecule.add_bond(0, 2, BondOrder::Single);
         molecule.apply_topology_with_db(&db);
         assert_eq!(molecule.bond_count(), 1);
+        assert_eq!(
+            molecule.get_residue_prop_str("A", "1", "type").unwrap(),
+            Some("non-polymer")
+        );
         assert_eq!(
             (molecule.bonds()[0].atom1, molecule.bonds()[0].atom2),
             (0, 1)

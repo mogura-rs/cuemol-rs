@@ -195,7 +195,7 @@ pub fn read_qdf_surface_bytes(input: &[u8]) -> Result<MolSurfObj> {
             cursor.read_f32()? as f64,
         );
         let _id = cursor.read_string()?;
-        mesh.push_vertex(SurfaceVertex { position, normal });
+        mesh.push_vertex(SurfaceVertex::new(position, normal));
     }
 
     let face_count = cursor.read_data_def("face")?;

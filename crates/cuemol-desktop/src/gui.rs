@@ -3,7 +3,10 @@
 use crate::{anim_step, AnimKind, AnimObject, DesktopAppState, GuiLoadedPath, GuiSequenceSummary};
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::Rgba8;
-use cuemol_render::{MeshVertex, RenderAtom, RenderBond, RenderSceneSnapshot};
+use cuemol_render::{
+    MeshVertex, RenderAtom, RenderBond, RenderSceneSnapshot, UmbreonDenoiseMode,
+    UmbreonSceneExporter,
+};
 use egui_wgpu::ScreenDescriptor;
 use glam::{Mat4, Quat, Vec3, Vec4 as GlamVec4};
 use std::fs;
@@ -417,6 +420,7 @@ struct GuiApplication {
     bottom_tab: BottomTab,
     render_preset: String,
     render_backend: String,
+    umbreon_denoise: UmbreonDenoiseMode,
     ribbon_tab: RibbonTab,
     interaction_mode: InteractionMode,
     measure_mode: MeasureMode,
@@ -676,6 +680,7 @@ impl GuiApplication {
             bottom_tab: BottomTab::Output,
             render_preset: RENDER_PRESETS[1].0.to_string(),
             render_backend: "POV-Ray".to_string(),
+            umbreon_denoise: UmbreonDenoiseMode::default(),
             ribbon_tab: RibbonTab::Home,
             interaction_mode: InteractionMode::Rotate,
             measure_mode: MeasureMode::Distance,
@@ -2718,11 +2723,7 @@ impl GuiApplication {
                 .selected_text(&self.render_backend)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.render_backend, "POV-Ray".to_string(), "POV-Ray");
-                    ui.selectable_value(
-                        &mut self.render_backend,
-                        "Internal".to_string(),
-                        "Internal",
-                    );
+                    ui.selectable_value(&mut self.render_backend, "Umbreon".to_string(), "Umbreon");
                 });
             egui::ComboBox::from_label("Size")
                 .selected_text(&self.render_preset)
@@ -2743,6 +2744,19 @@ impl GuiApplication {
             }
             if ui.button("Cancel").clicked() {
                 self.set_status("No render job is running");
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Output");
+            ui.text_edit_singleline(&mut self.export_path);
+            if self.render_backend == "Umbreon" {
+                egui::ComboBox::from_label("Denoise")
+                    .selected_text(self.umbreon_denoise.label())
+                    .show_ui(ui, |ui| {
+                        for mode in UmbreonDenoiseMode::ALL {
+                            ui.selectable_value(&mut self.umbreon_denoise, mode, mode.label());
+                        }
+                    });
             }
         });
     }
@@ -2793,21 +2807,8 @@ impl GuiApplication {
                             .join(", ")
                     ));
                 }
-                // Display any surface objects the `.qsc` carried (OBJ/PLY-text MolSurf
-                // objects), merged into the surface slot and shown via the surface toggle.
-                let surfaces = self.state.active_scene_surface_meshes();
-                if !surfaces.is_empty() {
-                    let mut merged = cuemol_render::RenderMesh::default();
-                    for mesh in surfaces {
-                        let base = merged.vertices.len() as u32;
-                        merged.vertices.extend(mesh.vertices);
-                        merged
-                            .indices
-                            .extend(mesh.indices.iter().map(|index| base + index));
-                    }
-                    self.surface_mesh = Some(merged);
-                    self.show_surface = true;
-                }
+                self.surface_mesh = None;
+                self.show_surface = false;
                 self.rebuild_snapshot();
                 // Restore the scene's saved view (a `.qsc` `<camera>`); only a
                 // camera-less scene falls back to auto-framing the bounding box.
@@ -2948,11 +2949,46 @@ impl GuiApplication {
         }
     }
 
+    fn render_dimensions(&self) -> (u32, u32) {
+        RENDER_PRESETS
+            .iter()
+            .find(|(label, _, _)| *label == self.render_preset)
+            .map(|(_, width, height)| (*width, *height))
+            .unwrap_or((1920, 1080))
+    }
+
     fn export_current_scene(&mut self) {
         let path = self.export_path.trim().to_string();
-        // Dispatch on the file extension: `.png` renders an image via the offscreen
-        // wgpu path (the same one the live viewport uses), anything else stays POV-Ray.
-        // Previously every export produced POV-Ray regardless of the typed name.
+        if self.render_backend == "Umbreon" {
+            if !crate::DesktopAppState::path_has_extension(&path, "png") {
+                self.set_status("Umbreon output path must use the .png extension");
+                return;
+            }
+            let Some(scene_uid) = self.state.active_scene() else {
+                self.set_status("No active scene");
+                return;
+            };
+            let (width, height) = self.render_dimensions();
+            let mut exporter = UmbreonSceneExporter::new();
+            exporter.scene_mut().attach(scene_uid);
+            exporter.handler_mut().set_path(&path);
+            exporter.set_width(width.min(i32::MAX as u32) as i32);
+            exporter.set_height(height.min(i32::MAX as u32) as i32);
+            exporter.set_denoise_mode(self.umbreon_denoise);
+            match self
+                .state
+                .write_umbreon_exporter(&mut exporter, &self.selection_text)
+            {
+                Ok(_) => {
+                    self.set_status(format!("Rendered {width}x{height} Umbreon image to {path}"))
+                }
+                Err(error) => self.set_error(error),
+            }
+            return;
+        }
+
+        // Scene export remains extension-driven outside the Umbreon render
+        // backend: PNG uses the live wgpu path and other paths use POV-Ray.
         if crate::DesktopAppState::path_has_extension(&path, "png") {
             let (width, height) = self
                 .viewport_rect
@@ -7170,9 +7206,9 @@ mod tests {
         }
 
         // (qsc surface) A `.qsc` that CARRIES an OBJ-text MolSurf object now loads AND
-        // displays the surface (the scene-object → surface-display slice), rendered
-        // offscreen. Verifies the whole chain: loader captures the surface datachunk →
-        // active_scene_surface_meshes converts it → the open handler shows it.
+        // displays the surface through the shared render snapshot, rendered offscreen.
+        // Verifies the whole chain: loader captures the surface datachunk → the core
+        // converts it → every renderer and exporter sees it.
         {
             let mut builder = cuemol_molstr::MolSceneManager::new();
             let bscene = builder.new_scene("s");
@@ -7198,8 +7234,8 @@ mod tests {
             app.open_path = qsc_path.to_string_lossy().to_string();
             app.open_current_path(&mut camera);
             assert!(
-                app.surface_mesh.is_some(),
-                "loading a .qsc with an OBJ surface must populate the surface slot"
+                app.snapshot.mesh_count() > 0,
+                "loading a .qsc with an OBJ surface must populate the render snapshot"
             );
             let (w, h) = (900u32, 700u32);
             let mvp = camera

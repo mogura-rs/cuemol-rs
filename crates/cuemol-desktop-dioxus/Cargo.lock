@@ -820,8 +820,10 @@ dependencies = [
  "cuemol-lwview",
  "cuemol-mdtools",
  "cuemol-molanl",
+ "cuemol-molclient",
  "cuemol-molstr",
  "cuemol-molvis",
+ "cuemol-py",
  "cuemol-qsys",
  "cuemol-render",
  "cuemol-surface",
@@ -894,6 +896,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuemol-molclient"
+version = "0.1.0"
+dependencies = [
+ "cuemol-core",
+ "cuemol-molstr",
+]
+
+[[package]]
 name = "cuemol-molstr"
 version = "0.1.0"
 dependencies = [
@@ -912,6 +922,15 @@ dependencies = [
  "cuemol-molstr",
  "cuemol-qsys",
  "cuemol-render",
+]
+
+[[package]]
+name = "cuemol-py"
+version = "0.1.0"
+dependencies = [
+ "cuemol-core",
+ "cuemol-gfx",
+ "cuemol-molstr",
 ]
 
 [[package]]

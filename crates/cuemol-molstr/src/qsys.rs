@@ -23,6 +23,7 @@ type PendingAtomIntrRenderer = (String, Vec<PendingAtomIntrDef>);
 
 enum PendingAtomIntrDef {
     Atoms(AtomIntrKind, Vec<String>),
+    Selections(AtomIntrKind, Vec<String>),
     Positions(AtomIntrKind, Vec<Vector4>),
 }
 
@@ -47,7 +48,9 @@ pub struct AtomIntrLine {
     pub a3: Option<String>,
     kind: AtomIntrKind,
     aids: Vec<String>,
+    selectors: Vec<String>,
     positions: Vec<Vector4>,
+    active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +94,103 @@ impl AtomIntrLine {
     pub fn positions(&self) -> &[Vector4] {
         &self.positions
     }
+
+    pub fn selectors(&self) -> &[String] {
+        &self.selectors
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn deactivate(&mut self) -> bool {
+        let changed = self.active;
+        self.active = false;
+        changed
+    }
+
+    pub fn from_atom_references(
+        kind: AtomIntrKind,
+        aids: Vec<String>,
+        labels: Vec<String>,
+    ) -> Self {
+        Self {
+            a0: labels.first().cloned().unwrap_or_default(),
+            a1: labels.get(1).cloned().unwrap_or_default(),
+            a2: labels.get(2).cloned(),
+            a3: labels.get(3).cloned(),
+            kind,
+            aids,
+            selectors: Vec::new(),
+            positions: Vec::new(),
+            active: true,
+        }
+    }
+
+    pub fn from_selections(kind: AtomIntrKind, selectors: Vec<String>) -> Self {
+        Self {
+            a0: selectors.first().cloned().unwrap_or_default(),
+            a1: selectors.get(1).cloned().unwrap_or_default(),
+            a2: selectors.get(2).cloned(),
+            a3: selectors.get(3).cloned(),
+            kind,
+            aids: Vec::new(),
+            selectors,
+            positions: Vec::new(),
+            active: true,
+        }
+    }
+
+    pub fn from_positions(kind: AtomIntrKind, positions: Vec<Vector4>) -> Self {
+        let labels = positions
+            .iter()
+            .map(|position| format!("({:.2},{:.2},{:.2})", position.x, position.y, position.z))
+            .collect::<Vec<_>>();
+        Self::from_positions_with_labels(kind, positions, labels)
+    }
+
+    pub fn from_positions_with_labels(
+        kind: AtomIntrKind,
+        positions: Vec<Vector4>,
+        mut labels: Vec<String>,
+    ) -> Self {
+        let supplied = labels.len();
+        labels.extend(positions.iter().skip(supplied).map(ToString::to_string));
+        Self {
+            a0: labels.first().cloned().unwrap_or_default(),
+            a1: labels.get(1).cloned().unwrap_or_default(),
+            a2: labels.get(2).cloned(),
+            a3: labels.get(3).cloned(),
+            kind,
+            aids: Vec::new(),
+            selectors: Vec::new(),
+            positions,
+            active: true,
+        }
+    }
+}
+
+pub fn atom_intr_defs_json(lines: &[AtomIntrLine]) -> String {
+    let entries = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.active)
+        .map(|(id, line)| {
+            let labels = [&line.a0, &line.a1]
+                .into_iter()
+                .map(Some)
+                .chain([line.a2.as_ref(), line.a3.as_ref()])
+                .take(line.kind.atom_count())
+                .enumerate()
+                .filter_map(|(index, label)| {
+                    label.map(|label| format!("\"a{index}\":\"{}\"", escape_json(label)))
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{\"id\":{id},\"mode\":{},{labels}}}", line.kind.mode())
+        })
+        .collect::<Vec<_>>();
+    format!("[{}]", entries.join(","))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +292,10 @@ impl MolRenderer {
 
     pub fn atom_intr_lines(&self) -> &[AtomIntrLine] {
         &self.atom_intr_lines
+    }
+
+    pub fn set_atom_intr_lines(&mut self, lines: Vec<AtomIntrLine>) {
+        self.atom_intr_lines = lines;
     }
 
     pub fn group(&self) -> Option<&str> {
@@ -304,27 +408,70 @@ impl MolRenderer {
         self.qsc_attrs.remove(name).is_some()
     }
 
+    pub fn append_atom_intr_positions(
+        &mut self,
+        kind: AtomIntrKind,
+        positions: Vec<Vector4>,
+    ) -> Result<usize> {
+        if positions.len() != kind.atom_count() {
+            return Err(CueMolError::invalid_argument(format!(
+                "AtomIntr {} requires {} positions",
+                kind.tag(),
+                kind.atom_count()
+            )));
+        }
+        let id = self.atom_intr_lines.len();
+        self.atom_intr_lines
+            .push(AtomIntrLine::from_positions(kind, positions));
+        Ok(id)
+    }
+
+    pub fn append_atom_intr_selections(
+        &mut self,
+        kind: AtomIntrKind,
+        selections: Vec<String>,
+    ) -> Result<usize> {
+        if selections.len() != kind.atom_count() {
+            return Err(CueMolError::invalid_argument(format!(
+                "AtomIntr {} requires {} selections",
+                kind.tag(),
+                kind.atom_count()
+            )));
+        }
+        for selection in &selections {
+            crate::parse_selector(selection)?;
+        }
+        let id = self.atom_intr_lines.len();
+        self.atom_intr_lines
+            .push(AtomIntrLine::from_selections(kind, selections));
+        Ok(id)
+    }
+
+    pub fn remove_atom_intr(&mut self, id: usize) -> bool {
+        let Some(line) = self.atom_intr_lines.get_mut(id) else {
+            return false;
+        };
+        line.deactivate()
+    }
+
+    pub fn append_atom_intr_line(&mut self, line: AtomIntrLine) -> Result<usize> {
+        let count = line.kind.atom_count();
+        let valid = line.aids.len() == count
+            || line.selectors.len() == count
+            || line.positions.len() == count;
+        if !valid {
+            return Err(CueMolError::invalid_argument(format!(
+                "AtomIntr {} requires {count} elements",
+                line.kind.tag()
+            )));
+        }
+        let id = self.atom_intr_lines.len();
+        self.atom_intr_lines.push(line);
+        Ok(id)
+    }
+
     pub fn get_defs_json(&self) -> String {
-        let entries = self
-            .atom_intr_lines
-            .iter()
-            .enumerate()
-            .map(|(id, line)| {
-                let labels = [&line.a0, &line.a1]
-                    .into_iter()
-                    .map(Some)
-                    .chain([line.a2.as_ref(), line.a3.as_ref()])
-                    .take(line.kind.atom_count())
-                    .enumerate()
-                    .filter_map(|(index, label)| {
-                        label.map(|label| format!("\"a{index}\":\"{}\"", escape_json(label)))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!("{{\"id\":{id},\"mode\":{},{labels}}}", line.kind.mode())
-            })
-            .collect::<Vec<_>>();
-        format!("[{}]", entries.join(","))
+        atom_intr_defs_json(&self.atom_intr_lines)
     }
 
     pub fn is_hit_test_supported(&self) -> bool {
@@ -696,10 +843,13 @@ impl MolObject {
         &mut self,
         renderer_type: impl Into<String>,
         name: impl Into<String>,
-        qsc_attrs: BTreeMap<String, String>,
+        mut qsc_attrs: BTreeMap<String, String>,
     ) -> Uid {
         let uid = Uid::new(self.next_renderer_uid);
         self.next_renderer_uid += 1;
+        qsc_attrs
+            .entry("ui_order".to_string())
+            .or_insert_with(|| (uid.get() as i32).to_string());
         self.modified = true;
         self.renderers.push(MolRenderer {
             uid,
@@ -713,6 +863,33 @@ impl MolObject {
             default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
         });
         uid
+    }
+
+    pub fn add_renderer_with_uid(
+        &mut self,
+        uid: Uid,
+        renderer_type: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Option<Uid> {
+        if uid.get() == 0 || self.renderers.iter().any(|renderer| renderer.uid == uid) {
+            return None;
+        }
+        self.next_renderer_uid = self.next_renderer_uid.max(uid.get().saturating_add(1));
+        let mut qsc_attrs = BTreeMap::new();
+        qsc_attrs.insert("ui_order".to_string(), (uid.get() as i32).to_string());
+        self.modified = true;
+        self.renderers.push(MolRenderer {
+            uid,
+            name: name.into(),
+            renderer_type: renderer_type.into(),
+            qsc_attrs,
+            qsc_children: Vec::new(),
+            atom_intr_lines: Vec::new(),
+            selection: Selector::All,
+            coloring: SolidColoring::new(),
+            default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
+        });
+        Some(uid)
     }
 
     pub fn rend_uid_list(&self) -> String {
@@ -767,13 +944,8 @@ impl MolObject {
                     )
                 })
                 .collect::<BTreeMap<_, _>>();
-            attributes
-                .entry("group".to_string())
-                .or_insert_with(|| group_name.to_string());
-            let name = attributes
-                .get("name")
-                .cloned()
-                .unwrap_or_else(|| format!("{name_prefix}{renderer_type}"));
+            attributes.insert("group".to_string(), group_name.to_string());
+            let name = format!("{name_prefix}{renderer_type}");
             let uid = self.add_renderer_with_attrs(renderer_type, name, attributes);
             if let Some(renderer) = self.renderer_mut(uid) {
                 renderer.qsc_children = child
@@ -847,7 +1019,7 @@ impl MolObject {
         &mut self,
         name: impl Into<String>,
         defs: &[PendingAtomIntrDef],
-        qsc_attrs: BTreeMap<String, String>,
+        mut qsc_attrs: BTreeMap<String, String>,
     ) -> Result<Uid> {
         let mut lines = Vec::new();
         for def in defs {
@@ -864,15 +1036,24 @@ impl MolObject {
                         .iter()
                         .map(|aid| self.resolve_atom_label(aid))
                         .collect::<Result<Vec<_>>>()?;
-                    lines.push(AtomIntrLine {
-                        a0: labels[0].clone(),
-                        a1: labels[1].clone(),
-                        a2: labels.get(2).cloned(),
-                        a3: labels.get(3).cloned(),
-                        kind: *kind,
-                        aids: aids.clone(),
-                        positions: Vec::new(),
-                    });
+                    lines.push(AtomIntrLine::from_atom_references(
+                        *kind,
+                        aids.clone(),
+                        labels,
+                    ));
+                }
+                PendingAtomIntrDef::Selections(kind, selections) => {
+                    if selections.len() != kind.atom_count() {
+                        return Err(CueMolError::invalid_argument(format!(
+                            "AtomIntr {} requires {} selections",
+                            kind.tag(),
+                            kind.atom_count()
+                        )));
+                    }
+                    for selection in selections {
+                        crate::parse_selector(selection)?;
+                    }
+                    lines.push(AtomIntrLine::from_selections(*kind, selections.clone()));
                 }
                 PendingAtomIntrDef::Positions(kind, positions) => {
                     if positions.len() != kind.atom_count() {
@@ -882,24 +1063,15 @@ impl MolObject {
                             kind.atom_count()
                         )));
                     }
-                    let labels = positions
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>();
-                    lines.push(AtomIntrLine {
-                        a0: labels[0].clone(),
-                        a1: labels[1].clone(),
-                        a2: labels.get(2).cloned(),
-                        a3: labels.get(3).cloned(),
-                        kind: *kind,
-                        aids: Vec::new(),
-                        positions: positions.clone(),
-                    });
+                    lines.push(AtomIntrLine::from_positions(*kind, positions.clone()));
                 }
             }
         }
         let uid = Uid::new(self.next_renderer_uid);
         self.next_renderer_uid += 1;
+        qsc_attrs
+            .entry("ui_order".to_string())
+            .or_insert_with(|| (uid.get() as i32).to_string());
         self.renderers.push(MolRenderer {
             uid,
             name: name.into(),
@@ -954,8 +1126,29 @@ impl MolObject {
     }
 
     fn atom_intr_points(&self, line: &AtomIntrLine) -> Option<Vec<Vector4>> {
+        if !line.active {
+            return None;
+        }
         if !line.positions.is_empty() {
             return Some(line.positions.clone());
+        }
+        if !line.selectors.is_empty() {
+            return line
+                .selectors
+                .iter()
+                .map(|selection| {
+                    let selector = crate::parse_selector(selection).ok()?;
+                    let indices = self.mol.select_indices(&selector);
+                    let count = indices.len();
+                    (count > 0).then(|| {
+                        indices
+                            .into_iter()
+                            .map(|index| self.mol.atoms()[index].position)
+                            .fold(Vector4::ZERO, |sum, position| sum + position)
+                            / count as f64
+                    })
+                })
+                .collect();
         }
         line.aids
             .iter()
@@ -1223,6 +1416,9 @@ pub struct MolScene {
     loaded_qsc_objects: Vec<LoadedQscObject>,
     loaded_styles: Vec<LoadedStyle>,
     scene_attributes: BTreeMap<String, String>,
+    active_object_uid: Option<Uid>,
+    active_renderer_uid: Option<Uid>,
+    active_view_uid: Option<Uid>,
     scene_extension_nodes: Vec<LDom2Node>,
     /// Persistent SceneXMLWriter options from `<qsc_opts>`.
     qsc_options: Option<LDom2Node>,
@@ -1232,6 +1428,14 @@ pub struct MolScene {
 }
 
 impl MolScene {
+    pub fn first_object_uid(scene_uid: Uid) -> Uid {
+        Uid::new(OBJECT_UID_BASE + scene_uid.get() * UID_SCENE_STRIDE + 1)
+    }
+
+    pub fn next_object_uid_hint(&self) -> Uid {
+        Uid::new(self.next_object_uid)
+    }
+
     pub fn uid(&self) -> Uid {
         self.uid
     }
@@ -1323,6 +1527,30 @@ impl MolScene {
 
     pub fn set_scene_attribute(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.scene_attributes.insert(name.into(), value.into());
+    }
+
+    pub fn active_object_uid(&self) -> Option<Uid> {
+        self.active_object_uid
+    }
+
+    pub fn set_active_object_uid(&mut self, uid: Option<Uid>) {
+        self.active_object_uid = uid;
+    }
+
+    pub fn active_renderer_uid(&self) -> Option<Uid> {
+        self.active_renderer_uid
+    }
+
+    pub fn set_active_renderer_uid(&mut self, uid: Option<Uid>) {
+        self.active_renderer_uid = uid;
+    }
+
+    pub fn active_view_uid(&self) -> Option<Uid> {
+        self.active_view_uid
+    }
+
+    pub fn set_active_view_uid(&mut self, uid: Option<Uid>) {
+        self.active_view_uid = uid;
     }
 
     pub fn remove_scene_attribute(&mut self, name: &str) -> bool {
@@ -1437,6 +1665,12 @@ impl MolScene {
         }
     }
 
+    pub fn destroy_camera(&mut self, name: &str) -> bool {
+        let previous = self.cameras.len();
+        self.cameras.retain(|camera| camera.name() != name);
+        previous != self.cameras.len()
+    }
+
     pub fn object_by_name(&self, name: &str) -> Option<&MolObject> {
         self.objects.iter().find(|object| object.name == name)
     }
@@ -1500,6 +1734,29 @@ impl MolScene {
         self.add_molecule_with_source_type(name, mol, "qdfpdb")
     }
 
+    pub fn add_molecule_with_uid(
+        &mut self,
+        uid: Uid,
+        name: impl Into<String>,
+        mol: MolCoord,
+    ) -> Option<Uid> {
+        if uid.get() == 0
+            || self.objects.iter().any(|object| object.uid() == uid)
+            || self
+                .loaded_surfaces
+                .iter()
+                .any(|surface| surface.uid == uid)
+            || self
+                .loaded_lw_objects
+                .iter()
+                .any(|object| object.uid == uid)
+        {
+            return None;
+        }
+        self.next_object_uid = self.next_object_uid.max(uid.get().saturating_add(1));
+        Some(self.insert_molecule(uid, name, mol, "qdfpdb"))
+    }
+
     pub fn add_molecule_with_source_type(
         &mut self,
         name: impl Into<String>,
@@ -1508,9 +1765,29 @@ impl MolScene {
     ) -> Uid {
         let uid = Uid::new(self.next_object_uid);
         self.next_object_uid += 1;
-        let object_local = uid
-            .get()
-            .saturating_sub(OBJECT_UID_BASE + self.uid.get() * UID_SCENE_STRIDE);
+        self.insert_molecule(uid, name, mol, source_type)
+    }
+
+    fn insert_molecule(
+        &mut self,
+        uid: Uid,
+        name: impl Into<String>,
+        mol: MolCoord,
+        source_type: impl Into<String>,
+    ) -> Uid {
+        let object_base = OBJECT_UID_BASE + self.uid.get() * UID_SCENE_STRIDE;
+        let object_local = uid.get().checked_sub(object_base);
+        let next_renderer_uid = object_local
+            .filter(|local| *local < UID_SCENE_STRIDE)
+            .map_or_else(
+                || uid.get().saturating_add(1),
+                |local| {
+                    RENDERER_UID_BASE
+                        + self.uid.get() * UID_SCENE_STRIDE
+                        + local * UID_OBJECT_STRIDE
+                        + 1
+                },
+            );
         self.objects.push(MolObject {
             uid,
             name: name.into(),
@@ -1521,13 +1798,10 @@ impl MolScene {
             modified: false,
             ui_locked: false,
             ui_collapsed: false,
-            ui_order: object_local as i32,
+            ui_order: uid.get() as i32,
             mol,
             renderers: Vec::new(),
-            next_renderer_uid: RENDERER_UID_BASE
-                + self.uid.get() * UID_SCENE_STRIDE
-                + object_local * UID_OBJECT_STRIDE
-                + 1,
+            next_renderer_uid,
             paint_coloring: Vec::new(),
             coloring_type: None,
             coloring_attrs: BTreeMap::new(),
@@ -1915,6 +2189,13 @@ impl MolScene {
                         defs.push(PendingAtomIntrDef::Atoms(kind, aids));
                         continue;
                     }
+                    let selections = (1..=kind.atom_count())
+                        .map(|index| attr_value(line, &format!("sel{index}")))
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(selections) = selections {
+                        defs.push(PendingAtomIntrDef::Selections(kind, selections));
+                        continue;
+                    }
                     let positions = (1..=kind.atom_count())
                         .map(|index| {
                             let value = attr_value(line, &format!("pos{index}"))?;
@@ -1925,7 +2206,7 @@ impl MolScene {
                         defs.push(PendingAtomIntrDef::Positions(kind, positions));
                     } else {
                         return Err(CueMolError::parse(format!(
-                            "AtomIntr {} requires aid or pos attributes",
+                            "AtomIntr {} requires aid, sel, or pos attributes",
                             kind.tag()
                         )));
                     }
@@ -2076,14 +2357,16 @@ impl MolScene {
             } else {
                 " visible=\"false\"".to_string()
             };
-            let locked_attr = object
-                .is_ui_locked()
-                .then_some(" locked=\"true\"")
-                .unwrap_or_default();
-            let collapsed_attr = object
-                .is_ui_collapsed()
-                .then_some(" ui_collapsed=\"true\"")
-                .unwrap_or_default();
+            let locked_attr = if object.is_ui_locked() {
+                " locked=\"true\""
+            } else {
+                ""
+            };
+            let collapsed_attr = if object.is_ui_collapsed() {
+                " ui_collapsed=\"true\""
+            } else {
+                ""
+            };
             let alt_source_attr = if object.alt_source().is_empty() {
                 String::new()
             } else {
@@ -2146,7 +2429,18 @@ impl MolScene {
                         format_renderer_attrs(renderer, Some("DefaultLabel,DefaultAtomIntr"))
                     ));
                     for line in &renderer.atom_intr_lines {
-                        let attrs = if line.positions.is_empty() {
+                        if !line.active {
+                            continue;
+                        }
+                        let attrs = if !line.selectors.is_empty() {
+                            line.selectors
+                                .iter()
+                                .enumerate()
+                                .map(|(index, selection)| {
+                                    format!(" sel{}=\"{}\"", index + 1, escape_xml(selection))
+                                })
+                                .collect::<String>()
+                        } else if line.positions.is_empty() {
                             line.aids
                                 .iter()
                                 .enumerate()
@@ -2489,6 +2783,9 @@ impl MolSceneManager {
             loaded_qsc_objects: Vec::new(),
             loaded_styles: Vec::new(),
             scene_attributes: BTreeMap::new(),
+            active_object_uid: None,
+            active_renderer_uid: None,
+            active_view_uid: None,
             scene_extension_nodes: Vec::new(),
             qsc_options: None,
             animation_node: None,
@@ -2915,6 +3212,7 @@ fn attr_map(line: &str) -> BTreeMap<String, String> {
 
 fn format_renderer_attrs(renderer: &MolRenderer, default_style: Option<&str>) -> String {
     let mut attrs = renderer.qsc_attrs.clone();
+    attrs.remove("ui_order");
     attrs.insert("type".to_string(), renderer.renderer_type().to_string());
     attrs.insert("name".to_string(), renderer.name().to_string());
     attrs.entry("group".to_string()).or_default();

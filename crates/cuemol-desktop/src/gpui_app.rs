@@ -1142,24 +1142,14 @@ impl CueMolGpuiApp {
                         self.selected_object = Some(object_uid);
                         self.selected_renderer = None;
                     }
-                    GuiLoadedPath::Scene { scene_uid } | GuiLoadedPath::Map { scene_uid, .. } => {
+                    GuiLoadedPath::Scene { scene_uid } => {
+                        self.state.set_active_scene(Some(scene_uid));
+                        self.surface_mesh = None;
+                        self.show_surface = false;
+                    }
+                    GuiLoadedPath::Map { scene_uid, .. } => {
                         self.state.set_active_scene(Some(scene_uid));
                     }
-                }
-                // Display any surface objects the `.qsc` carried (OBJ/PLY-text MolSurf),
-                // merged into the surface slot and shown via the surface toggle.
-                let surfaces = self.state.active_scene_surface_meshes();
-                if !surfaces.is_empty() {
-                    let mut merged = cuemol_render::RenderMesh::default();
-                    for mesh in surfaces {
-                        let base = merged.vertices.len() as u32;
-                        merged.vertices.extend(mesh.vertices);
-                        merged
-                            .indices
-                            .extend(mesh.indices.iter().map(|index| base + index));
-                    }
-                    self.surface_mesh = Some(merged);
-                    self.show_surface = true;
                 }
                 self.add_recent(path.clone());
                 self.refresh_scene(true);
@@ -5784,9 +5774,9 @@ mod tests {
     }
 
     #[test]
-    fn loading_a_qsc_with_an_obj_surface_populates_the_surface_slot() {
-        // Parity with egui: opening a `.qsc` that carries an OBJ-text MolSurf object
-        // shows its surface. Build the .qsc via the real writer + a spliced OBJ surface.
+    fn loading_a_qsc_with_an_obj_surface_populates_the_render_snapshot() {
+        // Opening a `.qsc` that carries an OBJ-text MolSurf object shows its surface
+        // through the shared render snapshot.
         let mut builder = cuemol_molstr::MolSceneManager::new();
         let bscene = builder.new_scene("s");
         let mol = cuemol_molstr::read_pdb_str(
@@ -5805,12 +5795,9 @@ mod tests {
         let mut app = CueMolGpuiApp::new(Vec::new());
         app.open_file(path.to_str().unwrap());
         assert!(
-            app.surface_mesh.is_some(),
-            "a .qsc surface must populate the surface slot"
-        );
-        assert!(
-            app.show_surface,
-            "a .qsc surface must enable the surface display"
+            app.current_render_snapshot()
+                .is_some_and(|snapshot| snapshot.mesh_count() > 0),
+            "a .qsc surface must populate the render snapshot"
         );
         let _ = std::fs::remove_file(&path);
     }

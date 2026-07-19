@@ -20,6 +20,49 @@ pub struct UmbreonSmokeResult {
     pub non_background_pixels: usize,
 }
 
+/// User-facing Umbreon denoise modes used by the Tritium render settings.
+///
+/// Umbreon exposes two independent low-level controls: `gi_denoise` applies
+/// OIDN to the indirect-irradiance buffer, while `denoiser` selects a
+/// full-frame post-pass. The UI composes those controls into these three
+/// mutually exclusive modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UmbreonDenoiseMode {
+    #[default]
+    Oidn,
+    Atrous,
+    None,
+}
+
+impl UmbreonDenoiseMode {
+    pub const ALL: [Self; 3] = [Self::Oidn, Self::Atrous, Self::None];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Oidn => "OIDN",
+            Self::Atrous => "A-trous",
+            Self::None => "None",
+        }
+    }
+
+    pub const fn exporter_settings(self) -> (bool, i32) {
+        match self {
+            Self::Oidn => (true, 0),
+            Self::Atrous => (false, 1),
+            Self::None => (false, 0),
+        }
+    }
+
+    /// Parse a Tritium setting, falling back to OIDN like the reference
+    /// backend does for an absent or unknown value.
+    pub fn from_label_or_default(value: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.label() == value)
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UmbreonRenderParams {
     pub width: i32,
@@ -317,6 +360,12 @@ impl UmbreonSceneExporter {
 
     pub fn set_denoiser(&mut self, value: i32) {
         self.params.denoiser = value;
+    }
+
+    pub fn set_denoise_mode(&mut self, mode: UmbreonDenoiseMode) {
+        let (gi_denoise, denoiser) = mode.exporter_settings();
+        self.set_gi_denoise(gi_denoise);
+        self.set_denoiser(denoiser);
     }
 
     pub fn set_render_input(
@@ -1176,6 +1225,27 @@ mod tests {
         denoise_pixels(&mut pixels, 5, 5, 3, 1);
         assert!(pixels[center] < 48);
         assert!(pixels[center - 3] > 0);
+    }
+
+    #[test]
+    fn tritium_denoise_modes_compose_the_two_exporter_knobs() {
+        let expected = [
+            (UmbreonDenoiseMode::Oidn, "OIDN", true, 0),
+            (UmbreonDenoiseMode::Atrous, "A-trous", false, 1),
+            (UmbreonDenoiseMode::None, "None", false, 0),
+        ];
+        let mut exporter = UmbreonSceneExporter::new();
+        for (mode, label, gi_denoise, denoiser) in expected {
+            assert_eq!(mode.label(), label);
+            assert_eq!(UmbreonDenoiseMode::from_label_or_default(label), mode);
+            exporter.set_denoise_mode(mode);
+            assert_eq!(exporter.gi_denoise(), gi_denoise);
+            assert_eq!(exporter.denoiser(), denoiser);
+        }
+        assert_eq!(
+            UmbreonDenoiseMode::from_label_or_default("unknown"),
+            UmbreonDenoiseMode::Oidn
+        );
     }
 
     #[test]

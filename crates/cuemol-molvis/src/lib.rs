@@ -4211,14 +4211,12 @@ fn bounds_of_atoms(
     bounds
 }
 
-/// Build a smooth main-chain trace ("cartoon"/tube-style) snapshot.
+/// Build a smooth round main-chain trace snapshot.
 ///
-/// The current GPU pipeline only draws spheres and line segments, so a full
-/// secondary-structure ribbon mesh is not available. Instead we approximate the
-/// cartoon look the way the original `SplineRenderer` does conceptually: gather
-/// each chain's pivot atoms (CA for proteins, P/C1' for nucleic acids) in residue
-/// order, interpolate them with a Catmull-Rom spline, and emit a chain of small
-/// spheres plus connecting segments — a smooth tube along the backbone.
+/// This helper gathers each chain's pivot atoms (CA for proteins, P/C1' for
+/// nucleic acids), interpolates them with a Catmull-Rom spline, and emits round
+/// primitives along the backbone. Ribbon and cartoon renderers use
+/// [`ribbon_mesh_snapshot`] for their secondary-structure triangle meshes.
 pub fn mainchain_trace_snapshot(
     molecule: &MolCoord,
     options: &MoleculeRenderOptions,

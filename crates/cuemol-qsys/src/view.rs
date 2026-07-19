@@ -77,7 +77,7 @@ impl View {
             uid,
             scene_uid,
             name: String::new(),
-            active: false,
+            active: true,
             zoom: 50.0,
             view_dist: 200.0,
             slab_depth: 50.0,
@@ -90,10 +90,10 @@ impl View {
             stereo_distance: 1.0,
             swap_stereo_eyes: false,
             center_mark: CenterMark::Cross,
-            width: 0,
-            height: 0,
+            width: 100,
+            height: 100,
             scale_factor: (1.0, 1.0),
-            projection_changed: false,
+            projection_changed: true,
             style_names: String::new(),
             draw_objs: BTreeMap::new(),
             event_caster: Arc::new(EventCaster::new()),
@@ -1337,7 +1337,9 @@ mod tests {
     fn view_vectors_and_projection_flags_match_reference_shape() {
         let mut view = View::new(Uid::new(1), Uid::new(2));
         assert_eq!(view.name(), "");
-        assert!(!view.is_active());
+        assert!(view.is_active());
+        assert_eq!((view.width(), view.height()), (100, 100));
+        assert!(view.is_projection_changed());
         assert!(!view.is_perspective());
         assert_eq!(view.stereo_mode(), StereoMode::None);
         assert_eq!(view.center_mark(), CenterMark::Cross);
@@ -1546,14 +1548,13 @@ mod tests {
         view.set_active(true);
 
         let events = events.lock().unwrap();
-        assert_eq!(events.len(), 5);
+        assert_eq!(events.len(), 4);
         assert_eq!(events[0].event_type(), ViewEvent::VWE_PROPCHG);
         assert_eq!(events[0].descr(), "zoom");
         assert_eq!(events[1].descr(), "center");
         assert_eq!(events[2].event_type(), ViewEvent::VWE_PROPCHG_DRG);
         assert_eq!(events[2].descr(), "center");
         assert_eq!(events[3].event_type(), ViewEvent::VWE_SIZECHG);
-        assert_eq!(events[4].event_type(), ViewEvent::VWE_ACTIVATED);
         assert!(events.iter().all(|event| event.target() == 7));
         assert!(events.iter().all(|event| event.source() == 3));
     }

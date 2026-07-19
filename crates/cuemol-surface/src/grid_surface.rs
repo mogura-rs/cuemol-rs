@@ -388,6 +388,7 @@ where
     mesh.push_vertex(SurfaceVertex {
         position: vertex,
         normal: normalize(field.gradient(vertex)),
+        info: 0,
     });
     edge_cache.insert(key, index);
     index

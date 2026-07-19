@@ -1507,7 +1507,10 @@ impl Model {
         match self.state.open_path(&path) {
             Ok(_) => {
                 self.selection_text.clear();
-                // Note any non-molecule objects skipped on load (surface/map objects).
+                self.surface_mesh = None;
+                self.density_solid_mesh = None;
+                self.show_surface = false;
+                // Note any object classes or source formats skipped on load.
                 let skipped = self.state.active_scene_skipped_objects();
                 let suffix = if skipped.is_empty() {
                     String::new()
@@ -1515,21 +1518,6 @@ impl Model {
                     format!(" ({} object(s) skipped)", skipped.len())
                 };
                 self.status = format!("Loaded {}{}", path.display(), suffix);
-                // Display any surface objects the `.qsc` carried (OBJ/PLY-text MolSurf),
-                // merged into the surface slot and shown via the surface toggle.
-                let surfaces = self.state.active_scene_surface_meshes();
-                if !surfaces.is_empty() {
-                    let mut merged = cuemol_render::RenderMesh::default();
-                    for mesh in surfaces {
-                        let base = merged.vertices.len() as u32;
-                        merged.vertices.extend(mesh.vertices);
-                        merged
-                            .indices
-                            .extend(mesh.indices.iter().map(|index| base + index));
-                    }
-                    self.surface_mesh = Some(merged);
-                    self.show_surface = true;
-                }
                 self.rebuild_after_load();
             }
             Err(error) => {
@@ -3250,9 +3238,9 @@ mod tests {
     }
 
     #[test]
-    fn loading_a_qsc_with_an_obj_surface_shows_it() {
-        // Parity with egui/gpui: opening a `.qsc` carrying an OBJ-text MolSurf object
-        // shows its surface (slot populated AND reaching the tessellated output).
+    fn loading_a_qsc_with_an_obj_surface_uses_the_shared_scene_snapshot() {
+        // Loaded MolSurf objects belong to the shared scene snapshot. They must not
+        // also populate the transient generated-surface cache.
         let mut builder = cuemol_molstr::MolSceneManager::new();
         let bscene = builder.new_scene("s");
         let mol = cuemol_molstr::read_pdb_str(
@@ -3270,14 +3258,11 @@ mod tests {
         std::fs::write(&path, &qsc).unwrap();
         let mut model = Model::new(Vec::new());
         model.open_path(path.clone());
-        assert!(
-            model.surface_mesh.is_some(),
-            "a .qsc surface must populate the surface slot"
-        );
-        assert!(
-            model.show_surface,
-            "a .qsc surface must enable the surface display"
-        );
+        assert!(model.surface_mesh.is_none());
+        assert!(!model.show_surface);
+        let snapshot = model.current_render_snapshot().unwrap();
+        assert_eq!(snapshot.meshes.len(), 1);
+        assert_eq!(snapshot.meshes[0].indices.len(), 3);
         let _ = std::fs::remove_file(&path);
     }
 

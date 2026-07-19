@@ -10,6 +10,7 @@ use std::rc::{Rc, Weak};
 
 pub mod analytic_ses;
 pub mod boundary;
+pub mod dist_field;
 pub mod grid_surface;
 pub mod hole_surface;
 pub mod msms;
@@ -18,6 +19,7 @@ pub mod ply;
 pub mod qdf;
 
 pub use boundary::{Boundary, BoundaryElement, BoundarySet};
+pub use dist_field::{DistFieldSurfBuilder, DistMapMarchingCubes};
 pub use grid_surface::{
     build_grid_isosurface, build_grid_isosurface_masked, ScalarField, SurfSphere,
 };
@@ -549,6 +551,26 @@ fn selected_surface_atoms<'a>(
 pub struct SurfaceVertex {
     pub position: Vector4,
     pub normal: Vector4,
+    /// Source atom identifier used by molecular-surface coloring and hit tests.
+    pub info: u32,
+}
+
+impl SurfaceVertex {
+    pub const fn new(position: Vector4, normal: Vector4) -> Self {
+        Self {
+            position,
+            normal,
+            info: 0,
+        }
+    }
+
+    pub const fn with_info(position: Vector4, normal: Vector4, info: u32) -> Self {
+        Self {
+            position,
+            normal,
+            info,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -793,7 +815,11 @@ fn cut_intersection_vertex(
         let position = va.position * (1.0 - t) + vb.position * t;
         let normal = normalize_or_z(va.normal * (1.0 - t) + vb.normal * t);
         let id = vertices.len() as u32;
-        vertices.push(SurfaceVertex { position, normal });
+        vertices.push(SurfaceVertex {
+            position,
+            normal,
+            info: 0,
+        });
         id
     })
 }
@@ -917,6 +943,7 @@ fn append_cut_section(
         vertices.push(SurfaceVertex {
             position: plane_position + axis_u * x as f64 + axis_v * y as f64,
             normal: cap_normal,
+            info: 0,
         });
     }
     for indices in geometry.indices.chunks_exact(3) {
@@ -1282,6 +1309,7 @@ impl MolSurfObj {
             SurfaceVertex {
                 position: Vector4::ZERO,
                 normal: Vector4::ZERO,
+                info: 0,
             };
             size
         ];
@@ -1305,7 +1333,12 @@ impl MolSurfObj {
         let vertex = self.mesh.vertices.get_mut(index).ok_or_else(|| {
             cuemol_core::CueMolError::invalid_argument("surface vertex index out of range")
         })?;
-        *vertex = SurfaceVertex { position, normal };
+        let info = vertex.info;
+        *vertex = SurfaceVertex {
+            position,
+            normal,
+            info,
+        };
         Ok(())
     }
 
@@ -1820,6 +1853,7 @@ pub struct MolSurfRenderer {
     target: String,
     width: f64,
     elepot: String,
+    color_map_name: String,
     low_param: f64,
     mid_param: f64,
     high_param: f64,
@@ -1844,6 +1878,7 @@ impl Default for MolSurfRenderer {
             target: String::new(),
             width: 1.2,
             elepot: String::new(),
+            color_map_name: String::new(),
             low_param: -10.0,
             mid_param: 0.0,
             high_param: 10.0,
@@ -2006,7 +2041,7 @@ impl MolSurfRenderer {
     }
 
     pub fn color_map_name(&self) -> &str {
-        &self.elepot
+        &self.color_map_name
     }
 
     pub fn color_mapname(&self) -> &str {
@@ -2022,7 +2057,7 @@ impl MolSurfRenderer {
     }
 
     pub fn set_color_map_name(&mut self, value: impl Into<String>) {
-        self.set_elepot(value);
+        self.color_map_name = value.into();
     }
 
     pub fn set_color_mapname(&mut self, value: impl Into<String>) {
@@ -2900,6 +2935,27 @@ impl DirectSurfRenderer2 {
 
     pub fn into_renderer(self) -> DirectSurfRenderer {
         self.inner
+    }
+
+    /// Build the dedicated `dsurf2` distance-field mesh.
+    pub fn render_mesh(&self, molecule: &MolCoord) -> SurfaceMesh {
+        let mut builder = DistFieldSurfBuilder::new();
+        builder.set_probe_radius(self.inner.probe_radius.max(0.0));
+        builder.set_grid_spacing(self.inner.grid_spacing());
+        builder.set_surface_type(self.inner.surface_type);
+        for atom in molecule
+            .atoms()
+            .iter()
+            .filter(|atom| self.inner.selection.matches_in_molecule(atom, molecule))
+        {
+            builder.add_atom(
+                atom.position,
+                self.inner.vdw_radii.radius_for_element(&atom.element),
+                atom.serial,
+            );
+        }
+        builder.build();
+        builder.into_mesh()
     }
 }
 
@@ -3921,14 +3977,17 @@ attribute \"dep\" string \"positions\"
         obj.mesh_mut().push_vertex(SurfaceVertex {
             position: Vector4::new3(1.0, 2.0, 3.0),
             normal: Vector4::new3(0.0, 0.0, 1.0),
+            info: 0,
         });
         obj.mesh_mut().push_vertex(SurfaceVertex {
             position: Vector4::new3(2.0, 3.0, 4.0),
             normal: Vector4::new3(0.0, 1.0, 0.0),
+            info: 0,
         });
         obj.mesh_mut().push_vertex(SurfaceVertex {
             position: Vector4::new3(3.0, 4.0, 5.0),
             normal: Vector4::new3(1.0, 0.0, 0.0),
+            info: 0,
         });
         obj.mesh_mut().push_triangle([0, 1, 2]);
 
@@ -4034,6 +4093,7 @@ attribute \"dep\" string \"positions\"
         assert_eq!(renderer.target(), "");
         assert_eq!(renderer.width(), 1.2);
         assert_eq!(renderer.elepot(), "");
+        assert_eq!(renderer.color_mapname(), "");
         assert_eq!(renderer.low_param(), -10.0);
         assert_eq!(renderer.mid_param(), 0.0);
         assert_eq!(renderer.high_param(), 10.0);
@@ -4046,10 +4106,12 @@ attribute \"dep\" string \"positions\"
         assert_eq!(renderer.drawmode(), MolSurfRenderer::SFDRAW_FILL);
         renderer.set_cullface(true);
         renderer.set_drawmode(MolSurfRenderer::SFDRAW_LINE);
-        renderer.set_color_mapname("potential");
+        renderer.set_elepot("potential");
+        renderer.set_color_mapname("density");
         assert!(renderer.cull_face());
         assert_eq!(renderer.draw_mode(), MolSurfRenderer::SFDRAW_LINE);
-        assert_eq!(renderer.color_mapname(), "potential");
+        assert_eq!(renderer.elepot(), "potential");
+        assert_eq!(renderer.color_mapname(), "density");
     }
 
     #[test]
@@ -4138,7 +4200,12 @@ attribute \"dep\" string \"positions\"
 
         let mut renderer2 = DirectSurfRenderer2::new();
         renderer2.set_surface_type(DirectSurfRenderer2::DS_VDW);
-        assert!(renderer2.render_mesh(&molecule).triangle_count() > 0);
+        let mesh = renderer2.render_mesh(&molecule);
+        assert!(mesh.triangle_count() > 0);
+        assert!(mesh
+            .vertices()
+            .iter()
+            .all(|vertex| vertex.info == molecule.atoms()[0].serial as u32));
     }
 
     #[test]
@@ -4233,6 +4300,7 @@ attribute \"dep\" string \"positions\"
             mesh.push_vertex(SurfaceVertex {
                 position,
                 normal: normalize_or_z(position),
+                info: 0,
             });
         }
         for triangle in [

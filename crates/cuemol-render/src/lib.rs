@@ -6,8 +6,8 @@ use cuemol_qsys::{InOutHandler, SceneExporter as QsysSceneExporter};
 use std::fmt::Write as _;
 
 pub use raytrace::{
-    render_umbreon_smoke, render_umbreon_snapshot, UmbreonFrame, UmbreonRenderParams,
-    UmbreonSceneExporter, UmbreonSmokeResult,
+    render_umbreon_smoke, render_umbreon_snapshot, UmbreonDenoiseMode, UmbreonFrame,
+    UmbreonRenderParams, UmbreonSceneExporter, UmbreonSmokeResult,
 };
 
 #[derive(Debug, Clone, PartialEq)]

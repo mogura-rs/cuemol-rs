@@ -8,6 +8,21 @@ pub mod qdf_lwobj;
 pub use qdf_lwobj::{read_qdf_lwobj_bytes, write_qdf_lwobj_bytes, QdfLWObjReader, QdfLWObjWriter};
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct RenderLWRendererSnapshot {
+    pub name: String,
+    pub visible: bool,
+    pub snapshot: RenderSceneSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderLWObjectSnapshot {
+    pub uid: Uid,
+    pub name: String,
+    pub visible: bool,
+    pub renderers: Vec<RenderLWRendererSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct LWHitData {
     id: i32,
     message: String,
@@ -534,53 +549,80 @@ impl LWViewerManager {
         source: &Scene<RenderSceneSnapshot>,
         target: &mut Scene<LWObject>,
     ) {
-        for object_uid in source.object_uids() {
-            let Some(object) = source.object(object_uid) else {
-                continue;
-            };
-            let mut snapshot = object.data().clone();
-            if object.xform_matrix() != cuemol_core::Matrix4::IDENTITY {
-                snapshot.apply_xform(&object.xform_matrix());
-            }
-            let mesh = tessellate_snapshot(&snapshot);
-            let mut lw_object = LWObject::new();
-            lw_object.set_name(object.name());
-            lw_object.set_visible(object.is_visible());
-            let mut scene_object = SceneObject::new(object.uid(), lw_object);
-            scene_object.set_name(object.name());
-            scene_object.set_visible(object.is_visible());
-            scene_object.set_class_name("LWObject");
-            let renderer_uid = scene_object.create_renderer("lwrend");
-            let data_id = i32::try_from(renderer_uid.get()).unwrap_or(i32::MAX);
-            if let Some(renderer) = scene_object.renderer_mut(renderer_uid) {
-                renderer.set_name("render");
-                renderer.set_property_str("data_id", data_id.to_string());
-            }
-            if !mesh.indices.is_empty() {
-                let vertices = mesh
-                    .vertices
-                    .iter()
-                    .map(|vertex| LWVertexNormalColor {
-                        position: vector_to_f32(vertex.position),
-                        normal: vector_to_f32(vertex.normal),
-                        color: vertex.color.map(f32_color_component),
-                    })
-                    .collect();
-                let indices = mesh.indices.iter().map(|&index| index as i32).collect();
-                scene_object.data_mut().add_draw_element(LWDrawElement::new(
-                    data_id,
-                    cuemol_gfx::AbstDrawElem::DRAW_TRIANGLES as i8,
-                    1.0,
-                    [255; 4],
-                    LWDrawData::VertexNormalColorIndices { vertices, indices },
-                ));
-            }
-            target.insert_object(scene_object);
-        }
+        let objects = source
+            .object_uids()
+            .into_iter()
+            .filter_map(|object_uid| source.object(object_uid))
+            .map(|object| {
+                let mut snapshot = object.data().clone();
+                if object.xform_matrix() != cuemol_core::Matrix4::IDENTITY {
+                    snapshot.apply_xform(&object.xform_matrix());
+                }
+                RenderLWObjectSnapshot {
+                    uid: object.uid(),
+                    name: object.name().to_string(),
+                    visible: object.is_visible(),
+                    renderers: vec![RenderLWRendererSnapshot {
+                        name: "render".to_string(),
+                        visible: true,
+                        snapshot,
+                    }],
+                }
+            })
+            .collect::<Vec<_>>();
+        self.conv_render_objects_to_lw_scene(&objects, target);
         for (name, camera) in source.cameras() {
             let mut camera = camera.clone();
             camera.set_source("");
             target.set_camera(name, camera);
+        }
+    }
+
+    /// Convert resolved per-renderer snapshots while preserving the source object
+    /// and renderer boundaries used by CueMol's lightweight scene converter.
+    pub fn conv_render_objects_to_lw_scene(
+        &mut self,
+        source: &[RenderLWObjectSnapshot],
+        target: &mut Scene<LWObject>,
+    ) {
+        for object in source {
+            let mut lw_object = LWObject::new();
+            lw_object.set_name(&object.name);
+            lw_object.set_visible(object.visible);
+            let mut scene_object = SceneObject::new(object.uid, lw_object);
+            scene_object.set_name(&object.name);
+            scene_object.set_visible(object.visible);
+            scene_object.set_class_name("LWObject");
+            for source_renderer in &object.renderers {
+                let renderer_uid = scene_object.create_renderer("lwrend");
+                let data_id = i32::try_from(renderer_uid.get()).unwrap_or(i32::MAX);
+                if let Some(renderer) = scene_object.renderer_mut(renderer_uid) {
+                    renderer.set_name(&source_renderer.name);
+                    renderer.set_visible(source_renderer.visible);
+                    renderer.set_property_str("data_id", data_id.to_string());
+                }
+                let mesh = tessellate_snapshot(&source_renderer.snapshot);
+                if !mesh.indices.is_empty() {
+                    let vertices = mesh
+                        .vertices
+                        .iter()
+                        .map(|vertex| LWVertexNormalColor {
+                            position: vector_to_f32(vertex.position),
+                            normal: vector_to_f32(vertex.normal),
+                            color: vertex.color.map(f32_color_component),
+                        })
+                        .collect();
+                    let indices = mesh.indices.iter().map(|&index| index as i32).collect();
+                    scene_object.data_mut().add_draw_element(LWDrawElement::new(
+                        data_id,
+                        cuemol_gfx::AbstDrawElem::DRAW_TRIANGLES as i8,
+                        1.0,
+                        [255; 4],
+                        LWDrawData::VertexNormalColorIndices { vertices, indices },
+                    ));
+                }
+            }
+            target.insert_object(scene_object);
         }
         self.conversions += 1;
     }
@@ -785,5 +827,73 @@ mod tests {
         assert_eq!(vertices[0].color, [255, 0, 0, 255]);
         assert_eq!(indices, &[0, 1, 2]);
         assert!(read_qdf_lwobj_bytes(&write_qdf_lwobj_bytes(object.data())).is_ok());
+    }
+
+    #[test]
+    fn lw_viewer_manager_preserves_object_and_renderer_boundaries() {
+        let triangle = |offset: f64, color: [f32; 4]| {
+            let mut snapshot = RenderSceneSnapshot::empty();
+            snapshot.meshes.push(cuemol_render::RenderMesh {
+                vertices: [
+                    Vector4::new3(offset, 0.0, 0.0),
+                    Vector4::new3(offset + 1.0, 0.0, 0.0),
+                    Vector4::new3(offset, 1.0, 0.0),
+                ]
+                .into_iter()
+                .map(|position| cuemol_render::MeshVertex {
+                    position,
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color,
+                })
+                .collect(),
+                indices: vec![0, 1, 2],
+            });
+            snapshot.recompute_bounds();
+            snapshot
+        };
+        let source = vec![
+            RenderLWObjectSnapshot {
+                uid: Uid::new(10),
+                name: "first".to_string(),
+                visible: true,
+                renderers: vec![
+                    RenderLWRendererSnapshot {
+                        name: "red".to_string(),
+                        visible: true,
+                        snapshot: triangle(0.0, [1.0, 0.0, 0.0, 1.0]),
+                    },
+                    RenderLWRendererSnapshot {
+                        name: "green-hidden".to_string(),
+                        visible: false,
+                        snapshot: triangle(2.0, [0.0, 1.0, 0.0, 1.0]),
+                    },
+                ],
+            },
+            RenderLWObjectSnapshot {
+                uid: Uid::new(20),
+                name: "second-hidden".to_string(),
+                visible: false,
+                renderers: vec![RenderLWRendererSnapshot {
+                    name: "blue".to_string(),
+                    visible: true,
+                    snapshot: triangle(4.0, [0.0, 0.0, 1.0, 1.0]),
+                }],
+            },
+        ];
+        let mut target = Scene::new(Uid::new(2), "target");
+        let mut manager = LWViewerManager::new();
+        manager.conv_render_objects_to_lw_scene(&source, &mut target);
+
+        assert_eq!(target.object_uids(), vec![Uid::new(10), Uid::new(20)]);
+        let first = target.object(Uid::new(10)).unwrap();
+        assert_eq!(first.rend_count(), 2);
+        assert_eq!(first.data().draw_elements().len(), 2);
+        assert_eq!(first.renderer_by_index(0).unwrap().name(), "red");
+        assert_eq!(first.renderer_by_index(1).unwrap().name(), "green-hidden");
+        assert!(!first.renderer_by_index(1).unwrap().is_visible());
+        let second = target.object(Uid::new(20)).unwrap();
+        assert!(!second.is_visible());
+        assert_eq!(second.rend_count(), 1);
+        assert_eq!(second.data().draw_elements().len(), 1);
     }
 }

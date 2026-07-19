@@ -1694,13 +1694,20 @@ fn renderer_node_from_mol(renderer: &MolRenderer, type_override: Option<&str>) -
     node.set_str_attr("name", renderer.name());
     if renderer.renderer_type() == "atomintr" {
         for definition in renderer.atom_intr_lines() {
+            if !definition.is_active() {
+                continue;
+            }
             let tag = match definition.kind() {
                 AtomIntrKind::Distance => "line",
                 AtomIntrKind::Angle => "angle",
                 AtomIntrKind::Torsion => "torsion",
             };
             let child = node.append_child(tag);
-            if definition.positions().is_empty() {
+            if !definition.selectors().is_empty() {
+                for (index, selection) in definition.selectors().iter().enumerate() {
+                    child.set_str_attr(format!("sel{}", index + 1), selection);
+                }
+            } else if definition.positions().is_empty() {
                 for (index, aid) in definition.aids().iter().enumerate() {
                     child.set_str_attr(format!("aid{}", index + 1), aid);
                 }

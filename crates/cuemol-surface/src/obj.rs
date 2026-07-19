@@ -68,7 +68,7 @@ pub fn read_obj_str(input: &str) -> Result<SurfaceMesh> {
 
     let mut mesh = SurfaceMesh::new();
     for (position, normal) in positions.into_iter().zip(normals) {
-        mesh.push_vertex(SurfaceVertex { position, normal });
+        mesh.push_vertex(SurfaceVertex::new(position, normal));
     }
     for triangle in triangles {
         mesh.push_triangle(triangle);
@@ -192,7 +192,7 @@ f -3 -2 -1
             (Vector4::new3(0.0, 2.5, 0.0), Vector4::new3(0.0, 1.0, 0.0)),
             (Vector4::new3(0.0, 0.0, 3.5), Vector4::new3(0.0, 0.0, -1.0)),
         ] {
-            mesh.push_vertex(SurfaceVertex { position, normal });
+            mesh.push_vertex(SurfaceVertex::new(position, normal));
         }
         mesh.push_triangle([0, 1, 2]);
         mesh.push_triangle([0, 2, 3]);

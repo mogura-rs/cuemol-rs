@@ -155,7 +155,7 @@ pub fn read_ply_bytes(input: &[u8]) -> Result<SurfaceMesh> {
 
     let mut mesh = SurfaceMesh::new();
     for (position, normal) in positions.into_iter().zip(normals) {
-        mesh.push_vertex(SurfaceVertex { position, normal });
+        mesh.push_vertex(SurfaceVertex::new(position, normal));
     }
     for triangle in triangles {
         mesh.push_triangle(triangle);

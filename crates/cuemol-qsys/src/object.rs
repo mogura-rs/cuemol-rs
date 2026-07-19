@@ -386,9 +386,9 @@ impl<T> SceneObject<T> {
             }
             let uid = self.create_renderer(type_name);
             if let Some(renderer) = self.renderers.get_mut(&uid) {
+                renderer.read_properties_from_node(child);
                 renderer.set_name(format!("{name_prefix}{type_name}"));
                 renderer.set_group_name(group_name.clone());
-                renderer.read_properties_from_node(child);
             }
         }
         if !self.attach_renderer(group) {
@@ -401,7 +401,7 @@ impl<T> SceneObject<T> {
 
     pub fn attach_renderer(&mut self, mut renderer: Renderer) -> bool {
         let uid = renderer.uid();
-        if self.renderers.contains_key(&uid) {
+        if renderer.client_obj_uid().get() != 0 || self.renderers.contains_key(&uid) {
             return false;
         }
         self.uid_generator.ensure_after(uid);
@@ -474,7 +474,10 @@ impl<T> SceneObject<T> {
             return None;
         }
         self.fire_renderer_scene_event(SceneEvent::SCE_REND_REMOVING, uid);
-        self.renderers.remove(&uid)
+        let mut renderer = self.renderers.remove(&uid)?;
+        renderer.set_client_obj_uid(Uid::new(0));
+        renderer.set_scene_uid(Uid::new(0));
+        Some(renderer)
     }
 
     pub fn rend_count(&self) -> usize {
@@ -486,7 +489,7 @@ impl<T> SceneObject<T> {
     }
 
     pub fn renderer_by_index(&self, index: usize) -> Option<&Renderer> {
-        self.sorted_renderers().get(index).copied()
+        self.renderers.values().nth(index)
     }
 
     pub fn get_renderer_by_index(&self, index: usize) -> Option<&Renderer> {
@@ -800,7 +803,26 @@ mod tests {
         assert!(filtered.contains("\"name\":\"child\""));
         assert!(!filtered.contains("solo"));
         assert_eq!(object.rend_uids(), "4,2,3");
-        assert_eq!(object.get_renderer_by_index(0).unwrap().name(), "solo");
+        assert_eq!(object.get_renderer_by_index(0).unwrap().name(), "grp");
+    }
+
+    #[test]
+    fn renderer_attachment_rejects_owned_renderers_and_detach_clears_owner() {
+        let mut first = SceneObject::new(Uid::new(1), ());
+        let second = SceneObject::new(Uid::new(2), ());
+        let renderer = Renderer::with_uid("simple", Uid::new(3));
+        assert!(first.attach_renderer(renderer));
+        let owned = first.renderer(Uid::new(3)).unwrap().clone();
+        let mut second = second;
+        assert!(!second.attach_renderer(owned));
+        let detached = first.detach_renderer(Uid::new(3)).unwrap();
+        assert_eq!(detached.client_obj_uid(), Uid::new(0));
+        assert_eq!(detached.scene_uid(), Uid::new(0));
+        assert!(second.attach_renderer(detached));
+        assert_eq!(
+            second.renderer(Uid::new(3)).unwrap().client_obj_uid(),
+            Uid::new(2)
+        );
     }
 
     #[test]

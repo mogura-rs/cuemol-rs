@@ -449,6 +449,12 @@ impl StyleManager {
         self.take_style_set(scope_id, style_set_id).is_some()
     }
 
+    pub fn clear_scope(&mut self, scope_id: u64) {
+        self.scopes.remove(&scope_id);
+        self.pending_events
+            .retain(|(event_scope, _)| *event_scope != scope_id);
+    }
+
     /// Remove and return a style set and its insertion index for undo/redo.
     pub fn take_style_set(
         &mut self,
@@ -599,11 +605,42 @@ impl StyleManager {
     }
 
     pub fn get_str_data(&self, category: &str, key: &str, scope_id: u64) -> String {
-        self.find_in_scope(scope_id, |set| {
-            set.has_str_data(category, key)
-                .then(|| set.get_str_data(category, key))
-        })
-        .unwrap_or_default()
+        let lookup = |scope_id| {
+            self.find_in_scope(scope_id, |set| {
+                set.has_str_data(category, key)
+                    .then(|| set.get_str_data(category, key))
+            })
+        };
+        lookup(scope_id)
+            .or_else(|| (scope_id != 0).then(|| lookup(0)).flatten())
+            .unwrap_or_default()
+    }
+
+    pub fn str_data_names(&self, category: &str, scope_id: u64) -> Vec<String> {
+        let prefix = format!("string\t{category}\t");
+        let mut names = std::collections::BTreeSet::new();
+        for scope in [0, scope_id] {
+            names.extend(
+                self.scopes
+                    .get(&scope)
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|set| set.strings.keys())
+                    .filter_map(|key| key.strip_prefix(&prefix))
+                    .map(str::to_string),
+            );
+        }
+        names.into_iter().collect()
+    }
+
+    pub fn str_data_entries(&self, category: &str, scope_id: u64) -> BTreeMap<String, String> {
+        self.str_data_names(category, scope_id)
+            .into_iter()
+            .map(|name| {
+                let value = self.get_str_data(category, &name, scope_id);
+                (name, value)
+            })
+            .collect()
     }
 
     pub fn get_str_data2(
@@ -808,7 +845,10 @@ impl StyleManager {
         set.set_style(name, object.to_style_node())
     }
 
-    pub fn compile_color(&self, rep: &str, _scope_id: u64) -> SolidColor {
+    pub fn compile_color(&self, rep: &str, scope_id: u64) -> SolidColor {
+        if let Some(color) = self.get_color(rep.trim(), scope_id) {
+            return color.clone();
+        }
         parse_color(rep)
             .ok()
             .and_then(|spec| spec.rgba8())
@@ -1756,6 +1796,52 @@ mod tests {
 
         assert!(manager.destroy_style_set(10, uid));
         assert_eq!(manager.has_style_set("Default", 10), INVALID_UID);
+    }
+
+    #[test]
+    fn string_data_lookup_falls_back_to_global_scope_and_lists_overrides() {
+        let mut manager = StyleManager::new();
+        let global = manager.create_style_set("global", 0);
+        let local = manager.create_style_set("local", 42);
+        assert!(manager.set_str_data("sel", "protein", "rprop type=prot", 0, global));
+        assert!(manager.set_str_data("sel", "solvent", "resn HOH", 0, global));
+        assert!(manager.set_str_data("sel", "protein", "chain A", 42, local));
+
+        assert_eq!(manager.get_str_data("sel", "protein", 42), "chain A");
+        assert_eq!(manager.get_str_data("sel", "solvent", 42), "resn HOH");
+        assert_eq!(
+            manager.str_data_names("sel", 42),
+            vec!["protein".to_string(), "solvent".to_string()]
+        );
+        assert_eq!(
+            manager.str_data_entries("sel", 42),
+            BTreeMap::from([
+                ("protein".to_string(), "chain A".to_string()),
+                ("solvent".to_string(), "resn HOH".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn compile_color_uses_scope_fallback_and_clear_scope_removes_local_state() {
+        let mut manager = StyleManager::new();
+        let global = manager.create_style_set("global", 0);
+        let local = manager.create_style_set("local", 42);
+        assert!(manager.set_color("accent", SolidColor::from_rgb_u8(255, 0, 0), 0, global));
+        assert!(manager.set_color("accent", SolidColor::from_rgb_u8(0, 0, 255), 42, local));
+        assert!(manager.set_color("global-only", SolidColor::from_rgb_u8(0, 255, 0), 0, global));
+
+        assert_eq!(manager.compile_color("accent", 42).rgba8().b, 255);
+        assert_eq!(manager.compile_color("global-only", 42).rgba8().g, 255);
+        assert_eq!(manager.compile_color("#010203", 42).rgba8().r, 1);
+        manager.set_style_value(42, "local", "Renderer.width", "2");
+        assert_eq!(manager.pending_event_count(), 1);
+
+        manager.clear_scope(42);
+        assert_eq!(manager.has_style_set("local", 42), INVALID_UID);
+        assert_eq!(manager.compile_color("accent", 42).rgba8().r, 255);
+        assert_eq!(manager.pending_event_count(), 0);
+        assert_ne!(manager.has_style_set("global", 0), INVALID_UID);
     }
 
     #[test]

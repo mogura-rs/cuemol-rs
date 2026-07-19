@@ -225,6 +225,7 @@ pub fn add_concave_patch(
                 position,
                 // Concave patch: solvent-facing normal points back toward the probe.
                 normal: normal_in * -1.0,
+                info: 0,
             });
         }
         rows.push(row);
@@ -315,6 +316,7 @@ pub fn add_convex_cap(
                 mesh.push_vertex(SurfaceVertex {
                     position: center + dir * r,
                     normal: dir, // convex: outward normal points away from the atom
+                    info: idx as u32,
                 });
             } else {
                 row.push(None);
@@ -427,6 +429,7 @@ pub fn add_saddle_torus(
             mesh.push_vertex(SurfaceVertex {
                 position: c + dir * r_p,
                 normal: dir * -1.0, // reentrant: normal points back toward the probe
+                info: 0,
             });
         }
         if let Some(prev) = &prev {

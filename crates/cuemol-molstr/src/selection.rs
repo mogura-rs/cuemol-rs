@@ -41,7 +41,7 @@ pub enum Selector {
     Not(Box<Selector>),
     And(Box<Selector>, Box<Selector>),
     Or(Box<Selector>, Box<Selector>),
-    /// A named-selection reference (`sel name`), resolved against a registry of
+    /// A named-selection reference (a bare identifier), resolved against a registry of
     /// saved selections via [`Selector::resolve_named`] (C++ `SelRefNode`).
     Ref(String),
     Hier(HierSelector),
@@ -154,6 +154,24 @@ impl SelCommand {
         Ok(())
     }
 
+    pub fn compile_named_result(
+        &mut self,
+        expression: &str,
+        registry: &HashMap<String, Selector>,
+    ) -> Result<()> {
+        if expression.is_empty() {
+            self.selector = None;
+            self.original.clear();
+            self.error_msg.clear();
+            return Ok(());
+        }
+        let selector = parse_named_selector(expression, registry)?;
+        self.selector = Some(selector);
+        self.original = expression.to_string();
+        self.error_msg.clear();
+        Ok(())
+    }
+
     pub fn selector(&self) -> Option<&Selector> {
         self.selector.as_ref()
     }
@@ -173,6 +191,43 @@ impl SelCommand {
         self.selector
             .as_ref()
             .is_none_or(|selector| selector.matches(atom))
+    }
+
+    pub fn is_selected_in_molecule(&self, molecule: &MolCoord, atom: &Atom) -> bool {
+        self.selector
+            .as_ref()
+            .is_none_or(|selector| selector.matches_in_molecule(atom, molecule))
+    }
+
+    pub fn is_selected_resid_by_name(
+        &self,
+        molecule: &MolCoord,
+        chain: &str,
+        sindex: &str,
+    ) -> Result<i32> {
+        let residue = molecule
+            .get_residue(chain, sindex)?
+            .ok_or_else(|| CueMolError::NotFound(format!("residue {chain}.{sindex}")))?;
+        Ok(selection_status(
+            self.selector.as_ref(),
+            molecule,
+            residue.atom_indices.into_iter(),
+        ))
+    }
+
+    pub fn is_selected_chain_by_name(&self, molecule: &MolCoord, chain: &str) -> i32 {
+        let statuses = molecule
+            .residue_summaries()
+            .into_iter()
+            .filter(|residue| residue.key.chain_id == chain)
+            .map(|residue| {
+                selection_status(
+                    self.selector.as_ref(),
+                    molecule,
+                    residue.atom_indices.into_iter(),
+                )
+            });
+        aggregate_status(statuses)
     }
 
     pub fn is_selected_resid(&self, residue: &crate::ResidueView<'_>) -> i32 {
@@ -289,7 +344,7 @@ pub fn parse_selector(input: &str) -> Result<Selector> {
     }
 }
 
-/// Parse a selection, resolving any `sel name` references against `registry`
+/// Parse a selection, resolving named references against `registry`
 /// (named/saved selections). Errors on an unknown or cyclic name.
 pub fn parse_named_selector(input: &str, registry: &HashMap<String, Selector>) -> Result<Selector> {
     parse_selector(input)?.resolve_named(registry)
@@ -580,7 +635,7 @@ impl SelCacheMgr {
 }
 
 impl Selector {
-    /// Replace every `sel name` reference with the registered selector, returning
+    /// Replace every named reference with the registered selector, returning
     /// a reference-free selector (C++ `SelRefNode::resolveReference`). Errors on an
     /// unknown name or a reference cycle.
     pub fn resolve_named(&self, registry: &HashMap<String, Selector>) -> Result<Selector> {
@@ -666,7 +721,7 @@ impl Selector {
             Selector::Not(inner) => format!("!({})", inner.dump()),
             Selector::And(lhs, rhs) => format!("({}) and ({})", lhs.dump(), rhs.dump()),
             Selector::Or(lhs, rhs) => format!("({}) or ({})", lhs.dump(), rhs.dump()),
-            Selector::Ref(name) => format!("sel {name}"),
+            Selector::Ref(name) => format!("Ref({name})"),
             Selector::Hier(value) => value.dump(),
         }
     }
@@ -1198,13 +1253,6 @@ impl<'a> Parser<'a> {
         if self.consume_keyword("aprop") {
             return parse_aprop(self.read_leaf_tail());
         }
-        if self.consume_keyword("sel") {
-            let name = self.read_leaf_tail().trim().to_string();
-            if name.is_empty() {
-                return Err(CueMolError::parse("missing selection name after 'sel'"));
-            }
-            return Ok(Selector::Ref(name));
-        }
         if self.consume_keyword("resi")
             || self.consume_keyword("resid")
             || self.consume_keyword("i;")
@@ -1231,7 +1279,11 @@ impl<'a> Parser<'a> {
         if trimmed.contains('.') {
             return parse_hier_selector(trimmed);
         }
-        Err(CueMolError::undefined_reference(trimmed.to_string()))
+        if is_reference_token(trimmed) {
+            Ok(Selector::Ref(trimmed.to_string()))
+        } else {
+            Err(CueMolError::parse("invalid selection reference"))
+        }
     }
 
     fn consume_distance_op(&mut self) -> Option<DistanceOp> {
@@ -1474,6 +1526,33 @@ fn parse_name_list(input: &str, kind: ListKind) -> Result<Vec<NamePattern>> {
         .into_iter()
         .map(|part| parse_name_pattern(part.trim(), kind))
         .collect()
+}
+
+fn is_reference_token(input: &str) -> bool {
+    let mut chars = input.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphanumeric() || first == '_') {
+        return false;
+    }
+    if !chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '\'' | '*')) {
+        return false;
+    }
+    if input.parse::<i32>().is_ok() {
+        return false;
+    }
+    let digits = input
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .last()
+        .map_or(0, |(index, ch)| index + ch.len_utf8());
+    let integer_prefix = &input[..digits];
+    let is_scanner_integer =
+        integer_prefix == "0" || (digits > 0 && !integer_prefix.starts_with('0'));
+    !(is_scanner_integer
+        && digits + 1 == input.len()
+        && input[digits..].chars().all(|ch| ch.is_ascii_alphabetic()))
 }
 
 fn parse_name_pattern(input: &str, kind: ListKind) -> Result<NamePattern> {
@@ -2107,6 +2186,7 @@ mod tests {
             "chain ,A",
             "chain A,",
             "CHAIN A",
+            "sel chainA",
             "elem",
             "name \"CA",
             "aid",
@@ -2223,25 +2303,25 @@ ATOM      3  C   THR B   2      15.685  12.755   5.133  1.00  9.19           C
         registry.insert("chainA".to_string(), parse_selector("chain A").unwrap());
         registry.insert("carbons".to_string(), parse_selector("elem C").unwrap());
 
-        // `sel name` references a saved selection.
-        let sel = parse_named_selector("sel chainA", &registry).unwrap();
+        // A bare identifier references a saved selection.
+        let sel = parse_named_selector("chainA", &registry).unwrap();
         assert_eq!(mol.select_indices(&sel), vec![0, 1]);
 
         // It composes with operators: chain-A carbons = atom 1 (CA).
-        let sel = parse_named_selector("sel chainA and sel carbons", &registry).unwrap();
+        let sel = parse_named_selector("chainA and carbons", &registry).unwrap();
         assert_eq!(mol.select_indices(&sel), vec![1]);
 
-        // The unresolved reference dumps as `sel name`.
-        assert_eq!(parse_selector("sel chainA").unwrap().dump(), "sel chainA");
+        // The unresolved reference retains its name.
+        assert_eq!(parse_selector("chainA").unwrap().dump(), "Ref(chainA)");
 
         // An unknown name is an error.
-        assert!(parse_named_selector("sel nope", &registry).is_err());
+        assert!(parse_named_selector("nope", &registry).is_err());
 
         // A reference cycle is detected, not looped forever.
         let mut cyclic = HashMap::new();
-        cyclic.insert("a".to_string(), parse_selector("sel b").unwrap());
-        cyclic.insert("b".to_string(), parse_selector("sel a").unwrap());
-        assert!(parse_named_selector("sel a", &cyclic).is_err());
+        cyclic.insert("a".to_string(), parse_selector("b").unwrap());
+        cyclic.insert("b".to_string(), parse_selector("a").unwrap());
+        assert!(parse_named_selector("a", &cyclic).is_err());
     }
 
     #[test]

@@ -424,7 +424,6 @@ impl<T> Scene<T> {
             object.attach_event_manager(manager.clone());
         }
         self.objects.insert(uid, object);
-        self.active_object_uid = Some(uid);
         self.modified = true;
         self.fire_scene_event_type(SceneEvent::SCE_OBJ_ADDED, uid, "");
         uid
@@ -443,7 +442,6 @@ impl<T> Scene<T> {
             object.attach_event_manager(manager.clone());
         }
         self.objects.insert(uid, object);
-        self.active_object_uid = Some(uid);
         self.modified = true;
         self.fire_scene_event_type(SceneEvent::SCE_OBJ_ADDED, uid, "");
         true
@@ -513,9 +511,6 @@ impl<T> Scene<T> {
         self.fire_scene_event_type(SceneEvent::SCE_OBJ_REMOVING, uid, "");
         let removed = self.objects.remove(&uid);
         if removed.is_some() {
-            if self.active_object_uid == Some(uid) {
-                self.active_object_uid = None;
-            }
             self.modified = true;
         }
         removed
@@ -530,11 +525,8 @@ impl<T> Scene<T> {
     pub fn clear_all_data(&mut self) {
         self.undo_manager
             .with_mut(|manager| manager.clear_all_info());
-        self.destroy_all_objects();
-        self.views.clear();
+        self.objects.clear();
         self.cameras.clear();
-        self.active_view_uid = None;
-        self.active_renderer_uid = None;
     }
 
     pub fn clear_all_data_script(&mut self) {
@@ -591,12 +583,16 @@ impl<T> Scene<T> {
         self.active_renderer_uid()
     }
 
-    pub fn set_active_renderer_uid(&mut self, uid: Option<Uid>) {
+    pub fn set_active_renderer_uid(&mut self, uid: Option<Uid>) -> bool {
+        if uid.is_some_and(|uid| self.get_renderer(uid).is_none()) {
+            return false;
+        }
         self.active_renderer_uid = uid;
+        true
     }
 
-    pub fn set_active_rend_id(&mut self, uid: Option<Uid>) {
-        self.set_active_renderer_uid(uid);
+    pub fn set_active_rend_id(&mut self, uid: Option<Uid>) -> bool {
+        self.set_active_renderer_uid(uid)
     }
 
     pub fn get_renderer(&self, uid: Uid) -> Option<&crate::Renderer> {
@@ -623,10 +619,6 @@ impl<T> Scene<T> {
         if let Some(manager) = self.event_manager.as_ref() {
             view.attach_event_manager(manager.clone());
         }
-        if self.views.is_empty() {
-            view.set_active(true);
-            self.active_view_uid = Some(uid);
-        }
         self.views.insert(uid, view);
         self.fire_scene_event_type(SceneEvent::SCE_VIEW_ADDED, uid, "");
         uid
@@ -638,10 +630,6 @@ impl<T> Scene<T> {
             return false;
         }
         self.uid_generator.ensure_after(uid);
-        if self.views.is_empty() {
-            view.set_active(true);
-            self.active_view_uid = Some(uid);
-        }
         if let Some(manager) = self.event_manager.as_ref() {
             view.attach_event_manager(manager.clone());
         }
@@ -707,14 +695,7 @@ impl<T> Scene<T> {
             return false;
         }
         self.fire_scene_event_type(SceneEvent::SCE_VIEW_REMOVING, uid, "");
-        let removed = self.views.remove(&uid).is_some();
-        if removed && self.active_view_uid == Some(uid) {
-            self.active_view_uid = self.views.keys().next().copied();
-            for view in self.views.values_mut() {
-                view.set_active(Some(view.uid()) == self.active_view_uid);
-            }
-        }
-        removed
+        self.views.remove(&uid).is_some()
     }
 
     pub fn active_view_uid(&self) -> Option<Uid> {
@@ -742,9 +723,6 @@ impl<T> Scene<T> {
             return false;
         }
         self.active_view_uid = uid;
-        for view in self.views.values_mut() {
-            view.set_active(Some(view.uid()) == uid);
-        }
         true
     }
 
@@ -1461,6 +1439,8 @@ mod tests {
         assert_eq!(scene.bg_color().rgba8().r, 0);
         let object_uid = scene.add_object("myObj", ());
         assert_eq!(scene.object_count(), 1);
+        assert_eq!(scene.active_object_uid(), None);
+        assert!(scene.set_active_object_uid(Some(object_uid)));
         assert_eq!(scene.active_object_uid(), Some(object_uid));
         assert_eq!(
             scene.object(object_uid).unwrap().scene_uid(),
@@ -1472,6 +1452,8 @@ mod tests {
         let view_uid = scene.create_view();
         scene.view_mut(view_uid).unwrap().set_name("0");
         assert_eq!(scene.view_count(), 1);
+        assert_eq!(scene.active_view_uid(), None);
+        assert!(scene.set_active_view_uid(Some(view_uid)));
         assert_eq!(scene.active_view_uid(), Some(view_uid));
         assert!(scene.view(view_uid).unwrap().is_active());
         assert_eq!(scene.view_by_name("0").unwrap().uid(), view_uid);
@@ -1501,6 +1483,39 @@ mod tests {
         assert_eq!(scene.get_anim_mgr().scene_uid(), scene_uid);
         assert!(scene.destroy_view(view_uid));
         assert_eq!(scene.view_count(), 0);
+    }
+
+    #[test]
+    fn scene_selection_ids_do_not_drive_view_activation_or_cleanup() {
+        let mut scene = Scene::<()>::new(Uid::new(1), "scene");
+        let object_uid = scene.add_object("object", ());
+        assert!(scene.set_active_object_uid(Some(object_uid)));
+        let renderer_uid = scene
+            .object_mut(object_uid)
+            .unwrap()
+            .create_renderer("simple");
+        assert!(!scene.set_active_renderer_uid(Some(Uid::new(999_999))));
+        assert!(scene.set_active_renderer_uid(Some(renderer_uid)));
+
+        let first_view = scene.create_view();
+        let second_view = scene.create_view();
+        assert!(scene.view(first_view).unwrap().is_active());
+        assert!(scene.view(second_view).unwrap().is_active());
+        assert!(scene.set_active_view_uid(Some(second_view)));
+        assert!(scene.view(first_view).unwrap().is_active());
+        assert!(scene.view(second_view).unwrap().is_active());
+
+        assert!(scene.destroy_object(object_uid));
+        assert!(scene.destroy_view(second_view));
+        assert_eq!(scene.active_object_uid(), Some(object_uid));
+        assert_eq!(scene.active_renderer_uid(), Some(renderer_uid));
+        assert_eq!(scene.active_view_uid(), Some(second_view));
+
+        scene.add_object("cleared object", ());
+        scene.clear_all_data();
+        assert_eq!(scene.object_count(), 0);
+        assert_eq!(scene.view_count(), 1);
+        assert_eq!(scene.view(first_view).unwrap().uid(), first_view);
     }
 
     #[test]

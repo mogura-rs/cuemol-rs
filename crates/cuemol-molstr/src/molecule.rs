@@ -151,6 +151,7 @@ pub struct MolCoord {
     bonds: Vec<Bond>,
     residue_props: BTreeMap<ResidueKey, BTreeMap<String, String>>,
     selection: Selector,
+    selection_text: String,
     coloring: SolidColoring,
     default_color: SolidColor,
     atoms_moved_generation: usize,
@@ -170,6 +171,7 @@ impl MolCoord {
             bonds: Vec::new(),
             residue_props: BTreeMap::new(),
             selection: Selector::All,
+            selection_text: String::new(),
             coloring: SolidColoring::new(),
             default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
             atoms_moved_generation: 0,
@@ -183,6 +185,7 @@ impl MolCoord {
             bonds: Vec::new(),
             residue_props: BTreeMap::new(),
             selection: Selector::All,
+            selection_text: String::new(),
             coloring: SolidColoring::new(),
             default_color: SolidColor::from_rgb(1.0, 1.0, 1.0),
             atoms_moved_generation: 0,
@@ -200,6 +203,10 @@ impl MolCoord {
 
     pub fn sel(&self) -> &Selector {
         self.selection()
+    }
+
+    pub fn selection_text(&self) -> &str {
+        &self.selection_text
     }
 
     pub fn coloring(&self) -> &SolidColoring {
@@ -239,11 +246,24 @@ impl MolCoord {
     }
 
     pub fn set_selection(&mut self, selection: Selector) {
+        self.selection_text = selection.to_string();
         self.selection = selection;
     }
 
     pub fn set_sel(&mut self, selection: Selector) {
         self.set_selection(selection);
+    }
+
+    pub fn set_selection_text(&mut self, value: impl Into<String>) -> Result<()> {
+        let value = value.into();
+        let selection = if value.is_empty() {
+            Selector::All
+        } else {
+            crate::parse_selector(&value)?
+        };
+        self.selection = selection;
+        self.selection_text = value;
+        Ok(())
     }
 
     /// Crystallographic unit-cell parameters (from PDB CRYST1 or mmCIF
@@ -1945,5 +1965,20 @@ mod tests {
             mol.get_residue_prop_str("A", "1", "basepair").unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn molcoord_preserves_empty_and_explicit_all_selection_text() {
+        let mut mol = MolCoord::new();
+        assert_eq!(mol.selection(), &Selector::All);
+        assert_eq!(mol.selection_text(), "");
+
+        mol.set_selection_text("*").unwrap();
+        assert_eq!(mol.selection(), &Selector::All);
+        assert_eq!(mol.selection_text(), "*");
+
+        mol.set_selection_text("").unwrap();
+        assert_eq!(mol.selection(), &Selector::All);
+        assert_eq!(mol.selection_text(), "");
     }
 }

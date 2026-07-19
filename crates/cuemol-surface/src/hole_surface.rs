@@ -306,6 +306,7 @@ pub fn build_hole_test_tube(
             mesh.push_vertex(SurfaceVertex {
                 position: point.center + normal * point.radius,
                 normal,
+                info: 0,
             });
         }
     }
