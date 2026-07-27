@@ -843,6 +843,34 @@ enum ModelRequest {
         selection: String,
         start: i32,
     },
+    SuperposeObjects {
+        algorithm: String,
+        reference_object_uid: u64,
+        reference_selection: String,
+        moving_object_uid: u64,
+        moving_selection: String,
+        auto_recenter: bool,
+        use_property: bool,
+    },
+    EditBond {
+        object_uid: u64,
+        aid1: i32,
+        aid2: i32,
+        make: bool,
+    },
+    CalculateContacts {
+        object_uid: u64,
+        selection: String,
+        r_min: f64,
+        r_max: f64,
+        hbond: bool,
+        max_count: usize,
+    },
+    AssignSecondaryStructure {
+        object_uid: u64,
+        ignore_bulge: bool,
+        angle: f64,
+    },
     SetDisplayOption {
         option: String,
         value: bool,
@@ -1140,6 +1168,114 @@ fn handle_model_request(
                 model.push_undo(undo);
             }
             model.status = format!("Renumbered residues for {count} atom(s)");
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SuperposeObjects {
+            algorithm,
+            reference_object_uid,
+            reference_selection,
+            moving_object_uid,
+            moving_selection,
+            auto_recenter,
+            use_property,
+        } => {
+            if reference_object_uid == moving_object_uid {
+                return Err("reference and moving objects must differ".to_string());
+            }
+            let undo = model.capture_undo();
+            model
+                .desktop
+                .superpose_objects_with_algorithm(
+                    Uid::new(reference_object_uid),
+                    &reference_selection,
+                    Uid::new(moving_object_uid),
+                    &moving_selection,
+                    &algorithm,
+                    use_property,
+                )
+                .map_err(|error| error.to_string())?;
+            model.status = "Molecular superposition applied".to_string();
+            model.rebuild_mesh(auto_recenter)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::EditBond {
+            object_uid,
+            aid1,
+            aid2,
+            make,
+        } => {
+            if aid1 == aid2 {
+                return Err("two different atom serials are required".to_string());
+            }
+            let undo = model.capture_undo();
+            let changed = if make {
+                model
+                    .desktop
+                    .make_bond_in_object(Uid::new(object_uid), aid1, aid2)
+            } else {
+                model
+                    .desktop
+                    .remove_bond_in_object(Uid::new(object_uid), aid1, aid2)
+            }
+            .map_err(|error| error.to_string())?;
+            if changed {
+                model.rebuild_mesh(false)?;
+                model.push_undo(undo);
+            }
+            model.status = if changed {
+                if make {
+                    "Bond created"
+                } else {
+                    "Bond removed"
+                }
+            } else {
+                "Bond was unchanged"
+            }
+            .to_string();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::CalculateContacts {
+            object_uid,
+            selection,
+            r_min,
+            r_max,
+            hbond,
+            max_count,
+        } => {
+            if !r_min.is_finite() || !r_max.is_finite() || r_min < 0.0 || r_max < r_min {
+                return Err("contact distance range is invalid".to_string());
+            }
+            let contacts = model
+                .desktop
+                .calc_atom_contacts_in_object(
+                    Uid::new(object_uid),
+                    &selection,
+                    r_min,
+                    r_max,
+                    hbond,
+                    max_count.clamp(1, 10_000),
+                )
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Contacts: {contacts}");
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::AssignSecondaryStructure {
+            object_uid,
+            ignore_bulge,
+            angle,
+        } => {
+            if !angle.is_finite() || !(0.0..=180.0).contains(&angle) {
+                return Err("helix angle must be between 0 and 180 degrees".to_string());
+            }
+            let undo = model.capture_undo();
+            let count = model
+                .desktop
+                .assign_secondary_structure_in_object(Uid::new(object_uid), ignore_bulge, angle)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Secondary structure assigned for {count} atom(s)");
+            model.rebuild_mesh(false)?;
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetDisplayOption { option, value } => {
@@ -1546,6 +1682,91 @@ fn renumber_residues(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn superpose_objects(
+    algorithm: String,
+    reference_object_uid: u64,
+    reference_selection: String,
+    moving_object_uid: u64,
+    moving_selection: String,
+    auto_recenter: bool,
+    use_property: bool,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SuperposeObjects {
+            algorithm,
+            reference_object_uid,
+            reference_selection,
+            moving_object_uid,
+            moving_selection,
+            auto_recenter,
+            use_property,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn edit_bond(
+    object_uid: u64,
+    aid1: i32,
+    aid2: i32,
+    make: bool,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::EditBond {
+            object_uid,
+            aid1,
+            aid2,
+            make,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn calculate_contacts(
+    object_uid: u64,
+    selection: String,
+    r_min: f64,
+    r_max: f64,
+    hbond: bool,
+    max_count: usize,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::CalculateContacts {
+            object_uid,
+            selection,
+            r_min,
+            r_max,
+            hbond,
+            max_count,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn assign_secondary_structure(
+    object_uid: u64,
+    ignore_bulge: bool,
+    angle: f64,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::AssignSecondaryStructure {
+            object_uid,
+            ignore_bulge,
+            angle,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn set_display_option(
     option: String,
     value: bool,
@@ -1821,6 +2042,10 @@ pub fn run() -> Result<(), tauri::Error> {
             delete_atoms,
             change_chain,
             renumber_residues,
+            superpose_objects,
+            edit_bond,
+            calculate_contacts,
+            assign_secondary_structure,
             set_display_option,
             set_density_level,
             set_background,
@@ -2057,5 +2282,80 @@ mod tests {
         .unwrap();
         assert_eq!(model.snapshot().animation_elapsed, 0.0);
         assert_eq!(model.camera.rotation(), before);
+    }
+
+    #[test]
+    fn analysis_dialog_requests_call_the_shared_tools() {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let pdb = root.join("tests/test_data/1CRN.pdb");
+        if !pdb.exists() {
+            return;
+        }
+        let mut model = model_without_gpu();
+        model.desktop.open_path(&pdb).unwrap();
+        model.desktop.open_path(&pdb).unwrap();
+        model.rebuild_mesh(true).unwrap();
+        let objects = model.desktop.active_object_summaries();
+        let first = objects[0].uid.get();
+        let second = objects[1].uid.get();
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::SuperposeObjects {
+                algorithm: "lsq".to_string(),
+                reference_object_uid: first,
+                reference_selection: "name CA".to_string(),
+                moving_object_uid: second,
+                moving_selection: "name CA".to_string(),
+                auto_recenter: true,
+                use_property: true,
+            },
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::EditBond {
+                object_uid: first,
+                aid1: 1,
+                aid2: 327,
+                make: true,
+            },
+        )
+        .unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CalculateContacts {
+                object_uid: first,
+                selection: "name CA".to_string(),
+                r_min: 1.0,
+                r_max: 8.0,
+                hbond: false,
+                max_count: 4,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert!(snapshot.status.starts_with("Contacts: ["));
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::AssignSecondaryStructure {
+                object_uid: first,
+                ignore_bulge: false,
+                angle: 0.0,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(
+            snapshot.status,
+            "Secondary structure assigned for 327 atom(s)"
+        );
+        assert!(snapshot.can_undo);
     }
 }

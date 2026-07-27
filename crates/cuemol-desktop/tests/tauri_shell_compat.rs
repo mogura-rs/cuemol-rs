@@ -106,6 +106,10 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "add_animation_object",
         "animation_control",
         "tick_animation",
+        "superpose_objects",
+        "edit_bond",
+        "calculate_contacts",
+        "assign_secondary_structure",
     ] {
         assert!(JS.contains(command), "missing menu binding {command}");
     }

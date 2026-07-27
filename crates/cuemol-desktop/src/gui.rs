@@ -458,14 +458,19 @@ struct GuiApplication {
     animation_elapsed: f32,
     superpose_reference: Option<cuemol_core::Uid>,
     superpose_moving: Option<cuemol_core::Uid>,
+    superpose_algorithm: String,
     superpose_reference_selection: String,
     superpose_moving_selection: String,
+    superpose_auto_recenter: bool,
+    superpose_use_property: bool,
     bond_aid1: String,
     bond_aid2: String,
     contact_r_min: f64,
     contact_r_max: f64,
     contact_hbond: bool,
+    contact_max_count: usize,
     secondary_ignore_breaks: bool,
+    secondary_gap_fill: bool,
     secondary_angle: f64,
     surface_path: String,
     surface_density: f64,
@@ -726,15 +731,20 @@ impl GuiApplication {
             animation_elapsed: 0.0,
             superpose_reference: None,
             superpose_moving: None,
+            superpose_algorithm: "lsq".to_string(),
             superpose_reference_selection: "name CA".to_string(),
             superpose_moving_selection: "name CA".to_string(),
+            superpose_auto_recenter: true,
+            superpose_use_property: false,
             bond_aid1: String::new(),
             bond_aid2: String::new(),
-            contact_r_min: 1.0,
+            contact_r_min: 1.5,
             contact_r_max: 3.5,
-            contact_hbond: false,
+            contact_hbond: true,
+            contact_max_count: 100,
             secondary_ignore_breaks: false,
-            secondary_angle: 60.0,
+            secondary_gap_fill: false,
+            secondary_angle: 120.0,
             surface_path: "surface.obj".to_string(),
             surface_density: 1.0,
             surface_probe_radius: 1.4,
@@ -3142,7 +3152,7 @@ impl GuiApplication {
         }
     }
 
-    fn apply_superpose(&mut self) {
+    fn apply_superpose(&mut self, camera: &mut CameraController) {
         let Some(reference) = self.superpose_reference else {
             self.set_status("No reference object selected");
             return;
@@ -3156,16 +3166,21 @@ impl GuiApplication {
             return;
         }
         let undo = self.capture_undo();
-        match self.state.superpose_objects(
+        match self.state.superpose_objects_with_algorithm(
             reference,
             &self.superpose_reference_selection,
             moving,
             &self.superpose_moving_selection,
+            &self.superpose_algorithm,
+            self.superpose_use_property,
         ) {
             Ok(matrix) => {
                 self.push_undo_snapshot(undo);
                 self.selected_object = Some(moving);
                 self.rebuild_snapshot();
+                if self.superpose_auto_recenter {
+                    camera.fit_snapshot(&self.snapshot);
+                }
                 self.log_lines.push(format!("Superpose matrix: {matrix}"));
                 self.set_status("Molecular superposition applied");
             }
@@ -3224,7 +3239,7 @@ impl GuiApplication {
             self.contact_r_min,
             self.contact_r_max,
             self.contact_hbond,
-            200,
+            self.contact_max_count,
         ) {
             Ok(json) => {
                 self.log_lines.push(format!("Contacts: {json}"));
@@ -3243,7 +3258,11 @@ impl GuiApplication {
         match self.state.assign_secondary_structure_in_object(
             object_uid,
             self.secondary_ignore_breaks,
-            self.secondary_angle,
+            if self.secondary_gap_fill {
+                self.secondary_angle
+            } else {
+                0.0
+            },
         ) {
             Ok(count) => {
                 self.push_undo_snapshot(undo);
@@ -3699,7 +3718,7 @@ impl GuiApplication {
         self.get_pdb_dialog(ctx, camera);
         self.script_dialog(ctx);
         self.console_dialog(ctx);
-        self.tool_dialog(ctx);
+        self.tool_dialog(ctx, camera);
     }
 
     fn about_dialog(&mut self, ctx: &egui::Context) {
@@ -3887,7 +3906,7 @@ impl GuiApplication {
         }
     }
 
-    fn tool_dialog(&mut self, ctx: &egui::Context) {
+    fn tool_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         let Some(title) = self.tool_dialog.clone() else {
             return;
         };
@@ -3898,7 +3917,7 @@ impl GuiApplication {
             .collapsible(false)
             .show(ctx, |ui| {
                 match title.as_str() {
-                    "Molecular superposition" => self.superpose_tool_ui(ui),
+                    "Molecular superposition" => self.superpose_tool_ui(ui, camera),
                     "Mol bond editor" => self.bond_editor_tool_ui(ui),
                     "Interaction" => self.interaction_tool_ui(ui),
                     "Reassign secondary str" => self.secondary_structure_tool_ui(ui),
@@ -3924,7 +3943,7 @@ impl GuiApplication {
         }
     }
 
-    fn superpose_tool_ui(&mut self, ui: &mut egui::Ui) {
+    fn superpose_tool_ui(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         let objects = self.state.active_object_summaries();
         if objects.len() < 2 {
             ui.label("At least two objects are required.");
@@ -3942,7 +3961,24 @@ impl GuiApplication {
         {
             self.superpose_moving = Some(objects[1].uid);
         }
-        egui::ComboBox::from_label("Reference")
+        egui::ComboBox::from_label("Algorithm")
+            .selected_text(match self.superpose_algorithm.as_str() {
+                "ssm" => "Secondary Structure Matching",
+                _ => "Least Square Fitting",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.superpose_algorithm,
+                    "lsq".to_string(),
+                    "Least Square Fitting",
+                );
+                ui.selectable_value(
+                    &mut self.superpose_algorithm,
+                    "ssm".to_string(),
+                    "Secondary Structure Matching",
+                );
+            });
+        egui::ComboBox::from_label("Reference molecule")
             .selected_text(object_combo_label(&objects, self.superpose_reference))
             .show_ui(ui, |ui| {
                 for object in &objects {
@@ -3953,7 +3989,7 @@ impl GuiApplication {
                     );
                 }
             });
-        egui::ComboBox::from_label("Moving")
+        egui::ComboBox::from_label("Moving molecule")
             .selected_text(object_combo_label(&objects, self.superpose_moving))
             .show_ui(ui, |ui| {
                 for object in &objects {
@@ -3974,8 +4010,10 @@ impl GuiApplication {
             egui::TextEdit::singleline(&mut self.superpose_moving_selection)
                 .hint_text("moving selection"),
         );
+        ui.checkbox(&mut self.superpose_auto_recenter, "Auto recenter");
+        ui.checkbox(&mut self.superpose_use_property, "Use xformMat property");
         if ui.button("Superpose").clicked() {
-            self.apply_superpose();
+            self.apply_superpose(camera);
         }
     }
 
@@ -4006,18 +4044,28 @@ impl GuiApplication {
             ui.label("Distance");
             ui.add(egui::DragValue::new(&mut self.contact_r_min).speed(0.1));
             ui.add(egui::DragValue::new(&mut self.contact_r_max).speed(0.1));
-            ui.checkbox(&mut self.contact_hbond, "H-bond");
         });
+        ui.horizontal(|ui| {
+            ui.label("Max labels");
+            ui.add(egui::DragValue::new(&mut self.contact_max_count).range(1..=10_000));
+        });
+        ui.checkbox(&mut self.contact_hbond, "Hydrogen bond (N, O) only");
         if ui.button("Calculate Contacts").clicked() {
             self.calculate_contacts();
         }
     }
 
     fn secondary_structure_tool_ui(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.secondary_ignore_breaks, "Ignore chain breaks");
+        ui.checkbox(&mut self.secondary_ignore_breaks, "Ignore β bulge");
+        ui.checkbox(&mut self.secondary_gap_fill, "Helix gap-fill angle (°)");
         ui.horizontal(|ui| {
-            ui.label("Helix angle");
-            ui.add(egui::DragValue::new(&mut self.secondary_angle).speed(1.0));
+            ui.label("Gap-fill angle");
+            ui.add_enabled(
+                self.secondary_gap_fill,
+                egui::DragValue::new(&mut self.secondary_angle)
+                    .speed(5.0)
+                    .range(0.0..=180.0),
+            );
         });
         if ui.button("Assign").clicked() {
             self.assign_secondary_structure();

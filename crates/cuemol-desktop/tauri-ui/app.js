@@ -33,6 +33,7 @@ const sequenceView = document.getElementById("sequence-view");
 const referenceDialog = document.getElementById("reference-dialog");
 const dialogTitle = document.getElementById("dialog-title");
 const dialogContent = document.getElementById("dialog-content");
+const dialogFooter = document.getElementById("dialog-footer");
 const centerMarkElement = document.querySelector(".center-mark");
 const selectionRectangle = document.querySelector(".selection-rectangle");
 const animationPlay = document.getElementById("animation-play");
@@ -123,9 +124,51 @@ function dialogField(label, value, type = "text") {
   return input;
 }
 
+function dialogSelect(label, options, value) {
+  const wrapper = document.createElement("label");
+  wrapper.className = "dialog-field";
+  const text = document.createElement("span");
+  text.textContent = label;
+  const select = document.createElement("select");
+  for (const [optionValue, optionLabel] of options) {
+    const option = document.createElement("option");
+    option.value = String(optionValue);
+    option.textContent = optionLabel;
+    select.append(option);
+  }
+  select.value = String(value);
+  wrapper.append(text, select);
+  dialogContent.append(wrapper);
+  return select;
+}
+
+function dialogCheckbox(label, checked) {
+  const wrapper = document.createElement("label");
+  wrapper.className = "dialog-check";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  const text = document.createElement("span");
+  text.textContent = label;
+  wrapper.append(input, text);
+  dialogContent.append(wrapper);
+  return input;
+}
+
+function dialogActions(...actions) {
+  dialogFooter.hidden = true;
+  referenceDialog.classList.add("has-actions");
+  const row = document.createElement("div");
+  row.className = "dialog-actions";
+  row.append(...actions);
+  dialogContent.append(row);
+}
+
 function showReferenceDialog(title) {
   dialogTitle.textContent = title;
   dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.classList.remove("has-actions");
   if (title === "About CueMol2") {
     const heading = document.createElement("h2");
     heading.textContent = "CueMol2";
@@ -156,6 +199,140 @@ function showReferenceDialog(title) {
       dialogParagraph(`Background: ${snapshot?.background || "black"}`),
       dialogParagraph(`Center mark: ${centerMark}`),
     );
+  } else if (title === "Molecular superposition") {
+    const objects = activeObjects();
+    if (objects.length < 2) {
+      dialogContent.append(dialogParagraph("At least two molecular objects are required."));
+    } else {
+      const objectOptions = objects.map((object) => [object.uid, object.name]);
+      const algorithm = dialogSelect(
+        "Algorithm",
+        [
+          ["lsq", "Least Square Fitting"],
+          ["ssm", "Secondary Structure Matching"],
+        ],
+        "lsq",
+      );
+      const referenceObject = dialogSelect("Reference molecule", objectOptions, objects[0].uid);
+      const referenceSelection = dialogField("Reference selection", "name CA");
+      const movingObject = dialogSelect("Moving molecule", objectOptions, objects[1].uid);
+      const movingSelection = dialogField("Moving selection", "name CA");
+      const autoRecenter = dialogCheckbox("Auto recenter", true);
+      const useProperty = dialogCheckbox("Use xformMat property", false);
+      const apply = button("OK", "dialog-primary", async () => {
+        await mutate("superpose_objects", {
+          algorithm: algorithm.value,
+          referenceObjectUid: Number(referenceObject.value),
+          referenceSelection: referenceSelection.value,
+          movingObjectUid: Number(movingObject.value),
+          movingSelection: movingSelection.value,
+          autoRecenter: autoRecenter.checked,
+          useProperty: useProperty.checked,
+        });
+        referenceDialog.close();
+      });
+      dialogActions(apply);
+    }
+  } else if (title === "Mol bond editor") {
+    dialogTitle.textContent = "Edit non-standard bonds";
+    const objects = activeObjects();
+    if (objects.length === 0) {
+      dialogContent.append(dialogParagraph("No molecular object is loaded."));
+    } else {
+      const objectOptions = objects.map((object) => [object.uid, object.name]);
+      const object = dialogSelect(
+        "Mol name",
+        objectOptions,
+        selectedObjectUid ?? objects[0].uid,
+      );
+      const aid1 = dialogField("Atom1", "", "number");
+      const aid2 = dialogField("Atom2", "", "number");
+      const make = button("Add", "dialog-primary", async () => {
+        await mutate("edit_bond", {
+          objectUid: Number(object.value),
+          aid1: Number(aid1.value),
+          aid2: Number(aid2.value),
+          make: true,
+        });
+      });
+      const remove = button("Delete", "", async () => {
+        await mutate("edit_bond", {
+          objectUid: Number(object.value),
+          aid1: Number(aid1.value),
+          aid2: Number(aid2.value),
+          make: false,
+        });
+      });
+      dialogActions(remove, make);
+    }
+  } else if (title === "Interaction") {
+    dialogTitle.textContent = "Interaction analysis";
+    const objects = activeObjects();
+    if (objects.length === 0) {
+      dialogContent.append(dialogParagraph("No molecular object is loaded."));
+    } else {
+      const objectOptions = objects.map((object) => [object.uid, object.name]);
+      const object = dialogSelect(
+        "Molecule",
+        objectOptions,
+        selectedObjectUid ?? objects[0].uid,
+      );
+      const selection = dialogField("Selection 1", snapshot.selection);
+      const rMin = dialogField("Min distance (Å)", "1.5", "number");
+      rMin.step = "0.1";
+      rMin.min = "0";
+      const rMax = dialogField("Max distance (Å)", "3.5", "number");
+      rMax.step = "0.1";
+      rMax.min = "0";
+      const maxCount = dialogField("Max labels", "100", "number");
+      maxCount.min = "1";
+      const hbond = dialogCheckbox("Hydrogen bond (N, O) only", true);
+      const calculate = button("OK", "dialog-primary", async () => {
+        await mutate("calculate_contacts", {
+          objectUid: Number(object.value),
+          selection: selection.value,
+          rMin: Number(rMin.value),
+          rMax: Number(rMax.value),
+          hbond: hbond.checked,
+          maxCount: Number(maxCount.value),
+        });
+        showBottomPanel("output");
+        referenceDialog.close();
+      });
+      dialogActions(calculate);
+    }
+  } else if (title === "Reassign secondary str") {
+    dialogTitle.textContent = "Protein secondary str tool";
+    const objects = activeObjects();
+    if (objects.length === 0) {
+      dialogContent.append(dialogParagraph("No molecular object is loaded."));
+    } else {
+      const objectOptions = objects.map((object) => [object.uid, object.name]);
+      const object = dialogSelect(
+        "Molecule",
+        objectOptions,
+        selectedObjectUid ?? objects[0].uid,
+      );
+      const ignoreBulge = dialogCheckbox("Ignore β bulge", false);
+      const gapFill = dialogCheckbox("Helix gap-fill angle (°)", false);
+      const angle = dialogField("Gap-fill angle", "120", "number");
+      angle.min = "0";
+      angle.max = "180";
+      angle.step = "5";
+      angle.disabled = true;
+      gapFill.addEventListener("change", () => {
+        angle.disabled = !gapFill.checked;
+      });
+      const assign = button("OK", "dialog-primary", async () => {
+        await mutate("assign_secondary_structure", {
+          objectUid: Number(object.value),
+          ignoreBulge: ignoreBulge.checked,
+          angle: gapFill.checked ? Number(angle.value) : 0,
+        });
+        referenceDialog.close();
+      });
+      dialogActions(assign);
+    }
   } else if (title === "Delete mol atoms") {
     const object = selectedObject();
     if (!object) {
@@ -169,7 +346,7 @@ function showReferenceDialog(title) {
         });
         referenceDialog.close();
       });
-      dialogContent.append(apply);
+      dialogActions(apply);
     }
   } else if (title === "Change chain ID") {
     const object = selectedObject();
@@ -186,7 +363,7 @@ function showReferenceDialog(title) {
         });
         referenceDialog.close();
       });
-      dialogContent.append(apply);
+      dialogActions(apply);
     }
   } else if (title === "Change residue number") {
     const object = selectedObject();
@@ -203,7 +380,7 @@ function showReferenceDialog(title) {
         });
         referenceDialog.close();
       });
-      dialogContent.append(apply);
+      dialogActions(apply);
     }
   } else if (title === "Animation object properties") {
     const object = snapshot?.animationObjects.find(
@@ -223,7 +400,7 @@ function showReferenceDialog(title) {
         });
         referenceDialog.close();
       });
-      dialogContent.append(apply);
+      dialogActions(apply);
     }
   } else if (title === "Open PDB") {
     const pdbId = dialogField("PDB ID", "1CRN");
@@ -231,7 +408,7 @@ function showReferenceDialog(title) {
       const id = pdbId.value.trim().toUpperCase();
       if (id) window.open(`https://www.rcsb.org/structure/${encodeURIComponent(id)}`, "_blank");
     });
-    dialogContent.append(open);
+    dialogActions(open);
   } else {
     dialogContent.append(dialogParagraph(`${title} dialog`));
   }

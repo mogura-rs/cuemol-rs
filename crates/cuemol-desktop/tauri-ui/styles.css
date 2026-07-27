@@ -1365,6 +1365,10 @@ summary:focus-visible {
   min-height: 180px;
 }
 
+.reference-dialog.has-actions form {
+  grid-template-rows: 30px minmax(110px, auto);
+}
+
 .reference-dialog header,
 .reference-dialog footer {
   display: flex;
@@ -1415,8 +1419,21 @@ summary:focus-visible {
   margin-bottom: 8px;
 }
 
+.dialog-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 12px;
+}
+
 .dialog-primary {
-  float: right;
   min-width: 78px;
 }
 

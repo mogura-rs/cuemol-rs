@@ -3798,14 +3798,14 @@ impl DesktopAppState {
     pub fn assign_secondary_structure_in_object(
         &mut self,
         object_uid: Uid,
-        ignore_breaks: bool,
+        ignore_bulge: bool,
         angle: f64,
     ) -> Result<usize> {
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        MolAnlManager::new().calc_prot_2ndry2(object.mol_mut(), ignore_breaks, angle);
+        MolAnlManager::new().calc_prot_2ndry2(object.mol_mut(), ignore_bulge, angle);
         Ok(object.mol().atom_count())
     }
 
@@ -3840,15 +3840,85 @@ impl DesktopAppState {
         moving_object: Uid,
         moving_selection: &str,
     ) -> Result<String> {
+        self.superpose_objects_with_algorithm(
+            reference_object,
+            reference_selection,
+            moving_object,
+            moving_selection,
+            "ssm",
+            false,
+        )
+    }
+
+    /// Superpose one molecule onto another with the algorithm exposed by CueMol2's
+    /// Molecular superposition dialog (`LSQ` or `SSM`).
+    pub fn superpose_objects_with_algorithm(
+        &mut self,
+        reference_object: Uid,
+        reference_selection: &str,
+        moving_object: Uid,
+        moving_selection: &str,
+        algorithm: &str,
+        use_property: bool,
+    ) -> Result<String> {
+        if reference_object == moving_object {
+            return Err(CueMolError::invalid_argument(
+                "reference and moving objects must differ",
+            ));
+        }
         let reference_selection = nonempty_selection(reference_selection);
         let moving_selection = nonempty_selection(moving_selection);
-        let matrix = MolAnlManager::new().superpose_ssm2_in_manager(
-            self.scene_manager_mut(),
-            reference_object.get(),
-            reference_selection,
-            moving_object.get(),
-            moving_selection,
-        )?;
+        let manager = MolAnlManager::new();
+        let reference_selector = parse_gui_selector(reference_selection)?.unwrap_or(Selector::All);
+        let moving_selector = parse_gui_selector(moving_selection)?.unwrap_or(Selector::All);
+        let reference = self
+            .scene_manager()
+            .object(reference_object)
+            .ok_or_else(|| {
+                CueMolError::NotFound(format!("reference object {}", reference_object.get()))
+            })?
+            .mol()
+            .clone();
+        let moving = self
+            .scene_manager()
+            .object(moving_object)
+            .ok_or_else(|| CueMolError::NotFound(format!("moving object {}", moving_object.get())))?
+            .mol()
+            .clone();
+        let matrix = match algorithm.trim().to_ascii_lowercase().as_str() {
+            "ssm" => manager.superpose_ssm_matrix(
+                &reference,
+                &reference_selector,
+                &moving,
+                &moving_selector,
+            )?,
+            "lsq" => manager.superpose_lsq_matrix(
+                &reference,
+                &reference_selector,
+                &moving,
+                &moving_selector,
+            )?,
+            other => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unsupported superposition algorithm: {other}"
+                )));
+            }
+        };
+        let moving = self
+            .scene_manager_mut()
+            .object_mut(moving_object)
+            .ok_or_else(|| {
+                CueMolError::NotFound(format!("moving object {}", moving_object.get()))
+            })?;
+        if use_property {
+            moving.set_xform_matrix(matrix);
+        } else {
+            let moving_molecule = moving.mol_mut();
+            if moving_molecule.xform_by_mat(matrix, None) == 0 {
+                return Err(CueMolError::invalid_argument("no moving atoms selected"));
+            }
+            moving_molecule.fire_atoms_moved();
+        }
         Ok(matrix.to_script_string())
     }
 
@@ -46913,6 +46983,14 @@ attribute \"dep\" string \"positions\"
             .superpose_objects(first, "name CA", second, "name CA")
             .unwrap();
         assert!(matrix.starts_with('('));
+        let matrix = app
+            .superpose_objects_with_algorithm(first, "name CA", second, "name CA", "lsq", true)
+            .unwrap();
+        assert!(matrix.starts_with('('));
+        assert_eq!(
+            app.scene_manager().object(second).unwrap().xform_matrix(),
+            Matrix4::IDENTITY
+        );
 
         assert!(app.make_bond_in_object(first, 1, 327).unwrap());
         assert!(app.remove_bond_in_object(first, 1, 327).unwrap());
