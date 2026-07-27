@@ -45,8 +45,9 @@ function showError(error) {
 function recordStatus(message) {
   if (!message || statusTrail.at(-1) === message) return;
   statusTrail.push(message);
-  statusTrail = statusTrail.slice(-4);
-  statusHistory.textContent = statusTrail.slice(0, -1).join("  /  ") || "CueMol2 Rust core";
+  statusTrail = statusTrail.slice(-80);
+  statusHistory.textContent = statusTrail.join("\n") || "CueMol2 Rust core";
+  statusHistory.scrollTop = statusHistory.scrollHeight;
 }
 
 function button(label, className, onClick) {
@@ -172,7 +173,7 @@ function renderShell() {
   projectionReadout.textContent = snapshot.perspective ? "PERSPECTIVE" : "ORTHO";
   statusText.textContent = snapshot.status;
   recordStatus(snapshot.status);
-  metrics.textContent = `${snapshot.scenes.length} SCENES / ${snapshot.objects.length} OBJECTS`;
+  metrics.textContent = `${snapshot.scenes.length} scenes / ${snapshot.objects.length} objects`;
   renderSceneTabs();
   renderSceneTree();
   renderInspector();
@@ -327,7 +328,77 @@ async function handleAction(action) {
 }
 
 document.querySelectorAll("[data-action]").forEach((element) => {
-  element.addEventListener("click", () => handleAction(element.dataset.action));
+  element.addEventListener("click", () => {
+    document.querySelectorAll(".menu[open]").forEach((menu) => menu.removeAttribute("open"));
+    handleAction(element.dataset.action);
+  });
+});
+
+document.querySelectorAll("[data-ribbon-select]").forEach((element) => {
+  element.addEventListener("click", () => {
+    const target = element.dataset.ribbonSelect;
+    document.querySelectorAll("[data-ribbon-select]").forEach((tab) => {
+      const active = tab === element;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", String(active));
+    });
+    document.querySelectorAll("[data-ribbon-panel]").forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.ribbonPanel === target);
+    });
+    scheduleRender(140);
+  });
+});
+
+document.querySelector("[data-ribbon-collapse]")?.addEventListener("click", () => {
+  document.querySelector(".ribbon")?.classList.toggle("collapsed");
+  scheduleRender(140);
+});
+
+document.querySelectorAll("[data-panel-toggle]").forEach((element) => {
+  element.addEventListener("click", (event) => {
+    if (event.target.closest(".panel-close")) return;
+    const card = element.closest("[data-side-card]");
+    const open = card.classList.toggle("open");
+    element.setAttribute("aria-expanded", String(open));
+    element.querySelector(".disclosure").textContent = open ? "▾" : "▸";
+    scheduleRender(140);
+  });
+});
+
+document.querySelectorAll(".toolbar-group[role='radiogroup']").forEach((group) => {
+  group.querySelectorAll(".tool-button").forEach((element) => {
+    element.addEventListener("click", () => {
+      group.querySelectorAll(".tool-button").forEach((button) => {
+        button.classList.toggle("selected", button === element);
+      });
+    });
+  });
+});
+
+document.querySelectorAll("[data-bottom-select]").forEach((element) => {
+  element.addEventListener("click", () => {
+    const target = element.dataset.bottomSelect;
+    document.querySelectorAll("[data-bottom-select]").forEach((tab) => {
+      tab.classList.toggle("active", tab === element);
+    });
+    document.querySelectorAll("[data-bottom-panel]").forEach((panel) => {
+      panel.classList.toggle("active", panel.dataset.bottomPanel === target);
+    });
+  });
+});
+
+document.querySelectorAll(".selection-tabs button").forEach((element) => {
+  element.addEventListener("click", () => {
+    document.querySelectorAll(".selection-tabs button").forEach((tab) => {
+      tab.classList.toggle("active", tab === element);
+    });
+  });
+});
+
+document.addEventListener("pointerdown", (event) => {
+  document.querySelectorAll(".menu[open]").forEach((menu) => {
+    if (!menu.contains(event.target)) menu.removeAttribute("open");
+  });
 });
 
 selectionInput.addEventListener("keydown", (event) => {

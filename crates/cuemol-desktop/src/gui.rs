@@ -199,8 +199,8 @@ impl NativeRunner {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("CueMol2-rs")
-            .with_inner_size(PhysicalSize::new(1280, 820));
+            .with_title("CueMol2")
+            .with_inner_size(PhysicalSize::new(1024, 768));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -404,7 +404,7 @@ struct GuiApplication {
     show_labels: bool,
     /// Hydrogen-bond dashed lines (heavy-atom N···O heuristic).
     show_hbonds: bool,
-    /// Light vs dark UI theme (CueMol2's native XUL look is light; dark is the default).
+    /// Light vs dark UI theme (CueMol2's native XUL look is light by default).
     light_theme: bool,
     /// Force every left-dock accordion section open (an "expand all panels" aid, also
     /// used to snapshot the bodies inside the REAL narrow dock for layout review).
@@ -538,8 +538,6 @@ enum CenterMark {
 enum BottomTab {
     Output,
     Sequence,
-    Animation,
-    Render,
 }
 
 /// Selection-panel tab (CueMol2 `selection-panel.xul`): the free-text Command tab
@@ -561,12 +559,11 @@ enum ColoringMode {
 }
 
 /// Ribbon toolbar tabs mirroring CueMol2's `topbar/cuemol2-ribbon.xul`
-/// (`tool-ribbon.js`): Home (navigate), Measure, Animation.
+/// (`tool-ribbon.js`): Home (navigate) and Measure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RibbonTab {
     Home,
     Measure,
-    Animation,
 }
 
 /// Home-tab interaction mode radio group (CueMol2 `navi-toolribbon.js`):
@@ -630,6 +627,17 @@ impl LeftPanel {
             LeftPanel::Animation => "Animation",
         }
     }
+
+    fn default_open(self) -> bool {
+        matches!(
+            self,
+            LeftPanel::Workspace
+                | LeftPanel::MolStruct
+                | LeftPanel::Selection
+                | LeftPanel::Coloring
+                | LeftPanel::DensityMap
+        )
+    }
 }
 
 impl GuiApplication {
@@ -668,7 +676,7 @@ impl GuiApplication {
             mesh_import_path: String::new(),
             show_labels: false,
             show_hbonds: false,
-            light_theme: false,
+            light_theme: true,
             force_open_all_panels: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
@@ -757,7 +765,7 @@ impl GuiApplication {
 
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         self.pixels_per_point = ctx.pixels_per_point();
-        // UI theme (View menu): CueMol2's native XUL look is light; dark is the default.
+        // UI theme (View menu): CueMol2's native XUL look is light by default.
         ctx.set_visuals(if self.light_theme {
             egui::Visuals::light()
         } else {
@@ -1092,12 +1100,12 @@ impl GuiApplication {
                 });
                 ui.menu_button("Rendering", |ui| {
                     if ui.button("POV-Ray rendering...").clicked() {
-                        self.bottom_tab = BottomTab::Render;
                         self.render_backend = "POV-Ray".to_string();
+                        self.tool_dialog = Some("POV-Ray rendering".to_string());
                         ui.close();
                     }
                     if ui.button("Animation rendering...").clicked() {
-                        self.bottom_tab = BottomTab::Animation;
+                        self.tool_dialog = Some("Animation rendering".to_string());
                         ui.close();
                     }
                     if ui.button("Export scene...").clicked() {
@@ -1262,20 +1270,18 @@ impl GuiApplication {
         });
     }
 
-    /// Ribbon toolbar (CueMol2 `topbar/cuemol2-ribbon.xul`): a tabbed toolbar with
-    /// Home / Measure / Animation tabs sitting directly below the menu bar.
+    /// Ribbon toolbar (CueMol2 `topbar/cuemol2-ribbon.xul`): Home and Measure
+    /// tabs sitting directly below the menu bar.
     fn ribbon_bar(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         egui::TopBottomPanel::top("ribbon").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Home, "Home");
                 ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Measure, "Measure");
-                ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Animation, "Animation");
             });
             ui.separator();
             match self.ribbon_tab {
                 RibbonTab::Home => self.ribbon_home(ui, camera),
                 RibbonTab::Measure => self.ribbon_measure(ui),
-                RibbonTab::Animation => self.ribbon_animation(ui),
             }
         });
     }
@@ -1379,24 +1385,6 @@ impl GuiApplication {
         }
     }
 
-    fn ribbon_animation(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let play_label = if self.animation_playing {
-                "⏸ Pause"
-            } else {
-                "▶ Play"
-            };
-            if ui.button(play_label).clicked() {
-                self.animation_playing = !self.animation_playing;
-            }
-            if ui.button("⏹ Stop").clicked() {
-                self.animation_playing = false;
-            }
-            ui.separator();
-            ui.label(format!("frames: {}", self.animation_frames));
-        });
-    }
-
     /// Left dock: a vertical accordion of CueMol2's eight side panels
     /// (`cuemol2-panels.js` / `sidepanelholder`). Each is an independently
     /// collapsible `CollapsingHeader`.
@@ -1408,7 +1396,7 @@ impl GuiApplication {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for panel in LeftPanel::ALL {
                         egui::CollapsingHeader::new(panel.title())
-                            .default_open(matches!(panel, LeftPanel::Workspace))
+                            .default_open(panel.default_open())
                             .open(self.force_open_all_panels.then_some(true))
                             .show(ui, |ui| {
                                 self.left_panel_body(ui, camera, panel);
@@ -2614,15 +2602,11 @@ impl GuiApplication {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Output, "Output");
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Sequence, "Sequence");
-                    ui.selectable_value(&mut self.bottom_tab, BottomTab::Animation, "Animation");
-                    ui.selectable_value(&mut self.bottom_tab, BottomTab::Render, "Render");
                 });
                 ui.separator();
                 match self.bottom_tab {
                     BottomTab::Output => self.output_tab(ui),
                     BottomTab::Sequence => self.sequence_tab(ui),
-                    BottomTab::Animation => self.animation_tab(ui),
-                    BottomTab::Render => self.render_tab(ui),
                 }
             });
     }
@@ -3860,6 +3844,8 @@ impl GuiApplication {
                     "About plugins" => self.plugin_tool_ui(ui),
                     "About config" => self.config_tool_ui(ui),
                     "Addon manager" => self.addon_tool_ui(ui),
+                    "POV-Ray rendering" => self.render_tab(ui),
+                    "Animation rendering" => self.animation_tab(ui),
                     _ => {
                         ui.label(tool_status_text(&title));
                     }
@@ -6127,6 +6113,24 @@ mod tests {
             });
         let pdb = root.join("tests/test_data/1CRN.pdb");
         pdb.exists().then_some(pdb)
+    }
+
+    #[test]
+    fn left_panel_order_and_defaults_match_cuemol2() {
+        let panels = LeftPanel::ALL.map(|panel| (panel.title(), panel.default_open()));
+        assert_eq!(
+            panels,
+            [
+                ("Workspace", true),
+                ("MolStruct", true),
+                ("Selection", true),
+                ("Coloring", true),
+                ("Symmetry", false),
+                ("Density map", true),
+                ("View", false),
+                ("Animation", false),
+            ]
+        );
     }
 
     /// Exercise the whole shell + every left-panel section headlessly so a runtime

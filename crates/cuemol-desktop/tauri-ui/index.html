@@ -3,141 +3,267 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light" />
     <title>CueMol2</title>
     <link rel="stylesheet" href="./styles.css" />
     <script src="./app.js" defer></script>
   </head>
   <body>
     <div class="app-shell">
-      <header class="titlebar">
-        <div class="brand">
-          <span class="brand-mark" aria-hidden="true">
-            <i></i><i></i><i></i>
-          </span>
-          <span class="brand-name">CueMol</span>
-          <span class="brand-version">2 / TAURI</span>
-        </div>
-        <nav class="menu-bar" aria-label="Application actions">
-          <button type="button" data-action="open">Open</button>
-          <button type="button" data-action="save">Save scene</button>
-          <button type="button" data-action="export">Export PNG</button>
-        </nav>
-        <div class="window-readout">
-          <span class="live-dot" aria-hidden="true"></span>
-          <span id="projection-readout">ORTHO</span>
-        </div>
+      <header class="application-menu">
+        <details class="menu">
+          <summary>File</summary>
+          <div class="menu-popup">
+            <button type="button" data-action="new-scene">New Tab</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-action="open">Open File…</button>
+            <button type="button" data-action="save">Save Scene</button>
+            <button type="button" data-action="export">Export PNG…</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-action="close-scene">Close Tab</button>
+          </div>
+        </details>
+        <button type="button" class="menu-label">Edit</button>
+        <button type="button" class="menu-label">Rendering</button>
+        <details class="menu">
+          <summary>Scene</summary>
+          <div class="menu-popup">
+            <button type="button" data-action="fit">Fit view</button>
+            <button type="button" data-action="projection">Toggle projection</button>
+          </div>
+        </details>
+        <button type="button" class="menu-label">View</button>
+        <button type="button" class="menu-label">Tools</button>
+        <button type="button" class="menu-label">Window</button>
+        <button type="button" class="menu-label">Help</button>
       </header>
 
-      <section class="scene-strip" aria-label="Scenes">
-        <div id="scene-tabs" class="scene-tabs"></div>
-        <button class="icon-button scene-add" type="button" data-action="new-scene" title="New scene">+</button>
-      </section>
+      <section class="ribbon">
+        <div class="ribbon-tabs" role="tablist" aria-label="Tools">
+          <button class="ribbon-tab active" type="button" role="tab" aria-selected="true" data-ribbon-select="home">
+            Home
+          </button>
+          <button class="ribbon-tab" type="button" role="tab" aria-selected="false" data-ribbon-select="measure">
+            Measure
+          </button>
+          <button class="ribbon-collapse" type="button" title="Collapse ribbon" data-ribbon-collapse>⌃</button>
+        </div>
 
-      <section class="instrument-bar" aria-label="View controls">
-        <div class="tool-cluster">
-          <span class="cluster-label">VIEW</span>
-          <button type="button" data-action="fit">Fit</button>
-          <button type="button" data-action="projection">Projection</button>
-        </div>
-        <div class="tool-cluster selection-cluster">
-          <label for="selection-input">SELECTION</label>
-          <input id="selection-input" type="text" spellcheck="false" placeholder="chain A and name CA" />
-          <button type="button" data-action="select">Apply</button>
-          <button class="quiet" type="button" data-action="clear-selection">Clear</button>
-        </div>
-        <div class="tool-cluster readout-cluster" aria-label="Mouse controls">
-          <span>LMB</span><b>ORBIT</b>
-          <span>RMB</span><b>PAN</b>
-          <span>WHEEL</span><b>ZOOM</b>
-        </div>
-      </section>
-
-      <main class="workbench">
-        <aside class="panel scene-panel">
-          <div class="panel-heading">
-            <div>
-              <span class="eyebrow">NAVIGATOR</span>
-              <h1>Scene hierarchy</h1>
+        <div class="ribbon-panels">
+          <div class="ribbon-panel active" role="tabpanel" data-ribbon-panel="home">
+            <div class="toolbar-group file-tools">
+              <button class="tool-button new-tab-tool" type="button" data-action="new-scene">
+                <span class="tool-icon">＋</span><span>New tab</span>
+              </button>
+              <button class="tool-button open-tool" type="button" data-action="open">
+                <span class="tool-icon">↗</span><span>Open</span>
+              </button>
+              <button class="tool-button save-tool" type="button" data-action="save">
+                <span class="tool-icon">▣</span><span>Save as</span>
+              </button>
             </div>
-            <button class="icon-button" type="button" data-action="close-scene" title="Close active scene">×</button>
+            <div class="toolbar-separator"></div>
+            <div class="toolbar-group scene-tools">
+              <button class="tool-button" type="button" data-action="open">
+                <span class="tool-icon">▱</span><span>Open scene</span>
+              </button>
+              <button class="tool-button" type="button" data-action="fit">
+                <span class="tool-icon">↻</span><span>Reload / fit</span>
+              </button>
+              <button class="tool-button" type="button" data-action="save">
+                <span class="tool-icon">▣</span><span>Save scene</span>
+              </button>
+            </div>
+            <div class="toolbar-separator"></div>
+            <div class="toolbar-group history-tools">
+              <button class="tool-button compact" type="button" disabled>
+                <span class="tool-icon">↶</span><span>Undo</span>
+              </button>
+              <button class="tool-button compact" type="button" disabled>
+                <span class="tool-icon">↷</span><span>Redo</span>
+              </button>
+            </div>
+            <div class="toolbar-separator"></div>
+            <div class="toolbar-group mode-tools" role="radiogroup" aria-label="Navigation mode">
+              <button class="tool-button selected" type="button">
+                <span class="tool-icon pointer-icon">➤</span><span>Rotate</span>
+              </button>
+              <button class="tool-button" type="button">
+                <span class="tool-icon rect-icon">□</span><span>Rect select</span>
+              </button>
+            </div>
           </div>
-          <div id="scene-tree" class="scene-tree"></div>
+
+          <div class="ribbon-panel" role="tabpanel" data-ribbon-panel="measure">
+            <div class="toolbar-group mode-tools" role="radiogroup" aria-label="Measurement mode">
+              <button class="tool-button selected" type="button">
+                <span class="tool-icon">↔</span><span>Distance</span>
+              </button>
+              <button class="tool-button" type="button">
+                <span class="tool-icon">∠</span><span>Angle</span>
+              </button>
+              <button class="tool-button" type="button">
+                <span class="tool-icon">⤨</span><span>Torsion</span>
+              </button>
+            </div>
+            <div class="toolbar-separator"></div>
+            <label class="renderer-name">
+              Renderer name:
+              <input type="text" value="measure" />
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <main class="content-holder">
+        <aside class="side-panel" aria-label="CueMol panels">
+          <section class="side-card open" data-side-card>
+            <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
+              <span class="disclosure">▾</span><span>Workspace</span><span class="panel-close">×</span>
+            </button>
+            <div class="side-body workspace-body">
+              <div class="tree-columns"><span>V</span><span>Name</span></div>
+              <div id="scene-tree" class="scene-tree"></div>
+              <div class="workspace-tools">
+                <button type="button" data-action="fit" title="Zoom at">⌕</button>
+                <button type="button" data-action="add-renderer" title="Add renderer">＋</button>
+                <button type="button" data-action="close-scene" title="Delete">−</button>
+                <button type="button" title="Properties">⚙</button>
+              </div>
+              <div class="workspace-properties">
+                <strong id="inspector-title">No object</strong>
+                <dl id="object-stats" class="stats-grid">
+                  <div><dt>Atoms</dt><dd>—</dd></div>
+                  <div><dt>Residues</dt><dd>—</dd></div>
+                  <div><dt>Bonds</dt><dd>—</dd></div>
+                </dl>
+                <label class="field-label" for="renderer-type">New renderer</label>
+                <div class="add-renderer">
+                  <select id="renderer-type" aria-label="Renderer type">
+                    <option value="simple">Simple</option>
+                    <option value="ballstick">Ball &amp; stick</option>
+                    <option value="cpk">CPK</option>
+                    <option value="ribbon">Ribbon</option>
+                    <option value="cartoon">Cartoon</option>
+                    <option value="trace">Trace</option>
+                    <option value="tube">Tube</option>
+                    <option value="spline">Spline</option>
+                  </select>
+                  <button type="button" data-action="add-renderer">Add</button>
+                </div>
+                <div id="renderer-list" class="renderer-list"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="side-card open" data-side-card>
+            <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
+              <span class="disclosure">▾</span><span>MolStruct</span><span class="panel-close">×</span>
+            </button>
+            <div class="side-body">
+              <p>Select a molecule in Workspace to inspect chains and residues.</p>
+            </div>
+          </section>
+
+          <section class="side-card open" data-side-card>
+            <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
+              <span class="disclosure">▾</span><span>Selection</span><span class="panel-close">×</span>
+            </button>
+            <div class="side-body selection-body">
+              <div class="selection-tabs"><button class="active" type="button">Command</button><button type="button">Editor</button></div>
+              <label for="selection-input">Selection command</label>
+              <input id="selection-input" type="text" spellcheck="false" placeholder="chain A and name CA" />
+              <div class="selection-actions">
+                <button type="button" data-action="select">Apply</button>
+                <button type="button" data-action="clear-selection">Clear</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="side-card open" data-side-card>
+            <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
+              <span class="disclosure">▾</span><span>Coloring</span><span class="panel-close">×</span>
+            </button>
+            <div class="side-body"><p>Coloring controls follow the selected renderer.</p></div>
+          </section>
+
+          <section class="side-card" data-side-card>
+            <button class="side-title" type="button" data-panel-toggle aria-expanded="false">
+              <span class="disclosure">▸</span><span>Symmetry</span><span class="panel-close">×</span>
+            </button>
+            <div class="side-body"><p>Crystal symmetry and unit-cell controls.</p></div>
+          </section>
+
+          <section class="side-card open" data-side-card>
+            <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
+              <span class="disclosure">▾</span><span>Density map</span><span class="panel-close">×</span>
+            </button>
+            <div class="side-body"><p>Density contour level and map renderer controls.</p></div>
+          </section>
+
+          <section class="side-card" data-side-card>
+            <button class="side-title" type="button" data-panel-toggle aria-expanded="false">
+              <span class="disclosure">▸</span><span>View</span><span class="panel-close">×</span>
+            </button>
+            <div class="side-body">
+              <button type="button" data-action="fit">Fit view</button>
+              <button type="button" data-action="projection">Projection</button>
+            </div>
+          </section>
+
+          <section class="side-card" data-side-card>
+            <button class="side-title" type="button" data-panel-toggle aria-expanded="false">
+              <span class="disclosure">▸</span><span>Animation</span><span class="panel-close">×</span>
+            </button>
+            <div class="side-body"><p>Animation objects and timeline controls.</p></div>
+          </section>
         </aside>
 
-        <section class="viewport-panel">
+        <div class="vertical-splitter" aria-hidden="true"></div>
+
+        <section class="main-view">
+          <div class="scene-strip" aria-label="Scenes">
+            <div id="scene-tabs" class="scene-tabs"></div>
+            <button class="scene-add" type="button" data-action="new-scene" title="New scene">＋</button>
+          </div>
+
           <div id="viewport" class="viewport" tabindex="0" aria-label="Molecular viewport">
-            <div class="viewport-grid" aria-hidden="true"></div>
             <img id="viewport-image" alt="Rendered molecular structure" draggable="false" />
             <div id="viewport-empty" class="viewport-empty">
-              <div class="empty-orbit" aria-hidden="true"><i></i><i></i><i></i></div>
-              <strong>NO STRUCTURE LOADED</strong>
-              <span>Open or drop a molecular data file to begin.</span>
+              <strong>No structure loaded</strong>
+              <span>Open or drop a molecular data file.</span>
             </div>
-            <div class="axis" aria-hidden="true">
-              <span class="axis-y">Y</span>
-              <span class="axis-x">X</span>
-              <i></i>
-            </div>
-            <div class="viewport-corner top-left"></div>
-            <div class="viewport-corner top-right"></div>
-            <div class="viewport-corner bottom-left"></div>
-            <div class="viewport-corner bottom-right"></div>
+            <div class="center-mark" aria-hidden="true"></div>
             <div id="render-size" class="render-size">— × —</div>
             <div id="drag-readout" class="drag-readout"></div>
           </div>
-        </section>
 
-        <aside class="panel inspector-panel">
-          <div class="panel-heading">
-            <div>
-              <span class="eyebrow">INSPECTOR</span>
-              <h1 id="inspector-title">No object</h1>
+          <div class="horizontal-splitter" aria-hidden="true"></div>
+
+          <section class="bottom-panel">
+            <div class="bottom-panels">
+              <div class="bottom-content active" data-bottom-panel="output">
+                <pre id="status-history" class="output-log">CueMol2 Rust core</pre>
+                <label class="command-line"><span>&gt;</span><input type="text" aria-label="Command line" /></label>
+              </div>
+              <div class="bottom-content sequence-placeholder" data-bottom-panel="sequence">
+                <span>Sequence</span>
+                <p>Residue sequence appears after a molecular object is loaded.</p>
+              </div>
             </div>
-          </div>
-          <section class="inspector-section">
-            <h2>Object statistics</h2>
-            <dl id="object-stats" class="stats-grid">
-              <div><dt>Atoms</dt><dd>—</dd></div>
-              <div><dt>Residues</dt><dd>—</dd></div>
-              <div><dt>Bonds</dt><dd>—</dd></div>
-            </dl>
-          </section>
-          <section class="inspector-section">
-            <h2>Render representation</h2>
-            <div class="add-renderer">
-              <select id="renderer-type" aria-label="Renderer type">
-                <option value="simple">Simple</option>
-                <option value="ballstick">Ball &amp; stick</option>
-                <option value="cpk">CPK</option>
-                <option value="ribbon">Ribbon</option>
-                <option value="cartoon">Cartoon</option>
-                <option value="trace">Trace</option>
-                <option value="tube">Tube</option>
-                <option value="spline">Spline</option>
-              </select>
-              <button type="button" data-action="add-renderer">Add</button>
+            <div class="bottom-tabs" role="tablist">
+              <button class="active" type="button" data-bottom-select="output">Output</button>
+              <button type="button" data-bottom-select="sequence">Sequence</button>
             </div>
-            <div id="renderer-list" class="renderer-list"></div>
           </section>
-          <section class="inspector-section shortcut-section">
-            <h2>Shortcuts</h2>
-            <div><kbd>⌘ O</kbd><span>Open files</span></div>
-            <div><kbd>F</kbd><span>Fit active scene</span></div>
-            <div><kbd>P</kbd><span>Toggle projection</span></div>
-          </section>
-        </aside>
+        </section>
       </main>
 
-      <footer class="status-dock">
-        <div class="status-primary">
-          <span class="status-label">STATUS</span>
-          <span id="status-text">Starting CueMol2…</span>
-        </div>
-        <div class="status-log">
-          <span id="status-history">Rust core initializing</span>
-        </div>
-        <div id="scene-metrics" class="scene-metrics">0 SCENES / 0 OBJECTS</div>
+      <footer class="statusbar">
+        <span id="status-text">Starting CueMol2…</span>
+        <span class="status-spacer"></span>
+        <span id="projection-readout">ORTHO</span>
+        <span id="scene-metrics">0 scenes / 0 objects</span>
       </footer>
     </div>
     <div id="toast" class="toast" role="alert"></div>
