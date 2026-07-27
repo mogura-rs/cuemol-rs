@@ -110,6 +110,12 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "edit_bond",
         "calculate_contacts",
         "assign_secondary_structure",
+        "write_surface",
+        "write_cut_surface",
+        "write_apbs_files",
+        "append_morph_frame",
+        "remove_morph_frame",
+        "apply_morph_frame",
     ] {
         assert!(JS.contains(command), "missing menu binding {command}");
     }

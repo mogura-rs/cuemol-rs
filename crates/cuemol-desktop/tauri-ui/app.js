@@ -67,6 +67,7 @@ let centerMark = "cross";
 let performanceMeasure = false;
 let interactionMode = "rotate";
 let selectedAnimationIndex = null;
+let selectedMorphFrameIndex = null;
 let animationTimer = null;
 let animationTickBusy = false;
 
@@ -162,6 +163,23 @@ function dialogActions(...actions) {
   row.className = "dialog-actions";
   row.append(...actions);
   dialogContent.append(row);
+}
+
+function replaceFileExtension(path, extension) {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const dot = path.lastIndexOf(".");
+  return `${dot > slash ? path.slice(0, dot) : path}${extension}`;
+}
+
+async function chooseOutputPath(defaultPath, name, extensions) {
+  if (!dialog?.save) {
+    showError("The Tauri dialog plugin is unavailable.");
+    return null;
+  }
+  return dialog.save({
+    defaultPath,
+    filters: [{ name, extensions }],
+  });
 }
 
 function showReferenceDialog(title) {
@@ -333,6 +351,205 @@ function showReferenceDialog(title) {
       });
       dialogActions(assign);
     }
+  } else if (title === "Mol surface generation") {
+    dialogTitle.textContent = "Mol surface tool";
+    const objects = activeObjects();
+    if (objects.length === 0) {
+      dialogContent.append(dialogParagraph("No molecular object is loaded."));
+    } else {
+      dialogContent.append(dialogParagraph("Create solvent-excluded surface:"));
+      const objectOptions = objects.map((object) => [object.uid, object.name]);
+      const object = dialogSelect(
+        "Target molecule",
+        objectOptions,
+        selectedObjectUid ?? objects[0].uid,
+      );
+      const useSelection = dialogCheckbox("Selection", Boolean(snapshot.selection));
+      const selection = dialogField("Selection code", snapshot.selection);
+      selection.disabled = !useSelection.checked;
+      useSelection.addEventListener("change", () => {
+        selection.disabled = !useSelection.checked;
+      });
+      const outputName = dialogField("Surface name", "surface");
+      const density = dialogField("Density (/Å)", "1.0", "number");
+      density.min = "0.1";
+      density.step = "0.1";
+      const probeRadius = dialogField("Probe radius (Å)", "1.4", "number");
+      probeRadius.min = "0.1";
+      probeRadius.step = "0.1";
+      const generate = button("OK", "dialog-primary", async () => {
+        const name = outputName.value.trim() || "surface";
+        const path = await chooseOutputPath(`${name}.obj`, "Wavefront OBJ", ["obj"]);
+        if (!path) return;
+        await mutate("write_surface", {
+          objectUid: Number(object.value),
+          selection: useSelection.checked ? selection.value : "",
+          density: Number(density.value),
+          probeRadius: Number(probeRadius.value),
+          path,
+        });
+        referenceDialog.close();
+      });
+      dialogActions(generate);
+    }
+  } else if (title === "Mol surface cutter") {
+    dialogTitle.textContent = "MolSurf cutting tool";
+    const objects = activeObjects();
+    if (objects.length === 0) {
+      dialogContent.append(dialogParagraph("No molecular object is loaded."));
+    } else {
+      dialogContent.append(
+        dialogParagraph("Cut molecular surface by the current clipping plane:"),
+      );
+      const objectOptions = objects.map((object) => [object.uid, object.name]);
+      const object = dialogSelect(
+        "Target molecule",
+        objectOptions,
+        selectedObjectUid ?? objects[0].uid,
+      );
+      const selection = dialogField("Selection", snapshot.selection);
+      const density = dialogField("Density (/Å)", "1.0", "number");
+      const probeRadius = dialogField("Probe radius (Å)", "1.4", "number");
+      const normalX = dialogField("Normal X", "0", "number");
+      const normalY = dialogField("Normal Y", "0", "number");
+      const normalZ = dialogField("Normal Z", "1", "number");
+      const positionX = dialogField("Position X", "0", "number");
+      const positionY = dialogField("Position Y", "0", "number");
+      const positionZ = dialogField("Position Z", "0", "number");
+      const cut = button("OK", "dialog-primary", async () => {
+        const path = await chooseOutputPath("cut_surface.obj", "Wavefront OBJ", ["obj"]);
+        if (!path) return;
+        await mutate("write_cut_surface", {
+          objectUid: Number(object.value),
+          selection: selection.value,
+          density: Number(density.value),
+          probeRadius: Number(probeRadius.value),
+          normal: [Number(normalX.value), Number(normalY.value), Number(normalZ.value)],
+          position: [
+            Number(positionX.value),
+            Number(positionY.value),
+            Number(positionZ.value),
+          ],
+          path,
+        });
+        referenceDialog.close();
+      });
+      dialogActions(cut);
+    }
+  } else if (title === "APBS elepot calculation") {
+    dialogTitle.textContent = "APBS tool";
+    const objects = activeObjects();
+    if (objects.length === 0) {
+      dialogContent.append(dialogParagraph("No molecular object is loaded."));
+    } else {
+      dialogContent.append(
+        dialogParagraph("Calculate electrostatic potential by APBS:"),
+      );
+      const objectOptions = objects.map((object) => [object.uid, object.name]);
+      const object = dialogSelect(
+        "Target molecule",
+        objectOptions,
+        selectedObjectUid ?? objects[0].uid,
+      );
+      const useSelection = dialogCheckbox("Selection", Boolean(snapshot.selection));
+      const selection = dialogField("Selection code", snapshot.selection);
+      selection.disabled = !useSelection.checked;
+      useSelection.addEventListener("change", () => {
+        selection.disabled = !useSelection.checked;
+      });
+      const name = dialogField("Elepot name", "apbs");
+      dialogSelect(
+        "Charge calculation",
+        [
+          ["pdb2pqr", "Use PDB2PQR"],
+          ["internal", "Use internal method"],
+        ],
+        "internal",
+      );
+      dialogCheckbox("Use hydrogen atoms", true);
+      const write = button("Write input files", "dialog-primary", async () => {
+        const baseName = name.value.trim() || "apbs";
+        const inputPath = await chooseOutputPath(`${baseName}.in`, "APBS input", ["in"]);
+        if (!inputPath) return;
+        await mutate("write_apbs_files", {
+          objectUid: Number(object.value),
+          selection: useSelection.checked ? selection.value : "",
+          pqrPath: replaceFileExtension(inputPath, ".pqr"),
+          inputPath,
+          dxPath: replaceFileExtension(inputPath, ".dx"),
+        });
+        referenceDialog.close();
+      });
+      dialogActions(write);
+    }
+  } else if (title === "Mol morphing animation") {
+    dialogTitle.textContent = "Morph animation tool";
+    const objects = activeObjects();
+    if (objects.length === 0) {
+      dialogContent.append(dialogParagraph("No molecular object is loaded."));
+    } else {
+      const objectOptions = objects.map((object) => [object.uid, object.name]);
+      const target = dialogSelect(
+        "Target",
+        objectOptions,
+        selectedObjectUid ?? objects[0].uid,
+      );
+      const source = dialogSelect("Source frame", objectOptions, objects[0].uid);
+      const frameName = dialogField("Frame name", "frame");
+      const morph = snapshot.morphs?.find(
+        (item) => item.objectUid === Number(target.value),
+      );
+      const frameList = document.createElement("div");
+      frameList.className = "morph-frame-list";
+      for (const frame of morph?.frames || []) {
+        const row = button(
+          `${frame.name}  ${frame.source || frame.sourceType}`,
+          frame.index === selectedMorphFrameIndex ? "active" : "",
+          () => {
+            selectedMorphFrameIndex = frame.index;
+            frameList.querySelectorAll("button").forEach((item, index) => {
+              item.classList.toggle("active", index === frame.index);
+            });
+          },
+        );
+        frameList.append(row);
+      }
+      if (!morph?.frames?.length) {
+        frameList.append(dialogParagraph("No morph frames."));
+      }
+      dialogContent.append(frameList);
+      const frame = dialogField("Frame", String(morph?.frame ?? 0), "number");
+      frame.min = "0";
+      frame.max = String(Math.max(0, (morph?.frames?.length || 1) - 1));
+      frame.step = "0.05";
+      const add = button("Add", "dialog-primary", async () => {
+        await mutate("append_morph_frame", {
+          targetObjectUid: Number(target.value),
+          sourceObjectUid: Number(source.value),
+          frameName: frameName.value,
+        });
+        referenceDialog.close();
+      });
+      const remove = button("Delete", "", async () => {
+        if (selectedMorphFrameIndex === null) {
+          showError("Select a morph frame first.");
+          return;
+        }
+        await mutate("remove_morph_frame", {
+          objectUid: Number(target.value),
+          index: selectedMorphFrameIndex,
+        });
+        selectedMorphFrameIndex = null;
+        referenceDialog.close();
+      });
+      const apply = button("Apply frame", "", async () => {
+        await mutate("apply_morph_frame", {
+          objectUid: Number(target.value),
+          frame: Number(frame.value),
+        });
+      });
+      dialogActions(remove, apply, add);
+    }
   } else if (title === "Delete mol atoms") {
     const object = selectedObject();
     if (!object) {
@@ -412,7 +629,7 @@ function showReferenceDialog(title) {
   } else {
     dialogContent.append(dialogParagraph(`${title} dialog`));
   }
-  if (referenceDialog.showModal) referenceDialog.showModal();
+  if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
 }
 
 function applyCenterMark(value) {

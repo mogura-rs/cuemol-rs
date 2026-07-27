@@ -661,6 +661,14 @@ pub struct GuiMorphSummary {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct GuiMorphFrameSummary {
+    pub index: usize,
+    pub name: String,
+    pub source: String,
+    pub source_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuiDensityMapSummary {
     pub uid: Uid,
     pub scene_uid: Uid,
@@ -4033,6 +4041,56 @@ impl DesktopAppState {
             object_uid: target_object,
             frame_count: morph.frame_size(),
             atom_count: target_atom_count,
+        })
+    }
+
+    pub fn morph_frame_summaries(&self, object_uid: Uid) -> Vec<GuiMorphFrameSummary> {
+        self.morphs
+            .get(&object_uid)
+            .map(|morph| {
+                morph
+                    .frames()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, frame)| GuiMorphFrameSummary {
+                        index,
+                        name: if frame.is_this() {
+                            "(this)".to_string()
+                        } else {
+                            frame.name().to_string()
+                        },
+                        source: frame.source().to_string(),
+                        source_type: frame.source_type().to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn morph_frame_value(&self, object_uid: Uid) -> Option<f64> {
+        self.morphs.get(&object_uid).map(MorphMol::frame)
+    }
+
+    pub fn remove_morph_frame(&mut self, object_uid: Uid, index: usize) -> Result<GuiMorphSummary> {
+        let atom_count = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?
+            .mol()
+            .atom_count();
+        let morph = self
+            .morphs
+            .get_mut(&object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("morph object {}", object_uid.get())))?;
+        if !morph.remove_frame(index) {
+            return Err(CueMolError::invalid_argument(format!(
+                "morph frame {index} cannot be removed"
+            )));
+        }
+        Ok(GuiMorphSummary {
+            object_uid,
+            frame_count: morph.frame_size(),
+            atom_count,
         })
     }
 
@@ -47070,8 +47128,13 @@ attribute \"dep\" string \"positions\"
             .append_morph_frame_from_object(first, second, "second")
             .unwrap();
         assert_eq!(morph.frame_count, 2);
+        let frames = app.morph_frame_summaries(first);
+        assert_eq!(frames[0].name, "start");
+        assert_eq!(frames[1].name, "second");
         let applied = app.apply_morph_frame(first, 0.5).unwrap();
         assert_eq!(applied.atom_count, 327);
+        assert_eq!(app.morph_frame_value(first), Some(0.5));
+        assert_eq!(app.remove_morph_frame(first, 1).unwrap().frame_count, 1);
 
         for path in [surface_path, cut_path, pqr_path, input_path] {
             let _ = std::fs::remove_file(path);

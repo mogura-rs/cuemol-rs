@@ -1396,6 +1396,10 @@ summary:focus-visible {
   border-top: 1px solid #aaa;
 }
 
+.reference-dialog footer[hidden] {
+  display: none;
+}
+
 .dialog-content {
   overflow: auto;
   padding: 12px;
@@ -1431,6 +1435,30 @@ summary:focus-visible {
   justify-content: flex-end;
   gap: 6px;
   margin-top: 12px;
+}
+
+.morph-frame-list {
+  min-height: 72px;
+  max-height: 150px;
+  margin: 8px 0;
+  overflow: auto;
+  border: 1px solid #aaa;
+  background: #fff;
+}
+
+.morph-frame-list button {
+  display: block;
+  width: 100%;
+  min-height: 22px;
+  border: 0;
+  border-bottom: 1px solid #ddd;
+  border-radius: 0;
+  text-align: left;
+}
+
+.morph-frame-list button.active {
+  background: var(--selected);
+  color: #fff;
 }
 
 .dialog-primary {

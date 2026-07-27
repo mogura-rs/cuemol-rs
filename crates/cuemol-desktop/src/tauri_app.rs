@@ -140,6 +140,23 @@ struct AnimationObjectDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct MorphFrameDto {
+    index: usize,
+    name: String,
+    source: String,
+    source_type: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MorphObjectDto {
+    object_uid: u64,
+    frame: f64,
+    frames: Vec<MorphFrameDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppSnapshot {
     scenes: Vec<SceneDto>,
     objects: Vec<ObjectDto>,
@@ -162,6 +179,7 @@ struct AppSnapshot {
     animation_duration: f64,
     animation_playing: bool,
     animation_loop: bool,
+    morphs: Vec<MorphObjectDto>,
     can_undo: bool,
     can_redo: bool,
     status: String,
@@ -405,6 +423,26 @@ impl AppModel {
                 }
             })
             .collect();
+        let morphs = objects
+            .iter()
+            .filter_map(|object| {
+                let object_uid = Uid::new(object.uid);
+                let frames = self.desktop.morph_frame_summaries(object_uid);
+                (!frames.is_empty()).then(|| MorphObjectDto {
+                    object_uid: object.uid,
+                    frame: self.desktop.morph_frame_value(object_uid).unwrap_or(0.0),
+                    frames: frames
+                        .into_iter()
+                        .map(|frame| MorphFrameDto {
+                            index: frame.index,
+                            name: frame.name,
+                            source: frame.source,
+                            source_type: frame.source_type,
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
         AppSnapshot {
             scenes,
             objects,
@@ -427,6 +465,7 @@ impl AppModel {
             animation_duration: animation_start,
             animation_playing: self.animation_playing,
             animation_loop: self.animation_loop,
+            morphs,
             can_undo: !self.undo_stack.is_empty(),
             can_redo: !self.redo_stack.is_empty(),
             status: self.status.clone(),
@@ -871,6 +910,42 @@ enum ModelRequest {
         ignore_bulge: bool,
         angle: f64,
     },
+    WriteSurface {
+        object_uid: u64,
+        selection: String,
+        density: f64,
+        probe_radius: f64,
+        path: String,
+    },
+    WriteCutSurface {
+        object_uid: u64,
+        selection: String,
+        density: f64,
+        probe_radius: f64,
+        normal: [f64; 3],
+        position: [f64; 3],
+        path: String,
+    },
+    WriteApbsFiles {
+        object_uid: u64,
+        selection: String,
+        pqr_path: String,
+        input_path: String,
+        dx_path: String,
+    },
+    AppendMorphFrame {
+        target_object_uid: u64,
+        source_object_uid: u64,
+        frame_name: String,
+    },
+    RemoveMorphFrame {
+        object_uid: u64,
+        index: usize,
+    },
+    ApplyMorphFrame {
+        object_uid: u64,
+        frame: f64,
+    },
     SetDisplayOption {
         option: String,
         value: bool,
@@ -1274,6 +1349,158 @@ fn handle_model_request(
                 .assign_secondary_structure_in_object(Uid::new(object_uid), ignore_bulge, angle)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Secondary structure assigned for {count} atom(s)");
+            model.rebuild_mesh(false)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::WriteSurface {
+            object_uid,
+            selection,
+            density,
+            probe_radius,
+            path,
+        } => {
+            if !density.is_finite() || density < 0.1 {
+                return Err("surface density must be at least 0.1".to_string());
+            }
+            if !probe_radius.is_finite() || probe_radius < 0.1 {
+                return Err("probe radius must be at least 0.1 Å".to_string());
+            }
+            if path.trim().is_empty() {
+                return Err("an output OBJ path is required".to_string());
+            }
+            let summary = model
+                .desktop
+                .write_surface_obj(
+                    Uid::new(object_uid),
+                    &selection,
+                    density,
+                    probe_radius,
+                    &path,
+                )
+                .map_err(|error| error.to_string())?;
+            model.status = format!(
+                "Surface OBJ written: {} vertices / {} triangles",
+                summary.vertex_count, summary.triangle_count
+            );
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::WriteCutSurface {
+            object_uid,
+            selection,
+            density,
+            probe_radius,
+            normal,
+            position,
+            path,
+        } => {
+            if !density.is_finite() || density < 0.1 {
+                return Err("surface density must be at least 0.1".to_string());
+            }
+            if !probe_radius.is_finite() || probe_radius < 0.1 {
+                return Err("probe radius must be at least 0.1 Å".to_string());
+            }
+            if normal
+                .iter()
+                .chain(position.iter())
+                .any(|value| !value.is_finite())
+            {
+                return Err("surface cut plane must be finite".to_string());
+            }
+            if normal.iter().map(|value| value * value).sum::<f64>() < 1.0e-12 {
+                return Err("surface cut normal must be non-zero".to_string());
+            }
+            if path.trim().is_empty() {
+                return Err("an output OBJ path is required".to_string());
+            }
+            let summary = model
+                .desktop
+                .write_cut_surface_obj(
+                    Uid::new(object_uid),
+                    &selection,
+                    density,
+                    probe_radius,
+                    Vector4::new3(normal[0], normal[1], normal[2]),
+                    Vector4::new3(position[0], position[1], position[2]),
+                    &path,
+                )
+                .map_err(|error| error.to_string())?;
+            model.status = format!(
+                "Cut surface OBJ written: {} vertices / {} triangles",
+                summary.vertex_count, summary.triangle_count
+            );
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::WriteApbsFiles {
+            object_uid,
+            selection,
+            pqr_path,
+            input_path,
+            dx_path,
+        } => {
+            if [pqr_path.as_str(), input_path.as_str(), dx_path.as_str()]
+                .iter()
+                .any(|path| path.trim().is_empty())
+            {
+                return Err("PQR, input, and DX paths are required".to_string());
+            }
+            let summary = model
+                .desktop
+                .write_apbs_files(
+                    Uid::new(object_uid),
+                    &selection,
+                    &pqr_path,
+                    &input_path,
+                    &dx_path,
+                )
+                .map_err(|error| error.to_string())?;
+            model.status = format!("APBS files written for {} atom(s)", summary.atom_count);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::AppendMorphFrame {
+            target_object_uid,
+            source_object_uid,
+            frame_name,
+        } => {
+            if frame_name.trim().is_empty() {
+                return Err("a morph frame name is required".to_string());
+            }
+            let undo = model.capture_undo();
+            let summary = model
+                .desktop
+                .append_morph_frame_from_object(
+                    Uid::new(target_object_uid),
+                    Uid::new(source_object_uid),
+                    frame_name.trim(),
+                )
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Morph frame appended: {} frame(s)", summary.frame_count);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::RemoveMorphFrame { object_uid, index } => {
+            let undo = model.capture_undo();
+            let summary = model
+                .desktop
+                .remove_morph_frame(Uid::new(object_uid), index)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Morph frame removed: {} frame(s)", summary.frame_count);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ApplyMorphFrame { object_uid, frame } => {
+            if !frame.is_finite() {
+                return Err("morph frame must be finite".to_string());
+            }
+            let undo = model.capture_undo();
+            let summary = model
+                .desktop
+                .apply_morph_frame(Uid::new(object_uid), frame)
+                .map_err(|error| error.to_string())?;
+            model.status = format!(
+                "Morph frame {:.2} applied to {} atom(s)",
+                frame, summary.atom_count
+            );
             model.rebuild_mesh(false)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -1767,6 +1994,116 @@ fn assign_secondary_structure(
 }
 
 #[tauri::command]
+fn write_surface(
+    object_uid: u64,
+    selection: String,
+    density: f64,
+    probe_radius: f64,
+    path: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::WriteSurface {
+            object_uid,
+            selection,
+            density,
+            probe_radius,
+            path,
+        },
+    )?)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn write_cut_surface(
+    object_uid: u64,
+    selection: String,
+    density: f64,
+    probe_radius: f64,
+    normal: [f64; 3],
+    position: [f64; 3],
+    path: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::WriteCutSurface {
+            object_uid,
+            selection,
+            density,
+            probe_radius,
+            normal,
+            position,
+            path,
+        },
+    )?)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn write_apbs_files(
+    object_uid: u64,
+    selection: String,
+    pqr_path: String,
+    input_path: String,
+    dx_path: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::WriteApbsFiles {
+            object_uid,
+            selection,
+            pqr_path,
+            input_path,
+            dx_path,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn append_morph_frame(
+    target_object_uid: u64,
+    source_object_uid: u64,
+    frame_name: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::AppendMorphFrame {
+            target_object_uid,
+            source_object_uid,
+            frame_name,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn remove_morph_frame(
+    object_uid: u64,
+    index: usize,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::RemoveMorphFrame { object_uid, index },
+    )?)
+}
+
+#[tauri::command]
+fn apply_morph_frame(
+    object_uid: u64,
+    frame: f64,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ApplyMorphFrame { object_uid, frame },
+    )?)
+}
+
+#[tauri::command]
 fn set_display_option(
     option: String,
     value: bool,
@@ -2046,6 +2383,12 @@ pub fn run() -> Result<(), tauri::Error> {
             edit_bond,
             calculate_contacts,
             assign_secondary_structure,
+            write_surface,
+            write_cut_surface,
+            write_apbs_files,
+            append_morph_frame,
+            remove_morph_frame,
+            apply_morph_frame,
             set_display_option,
             set_density_level,
             set_background,
@@ -2357,5 +2700,109 @@ mod tests {
             "Secondary structure assigned for 327 atom(s)"
         );
         assert!(snapshot.can_undo);
+    }
+
+    #[test]
+    fn surface_apbs_and_morph_dialog_requests_write_and_update_data() {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let pdb = root.join("tests/test_data/1CRN.pdb");
+        if !pdb.exists() {
+            return;
+        }
+        let output_dir =
+            std::env::temp_dir().join(format!("cuemol-tauri-tools-{}", std::process::id()));
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let surface_path = output_dir.join("surface.obj");
+        let cut_path = output_dir.join("cut.obj");
+        let pqr_path = output_dir.join("apbs.pqr");
+        let input_path = output_dir.join("apbs.in");
+        let dx_path = output_dir.join("apbs.dx");
+
+        let mut model = model_without_gpu();
+        model.desktop.open_path(&pdb).unwrap();
+        model.desktop.open_path(&pdb).unwrap();
+        model.rebuild_mesh(true).unwrap();
+        let objects = model.desktop.active_object_summaries();
+        let first = objects[0].uid.get();
+        let second = objects[1].uid.get();
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::WriteSurface {
+                object_uid: first,
+                selection: "aid 1".to_string(),
+                density: 0.5,
+                probe_radius: 1.4,
+                path: surface_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap();
+        assert!(surface_path.exists());
+        handle_model_request(
+            &mut model,
+            ModelRequest::WriteCutSurface {
+                object_uid: first,
+                selection: "aid 1".to_string(),
+                density: 0.5,
+                probe_radius: 1.4,
+                normal: [0.0, 0.0, 1.0],
+                position: [0.0, 0.0, 0.0],
+                path: cut_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap();
+        assert!(cut_path.exists());
+        handle_model_request(
+            &mut model,
+            ModelRequest::WriteApbsFiles {
+                object_uid: first,
+                selection: "aid 1".to_string(),
+                pqr_path: pqr_path.to_string_lossy().to_string(),
+                input_path: input_path.to_string_lossy().to_string(),
+                dx_path: dx_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap();
+        assert!(pqr_path.exists() && input_path.exists());
+
+        for (source, name) in [(first, "start"), (second, "end")] {
+            handle_model_request(
+                &mut model,
+                ModelRequest::AppendMorphFrame {
+                    target_object_uid: first,
+                    source_object_uid: source,
+                    frame_name: name.to_string(),
+                },
+            )
+            .unwrap();
+        }
+        handle_model_request(
+            &mut model,
+            ModelRequest::ApplyMorphFrame {
+                object_uid: first,
+                frame: 0.5,
+            },
+        )
+        .unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::RemoveMorphFrame {
+                object_uid: first,
+                index: 1,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.morphs.len(), 1);
+        assert_eq!(snapshot.morphs[0].frames.len(), 1);
+
+        for path in [surface_path, cut_path, pqr_path, input_path] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(output_dir);
     }
 }
