@@ -13508,27 +13508,43 @@ impl DesktopAppState {
         }
         fn with_script_anim_motion_mut<R>(
             uid: u64,
+            property_name: &str,
             operation: impl FnOnce(&mut AnimMotion) -> R,
         ) -> JsResult<R> {
             script_env::with_mut(|env| {
-                if let Some(motion) = env.animation.motion_by_uid_mut(Uid::new(uid)) {
-                    return Some(operation(motion));
+                let uid = Uid::new(uid);
+                if env.animation.motion_by_uid(uid).is_some() {
+                    return env
+                        .animation
+                        .edit_motion_by_uid(uid, property_name, "", operation);
                 }
-                if let Some(motion) = env
+                if let Some(scene_index) = env
                     .scenes
-                    .iter_mut()
-                    .find_map(|scene| scene.animation.motion_by_uid_mut(Uid::new(uid)))
+                    .iter()
+                    .position(|scene| scene.animation.motion_by_uid(uid).is_some())
                 {
-                    return Some(operation(motion));
+                    return env.scenes[scene_index].animation.edit_motion_by_uid(
+                        uid,
+                        property_name,
+                        "",
+                        operation,
+                    );
                 }
-                if let Some(motion) = env
-                    .detached_animation_managers
-                    .values_mut()
-                    .find_map(|animation| animation.motion_by_uid_mut(Uid::new(uid)))
+                if let Some(scene_uid) =
+                    env.detached_animation_managers
+                        .iter()
+                        .find_map(|(scene_uid, animation)| {
+                            animation.motion_by_uid(uid).is_some().then_some(*scene_uid)
+                        })
                 {
-                    return Some(operation(motion));
+                    return env
+                        .detached_animation_managers
+                        .get_mut(&scene_uid)
+                        .and_then(|animation| {
+                            animation.edit_motion_by_uid(uid, property_name, "", operation)
+                        });
                 }
-                env.pending_animations.get_mut(&uid).map(operation)
+                env.pending_animations.get_mut(&uid.get()).map(operation)
             })
             .ok_or_else(|| script_error(format!("AnimObj {uid} is not available")))
         }
@@ -13582,6 +13598,20 @@ impl DesktopAppState {
             AbsEnd,
             Quadric,
         }
+        impl AnimObjectProperty {
+            fn qif_name(self) -> &'static str {
+                match self {
+                    Self::Name => "name",
+                    Self::Disabled => "disabled",
+                    Self::TimeRefName => "timeRefName",
+                    Self::Start => "start",
+                    Self::End => "end",
+                    Self::AbsStart => "absStart",
+                    Self::AbsEnd => "absEnd",
+                    Self::Quadric => "quadric",
+                }
+            }
+        }
         #[derive(Clone, Copy)]
         enum AnimSpecificProperty {
             EndCamera,
@@ -13604,6 +13634,32 @@ impl DesktopAppState {
             Axis,
             Direction,
             Distance,
+        }
+        impl AnimSpecificProperty {
+            fn qif_name(self) -> &'static str {
+                match self {
+                    Self::EndCamera => "endcam",
+                    Self::IgnoreCenter => "ignorecenter",
+                    Self::IgnoreRotate => "ignorerotate",
+                    Self::IgnoreZoom => "ignorezoom",
+                    Self::IgnoreSlab => "ignoreslab",
+                    Self::KeepQuatPositive => "keepquatpositive",
+                    Self::StartValue => "startValue",
+                    Self::EndValue => "endValue",
+                    Self::Property => "prop",
+                    Self::Renderer => "rend",
+                    Self::Molecule => "mol",
+                    Self::StartTranslation => "start_tran",
+                    Self::EndTranslation => "end_tran",
+                    Self::Hide => "hide",
+                    Self::Fade => "fade",
+                    Self::TargetAlpha => "tgt_alpha",
+                    Self::Angle => "angle",
+                    Self::Axis => "axis",
+                    Self::Direction => "direction",
+                    Self::Distance => "distance",
+                }
+            }
         }
         fn anim_object_property_get(
             property: AnimObjectProperty,
@@ -13635,34 +13691,36 @@ impl DesktopAppState {
             match property {
                 AnimObjectProperty::Name => {
                     let value = value.to_string(ctx)?.to_std_string_escaped();
-                    with_script_anim_motion_mut(uid, |motion| motion.base_mut().set_name(value))?;
+                    with_script_anim_motion_mut(uid, property.qif_name(), |motion| {
+                        motion.base_mut().set_name(value)
+                    })?;
                 }
                 AnimObjectProperty::Disabled => {
-                    with_script_anim_motion_mut(uid, |motion| {
+                    with_script_anim_motion_mut(uid, property.qif_name(), |motion| {
                         motion.base_mut().set_disabled(value.to_boolean())
                     })?;
                 }
                 AnimObjectProperty::TimeRefName => {
                     let value = value.to_string(ctx)?.to_std_string_escaped();
-                    with_script_anim_motion_mut(uid, |motion| {
+                    with_script_anim_motion_mut(uid, property.qif_name(), |motion| {
                         motion.base_mut().set_time_ref_name(value)
                     })?;
                 }
                 AnimObjectProperty::Start => {
                     let value = time_value_to_nanos(&value, ctx)?;
-                    with_script_anim_motion_mut(uid, |motion| {
+                    with_script_anim_motion_mut(uid, property.qif_name(), |motion| {
                         motion.base_mut().set_rel_start(value)
                     })?;
                 }
                 AnimObjectProperty::End => {
                     let value = time_value_to_nanos(&value, ctx)?;
-                    with_script_anim_motion_mut(uid, |motion| {
+                    with_script_anim_motion_mut(uid, property.qif_name(), |motion| {
                         motion.base_mut().set_rel_end(value)
                     })?;
                 }
                 AnimObjectProperty::Quadric => {
                     let value = value.to_number(ctx)?;
-                    with_script_anim_motion_mut(uid, |motion| {
+                    with_script_anim_motion_mut(uid, property.qif_name(), |motion| {
                         motion.base_mut().set_quadric(value)
                     })?;
                 }
@@ -13781,44 +13839,52 @@ impl DesktopAppState {
                 | AnimSpecificProperty::Renderer
                 | AnimSpecificProperty::Molecule => {
                     let value = value.to_string(ctx)?.to_std_string_escaped();
-                    with_script_anim_motion_mut(uid, |motion| match (property, motion) {
-                        (AnimSpecificProperty::EndCamera, AnimMotion::Camera(target)) => {
-                            target.set_endcam(value);
-                            true
+                    with_script_anim_motion_mut(uid, property.qif_name(), |motion| {
+                        match (property, motion) {
+                            (AnimSpecificProperty::EndCamera, AnimMotion::Camera(target)) => {
+                                target.set_endcam(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Property, AnimMotion::RealProperty(target)) => {
+                                target.set_prop(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Property, AnimMotion::Molecule(target)) => {
+                                target.set_prop(value);
+                                true
+                            }
+                            (
+                                AnimSpecificProperty::Property,
+                                AnimMotion::RendererTransform(target),
+                            ) => {
+                                target.set_prop(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Renderer, AnimMotion::RealProperty(target)) => {
+                                target.set_rend(value);
+                                true
+                            }
+                            (
+                                AnimSpecificProperty::Renderer,
+                                AnimMotion::RendererTransform(target),
+                            ) => {
+                                target.set_rend(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Renderer, AnimMotion::ShowHide(target)) => {
+                                target.set_rend(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Renderer, AnimMotion::Slide(target)) => {
+                                target.set_rend(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Molecule, AnimMotion::Molecule(target)) => {
+                                target.set_mol(value);
+                                true
+                            }
+                            _ => false,
                         }
-                        (AnimSpecificProperty::Property, AnimMotion::RealProperty(target)) => {
-                            target.set_prop(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Property, AnimMotion::Molecule(target)) => {
-                            target.set_prop(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Property, AnimMotion::RendererTransform(target)) => {
-                            target.set_prop(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Renderer, AnimMotion::RealProperty(target)) => {
-                            target.set_rend(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Renderer, AnimMotion::RendererTransform(target)) => {
-                            target.set_rend(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Renderer, AnimMotion::ShowHide(target)) => {
-                            target.set_rend(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Renderer, AnimMotion::Slide(target)) => {
-                            target.set_rend(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Molecule, AnimMotion::Molecule(target)) => {
-                            target.set_mol(value);
-                            true
-                        }
-                        _ => false,
                     })?
                 }
                 AnimSpecificProperty::IgnoreCenter
@@ -13829,40 +13895,45 @@ impl DesktopAppState {
                 | AnimSpecificProperty::Hide
                 | AnimSpecificProperty::Fade => {
                     let value = value.to_boolean();
-                    with_script_anim_motion_mut(uid, |motion| match (property, motion) {
-                        (AnimSpecificProperty::IgnoreCenter, AnimMotion::Camera(target)) => {
-                            target.set_ignorecenter(value);
-                            true
+                    with_script_anim_motion_mut(uid, property.qif_name(), |motion| {
+                        match (property, motion) {
+                            (AnimSpecificProperty::IgnoreCenter, AnimMotion::Camera(target)) => {
+                                target.set_ignorecenter(value);
+                                true
+                            }
+                            (AnimSpecificProperty::IgnoreRotate, AnimMotion::Camera(target)) => {
+                                target.set_ignorerotate(value);
+                                true
+                            }
+                            (AnimSpecificProperty::IgnoreZoom, AnimMotion::Camera(target)) => {
+                                target.set_ignorezoom(value);
+                                true
+                            }
+                            (AnimSpecificProperty::IgnoreSlab, AnimMotion::Camera(target)) => {
+                                target.set_ignoreslab(value);
+                                true
+                            }
+                            (
+                                AnimSpecificProperty::KeepQuatPositive,
+                                AnimMotion::Camera(target),
+                            ) => {
+                                target.set_keepquatpositive(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Hide, AnimMotion::ShowHide(target)) => {
+                                target.set_hide(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Hide, AnimMotion::Slide(target)) => {
+                                target.set_hide(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Fade, AnimMotion::ShowHide(target)) => {
+                                target.set_fade(value);
+                                true
+                            }
+                            _ => false,
                         }
-                        (AnimSpecificProperty::IgnoreRotate, AnimMotion::Camera(target)) => {
-                            target.set_ignorerotate(value);
-                            true
-                        }
-                        (AnimSpecificProperty::IgnoreZoom, AnimMotion::Camera(target)) => {
-                            target.set_ignorezoom(value);
-                            true
-                        }
-                        (AnimSpecificProperty::IgnoreSlab, AnimMotion::Camera(target)) => {
-                            target.set_ignoreslab(value);
-                            true
-                        }
-                        (AnimSpecificProperty::KeepQuatPositive, AnimMotion::Camera(target)) => {
-                            target.set_keepquatpositive(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Hide, AnimMotion::ShowHide(target)) => {
-                            target.set_hide(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Hide, AnimMotion::Slide(target)) => {
-                            target.set_hide(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Fade, AnimMotion::ShowHide(target)) => {
-                            target.set_fade(value);
-                            true
-                        }
-                        _ => false,
                     })?
                 }
                 AnimSpecificProperty::StartValue
@@ -13872,65 +13943,72 @@ impl DesktopAppState {
                 | AnimSpecificProperty::Direction
                 | AnimSpecificProperty::Distance => {
                     let value = value.to_number(ctx)?;
-                    with_script_anim_motion_mut(uid, |motion| match (property, motion) {
-                        (AnimSpecificProperty::StartValue, AnimMotion::RealProperty(target)) => {
-                            target.set_start_value(value);
-                            true
+                    with_script_anim_motion_mut(uid, property.qif_name(), |motion| {
+                        match (property, motion) {
+                            (
+                                AnimSpecificProperty::StartValue,
+                                AnimMotion::RealProperty(target),
+                            ) => {
+                                target.set_start_value(value);
+                                true
+                            }
+                            (AnimSpecificProperty::StartValue, AnimMotion::Molecule(target)) => {
+                                target.set_start_value(value);
+                                true
+                            }
+                            (AnimSpecificProperty::EndValue, AnimMotion::RealProperty(target)) => {
+                                target.set_end_value(value);
+                                true
+                            }
+                            (AnimSpecificProperty::EndValue, AnimMotion::Molecule(target)) => {
+                                target.set_end_value(value);
+                                true
+                            }
+                            (AnimSpecificProperty::TargetAlpha, AnimMotion::ShowHide(target)) => {
+                                target.set_tgt_alpha(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Angle, AnimMotion::Spin(target)) => {
+                                target.set_angle(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Direction, AnimMotion::Slide(target)) => {
+                                target.set_direction(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Distance, AnimMotion::Slide(target)) => {
+                                target.set_distance(value);
+                                true
+                            }
+                            _ => false,
                         }
-                        (AnimSpecificProperty::StartValue, AnimMotion::Molecule(target)) => {
-                            target.set_start_value(value);
-                            true
-                        }
-                        (AnimSpecificProperty::EndValue, AnimMotion::RealProperty(target)) => {
-                            target.set_end_value(value);
-                            true
-                        }
-                        (AnimSpecificProperty::EndValue, AnimMotion::Molecule(target)) => {
-                            target.set_end_value(value);
-                            true
-                        }
-                        (AnimSpecificProperty::TargetAlpha, AnimMotion::ShowHide(target)) => {
-                            target.set_tgt_alpha(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Angle, AnimMotion::Spin(target)) => {
-                            target.set_angle(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Direction, AnimMotion::Slide(target)) => {
-                            target.set_direction(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Distance, AnimMotion::Slide(target)) => {
-                            target.set_distance(value);
-                            true
-                        }
-                        _ => false,
                     })?
                 }
                 AnimSpecificProperty::StartTranslation
                 | AnimSpecificProperty::EndTranslation
                 | AnimSpecificProperty::Axis => {
                     let value = vector_from_value(&value, ctx)?;
-                    with_script_anim_motion_mut(uid, |motion| match (property, motion) {
-                        (
-                            AnimSpecificProperty::StartTranslation,
-                            AnimMotion::RendererTransform(target),
-                        ) => {
-                            target.set_start_tran(value);
-                            true
+                    with_script_anim_motion_mut(uid, property.qif_name(), |motion| {
+                        match (property, motion) {
+                            (
+                                AnimSpecificProperty::StartTranslation,
+                                AnimMotion::RendererTransform(target),
+                            ) => {
+                                target.set_start_tran(value);
+                                true
+                            }
+                            (
+                                AnimSpecificProperty::EndTranslation,
+                                AnimMotion::RendererTransform(target),
+                            ) => {
+                                target.set_end_tran(value);
+                                true
+                            }
+                            (AnimSpecificProperty::Axis, AnimMotion::Spin(target)) => {
+                                target.set_axis(value)
+                            }
+                            _ => false,
                         }
-                        (
-                            AnimSpecificProperty::EndTranslation,
-                            AnimMotion::RendererTransform(target),
-                        ) => {
-                            target.set_end_tran(value);
-                            true
-                        }
-                        (AnimSpecificProperty::Axis, AnimMotion::Spin(target)) => {
-                            target.set_axis(value)
-                        }
-                        _ => false,
                     })?
                 }
             };

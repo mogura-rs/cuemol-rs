@@ -1,8 +1,8 @@
 use cuemol_core::{Matrix4, Vector4};
 use cuemol_mdtools::{
     read_amber_mdcrd_file, read_amber_prmtop_file, read_amber_prmtop_with_restart_files,
-    read_amber_restart_file, read_gro_file, read_namd_coor_file, read_namd_coor_with_psf_files,
-    read_psf_file,
+    read_amber_restart_file, read_dcd_file_with_options, read_gro_file, read_namd_coor_file,
+    read_namd_coor_with_psf_files, read_psf_file, DcdReadOptions,
 };
 use cuemol_molstr::{
     parse_selector, read_brix_map_with_header_file, read_ccp4_map_with_header_file,
@@ -180,6 +180,40 @@ fn run() -> Result<(), String> {
                         "first={:.6},{:.6},{:.6}",
                         position.x, position.y, position.z
                     );
+                }
+            }
+            Ok(())
+        }
+        "dcd-info" => {
+            let path = args
+                .next()
+                .ok_or_else(|| "missing DCD trajectory path".to_string())?;
+            let skip_no = args
+                .next()
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| "invalid DCD frame skip".to_string())
+                })
+                .transpose()?
+                .unwrap_or(1);
+            let block = read_dcd_file_with_options(
+                path,
+                &DcdReadOptions {
+                    skip_no,
+                    ..DcdReadOptions::default()
+                },
+            )
+            .map_err(|err| err.to_string())?;
+            println!("frames={}", block.frame_count());
+            println!("atoms={}", block.atom_count());
+            println!(
+                "has_cell={}",
+                (0..block.frame_count()).any(|index| block.cell(index).is_some())
+            );
+            if let Some(frame) = block.frame(0) {
+                if let Some(first) = frame.get(..3) {
+                    println!("first={:.6},{:.6},{:.6}", first[0], first[1], first[2]);
                 }
             }
             Ok(())
@@ -551,6 +585,7 @@ fn print_usage() {
     eprintln!("  cuemol namdcoor-info <file.coor> [file.psf]");
     eprintln!("  cuemol ambercrd-info <file.inpcrd|file.rst7>");
     eprintln!("  cuemol ambermdcrd-info <file.mdcrd|file.crd> <natom> [box]");
+    eprintln!("  cuemol dcd-info <file.dcd> [nevery]");
     eprintln!("  cuemol amberprm-info <file.prmtop|file.parm7> [file.inpcrd]");
     eprintln!("  cuemol sdf-write <file.sdf>");
     eprintln!("  cuemol opendx-info <file.dx>");

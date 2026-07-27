@@ -1,6 +1,9 @@
 use cuemol_core::{CueMolError, LDom2Node, Matrix4, Quat, Result, Uid, Vector4, NANOS_PER_SECOND};
 use cuemol_molstr::MolCoord;
-use cuemol_qsys::{Camera, Renderer, Scene, SceneExporter, View};
+use cuemol_qsys::{
+    AnimObjEvent, Camera, Renderer, Scene, SceneExporter, ScrEventManager, ScrEventManagerHandle,
+    View,
+};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1556,6 +1559,7 @@ pub struct AnimMgr {
     render_end_frame: i32,
     render_delta: f64,
     target_scene_uid: Option<Uid>,
+    event_manager: Option<ScrEventManagerHandle>,
     motions: Vec<AnimMotion>,
 }
 
@@ -1572,6 +1576,7 @@ impl Default for AnimMgr {
             render_end_frame: -1,
             render_delta: 0.0,
             target_scene_uid: None,
+            event_manager: None,
             motions: Vec::new(),
         }
     }
@@ -1684,6 +1689,22 @@ impl AnimMgr {
 
     pub fn frameno(&self) -> i32 {
         self.frame_no()
+    }
+
+    pub fn target_scene_uid(&self) -> Option<Uid> {
+        self.target_scene_uid
+    }
+
+    pub fn set_target_scene_uid(&mut self, value: Uid) {
+        self.target_scene_uid = Some(value);
+    }
+
+    pub fn attach_event_manager(&mut self, manager: ScrEventManagerHandle) {
+        self.event_manager = Some(manager);
+    }
+
+    pub fn detach_event_manager(&mut self) {
+        self.event_manager = None;
     }
 
     pub fn start(&mut self, view: &View) {
@@ -1929,44 +1950,116 @@ impl AnimMgr {
             .find(|motion| motion.base().uid() == uid)
     }
 
+    /// Mutate one animation object through its manager, then rebuild the
+    /// timeline and emit the C++-compatible `SEM_ANIM/SEM_PROPCHG` event.
+    pub fn edit_motion_by_uid<R>(
+        &mut self,
+        uid: Uid,
+        property_name: &str,
+        parent_name: &str,
+        operation: impl FnOnce(&mut AnimMotion) -> R,
+    ) -> Option<R> {
+        let index = self
+            .motions
+            .iter()
+            .position(|motion| motion.base().uid() == uid)?;
+        let result = operation(&mut self.motions[index]);
+        self.update_timeline();
+        self.fire_anim_prop_event(property_name, parent_name);
+        Some(result)
+    }
+
     pub fn append_motion(&mut self, motion: AnimMotion) {
+        let index = self.motions.len();
         self.motions.push(motion);
         self.update_timeline();
+        self.fire_anim_event("animObjAdded", ScrEventManager::SEM_ADDED, index as i32);
     }
 
     pub fn insert_motion_before(&mut self, index: usize, motion: AnimMotion) {
+        let inserted_index = index.min(self.motions.len());
         if index >= self.motions.len() {
             self.motions.push(motion);
         } else {
             self.motions.insert(index, motion);
         }
         self.update_timeline();
+        self.fire_anim_event(
+            "animObjAdded",
+            ScrEventManager::SEM_ADDED,
+            inserted_index as i32,
+        );
     }
 
     pub fn append(&mut self, object: AnimObj) {
+        let index = self.motions.len();
         self.motions
             .push(AnimMotion::Noop(NoopAnimObj { base: object }));
         self.update_timeline();
+        self.fire_anim_event("animObjAdded", ScrEventManager::SEM_ADDED, index as i32);
     }
 
     pub fn insert_before(&mut self, index: usize, object: AnimObj) {
         let motion = AnimMotion::Noop(NoopAnimObj { base: object });
+        let inserted_index = index.min(self.motions.len());
         if index >= self.motions.len() {
             self.motions.push(motion);
         } else {
             self.motions.insert(index, motion);
         }
         self.update_timeline();
+        self.fire_anim_event(
+            "animObjAdded",
+            ScrEventManager::SEM_ADDED,
+            inserted_index as i32,
+        );
     }
 
     pub fn remove_at(&mut self, index: usize) -> bool {
         if index >= self.motions.len() {
             false
         } else {
+            self.fire_anim_event(
+                "animObjRemoving",
+                ScrEventManager::SEM_REMOVING,
+                index as i32,
+            );
             self.motions.remove(index);
             self.update_timeline();
             true
         }
+    }
+
+    fn fire_anim_event(&self, descr: &str, event_type: i32, index: i32) {
+        let Some(manager) = &self.event_manager else {
+            return;
+        };
+        let mut event = AnimObjEvent::new();
+        event.set_descr(descr);
+        event.set_event_type(event_type);
+        event.set_source(
+            self.target_scene_uid
+                .map(Uid::get)
+                .unwrap_or(cuemol_qsys::INVALID_UID),
+        );
+        event.set_index(index);
+        let _ = manager.with(|manager| manager.fire_anim_obj_event(&event));
+    }
+
+    fn fire_anim_prop_event(&self, property_name: &str, parent_name: &str) {
+        let Some(manager) = &self.event_manager else {
+            return;
+        };
+        let mut event = AnimObjEvent::new();
+        event.set_descr(property_name);
+        event.set_event_type(ScrEventManager::SEM_PROPCHG);
+        event.set_source(
+            self.target_scene_uid
+                .map(Uid::get)
+                .unwrap_or(cuemol_qsys::INVALID_UID),
+        );
+        event.set_prop_event(property_name, parent_name);
+        let _ = manager.with(|manager| manager.fire_anim_obj_event(&event));
     }
 
     fn update_timeline(&mut self) {
@@ -2253,8 +2346,34 @@ fn json_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cuemol_core::{parse_ldom2_xml, write_ldom2_xml, LDom2Tree};
+    use cuemol_core::{
+        parse_ldom2_xml, write_ldom2_xml, LDom2Tree, LScrCallBack, LScrObject, LVarArgs, LVariant,
+    };
     use cuemol_molstr::Atom;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    type RecordedAnimCall = (String, i32, i32, i32, String);
+
+    struct RecordingAnimCallback {
+        calls: Rc<RefCell<Vec<RecordedAnimCall>>>,
+    }
+
+    impl LScrObject for RecordingAnimCallback {}
+
+    impl LScrCallBack for RecordingAnimCallback {
+        fn invoke(&self, args: &mut LVarArgs) -> Result<bool> {
+            self.calls.borrow_mut().push((
+                args.get(1).get_string_value()?.as_str().to_string(),
+                args.get(2).get_int_value()?,
+                args.get(3).get_int_value()?,
+                args.get(4).get_int_value()?,
+                args.get(5).get_string_value()?.as_str().to_string(),
+            ));
+            *args.retval_mut() = LVariant::Boolean(false);
+            Ok(true)
+        }
+    }
 
     fn atom(serial: i32, x: f64) -> Atom {
         Atom {
@@ -2595,6 +2714,56 @@ mod tests {
         assert_eq!(writer.client_scene(), None);
         manager.clear();
         assert_eq!(manager.size(), 0);
+    }
+
+    #[test]
+    fn anim_manager_fires_script_events_for_list_edits() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let callback = Rc::new(RecordingAnimCallback {
+            calls: Rc::clone(&calls),
+        });
+        let events = ScrEventManagerHandle::new();
+        events.with_mut(|manager| {
+            manager.add_listener(callback);
+            manager.append("", ScrEventManager::SEM_ANIM, -1, 77);
+        });
+
+        let mut manager = AnimMgr::new();
+        manager.set_target_scene_uid(Uid::new(77));
+        manager.attach_event_manager(events);
+        manager.append(AnimObj::new());
+        manager.insert_before(0, AnimObj::new());
+        assert!(manager.remove_at(1));
+        assert!(!manager.remove_at(9));
+        let first_uid = manager.get_at(0).unwrap().uid();
+        manager
+            .edit_motion_by_uid(first_uid, "end", "timing", |motion| {
+                motion.base_mut().set_rel_end(250)
+            })
+            .unwrap();
+        assert_eq!(manager.length(), 250);
+
+        let calls = calls.borrow();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(
+            &calls[0],
+            &(
+                "animObjAdded".to_string(),
+                ScrEventManager::SEM_ANIM,
+                ScrEventManager::SEM_ADDED,
+                77,
+                "{\"index\":0}".to_string(),
+            )
+        );
+        assert_eq!(calls[1].0, "animObjAdded");
+        assert_eq!(calls[1].4, "{\"index\":0}");
+        assert_eq!(calls[2].0, "animObjRemoving");
+        assert_eq!(calls[2].2, ScrEventManager::SEM_REMOVING);
+        assert_eq!(calls[2].4, "{\"index\":1}");
+        assert_eq!(calls[3].0, "end");
+        assert_eq!(calls[3].2, ScrEventManager::SEM_PROPCHG);
+        assert!(calls[3].4.contains("\"propname\": \"end\""));
+        assert!(calls[3].4.contains("\"parentname\": \"timing\""));
     }
 
     #[test]

@@ -21,7 +21,7 @@ only.
 - `cuemol-xtal`: density maps, crystallographic readers, and map renderers
 - `cuemol-molanl`: molecular analysis, RMSD, and structural superposition
 - `cuemol-anim`: scene, camera, property, and renderer animation
-- `cuemol-mdtools`: GRO, NAMD, AMBER, and PSF readers
+- `cuemol-mdtools`: GRO, NAMD, AMBER, PSF, and DCD trajectory readers
 - `cuemol-lwview`: lightweight scene viewer
 - `cuemol-molclient`: molecular client facade
 - `cuemol-render`: render snapshots, GPU/headless backends, and ray tracing

@@ -43,6 +43,7 @@ fn stream_manager_default_registry_matches_reference_handlers() {
     assert!(info_json.contains("\"name\":\"psf\""));
     assert!(info_json.contains("\"name\":\"amberprm\""));
     assert!(info_json.contains("\"name\":\"namdcoor\""));
+    assert!(info_json.contains("\"name\":\"dcdtraj\""));
     assert!(info_json.contains("\"name\":\"ccp4map\""));
     assert!(info_json.contains("\"name\":\"xplormap\""));
     assert!(info_json.contains("\"name\":\"brix\""));
@@ -67,7 +68,7 @@ fn stream_manager_default_registry_matches_reference_handlers() {
         .is_some());
 
     let reader_info = manager.get_reader_info_json();
-    assert!(reader_info.contains("size: 22"));
+    assert!(reader_info.contains("size: 23"));
     assert!(reader_info.contains("\"PDB Coordinates (*.pdb;*.ent;*.pdb.gz)\""));
     assert!(reader_info.contains("\"QDF-PDB (*.qdfpdb)\""));
     assert!(reader_info.contains("\"mmcifmap\""));
@@ -76,6 +77,7 @@ fn stream_manager_default_registry_matches_reference_handlers() {
     assert!(reader_info.contains("\"psf\""));
     assert!(reader_info.contains("\"amberprm\""));
     assert!(reader_info.contains("\"namdcoor\""));
+    assert!(reader_info.contains("\"dcdtraj\""));
     assert!(reader_info.contains("\"ccp4map\""));
     assert!(reader_info.contains("\"CCP4 Density Map(*.map;*.ccp4;*.mrc;*.ccp4.gz)\""));
     assert!(reader_info.contains("\"xplormap\""));
@@ -402,6 +404,22 @@ fn stream_manager_searches_reference_importer_sniffers() {
         cuemol_molstr::ContentVerdict::Yes
     );
     let _ = fs::remove_file(swapped_namd);
+
+    let dcd = temp_file("stream-trajectory.dcd");
+    let mut dcd_header = vec![0_u8; 92];
+    dcd_header[..4].copy_from_slice(&84_u32.to_le_bytes());
+    dcd_header[4..8].copy_from_slice(b"CORD");
+    dcd_header[88..92].copy_from_slice(&84_u32.to_le_bytes());
+    fs::write(&dcd, dcd_header).unwrap();
+    assert_eq!(
+        manager.search_reader_by_content(&dcd, "", HandlerCategory::ObjReader, false, 0),
+        "dcdtraj"
+    );
+    assert_eq!(
+        manager.sniff_content(&dcd, HandlerSniffer::Dcd, 0),
+        cuemol_molstr::ContentVerdict::Yes
+    );
+    let _ = fs::remove_file(dcd);
 
     let ccp4 = temp_file("stream-density.map");
     let mut ccp4_bytes = vec![0_u8; 216];

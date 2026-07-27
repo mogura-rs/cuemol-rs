@@ -4,7 +4,7 @@
 //! via the shared inverse FFT. Port of C++ `xtal/MmcifMapReader`, which feeds
 //! the same `MapFFT` the MTZ reader uses.
 
-use cuemol_core::{CueMolError, Result};
+use cuemol_core::{parse_cif, CueMolError, Result};
 
 use crate::fft::Reflection;
 use crate::map_renderers::DensityMap;
@@ -27,40 +27,48 @@ pub struct CifMapCoeffs {
 /// (falling back to `pdbx_DELPHWT`); the space group is the integer
 /// `_symmetry.Int_Tables_number`.
 pub fn parse_cif_map_coeffs(input: &str) -> Result<CifMapCoeffs> {
-    let lines: Vec<&str> = input.lines().collect();
+    let document = parse_cif(input)?;
 
     let cell = [
-        cell_item(&lines, "_cell.length_a")?,
-        cell_item(&lines, "_cell.length_b")?,
-        cell_item(&lines, "_cell.length_c")?,
-        cell_item(&lines, "_cell.angle_alpha")?,
-        cell_item(&lines, "_cell.angle_beta")?,
-        cell_item(&lines, "_cell.angle_gamma")?,
+        cell_item(&document, "_cell.length_a")?,
+        cell_item(&document, "_cell.length_b")?,
+        cell_item(&document, "_cell.length_c")?,
+        cell_item(&document, "_cell.angle_alpha")?,
+        cell_item(&document, "_cell.angle_beta")?,
+        cell_item(&document, "_cell.angle_gamma")?,
     ];
 
-    let space_group = find_item(&lines, "_symmetry.Int_Tables_number")
+    let space_group = document
+        .item("_symmetry.Int_Tables_number")
         .and_then(|value| value.parse::<i32>().ok())
         .ok_or_else(|| CueMolError::parse("_symmetry.Int_Tables_number not found"))?;
 
-    let (tags, rows) =
-        find_loop(&lines, "_refln.").ok_or_else(|| CueMolError::parse("_refln loop not found"))?;
+    let refln_loop = document
+        .loops()
+        .find(|cif_loop| cif_loop.category_is("_refln"))
+        .ok_or_else(|| CueMolError::parse("_refln loop not found"))?;
 
-    let col_h =
-        column(&tags, "index_h").ok_or_else(|| CueMolError::parse("_refln.index_h not found"))?;
-    let col_k =
-        column(&tags, "index_k").ok_or_else(|| CueMolError::parse("_refln.index_k not found"))?;
-    let col_l =
-        column(&tags, "index_l").ok_or_else(|| CueMolError::parse("_refln.index_l not found"))?;
-    let col_f = column(&tags, "pdbx_FWT")
-        .or_else(|| column(&tags, "pdbx_DELFWT"))
+    let col_h = refln_loop
+        .column_index("index_h")
+        .ok_or_else(|| CueMolError::parse("_refln.index_h not found"))?;
+    let col_k = refln_loop
+        .column_index("index_k")
+        .ok_or_else(|| CueMolError::parse("_refln.index_k not found"))?;
+    let col_l = refln_loop
+        .column_index("index_l")
+        .ok_or_else(|| CueMolError::parse("_refln.index_l not found"))?;
+    let col_f = refln_loop
+        .column_index("pdbx_FWT")
+        .or_else(|| refln_loop.column_index("pdbx_DELFWT"))
         .ok_or_else(|| CueMolError::parse("_refln.pdbx_FWT or pdbx_DELFWT not found"))?;
-    let col_phi = column(&tags, "pdbx_PHWT")
-        .or_else(|| column(&tags, "pdbx_DELPHWT"))
+    let col_phi = refln_loop
+        .column_index("pdbx_PHWT")
+        .or_else(|| refln_loop.column_index("pdbx_DELPHWT"))
         .ok_or_else(|| CueMolError::parse("_refln.pdbx_PHWT or pdbx_DELPHWT not found"))?;
 
     let max_col = col_h.max(col_k).max(col_l).max(col_f).max(col_phi);
-    let mut reflections = Vec::with_capacity(rows.len());
-    for row in &rows {
+    let mut reflections = Vec::with_capacity(refln_loop.rows.len());
+    for row in &refln_loop.rows {
         if row.len() <= max_col {
             continue;
         }
@@ -108,69 +116,11 @@ pub fn density_map_from_cif(input: &str, resolution: f64, grid_size: f64) -> Res
 }
 
 /// Read a required numeric `_cell.*` item, erroring if it is absent.
-fn cell_item(lines: &[&str], tag: &str) -> Result<f64> {
-    find_item(lines, tag)
+fn cell_item(document: &cuemol_core::CifDocument, tag: &str) -> Result<f64> {
+    document
+        .item(tag)
         .and_then(|value| value.parse::<f64>().ok())
         .ok_or_else(|| CueMolError::parse(format!("{tag} not found")))
-}
-
-/// Find a single CIF key-value item (`<tag>  <value>` on one line) and return
-/// its (first) value token. The trailing-whitespace check keeps `_cell.length_a`
-/// from matching `_cell.length_alpha`.
-fn find_item(lines: &[&str], tag: &str) -> Option<String> {
-    lines.iter().find_map(|line| {
-        let rest = line.trim().strip_prefix(tag)?;
-        let mut chars = rest.chars();
-        match chars.next() {
-            Some(c) if c.is_whitespace() => rest.split_whitespace().next().map(str::to_string),
-            _ => None,
-        }
-    })
-}
-
-/// Find the `loop_` whose first tag starts with `category` and return its column
-/// tags and whitespace-tokenized data rows.
-fn find_loop<'a>(lines: &[&'a str], category: &str) -> Option<(Vec<&'a str>, Vec<Vec<&'a str>>)> {
-    let mut i = 0;
-    while i < lines.len() {
-        if lines[i].trim() != "loop_" {
-            i += 1;
-            continue;
-        }
-        let mut tags = Vec::new();
-        let mut j = i + 1;
-        while j < lines.len() && lines[j].trim().starts_with('_') {
-            tags.push(lines[j].trim());
-            j += 1;
-        }
-        if tags.first().is_some_and(|tag| tag.starts_with(category)) {
-            let mut rows = Vec::new();
-            while j < lines.len() {
-                let line = lines[j].trim();
-                if line.is_empty()
-                    || line == "#"
-                    || line == "loop_"
-                    || line.starts_with('_')
-                    || line.starts_with("data_")
-                {
-                    break;
-                }
-                rows.push(line.split_whitespace().collect());
-                j += 1;
-            }
-            return Some((tags, rows));
-        }
-        i = j;
-    }
-    None
-}
-
-/// Index of the column whose tag field (after the `.`) equals `suffix`.
-fn column(tags: &[&str], suffix: &str) -> Option<usize> {
-    tags.iter().position(|tag| {
-        tag.rsplit_once('.')
-            .is_some_and(|(_, field)| field == suffix)
-    })
 }
 
 #[cfg(test)]
@@ -270,5 +220,29 @@ mod tests {
              loop_\n_refln.index_h\n_refln.index_k\n_refln.index_l\n\
              _refln.pdbx_FWT\n_refln.pdbx_PHWT\n1 0 0 1.0 0.0\n";
         assert!(parse_cif_map_coeffs(no_sg).is_err());
+    }
+
+    #[test]
+    fn reflection_rows_can_span_lines_and_use_quoted_numbers() {
+        let cif = "data_map\n\
+             _cell.length_a 10.0\n\
+             _cell.length_b 10.0\n\
+             _cell.length_c 10.0\n\
+             _cell.angle_alpha 90.0\n\
+             _cell.angle_beta 90.0\n\
+             _cell.angle_gamma 90.0\n\
+             _symmetry.Int_Tables_number 1\n\
+             loop_\n\
+             _refln.index_h\n\
+             _refln.index_k\n\
+             _refln.index_l\n\
+             _refln.pdbx_FWT\n\
+             _refln.pdbx_PHWT\n\
+             1 0\n\
+             0 '250.0' 45.0\n";
+        let coeffs = parse_cif_map_coeffs(cif).unwrap();
+        assert_eq!(coeffs.reflections.len(), 1);
+        assert_eq!(coeffs.reflections[0].f, 250.0);
+        assert_eq!(coeffs.reflections[0].phi_deg, 45.0);
     }
 }

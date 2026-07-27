@@ -3,6 +3,7 @@ mod fileio;
 pub mod gro;
 pub mod namd;
 pub mod psf;
+pub mod trajectory;
 
 pub use amber::{
     apply_amber_mdcrd_frame, apply_amber_restart, apply_amber_restart_str, read_amber_mdcrd_file,
@@ -20,10 +21,15 @@ pub use namd::{
     NamdCoorFrame, NamdCoorLoad, NamdCoorReader,
 };
 pub use psf::{read_psf_file, read_psf_str, sniff_psf_content, PsfReader};
+pub use trajectory::{
+    read_dcd_bytes, read_dcd_bytes_with_options, read_dcd_file, read_dcd_file_with_options,
+    sniff_dcd_content, DcdReadOptions, DcdTrajReader, TrajBlock, Trajectory,
+};
 
 pub type GROFileReader = GroReader;
 pub type NAMDCoorReader = NamdCoorReader;
 pub type PSFReader = PsfReader;
+pub type DCDTrajReader = DcdTrajReader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MdCoordinateFormat {
@@ -31,6 +37,7 @@ pub enum MdCoordinateFormat {
     NamdCoor,
     AmberCrd,
     AmberMdcrd,
+    Dcd,
     Psf,
 }
 
@@ -70,5 +77,11 @@ mod tests {
         );
         assert_eq!(psf.handler().file_ext(), "*.psf");
         assert_eq!(psf.handler().category(), InOutHandler::IOH_CAT_OBJREADER);
+
+        let dcd = DcdTrajReader::new();
+        assert_eq!(dcd.handler().name(), "dcdtraj");
+        assert_eq!(dcd.handler().type_descr(), "DCD binary trajectory (*.dcd)");
+        assert_eq!(dcd.handler().file_ext(), "*.dcd");
+        assert_eq!(dcd.handler().category(), InOutHandler::IOH_CAT_OBJREADER);
     }
 }

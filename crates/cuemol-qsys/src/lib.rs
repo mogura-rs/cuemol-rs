@@ -34,8 +34,8 @@ pub use edit_info::{
     SharedScene, SharedStyleManager, StyleCreateEditInfo, StyleSrcEditInfo,
 };
 pub use events::{
-    shared_view_event_listener, DispListCacheImpl, InDevEvent, ObjectEvent, QsysEvent,
-    RendererEvent, SceneEvent, ScrEventManager, ScrEventManagerHandle, ScriptEventSlot,
+    shared_view_event_listener, AnimObjEvent, DispListCacheImpl, InDevEvent, ObjectEvent,
+    QsysEvent, RendererEvent, SceneEvent, ScrEventManager, ScrEventManagerHandle, ScriptEventSlot,
     SharedViewEventListener, ViewEvent,
 };
 pub use frame_render_pipeline::{FrameRenderParams, FrameRenderPipeline};

@@ -391,6 +391,10 @@ impl ScrEventManager {
         self.fire_category(event.category(), event.source(), event.json())
     }
 
+    pub fn fire_anim_obj_event(&self, event: &AnimObjEvent) -> Result<bool> {
+        self.fire_category(event.category(), event.source(), event.json())
+    }
+
     pub fn fire_view_event(&mut self, event: &mut ViewEvent) -> Result<bool> {
         self.fire_native_view_event(event);
         self.fire_category(event.category(), event.source(), event.json())
@@ -807,6 +811,86 @@ impl ObjectEvent {
     }
 }
 
+/// Animation-list event emitted by `AnimMgr`.
+///
+/// C++ `AnimObjEvent` uses the common script-event type values (`SEM_ADDED`,
+/// `SEM_REMOVING`, and `SEM_PROPCHG`) and adds the edited list index to the
+/// JSON payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnimObjEvent {
+    inner: QsysEvent,
+    index: i32,
+    prop_name: String,
+    parent_name: String,
+}
+
+impl Default for AnimObjEvent {
+    fn default() -> Self {
+        Self {
+            inner: QsysEvent::default(),
+            index: -1,
+            prop_name: String::new(),
+            parent_name: String::new(),
+        }
+    }
+}
+
+impl AnimObjEvent {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    delegate_event_accessors!();
+
+    pub fn index(&self) -> i32 {
+        self.index
+    }
+
+    pub fn get_index(&self) -> i32 {
+        self.index()
+    }
+
+    pub fn set_index(&mut self, value: i32) {
+        self.index = value;
+    }
+
+    pub fn set_prop_event(&mut self, prop_name: impl Into<String>, parent_name: impl Into<String>) {
+        self.prop_name = prop_name.into();
+        self.parent_name = parent_name.into();
+    }
+
+    pub fn json(&self) -> LString {
+        if self.event_type() == ScrEventManager::SEM_PROPCHG && !self.prop_name.is_empty() {
+            let mut fields = Vec::new();
+            if self.index >= 0 {
+                fields.push(format!("\"index\":{}", self.index));
+            }
+            fields.push(format!(
+                "\"propname\": \"{}\"",
+                escape_json(&self.prop_name)
+            ));
+            fields.push(format!(
+                "\"parentname\": \"{}\"",
+                escape_json(&self.parent_name)
+            ));
+            return LString::from(format!("{{{}}}", fields.join(", ")));
+        }
+        if self.index >= 0 {
+            LString::from(format!("{{\"index\":{}}}", self.index))
+        } else {
+            self.inner.json()
+        }
+    }
+
+    pub fn category(&self) -> Option<(LString, i32, i32)> {
+        Some((
+            LString::from(self.descr().to_string()),
+            ScrEventManager::SEM_ANIM,
+            self.event_type(),
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SceneEvent {
     inner: QsysEvent,
@@ -1218,6 +1302,31 @@ mod tests {
                 ScrEventManager::SEM_PROPCHG
             )
         );
+    }
+
+    #[test]
+    fn animation_event_includes_index_and_property_payload() {
+        let mut event = AnimObjEvent::new();
+        event.set_event_type(ScrEventManager::SEM_ADDED);
+        event.set_source(42);
+        event.set_descr("animObjAdded");
+        event.set_index(3);
+        assert_eq!(event.json(), LString::from("{\"index\":3}"));
+        assert_eq!(
+            event.category().unwrap(),
+            (
+                LString::from("animObjAdded"),
+                ScrEventManager::SEM_ANIM,
+                ScrEventManager::SEM_ADDED,
+            )
+        );
+
+        event.set_event_type(ScrEventManager::SEM_PROPCHG);
+        event.set_prop_event("start\"time", "timing");
+        let json = event.json();
+        assert!(json.index_of("\"index\":3") >= 0);
+        assert!(json.index_of("start\\\"time") >= 0);
+        assert!(json.index_of("\"parentname\": \"timing\"") >= 0);
     }
 
     #[test]

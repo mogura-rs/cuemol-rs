@@ -94,6 +94,7 @@ pub enum HandlerSniffer {
     Psf,
     AmberPrmtop,
     NamdCoor,
+    Dcd,
     OpenDx,
     MmcifMap,
     Ccp4Map,
@@ -823,6 +824,14 @@ fn default_handlers() -> Vec<StreamHandlerInfo> {
             Some(HandlerSniffer::NamdCoor),
         ),
         StreamHandlerInfo::new(
+            "cuemol_rs::DCDTrajReader",
+            "dcdtraj",
+            "DCD binary trajectory (*.dcd)",
+            "*.dcd",
+            HandlerCategory::ObjReader,
+            Some(HandlerSniffer::Dcd),
+        ),
+        StreamHandlerInfo::new(
             "cuemol_rs::OpenDXPotReader",
             "apbs",
             "APBS Potential Map(*.dx)",
@@ -1091,6 +1100,7 @@ fn sniff_text(input: &str, sniffer: HandlerSniffer) -> ContentVerdict {
         HandlerSniffer::Psf => sniff_psf(input),
         HandlerSniffer::AmberPrmtop => sniff_amber_prmtop(input.as_bytes()),
         HandlerSniffer::NamdCoor => sniff_namd_coor(input.as_bytes()),
+        HandlerSniffer::Dcd => sniff_dcd(input.as_bytes()),
         HandlerSniffer::OpenDx => sniff_opendx(input),
         HandlerSniffer::MmcifMap => sniff_mmcif_map(input),
         HandlerSniffer::Ccp4Map => sniff_ccp4_map(input.as_bytes()),
@@ -1115,6 +1125,7 @@ fn sniff_bytes(bytes: &[u8], sniffer: HandlerSniffer) -> ContentVerdict {
     match sniffer {
         HandlerSniffer::AmberPrmtop => sniff_amber_prmtop(bytes),
         HandlerSniffer::NamdCoor => sniff_namd_coor(bytes),
+        HandlerSniffer::Dcd => sniff_dcd(bytes),
         HandlerSniffer::Ccp4Map => sniff_ccp4_map(bytes),
         HandlerSniffer::MtzMap => sniff_mtz_map(bytes),
         HandlerSniffer::QdfMol => sniff_qdf_file_types(bytes, &[b"MOL2"]),
@@ -1267,7 +1278,24 @@ fn sniff_namd_coor(bytes: &[u8]) -> ContentVerdict {
     if bytes.len() < 28 {
         return ContentVerdict::Unknown;
     }
+    if sniff_dcd(bytes) == ContentVerdict::Yes {
+        return ContentVerdict::No;
+    }
     if is_valid_namd_coor_header(bytes, false) || is_valid_namd_coor_header(bytes, true) {
+        ContentVerdict::Yes
+    } else {
+        ContentVerdict::Unknown
+    }
+}
+
+fn sniff_dcd(bytes: &[u8]) -> ContentVerdict {
+    if bytes.len() < 8 {
+        return ContentVerdict::Unknown;
+    }
+    let marker = bytes[..4].try_into().unwrap();
+    if (u32::from_le_bytes(marker) == 84 || u32::from_be_bytes(marker) == 84)
+        && bytes.get(4..8) == Some(b"CORD".as_slice())
+    {
         ContentVerdict::Yes
     } else {
         ContentVerdict::Unknown

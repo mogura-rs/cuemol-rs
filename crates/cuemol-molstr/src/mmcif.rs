@@ -1,5 +1,5 @@
 use crate::molecule::{Atom, BondOrder, MolCoord};
-use cuemol_core::{CueMolError, Result, Vector4};
+use cuemol_core::{parse_cif, CifDocument, CifLoop, CueMolError, Result, Vector4};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -98,7 +98,8 @@ pub fn read_mmcif_str(input: &str) -> Result<MolCoord> {
 }
 
 pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Result<MolCoord> {
-    let loops = parse_loops(input)?;
+    let document = parse_cif(input)?;
+    let loops = document.loops().cloned().collect::<Vec<_>>();
     let mut mol = MolCoord::new();
     let mut atom_keys = HashMap::new();
     let mut struct_conn_rows = Vec::new();
@@ -182,29 +183,19 @@ pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Re
     // Crystallographic cell + space group come as single key-value items (not a
     // loop_), so parse those separately. The symm layer resolves the space group
     // to operators from these raw values.
-    if let Some(cell) = build_cell_params(&parse_single_items(input)) {
+    if let Some(cell) = build_cell_params(&parse_single_items(&document)) {
         mol.set_cell_params(cell);
     }
     Ok(mol)
 }
 
-/// Collect single (non-loop) `_category.item value` pairs. A loop column header
-/// is a lone `_`-token line (one token); a key-value item has the value on the
-/// same line (>= 2 tokens); data rows do not start with `_`.
-fn parse_single_items(input: &str) -> HashMap<String, String> {
-    let mut items = HashMap::new();
-    for line in cif_content_lines(input) {
-        let line = line.trim();
-        if !line.starts_with('_') {
-            continue;
-        }
-        if let Ok(tokens) = tokenize_cif_line(line) {
-            if tokens.len() >= 2 {
-                items.insert(tokens[0].to_ascii_lowercase(), tokens[1].clone());
-            }
-        }
-    }
-    items
+/// Collect single (non-loop) `_category.item value` pairs from the shared CIF
+/// document.
+fn parse_single_items(document: &CifDocument) -> HashMap<String, String> {
+    document
+        .items()
+        .map(|item| (item.name.to_ascii_lowercase(), item.value.clone()))
+        .collect()
 }
 
 /// Build unit-cell parameters from mmCIF `_cell` / `_symmetry` single items.
@@ -292,147 +283,6 @@ fn apply_secstr_range(cif_loop: &CifLoop, mol: &mut MolCoord, value: &str) {
                 mol.set_residue_prop_str(&chain, &res_id.to_string(), "secondary2", &secondary2);
         }
     }
-}
-
-#[derive(Debug, Clone)]
-struct CifLoop {
-    columns: Vec<String>,
-    rows: Vec<Vec<String>>,
-}
-
-impl CifLoop {
-    fn category_is(&self, expected: &str) -> bool {
-        self.columns
-            .first()
-            .and_then(|name| name.split_once('.').map(|(category, _)| category))
-            .is_some_and(|category| category.eq_ignore_ascii_case(expected))
-    }
-
-    fn column_index(&self, suffix: &str) -> Option<usize> {
-        self.columns.iter().position(|column| {
-            column
-                .rsplit_once('.')
-                .is_some_and(|(_, field)| field.eq_ignore_ascii_case(suffix))
-        })
-    }
-}
-
-fn parse_loops(input: &str) -> Result<Vec<CifLoop>> {
-    let lines = cif_content_lines(input);
-    let mut loops = Vec::new();
-    let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index].trim();
-        if !line.eq_ignore_ascii_case("loop_") {
-            index += 1;
-            continue;
-        }
-        index += 1;
-        let mut columns = Vec::new();
-        while index < lines.len() {
-            let line = lines[index].trim();
-            if line.starts_with('_') {
-                columns.push(line.to_string());
-                index += 1;
-            } else {
-                break;
-            }
-        }
-        let mut rows = Vec::new();
-        let mut pending = Vec::new();
-        while index < lines.len() {
-            let line = lines[index].trim();
-            if line.is_empty() {
-                index += 1;
-                continue;
-            }
-            if line == "#" {
-                index += 1;
-                break;
-            }
-            if line.eq_ignore_ascii_case("loop_")
-                || line.starts_with('_')
-                || starts_with_ignore_ascii_case(line, "data_")
-            {
-                break;
-            }
-            let tokens = tokenize_cif_line(line)?;
-            pending.extend(tokens);
-            if !columns.is_empty() {
-                while pending.len() >= columns.len() {
-                    rows.push(pending.drain(..columns.len()).collect());
-                }
-            }
-            index += 1;
-        }
-        if !columns.is_empty() {
-            loops.push(CifLoop { columns, rows });
-        }
-    }
-    Ok(loops)
-}
-
-fn cif_content_lines(input: &str) -> Vec<&str> {
-    let mut in_text_block = false;
-    input
-        .lines()
-        .filter(|line| {
-            if line.starts_with(';') {
-                in_text_block = !in_text_block;
-                return false;
-            }
-            !in_text_block
-        })
-        .collect()
-}
-
-fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
-    value
-        .get(..prefix.len())
-        .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
-}
-
-fn tokenize_cif_line(line: &str) -> Result<Vec<String>> {
-    let mut tokens = Vec::new();
-    let mut pos = 0;
-    while pos < line.len() {
-        let ch = line[pos..].chars().next().unwrap();
-        if ch.is_whitespace() {
-            pos += ch.len_utf8();
-            continue;
-        }
-        if ch == '#' {
-            break;
-        }
-        if ch == '\'' || ch == '"' {
-            let quote = ch;
-            pos += ch.len_utf8();
-            let start = pos;
-            while pos < line.len() {
-                let next = line[pos..].chars().next().unwrap();
-                if next == quote {
-                    tokens.push(line[start..pos].to_string());
-                    pos += quote.len_utf8();
-                    break;
-                }
-                pos += next.len_utf8();
-            }
-            if pos >= line.len() && !line.ends_with(quote) {
-                return Err(CueMolError::parse("unterminated mmCIF quote"));
-            }
-            continue;
-        }
-        let start = pos;
-        while pos < line.len() {
-            let next = line[pos..].chars().next().unwrap();
-            if next.is_whitespace() {
-                break;
-            }
-            pos += next.len_utf8();
-        }
-        tokens.push(line[start..pos].to_string());
-    }
-    Ok(tokens)
 }
 
 fn atom_from_row_with_options(
@@ -1069,5 +919,36 @@ _atom_site.Cartn_z
         let mol = read_mmcif_str(cif).unwrap();
         assert_eq!(mol.atom_count(), 1);
         assert_eq!(mol.atoms()[0].name, "N");
+    }
+
+    #[test]
+    fn single_cell_items_accept_separate_lines_and_quoted_values() {
+        let cif = "\
+data_test
+_cell.length_a
+10.0
+_cell.length_b 11.0
+_cell.length_c 12.0
+_cell.angle_alpha 90.0
+_cell.angle_beta 91.0
+_cell.angle_gamma 92.0
+_symmetry.space_group_name_H-M 'P 1'
+loop_
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_seq_id
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+1 C CA ALA A 1 0.0 0.0 0.0
+";
+        let mol = read_mmcif_str(cif).unwrap();
+        let cell = mol.cell_params().unwrap();
+        assert_eq!((cell.a, cell.b, cell.c), (10.0, 11.0, 12.0));
+        assert_eq!((cell.alpha, cell.beta, cell.gamma), (90.0, 91.0, 92.0));
+        assert_eq!(cell.space_group_name, "P 1");
     }
 }

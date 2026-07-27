@@ -7,6 +7,7 @@ pub mod qdf_map;
 use cuemol_qsys::{InOutHandler, ObjReader};
 
 pub use cif_map::{density_map_from_cif, parse_cif_map_coeffs, CifMapCoeffs};
+pub use cuemol_core::{CifBlock, CifDocument, CifItem, CifLoop, CifParser};
 pub use cuemol_molstr::{
     read_brix_map_bytes, read_brix_map_file, read_brix_map_with_header_bytes,
     read_brix_map_with_header_file, read_ccp4_map_bytes, read_ccp4_map_file,
