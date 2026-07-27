@@ -189,7 +189,7 @@ summary:focus-visible {
   background: #c4c4c4;
 }
 
-/* CueMol2 Home / Measure ribbon */
+/* CueMol2 Home / Measure / Animation ribbon */
 
 .ribbon {
   border-bottom: 2px solid #9e9e9e;
@@ -327,6 +327,34 @@ summary:focus-visible {
 
 .renderer-name input {
   width: 130px;
+}
+
+.animation-ribbon-panel {
+  align-items: center;
+  gap: 5px;
+}
+
+.animation-loop {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 5px;
+}
+
+.animation-loop input {
+  min-height: auto;
+  margin: 0;
+}
+
+.animation-slider {
+  min-width: 120px;
+  min-height: auto;
+  flex: 1;
+}
+
+.animation-time {
+  min-width: 94px;
+  font-family: var(--font-mono);
 }
 
 /* Main XUL-equivalent layout */
@@ -834,6 +862,93 @@ summary:focus-visible {
 .view-body input {
   min-height: auto;
   margin: 0;
+}
+
+.animation-body {
+  min-width: 0;
+}
+
+.animation-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 5px;
+}
+
+.animation-summary select {
+  min-width: 0;
+  flex: 1;
+}
+
+.animation-columns,
+.animation-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 45px 45px;
+  align-items: center;
+}
+
+.animation-columns {
+  min-height: 21px;
+  border: 1px solid #aaa;
+  background: linear-gradient(#fff, #dedede);
+  font-weight: 600;
+}
+
+.animation-columns span {
+  padding: 2px 4px;
+  border-right: 1px solid #bbb;
+}
+
+.animation-list {
+  min-height: 74px;
+  max-height: 210px;
+  overflow: auto;
+  border-right: 1px solid #aaa;
+  border-bottom: 1px solid #aaa;
+  border-left: 1px solid #aaa;
+  background: #fff;
+}
+
+.animation-row {
+  width: 100%;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid #eee;
+  border-radius: 0;
+  background: #fff;
+  box-shadow: none;
+  text-align: left;
+}
+
+.animation-row span,
+.animation-row input {
+  min-width: 0;
+  min-height: 20px;
+  padding: 2px 4px;
+  border: 0;
+  border-right: 1px solid #ddd;
+  border-radius: 0;
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.animation-row.selected {
+  background: var(--selection);
+  color: var(--selection-text);
+}
+
+.animation-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(5, 25px);
+  gap: 3px;
+  margin-top: 5px;
+}
+
+.animation-tools button {
+  min-width: 25px;
+  padding: 0;
 }
 
 /* Tabbed molecular view */

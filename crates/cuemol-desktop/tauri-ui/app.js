@@ -35,6 +35,19 @@ const dialogTitle = document.getElementById("dialog-title");
 const dialogContent = document.getElementById("dialog-content");
 const centerMarkElement = document.querySelector(".center-mark");
 const selectionRectangle = document.querySelector(".selection-rectangle");
+const animationPlay = document.getElementById("animation-play");
+const animationStop = document.getElementById("animation-stop");
+const animationLoop = document.getElementById("animation-loop");
+const animationSlider = document.getElementById("animation-slider");
+const animationTime = document.getElementById("animation-time");
+const animationDuration = document.getElementById("animation-duration");
+const animationList = document.getElementById("animation-list");
+const animationKind = document.getElementById("animation-kind");
+const animationAdd = document.getElementById("animation-add");
+const animationDelete = document.getElementById("animation-delete");
+const animationChange = document.getElementById("animation-change");
+const animationUp = document.getElementById("animation-up");
+const animationDown = document.getElementById("animation-down");
 
 const tauri = window.__TAURI__;
 const invoke = tauri?.core?.invoke;
@@ -52,6 +65,9 @@ let lastOpenedPaths = [];
 let centerMark = "cross";
 let performanceMeasure = false;
 let interactionMode = "rotate";
+let selectedAnimationIndex = null;
+let animationTimer = null;
+let animationTickBusy = false;
 
 function setBusy(value) {
   appShell.classList.toggle("busy", value);
@@ -184,6 +200,26 @@ function showReferenceDialog(title) {
           objectUid: object.uid,
           selection: selection.value,
           start: Number(start.value),
+        });
+        referenceDialog.close();
+      });
+      dialogContent.append(apply);
+    }
+  } else if (title === "Animation object properties") {
+    const object = snapshot?.animationObjects.find(
+      (item) => item.index === selectedAnimationIndex,
+    );
+    if (!object) {
+      dialogContent.append(dialogParagraph("Select an animation object first."));
+    } else {
+      dialogContent.append(dialogParagraph(object.name));
+      const duration = dialogField("Duration (seconds)", String(object.duration), "number");
+      duration.min = "0.1";
+      duration.step = "0.1";
+      const apply = button("Apply", "dialog-primary", async () => {
+        await mutate("set_animation_duration", {
+          index: object.index,
+          duration: Number(duration.value),
         });
         referenceDialog.close();
       });
@@ -553,6 +589,82 @@ function renderSequence() {
   }
 }
 
+function formatAnimationTime(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(value / 60);
+  const remainder = Math.floor(value % 60);
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+function syncAnimationTimer() {
+  if (snapshot?.animationPlaying && invoke) {
+    if (animationTimer) return;
+    animationTimer = setInterval(async () => {
+      if (animationTickBusy) return;
+      animationTickBusy = true;
+      try {
+        snapshot = await invoke("tick_animation", { dt: 0.1 });
+        renderShell();
+        await renderViewport();
+      } catch (error) {
+        showError(error);
+      } finally {
+        animationTickBusy = false;
+      }
+    }, 100);
+  } else if (animationTimer) {
+    clearInterval(animationTimer);
+    animationTimer = null;
+  }
+}
+
+function renderAnimation() {
+  const objects = snapshot.animationObjects;
+  if (!objects.some((object) => object.index === selectedAnimationIndex)) {
+    selectedAnimationIndex = null;
+  }
+  animationList.replaceChildren();
+  if (objects.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "animation-empty";
+    empty.textContent = "No animation objects.";
+    animationList.append(empty);
+  }
+  for (const object of objects) {
+    const row = button("", `animation-row${object.index === selectedAnimationIndex ? " selected" : ""}`, () => {
+      selectedAnimationIndex = object.index;
+      renderAnimation();
+    });
+    const name = document.createElement("span");
+    name.textContent = object.name;
+    const start = document.createElement("span");
+    start.textContent = object.start.toFixed(1);
+    const end = document.createElement("span");
+    end.textContent = object.end.toFixed(1);
+    row.append(name, start, end);
+    animationList.append(row);
+  }
+  const total = snapshot.animationDuration;
+  animationDuration.textContent = formatAnimationTime(total);
+  animationSlider.max = String(Math.max(total, 0));
+  animationSlider.value = String(Math.min(snapshot.animationElapsed, total));
+  animationSlider.disabled = total <= 0;
+  animationTime.textContent = `${formatAnimationTime(snapshot.animationElapsed)} / ${formatAnimationTime(total)}`;
+  animationLoop.checked = snapshot.animationLoop;
+  animationPlay.disabled = objects.length === 0;
+  animationStop.disabled = !snapshot.animationPlaying && snapshot.animationElapsed <= 0;
+  const playIcon = animationPlay.querySelector(".tool-icon");
+  const playLabel = animationPlay.querySelector("span:last-child");
+  playIcon.textContent = snapshot.animationPlaying ? "Ⅱ" : "▶";
+  playLabel.textContent = snapshot.animationPlaying ? "Pause" : "Play";
+  const selected = selectedAnimationIndex !== null;
+  animationDelete.disabled = !selected;
+  animationChange.disabled = !selected;
+  animationUp.disabled = !selected || selectedAnimationIndex === 0;
+  animationDown.disabled = !selected || selectedAnimationIndex === objects.length - 1;
+  syncAnimationTimer();
+}
+
 function renderShell() {
   if (!snapshot) return;
   normalizeSelection();
@@ -594,6 +706,7 @@ function renderShell() {
   renderSymmetry();
   renderDensity();
   renderSequence();
+  renderAnimation();
 }
 
 function viewportDimensions() {
@@ -929,6 +1042,62 @@ densityLevel.addEventListener("input", () => {
 
 densityLevel.addEventListener("change", () => {
   mutate("set_density_level", { level: Number(densityLevel.value) });
+});
+
+animationPlay.addEventListener("click", () => {
+  mutate("animation_control", {
+    action: snapshot?.animationPlaying ? "pause" : "play",
+  });
+});
+
+animationStop.addEventListener("click", () => {
+  mutate("animation_control", { action: "stop" });
+});
+
+animationLoop.addEventListener("change", () => {
+  mutate("set_animation_loop", { value: animationLoop.checked });
+});
+
+animationSlider.addEventListener("input", () => {
+  animationTime.textContent = `${formatAnimationTime(animationSlider.value)} / ${formatAnimationTime(snapshot?.animationDuration)}`;
+});
+
+animationSlider.addEventListener("change", () => {
+  mutate("seek_animation", { elapsed: Number(animationSlider.value) });
+});
+
+animationAdd.addEventListener("click", () => {
+  mutate("add_animation_object", { kind: animationKind.value });
+});
+
+animationDelete.addEventListener("click", () => {
+  if (selectedAnimationIndex !== null) {
+    mutate("delete_animation_object", { index: selectedAnimationIndex });
+  }
+});
+
+animationChange.addEventListener("click", () => {
+  showReferenceDialog("Animation object properties");
+});
+
+animationUp.addEventListener("click", () => {
+  if (selectedAnimationIndex !== null) {
+    mutate("move_animation_object", {
+      index: selectedAnimationIndex,
+      direction: -1,
+    });
+    selectedAnimationIndex -= 1;
+  }
+});
+
+animationDown.addEventListener("click", () => {
+  if (selectedAnimationIndex !== null) {
+    mutate("move_animation_object", {
+      index: selectedAnimationIndex,
+      direction: 1,
+    });
+    selectedAnimationIndex += 1;
+  }
 });
 
 document.querySelectorAll("input[name='projection']").forEach((input) => {

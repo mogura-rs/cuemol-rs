@@ -451,6 +451,7 @@ struct GuiApplication {
     perf_measure: bool,
     animation_frames: usize,
     animation_playing: bool,
+    animation_loop: bool,
     /// Animation timeline objects (CueMol2 `anim-panel` list) + the elapsed playback
     /// time in seconds while playing.
     animation_objects: Vec<AnimObject>,
@@ -558,12 +559,12 @@ enum ColoringMode {
     Bfac,
 }
 
-/// Ribbon toolbar tabs mirroring CueMol2's `topbar/cuemol2-ribbon.xul`
-/// (`tool-ribbon.js`): Home (navigate) and Measure.
+/// Ribbon toolbar tabs mirroring CueMol2's base ribbon plus `anim-ribbon.xul`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RibbonTab {
     Home,
     Measure,
+    Animation,
 }
 
 /// Home-tab interaction mode radio group (CueMol2 `navi-toolribbon.js`):
@@ -720,6 +721,7 @@ impl GuiApplication {
             perf_measure: false,
             animation_frames: 0,
             animation_playing: false,
+            animation_loop: false,
             animation_objects: Vec::new(),
             animation_elapsed: 0.0,
             superpose_reference: None,
@@ -1270,18 +1272,20 @@ impl GuiApplication {
         });
     }
 
-    /// Ribbon toolbar (CueMol2 `topbar/cuemol2-ribbon.xul`): Home and Measure
-    /// tabs sitting directly below the menu bar.
+    /// Ribbon toolbar (CueMol2 base ribbon + `anim-ribbon.xul`): Home, Measure,
+    /// and Animation tabs sitting directly below the menu bar.
     fn ribbon_bar(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         egui::TopBottomPanel::top("ribbon").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Home, "Home");
                 ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Measure, "Measure");
+                ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Animation, "Animation");
             });
             ui.separator();
             match self.ribbon_tab {
                 RibbonTab::Home => self.ribbon_home(ui, camera),
                 RibbonTab::Measure => self.ribbon_measure(ui),
+                RibbonTab::Animation => self.ribbon_animation(ui),
             }
         });
     }
@@ -1385,15 +1389,66 @@ impl GuiApplication {
         }
     }
 
+    fn ribbon_animation(&mut self, ui: &mut egui::Ui) {
+        let total = self
+            .animation_objects
+            .iter()
+            .map(|object| object.duration.max(0.01))
+            .sum::<f64>() as f32;
+        ui.horizontal(|ui| {
+            let play_label = if self.animation_playing {
+                "⏸ Pause"
+            } else {
+                "▶ Play"
+            };
+            if ui
+                .add_enabled(total > 0.0, egui::Button::new(play_label))
+                .clicked()
+            {
+                self.animation_playing = !self.animation_playing;
+            }
+            if ui
+                .add_enabled(
+                    self.animation_playing || self.animation_elapsed > 0.0,
+                    egui::Button::new("⏹ Stop"),
+                )
+                .clicked()
+            {
+                self.animation_playing = false;
+                self.animation_elapsed = 0.0;
+            }
+            ui.checkbox(&mut self.animation_loop, "Loop");
+            if total > 0.0 {
+                ui.add(
+                    egui::Slider::new(&mut self.animation_elapsed, 0.0..=total).show_value(false),
+                );
+            } else {
+                ui.add_enabled(
+                    false,
+                    egui::Slider::new(&mut self.animation_elapsed, 0.0..=1.0).show_value(false),
+                );
+            }
+            let current = self.animation_elapsed.max(0.0);
+            ui.monospace(format!(
+                "{:02}:{:02} / {:02}:{:02}",
+                (current / 60.0).floor() as u32,
+                (current % 60.0).floor() as u32,
+                (total / 60.0).floor() as u32,
+                (total % 60.0).floor() as u32
+            ));
+        });
+    }
+
     /// Left dock: a vertical accordion of CueMol2's eight side panels
     /// (`cuemol2-panels.js` / `sidepanelholder`). Each is an independently
     /// collapsible `CollapsingHeader`.
     fn left_panel(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         egui::SidePanel::left("left_dock")
             .resizable(true)
-            .default_width(240.0)
+            .default_width(250.0)
+            .width_range(220.0..=360.0)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::ScrollArea::both().show(ui, |ui| {
                     for panel in LeftPanel::ALL {
                         egui::CollapsingHeader::new(panel.title())
                             .default_open(panel.default_open())
@@ -2271,6 +2326,16 @@ impl GuiApplication {
     /// active object via the shared-core `anim_spin_direction` (CueMol2 anim playback;
     /// empty list → a simple continuous spin).
     fn advance_animation(&mut self, dt: f32, camera: &mut CameraController) {
+        let total = self
+            .animation_objects
+            .iter()
+            .map(|object| object.duration.max(0.01))
+            .sum::<f64>() as f32;
+        if total > 0.0 && !self.animation_loop && self.animation_elapsed + dt >= total {
+            self.animation_elapsed = total;
+            self.animation_playing = false;
+            return;
+        }
         let frame = anim_step(
             &self.animation_objects,
             self.animation_elapsed as f64,

@@ -33,8 +33,8 @@ fn tauri_shell_matches_the_reference_xul_dock_order() {
 fn tauri_shell_uses_the_native_light_chrome_and_cuemol_viewport() {
     assert!(HTML.contains("name=\"color-scheme\" content=\"light\""));
     assert_eq!(HTML.matches("class=\"side-card open\"").count(), 5);
-    assert_eq!(HTML.matches("data-ribbon-panel=").count(), 2);
-    assert!(!HTML.contains("data-ribbon=\"animation\""));
+    assert_eq!(HTML.matches("data-ribbon-panel=").count(), 3);
+    assert!(HTML.contains("data-ribbon-select=\"animation\""));
     assert!(CSS.contains("--viewport: #000"));
     assert!(CSS.contains("grid-template-columns: var(--panel-width) 6px minmax(0, 1fr)"));
     assert!(!HTML.contains("NAVIGATOR"));
@@ -103,6 +103,9 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "renumber_residues",
         "pick_atom",
         "select_screen_rect",
+        "add_animation_object",
+        "animation_control",
+        "tick_animation",
     ] {
         assert!(JS.contains(command), "missing menu binding {command}");
     }

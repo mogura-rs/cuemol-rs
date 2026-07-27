@@ -131,6 +131,9 @@
           <button class="ribbon-tab" type="button" role="tab" aria-selected="false" data-ribbon-select="measure">
             Measure
           </button>
+          <button class="ribbon-tab" type="button" role="tab" aria-selected="false" data-ribbon-select="animation">
+            Animation
+          </button>
           <button class="ribbon-collapse" type="button" title="Collapse ribbon" data-ribbon-collapse>⌃</button>
         </div>
 
@@ -197,6 +200,18 @@
               <input type="text" value="measure" />
             </label>
             <output id="measure-readout" class="measure-readout">Select 2 / 3 / 4 atoms</output>
+          </div>
+
+          <div class="ribbon-panel animation-ribbon-panel" role="tabpanel" data-ribbon-panel="animation">
+            <button id="animation-play" class="tool-button compact" type="button">
+              <span class="tool-icon">▶</span><span>Play</span>
+            </button>
+            <button id="animation-stop" class="tool-button compact" type="button">
+              <span class="tool-icon">■</span><span>Stop</span>
+            </button>
+            <label class="animation-loop"><input id="animation-loop" type="checkbox" />Loop</label>
+            <input id="animation-slider" class="animation-slider" type="range" min="0" max="0" step="0.05" value="0" />
+            <output id="animation-time" class="animation-time">00:00 / 00:00</output>
           </div>
         </div>
       </section>
@@ -337,7 +352,29 @@
             <button class="side-title" type="button" data-panel-toggle aria-expanded="false">
               <span class="disclosure">▸</span><span>Animation</span><span class="panel-close">×</span>
             </button>
-            <div class="side-body"><p>Animation objects and timeline controls.</p></div>
+            <div class="side-body animation-body">
+              <label class="animation-summary">Duration: <output id="animation-duration">00:00</output></label>
+              <label class="animation-summary">Start cam: <select id="animation-start-camera"><option>__current</option></select></label>
+              <div class="animation-columns"><span>Name</span><span>Start</span><span>End</span></div>
+              <div id="animation-list" class="animation-list"></div>
+              <div class="animation-tools">
+                <select id="animation-kind" aria-label="Animation type">
+                  <option value="simple-spin">Simple spin</option>
+                  <option value="camera-motion">Camera motion</option>
+                  <option value="show">Show</option>
+                  <option value="hide">Hide</option>
+                  <option value="slide-in">Slide In</option>
+                  <option value="slide-out">Slide Out</option>
+                  <option value="mol-anim">Mol Morphing</option>
+                  <option value="noop">No operation</option>
+                </select>
+                <button id="animation-add" type="button" title="Add">＋</button>
+                <button id="animation-delete" type="button" title="Delete" disabled>−</button>
+                <button id="animation-change" type="button" title="Change" disabled>⚙</button>
+                <button id="animation-up" type="button" title="Move up" disabled>↑</button>
+                <button id="animation-down" type="button" title="Move down" disabled>↓</button>
+              </div>
+            </div>
           </section>
         </aside>
 

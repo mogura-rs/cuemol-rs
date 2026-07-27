@@ -10,7 +10,9 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::offscreen::{camera_mvp, encode_rgba_png, SceneRenderer};
-use crate::{atoms_in_screen_rect, pick_atom_screen, DesktopAppState};
+use crate::{
+    anim_step, atoms_in_screen_rect, pick_atom_screen, AnimKind, AnimObject, DesktopAppState,
+};
 
 const MAX_VIEW_DIM: u32 = 1_600;
 
@@ -128,6 +130,16 @@ struct DensityMapDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct AnimationObjectDto {
+    index: usize,
+    name: String,
+    start: f64,
+    end: f64,
+    duration: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppSnapshot {
     scenes: Vec<SceneDto>,
     objects: Vec<ObjectDto>,
@@ -145,6 +157,11 @@ struct AppSnapshot {
     show_density_contour: bool,
     color_proofing: bool,
     density_level: f64,
+    animation_objects: Vec<AnimationObjectDto>,
+    animation_elapsed: f64,
+    animation_duration: f64,
+    animation_playing: bool,
+    animation_loop: bool,
     can_undo: bool,
     can_redo: bool,
     status: String,
@@ -171,6 +188,11 @@ struct AppModel {
     show_density_contour: bool,
     color_proofing: bool,
     density_level: f64,
+    animation_objects: Vec<AnimObject>,
+    animation_elapsed: f64,
+    animation_playing: bool,
+    animation_loop: bool,
+    animation_start_camera: Option<Camera>,
     undo_stack: Vec<AppModelUndo>,
     redo_stack: Vec<AppModelUndo>,
     status: String,
@@ -187,6 +209,9 @@ struct AppModelUndo {
     show_density_contour: bool,
     color_proofing: bool,
     density_level: f64,
+    animation_objects: Vec<AnimObject>,
+    animation_elapsed: f64,
+    animation_loop: bool,
 }
 
 impl AppModel {
@@ -222,6 +247,11 @@ impl AppModel {
             show_density_contour: false,
             color_proofing: false,
             density_level: 1.5,
+            animation_objects: Vec::new(),
+            animation_elapsed: 0.0,
+            animation_playing: false,
+            animation_loop: false,
+            animation_start_camera: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             status,
@@ -357,6 +387,24 @@ impl AppModel {
                 rmsd_density: map.rmsd_density,
             })
             .collect();
+        let mut animation_start = 0.0;
+        let animation_objects = self
+            .animation_objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| {
+                let duration = object.duration.max(0.01);
+                let start = animation_start;
+                animation_start += duration;
+                AnimationObjectDto {
+                    index,
+                    name: object.kind.label().to_string(),
+                    start,
+                    end: animation_start,
+                    duration,
+                }
+            })
+            .collect();
         AppSnapshot {
             scenes,
             objects,
@@ -374,6 +422,11 @@ impl AppModel {
             show_density_contour: self.show_density_contour,
             color_proofing: self.color_proofing,
             density_level: self.density_level,
+            animation_objects,
+            animation_elapsed: self.animation_elapsed,
+            animation_duration: animation_start,
+            animation_playing: self.animation_playing,
+            animation_loop: self.animation_loop,
             can_undo: !self.undo_stack.is_empty(),
             can_redo: !self.redo_stack.is_empty(),
             status: self.status.clone(),
@@ -599,6 +652,86 @@ impl AppModel {
         self.rebuild_mesh(false)
     }
 
+    fn animation_duration(&self) -> f64 {
+        self.animation_objects
+            .iter()
+            .map(|object| object.duration.max(0.01))
+            .sum()
+    }
+
+    fn apply_animation_visibility(&mut self, visible: bool) -> Result<bool, String> {
+        let mut changed = false;
+        for object in self.desktop.active_object_summaries() {
+            for renderer in self.desktop.renderer_summaries(object.uid) {
+                if renderer.visible != visible {
+                    self.desktop
+                        .set_renderer_visible(object.uid, renderer.uid, visible)
+                        .map_err(|error| error.to_string())?;
+                    changed = true;
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    fn tick_animation(&mut self, dt: f64) -> Result<(), String> {
+        if !self.animation_playing {
+            return Ok(());
+        }
+        let total = self.animation_duration();
+        if total <= 0.0 {
+            self.animation_playing = false;
+            self.status = "No animation objects".to_string();
+            return Ok(());
+        }
+        let reaches_end = !self.animation_loop && self.animation_elapsed + dt >= total;
+        let step = if reaches_end {
+            (total - self.animation_elapsed - 1.0e-6).max(0.0)
+        } else {
+            dt.clamp(0.0, 0.25)
+        };
+        let frame = anim_step(&self.animation_objects, self.animation_elapsed, step);
+        self.animation_elapsed = if reaches_end { total } else { frame.elapsed };
+        if frame.rotate_dir != 0.0 {
+            let rotation = self
+                .camera
+                .rotation()
+                .rotate_y(frame.rotate_dir * step * 45.0)
+                .map_err(|error| error.to_string())?;
+            self.camera.set_rotation(rotation);
+        }
+        if frame.slide_dir != 0.0 {
+            let factor = (1.0 + frame.slide_dir * step * 0.3).clamp(0.2, 5.0);
+            self.camera
+                .set_zoom((self.camera.zoom() * factor).clamp(0.5, 1.0e6));
+        }
+        let mut rebuild = false;
+        if let Some(visible) = frame.set_visible {
+            rebuild |= self.apply_animation_visibility(visible)?;
+        }
+        if let Some(fraction) = frame.frame_fraction {
+            if let Some(object_uid) = self
+                .desktop
+                .active_object_summaries()
+                .first()
+                .map(|object| object.uid)
+            {
+                if self.desktop.object_has_trajectory(object_uid) {
+                    self.desktop.apply_trajectory_fraction(object_uid, fraction);
+                    rebuild = true;
+                }
+            }
+        }
+        if rebuild {
+            self.rebuild_mesh(false)?;
+        }
+        if reaches_end {
+            self.animation_playing = false;
+            self.status = "Animation finished".to_string();
+        }
+        Ok(())
+    }
+
     fn capture_undo(&self) -> AppModelUndo {
         AppModelUndo {
             desktop: self.desktop.clone(),
@@ -610,6 +743,9 @@ impl AppModel {
             show_density_contour: self.show_density_contour,
             color_proofing: self.color_proofing,
             density_level: self.density_level,
+            animation_objects: self.animation_objects.clone(),
+            animation_elapsed: self.animation_elapsed,
+            animation_loop: self.animation_loop,
         }
     }
 
@@ -631,6 +767,11 @@ impl AppModel {
         self.show_density_contour = snapshot.show_density_contour;
         self.color_proofing = snapshot.color_proofing;
         self.density_level = snapshot.density_level;
+        self.animation_objects = snapshot.animation_objects;
+        self.animation_elapsed = snapshot.animation_elapsed;
+        self.animation_loop = snapshot.animation_loop;
+        self.animation_playing = false;
+        self.animation_start_camera = None;
         self.rebuild_mesh(false)
     }
 
@@ -722,6 +863,20 @@ enum ModelRequest {
         width: u32,
         height: u32,
     },
+    AddAnimationObject(String),
+    DeleteAnimationObject(usize),
+    MoveAnimationObject {
+        index: usize,
+        direction: i32,
+    },
+    SetAnimationDuration {
+        index: usize,
+        duration: f64,
+    },
+    AnimationControl(String),
+    SetAnimationLoop(bool),
+    SeekAnimation(f64),
+    TickAnimation(f64),
     Render {
         width: u32,
         height: u32,
@@ -753,6 +908,21 @@ struct ModelEnvelope {
 
 struct ManagedState {
     sender: mpsc::Sender<ModelEnvelope>,
+}
+
+fn animation_kind(value: &str) -> Option<AnimKind> {
+    match value {
+        "simple-spin" => Some(AnimKind::Spin),
+        "camera-motion" => Some(AnimKind::CameraMotion),
+        "rock" => Some(AnimKind::Rock),
+        "show" => Some(AnimKind::ShowAnim),
+        "hide" => Some(AnimKind::HideAnim),
+        "slide-in" => Some(AnimKind::SlideIn),
+        "slide-out" => Some(AnimKind::SlideOut),
+        "mol-anim" => Some(AnimKind::MolAnim),
+        "noop" => Some(AnimKind::Pause),
+        _ => None,
+    }
 }
 
 fn handle_model_request(
@@ -1025,6 +1195,118 @@ fn handle_model_request(
             height,
         } => {
             model.select_screen_rect(x1, y1, x2, y2, width, height)?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::AddAnimationObject(kind) => {
+            let kind =
+                animation_kind(&kind).ok_or_else(|| format!("unsupported animation: {kind}"))?;
+            let undo = model.capture_undo();
+            model.animation_objects.push(AnimObject {
+                kind,
+                duration: 3.0,
+            });
+            model.animation_elapsed = 0.0;
+            model.animation_playing = false;
+            model.animation_start_camera = None;
+            model.status = format!("Added {} animation", kind.label());
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::DeleteAnimationObject(index) => {
+            if index >= model.animation_objects.len() {
+                return Err(format!("animation object {index} was not found"));
+            }
+            let undo = model.capture_undo();
+            model.animation_objects.remove(index);
+            model.animation_elapsed = 0.0;
+            model.animation_playing = false;
+            model.animation_start_camera = None;
+            model.status = "Animation object deleted".to_string();
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::MoveAnimationObject { index, direction } => {
+            if index >= model.animation_objects.len() {
+                return Err(format!("animation object {index} was not found"));
+            }
+            let target = if direction < 0 {
+                index.checked_sub(1)
+            } else {
+                index
+                    .checked_add(1)
+                    .filter(|target| *target < model.animation_objects.len())
+            }
+            .ok_or_else(|| "animation object cannot move farther".to_string())?;
+            let undo = model.capture_undo();
+            model.animation_objects.swap(index, target);
+            model.animation_elapsed = 0.0;
+            model.status = "Animation object moved".to_string();
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetAnimationDuration { index, duration } => {
+            if !duration.is_finite() {
+                return Err("animation duration must be finite".to_string());
+            }
+            if index >= model.animation_objects.len() {
+                return Err(format!("animation object {index} was not found"));
+            }
+            let undo = model.capture_undo();
+            model.animation_objects[index].duration = duration.clamp(0.1, 3600.0);
+            model.animation_elapsed = model.animation_elapsed.min(model.animation_duration());
+            model.status = "Animation duration changed".to_string();
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::AnimationControl(action) => {
+            match action.as_str() {
+                "play" => {
+                    if model.animation_objects.is_empty() {
+                        model.status = "No animation objects".to_string();
+                    } else {
+                        if model.animation_elapsed >= model.animation_duration() {
+                            model.animation_elapsed = 0.0;
+                        }
+                        if model.animation_elapsed == 0.0 {
+                            model.animation_start_camera = Some(model.camera.clone());
+                        }
+                        model.animation_playing = true;
+                        model.status = "Animation playing".to_string();
+                    }
+                }
+                "pause" => {
+                    model.animation_playing = false;
+                    model.status = "Animation paused".to_string();
+                }
+                "stop" => {
+                    model.animation_playing = false;
+                    model.animation_elapsed = 0.0;
+                    if let Some(camera) = model.animation_start_camera.take() {
+                        model.camera = camera;
+                    }
+                    model.status = "Animation stopped".to_string();
+                }
+                _ => return Err(format!("unsupported animation control: {action}")),
+            }
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetAnimationLoop(value) => {
+            let undo = model.capture_undo();
+            model.animation_loop = value;
+            model.status = format!("Animation loop: {value}");
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SeekAnimation(elapsed) => {
+            if !elapsed.is_finite() {
+                return Err("animation time must be finite".to_string());
+            }
+            model.animation_elapsed = elapsed.clamp(0.0, model.animation_duration());
+            model.status = format!("Animation time: {:.2} s", model.animation_elapsed);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::TickAnimation(dt) => {
+            model.tick_animation(dt)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::Render { width, height } => {
@@ -1334,6 +1616,81 @@ fn select_screen_rect(
 }
 
 #[tauri::command]
+fn add_animation_object(
+    kind: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::AddAnimationObject(kind),
+    )?)
+}
+
+#[tauri::command]
+fn delete_animation_object(
+    index: usize,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::DeleteAnimationObject(index),
+    )?)
+}
+
+#[tauri::command]
+fn move_animation_object(
+    index: usize,
+    direction: i32,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::MoveAnimationObject { index, direction },
+    )?)
+}
+
+#[tauri::command]
+fn set_animation_duration(
+    index: usize,
+    duration: f64,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetAnimationDuration { index, duration },
+    )?)
+}
+
+#[tauri::command]
+fn animation_control(
+    action: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::AnimationControl(action),
+    )?)
+}
+
+#[tauri::command]
+fn set_animation_loop(value: bool, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetAnimationLoop(value),
+    )?)
+}
+
+#[tauri::command]
+fn seek_animation(elapsed: f64, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::SeekAnimation(elapsed))?)
+}
+
+#[tauri::command]
+fn tick_animation(dt: f64, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::TickAnimation(dt))?)
+}
+
+#[tauri::command]
 fn render_viewport(
     width: u32,
     height: u32,
@@ -1469,6 +1826,14 @@ pub fn run() -> Result<(), tauri::Error> {
             set_background,
             pick_atom,
             select_screen_rect,
+            add_animation_object,
+            delete_animation_object,
+            move_animation_object,
+            set_animation_duration,
+            animation_control,
+            set_animation_loop,
+            seek_animation,
+            tick_animation,
             render_viewport,
             update_camera,
             save_scene,
@@ -1496,6 +1861,11 @@ mod tests {
             show_density_contour: false,
             color_proofing: false,
             density_level: 1.5,
+            animation_objects: Vec::new(),
+            animation_elapsed: 0.0,
+            animation_playing: false,
+            animation_loop: false,
+            animation_start_camera: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             status: "Ready".to_string(),
@@ -1657,5 +2027,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(model.snapshot().selection, "aid 1");
+    }
+
+    #[test]
+    fn animation_ribbon_controls_the_shared_timeline() {
+        let mut model = model_without_gpu();
+        let before = model.camera.rotation();
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddAnimationObject("simple-spin".to_string()),
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::AnimationControl("play".to_string()),
+        )
+        .unwrap();
+        handle_model_request(&mut model, ModelRequest::TickAnimation(0.1)).unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.animation_objects.len(), 1);
+        assert_eq!(snapshot.animation_duration, 3.0);
+        assert!(snapshot.animation_elapsed > 0.0);
+        assert!(snapshot.animation_playing);
+        assert_ne!(model.camera.rotation(), before);
+        handle_model_request(
+            &mut model,
+            ModelRequest::AnimationControl("stop".to_string()),
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().animation_elapsed, 0.0);
+        assert_eq!(model.camera.rotation(), before);
     }
 }
