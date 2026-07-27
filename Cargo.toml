@@ -21,13 +21,6 @@ members = [
   "crates/cuemol-node",
   "crates/cuemol-py",
 ]
-# The Dioxus front end is intentionally NOT a workspace member: gpui 0.2.2 hard-
-# pins `cocoa =0.26.0` (the only published gpui version) while every Dioxus needs
-# `>=0.26.1`. A workspace shares one Cargo.lock, and non-activated optional deps
-# still constrain it, so the two cannot co-resolve. The Dioxus crate keeps its own
-# lockfile (depends on the gpui-free `cuemol-desktop-core`) and is built with
-# `cargo run --manifest-path crates/cuemol-desktop-dioxus/Cargo.toml`.
-exclude = ["crates/cuemol-desktop-dioxus"]
 resolver = "2"
 
 [workspace.package]

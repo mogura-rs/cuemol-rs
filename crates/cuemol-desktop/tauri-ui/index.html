@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>CueMol2</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="titlebar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <i></i><i></i><i></i>
+          </span>
+          <span class="brand-name">CueMol</span>
+          <span class="brand-version">2 / TAURI</span>
+        </div>
+        <nav class="menu-bar" aria-label="Application actions">
+          <button type="button" data-action="open">Open</button>
+          <button type="button" data-action="save">Save scene</button>
+          <button type="button" data-action="export">Export PNG</button>
+        </nav>
+        <div class="window-readout">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span id="projection-readout">ORTHO</span>
+        </div>
+      </header>
+
+      <section class="scene-strip" aria-label="Scenes">
+        <div id="scene-tabs" class="scene-tabs"></div>
+        <button class="icon-button scene-add" type="button" data-action="new-scene" title="New scene">+</button>
+      </section>
+
+      <section class="instrument-bar" aria-label="View controls">
+        <div class="tool-cluster">
+          <span class="cluster-label">VIEW</span>
+          <button type="button" data-action="fit">Fit</button>
+          <button type="button" data-action="projection">Projection</button>
+        </div>
+        <div class="tool-cluster selection-cluster">
+          <label for="selection-input">SELECTION</label>
+          <input id="selection-input" type="text" spellcheck="false" placeholder="chain A and name CA" />
+          <button type="button" data-action="select">Apply</button>
+          <button class="quiet" type="button" data-action="clear-selection">Clear</button>
+        </div>
+        <div class="tool-cluster readout-cluster" aria-label="Mouse controls">
+          <span>LMB</span><b>ORBIT</b>
+          <span>RMB</span><b>PAN</b>
+          <span>WHEEL</span><b>ZOOM</b>
+        </div>
+      </section>
+
+      <main class="workbench">
+        <aside class="panel scene-panel">
+          <div class="panel-heading">
+            <div>
+              <span class="eyebrow">NAVIGATOR</span>
+              <h1>Scene hierarchy</h1>
+            </div>
+            <button class="icon-button" type="button" data-action="close-scene" title="Close active scene">×</button>
+          </div>
+          <div id="scene-tree" class="scene-tree"></div>
+        </aside>
+
+        <section class="viewport-panel">
+          <div id="viewport" class="viewport" tabindex="0" aria-label="Molecular viewport">
+            <div class="viewport-grid" aria-hidden="true"></div>
+            <img id="viewport-image" alt="Rendered molecular structure" draggable="false" />
+            <div id="viewport-empty" class="viewport-empty">
+              <div class="empty-orbit" aria-hidden="true"><i></i><i></i><i></i></div>
+              <strong>NO STRUCTURE LOADED</strong>
+              <span>Open or drop a molecular data file to begin.</span>
+            </div>
+            <div class="axis" aria-hidden="true">
+              <span class="axis-y">Y</span>
+              <span class="axis-x">X</span>
+              <i></i>
+            </div>
+            <div class="viewport-corner top-left"></div>
+            <div class="viewport-corner top-right"></div>
+            <div class="viewport-corner bottom-left"></div>
+            <div class="viewport-corner bottom-right"></div>
+            <div id="render-size" class="render-size">— × —</div>
+            <div id="drag-readout" class="drag-readout"></div>
+          </div>
+        </section>
+
+        <aside class="panel inspector-panel">
+          <div class="panel-heading">
+            <div>
+              <span class="eyebrow">INSPECTOR</span>
+              <h1 id="inspector-title">No object</h1>
+            </div>
+          </div>
+          <section class="inspector-section">
+            <h2>Object statistics</h2>
+            <dl id="object-stats" class="stats-grid">
+              <div><dt>Atoms</dt><dd>—</dd></div>
+              <div><dt>Residues</dt><dd>—</dd></div>
+              <div><dt>Bonds</dt><dd>—</dd></div>
+            </dl>
+          </section>
+          <section class="inspector-section">
+            <h2>Render representation</h2>
+            <div class="add-renderer">
+              <select id="renderer-type" aria-label="Renderer type">
+                <option value="simple">Simple</option>
+                <option value="ballstick">Ball &amp; stick</option>
+                <option value="cpk">CPK</option>
+                <option value="ribbon">Ribbon</option>
+                <option value="cartoon">Cartoon</option>
+                <option value="trace">Trace</option>
+                <option value="tube">Tube</option>
+                <option value="spline">Spline</option>
+              </select>
+              <button type="button" data-action="add-renderer">Add</button>
+            </div>
+            <div id="renderer-list" class="renderer-list"></div>
+          </section>
+          <section class="inspector-section shortcut-section">
+            <h2>Shortcuts</h2>
+            <div><kbd>⌘ O</kbd><span>Open files</span></div>
+            <div><kbd>F</kbd><span>Fit active scene</span></div>
+            <div><kbd>P</kbd><span>Toggle projection</span></div>
+          </section>
+        </aside>
+      </main>
+
+      <footer class="status-dock">
+        <div class="status-primary">
+          <span class="status-label">STATUS</span>
+          <span id="status-text">Starting CueMol2…</span>
+        </div>
+        <div class="status-log">
+          <span id="status-history">Rust core initializing</span>
+        </div>
+        <div id="scene-metrics" class="scene-metrics">0 SCENES / 0 OBJECTS</div>
+      </footer>
+    </div>
+    <div id="toast" class="toast" role="alert"></div>
+  </body>
+</html>

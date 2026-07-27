@@ -1,5 +1,7 @@
 # cuemol2-rs
 
+![](cuemol-rs.png)
+
 Rust reimplementation of CueMol2.
 
 This repository implements `../cuemol2` as a Rust-native workspace.
@@ -24,20 +26,18 @@ only.
 - `cuemol-molclient`: molecular client facade
 - `cuemol-render`: render snapshots, GPU/headless backends, and ray tracing
 - `cuemol-desktop-core`: shared desktop application state and offscreen rendering
-- `cuemol-desktop`: GPUI desktop application
+- `cuemol-desktop`: egui and Tauri desktop applications
 - `cuemol-cli`: command-line validation utility
 - `cuemol-node`: Node.js binding facade
 - `cuemol-py`: Python binding facade
-
-The Dioxus desktop frontend is maintained in the excluded
-`crates/cuemol-desktop-dioxus` package and is checked separately.
 
 ## Development
 
 ```sh
 cargo test --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features
-cargo check --manifest-path crates/cuemol-desktop-dioxus/Cargo.toml --all-targets
+cargo run -p cuemol-desktop --bin cuemol-desktop --features egui-gui
+cargo run -p cuemol-desktop --bin cuemol-desktop-tauri --features tauri-gui
 cargo run -p cuemol-cli -- select-dump "chain A and elem C"
 cargo run -p cuemol-cli -- pdb-info ../cuemol2/tests/test_data/1CRN.pdb
 cargo run -p cuemol-cli -- qdfpdb-info example.qdfpdb

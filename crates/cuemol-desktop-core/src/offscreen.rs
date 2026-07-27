@@ -1,8 +1,7 @@
 //! Offscreen wgpu renderer: rasterize [`RenderMesh`] triangles to an in-memory
 //! RGBA image, with NO window/surface. This is verifiable headless (render a
 //! known mesh, read the pixels back), unlike on-screen drawing — and it is the
-//! wgpu 3D component the gpui GUI will composite (gpui panels + a wgpu-rendered
-//! 3D image, per the user's direction). wgpu compiles shaders at runtime
+//! wgpu 3D component the Tauri GUI composites into its webview. wgpu compiles shaders at runtime
 //! (naga -> Metal), so this needs no Xcode, only the Command Line Tools.
 
 use wgpu::util::DeviceExt;
@@ -985,7 +984,7 @@ fn resolve_rgba(accumulated: &[u32], sample_count: usize) -> Vec<u8> {
 }
 
 /// Render a whole molecular scene (atoms + bonds + meshes) to an offscreen RGBA8
-/// image — the full 3D image the gpui GUI will composite. Returns `None` when no
+/// image — the full 3D image a webview GUI can composite. Returns `None` when no
 /// GPU adapter is available.
 pub fn render_snapshot_offscreen(
     snapshot: &RenderSceneSnapshot,

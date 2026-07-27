@@ -3,10 +3,11 @@ name = "cuemol-desktop"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+build = "build.rs"
 
 [dependencies]
 # GUI-agnostic shared logic (DesktopAppState facade, Gui* view-models, offscreen
-# wgpu renderer). Re-exported at this crate's root for the egui/gpui modules.
+# wgpu renderer). Re-exported at this crate's root for the egui and Tauri modules.
 cuemol-desktop-core.workspace = true
 cuemol-core.workspace = true
 cuemol-gfx.workspace = true
@@ -27,22 +28,18 @@ egui-wgpu = { version = "0.33.3", optional = true }
 # feature into the test build; without it the two disagree on `accesskit_update`.
 egui-winit = { version = "0.33.3", default-features = false, features = ["accesskit"], optional = true }
 glam = { version = "0.30.10", optional = true }
-# Same version gpui resolves to, so `image::Frame` matches `gpui::RenderImage::new`.
-image = { version = "0.25", optional = true }
-# `runtime_shaders` makes gpui compile its Metal shaders at RUNTIME (via the
-# Metal framework) instead of at build time via `xcrun metal` — the latter needs
-# the full Xcode toolchain (CLT lacks the offline `metal` compiler). This lets
-# the gpui GUI build with only Command Line Tools.
-gpui = { version = "0.2.2", optional = true, features = ["runtime_shaders"] }
-# naga (with `termcolor`) and png are pulled in via `cuemol-desktop-core/offscreen`
-# (enabled by both GUI features below), so they no longer need a direct dep here.
 pollster = { version = "0.4", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+tauri = { version = "2.11.5", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+# cookie 0.18.1 still calls the pre-0.3.52 parsing API used by Tauri.
+time = { version = "=0.3.51", optional = true }
 wgpu = { version = "27.0.1", optional = true }
 winit = { version = "0.30.12", optional = true }
 
 [features]
 default = []
-native-gui = [
+egui-gui = [
   "cuemol-desktop-core/offscreen",
   "cuemol-desktop-core/scripting",
   "dep:bytemuck",
@@ -54,26 +51,28 @@ native-gui = [
   "dep:wgpu",
   "dep:winit",
 ]
-# Parallel gpui-based GUI (Zed's framework): gpui draws the panels, wgpu renders
-# the 3D molecular view offscreen and is composited as an image.
-gpui-gui = [
+# Tauri desktop shell: the webview draws the panels and the shared wgpu renderer
+# supplies the molecular viewport as a PNG data URI.
+tauri-gui = [
   "cuemol-desktop-core/offscreen",
   "cuemol-desktop-core/scripting",
-  "dep:bytemuck",
-  "dep:glam",
-  "dep:gpui",
-  "dep:image",
-  "dep:pollster",
-  "dep:wgpu",
+  "dep:serde",
+  "dep:tauri",
+  "dep:tauri-build",
+  "dep:tauri-plugin-dialog",
+  "dep:time",
 ]
 
 # Visual self-verification: render the egui shell to a PNG offscreen (wgpu/Metal),
 # so the CueMol2 layout can be compared against the XUL spec without a window.
 # Pinned to egui's exact minor (0.33.x) — a mismatch would drag a second egui copy
-# into the tree and break `egui::Context` type identity. Only used by native-gui tests.
+# into the tree and break `egui::Context` type identity. Only used by egui-gui tests.
 [dev-dependencies]
 egui_kittest = { version = "0.33.3", features = ["wgpu"] }
 image = "0.25"
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", optional = true }
 
 [lib]
 name = "cuemol_desktop"
@@ -82,9 +81,9 @@ path = "src/lib.rs"
 [[bin]]
 name = "cuemol-desktop"
 path = "src/main.rs"
-required-features = ["native-gui"]
+required-features = ["egui-gui"]
 
 [[bin]]
-name = "cuemol-desktop-gpui"
-path = "src/gpui_main.rs"
-required-features = ["gpui-gui"]
+name = "cuemol-desktop-tauri"
+path = "src/tauri_main.rs"
+required-features = ["tauri-gui"]

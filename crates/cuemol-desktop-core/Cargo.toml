@@ -4,12 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
-# GUI-agnostic desktop logic shared by every front end (egui/gpui/Dioxus): the
+# GUI-agnostic desktop logic shared by the egui and Tauri front ends: the
 # headless `DesktopAppState` facade, the `Gui*Summary` view-models, and the
-# offscreen wgpu renderer. Deliberately depends on NO windowing/GUI toolkit so it
-# can be a dependency of GUI crates with mutually incompatible native deps — most
-# importantly the Dioxus front end (which lives outside this workspace because
-# gpui 0.2.2 hard-pins `cocoa =0.26.0` while Dioxus needs `>=0.26.1`).
+# offscreen wgpu renderer. It deliberately depends on no windowing toolkit.
 
 [dependencies]
 cuemol-core.workspace = true

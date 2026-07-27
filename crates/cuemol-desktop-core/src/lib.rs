@@ -472,7 +472,7 @@ pub struct GuiStructChain {
 
 /// A molecule's full chain → residue → atom hierarchy for the MolStruct side panel
 /// (CueMol2 `molstruct-panel.xul` `molStructTree`). Built from the molecule's own
-/// `chain_summaries()` + `residue_summaries()`; shared by all three front ends.
+/// `chain_summaries()` + `residue_summaries()` and shared by both front ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiStructObject {
     pub object_uid: Uid,
@@ -3099,7 +3099,7 @@ impl DesktopAppState {
 
     /// Project the SELECTED atoms to image-pixel positions + their `RESid:ATOM` text,
     /// for overlaying atom labels over the composited viewport image (CueMol2 atom
-    /// labels) in the gpui/dioxus front ends. `mvp` is the column-major view-projection
+    /// labels) in the Tauri front end. `mvp` is the column-major view-projection
     /// (`camera_mvp`); `width`/`height` are the image pixel size. Atoms behind the camera
     /// or off-screen are dropped; capped at `max`.
     pub fn active_atom_labels(
@@ -44780,7 +44780,7 @@ end_header
     #[test]
     fn render_snapshot_applies_a_renderers_resolved_style_geometry() {
         // The GUI render snapshot must honour a renderer's `style="..."` preset,
-        // not just its per-type defaults (the gap this closes — egui/gpui/dioxus all
+        // not just its per-type defaults (the gap this closes — both front ends
         // route geometry through `active_render_snapshot`). Discriminator: a
         // ballstick renderer draws bonds at the 0.08 type default until tagged with
         // `DefaultBallStick`, whose bundled preset is bondw=0.2 / sphr=0.3.

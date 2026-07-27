@@ -1,5 +1,5 @@
 // AnimKind/AnimObject + the `anim_spin_direction` timeline stepper are shared via core
-// so egui/gpui/dioxus drive the animation timeline identically.
+// so both desktop front ends drive the animation timeline identically.
 use crate::{anim_step, AnimKind, AnimObject, DesktopAppState, GuiLoadedPath, GuiSequenceSummary};
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::Rgba8;
@@ -3333,7 +3333,7 @@ impl GuiApplication {
             Err(error) => self.set_error(error),
         }
         // Crystal packing (Symmetry "Unit cell" / "Symm mol") via the shared core path,
-        // so egui/gpui/dioxus render it identically.
+        // so both desktop front ends render it identically.
         self.state.append_crystal_geometry(
             &mut self.snapshot,
             self.show_unit_cell,
@@ -3439,7 +3439,7 @@ impl GuiApplication {
                 self.set_status(format!("Imported mesh: {verts} vertices, {tris} triangles"));
                 self.rebuild_snapshot();
                 // Frame the imported mesh (it may sit far from the molecule), matching
-                // gpui's refit-on-import so all three shells behave the same.
+                // the shared refit-on-import behavior used by both shells.
                 camera.fit_snapshot(&self.snapshot);
             }
             Err(error) => self.set_status(format!("Mesh import failed: {error}")),
