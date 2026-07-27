@@ -116,6 +116,10 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "append_morph_frame",
         "remove_morph_frame",
         "apply_morph_frame",
+        "clear_log",
+        "execute_script",
+        "export_pov",
+        "render_animation",
     ] {
         assert!(JS.contains(command), "missing menu binding {command}");
     }

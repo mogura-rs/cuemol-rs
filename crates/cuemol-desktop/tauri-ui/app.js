@@ -68,6 +68,7 @@ let performanceMeasure = false;
 let interactionMode = "rotate";
 let selectedAnimationIndex = null;
 let selectedMorphFrameIndex = null;
+let lastModelLogCount = 0;
 let animationTimer = null;
 let animationTickBusy = false;
 
@@ -120,6 +121,19 @@ function dialogField(label, value, type = "text") {
   const input = document.createElement("input");
   input.type = type;
   input.value = value;
+  wrapper.append(text, input);
+  dialogContent.append(wrapper);
+  return input;
+}
+
+function dialogTextArea(label, value) {
+  const wrapper = document.createElement("label");
+  wrapper.className = "dialog-field dialog-textarea";
+  const text = document.createElement("span");
+  text.textContent = label;
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.spellcheck = false;
   wrapper.append(text, input);
   dialogContent.append(wrapper);
   return input;
@@ -550,6 +564,102 @@ function showReferenceDialog(title) {
       });
       dialogActions(remove, apply, add);
     }
+  } else if (title === "POV-Ray rendering") {
+    const scene = snapshot?.scenes.find((item) => item.active);
+    dialogSelect(
+      "Target",
+      scene ? [[scene.uid, scene.name]] : [],
+      scene?.uid ?? "",
+    );
+    const width = dialogField("Image width (px)", "1000", "number");
+    width.min = "1";
+    width.max = "10000";
+    const height = dialogField("Image height (px)", "1000", "number");
+    height.min = "1";
+    height.max = "10000";
+    dialogSelect(
+      "Projection",
+      [
+        ["perspective", "Perspective"],
+        ["orthographic", "Orthographic"],
+      ],
+      snapshot.perspective ? "perspective" : "orthographic",
+    );
+    dialogCheckbox("Clipping plane", true);
+    dialogCheckbox("Post-render alpha blending", true);
+    dialogCheckbox("Edge lines", true);
+    dialogCheckbox("Pix labels", false);
+    const savePov = button("Save POV scene…", "", async () => {
+      const path = await chooseOutputPath("cuemol.pov", "POV-Ray scene", ["pov"]);
+      if (!path) return;
+      await mutate("export_pov", { path });
+      referenceDialog.close();
+    });
+    const saveImage = button("Save image…", "dialog-primary", async () => {
+      const path = await chooseOutputPath("cuemol.png", "PNG image", ["png"]);
+      if (!path) return;
+      await mutate("export_png", {
+        path,
+        width: Number(width.value),
+        height: Number(height.value),
+      });
+      referenceDialog.close();
+    });
+    dialogActions(savePov, saveImage);
+  } else if (title === "Animation rendering") {
+    const scene = snapshot?.scenes.find((item) => item.active);
+    dialogSelect(
+      "Target scene",
+      scene ? [[scene.uid, scene.name]] : [],
+      scene?.uid ?? "",
+    );
+    const outputDir = dialogField("Output dir", "");
+    const baseName = dialogField("Output base name", "frame");
+    const width = dialogField("Width (px)", "640", "number");
+    width.min = "100";
+    const height = dialogField("Height (px)", "480", "number");
+    height.min = "100";
+    const frameRate = dialogSelect(
+      "Frame rate (fps)",
+      [
+        [24, "24"],
+        [30, "30"],
+        [60, "60"],
+      ],
+      30,
+    );
+    dialogCheckbox("Loop", false);
+    const chooseDir = button("Change output dir…", "", async () => {
+      if (!dialog?.open) {
+        showError("The Tauri dialog plugin is unavailable.");
+        return;
+      }
+      const path = await dialog.open({ directory: true, multiple: false });
+      if (path) outputDir.value = path;
+    });
+    const start = button("Start", "dialog-primary", async () => {
+      await mutate("render_animation", {
+        outputDir: outputDir.value,
+        baseName: baseName.value,
+        width: Number(width.value),
+        height: Number(height.value),
+        frameRate: Number(frameRate.value),
+      });
+      showBottomPanel("output");
+      referenceDialog.close();
+    });
+    dialogActions(chooseDir, start);
+  } else if (title === "Execute script") {
+    const script = dialogTextArea(
+      "JavaScript",
+      'print("CueMol2");\n// cuemol.select("name CA");',
+    );
+    const run = button("Execute", "dialog-primary", async () => {
+      await mutate("execute_script", { script: script.value });
+      showBottomPanel("output");
+      referenceDialog.close();
+    });
+    dialogActions(run);
   } else if (title === "Delete mol atoms") {
     const object = selectedObject();
     if (!object) {
@@ -693,8 +803,7 @@ async function handleLocalAction(action) {
       scheduleRender(140);
       break;
     case "clear-log":
-      statusTrail = [];
-      statusHistory.textContent = "";
+      await mutate("clear_log");
       break;
     case "restore-panels":
       restoreDefaultPanels();
@@ -1090,6 +1199,14 @@ function renderShell() {
   });
   measureReadout.textContent = snapshot.measureResult || "Select 2 / 3 / 4 atoms";
   statusText.textContent = snapshot.status;
+  const modelLog = snapshot.logLines || [];
+  if (modelLog.length < lastModelLogCount) {
+    statusTrail = [];
+    statusHistory.textContent = "";
+    lastModelLogCount = 0;
+  }
+  for (const line of modelLog.slice(lastModelLogCount)) recordStatus(line);
+  lastModelLogCount = modelLog.length;
   recordStatus(snapshot.status);
   metrics.textContent = `${snapshot.scenes.length} scenes / ${snapshot.objects.length} objects`;
   renderSceneTabs();

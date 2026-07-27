@@ -1,6 +1,7 @@
 //! Tauri desktop shell backed by the shared [`DesktopAppState`].
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use cuemol_core::{Uid, Vector4};
@@ -182,6 +183,7 @@ struct AppSnapshot {
     morphs: Vec<MorphObjectDto>,
     can_undo: bool,
     can_redo: bool,
+    log_lines: Vec<String>,
     status: String,
 }
 
@@ -213,6 +215,7 @@ struct AppModel {
     animation_start_camera: Option<Camera>,
     undo_stack: Vec<AppModelUndo>,
     redo_stack: Vec<AppModelUndo>,
+    log_lines: Vec<String>,
     status: String,
 }
 
@@ -272,6 +275,7 @@ impl AppModel {
             animation_start_camera: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            log_lines: Vec::new(),
             status,
         };
         let _ = model.rebuild_mesh(true);
@@ -468,6 +472,7 @@ impl AppModel {
             morphs,
             can_undo: !self.undo_stack.is_empty(),
             can_redo: !self.redo_stack.is_empty(),
+            log_lines: self.log_lines.clone(),
             status: self.status.clone(),
         }
     }
@@ -555,6 +560,98 @@ impl AppModel {
             height,
             status: self.status.clone(),
         }
+    }
+
+    fn render_png_bytes(&self, width: u32, height: u32) -> Result<Vec<u8>, String> {
+        let width = width.clamp(64, MAX_VIEW_DIM);
+        let height = height.clamp(64, MAX_VIEW_DIM);
+        let renderer = self
+            .renderer
+            .as_ref()
+            .ok_or_else(|| "the GPU renderer is unavailable".to_string())?;
+        let mesh = self
+            .mesh
+            .as_ref()
+            .filter(|mesh| !mesh.indices.is_empty())
+            .ok_or_else(|| "the active scene has no renderable geometry".to_string())?;
+        let mvp = camera_mvp(&self.camera, f64::from(width) / f64::from(height));
+        let rgba = renderer
+            .render(
+                std::slice::from_ref(mesh),
+                mvp,
+                width,
+                height,
+                if self.background == "white" {
+                    [1.0, 1.0, 1.0, 1.0]
+                } else {
+                    [0.0, 0.0, 0.0, 1.0]
+                },
+            )
+            .ok_or_else(|| "rendering the animation frame failed".to_string())?;
+        Ok(encode_rgba_png(&rgba, width, height))
+    }
+
+    fn render_animation_frames(
+        &mut self,
+        output_dir: &str,
+        base_name: &str,
+        width: u32,
+        height: u32,
+        frame_rate: f64,
+    ) -> Result<usize, String> {
+        if self.animation_objects.is_empty() {
+            return Err("no animation objects are defined".to_string());
+        }
+        if !frame_rate.is_finite() || !(1.0..=120.0).contains(&frame_rate) {
+            return Err("frame rate must be between 1 and 120 fps".to_string());
+        }
+        let base_name = base_name.trim();
+        if base_name.is_empty()
+            || base_name.contains('/')
+            || base_name.contains('\\')
+            || base_name == "."
+            || base_name == ".."
+        {
+            return Err("output base name must be a simple file name".to_string());
+        }
+        let total = self.animation_duration();
+        let frame_count = ((total * frame_rate).ceil() as usize + 1).min(10_000);
+        if frame_count == 10_000 && total * frame_rate >= 10_000.0 {
+            return Err("animation rendering is limited to 9999 frames".to_string());
+        }
+        let output_dir = Path::new(output_dir);
+        fs::create_dir_all(output_dir).map_err(|error| error.to_string())?;
+
+        let original_desktop = self.desktop.clone();
+        let original_camera = self.camera.clone();
+        let original_elapsed = self.animation_elapsed;
+        let original_playing = self.animation_playing;
+        let original_start_camera = self.animation_start_camera.clone();
+
+        self.animation_elapsed = 0.0;
+        self.animation_playing = true;
+        self.animation_start_camera = Some(self.camera.clone());
+        let render_result = (|| {
+            for index in 0..frame_count {
+                let target = (index as f64 / frame_rate).min(total);
+                while self.animation_elapsed + 1.0e-9 < target {
+                    self.animation_playing = true;
+                    self.tick_animation((target - self.animation_elapsed).min(0.25))?;
+                }
+                let png = self.render_png_bytes(width, height)?;
+                let path = output_dir.join(format!("{base_name}_{index:05}.png"));
+                fs::write(&path, png).map_err(|error| error.to_string())?;
+            }
+            Ok(frame_count)
+        })();
+
+        self.desktop = original_desktop;
+        self.camera = original_camera;
+        self.animation_elapsed = original_elapsed;
+        self.animation_playing = original_playing;
+        self.animation_start_camera = original_start_camera;
+        self.rebuild_mesh(false)?;
+        render_result
     }
 
     fn update_camera(
@@ -980,6 +1077,18 @@ enum ModelRequest {
     SetAnimationLoop(bool),
     SeekAnimation(f64),
     TickAnimation(f64),
+    ClearLog,
+    ExecuteScript(String),
+    ExportPov {
+        path: String,
+    },
+    RenderAnimation {
+        output_dir: String,
+        base_name: String,
+        width: u32,
+        height: u32,
+        frame_rate: f64,
+    },
     Render {
         width: u32,
         height: u32,
@@ -1672,6 +1781,64 @@ fn handle_model_request(
             model.tick_animation(dt)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::ClearLog => {
+            model.log_lines.clear();
+            model.status = "Output log cleared".to_string();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ExecuteScript(script) => {
+            if script.trim().is_empty() {
+                return Err("a script is required".to_string());
+            }
+            let undo = model.capture_undo();
+            let (log, selection) = model
+                .desktop
+                .run_script_js(&script)
+                .map_err(|error| error.to_string())?;
+            model
+                .log_lines
+                .extend(log.lines().map(|line| line.to_string()));
+            if let Some(selection) = selection {
+                model.selection = selection;
+            }
+            model.rebuild_mesh(false)?;
+            model.push_undo(undo);
+            model.status = "Script executed".to_string();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ExportPov { path } => {
+            if path.trim().is_empty() {
+                return Err("a POV-Ray output path is required".to_string());
+            }
+            model.persist_camera()?;
+            let count = model
+                .desktop
+                .export_active_scene_pov(&path, &model.selection)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("POV-Ray scene written: {count} atom(s)");
+            model.log_lines.push(format!("POV-Ray scene: {path}"));
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::RenderAnimation {
+            output_dir,
+            base_name,
+            width,
+            height,
+            frame_rate,
+        } => {
+            let count = model.render_animation_frames(
+                &output_dir,
+                &base_name,
+                width,
+                height,
+                frame_rate,
+            )?;
+            model.status = format!("Animation rendered: {count} frame(s)");
+            model
+                .log_lines
+                .push(format!("Animation frames: {output_dir}/{base_name}_*.png"));
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::Render { width, height } => {
             Ok(ModelResponse::Viewport(model.render(width, height)))
         }
@@ -2249,6 +2416,42 @@ fn tick_animation(dt: f64, state: State<'_, ManagedState>) -> Result<AppSnapshot
 }
 
 #[tauri::command]
+fn clear_log(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::ClearLog)?)
+}
+
+#[tauri::command]
+fn execute_script(script: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::ExecuteScript(script))?)
+}
+
+#[tauri::command]
+fn export_pov(path: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::ExportPov { path })?)
+}
+
+#[tauri::command]
+fn render_animation(
+    output_dir: String,
+    base_name: String,
+    width: u32,
+    height: u32,
+    frame_rate: f64,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::RenderAnimation {
+            output_dir,
+            base_name,
+            width,
+            height,
+            frame_rate,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn render_viewport(
     width: u32,
     height: u32,
@@ -2402,6 +2605,10 @@ pub fn run() -> Result<(), tauri::Error> {
             set_animation_loop,
             seek_animation,
             tick_animation,
+            clear_log,
+            execute_script,
+            export_pov,
+            render_animation,
             render_viewport,
             update_camera,
             save_scene,
@@ -2436,6 +2643,7 @@ mod tests {
             animation_start_camera: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            log_lines: Vec::new(),
             status: "Ready".to_string(),
         }
     }
@@ -2803,6 +3011,88 @@ mod tests {
         for path in [surface_path, cut_path, pqr_path, input_path] {
             let _ = std::fs::remove_file(path);
         }
+        let _ = std::fs::remove_dir(output_dir);
+    }
+
+    #[test]
+    fn rendering_and_script_dialog_requests_produce_outputs() {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let pdb = root.join("tests/test_data/1CRN.pdb");
+        if !pdb.exists() {
+            return;
+        }
+        let pov_path =
+            std::env::temp_dir().join(format!("cuemol-tauri-pov-{}.pov", std::process::id()));
+        let mut model = model_without_gpu();
+        model.desktop.open_path(&pdb).unwrap();
+        model.rebuild_mesh(true).unwrap();
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::ExecuteScript("print('tauri-script');".to_string()),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.log_lines, ["tauri-script"]);
+        handle_model_request(
+            &mut model,
+            ModelRequest::ExportPov {
+                path: pov_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(&pov_path)
+            .unwrap()
+            .contains("CueMol POV-Ray scene"));
+        let response = handle_model_request(&mut model, ModelRequest::ClearLog).unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert!(snapshot.log_lines.is_empty());
+        let _ = std::fs::remove_file(pov_path);
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn animation_rendering_writes_numbered_png_frames() {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let pdb = root.join("tests/test_data/1CRN.pdb");
+        if !pdb.exists() {
+            return;
+        }
+        let output_dir =
+            std::env::temp_dir().join(format!("cuemol-tauri-animation-{}", std::process::id()));
+        let mut model = AppModel::new(vec![pdb]);
+        assert!(model.renderer.is_some());
+        model.animation_objects.push(AnimObject {
+            kind: AnimKind::Spin,
+            duration: 0.1,
+        });
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::RenderAnimation {
+                output_dir: output_dir.to_string_lossy().to_string(),
+                base_name: "frame".to_string(),
+                width: 64,
+                height: 64,
+                frame_rate: 2.0,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.status, "Animation rendered: 2 frame(s)");
+        let first = std::fs::read(output_dir.join("frame_00000.png")).unwrap();
+        assert_eq!(&first[..8], b"\x89PNG\r\n\x1a\n");
+        let _ = std::fs::remove_file(output_dir.join("frame_00000.png"));
+        let _ = std::fs::remove_file(output_dir.join("frame_00001.png"));
         let _ = std::fs::remove_dir(output_dir);
     }
 }

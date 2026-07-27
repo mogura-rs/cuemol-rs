@@ -1423,6 +1423,17 @@ summary:focus-visible {
   margin-bottom: 8px;
 }
 
+.dialog-textarea {
+  align-items: start;
+}
+
+.dialog-textarea textarea {
+  min-height: 150px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 .dialog-check {
   display: flex;
   align-items: center;
