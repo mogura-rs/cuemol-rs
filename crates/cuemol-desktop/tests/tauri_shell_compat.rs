@@ -120,6 +120,11 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "execute_script",
         "export_pov",
         "render_animation",
+        "open_pdb",
+        "merge_molecules",
+        "save_object",
+        "save_view",
+        "load_view",
     ] {
         assert!(JS.contains(command), "missing menu binding {command}");
     }

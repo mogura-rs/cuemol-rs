@@ -2,9 +2,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc;
 
-use cuemol_core::{Uid, Vector4};
+use cuemol_core::{Quat, Uid, Vector4};
 use cuemol_qsys::Camera;
 use cuemol_render::{tessellate_snapshot, RenderMesh, RenderSceneSnapshot};
 use serde::Serialize;
@@ -948,6 +949,7 @@ enum ModelRequest {
     Redo,
     ClearUndo,
     OpenPaths(Vec<String>),
+    OpenPdb(String),
     NewScene(Option<String>),
     ActivateScene(u64),
     CloseActiveScene,
@@ -978,6 +980,12 @@ enum ModelRequest {
         object_uid: u64,
         selection: String,
         start: i32,
+    },
+    MergeMolecules {
+        source_object_uid: u64,
+        selection: String,
+        target_object_uid: u64,
+        copy: bool,
     },
     SuperposeObjects {
         algorithm: String,
@@ -1101,6 +1109,12 @@ enum ModelRequest {
         height: u32,
     },
     SaveScene(String),
+    SaveObject {
+        object_uid: u64,
+        path: String,
+    },
+    SaveView(String),
+    LoadView(String),
     ExportPng {
         path: String,
         width: u32,
@@ -1168,6 +1182,21 @@ fn handle_model_request(
         ModelRequest::OpenPaths(paths) => {
             let undo = model.capture_undo();
             model.open_paths(paths);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::OpenPdb(pdb_id) => {
+            let path = download_pdb_to_temp(&pdb_id)?;
+            let undo = model.capture_undo();
+            let result = model
+                .desktop
+                .open_path(&path)
+                .map_err(|error| error.to_string());
+            let _ = fs::remove_file(&path);
+            result?;
+            model.selection.clear();
+            model.status = format!("Opened PDB {}", pdb_id.trim().to_ascii_uppercase());
+            model.rebuild_mesh(true)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -1352,6 +1381,30 @@ fn handle_model_request(
                 model.push_undo(undo);
             }
             model.status = format!("Renumbered residues for {count} atom(s)");
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::MergeMolecules {
+            source_object_uid,
+            selection,
+            target_object_uid,
+            copy,
+        } => {
+            let undo = model.capture_undo();
+            let count = model
+                .desktop
+                .merge_molecules(
+                    Uid::new(source_object_uid),
+                    &selection,
+                    Uid::new(target_object_uid),
+                    copy,
+                )
+                .map_err(|error| error.to_string())?;
+            model.status = format!(
+                "{} {count} atom(s) into the target molecule",
+                if copy { "Copied" } else { "Moved" }
+            );
+            model.rebuild_mesh(true)?;
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SuperposeObjects {
@@ -1861,6 +1914,32 @@ fn handle_model_request(
             model.status = format!("Saved scene: {path}");
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::SaveObject { object_uid, path } => {
+            if path.trim().is_empty() {
+                return Err("an object output path is required".to_string());
+            }
+            model
+                .desktop
+                .save_object_as(Uid::new(object_uid), &path)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Saved object: {path}");
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SaveView(path) => {
+            if path.trim().is_empty() {
+                return Err("a view output path is required".to_string());
+            }
+            fs::write(&path, camera_to_view_data(&model.camera))
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Saved current view: {path}");
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::LoadView(path) => {
+            let data = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+            model.camera = camera_from_view_data(&data)?;
+            model.status = format!("Loaded view: {path}");
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::ExportPng {
             path,
             width,
@@ -1951,6 +2030,11 @@ fn clear_undo(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 #[tauri::command]
 fn open_paths(paths: Vec<String>, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::OpenPaths(paths))?)
+}
+
+#[tauri::command]
+fn open_pdb(pdb_id: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::OpenPdb(pdb_id))?)
 }
 
 #[tauri::command]
@@ -2071,6 +2155,25 @@ fn renumber_residues(
             object_uid,
             selection,
             start,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn merge_molecules(
+    source_object_uid: u64,
+    selection: String,
+    target_object_uid: u64,
+    copy: bool,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::MergeMolecules {
+            source_object_uid,
+            selection,
+            target_object_uid,
+            copy,
         },
     )?)
 }
@@ -2490,6 +2593,28 @@ fn save_scene(path: String, state: State<'_, ManagedState>) -> Result<AppSnapsho
 }
 
 #[tauri::command]
+fn save_object(
+    object_uid: u64,
+    path: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SaveObject { object_uid, path },
+    )?)
+}
+
+#[tauri::command]
+fn save_view(path: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::SaveView(path))?)
+}
+
+#[tauri::command]
+fn load_view(path: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::LoadView(path))?)
+}
+
+#[tauri::command]
 fn export_png(
     path: String,
     width: u32,
@@ -2504,6 +2629,113 @@ fn export_png(
             height,
         },
     )?)
+}
+
+fn download_pdb_to_temp(pdb_id: &str) -> Result<PathBuf, String> {
+    let pdb_id = pdb_id.trim().to_ascii_uppercase();
+    if !(4..=16).contains(&pdb_id.len())
+        || !pdb_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return Err("PDB ID must contain 4-16 letters, digits, or underscores".to_string());
+    }
+    let path = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif"));
+    let url = format!("https://files.rcsb.org/download/{pdb_id}.cif");
+    let output = Command::new("curl")
+        .args(["--fail", "--silent", "--show-error", "--location"])
+        .arg("--max-time")
+        .arg("30")
+        .arg("--output")
+        .arg(&path)
+        .arg(&url)
+        .output()
+        .map_err(|error| format!("failed to start curl: {error}"))?;
+    if !output.status.success() {
+        let _ = fs::remove_file(&path);
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("RCSB download failed with {}", output.status)
+        } else {
+            format!("RCSB download failed: {detail}")
+        });
+    }
+    Ok(path)
+}
+
+fn camera_to_view_data(camera: &Camera) -> String {
+    let center = camera.center();
+    let rotation = camera.rotation();
+    let ortho_scale = 1000.0 / camera.zoom().max(0.1);
+    format!(
+        "cuemol2-rs-view\t2\n\
+target\t{:.6}\t{:.6}\t{:.6}\n\
+rotation\t{:.6}\t{:.6}\t{:.6}\t{:.6}\n\
+distance\t{:.6}\n\
+ortho_scale\t{:.6}\n\
+perspective\t{}\n",
+        center.x,
+        center.y,
+        center.z,
+        rotation.x,
+        rotation.y,
+        rotation.z,
+        rotation.w,
+        camera.cam_dist(),
+        ortho_scale,
+        camera.is_perspective()
+    )
+}
+
+fn camera_from_view_data(data: &str) -> Result<Camera, String> {
+    let mut camera = Camera::new();
+    let mut saw_header = false;
+    for line in data.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        match fields.as_slice() {
+            [] => {}
+            ["cuemol2-rs-view", "1" | "2"] => saw_header = true,
+            ["target", x, y, z] => {
+                camera.set_center(Vector4::new3(
+                    parse_view_number(x)?,
+                    parse_view_number(y)?,
+                    parse_view_number(z)?,
+                ));
+            }
+            ["rotation", x, y, z, w] => {
+                let rotation = Quat::new(
+                    parse_view_number(x)?,
+                    parse_view_number(y)?,
+                    parse_view_number(z)?,
+                    parse_view_number(w)?,
+                )
+                .normalize()
+                .map_err(|error| error.to_string())?;
+                camera.set_rotation(rotation);
+            }
+            ["distance", value] => camera.set_cam_dist(parse_view_number(value)?),
+            ["ortho_scale", value] => {
+                let scale = parse_view_number(value)?;
+                if scale <= 0.0 {
+                    return Err("orthographic scale must be positive".to_string());
+                }
+                camera.set_zoom(1000.0 / scale);
+            }
+            ["perspective", "true"] => camera.set_perspective(true),
+            ["perspective", "false"] => camera.set_perspective(false),
+            _ => return Err(format!("invalid view line: {line}")),
+        }
+    }
+    if !saw_header {
+        return Err("missing view header".to_string());
+    }
+    Ok(camera)
+}
+
+fn parse_view_number(value: &str) -> Result<f64, String> {
+    value
+        .parse::<f64>()
+        .map_err(|_| format!("invalid view number: {value}"))
 }
 
 fn frame_camera(snapshot: &RenderSceneSnapshot) -> Camera {
@@ -2572,6 +2804,7 @@ pub fn run() -> Result<(), tauri::Error> {
             redo,
             clear_undo,
             open_paths,
+            open_pdb,
             new_scene,
             activate_scene,
             close_active_scene,
@@ -2582,6 +2815,7 @@ pub fn run() -> Result<(), tauri::Error> {
             delete_atoms,
             change_chain,
             renumber_residues,
+            merge_molecules,
             superpose_objects,
             edit_bond,
             calculate_contacts,
@@ -2612,6 +2846,9 @@ pub fn run() -> Result<(), tauri::Error> {
             render_viewport,
             update_camera,
             save_scene,
+            save_object,
+            save_view,
+            load_view,
             export_png,
         ])
         .run(tauri::generate_context!())
@@ -2658,6 +2895,22 @@ mod tests {
         let camera = frame_camera(&snapshot);
         assert_eq!(camera.center(), Vector4::new3(0.0, 1.0, -1.0));
         assert!(camera.zoom() > 4.0);
+    }
+
+    #[test]
+    fn current_view_text_roundtrips_the_qsys_camera() {
+        let mut camera = Camera::new();
+        camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
+        camera.set_cam_dist(80.0);
+        camera.set_zoom(25.0);
+        camera.set_perspective(true);
+        camera.set_rotation(Quat::new(0.0, 0.0, 0.0, 1.0));
+        let restored = camera_from_view_data(&camera_to_view_data(&camera)).unwrap();
+        assert_eq!(restored.center(), camera.center());
+        assert_eq!(restored.cam_dist(), camera.cam_dist());
+        assert_eq!(restored.zoom(), camera.zoom());
+        assert_eq!(restored.rotation(), camera.rotation());
+        assert!(restored.is_perspective());
     }
 
     #[test]
@@ -3054,6 +3307,78 @@ mod tests {
         };
         assert!(snapshot.log_lines.is_empty());
         let _ = std::fs::remove_file(pov_path);
+    }
+
+    #[test]
+    fn file_dialog_requests_merge_save_and_restore_views() {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let pdb = root.join("tests/test_data/1CRN.pdb");
+        if !pdb.exists() {
+            return;
+        }
+        let output_dir =
+            std::env::temp_dir().join(format!("cuemol-tauri-files-{}", std::process::id()));
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let object_path = output_dir.join("merged.pdb");
+        let view_path = output_dir.join("current.view");
+        let mut model = model_without_gpu();
+        model.desktop.open_path(&pdb).unwrap();
+        model.desktop.open_path(&pdb).unwrap();
+        model.rebuild_mesh(true).unwrap();
+        let objects = model.desktop.active_object_summaries();
+        let source = objects[0].uid.get();
+        let target = objects[1].uid.get();
+        handle_model_request(
+            &mut model,
+            ModelRequest::ChangeChain {
+                object_uid: source,
+                selection: "name CA".to_string(),
+                chain_name: "B".to_string(),
+            },
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::MergeMolecules {
+                source_object_uid: source,
+                selection: "chain B".to_string(),
+                target_object_uid: target,
+                copy: false,
+            },
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SaveObject {
+                object_uid: target,
+                path: object_path.to_string_lossy().to_string(),
+            },
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(&object_path)
+            .unwrap()
+            .contains("ATOM"));
+
+        model.camera.set_center(Vector4::new3(4.0, 5.0, 6.0));
+        handle_model_request(
+            &mut model,
+            ModelRequest::SaveView(view_path.to_string_lossy().to_string()),
+        )
+        .unwrap();
+        model.camera.set_center(Vector4::ZERO);
+        handle_model_request(
+            &mut model,
+            ModelRequest::LoadView(view_path.to_string_lossy().to_string()),
+        )
+        .unwrap();
+        assert_eq!(model.camera.center(), Vector4::new3(4.0, 5.0, 6.0));
+
+        for path in [object_path, view_path] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(output_dir);
     }
 
     #[test]

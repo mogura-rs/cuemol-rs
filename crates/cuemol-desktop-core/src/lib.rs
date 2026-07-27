@@ -3787,6 +3787,48 @@ impl DesktopAppState {
         Ok(if changed { count } else { 0 })
     }
 
+    pub fn merge_molecules(
+        &mut self,
+        source_object: Uid,
+        selection_text: &str,
+        target_object: Uid,
+        copy: bool,
+    ) -> Result<usize> {
+        if source_object == target_object {
+            return Err(CueMolError::invalid_argument(
+                "source and target molecules must differ",
+            ));
+        }
+        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let source = self
+            .scene_manager()
+            .object(source_object)
+            .ok_or_else(|| CueMolError::NotFound(format!("source object {}", source_object.get())))?
+            .mol()
+            .clone();
+        let count = self
+            .scene_manager_mut()
+            .object_mut(target_object)
+            .ok_or_else(|| CueMolError::NotFound(format!("target object {}", target_object.get())))?
+            .mol_mut()
+            .copy_selected_atoms_from(&source, &selector)?;
+        if count == 0 {
+            return Err(CueMolError::invalid_argument(
+                "the merge selection contains no atoms",
+            ));
+        }
+        if !copy {
+            self.scene_manager_mut()
+                .object_mut(source_object)
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("source object {}", source_object.get()))
+                })?
+                .mol_mut()
+                .delete_selected_atoms(&selector);
+        }
+        Ok(count)
+    }
+
     pub fn make_bond_in_object(&mut self, object_uid: Uid, aid1: i32, aid2: i32) -> Result<bool> {
         let object = self
             .scene_manager_mut()
@@ -47020,6 +47062,47 @@ attribute \"dep\" string \"positions\"
 
         let snapshot = app.active_render_snapshot("").unwrap();
         assert_eq!(snapshot.atom_count(), 281);
+    }
+
+    #[test]
+    fn desktop_app_state_merges_a_selected_molecule_part() {
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let mut app = DesktopAppState::new();
+        let source = match app.open_path(root.join("1CRN.pdb")).unwrap() {
+            GuiLoadedPath::Object { object_uid, .. } => object_uid,
+            _ => panic!("expected object load"),
+        };
+        let target = match app.open_path(root.join("1CRN.pdb")).unwrap() {
+            GuiLoadedPath::Object { object_uid, .. } => object_uid,
+            _ => panic!("expected object load"),
+        };
+        assert_eq!(
+            app.change_chain_in_object(source, "name CA", "B").unwrap(),
+            46
+        );
+        assert_eq!(
+            app.merge_molecules(source, "chain B", target, false)
+                .unwrap(),
+            46
+        );
+        assert_eq!(
+            app.scene_manager()
+                .object(source)
+                .unwrap()
+                .mol()
+                .atom_count(),
+            281
+        );
+        assert_eq!(
+            app.scene_manager()
+                .object(target)
+                .unwrap()
+                .mol()
+                .atom_count(),
+            373
+        );
     }
 
     #[test]

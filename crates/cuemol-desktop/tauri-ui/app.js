@@ -660,6 +660,58 @@ function showReferenceDialog(title) {
       referenceDialog.close();
     });
     dialogActions(run);
+  } else if (title === "Save File As") {
+    const object = selectedObject();
+    if (!object) {
+      dialogContent.append(dialogParagraph("Select a molecular object first."));
+    } else {
+      dialogContent.append(dialogParagraph(`Object: ${object.name}`));
+      const save = button("Save…", "dialog-primary", async () => {
+        if (!dialog?.save) {
+          showError("The Tauri dialog plugin is unavailable.");
+          return;
+        }
+        const path = await dialog.save({
+          defaultPath: `${object.name || "molecule"}.pdb`,
+          filters: [
+            { name: "Molecular structure", extensions: ["pdb", "sdf", "qdf"] },
+          ],
+        });
+        if (!path) return;
+        await mutate("save_object", { objectUid: object.uid, path });
+        referenceDialog.close();
+      });
+      dialogActions(save);
+    }
+  } else if (title === "Save Current View") {
+    const save = button("Save…", "dialog-primary", async () => {
+      const path = await chooseOutputPath("current.view", "CueMol view", ["view", "cam"]);
+      if (!path) return;
+      await mutate("save_view", { path });
+      referenceDialog.close();
+    });
+    dialogActions(save);
+  } else if (title === "Merge molecule") {
+    const objects = activeObjects();
+    if (objects.length < 2) {
+      dialogContent.append(dialogParagraph("At least two molecular objects are required."));
+    } else {
+      const objectOptions = objects.map((object) => [object.uid, object.name]);
+      const source = dialogSelect("From molecule", objectOptions, objects[0].uid);
+      const selection = dialogField("Selection", snapshot.selection);
+      const target = dialogSelect("To molecule", objectOptions, objects[1].uid);
+      const copy = dialogCheckbox("Copy", false);
+      const merge = button("OK", "dialog-primary", async () => {
+        await mutate("merge_molecules", {
+          sourceObjectUid: Number(source.value),
+          selection: selection.value,
+          targetObjectUid: Number(target.value),
+          copy: copy.checked,
+        });
+        referenceDialog.close();
+      });
+      dialogActions(merge);
+    }
   } else if (title === "Delete mol atoms") {
     const object = selectedObject();
     if (!object) {
@@ -731,9 +783,11 @@ function showReferenceDialog(title) {
     }
   } else if (title === "Open PDB") {
     const pdbId = dialogField("PDB ID", "1CRN");
-    const open = button("Open RCSB PDB", "dialog-primary", () => {
+    const open = button("Download and Open", "dialog-primary", async () => {
       const id = pdbId.value.trim().toUpperCase();
-      if (id) window.open(`https://www.rcsb.org/structure/${encodeURIComponent(id)}`, "_blank");
+      if (!id) return;
+      await mutate("open_pdb", { pdbId: id });
+      referenceDialog.close();
     });
     dialogActions(open);
   } else {
@@ -1300,14 +1354,19 @@ async function openFiles() {
     filters: [
       {
         name: "CueMol structures and scenes",
-        extensions: ["pdb", "ent", "cif", "mmcif", "qsc", "qdfpdb", "pse", "sdf", "mol2", "gro", "dx", "map", "mrc", "ccp4", "obj", "ply"],
+        extensions: ["pdb", "ent", "cif", "mmcif", "qsc", "qdfpdb", "pse", "sdf", "mol2", "gro", "dx", "map", "mrc", "ccp4", "obj", "ply", "view", "cam"],
       },
     ],
   });
   if (!chosen) return;
   const paths = Array.isArray(chosen) ? chosen : [chosen];
-  lastOpenedPaths = paths;
-  await mutate("open_paths", { paths });
+  const viewPaths = paths.filter((path) => /\.(view|cam)$/i.test(path));
+  const objectPaths = paths.filter((path) => !/\.(view|cam)$/i.test(path));
+  if (objectPaths.length) {
+    lastOpenedPaths = objectPaths;
+    await mutate("open_paths", { paths: objectPaths });
+  }
+  for (const path of viewPaths) await mutate("load_view", { path });
 }
 
 async function saveScene() {
