@@ -143,7 +143,10 @@ struct AppSnapshot {
     show_unit_cell: bool,
     show_symmetry_mates: bool,
     show_density_contour: bool,
+    color_proofing: bool,
     density_level: f64,
+    can_undo: bool,
+    can_redo: bool,
     status: String,
 }
 
@@ -166,8 +169,24 @@ struct AppModel {
     show_unit_cell: bool,
     show_symmetry_mates: bool,
     show_density_contour: bool,
+    color_proofing: bool,
     density_level: f64,
+    undo_stack: Vec<AppModelUndo>,
+    redo_stack: Vec<AppModelUndo>,
     status: String,
+}
+
+#[derive(Clone)]
+struct AppModelUndo {
+    desktop: DesktopAppState,
+    camera: Camera,
+    selection: String,
+    background: String,
+    show_unit_cell: bool,
+    show_symmetry_mates: bool,
+    show_density_contour: bool,
+    color_proofing: bool,
+    density_level: f64,
 }
 
 impl AppModel {
@@ -201,7 +220,10 @@ impl AppModel {
             show_unit_cell: false,
             show_symmetry_mates: false,
             show_density_contour: false,
+            color_proofing: false,
             density_level: 1.5,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             status,
         };
         let _ = model.rebuild_mesh(true);
@@ -350,7 +372,10 @@ impl AppModel {
             show_unit_cell: self.show_unit_cell,
             show_symmetry_mates: self.show_symmetry_mates,
             show_density_contour: self.show_density_contour,
+            color_proofing: self.color_proofing,
             density_level: self.density_level,
+            can_undo: !self.undo_stack.is_empty(),
+            can_redo: !self.redo_stack.is_empty(),
             status: self.status.clone(),
         }
     }
@@ -370,6 +395,9 @@ impl AppModel {
             self.density_level,
             self.show_density_contour,
         );
+        if self.color_proofing && self.desktop.apply_color_proof(&mut snapshot).is_err() {
+            cuemol_render::apply_generic_color_proof(&mut snapshot);
+        }
         if refit {
             self.camera = self
                 .desktop
@@ -490,10 +518,78 @@ impl AppModel {
             .set_active_scene_camera(camera)
             .map_err(|error| error.to_string())
     }
+
+    fn capture_undo(&self) -> AppModelUndo {
+        AppModelUndo {
+            desktop: self.desktop.clone(),
+            camera: self.camera.clone(),
+            selection: self.selection.clone(),
+            background: self.background.clone(),
+            show_unit_cell: self.show_unit_cell,
+            show_symmetry_mates: self.show_symmetry_mates,
+            show_density_contour: self.show_density_contour,
+            color_proofing: self.color_proofing,
+            density_level: self.density_level,
+        }
+    }
+
+    fn push_undo(&mut self, snapshot: AppModelUndo) {
+        self.undo_stack.push(snapshot);
+        if self.undo_stack.len() > 50 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn restore_undo(&mut self, snapshot: AppModelUndo) -> Result<(), String> {
+        self.desktop = snapshot.desktop;
+        self.camera = snapshot.camera;
+        self.selection = snapshot.selection;
+        self.background = snapshot.background;
+        self.show_unit_cell = snapshot.show_unit_cell;
+        self.show_symmetry_mates = snapshot.show_symmetry_mates;
+        self.show_density_contour = snapshot.show_density_contour;
+        self.color_proofing = snapshot.color_proofing;
+        self.density_level = snapshot.density_level;
+        self.rebuild_mesh(false)
+    }
+
+    fn undo(&mut self) -> Result<(), String> {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            self.status = "Nothing to undo".to_string();
+            return Ok(());
+        };
+        let redo = self.capture_undo();
+        self.restore_undo(snapshot)?;
+        self.redo_stack.push(redo);
+        self.status = "Undo".to_string();
+        Ok(())
+    }
+
+    fn redo(&mut self) -> Result<(), String> {
+        let Some(snapshot) = self.redo_stack.pop() else {
+            self.status = "Nothing to redo".to_string();
+            return Ok(());
+        };
+        let undo = self.capture_undo();
+        self.restore_undo(snapshot)?;
+        self.undo_stack.push(undo);
+        self.status = "Redo".to_string();
+        Ok(())
+    }
+
+    fn clear_undo(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.status = "Undo data cleared".to_string();
+    }
 }
 
 enum ModelRequest {
     GetSnapshot,
+    Undo,
+    Redo,
+    ClearUndo,
     OpenPaths(Vec<String>),
     NewScene(Option<String>),
     ActivateScene(u64),
@@ -511,6 +607,20 @@ enum ModelRequest {
     SetObjectColoring {
         object_uid: u64,
         coloring: String,
+    },
+    DeleteAtoms {
+        object_uid: u64,
+        selection: String,
+    },
+    ChangeChain {
+        object_uid: u64,
+        selection: String,
+        chain_name: String,
+    },
+    RenumberResidues {
+        object_uid: u64,
+        selection: String,
+        start: i32,
     },
     SetDisplayOption {
         option: String,
@@ -567,11 +677,26 @@ fn handle_model_request(
     ];
     match request {
         ModelRequest::GetSnapshot => Ok(ModelResponse::Snapshot(Box::new(model.snapshot()))),
+        ModelRequest::Undo => {
+            model.undo()?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::Redo => {
+            model.redo()?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ClearUndo => {
+            model.clear_undo();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::OpenPaths(paths) => {
+            let undo = model.capture_undo();
             model.open_paths(paths);
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::NewScene(name) => {
+            let undo = model.capture_undo();
             let name = name
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "Untitled".to_string());
@@ -579,6 +704,7 @@ fn handle_model_request(
             model.selection.clear();
             model.status = "New scene".to_string();
             model.rebuild_mesh(true)?;
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ActivateScene(scene_uid) => {
@@ -591,6 +717,7 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::CloseActiveScene => {
+            let undo = model.capture_undo();
             model
                 .desktop
                 .close_active_scene()
@@ -599,6 +726,7 @@ fn handle_model_request(
             model.selection.clear();
             model.status = "Scene closed".to_string();
             model.rebuild_mesh(true)?;
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetSelection(selection) => {
@@ -620,6 +748,7 @@ fn handle_model_request(
             renderer_uid,
             visible,
         } => {
+            let undo = model.capture_undo();
             model
                 .desktop
                 .set_renderer_visible(Uid::new(object_uid), Uid::new(renderer_uid), visible)
@@ -630,6 +759,7 @@ fn handle_model_request(
                 "Renderer hidden".to_string()
             };
             model.rebuild_mesh(false)?;
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::AddRenderer {
@@ -639,6 +769,7 @@ fn handle_model_request(
             if !RENDERER_TYPES.contains(&renderer_type.as_str()) {
                 return Err(format!("unsupported renderer type: {renderer_type}"));
             }
+            let undo = model.capture_undo();
             let count = model.desktop.renderer_summaries(Uid::new(object_uid)).len();
             model
                 .desktop
@@ -650,12 +781,14 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.status = format!("Added {renderer_type} renderer");
             model.rebuild_mesh(false)?;
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetObjectColoring {
             object_uid,
             coloring,
         } => {
+            let undo = model.capture_undo();
             let (coloring_type, attrs) = match coloring.as_str() {
                 "element" => (None, std::collections::BTreeMap::new()),
                 "rainbow" => {
@@ -679,34 +812,105 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.status = format!("Applied {coloring} coloring");
             model.rebuild_mesh(false)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::DeleteAtoms {
+            object_uid,
+            selection,
+        } => {
+            let selection = selection.trim();
+            if selection.is_empty() {
+                return Err("an atom selection is required".to_string());
+            }
+            let undo = model.capture_undo();
+            let count = model
+                .desktop
+                .delete_atoms_in_object(Uid::new(object_uid), selection)
+                .map_err(|error| error.to_string())?;
+            if count > 0 {
+                model.selection.clear();
+                model.rebuild_mesh(true)?;
+                model.push_undo(undo);
+            }
+            model.status = format!("Deleted {count} atom(s)");
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ChangeChain {
+            object_uid,
+            selection,
+            chain_name,
+        } => {
+            let selection = selection.trim();
+            if selection.is_empty() {
+                return Err("an atom selection is required".to_string());
+            }
+            let undo = model.capture_undo();
+            let count = model
+                .desktop
+                .change_chain_in_object(Uid::new(object_uid), selection, &chain_name)
+                .map_err(|error| error.to_string())?;
+            if count > 0 {
+                model.rebuild_mesh(false)?;
+                model.push_undo(undo);
+            }
+            model.status = format!("Changed chain ID for {count} atom(s)");
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::RenumberResidues {
+            object_uid,
+            selection,
+            start,
+        } => {
+            let selection = selection.trim();
+            if selection.is_empty() {
+                return Err("an atom selection is required".to_string());
+            }
+            let undo = model.capture_undo();
+            let count = model
+                .desktop
+                .renumber_residues_in_object(Uid::new(object_uid), selection, start)
+                .map_err(|error| error.to_string())?;
+            if count > 0 {
+                model.rebuild_mesh(false)?;
+                model.push_undo(undo);
+            }
+            model.status = format!("Renumbered residues for {count} atom(s)");
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetDisplayOption { option, value } => {
+            let undo = model.capture_undo();
             match option.as_str() {
                 "unit-cell" => model.show_unit_cell = value,
                 "symmetry-mates" => model.show_symmetry_mates = value,
                 "density-contour" => model.show_density_contour = value,
+                "color-proof" => model.color_proofing = value,
                 _ => return Err(format!("unsupported display option: {option}")),
             }
             model.status = format!("{option}: {}", if value { "shown" } else { "hidden" });
             model.rebuild_mesh(false)?;
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetDensityLevel(level) => {
             if !level.is_finite() {
                 return Err("density level must be finite".to_string());
             }
+            let undo = model.capture_undo();
             model.density_level = level.clamp(0.1, 10.0);
             model.status = format!("Density level: {:.2} σ", model.density_level);
             model.rebuild_mesh(false)?;
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetBackground(background) => {
             if !matches!(background.as_str(), "black" | "white") {
                 return Err(format!("unsupported background: {background}"));
             }
+            let undo = model.capture_undo();
             model.background = background;
             model.status = format!("Background: {}", model.background);
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::Render { width, height } => {
@@ -804,6 +1008,21 @@ fn get_snapshot(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
+fn undo(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::Undo)?)
+}
+
+#[tauri::command]
+fn redo(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::Redo)?)
+}
+
+#[tauri::command]
+fn clear_undo(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::ClearUndo)?)
+}
+
+#[tauri::command]
 fn open_paths(paths: Vec<String>, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::OpenPaths(paths))?)
 }
@@ -877,6 +1096,55 @@ fn set_object_coloring(
         ModelRequest::SetObjectColoring {
             object_uid,
             coloring,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn delete_atoms(
+    object_uid: u64,
+    selection: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::DeleteAtoms {
+            object_uid,
+            selection,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn change_chain(
+    object_uid: u64,
+    selection: String,
+    chain_name: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ChangeChain {
+            object_uid,
+            selection,
+            chain_name,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn renumber_residues(
+    object_uid: u64,
+    selection: String,
+    start: i32,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::RenumberResidues {
+            object_uid,
+            selection,
+            start,
         },
     )?)
 }
@@ -1026,6 +1294,9 @@ pub fn run() -> Result<(), tauri::Error> {
         .manage(spawn_model(initial_paths))
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            undo,
+            redo,
+            clear_undo,
             open_paths,
             new_scene,
             activate_scene,
@@ -1034,6 +1305,9 @@ pub fn run() -> Result<(), tauri::Error> {
             set_renderer_visible,
             add_renderer,
             set_object_coloring,
+            delete_atoms,
+            change_chain,
+            renumber_residues,
             set_display_option,
             set_density_level,
             set_background,
@@ -1062,7 +1336,10 @@ mod tests {
             show_unit_cell: false,
             show_symmetry_mates: false,
             show_density_contour: false,
+            color_proofing: false,
             density_level: 1.5,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             status: "Ready".to_string(),
         }
     }
@@ -1096,6 +1373,14 @@ mod tests {
             },
         )
         .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetDisplayOption {
+                option: "color-proof".to_string(),
+                value: true,
+            },
+        )
+        .unwrap();
         handle_model_request(&mut model, ModelRequest::SetDensityLevel(2.4)).unwrap();
         let response =
             handle_model_request(&mut model, ModelRequest::SetBackground("white".to_string()))
@@ -1104,8 +1389,22 @@ mod tests {
             panic!("expected a snapshot");
         };
         assert!(snapshot.show_unit_cell);
+        assert!(snapshot.color_proofing);
         assert_eq!(snapshot.density_level, 2.4);
         assert_eq!(snapshot.background, "white");
+    }
+
+    #[test]
+    fn model_undo_and_redo_restore_gui_mutations() {
+        let mut model = model_without_gpu();
+        handle_model_request(&mut model, ModelRequest::SetBackground("white".to_string())).unwrap();
+        assert!(model.snapshot().can_undo);
+        handle_model_request(&mut model, ModelRequest::Undo).unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.background, "black");
+        assert!(snapshot.can_redo);
+        handle_model_request(&mut model, ModelRequest::Redo).unwrap();
+        assert_eq!(model.snapshot().background, "white");
     }
 
     #[test]
@@ -1141,5 +1440,31 @@ mod tests {
             snapshot.objects[0].coloring_type.as_deref(),
             Some("RainbowColoring")
         );
+    }
+
+    #[test]
+    fn edit_menu_atom_deletion_is_undoable() {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let pdb = root.join("tests/test_data/1CRN.pdb");
+        if !pdb.exists() {
+            return;
+        }
+        let mut model = model_without_gpu();
+        model.desktop.open_path(&pdb).unwrap();
+        model.rebuild_mesh(true).unwrap();
+        let object_uid = model.desktop.active_object_summaries()[0].uid;
+        handle_model_request(
+            &mut model,
+            ModelRequest::DeleteAtoms {
+                object_uid: object_uid.get(),
+                selection: "aid 1".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().objects[0].atom_count, 326);
+        handle_model_request(&mut model, ModelRequest::Undo).unwrap();
+        assert_eq!(model.snapshot().objects[0].atom_count, 327);
     }
 }

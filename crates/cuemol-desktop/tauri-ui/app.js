@@ -30,6 +30,10 @@ const showDensityContour = document.getElementById("show-density-contour");
 const densityLevel = document.getElementById("density-level");
 const densityLevelValue = document.getElementById("density-level-value");
 const sequenceView = document.getElementById("sequence-view");
+const referenceDialog = document.getElementById("reference-dialog");
+const dialogTitle = document.getElementById("dialog-title");
+const dialogContent = document.getElementById("dialog-content");
+const centerMarkElement = document.querySelector(".center-mark");
 
 const tauri = window.__TAURI__;
 const invoke = tauri?.core?.invoke;
@@ -43,6 +47,9 @@ let toastTimer = null;
 let requestSequence = 0;
 let drag = null;
 let statusTrail = [];
+let lastOpenedPaths = [];
+let centerMark = "cross";
+let performanceMeasure = false;
 
 function setBusy(value) {
   appShell.classList.toggle("busy", value);
@@ -62,6 +69,211 @@ function recordStatus(message) {
   statusTrail = statusTrail.slice(-80);
   statusHistory.textContent = statusTrail.join("\n") || "CueMol2 Rust core";
   statusHistory.scrollTop = statusHistory.scrollHeight;
+}
+
+function closeMenus(except = null) {
+  document.querySelectorAll(".menu[open]").forEach((menu) => {
+    if (menu !== except) menu.removeAttribute("open");
+  });
+}
+
+function showBottomPanel(name) {
+  document.querySelectorAll("[data-bottom-select]").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.bottomSelect === name);
+  });
+  document.querySelectorAll("[data-bottom-panel]").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.bottomPanel === name);
+  });
+}
+
+function dialogParagraph(text) {
+  const paragraph = document.createElement("p");
+  paragraph.textContent = text;
+  return paragraph;
+}
+
+function dialogField(label, value, type = "text") {
+  const wrapper = document.createElement("label");
+  wrapper.className = "dialog-field";
+  const text = document.createElement("span");
+  text.textContent = label;
+  const input = document.createElement("input");
+  input.type = type;
+  input.value = value;
+  wrapper.append(text, input);
+  dialogContent.append(wrapper);
+  return input;
+}
+
+function showReferenceDialog(title) {
+  dialogTitle.textContent = title;
+  dialogContent.replaceChildren();
+  if (title === "About CueMol2") {
+    const heading = document.createElement("h2");
+    heading.textContent = "CueMol2";
+    dialogContent.append(
+      heading,
+      dialogParagraph("Molecular visualization system — Rust desktop implementation."),
+    );
+  } else if (title === "Scene Properties") {
+    const scene = snapshot?.scenes.find((item) => item.active);
+    const properties = document.createElement("dl");
+    properties.className = "dialog-properties";
+    for (const [term, value] of [
+      ["Name", scene?.name || "(none)"],
+      ["UID", scene?.uid ?? "—"],
+      ["Objects", scene?.objectCount ?? 0],
+      ["Maps", scene?.mapCount ?? 0],
+    ]) {
+      const dt = document.createElement("dt");
+      dt.textContent = term;
+      const dd = document.createElement("dd");
+      dd.textContent = String(value);
+      properties.append(dt, dd);
+    }
+    dialogContent.append(properties);
+  } else if (title === "View Property") {
+    dialogContent.append(
+      dialogParagraph(`Projection: ${snapshot?.perspective ? "Perspective" : "Orthographic"}`),
+      dialogParagraph(`Background: ${snapshot?.background || "black"}`),
+      dialogParagraph(`Center mark: ${centerMark}`),
+    );
+  } else if (title === "Delete mol atoms") {
+    const object = selectedObject();
+    if (!object) {
+      dialogContent.append(dialogParagraph("Select a molecular object first."));
+    } else {
+      const selection = dialogField("Selection", snapshot.selection);
+      const apply = button("Delete", "dialog-primary", async () => {
+        await mutate("delete_atoms", {
+          objectUid: object.uid,
+          selection: selection.value,
+        });
+        referenceDialog.close();
+      });
+      dialogContent.append(apply);
+    }
+  } else if (title === "Change chain ID") {
+    const object = selectedObject();
+    if (!object) {
+      dialogContent.append(dialogParagraph("Select a molecular object first."));
+    } else {
+      const selection = dialogField("Selection", snapshot.selection);
+      const chainName = dialogField("New chain ID", "A");
+      const apply = button("Apply", "dialog-primary", async () => {
+        await mutate("change_chain", {
+          objectUid: object.uid,
+          selection: selection.value,
+          chainName: chainName.value,
+        });
+        referenceDialog.close();
+      });
+      dialogContent.append(apply);
+    }
+  } else if (title === "Change residue number") {
+    const object = selectedObject();
+    if (!object) {
+      dialogContent.append(dialogParagraph("Select a molecular object first."));
+    } else {
+      const selection = dialogField("Selection", snapshot.selection);
+      const start = dialogField("Start residue number", "1", "number");
+      const apply = button("Apply", "dialog-primary", async () => {
+        await mutate("renumber_residues", {
+          objectUid: object.uid,
+          selection: selection.value,
+          start: Number(start.value),
+        });
+        referenceDialog.close();
+      });
+      dialogContent.append(apply);
+    }
+  } else if (title === "Open PDB") {
+    const pdbId = dialogField("PDB ID", "1CRN");
+    const open = button("Open RCSB PDB", "dialog-primary", () => {
+      const id = pdbId.value.trim().toUpperCase();
+      if (id) window.open(`https://www.rcsb.org/structure/${encodeURIComponent(id)}`, "_blank");
+    });
+    dialogContent.append(open);
+  } else {
+    dialogContent.append(dialogParagraph(`${title} dialog`));
+  }
+  if (referenceDialog.showModal) referenceDialog.showModal();
+}
+
+function applyCenterMark(value) {
+  centerMark = value;
+  centerMarkElement.classList.toggle("axis", value === "axis");
+  centerMarkElement.classList.toggle("none", value === "none");
+}
+
+function restoreDefaultPanels() {
+  const openPanels = new Set(["Workspace", "MolStruct", "Selection", "Coloring", "Density map"]);
+  document.querySelectorAll("[data-side-card]").forEach((card) => {
+    const title = card.querySelector(".side-title span:nth-child(2)")?.textContent;
+    const open = openPanels.has(title);
+    card.classList.toggle("open", open);
+    const button = card.querySelector("[data-panel-toggle]");
+    button?.setAttribute("aria-expanded", String(open));
+    const disclosure = card.querySelector(".disclosure");
+    if (disclosure) disclosure.textContent = open ? "▾" : "▸";
+  });
+  document.querySelector(".side-panel")?.scrollTo({ top: 0 });
+  scheduleRender(140);
+}
+
+async function handleLocalAction(action) {
+  switch (action) {
+    case "new-window": {
+      const WebviewWindow = tauri?.webviewWindow?.WebviewWindow;
+      if (!WebviewWindow) {
+        showError("Tauri window API is unavailable.");
+        break;
+      }
+      new WebviewWindow(`cuemol-${Date.now()}`, {
+        url: "index.html",
+        title: "CueMol2",
+        width: 1024,
+        height: 768,
+        minWidth: 760,
+        minHeight: 520,
+      });
+      break;
+    }
+    case "reload-scene":
+      if (lastOpenedPaths.length) await mutate("open_paths", { paths: lastOpenedPaths });
+      else showError("No loaded path to reload.");
+      break;
+    case "color-proof":
+      if (snapshot) {
+        await mutate("set_display_option", {
+          option: "color-proof",
+          value: !snapshot.colorProofing,
+        });
+      }
+      break;
+    case "performance-measure":
+      performanceMeasure = !performanceMeasure;
+      renderSize.hidden = !performanceMeasure;
+      recordStatus(`Performance measure: ${performanceMeasure ? "on" : "off"}`);
+      break;
+    case "toggle-ribbon":
+      document.querySelector(".ribbon")?.classList.toggle("collapsed");
+      scheduleRender(140);
+      break;
+    case "clear-log":
+      statusTrail = [];
+      statusHistory.textContent = "";
+      break;
+    case "restore-panels":
+      restoreDefaultPanels();
+      break;
+    case "show-console":
+      showBottomPanel("output");
+      break;
+    case "check-updates":
+      recordStatus("Update check is not available offline");
+      break;
+  }
 }
 
 function button(label, className, onClick) {
@@ -350,6 +562,24 @@ function renderShell() {
   document.querySelectorAll("input[name='background']").forEach((input) => {
     input.checked = input.value === snapshot.background;
   });
+  document.querySelectorAll("[data-projection]").forEach((item) => {
+    item.classList.toggle(
+      "checked",
+      item.dataset.projection === (snapshot.perspective ? "perspective" : "orthographic"),
+    );
+  });
+  document.querySelectorAll("[data-background]").forEach((item) => {
+    item.classList.toggle("checked", item.dataset.background === snapshot.background);
+  });
+  document
+    .querySelector("[data-local-action='color-proof']")
+    ?.classList.toggle("checked", snapshot.colorProofing);
+  document.querySelectorAll("[data-action='undo']").forEach((item) => {
+    item.disabled = !snapshot.canUndo;
+  });
+  document.querySelectorAll("[data-action='redo']").forEach((item) => {
+    item.disabled = !snapshot.canRedo;
+  });
   measureReadout.textContent = snapshot.measureResult || "Select 2 / 3 / 4 atoms";
   statusText.textContent = snapshot.status;
   recordStatus(snapshot.status);
@@ -450,6 +680,7 @@ async function openFiles() {
   });
   if (!chosen) return;
   const paths = Array.isArray(chosen) ? chosen : [chosen];
+  lastOpenedPaths = paths;
   await mutate("open_paths", { paths });
 }
 
@@ -474,6 +705,15 @@ async function handleAction(action) {
   switch (action) {
     case "open":
       await openFiles();
+      break;
+    case "undo":
+      await mutate("undo");
+      break;
+    case "redo":
+      await mutate("redo");
+      break;
+    case "clear-undo":
+      await mutate("clear_undo");
       break;
     case "save":
       await saveScene();
@@ -518,8 +758,75 @@ async function handleAction(action) {
 
 document.querySelectorAll("[data-action]").forEach((element) => {
   element.addEventListener("click", () => {
-    document.querySelectorAll(".menu[open]").forEach((menu) => menu.removeAttribute("open"));
+    closeMenus();
     handleAction(element.dataset.action);
+  });
+});
+
+document.querySelectorAll("[data-dialog]").forEach((element) => {
+  element.addEventListener("click", () => {
+    closeMenus();
+    showReferenceDialog(element.dataset.dialog);
+  });
+});
+
+document.querySelectorAll("[data-local-action]").forEach((element) => {
+  element.addEventListener("click", () => {
+    closeMenus();
+    handleLocalAction(element.dataset.localAction);
+  });
+});
+
+document.querySelectorAll("[data-background]").forEach((element) => {
+  element.addEventListener("click", () => {
+    closeMenus();
+    if (snapshot?.background !== element.dataset.background) {
+      mutate("set_background", { background: element.dataset.background });
+    }
+  });
+});
+
+document.querySelectorAll("[data-projection]").forEach((element) => {
+  element.addEventListener("click", () => {
+    closeMenus();
+    const wantsPerspective = element.dataset.projection === "perspective";
+    if (snapshot && snapshot.perspective !== wantsPerspective) {
+      cameraCommand("projection", 0, 0, true);
+    }
+  });
+});
+
+document.querySelectorAll("[data-center-mark]").forEach((element) => {
+  element.addEventListener("click", () => {
+    closeMenus();
+    applyCenterMark(element.dataset.centerMark);
+    document.querySelectorAll("[data-center-mark]").forEach((item) => {
+      item.classList.toggle("checked", item === element);
+    });
+  });
+});
+
+document.querySelectorAll("[data-panel-menu]").forEach((element) => {
+  element.addEventListener("click", () => {
+    closeMenus();
+    const card = [...document.querySelectorAll("[data-side-card]")].find(
+      (item) =>
+        item.querySelector(".side-title span:nth-child(2)")?.textContent ===
+        element.dataset.panelMenu,
+    );
+    if (!card) return;
+    card.classList.add("open");
+    card.querySelector("[data-panel-toggle]")?.setAttribute("aria-expanded", "true");
+    const disclosure = card.querySelector(".disclosure");
+    if (disclosure) disclosure.textContent = "▾";
+    card.scrollIntoView({ block: "nearest" });
+    scheduleRender(140);
+  });
+});
+
+document.querySelectorAll(".menu").forEach((menu) => {
+  menu.addEventListener("toggle", () => {
+    if (menu.open) closeMenus(menu);
   });
 });
 
@@ -566,13 +873,7 @@ document.querySelectorAll(".toolbar-group[role='radiogroup']").forEach((group) =
 
 document.querySelectorAll("[data-bottom-select]").forEach((element) => {
   element.addEventListener("click", () => {
-    const target = element.dataset.bottomSelect;
-    document.querySelectorAll("[data-bottom-select]").forEach((tab) => {
-      tab.classList.toggle("active", tab === element);
-    });
-    document.querySelectorAll("[data-bottom-panel]").forEach((panel) => {
-      panel.classList.toggle("active", panel.dataset.bottomPanel === target);
-    });
+    showBottomPanel(element.dataset.bottomSelect);
   });
 });
 
@@ -715,7 +1016,10 @@ window.addEventListener("dragover", (event) => event.preventDefault());
 window.addEventListener("drop", (event) => {
   event.preventDefault();
   const paths = [...event.dataTransfer.files].map((file) => file.path).filter(Boolean);
-  if (paths.length) mutate("open_paths", { paths });
+  if (paths.length) {
+    lastOpenedPaths = paths;
+    mutate("open_paths", { paths });
+  }
 });
 
 new ResizeObserver(() => scheduleRender(140)).observe(viewport);

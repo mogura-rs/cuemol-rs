@@ -147,6 +147,8 @@ summary:focus-visible {
   left: 1px;
   display: grid;
   min-width: 182px;
+  max-height: calc(100vh - 34px);
+  overflow: auto;
   padding: 4px 0;
   border: 1px solid #8b8b8b;
   border-radius: 3px;
@@ -155,6 +157,7 @@ summary:focus-visible {
 }
 
 .menu-popup button {
+  position: relative;
   min-height: 23px;
   padding: 2px 22px;
   border: 0;
@@ -165,9 +168,19 @@ summary:focus-visible {
   white-space: nowrap;
 }
 
-.menu-popup button:hover {
+.menu-popup button:hover:not(:disabled) {
   background: var(--selection);
   color: var(--selection-text);
+}
+
+.menu-popup button.checked::before {
+  content: "✓";
+  position: absolute;
+  margin-left: -16px;
+}
+
+.wide-menu {
+  min-width: 224px;
 }
 
 .menu-separator {
@@ -971,6 +984,18 @@ summary:focus-visible {
   height: 17px;
 }
 
+.center-mark.axis::before {
+  background: #d84444;
+}
+
+.center-mark.axis::after {
+  background: #50b460;
+}
+
+.center-mark.none {
+  display: none;
+}
+
 .render-size,
 .drag-readout {
   position: absolute;
@@ -1183,6 +1208,98 @@ summary:focus-visible {
 .toast.show {
   opacity: 1;
   transform: translateY(0);
+}
+
+.reference-dialog {
+  width: min(520px, calc(100vw - 48px));
+  min-height: 180px;
+  padding: 0;
+  border: 1px solid #777;
+  border-radius: 5px;
+  background: #eee;
+  box-shadow: 0 12px 38px rgba(0, 0, 0, 0.38);
+  color: #111;
+}
+
+.reference-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.reference-dialog form {
+  display: grid;
+  grid-template-rows: 30px minmax(110px, auto) 36px;
+  min-height: 180px;
+}
+
+.reference-dialog header,
+.reference-dialog footer {
+  display: flex;
+  align-items: center;
+  padding: 4px 7px;
+  background: linear-gradient(#fff, #d5d5d5);
+}
+
+.reference-dialog header {
+  border-bottom: 1px solid #aaa;
+}
+
+.reference-dialog header strong {
+  flex: 1;
+}
+
+.reference-dialog header button {
+  min-width: 22px;
+  min-height: 20px;
+  padding: 0;
+}
+
+.reference-dialog footer {
+  justify-content: flex-end;
+  border-top: 1px solid #aaa;
+}
+
+.dialog-content {
+  overflow: auto;
+  padding: 12px;
+  background: #f7f7f7;
+}
+
+.dialog-content h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.dialog-content p {
+  margin: 5px 0;
+}
+
+.dialog-field {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.dialog-primary {
+  float: right;
+  min-width: 78px;
+}
+
+.dialog-properties {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: 5px 10px;
+  margin: 0;
+}
+
+.dialog-properties dt {
+  color: #666;
+}
+
+.dialog-properties dd {
+  margin: 0;
+  font-family: var(--font-mono);
 }
 
 .app-shell.busy {

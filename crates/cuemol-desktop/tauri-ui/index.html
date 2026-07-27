@@ -14,28 +14,113 @@
         <details class="menu">
           <summary>File</summary>
           <div class="menu-popup">
+            <button type="button" data-local-action="new-window">New Window</button>
             <button type="button" data-action="new-scene">New Tab</button>
-            <span class="menu-separator"></span>
             <button type="button" data-action="open">Open File…</button>
-            <button type="button" data-action="save">Save Scene</button>
-            <button type="button" data-action="export">Export PNG…</button>
-            <span class="menu-separator"></span>
+            <button type="button" data-dialog="Open PDB">Open PDB…</button>
+            <button type="button" disabled>Open recent</button>
+            <button type="button" data-dialog="Save File As">Save File As…</button>
+            <button type="button" data-dialog="Save Current View">Save current view…</button>
             <button type="button" data-action="close-scene">Close Tab</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-action="open">Open Scene…</button>
+            <button type="button" data-local-action="reload-scene">Reload Scene</button>
+            <button type="button" data-action="save">Save Scene</button>
+            <button type="button" data-action="save">Save Scene As…</button>
           </div>
         </details>
-        <button type="button" class="menu-label">Edit</button>
-        <button type="button" class="menu-label">Rendering</button>
+        <details class="menu">
+          <summary>Edit</summary>
+          <div class="menu-popup">
+            <button type="button" data-action="undo">Undo</button>
+            <button type="button" data-action="redo">Redo</button>
+            <button type="button" data-action="clear-undo">Clear undo data</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-dialog="Merge molecule">Merge molecule…</button>
+            <button type="button" data-dialog="Delete mol atoms">Delete mol atoms…</button>
+            <button type="button" data-dialog="Change chain ID">Change chain ID…</button>
+            <button type="button" data-dialog="Change residue number">Change residue number…</button>
+          </div>
+        </details>
+        <details class="menu">
+          <summary>Rendering</summary>
+          <div class="menu-popup">
+            <button type="button" data-dialog="POV-Ray rendering">POV-Ray rendering…</button>
+            <button type="button" data-dialog="Animation rendering">Animation rendering…</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-action="export">Export scene…</button>
+          </div>
+        </details>
         <details class="menu">
           <summary>Scene</summary>
           <div class="menu-popup">
-            <button type="button" data-action="fit">Fit view</button>
-            <button type="button" data-action="projection">Toggle projection</button>
+            <button type="button" data-background="white">Background color: White</button>
+            <button type="button" data-background="black">Background color: Black</button>
+            <button type="button" data-local-action="color-proof">Use color proofing</button>
+            <button type="button" data-dialog="Scene Properties">Properties…</button>
           </div>
         </details>
-        <button type="button" class="menu-label">View</button>
-        <button type="button" class="menu-label">Tools</button>
-        <button type="button" class="menu-label">Window</button>
-        <button type="button" class="menu-label">Help</button>
+        <details class="menu">
+          <summary>View</summary>
+          <div class="menu-popup">
+            <button type="button" data-projection="perspective">Perspective</button>
+            <button type="button" data-projection="orthographic">Orthographic</button>
+            <span class="menu-separator"></span>
+            <button type="button" class="checked" data-center-mark="cross">Center mark: Cross</button>
+            <button type="button" data-center-mark="axis">Center mark: Axis</button>
+            <button type="button" data-center-mark="none">Center mark: None</button>
+            <span class="menu-separator"></span>
+            <button type="button" disabled>Hardware stereo</button>
+            <button type="button" data-dialog="View Property">View property…</button>
+          </div>
+        </details>
+        <details class="menu">
+          <summary>Tools</summary>
+          <div class="menu-popup wide-menu">
+            <button type="button" data-dialog="Molecular superposition">Molecular superposition…</button>
+            <button type="button" data-dialog="Mol bond editor">Mol bond editor…</button>
+            <button type="button" data-dialog="Interaction">Interaction…</button>
+            <button type="button" data-dialog="Reassign secondary str">Reassign secondary str…</button>
+            <button type="button" data-dialog="Mol morphing animation">Mol morphing animation…</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-dialog="Mol surface generation">Mol surface generation…</button>
+            <button type="button" data-dialog="Mol surface cutter">Mol surface cutter…</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-dialog="APBS elepot calculation">APBS elepot calculation…</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-dialog="Execute script">Execute script…</button>
+            <button type="button" data-local-action="performance-measure">Performance measure</button>
+          </div>
+        </details>
+        <details class="menu">
+          <summary>Window</summary>
+          <div class="menu-popup">
+            <button type="button" data-local-action="toggle-ribbon">Show/Hide Topbar</button>
+            <button type="button" data-local-action="clear-log">Clear log contents</button>
+            <button type="button" data-local-action="restore-panels">Restore default panel location</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-panel-menu="Workspace">Panel: Workspace</button>
+            <button type="button" data-panel-menu="MolStruct">Panel: MolStruct</button>
+            <button type="button" data-panel-menu="Selection">Panel: Selection</button>
+            <button type="button" data-panel-menu="Coloring">Panel: Coloring</button>
+            <button type="button" data-panel-menu="Symmetry">Panel: Symmetry</button>
+            <button type="button" data-panel-menu="Density map">Panel: Density map</button>
+            <button type="button" data-panel-menu="View">Panel: View</button>
+            <button type="button" data-panel-menu="Animation">Panel: Animation</button>
+          </div>
+        </details>
+        <details class="menu">
+          <summary>Help</summary>
+          <div class="menu-popup">
+            <button type="button" data-dialog="About plugins">About plugins…</button>
+            <button type="button" data-dialog="About config">About config…</button>
+            <button type="button" data-dialog="Addon manager">Addon manager…</button>
+            <button type="button" data-dialog="About CueMol2">About CueMol2</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-local-action="show-console">Console</button>
+            <button type="button" data-local-action="check-updates">Check for updates</button>
+          </div>
+        </details>
       </header>
 
       <section class="ribbon">
@@ -271,7 +356,7 @@
               <span>Open or drop a molecular data file.</span>
             </div>
             <div class="center-mark" aria-hidden="true"></div>
-            <div id="render-size" class="render-size">— × —</div>
+            <div id="render-size" class="render-size" hidden>— × —</div>
             <div id="drag-readout" class="drag-readout"></div>
           </div>
 
@@ -305,5 +390,15 @@
       </footer>
     </div>
     <div id="toast" class="toast" role="alert"></div>
+    <dialog id="reference-dialog" class="reference-dialog">
+      <form method="dialog">
+        <header>
+          <strong id="dialog-title">CueMol2</strong>
+          <button type="submit" aria-label="Close">×</button>
+        </header>
+        <div id="dialog-content" class="dialog-content"></div>
+        <footer><button type="submit">Close</button></footer>
+      </form>
+    </dialog>
   </body>
 </html>

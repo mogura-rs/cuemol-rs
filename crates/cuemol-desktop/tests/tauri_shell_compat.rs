@@ -63,3 +63,45 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
         assert!(JS.contains(command), "missing IPC binding {command}");
     }
 }
+
+#[test]
+fn tauri_main_menu_matches_the_reference_inventory() {
+    for menu in [
+        "File",
+        "Edit",
+        "Rendering",
+        "Scene",
+        "View",
+        "Tools",
+        "Window",
+        "Help",
+    ] {
+        assert!(
+            HTML.contains(&format!("<summary>{menu}</summary>")),
+            "missing menu {menu}"
+        );
+    }
+    for item in [
+        "POV-Ray rendering",
+        "Animation rendering",
+        "Molecular superposition",
+        "Mol bond editor",
+        "Interaction",
+        "Mol surface generation",
+        "APBS elepot calculation",
+        "Restore default panel location",
+        "Check for updates",
+    ] {
+        assert!(HTML.contains(item), "missing menu item {item}");
+    }
+    for command in [
+        "undo",
+        "redo",
+        "clear_undo",
+        "delete_atoms",
+        "change_chain",
+        "renumber_residues",
+    ] {
+        assert!(JS.contains(command), "missing menu binding {command}");
+    }
+}
