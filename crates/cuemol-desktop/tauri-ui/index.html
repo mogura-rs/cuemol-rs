@@ -111,6 +111,7 @@
               Renderer name:
               <input type="text" value="measure" />
             </label>
+            <output id="measure-readout" class="measure-readout">Select 2 / 3 / 4 atoms</output>
           </div>
         </div>
       </section>
@@ -160,8 +161,13 @@
             <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
               <span class="disclosure">▾</span><span>MolStruct</span><span class="panel-close">×</span>
             </button>
-            <div class="side-body">
-              <p>Select a molecule in Workspace to inspect chains and residues.</p>
+            <div class="side-body molstruct-body">
+              <div class="panel-toolbar">
+                <select id="molstruct-object" aria-label="Molecule"></select>
+                <button type="button" data-action="select-object">Select</button>
+                <button type="button" data-action="fit">Zoom</button>
+              </div>
+              <div id="molstruct-tree" class="molstruct-tree"></div>
             </div>
           </section>
 
@@ -184,30 +190,61 @@
             <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
               <span class="disclosure">▾</span><span>Coloring</span><span class="panel-close">×</span>
             </button>
-            <div class="side-body"><p>Coloring controls follow the selected renderer.</p></div>
+            <div class="side-body coloring-body">
+              <label for="coloring-object">Molecule</label>
+              <select id="coloring-object"></select>
+              <label for="coloring-type">Coloring</label>
+              <select id="coloring-type">
+                <option value="element">Element (CPK)</option>
+                <option value="rainbow">Rainbow</option>
+                <option value="bfac">B-factor</option>
+              </select>
+              <p id="coloring-note">Per-element CPK colors.</p>
+            </div>
           </section>
 
           <section class="side-card" data-side-card>
             <button class="side-title" type="button" data-panel-toggle aria-expanded="false">
               <span class="disclosure">▸</span><span>Symmetry</span><span class="panel-close">×</span>
             </button>
-            <div class="side-body"><p>Crystal symmetry and unit-cell controls.</p></div>
+            <div class="side-body">
+              <div id="symmetry-content" class="summary-stack"></div>
+              <label class="check-row"><input id="show-unit-cell" type="checkbox" />Unit cell</label>
+              <label class="check-row"><input id="show-symmetry-mates" type="checkbox" />Symm mol</label>
+            </div>
           </section>
 
           <section class="side-card open" data-side-card>
             <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
               <span class="disclosure">▾</span><span>Density map</span><span class="panel-close">×</span>
             </button>
-            <div class="side-body"><p>Density contour level and map renderer controls.</p></div>
+            <div class="side-body density-body">
+              <div id="density-content" class="summary-stack"></div>
+              <label class="check-row"><input id="show-density-contour" type="checkbox" />Show contour</label>
+              <label class="range-row" for="density-level">
+                <span>Level</span>
+                <input id="density-level" type="range" min="0.1" max="5" step="0.1" value="1.5" />
+                <output id="density-level-value">1.5 σ</output>
+              </label>
+            </div>
           </section>
 
           <section class="side-card" data-side-card>
             <button class="side-title" type="button" data-panel-toggle aria-expanded="false">
               <span class="disclosure">▸</span><span>View</span><span class="panel-close">×</span>
             </button>
-            <div class="side-body">
+            <div class="side-body view-body">
+              <fieldset>
+                <legend>Projection</legend>
+                <label><input type="radio" name="projection" value="orthographic" checked />Ortho</label>
+                <label><input type="radio" name="projection" value="perspective" />Persp</label>
+              </fieldset>
+              <fieldset>
+                <legend>Background</legend>
+                <label><input type="radio" name="background" value="black" checked />Black</label>
+                <label><input type="radio" name="background" value="white" />White</label>
+              </fieldset>
               <button type="button" data-action="fit">Fit view</button>
-              <button type="button" data-action="projection">Projection</button>
             </div>
           </section>
 
@@ -247,8 +284,9 @@
                 <label class="command-line"><span>&gt;</span><input type="text" aria-label="Command line" /></label>
               </div>
               <div class="bottom-content sequence-placeholder" data-bottom-panel="sequence">
-                <span>Sequence</span>
-                <p>Residue sequence appears after a molecular object is loaded.</p>
+                <div id="sequence-view" class="sequence-view">
+                  <p>Residue sequence appears after a molecular object is loaded.</p>
+                </div>
               </div>
             </div>
             <div class="bottom-tabs" role="tablist">

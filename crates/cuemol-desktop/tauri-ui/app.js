@@ -16,6 +16,20 @@ const objectStats = document.getElementById("object-stats");
 const renderSize = document.getElementById("render-size");
 const dragReadout = document.getElementById("drag-readout");
 const toast = document.getElementById("toast");
+const measureReadout = document.getElementById("measure-readout");
+const molstructObject = document.getElementById("molstruct-object");
+const molstructTree = document.getElementById("molstruct-tree");
+const coloringObject = document.getElementById("coloring-object");
+const coloringType = document.getElementById("coloring-type");
+const coloringNote = document.getElementById("coloring-note");
+const symmetryContent = document.getElementById("symmetry-content");
+const showUnitCell = document.getElementById("show-unit-cell");
+const showSymmetryMates = document.getElementById("show-symmetry-mates");
+const densityContent = document.getElementById("density-content");
+const showDensityContour = document.getElementById("show-density-contour");
+const densityLevel = document.getElementById("density-level");
+const densityLevelValue = document.getElementById("density-level-value");
+const sequenceView = document.getElementById("sequence-view");
 
 const tauri = window.__TAURI__;
 const invoke = tauri?.core?.invoke;
@@ -166,17 +180,188 @@ function renderInspector() {
   }
 }
 
+function replaceOptions(select, objects) {
+  select.replaceChildren();
+  for (const object of objects) {
+    const option = document.createElement("option");
+    option.value = String(object.uid ?? object.objectUid);
+    option.textContent = object.name ?? object.objectName;
+    select.append(option);
+  }
+  select.disabled = objects.length === 0;
+  if (selectedObjectUid !== null) select.value = String(selectedObjectUid);
+}
+
+function renderMolStruct() {
+  replaceOptions(
+    molstructObject,
+    snapshot.structure.map((object) => ({ uid: object.objectUid, name: object.objectName })),
+  );
+  molstructTree.replaceChildren();
+  const object = snapshot.structure.find((item) => item.objectUid === selectedObjectUid);
+  if (!object) {
+    const empty = document.createElement("p");
+    empty.textContent = "No molecule selected.";
+    molstructTree.append(empty);
+    return;
+  }
+  for (const chain of object.chains) {
+    const chainNode = document.createElement("details");
+    chainNode.className = "structure-node chain-node";
+    const chainLabel = chain.chainId || "_";
+    const residueCount = chain.residues.length;
+    const chainSummary = document.createElement("summary");
+    chainSummary.textContent = `Chain ${chainLabel} (${residueCount} res)`;
+    chainNode.append(chainSummary);
+    for (const residue of chain.residues) {
+      const residueNode = document.createElement("details");
+      residueNode.className = "structure-node residue-node";
+      const residueSummary = document.createElement("summary");
+      residueSummary.textContent = `${residue.resName} ${residue.resId}${residue.insCode || ""}`;
+      residueNode.append(residueSummary);
+      const atomList = document.createElement("div");
+      atomList.className = "atom-list";
+      for (const atom of residue.atoms) {
+        const atomButton = button(`${atom.name}  ${atom.element || "?"}  #${atom.serial}`, "atom-row", () => {
+          mutate("set_selection", { selection: `aid ${atom.serial}` });
+        });
+        atomButton.title = `atom index ${atom.atomIndex}`;
+        atomList.append(atomButton);
+      }
+      residueNode.append(atomList);
+      chainNode.append(residueNode);
+    }
+    molstructTree.append(chainNode);
+  }
+}
+
+function renderColoring() {
+  const objects = activeObjects();
+  replaceOptions(coloringObject, objects);
+  const object = selectedObject();
+  const value =
+    object?.coloringType === "RainbowColoring"
+      ? "rainbow"
+      : object?.coloringType === "BfacColoring"
+        ? "bfac"
+        : "element";
+  coloringType.value = value;
+  coloringType.disabled = !object;
+  coloringNote.textContent =
+    value === "rainbow"
+      ? "N-terminus blue → C-terminus red."
+      : value === "bfac"
+        ? "Blue (low) → red (high), auto-scaled."
+        : "Per-element CPK colors.";
+}
+
+function renderSymmetry() {
+  symmetryContent.replaceChildren();
+  if (snapshot.crystals.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No crystal cell (non-crystallographic).";
+    symmetryContent.append(empty);
+  }
+  for (const crystal of snapshot.crystals) {
+    const card = document.createElement("dl");
+    card.className = "summary-grid";
+    const values = [
+      ["Molecule", crystal.objectName],
+      ["Space group", crystal.spaceGroupName || "(none)"],
+      ["a, b, c (Å)", `${crystal.a.toFixed(3)}, ${crystal.b.toFixed(3)}, ${crystal.c.toFixed(3)}`],
+      ["α, β, γ (°)", `${crystal.alpha.toFixed(2)}, ${crystal.beta.toFixed(2)}, ${crystal.gamma.toFixed(2)}`],
+    ];
+    for (const [term, description] of values) {
+      const dt = document.createElement("dt");
+      dt.textContent = term;
+      const dd = document.createElement("dd");
+      dd.textContent = description;
+      card.append(dt, dd);
+    }
+    symmetryContent.append(card);
+  }
+  showUnitCell.checked = snapshot.showUnitCell;
+  showSymmetryMates.checked = snapshot.showSymmetryMates;
+  showUnitCell.disabled = snapshot.crystals.length === 0;
+  showSymmetryMates.disabled = snapshot.crystals.length === 0;
+}
+
+function renderDensity() {
+  densityContent.replaceChildren();
+  if (snapshot.densityMaps.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No density map loaded.";
+    densityContent.append(empty);
+  }
+  for (const map of snapshot.densityMaps) {
+    const entry = document.createElement("div");
+    entry.className = "density-summary";
+    const title = document.createElement("strong");
+    title.textContent = map.name;
+    const dimensions = document.createElement("span");
+    dimensions.textContent = `${map.format} · ${map.counts.join(" × ")}`;
+    const range = document.createElement("span");
+    range.textContent = `mean ${map.meanDensity.toFixed(3)} / rmsd ${map.rmsdDensity.toFixed(3)}`;
+    entry.append(title, dimensions, range);
+    densityContent.append(entry);
+  }
+  showDensityContour.checked = snapshot.showDensityContour;
+  showDensityContour.disabled = snapshot.densityMaps.length === 0;
+  densityLevel.value = String(snapshot.densityLevel);
+  densityLevel.disabled = snapshot.densityMaps.length === 0;
+  densityLevelValue.textContent = `${snapshot.densityLevel.toFixed(1)} σ`;
+}
+
+function renderSequence() {
+  sequenceView.replaceChildren();
+  if (snapshot.sequence.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "No molecule loaded.";
+    sequenceView.append(empty);
+    return;
+  }
+  for (const chain of snapshot.sequence) {
+    const row = document.createElement("section");
+    row.className = "sequence-chain";
+    const title = document.createElement("strong");
+    title.textContent = `${chain.objectName} : chain ${chain.chainId || "_"}`;
+    const residues = document.createElement("div");
+    residues.className = "sequence-residues";
+    for (const residue of chain.residues) {
+      const cell = button(residue.letter, `sequence-cell${residue.selected ? " selected" : ""}`, () => {
+        mutate("set_selection", { selection: residue.selection });
+      });
+      cell.title = `${residue.resName} ${residue.resId}`;
+      residues.append(cell);
+    }
+    row.append(title, residues);
+    sequenceView.append(row);
+  }
+}
+
 function renderShell() {
   if (!snapshot) return;
   normalizeSelection();
   selectionInput.value = snapshot.selection;
   projectionReadout.textContent = snapshot.perspective ? "PERSPECTIVE" : "ORTHO";
+  document.querySelectorAll("input[name='projection']").forEach((input) => {
+    input.checked = input.value === (snapshot.perspective ? "perspective" : "orthographic");
+  });
+  document.querySelectorAll("input[name='background']").forEach((input) => {
+    input.checked = input.value === snapshot.background;
+  });
+  measureReadout.textContent = snapshot.measureResult || "Select 2 / 3 / 4 atoms";
   statusText.textContent = snapshot.status;
   recordStatus(snapshot.status);
   metrics.textContent = `${snapshot.scenes.length} scenes / ${snapshot.objects.length} objects`;
   renderSceneTabs();
   renderSceneTree();
   renderInspector();
+  renderMolStruct();
+  renderColoring();
+  renderSymmetry();
+  renderDensity();
+  renderSequence();
 }
 
 function viewportDimensions() {
@@ -324,6 +509,10 @@ async function handleAction(action) {
       await mutate("add_renderer", { objectUid: object.uid, rendererType });
       break;
     }
+    case "select-object":
+      selectedObjectUid = Number(molstructObject.value) || null;
+      renderShell();
+      break;
   }
 }
 
@@ -392,6 +581,61 @@ document.querySelectorAll(".selection-tabs button").forEach((element) => {
     document.querySelectorAll(".selection-tabs button").forEach((tab) => {
       tab.classList.toggle("active", tab === element);
     });
+  });
+});
+
+molstructObject.addEventListener("change", () => {
+  selectedObjectUid = Number(molstructObject.value) || null;
+  renderShell();
+});
+
+coloringObject.addEventListener("change", () => {
+  selectedObjectUid = Number(coloringObject.value) || null;
+  renderShell();
+});
+
+coloringType.addEventListener("change", () => {
+  const object = selectedObject();
+  if (object) {
+    mutate("set_object_coloring", {
+      objectUid: object.uid,
+      coloring: coloringType.value,
+    });
+  }
+});
+
+showUnitCell.addEventListener("change", () => {
+  mutate("set_display_option", { option: "unit-cell", value: showUnitCell.checked });
+});
+
+showSymmetryMates.addEventListener("change", () => {
+  mutate("set_display_option", { option: "symmetry-mates", value: showSymmetryMates.checked });
+});
+
+showDensityContour.addEventListener("change", () => {
+  mutate("set_display_option", { option: "density-contour", value: showDensityContour.checked });
+});
+
+densityLevel.addEventListener("input", () => {
+  densityLevelValue.textContent = `${Number(densityLevel.value).toFixed(1)} σ`;
+});
+
+densityLevel.addEventListener("change", () => {
+  mutate("set_density_level", { level: Number(densityLevel.value) });
+});
+
+document.querySelectorAll("input[name='projection']").forEach((input) => {
+  input.addEventListener("change", () => {
+    const wantsPerspective = input.value === "perspective";
+    if (input.checked && snapshot && snapshot.perspective !== wantsPerspective) {
+      cameraCommand("projection", 0, 0, true);
+    }
+  });
+});
+
+document.querySelectorAll("input[name='background']").forEach((input) => {
+  input.addEventListener("change", () => {
+    if (input.checked) mutate("set_background", { background: input.value });
   });
 });
 

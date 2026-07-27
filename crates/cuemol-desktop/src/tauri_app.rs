@@ -12,7 +12,6 @@ use tauri::State;
 use crate::offscreen::{camera_mvp, encode_rgba_png, SceneRenderer};
 use crate::DesktopAppState;
 
-const VIEW_CLEAR: [f64; 4] = [0.025, 0.035, 0.045, 1.0];
 const MAX_VIEW_DIM: u32 = 1_600;
 
 #[derive(Serialize)]
@@ -43,7 +42,88 @@ struct ObjectDto {
     atom_count: usize,
     residue_count: usize,
     bond_count: usize,
+    coloring_type: Option<String>,
     renderers: Vec<RendererDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StructAtomDto {
+    atom_index: usize,
+    serial: i32,
+    name: String,
+    element: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StructResidueDto {
+    res_name: String,
+    res_id: i32,
+    ins_code: Option<char>,
+    atoms: Vec<StructAtomDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StructChainDto {
+    chain_id: String,
+    residues: Vec<StructResidueDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StructObjectDto {
+    object_uid: u64,
+    object_name: String,
+    chains: Vec<StructChainDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SequenceResidueDto {
+    letter: String,
+    res_id: i32,
+    res_name: String,
+    selection: String,
+    selected: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SequenceChainDto {
+    object_uid: u64,
+    object_name: String,
+    chain_id: String,
+    residues: Vec<SequenceResidueDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CrystalDto {
+    object_uid: u64,
+    object_name: String,
+    a: f64,
+    b: f64,
+    c: f64,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    space_group_name: String,
+    space_group_number: Option<i32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DensityMapDto {
+    uid: u64,
+    name: String,
+    format: String,
+    counts: [usize; 3],
+    min_density: f64,
+    max_density: f64,
+    mean_density: f64,
+    rmsd_density: f64,
 }
 
 #[derive(Serialize)]
@@ -51,9 +131,19 @@ struct ObjectDto {
 struct AppSnapshot {
     scenes: Vec<SceneDto>,
     objects: Vec<ObjectDto>,
+    structure: Vec<StructObjectDto>,
+    sequence: Vec<SequenceChainDto>,
+    crystals: Vec<CrystalDto>,
+    density_maps: Vec<DensityMapDto>,
     active_scene_uid: Option<u64>,
     selection: String,
+    measure_result: Option<String>,
     perspective: bool,
+    background: String,
+    show_unit_cell: bool,
+    show_symmetry_mates: bool,
+    show_density_contour: bool,
+    density_level: f64,
     status: String,
 }
 
@@ -72,6 +162,11 @@ struct AppModel {
     renderer: Option<SceneRenderer>,
     mesh: Option<RenderMesh>,
     selection: String,
+    background: String,
+    show_unit_cell: bool,
+    show_symmetry_mates: bool,
+    show_density_contour: bool,
+    density_level: f64,
     status: String,
 }
 
@@ -102,6 +197,11 @@ impl AppModel {
             renderer: SceneRenderer::new(),
             mesh: None,
             selection: String::new(),
+            background: "black".to_string(),
+            show_unit_cell: false,
+            show_symmetry_mates: false,
+            show_density_contour: false,
+            density_level: 1.5,
             status,
         };
         let _ = model.rebuild_mesh(true);
@@ -142,25 +242,134 @@ impl AppModel {
                     atom_count: object.atom_count,
                     residue_count: object.residue_count,
                     bond_count: object.bond_count,
+                    coloring_type: self.desktop.object_coloring_type(object.uid),
                     renderers,
                 });
             }
         }
+        let structure = self
+            .desktop
+            .active_structure_tree()
+            .into_iter()
+            .map(|object| StructObjectDto {
+                object_uid: object.object_uid.get(),
+                object_name: object.object_name,
+                chains: object
+                    .chains
+                    .into_iter()
+                    .map(|chain| StructChainDto {
+                        chain_id: chain.chain_id,
+                        residues: chain
+                            .residues
+                            .into_iter()
+                            .map(|residue| StructResidueDto {
+                                res_name: residue.res_name,
+                                res_id: residue.res_id,
+                                ins_code: residue.ins_code,
+                                atoms: residue
+                                    .atoms
+                                    .into_iter()
+                                    .map(|atom| StructAtomDto {
+                                        atom_index: atom.atom_index,
+                                        serial: atom.serial,
+                                        name: atom.name,
+                                        element: atom.element,
+                                    })
+                                    .collect(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        let sequence = self
+            .desktop
+            .active_sequence_view(&self.selection)
+            .into_iter()
+            .map(|chain| SequenceChainDto {
+                object_uid: chain.object_uid.get(),
+                object_name: chain.object_name,
+                chain_id: chain.chain_id,
+                residues: chain
+                    .residues
+                    .into_iter()
+                    .map(|residue| SequenceResidueDto {
+                        letter: residue.letter,
+                        res_id: residue.res_id,
+                        res_name: residue.res_name,
+                        selection: residue.selection,
+                        selected: residue.selected,
+                    })
+                    .collect(),
+            })
+            .collect();
+        let crystals = self
+            .desktop
+            .active_crystal_summaries()
+            .into_iter()
+            .map(|crystal| CrystalDto {
+                object_uid: crystal.object_uid.get(),
+                object_name: crystal.object_name,
+                a: crystal.a,
+                b: crystal.b,
+                c: crystal.c,
+                alpha: crystal.alpha,
+                beta: crystal.beta,
+                gamma: crystal.gamma,
+                space_group_name: crystal.space_group_name,
+                space_group_number: crystal.space_group_number,
+            })
+            .collect();
+        let density_maps = self
+            .desktop
+            .active_density_map_summaries()
+            .into_iter()
+            .map(|map| DensityMapDto {
+                uid: map.uid.get(),
+                name: map.name,
+                format: map.format,
+                counts: map.counts,
+                min_density: map.min_density,
+                max_density: map.max_density,
+                mean_density: map.mean_density,
+                rmsd_density: map.rmsd_density,
+            })
+            .collect();
         AppSnapshot {
             scenes,
             objects,
+            structure,
+            sequence,
+            crystals,
+            density_maps,
             active_scene_uid: self.desktop.active_scene().map(Uid::get),
             selection: self.selection.clone(),
+            measure_result: self.desktop.active_measure(&self.selection),
             perspective: self.camera.is_perspective(),
+            background: self.background.clone(),
+            show_unit_cell: self.show_unit_cell,
+            show_symmetry_mates: self.show_symmetry_mates,
+            show_density_contour: self.show_density_contour,
+            density_level: self.density_level,
             status: self.status.clone(),
         }
     }
 
     fn rebuild_mesh(&mut self, refit: bool) -> Result<(), String> {
-        let snapshot = self
+        let mut snapshot = self
             .desktop
             .active_render_snapshot(&self.selection)
             .map_err(|error| error.to_string())?;
+        self.desktop.append_crystal_geometry(
+            &mut snapshot,
+            self.show_unit_cell,
+            self.show_symmetry_mates,
+        );
+        self.desktop.append_density_geometry(
+            &mut snapshot,
+            self.density_level,
+            self.show_density_contour,
+        );
         if refit {
             self.camera = self
                 .desktop
@@ -204,7 +413,17 @@ impl AppModel {
                 }
                 let mvp = camera_mvp(&self.camera, f64::from(width) / f64::from(height));
                 renderer
-                    .render(std::slice::from_ref(mesh), mvp, width, height, VIEW_CLEAR)
+                    .render(
+                        std::slice::from_ref(mesh),
+                        mvp,
+                        width,
+                        height,
+                        if self.background == "white" {
+                            [1.0, 1.0, 1.0, 1.0]
+                        } else {
+                            [0.0, 0.0, 0.0, 1.0]
+                        },
+                    )
                     .map(|rgba| {
                         let png = encode_rgba_png(&rgba, width, height);
                         format!("data:image/png;base64,{}", base64_encode(&png))
@@ -289,6 +508,16 @@ enum ModelRequest {
         object_uid: u64,
         renderer_type: String,
     },
+    SetObjectColoring {
+        object_uid: u64,
+        coloring: String,
+    },
+    SetDisplayOption {
+        option: String,
+        value: bool,
+    },
+    SetDensityLevel(f64),
+    SetBackground(String),
     Render {
         width: u32,
         height: u32,
@@ -309,7 +538,7 @@ enum ModelRequest {
 }
 
 enum ModelResponse {
-    Snapshot(AppSnapshot),
+    Snapshot(Box<AppSnapshot>),
     Viewport(ViewportDto),
 }
 
@@ -337,10 +566,10 @@ fn handle_model_request(
         "spline",
     ];
     match request {
-        ModelRequest::GetSnapshot => Ok(ModelResponse::Snapshot(model.snapshot())),
+        ModelRequest::GetSnapshot => Ok(ModelResponse::Snapshot(Box::new(model.snapshot()))),
         ModelRequest::OpenPaths(paths) => {
             model.open_paths(paths);
-            Ok(ModelResponse::Snapshot(model.snapshot()))
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::NewScene(name) => {
             let name = name
@@ -350,7 +579,7 @@ fn handle_model_request(
             model.selection.clear();
             model.status = "New scene".to_string();
             model.rebuild_mesh(true)?;
-            Ok(ModelResponse::Snapshot(model.snapshot()))
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ActivateScene(scene_uid) => {
             if !model.desktop.set_active_scene(Some(Uid::new(scene_uid))) {
@@ -359,7 +588,7 @@ fn handle_model_request(
             model.selection.clear();
             model.status = format!("Activated scene {scene_uid}");
             model.rebuild_mesh(true)?;
-            Ok(ModelResponse::Snapshot(model.snapshot()))
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::CloseActiveScene => {
             model
@@ -370,7 +599,7 @@ fn handle_model_request(
             model.selection.clear();
             model.status = "Scene closed".to_string();
             model.rebuild_mesh(true)?;
-            Ok(ModelResponse::Snapshot(model.snapshot()))
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetSelection(selection) => {
             let previous = std::mem::replace(&mut model.selection, selection.trim().to_string());
@@ -384,7 +613,7 @@ fn handle_model_request(
             } else {
                 format!("Selection: {}", model.selection)
             };
-            Ok(ModelResponse::Snapshot(model.snapshot()))
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetRendererVisible {
             object_uid,
@@ -401,7 +630,7 @@ fn handle_model_request(
                 "Renderer hidden".to_string()
             };
             model.rebuild_mesh(false)?;
-            Ok(ModelResponse::Snapshot(model.snapshot()))
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::AddRenderer {
             object_uid,
@@ -421,7 +650,64 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.status = format!("Added {renderer_type} renderer");
             model.rebuild_mesh(false)?;
-            Ok(ModelResponse::Snapshot(model.snapshot()))
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetObjectColoring {
+            object_uid,
+            coloring,
+        } => {
+            let (coloring_type, attrs) = match coloring.as_str() {
+                "element" => (None, std::collections::BTreeMap::new()),
+                "rainbow" => {
+                    let mut attrs = std::collections::BTreeMap::new();
+                    attrs.insert("mode".to_string(), "mol".to_string());
+                    attrs.insert("start_hue".to_string(), "240".to_string());
+                    attrs.insert("end_hue".to_string(), "0".to_string());
+                    attrs.insert("sat".to_string(), "1".to_string());
+                    attrs.insert("bri".to_string(), "1".to_string());
+                    (Some("RainbowColoring".to_string()), attrs)
+                }
+                "bfac" => (
+                    Some("BfacColoring".to_string()),
+                    std::collections::BTreeMap::new(),
+                ),
+                _ => return Err(format!("unsupported coloring type: {coloring}")),
+            };
+            model
+                .desktop
+                .set_object_coloring(Uid::new(object_uid), coloring_type, attrs)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Applied {coloring} coloring");
+            model.rebuild_mesh(false)?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetDisplayOption { option, value } => {
+            match option.as_str() {
+                "unit-cell" => model.show_unit_cell = value,
+                "symmetry-mates" => model.show_symmetry_mates = value,
+                "density-contour" => model.show_density_contour = value,
+                _ => return Err(format!("unsupported display option: {option}")),
+            }
+            model.status = format!("{option}: {}", if value { "shown" } else { "hidden" });
+            model.rebuild_mesh(false)?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetDensityLevel(level) => {
+            if !level.is_finite() {
+                return Err("density level must be finite".to_string());
+            }
+            model.density_level = level.clamp(0.1, 10.0);
+            model.status = format!("Density level: {:.2} σ", model.density_level);
+            model.rebuild_mesh(false)?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetBackground(background) => {
+            if !matches!(background.as_str(), "black" | "white") {
+                return Err(format!("unsupported background: {background}"));
+            }
+            model.background = background;
+            model.status = format!("Background: {}", model.background);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::Render { width, height } => {
             Ok(ModelResponse::Viewport(model.render(width, height)))
@@ -443,7 +729,7 @@ fn handle_model_request(
                 .save_active_scene_qsc(&path)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Saved scene: {path}");
-            Ok(ModelResponse::Snapshot(model.snapshot()))
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ExportPng {
             path,
@@ -461,7 +747,7 @@ fn handle_model_request(
                 )
                 .map_err(|error| error.to_string())?;
             model.status = format!("Exported image: {path}");
-            Ok(ModelResponse::Snapshot(model.snapshot()))
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
     }
 }
@@ -500,7 +786,7 @@ fn request_model(
 
 fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
     match response {
-        ModelResponse::Snapshot(snapshot) => Ok(snapshot),
+        ModelResponse::Snapshot(snapshot) => Ok(*snapshot),
         ModelResponse::Viewport(_) => Err("unexpected viewport response".to_string()),
     }
 }
@@ -577,6 +863,49 @@ fn add_renderer(
             object_uid,
             renderer_type,
         },
+    )?)
+}
+
+#[tauri::command]
+fn set_object_coloring(
+    object_uid: u64,
+    coloring: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetObjectColoring {
+            object_uid,
+            coloring,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn set_display_option(
+    option: String,
+    value: bool,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetDisplayOption { option, value },
+    )?)
+}
+
+#[tauri::command]
+fn set_density_level(level: f64, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::SetDensityLevel(level))?)
+}
+
+#[tauri::command]
+fn set_background(
+    background: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetBackground(background),
     )?)
 }
 
@@ -704,6 +1033,10 @@ pub fn run() -> Result<(), tauri::Error> {
             set_selection,
             set_renderer_visible,
             add_renderer,
+            set_object_coloring,
+            set_display_option,
+            set_density_level,
+            set_background,
             render_viewport,
             update_camera,
             save_scene,
@@ -715,6 +1048,24 @@ pub fn run() -> Result<(), tauri::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_without_gpu() -> AppModel {
+        let mut desktop = DesktopAppState::new();
+        desktop.ensure_active_scene();
+        AppModel {
+            desktop,
+            camera: Camera::new(),
+            renderer: None,
+            mesh: None,
+            selection: String::new(),
+            background: "black".to_string(),
+            show_unit_cell: false,
+            show_symmetry_mates: false,
+            show_density_contour: false,
+            density_level: 1.5,
+            status: "Ready".to_string(),
+        }
+    }
 
     #[test]
     fn frame_camera_fits_snapshot_bounds() {
@@ -732,5 +1083,63 @@ mod tests {
     fn base64_encoder_uses_standard_padding() {
         assert_eq!(base64_encode(b"CueMol"), "Q3VlTW9s");
         assert_eq!(base64_encode(b"rs"), "cnM=");
+    }
+
+    #[test]
+    fn panel_display_options_update_the_snapshot() {
+        let mut model = model_without_gpu();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetDisplayOption {
+                option: "unit-cell".to_string(),
+                value: true,
+            },
+        )
+        .unwrap();
+        handle_model_request(&mut model, ModelRequest::SetDensityLevel(2.4)).unwrap();
+        let response =
+            handle_model_request(&mut model, ModelRequest::SetBackground("white".to_string()))
+                .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert!(snapshot.show_unit_cell);
+        assert_eq!(snapshot.density_level, 2.4);
+        assert_eq!(snapshot.background, "white");
+    }
+
+    #[test]
+    fn shared_core_populates_structure_sequence_and_coloring_panels() {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let pdb = root.join("tests/test_data/1CRN.pdb");
+        if !pdb.exists() {
+            return;
+        }
+        let mut model = model_without_gpu();
+        model.desktop.open_path(&pdb).unwrap();
+        model.selection = "chain A and resid 1".to_string();
+        model.rebuild_mesh(true).unwrap();
+        let object_uid = model.desktop.active_object_summaries()[0].uid;
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetObjectColoring {
+                object_uid: object_uid.get(),
+                coloring: "rainbow".to_string(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.structure[0].object_name, "1CRN");
+        assert_eq!(snapshot.structure[0].chains[0].chain_id, "A");
+        assert_eq!(snapshot.sequence[0].residues[0].letter, "T");
+        assert!(snapshot.sequence[0].residues[0].selected);
+        assert_eq!(
+            snapshot.objects[0].coloring_type.as_deref(),
+            Some("RainbowColoring")
+        );
     }
 }

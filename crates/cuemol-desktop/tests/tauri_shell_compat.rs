@@ -1,5 +1,6 @@
 const HTML: &str = include_str!("../tauri-ui/index.html");
 const CSS: &str = include_str!("../tauri-ui/styles.css");
+const JS: &str = include_str!("../tauri-ui/app.js");
 
 #[test]
 fn tauri_shell_matches_the_reference_xul_dock_order() {
@@ -38,4 +39,27 @@ fn tauri_shell_uses_the_native_light_chrome_and_cuemol_viewport() {
     assert!(CSS.contains("grid-template-columns: var(--panel-width) 6px minmax(0, 1fr)"));
     assert!(!HTML.contains("NAVIGATOR"));
     assert!(!HTML.contains("INSPECTOR"));
+}
+
+#[test]
+fn tauri_reference_panels_are_bound_to_shared_core_data() {
+    for id in [
+        "molstruct-tree",
+        "coloring-type",
+        "symmetry-content",
+        "density-content",
+        "sequence-view",
+        "measure-readout",
+    ] {
+        assert!(HTML.contains(&format!("id=\"{id}\"")), "missing panel {id}");
+    }
+    for command in [
+        "set_object_coloring",
+        "set_display_option",
+        "set_density_level",
+        "set_background",
+        "set_selection",
+    ] {
+        assert!(JS.contains(command), "missing IPC binding {command}");
+    }
 }
