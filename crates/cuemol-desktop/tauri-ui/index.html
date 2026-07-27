@@ -170,10 +170,10 @@
             </div>
             <div class="toolbar-separator"></div>
             <div class="toolbar-group mode-tools" role="radiogroup" aria-label="Navigation mode">
-              <button class="tool-button selected" type="button">
+              <button class="tool-button selected" type="button" data-interaction="rotate">
                 <span class="tool-icon pointer-icon">➤</span><span>Rotate</span>
               </button>
-              <button class="tool-button" type="button">
+              <button class="tool-button" type="button" data-interaction="rect-select">
                 <span class="tool-icon rect-icon">□</span><span>Rect select</span>
               </button>
             </div>
@@ -356,6 +356,7 @@
               <span>Open or drop a molecular data file.</span>
             </div>
             <div class="center-mark" aria-hidden="true"></div>
+            <div class="selection-rectangle" aria-hidden="true"></div>
             <div id="render-size" class="render-size" hidden>— × —</div>
             <div id="drag-readout" class="drag-readout"></div>
           </div>

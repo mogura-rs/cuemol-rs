@@ -101,7 +101,11 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "delete_atoms",
         "change_chain",
         "renumber_residues",
+        "pick_atom",
+        "select_screen_rect",
     ] {
         assert!(JS.contains(command), "missing menu binding {command}");
     }
+    assert!(HTML.contains("data-interaction=\"rotate\""));
+    assert!(HTML.contains("data-interaction=\"rect-select\""));
 }

@@ -37464,6 +37464,50 @@ pub fn pick_atom_screen(
     best.map(|(_, object_uid, atom_index)| (object_uid, atom_index))
 }
 
+/// Return every identified atom whose projected center lies inside a screen-space
+/// rectangle. Coordinates use the same top-left pixel basis as [`pick_atom_screen`].
+pub fn atoms_in_screen_rect(
+    atoms: &[cuemol_render::RenderAtom],
+    mvp: [[f32; 4]; 4],
+    first_px: (f64, f64),
+    second_px: (f64, f64),
+    vp_px: (f64, f64),
+) -> Vec<(u64, usize)> {
+    let min_x = first_px.0.min(second_px.0);
+    let max_x = first_px.0.max(second_px.0);
+    let min_y = first_px.1.min(second_px.1);
+    let max_y = first_px.1.max(second_px.1);
+    let mut selected = Vec::new();
+    for atom in atoms {
+        let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) else {
+            continue;
+        };
+        let center = &atom.center;
+        let vector = [center.x as f32, center.y as f32, center.z as f32, 1.0];
+        let mut clip = [0.0f32; 4];
+        for row in 0..4 {
+            for col in 0..4 {
+                clip[row] += mvp[col][row] * vector[col];
+            }
+        }
+        if clip[3].abs() < 1.0e-6 {
+            continue;
+        }
+        let ndc_x = f64::from(clip[0] / clip[3]);
+        let ndc_y = f64::from(clip[1] / clip[3]);
+        let ndc_z = f64::from(clip[2] / clip[3]);
+        if !(-1.0..=1.0).contains(&ndc_z) {
+            continue;
+        }
+        let screen_x = (ndc_x + 1.0) * 0.5 * vp_px.0;
+        let screen_y = (1.0 - ndc_y) * 0.5 * vp_px.1;
+        if (min_x..=max_x).contains(&screen_x) && (min_y..=max_y).contains(&screen_y) {
+            selected.push((object_uid, atom_index));
+        }
+    }
+    selected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -43717,6 +43761,29 @@ end_header
         assert_eq!(
             pick_atom_screen(&[atom], mvp, (50.0, 50.0), (100.0, 100.0), 10.0),
             None
+        );
+    }
+
+    #[test]
+    fn screen_rectangle_returns_only_atoms_inside_its_bounds() {
+        let mvp = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let atoms = vec![
+            pick_atom_fixture(7, 0, 0.0, 0.0, 0.0),
+            pick_atom_fixture(7, 1, 0.4, 0.0, 0.0),
+            pick_atom_fixture(7, 2, 0.0, 0.4, 0.0),
+        ];
+        assert_eq!(
+            atoms_in_screen_rect(&atoms, mvp, (44.0, 44.0), (56.0, 56.0), (100.0, 100.0)),
+            vec![(7, 0)]
+        );
+        assert_eq!(
+            atoms_in_screen_rect(&atoms, mvp, (45.0, 25.0), (75.0, 55.0), (100.0, 100.0)),
+            vec![(7, 0), (7, 1), (7, 2)]
         );
     }
 

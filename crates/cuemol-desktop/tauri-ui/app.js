@@ -34,6 +34,7 @@ const referenceDialog = document.getElementById("reference-dialog");
 const dialogTitle = document.getElementById("dialog-title");
 const dialogContent = document.getElementById("dialog-content");
 const centerMarkElement = document.querySelector(".center-mark");
+const selectionRectangle = document.querySelector(".selection-rectangle");
 
 const tauri = window.__TAURI__;
 const invoke = tauri?.core?.invoke;
@@ -50,6 +51,7 @@ let statusTrail = [];
 let lastOpenedPaths = [];
 let centerMark = "cross";
 let performanceMeasure = false;
+let interactionMode = "rotate";
 
 function setBusy(value) {
   appShell.classList.toggle("busy", value);
@@ -867,6 +869,10 @@ document.querySelectorAll(".toolbar-group[role='radiogroup']").forEach((group) =
       group.querySelectorAll(".tool-button").forEach((button) => {
         button.classList.toggle("selected", button === element);
       });
+      if (element.dataset.interaction) {
+        interactionMode = element.dataset.interaction;
+        viewport.classList.toggle("rect-select", interactionMode === "rect-select");
+      }
     });
   });
 });
@@ -954,13 +960,21 @@ viewport.addEventListener("contextmenu", (event) => event.preventDefault());
 viewport.addEventListener("pointerdown", (event) => {
   if (event.button !== 0 && event.button !== 2) return;
   viewport.setPointerCapture(event.pointerId);
+  const action =
+    event.button === 2
+      ? "pan"
+      : event.shiftKey
+        ? "zoom"
+        : interactionMode === "rect-select"
+          ? "rect-select"
+          : "rotate";
   drag = {
     pointerId: event.pointerId,
     x: event.clientX,
     y: event.clientY,
     dx: 0,
     dy: 0,
-    action: event.button === 2 || event.shiftKey ? "pan" : "rotate",
+    action,
   };
   viewport.classList.add("dragging");
   dragReadout.textContent = drag.action.toUpperCase();
@@ -971,6 +985,14 @@ viewport.addEventListener("pointermove", (event) => {
   drag.dx = event.clientX - drag.x;
   drag.dy = event.clientY - drag.y;
   dragReadout.textContent = `${drag.action.toUpperCase()}  ${Math.round(drag.dx)}, ${Math.round(drag.dy)}`;
+  if (drag.action === "rect-select") {
+    const bounds = viewport.getBoundingClientRect();
+    selectionRectangle.style.left = `${Math.min(drag.x, event.clientX) - bounds.left}px`;
+    selectionRectangle.style.top = `${Math.min(drag.y, event.clientY) - bounds.top}px`;
+    selectionRectangle.style.width = `${Math.abs(drag.dx)}px`;
+    selectionRectangle.style.height = `${Math.abs(drag.dy)}px`;
+    selectionRectangle.classList.add("visible");
+  }
 });
 
 function finishDrag(event) {
@@ -978,14 +1000,44 @@ function finishDrag(event) {
   const completed = drag;
   drag = null;
   viewport.classList.remove("dragging");
+  selectionRectangle.classList.remove("visible");
   dragReadout.textContent = "";
-  if (Math.abs(completed.dx) + Math.abs(completed.dy) < 2) return;
-  const scale = completed.action === "rotate" ? 0.35 : 1;
-  cameraCommand(completed.action, completed.dx * scale, completed.dy * scale);
+  const bounds = viewport.getBoundingClientRect();
+  const startX = completed.x - bounds.left;
+  const startY = completed.y - bounds.top;
+  if (Math.abs(completed.dx) + Math.abs(completed.dy) < 2) {
+    if (completed.action === "rotate" || completed.action === "rect-select") {
+      mutate("pick_atom", {
+        x: startX,
+        y: startY,
+        ...viewportDimensions(),
+      });
+    }
+    return;
+  }
+  if (completed.action === "rect-select") {
+    mutate("select_screen_rect", {
+      x1: startX,
+      y1: startY,
+      x2: startX + completed.dx,
+      y2: startY + completed.dy,
+      ...viewportDimensions(),
+    });
+  } else if (completed.action === "zoom") {
+    cameraCommand("zoom", Math.exp(completed.dy * 0.01));
+  } else {
+    const scale = completed.action === "rotate" ? 0.35 : 1;
+    cameraCommand(completed.action, completed.dx * scale, completed.dy * scale);
+  }
 }
 
 viewport.addEventListener("pointerup", finishDrag);
-viewport.addEventListener("pointercancel", finishDrag);
+viewport.addEventListener("pointercancel", () => {
+  drag = null;
+  viewport.classList.remove("dragging");
+  selectionRectangle.classList.remove("visible");
+  dragReadout.textContent = "";
+});
 viewport.addEventListener(
   "wheel",
   (event) => {

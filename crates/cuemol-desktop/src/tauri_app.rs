@@ -10,7 +10,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::offscreen::{camera_mvp, encode_rgba_png, SceneRenderer};
-use crate::DesktopAppState;
+use crate::{atoms_in_screen_rect, pick_atom_screen, DesktopAppState};
 
 const MAX_VIEW_DIM: u32 = 1_600;
 
@@ -519,6 +519,86 @@ impl AppModel {
             .map_err(|error| error.to_string())
     }
 
+    fn pick_atom(&mut self, x: f64, y: f64, width: u32, height: u32) -> Result<(), String> {
+        let snapshot = self
+            .desktop
+            .active_render_snapshot(&self.selection)
+            .map_err(|error| error.to_string())?;
+        let mvp = camera_mvp(
+            &self.camera,
+            f64::from(width.max(1)) / f64::from(height.max(1)),
+        );
+        let Some((object_uid, atom_index)) = pick_atom_screen(
+            &snapshot.atoms,
+            mvp,
+            (x, y),
+            (f64::from(width), f64::from(height)),
+            10.0,
+        ) else {
+            self.status = "No atom at cursor".to_string();
+            return Ok(());
+        };
+        let atom = self
+            .desktop
+            .atom_summary(Uid::new(object_uid), atom_index)
+            .map_err(|error| error.to_string())?;
+        self.selection = atom.selection_text;
+        self.status = format!(
+            "Selected atom {} {}{}:{}",
+            atom.serial, atom.residue_name, atom.residue_id, atom.name
+        );
+        self.rebuild_mesh(false)
+    }
+
+    fn select_screen_rect(
+        &mut self,
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        let snapshot = self
+            .desktop
+            .active_render_snapshot(&self.selection)
+            .map_err(|error| error.to_string())?;
+        let mvp = camera_mvp(
+            &self.camera,
+            f64::from(width.max(1)) / f64::from(height.max(1)),
+        );
+        let hits = atoms_in_screen_rect(
+            &snapshot.atoms,
+            mvp,
+            (x1, y1),
+            (x2, y2),
+            (f64::from(width), f64::from(height)),
+        );
+        let serials = hits
+            .into_iter()
+            .filter_map(|(object_uid, atom_index)| {
+                self.desktop
+                    .atom_summary(Uid::new(object_uid), atom_index)
+                    .ok()
+                    .map(|atom| atom.serial)
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        self.selection = if serials.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "aid {}",
+                serials
+                    .iter()
+                    .map(i32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        self.status = format!("Rectangle selected {} atom(s)", serials.len());
+        self.rebuild_mesh(false)
+    }
+
     fn capture_undo(&self) -> AppModelUndo {
         AppModelUndo {
             desktop: self.desktop.clone(),
@@ -628,6 +708,20 @@ enum ModelRequest {
     },
     SetDensityLevel(f64),
     SetBackground(String),
+    PickAtom {
+        x: f64,
+        y: f64,
+        width: u32,
+        height: u32,
+    },
+    SelectScreenRect {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        width: u32,
+        height: u32,
+    },
     Render {
         width: u32,
         height: u32,
@@ -913,6 +1007,26 @@ fn handle_model_request(
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::PickAtom {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            model.pick_atom(x, y, width, height)?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SelectScreenRect {
+            x1,
+            y1,
+            x2,
+            y2,
+            width,
+            height,
+        } => {
+            model.select_screen_rect(x1, y1, x2, y2, width, height)?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::Render { width, height } => {
             Ok(ModelResponse::Viewport(model.render(width, height)))
         }
@@ -1178,6 +1292,48 @@ fn set_background(
 }
 
 #[tauri::command]
+fn pick_atom(
+    x: f64,
+    y: f64,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::PickAtom {
+            x,
+            y,
+            width,
+            height,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn select_screen_rect(
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SelectScreenRect {
+            x1,
+            y1,
+            x2,
+            y2,
+            width,
+            height,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn render_viewport(
     width: u32,
     height: u32,
@@ -1311,6 +1467,8 @@ pub fn run() -> Result<(), tauri::Error> {
             set_display_option,
             set_density_level,
             set_background,
+            pick_atom,
+            select_screen_rect,
             render_viewport,
             update_camera,
             save_scene,
@@ -1466,5 +1624,38 @@ mod tests {
         assert_eq!(model.snapshot().objects[0].atom_count, 326);
         handle_model_request(&mut model, ModelRequest::Undo).unwrap();
         assert_eq!(model.snapshot().objects[0].atom_count, 327);
+    }
+
+    #[test]
+    fn viewport_click_selects_the_projected_atom() {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let pdb = root.join("tests/test_data/1CRN.pdb");
+        if !pdb.exists() {
+            return;
+        }
+        let mut model = model_without_gpu();
+        model.desktop.open_path(&pdb).unwrap();
+        model.rebuild_mesh(true).unwrap();
+        model.selection = "aid 1".to_string();
+        let mvp = camera_mvp(&model.camera, 800.0 / 600.0);
+        let labels = model
+            .desktop
+            .active_atom_labels(&model.selection, mvp, 800.0, 600.0, 1);
+        assert_eq!(labels.len(), 1);
+        model.selection.clear();
+        model.rebuild_mesh(false).unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::PickAtom {
+                x: f64::from(labels[0].x),
+                y: f64::from(labels[0].y),
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().selection, "aid 1");
     }
 }
