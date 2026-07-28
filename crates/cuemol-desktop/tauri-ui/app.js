@@ -49,6 +49,24 @@ const animationDelete = document.getElementById("animation-delete");
 const animationChange = document.getElementById("animation-change");
 const animationUp = document.getElementById("animation-up");
 const animationDown = document.getElementById("animation-down");
+const trajectoryObject = document.getElementById("trajectory-object");
+const trajectoryFirst = document.getElementById("trajectory-first");
+const trajectoryPrevious = document.getElementById("trajectory-previous");
+const trajectoryPlay = document.getElementById("trajectory-play");
+const trajectoryNext = document.getElementById("trajectory-next");
+const trajectoryLast = document.getElementById("trajectory-last");
+const trajectoryFrame = document.getElementById("trajectory-frame");
+const trajectoryLastFrame = document.getElementById("trajectory-last-frame");
+const trajectorySlider = document.getElementById("trajectory-slider");
+const trajectoryEmpty = document.getElementById("trajectory-empty");
+const trajectoryLoop = document.getElementById("trajectory-loop");
+const trajectorySpeed = document.getElementById("trajectory-speed");
+const trajectoryBlockStrip = document.getElementById("trajectory-block-strip");
+const trajectoryBlockAdd = document.getElementById("trajectory-block-add");
+const trajectoryBlockRemove = document.getElementById("trajectory-block-remove");
+const trajectoryBlockLeft = document.getElementById("trajectory-block-left");
+const trajectoryBlockRight = document.getElementById("trajectory-block-right");
+const trajectoryBlockCount = document.getElementById("trajectory-block-count");
 
 const tauri = window.__TAURI__;
 const invoke = tauri?.core?.invoke;
@@ -71,6 +89,13 @@ let selectedMorphFrameIndex = null;
 let lastModelLogCount = 0;
 let animationTimer = null;
 let animationTickBusy = false;
+let selectedTrajectoryUid = null;
+let trajectoryPlaying = false;
+let trajectoryTimer = null;
+let trajectoryTickBusy = false;
+let selectedTrajectoryBlockUid = null;
+let draggedTrajectoryBlockUid = null;
+const trajectoryFrames = new Map();
 
 function setBusy(value) {
   appShell.classList.toggle("busy", value);
@@ -781,6 +806,132 @@ function showReferenceDialog(title) {
       });
       dialogActions(apply);
     }
+  } else if (title === "Open MD Trajectory") {
+    const topologyPath = dialogField("Topology file (.gro)", "");
+    topologyPath.placeholder = "/path/to/system.gro";
+    const trajectoryPaths = [];
+    const topologyActions = document.createElement("div");
+    topologyActions.className = "trajectory-path-actions";
+    const browseTopology = button("Browse topology…", "", async () => {
+      if (!dialog?.open) {
+        showError("The Tauri dialog plugin is unavailable.");
+        return;
+      }
+      const path = await dialog.open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "GROMACS topology", extensions: ["gro"] }],
+      });
+      if (path) topologyPath.value = path;
+      updateOpenState();
+    });
+    topologyActions.append(browseTopology);
+    dialogContent.append(topologyActions);
+
+    const listWrapper = document.createElement("label");
+    listWrapper.className = "dialog-field";
+    const listLabel = document.createElement("span");
+    listLabel.textContent = "Trajectory files";
+    const trajectoryList = document.createElement("select");
+    trajectoryList.className = "trajectory-file-list";
+    trajectoryList.size = 5;
+    listWrapper.append(listLabel, trajectoryList);
+    dialogContent.append(listWrapper);
+
+    const pathActions = document.createElement("div");
+    pathActions.className = "trajectory-path-actions";
+    const renderPaths = () => {
+      const selected = trajectoryList.selectedIndex;
+      trajectoryList.replaceChildren();
+      for (const path of trajectoryPaths) {
+        const option = document.createElement("option");
+        const name = path.split(/[\\/]/).pop() || path;
+        const extension = name.includes(".") ? name.split(".").pop().toUpperCase() : "TRAJ";
+        option.value = path;
+        option.textContent = `${name}  [${extension}]`;
+        option.title = path;
+        trajectoryList.append(option);
+      }
+      trajectoryList.selectedIndex = Math.min(selected, trajectoryPaths.length - 1);
+      updateOpenState();
+    };
+    const addPaths = button("Add…", "", async () => {
+      if (!dialog?.open) {
+        showError("The Tauri dialog plugin is unavailable.");
+        return;
+      }
+      const paths = await dialog.open({
+        multiple: true,
+        directory: false,
+        filters: [
+          { name: "MD trajectory", extensions: ["dcd", "xtc", "trr", "nc"] },
+        ],
+      });
+      if (paths) trajectoryPaths.push(...(Array.isArray(paths) ? paths : [paths]));
+      renderPaths();
+    });
+    const removePath = button("Remove", "", () => {
+      if (trajectoryList.selectedIndex >= 0) {
+        trajectoryPaths.splice(trajectoryList.selectedIndex, 1);
+        renderPaths();
+      }
+    });
+    const movePath = (direction) => {
+      const index = trajectoryList.selectedIndex;
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= trajectoryPaths.length) return;
+      [trajectoryPaths[index], trajectoryPaths[target]] = [
+        trajectoryPaths[target],
+        trajectoryPaths[index],
+      ];
+      renderPaths();
+      trajectoryList.selectedIndex = target;
+    };
+    pathActions.append(
+      addPaths,
+      removePath,
+      button("Up", "", () => movePath(-1)),
+      button("Down", "", () => movePath(1)),
+    );
+    dialogContent.append(pathActions);
+
+    const nevery = dialogField("Load every N-th frame", "1", "number");
+    nevery.min = "1";
+    nevery.max = "9999";
+    nevery.step = "1";
+    const rendererType = dialogSelect(
+      "Initial renderer",
+      [
+        ["simple", "Simple"],
+        ["ballstick", "Ball & stick"],
+        ["cpk", "CPK"],
+        ["ribbon", "Ribbon"],
+        ["cartoon", "Cartoon"],
+        ["trace", "Trace"],
+      ],
+      "simple",
+    );
+    const open = button("Open", "dialog-primary", async () => {
+      await mutate("load_trajectory", {
+        topologyPath: topologyPath.value.trim(),
+        trajectoryPaths,
+        nevery: Math.max(1, Number(nevery.value) || 1),
+        rendererType: rendererType.value,
+      });
+      const loaded = snapshot?.trajectories?.at(-1);
+      if (loaded) {
+        selectedTrajectoryUid = loaded.objectUid;
+        trajectoryFrames.set(loaded.objectUid, 0);
+      }
+      showBottomPanel("trajectory");
+      referenceDialog.close();
+    });
+    function updateOpenState() {
+      open.disabled = topologyPath.value.trim().length === 0 || trajectoryPaths.length === 0;
+    }
+    topologyPath.addEventListener("input", updateOpenState);
+    updateOpenState();
+    dialogActions(open);
   } else if (title === "Open PDB") {
     const pdbId = dialogField("PDB ID", "1CRN");
     const open = button("Download and Open", "dialog-primary", async () => {
@@ -1222,6 +1373,176 @@ function renderAnimation() {
   syncAnimationTimer();
 }
 
+function selectedTrajectory() {
+  return (snapshot?.trajectories || []).find(
+    (trajectory) => trajectory.objectUid === selectedTrajectoryUid,
+  );
+}
+
+async function seekTrajectory(frame) {
+  const trajectory = selectedTrajectory();
+  if (!trajectory) return;
+  const last = Math.max(0, trajectory.frameCount - 1);
+  const target = Math.max(0, Math.min(last, Math.round(Number(frame) || 0)));
+  trajectoryFrames.set(trajectory.objectUid, target);
+  await mutate("set_trajectory_frame", {
+    objectUid: trajectory.objectUid,
+    frame: target,
+  });
+}
+
+function syncTrajectoryTimer() {
+  const trajectory = selectedTrajectory();
+  if (trajectoryPlaying && trajectory?.frameCount > 1 && invoke) {
+    if (trajectoryTimer) return;
+    const interval = Math.max(25, 100 / (Number(trajectorySpeed.value) || 1));
+    trajectoryTimer = setInterval(async () => {
+      if (trajectoryTickBusy) return;
+      const active = selectedTrajectory();
+      if (!active) {
+        trajectoryPlaying = false;
+        renderTrajectory();
+        return;
+      }
+      const last = active.frameCount - 1;
+      let next = (trajectoryFrames.get(active.objectUid) || 0) + 1;
+      if (next > last) {
+        if (trajectoryLoop.checked) {
+          next = 0;
+        } else {
+          trajectoryPlaying = false;
+          renderTrajectory();
+          return;
+        }
+      }
+      trajectoryTickBusy = true;
+      try {
+        await seekTrajectory(next);
+      } finally {
+        trajectoryTickBusy = false;
+      }
+    }, interval);
+  } else if (trajectoryTimer) {
+    clearInterval(trajectoryTimer);
+    trajectoryTimer = null;
+  }
+}
+
+function renderTrajectory() {
+  const trajectories = snapshot.trajectories || [];
+  if (!trajectories.some((trajectory) => trajectory.objectUid === selectedTrajectoryUid)) {
+    selectedTrajectoryUid = trajectories[0]?.objectUid ?? null;
+  }
+  trajectoryObject.replaceChildren();
+  for (const trajectory of trajectories) {
+    const option = document.createElement("option");
+    option.value = String(trajectory.objectUid);
+    option.textContent = `${trajectory.objectName} (${trajectory.frameCount} frames)`;
+    trajectoryObject.append(option);
+  }
+  if (selectedTrajectoryUid !== null) {
+    trajectoryObject.value = String(selectedTrajectoryUid);
+  }
+
+  const trajectory = selectedTrajectory();
+  const enabled = Boolean(trajectory?.frameCount);
+  const blocks = trajectory?.blocks || [];
+  const last = enabled ? trajectory.frameCount - 1 : 0;
+  const current = enabled
+    ? Math.min(last, trajectory.currentFrame ?? trajectoryFrames.get(trajectory.objectUid) ?? 0)
+    : 0;
+  if (trajectory) trajectoryFrames.set(trajectory.objectUid, current);
+  trajectoryObject.disabled = trajectories.length === 0;
+  trajectorySlider.disabled = !enabled;
+  trajectorySlider.max = String(last);
+  trajectorySlider.value = String(current);
+  trajectoryFrame.disabled = !enabled;
+  trajectoryFrame.max = String(last);
+  trajectoryFrame.value = String(current);
+  trajectoryLastFrame.textContent = String(last);
+  trajectoryEmpty.hidden = blocks.length > 0;
+  trajectoryEmpty.textContent = trajectory
+    ? "No trajectory blocks — add a trajectory file."
+    : "No trajectory in this scene — use File > Open MD Trajectory…";
+
+  if (!blocks.some((block) => block.uid === selectedTrajectoryBlockUid)) {
+    selectedTrajectoryBlockUid = null;
+  }
+  trajectoryBlockStrip.replaceChildren();
+  for (const [index, block] of blocks.entries()) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.draggable = true;
+    item.className = `trajectory-block trajectory-block-c${block.uid % 6}`;
+    item.classList.toggle("selected", block.uid === selectedTrajectoryBlockUid);
+    item.style.flex = `${Math.max(1, block.frameCount)} 1 0px`;
+    item.textContent = `${block.name} · ${block.frameCount}`;
+    item.title = `${block.source || block.name}\n${block.format} · frames ${block.startIndex}–${block.startIndex + block.frameCount - 1}`;
+    item.addEventListener("click", () => {
+      selectedTrajectoryBlockUid = block.uid;
+      renderTrajectory();
+    });
+    item.addEventListener("dragstart", (event) => {
+      draggedTrajectoryBlockUid = block.uid;
+      item.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", String(block.uid));
+    });
+    item.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+    });
+    item.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      const active = selectedTrajectory();
+      const from = active?.blocks.findIndex(
+        (candidate) => candidate.uid === draggedTrajectoryBlockUid,
+      );
+      if (active && from >= 0 && from !== index) {
+        await mutate("move_trajectory_block", {
+          objectUid: active.objectUid,
+          from,
+          to: index,
+        });
+      }
+    });
+    item.addEventListener("dragend", () => {
+      draggedTrajectoryBlockUid = null;
+      item.classList.remove("dragging");
+    });
+    trajectoryBlockStrip.append(item);
+  }
+  const playhead = enabled && last > 0 ? (current / last) * 100 : 0;
+  trajectoryBlockStrip.style.setProperty("--trajectory-playhead", `${playhead}%`);
+  trajectoryBlockCount.textContent = `${blocks.length} block${blocks.length === 1 ? "" : "s"}`;
+  const selectedBlockIndex = blocks.findIndex(
+    (block) => block.uid === selectedTrajectoryBlockUid,
+  );
+  trajectoryBlockAdd.disabled = !trajectory;
+  trajectoryBlockRemove.disabled = selectedBlockIndex < 0;
+  trajectoryBlockLeft.disabled = selectedBlockIndex <= 0;
+  trajectoryBlockRight.disabled =
+    selectedBlockIndex < 0 || selectedBlockIndex >= blocks.length - 1;
+
+  for (const control of [
+    trajectoryFirst,
+    trajectoryPrevious,
+    trajectoryPlay,
+    trajectoryNext,
+    trajectoryLast,
+  ]) {
+    control.disabled = !enabled;
+  }
+  trajectoryFirst.disabled ||= current === 0;
+  trajectoryPrevious.disabled ||= current === 0;
+  trajectoryNext.disabled ||= current === last;
+  trajectoryLast.disabled ||= current === last;
+  trajectoryPlay.textContent = trajectoryPlaying ? "Ⅱ" : "▶";
+  trajectoryPlay.title = trajectoryPlaying ? "Pause trajectory" : "Play trajectory";
+  if (!enabled) trajectoryPlaying = false;
+  syncTrajectoryTimer();
+}
+
 function renderShell() {
   if (!snapshot) return;
   normalizeSelection();
@@ -1271,6 +1592,7 @@ function renderShell() {
   renderSymmetry();
   renderDensity();
   renderSequence();
+  renderTrajectory();
   renderAnimation();
 }
 
@@ -1313,15 +1635,17 @@ function scheduleRender(delay = 100) {
 async function mutate(command, args = {}) {
   if (!invoke) {
     showError("Tauri IPC is unavailable. Run this frontend through the Tauri binary.");
-    return;
+    return false;
   }
   setBusy(true);
   try {
     snapshot = await invoke(command, args);
     renderShell();
     await renderViewport();
+    return true;
   } catch (error) {
     showError(error);
+    return false;
   } finally {
     setBusy(false);
   }
@@ -1669,6 +1993,113 @@ animationDown.addEventListener("click", () => {
     selectedAnimationIndex += 1;
   }
 });
+
+trajectoryObject.addEventListener("change", () => {
+  selectedTrajectoryUid = Number(trajectoryObject.value) || null;
+  selectedTrajectoryBlockUid = null;
+  trajectoryPlaying = false;
+  renderTrajectory();
+});
+
+trajectorySlider.addEventListener("input", () => {
+  const trajectory = selectedTrajectory();
+  if (!trajectory) return;
+  const frame = Number(trajectorySlider.value);
+  trajectoryFrames.set(trajectory.objectUid, frame);
+  trajectoryFrame.value = String(frame);
+});
+
+trajectorySlider.addEventListener("change", () => {
+  seekTrajectory(trajectorySlider.value);
+});
+
+trajectoryFrame.addEventListener("change", () => {
+  seekTrajectory(trajectoryFrame.value);
+});
+
+trajectoryFirst.addEventListener("click", () => seekTrajectory(0));
+trajectoryPrevious.addEventListener("click", () => {
+  const trajectory = selectedTrajectory();
+  if (trajectory) seekTrajectory((trajectoryFrames.get(trajectory.objectUid) || 0) - 1);
+});
+trajectoryNext.addEventListener("click", () => {
+  const trajectory = selectedTrajectory();
+  if (trajectory) seekTrajectory((trajectoryFrames.get(trajectory.objectUid) || 0) + 1);
+});
+trajectoryLast.addEventListener("click", () => {
+  const trajectory = selectedTrajectory();
+  if (trajectory) seekTrajectory(trajectory.frameCount - 1);
+});
+trajectoryPlay.addEventListener("click", () => {
+  trajectoryPlaying = !trajectoryPlaying;
+  renderTrajectory();
+});
+trajectorySpeed.addEventListener("change", () => {
+  if (trajectoryTimer) {
+    clearInterval(trajectoryTimer);
+    trajectoryTimer = null;
+  }
+  syncTrajectoryTimer();
+});
+
+trajectoryBlockAdd.addEventListener("click", async () => {
+  const trajectory = selectedTrajectory();
+  if (!trajectory) return;
+  if (!dialog?.open) {
+    showError("The Tauri dialog plugin is unavailable.");
+    return;
+  }
+  const selected = await dialog.open({
+    multiple: true,
+    directory: false,
+    filters: [{ name: "MD trajectory", extensions: ["dcd", "xtc", "trr", "nc"] }],
+  });
+  const paths = selected ? (Array.isArray(selected) ? selected : [selected]) : [];
+  for (const path of paths) {
+    const changed = await mutate("append_trajectory_block", {
+      objectUid: trajectory.objectUid,
+      path,
+      nevery: 1,
+    });
+    if (!changed) break;
+    selectedTrajectoryBlockUid = selectedTrajectory()?.blocks.at(-1)?.uid ?? null;
+    renderTrajectory();
+  }
+});
+
+trajectoryBlockRemove.addEventListener("click", async () => {
+  const trajectory = selectedTrajectory();
+  const index = trajectory?.blocks.findIndex(
+    (block) => block.uid === selectedTrajectoryBlockUid,
+  );
+  if (!trajectory || index < 0) return;
+  const changed = await mutate("remove_trajectory_block", {
+    objectUid: trajectory.objectUid,
+    index,
+  });
+  if (changed) {
+    const blocks = selectedTrajectory()?.blocks || [];
+    selectedTrajectoryBlockUid = blocks[Math.min(index, blocks.length - 1)]?.uid ?? null;
+    renderTrajectory();
+  }
+});
+
+async function moveSelectedTrajectoryBlock(direction) {
+  const trajectory = selectedTrajectory();
+  const from = trajectory?.blocks.findIndex(
+    (block) => block.uid === selectedTrajectoryBlockUid,
+  );
+  const to = from + direction;
+  if (!trajectory || from < 0 || to < 0 || to >= trajectory.blocks.length) return;
+  await mutate("move_trajectory_block", {
+    objectUid: trajectory.objectUid,
+    from,
+    to,
+  });
+}
+
+trajectoryBlockLeft.addEventListener("click", () => moveSelectedTrajectoryBlock(-1));
+trajectoryBlockRight.addEventListener("click", () => moveSelectedTrajectoryBlock(1));
 
 document.querySelectorAll("input[name='projection']").forEach((input) => {
   input.addEventListener("change", () => {

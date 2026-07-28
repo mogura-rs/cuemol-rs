@@ -44,6 +44,9 @@ fn stream_manager_default_registry_matches_reference_handlers() {
     assert!(info_json.contains("\"name\":\"amberprm\""));
     assert!(info_json.contains("\"name\":\"namdcoor\""));
     assert!(info_json.contains("\"name\":\"dcdtraj\""));
+    assert!(info_json.contains("\"name\":\"trrtraj\""));
+    assert!(info_json.contains("\"name\":\"xtctraj\""));
+    assert!(info_json.contains("\"name\":\"ambnetcdftraj\""));
     assert!(info_json.contains("\"name\":\"ccp4map\""));
     assert!(info_json.contains("\"name\":\"xplormap\""));
     assert!(info_json.contains("\"name\":\"brix\""));
@@ -68,7 +71,7 @@ fn stream_manager_default_registry_matches_reference_handlers() {
         .is_some());
 
     let reader_info = manager.get_reader_info_json();
-    assert!(reader_info.contains("size: 23"));
+    assert!(reader_info.contains("size: 26"));
     assert!(reader_info.contains("\"PDB Coordinates (*.pdb;*.ent;*.pdb.gz)\""));
     assert!(reader_info.contains("\"QDF-PDB (*.qdfpdb)\""));
     assert!(reader_info.contains("\"mmcifmap\""));
@@ -78,6 +81,9 @@ fn stream_manager_default_registry_matches_reference_handlers() {
     assert!(reader_info.contains("\"amberprm\""));
     assert!(reader_info.contains("\"namdcoor\""));
     assert!(reader_info.contains("\"dcdtraj\""));
+    assert!(reader_info.contains("\"trrtraj\""));
+    assert!(reader_info.contains("\"xtctraj\""));
+    assert!(reader_info.contains("\"ambnetcdftraj\""));
     assert!(reader_info.contains("\"ccp4map\""));
     assert!(reader_info.contains("\"CCP4 Density Map(*.map;*.ccp4;*.mrc;*.ccp4.gz)\""));
     assert!(reader_info.contains("\"xplormap\""));

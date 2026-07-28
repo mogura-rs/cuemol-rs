@@ -95,6 +95,9 @@ pub enum HandlerSniffer {
     AmberPrmtop,
     NamdCoor,
     Dcd,
+    Trr,
+    Xtc,
+    AmberNetcdf,
     OpenDx,
     MmcifMap,
     Ccp4Map,
@@ -832,6 +835,30 @@ fn default_handlers() -> Vec<StreamHandlerInfo> {
             Some(HandlerSniffer::Dcd),
         ),
         StreamHandlerInfo::new(
+            "cuemol_rs::TrrTrajReader",
+            "trrtraj",
+            "GROMACS TRR trajectory (*.trr)",
+            "*.trr",
+            HandlerCategory::ObjReader,
+            Some(HandlerSniffer::Trr),
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::XtcTrajReader",
+            "xtctraj",
+            "GROMACS XTC trajectory (*.xtc)",
+            "*.xtc",
+            HandlerCategory::ObjReader,
+            Some(HandlerSniffer::Xtc),
+        ),
+        StreamHandlerInfo::new(
+            "cuemol_rs::AmberNetCDFReader",
+            "ambnetcdftraj",
+            "AMBER NetCDF trajectory (*.nc)",
+            "*.nc",
+            HandlerCategory::ObjReader,
+            Some(HandlerSniffer::AmberNetcdf),
+        ),
+        StreamHandlerInfo::new(
             "cuemol_rs::OpenDXPotReader",
             "apbs",
             "APBS Potential Map(*.dx)",
@@ -1101,6 +1128,9 @@ fn sniff_text(input: &str, sniffer: HandlerSniffer) -> ContentVerdict {
         HandlerSniffer::AmberPrmtop => sniff_amber_prmtop(input.as_bytes()),
         HandlerSniffer::NamdCoor => sniff_namd_coor(input.as_bytes()),
         HandlerSniffer::Dcd => sniff_dcd(input.as_bytes()),
+        HandlerSniffer::Trr => sniff_trr(input.as_bytes()),
+        HandlerSniffer::Xtc => sniff_xtc(input.as_bytes()),
+        HandlerSniffer::AmberNetcdf => sniff_amber_netcdf(input.as_bytes()),
         HandlerSniffer::OpenDx => sniff_opendx(input),
         HandlerSniffer::MmcifMap => sniff_mmcif_map(input),
         HandlerSniffer::Ccp4Map => sniff_ccp4_map(input.as_bytes()),
@@ -1126,6 +1156,9 @@ fn sniff_bytes(bytes: &[u8], sniffer: HandlerSniffer) -> ContentVerdict {
         HandlerSniffer::AmberPrmtop => sniff_amber_prmtop(bytes),
         HandlerSniffer::NamdCoor => sniff_namd_coor(bytes),
         HandlerSniffer::Dcd => sniff_dcd(bytes),
+        HandlerSniffer::Trr => sniff_trr(bytes),
+        HandlerSniffer::Xtc => sniff_xtc(bytes),
+        HandlerSniffer::AmberNetcdf => sniff_amber_netcdf(bytes),
         HandlerSniffer::Ccp4Map => sniff_ccp4_map(bytes),
         HandlerSniffer::MtzMap => sniff_mtz_map(bytes),
         HandlerSniffer::QdfMol => sniff_qdf_file_types(bytes, &[b"MOL2"]),
@@ -1299,6 +1332,31 @@ fn sniff_dcd(bytes: &[u8]) -> ContentVerdict {
         ContentVerdict::Yes
     } else {
         ContentVerdict::Unknown
+    }
+}
+
+fn sniff_trr(bytes: &[u8]) -> ContentVerdict {
+    match bytes.get(..4).and_then(|value| value.try_into().ok()) {
+        Some(value) if i32::from_be_bytes(value) == 1993 => ContentVerdict::Yes,
+        _ => ContentVerdict::Unknown,
+    }
+}
+
+fn sniff_xtc(bytes: &[u8]) -> ContentVerdict {
+    match bytes
+        .get(..4)
+        .and_then(|value| <[u8; 4]>::try_from(value).ok())
+        .map(i32::from_be_bytes)
+    {
+        Some(1995 | 2023) => ContentVerdict::Yes,
+        _ => ContentVerdict::Unknown,
+    }
+}
+
+fn sniff_amber_netcdf(bytes: &[u8]) -> ContentVerdict {
+    match bytes.get(..4) {
+        Some([b'C', b'D', b'F', 1 | 2 | 5]) => ContentVerdict::Yes,
+        _ => ContentVerdict::Unknown,
     }
 }
 

@@ -21,7 +21,7 @@ only.
 - `cuemol-xtal`: density maps, crystallographic readers, and map renderers
 - `cuemol-molanl`: molecular analysis, RMSD, and structural superposition
 - `cuemol-anim`: scene, camera, property, and renderer animation
-- `cuemol-mdtools`: GRO, NAMD, AMBER, PSF, and DCD trajectory readers
+- `cuemol-mdtools`: GRO, NAMD, AMBER, PSF, DCD, XTC, TRR, and NetCDF trajectory readers
 - `cuemol-lwview`: lightweight scene viewer
 - `cuemol-molclient`: molecular client facade
 - `cuemol-render`: render snapshots, GPU/headless backends, and ray tracing
@@ -47,6 +47,9 @@ cargo run -p cuemol-cli -- mol-array-info pdb ../cuemol2/tests/test_data/1CRN.pd
 cargo run -p cuemol-cli -- psf-info example.psf
 cargo run -p cuemol-cli -- amberprm-info example.prmtop
 cargo run -p cuemol-cli -- ambermdcrd-info example.mdcrd 327 box
+cargo run -p cuemol-cli -- trr-info example.trr
+cargo run -p cuemol-cli -- xtc-info example.xtc
+cargo run -p cuemol-cli -- ambernetcdf-info example.nc
 cargo run -p cuemol-cli -- opendx-info example.dx
 cargo run -p cuemol-cli -- mol-sel-array pdb ../cuemol2/tests/test_data/1CRN.pdb "chain A and name CA"
 cargo run -p cuemol-cli -- pdb-write ../cuemol2/tests/test_data/1CRN.pdb

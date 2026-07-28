@@ -1898,8 +1898,16 @@ impl AnimMgr {
     }
 
     pub fn write_frame(&mut self, writer: &mut SceneExporter) {
-        if self.frame_no > self.render_end_frame {
+        if !self.begin_frame(writer) {
             return;
+        }
+        writer.write();
+        self.end_frame(writer);
+    }
+
+    pub fn begin_frame(&mut self, writer: &mut SceneExporter) -> bool {
+        if self.frame_no > self.render_end_frame {
+            return false;
         }
         self.elapsed = (self.frame_no as f64 * self.render_delta).floor() as TimeValue;
         if let Some(scene_uid) = self.target_scene_uid {
@@ -1908,7 +1916,10 @@ impl AnimMgr {
         if !self.startcam.is_empty() {
             writer.set_camera(self.startcam.clone());
         }
-        writer.write();
+        true
+    }
+
+    pub fn end_frame(&mut self, writer: &mut SceneExporter) {
         if self.target_scene_uid.is_some() {
             writer.detach();
         }
@@ -2711,6 +2722,13 @@ mod tests {
         assert_eq!(manager.elapsed(), 0);
         assert_eq!(writer.write_count(), 1);
         assert_eq!(writer.camera(), "cam1");
+        assert_eq!(writer.client_scene(), None);
+        assert_eq!(manager.setup_render(0, NANOS_PER_SECOND, 30.0), 31);
+        assert!(manager.begin_frame(&mut writer));
+        assert_eq!(manager.frame_no(), 0);
+        assert_eq!(writer.client_scene(), Some(Uid::new(10)));
+        manager.end_frame(&mut writer);
+        assert_eq!(manager.frame_no(), 1);
         assert_eq!(writer.client_scene(), None);
         manager.clear();
         assert_eq!(manager.size(), 0);

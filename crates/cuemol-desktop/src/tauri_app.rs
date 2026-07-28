@@ -159,6 +159,27 @@ struct MorphObjectDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct TrajectoryBlockDto {
+    uid: u64,
+    name: String,
+    source: String,
+    format: String,
+    frame_count: usize,
+    start_index: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrajectoryDto {
+    object_uid: u64,
+    object_name: String,
+    frame_count: usize,
+    current_frame: usize,
+    blocks: Vec<TrajectoryBlockDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AppSnapshot {
     scenes: Vec<SceneDto>,
     objects: Vec<ObjectDto>,
@@ -182,6 +203,7 @@ struct AppSnapshot {
     animation_playing: bool,
     animation_loop: bool,
     morphs: Vec<MorphObjectDto>,
+    trajectories: Vec<TrajectoryDto>,
     can_undo: bool,
     can_redo: bool,
     log_lines: Vec<String>,
@@ -448,6 +470,29 @@ impl AppModel {
                 })
             })
             .collect();
+        let trajectories = self
+            .desktop
+            .active_trajectory_summaries()
+            .into_iter()
+            .map(|trajectory| TrajectoryDto {
+                object_uid: trajectory.object_uid.get(),
+                object_name: trajectory.object_name,
+                frame_count: trajectory.frame_count,
+                current_frame: trajectory.current_frame,
+                blocks: trajectory
+                    .blocks
+                    .into_iter()
+                    .map(|block| TrajectoryBlockDto {
+                        uid: block.uid,
+                        name: block.name,
+                        source: block.source,
+                        format: block.format,
+                        frame_count: block.frame_count,
+                        start_index: block.start_index,
+                    })
+                    .collect(),
+            })
+            .collect();
         AppSnapshot {
             scenes,
             objects,
@@ -471,6 +516,7 @@ impl AppModel {
             animation_playing: self.animation_playing,
             animation_loop: self.animation_loop,
             morphs,
+            trajectories,
             can_undo: !self.undo_stack.is_empty(),
             can_redo: !self.redo_stack.is_empty(),
             log_lines: self.log_lines.clone(),
@@ -950,6 +996,30 @@ enum ModelRequest {
     ClearUndo,
     OpenPaths(Vec<String>),
     OpenPdb(String),
+    LoadTrajectory {
+        topology_path: String,
+        trajectory_paths: Vec<String>,
+        nevery: usize,
+        renderer_type: String,
+    },
+    SetTrajectoryFrame {
+        object_uid: u64,
+        frame: usize,
+    },
+    AppendTrajectoryBlock {
+        object_uid: u64,
+        path: String,
+        nevery: usize,
+    },
+    RemoveTrajectoryBlock {
+        object_uid: u64,
+        index: usize,
+    },
+    MoveTrajectoryBlock {
+        object_uid: u64,
+        from: usize,
+        to: usize,
+    },
     NewScene(Option<String>),
     ActivateScene(u64),
     CloseActiveScene,
@@ -1197,6 +1267,90 @@ fn handle_model_request(
             model.selection.clear();
             model.status = format!("Opened PDB {}", pdb_id.trim().to_ascii_uppercase());
             model.rebuild_mesh(true)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::LoadTrajectory {
+            topology_path,
+            trajectory_paths,
+            nevery,
+            renderer_type,
+        } => {
+            let undo = model.capture_undo();
+            let scene_uid = model.desktop.ensure_active_scene();
+            let summary = model
+                .desktop
+                .load_md_trajectory(
+                    scene_uid,
+                    &topology_path,
+                    &trajectory_paths,
+                    nevery,
+                    &renderer_type,
+                )
+                .map_err(|error| error.to_string())?;
+            model.selection.clear();
+            model.status = format!(
+                "Loaded trajectory {}: {} frame(s)",
+                summary.object_name, summary.frame_count
+            );
+            model.rebuild_mesh(true)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetTrajectoryFrame { object_uid, frame } => {
+            model
+                .desktop
+                .apply_trajectory_frame(Uid::new(object_uid), frame)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Trajectory frame: {frame}");
+            model.rebuild_mesh(false)?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::AppendTrajectoryBlock {
+            object_uid,
+            path,
+            nevery,
+        } => {
+            let undo = model.capture_undo();
+            let summary = model
+                .desktop
+                .append_trajectory_block(Uid::new(object_uid), &path, nevery)
+                .map_err(|error| error.to_string())?;
+            model.status = format!(
+                "Added trajectory block: {} frame(s), {} block(s)",
+                summary.frame_count,
+                summary.blocks.len()
+            );
+            model.rebuild_mesh(false)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::RemoveTrajectoryBlock { object_uid, index } => {
+            let undo = model.capture_undo();
+            let summary = model
+                .desktop
+                .remove_trajectory_block(Uid::new(object_uid), index)
+                .map_err(|error| error.to_string())?;
+            model.status = format!(
+                "Removed trajectory block: {} block(s) remaining",
+                summary.blocks.len()
+            );
+            model.rebuild_mesh(false)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::MoveTrajectoryBlock {
+            object_uid,
+            from,
+            to,
+        } => {
+            let undo = model.capture_undo();
+            model
+                .desktop
+                .move_trajectory_block(Uid::new(object_uid), from, to)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Moved trajectory block: {} → {}", from + 1, to + 1);
+            model.rebuild_mesh(false)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -2038,6 +2192,83 @@ fn open_pdb(pdb_id: String, state: State<'_, ManagedState>) -> Result<AppSnapsho
 }
 
 #[tauri::command]
+fn load_trajectory(
+    topology_path: String,
+    trajectory_paths: Vec<String>,
+    nevery: usize,
+    renderer_type: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::LoadTrajectory {
+            topology_path,
+            trajectory_paths,
+            nevery,
+            renderer_type,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn set_trajectory_frame(
+    object_uid: u64,
+    frame: usize,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetTrajectoryFrame { object_uid, frame },
+    )?)
+}
+
+#[tauri::command]
+fn append_trajectory_block(
+    object_uid: u64,
+    path: String,
+    nevery: usize,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::AppendTrajectoryBlock {
+            object_uid,
+            path,
+            nevery,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn remove_trajectory_block(
+    object_uid: u64,
+    index: usize,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::RemoveTrajectoryBlock { object_uid, index },
+    )?)
+}
+
+#[tauri::command]
+fn move_trajectory_block(
+    object_uid: u64,
+    from: usize,
+    to: usize,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::MoveTrajectoryBlock {
+            object_uid,
+            from,
+            to,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn new_scene(name: Option<String>, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::NewScene(name))?)
 }
@@ -2805,6 +3036,11 @@ pub fn run() -> Result<(), tauri::Error> {
             clear_undo,
             open_paths,
             open_pdb,
+            load_trajectory,
+            set_trajectory_frame,
+            append_trajectory_block,
+            remove_trajectory_block,
+            move_trajectory_block,
             new_scene,
             activate_scene,
             close_active_scene,
@@ -3086,6 +3322,55 @@ mod tests {
         .unwrap();
         assert_eq!(model.snapshot().animation_elapsed, 0.0);
         assert_eq!(model.camera.rotation(), before);
+    }
+
+    #[test]
+    fn trajectory_panel_snapshot_and_seek_use_shared_frames() {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let pdb = root.join("tests/test_data/1CRN.pdb");
+        if !pdb.exists() {
+            return;
+        }
+        let mut model = model_without_gpu();
+        model.desktop.open_path(&pdb).unwrap();
+        let object = model.desktop.active_object_summaries()[0].clone();
+        let atom_count = object.atom_count;
+        model.desktop.set_object_trajectory(
+            object.uid,
+            vec![
+                vec![Vector4::new3(0.0, 0.0, 0.0); atom_count],
+                vec![Vector4::new3(9.0, 8.0, 7.0); atom_count],
+            ],
+        );
+
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.trajectories.len(), 1);
+        assert_eq!(snapshot.trajectories[0].frame_count, 2);
+        assert_eq!(snapshot.trajectories[0].current_frame, 0);
+        assert_eq!(snapshot.trajectories[0].blocks.len(), 1);
+        assert_eq!(snapshot.trajectories[0].blocks[0].start_index, 0);
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetTrajectoryFrame {
+                object_uid: object.uid.get(),
+                frame: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().trajectories[0].current_frame, 1);
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .object(object.uid)
+                .unwrap()
+                .mol()
+                .atoms()[0]
+                .position,
+            Vector4::new3(9.0, 8.0, 7.0)
+        );
     }
 
     #[test]

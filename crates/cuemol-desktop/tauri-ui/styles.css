@@ -1268,6 +1268,193 @@ summary:focus-visible {
   color: var(--selection-text);
 }
 
+.trajectory-panel {
+  overflow: hidden;
+  padding: 8px 10px;
+  background: linear-gradient(#fafafa, #e7e7e7);
+}
+
+.trajectory-toolbar {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto minmax(150px, auto) auto auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.trajectory-loop input {
+  min-height: auto;
+  margin: 0;
+}
+
+.trajectory-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.trajectory-toolbar select {
+  min-width: 0;
+  flex: 1;
+}
+
+.trajectory-transport {
+  display: flex;
+}
+
+.trajectory-transport button {
+  min-width: 28px;
+  border-radius: 0;
+  margin-left: -1px;
+  font-family: var(--font-mono);
+}
+
+.trajectory-transport button:first-child {
+  margin-left: 0;
+  border-radius: 3px 0 0 3px;
+}
+
+.trajectory-transport button:last-child {
+  border-radius: 0 3px 3px 0;
+}
+
+.trajectory-frame-field input {
+  width: 64px;
+  font-family: var(--font-mono);
+}
+
+.trajectory-frame-field output {
+  min-width: 36px;
+  font-family: var(--font-mono);
+}
+
+.trajectory-track {
+  --trajectory-playhead: 0%;
+  position: relative;
+  margin-top: 7px;
+  padding: 5px 8px 6px;
+  border: 1px solid #a6a6a6;
+  background:
+    repeating-linear-gradient(90deg, transparent 0 39px, rgba(0, 0, 0, 0.12) 39px 40px),
+    linear-gradient(#fdfdfd, #d8d8d8);
+  box-shadow: inset 0 1px #fff;
+}
+
+.trajectory-track input {
+  position: relative;
+  z-index: 3;
+  width: 100%;
+  min-height: 18px;
+  margin: 0;
+}
+
+.trajectory-block-strip {
+  position: relative;
+  display: flex;
+  height: 24px;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #777;
+  background: #c7c7c7;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.28);
+}
+
+.trajectory-block-strip::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  top: -1px;
+  bottom: -1px;
+  left: var(--trajectory-playhead);
+  width: 2px;
+  pointer-events: none;
+  background: #151515;
+  box-shadow: 1px 0 rgba(255, 255, 255, 0.75);
+}
+
+.trajectory-block {
+  position: relative;
+  min-width: 12px;
+  overflow: hidden;
+  padding: 2px 5px;
+  border: 0;
+  border-right: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: 0;
+  background: linear-gradient(#d7e5bc, #96ae70);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.55);
+  color: #17210f;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 18px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trajectory-block:hover {
+  filter: brightness(1.08);
+}
+
+.trajectory-block.selected {
+  z-index: 1;
+  outline: 2px solid #1d578c;
+  outline-offset: -2px;
+}
+
+.trajectory-block.dragging {
+  opacity: 0.45;
+}
+
+.trajectory-block-c1 {
+  background: linear-gradient(#bcdce8, #78aabd);
+  color: #10232b;
+}
+
+.trajectory-block-c2 {
+  background: linear-gradient(#e7cfad, #c09661);
+  color: #2d1d0d;
+}
+
+.trajectory-block-c3 {
+  background: linear-gradient(#d7c4e7, #a486bc);
+  color: #26152f;
+}
+
+.trajectory-block-c4 {
+  background: linear-gradient(#ecd0d0, #c88e8e);
+  color: #351616;
+}
+
+.trajectory-block-c5 {
+  background: linear-gradient(#c8ded6, #7fa99a);
+  color: #122923;
+}
+
+.trajectory-block-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.trajectory-block-toolbar button {
+  min-height: 21px;
+  padding: 1px 8px;
+}
+
+.trajectory-block-toolbar span {
+  margin-left: 5px;
+  color: #555;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+#trajectory-empty {
+  margin: 7px 4px;
+  color: #666;
+  text-align: center;
+}
+
 .bottom-tabs {
   display: flex;
   justify-content: center;
@@ -1446,6 +1633,24 @@ summary:focus-visible {
   justify-content: flex-end;
   gap: 6px;
   margin-top: 12px;
+}
+
+.trajectory-file-list {
+  display: block;
+  width: 100%;
+  min-height: 106px;
+  margin: 8px 0;
+  border: 1px solid #999;
+  border-radius: 0;
+  background: #fff;
+  font-family: var(--font-mono);
+}
+
+.trajectory-path-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  margin: -2px 0 10px;
 }
 
 .morph-frame-list {

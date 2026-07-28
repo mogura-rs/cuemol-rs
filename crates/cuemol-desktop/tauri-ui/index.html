@@ -18,6 +18,7 @@
             <button type="button" data-action="new-scene">New Tab</button>
             <button type="button" data-action="open">Open File…</button>
             <button type="button" data-dialog="Open PDB">Open PDB…</button>
+            <button type="button" data-dialog="Open MD Trajectory">Open MD Trajectory…</button>
             <button type="button" disabled>Open recent</button>
             <button type="button" data-dialog="Save File As">Save File As…</button>
             <button type="button" data-dialog="Save Current View">Save current view…</button>
@@ -411,10 +412,51 @@
                   <p>Residue sequence appears after a molecular object is loaded.</p>
                 </div>
               </div>
+              <div class="bottom-content trajectory-panel" data-bottom-panel="trajectory">
+                <div class="trajectory-toolbar">
+                  <label>Trajectory <select id="trajectory-object" aria-label="Trajectory"></select></label>
+                  <div class="trajectory-transport">
+                    <button id="trajectory-first" type="button" title="First frame">|‹</button>
+                    <button id="trajectory-previous" type="button" title="Previous frame">‹</button>
+                    <button id="trajectory-play" type="button" title="Play trajectory">▶</button>
+                    <button id="trajectory-next" type="button" title="Next frame">›</button>
+                    <button id="trajectory-last" type="button" title="Last frame">›|</button>
+                  </div>
+                  <label class="trajectory-frame-field">
+                    Frame
+                    <input id="trajectory-frame" type="number" min="0" step="1" value="0" />
+                    <span>/</span>
+                    <output id="trajectory-last-frame">0</output>
+                  </label>
+                  <label class="trajectory-loop"><input id="trajectory-loop" type="checkbox" />Loop</label>
+                  <label>Speed
+                    <select id="trajectory-speed">
+                      <option value="0.25">0.25×</option>
+                      <option value="0.5">0.5×</option>
+                      <option value="1" selected>1×</option>
+                      <option value="2">2×</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="trajectory-track">
+                  <input id="trajectory-slider" type="range" min="0" max="0" step="1" value="0" />
+                  <div class="trajectory-ruler" aria-hidden="true"></div>
+                  <div id="trajectory-block-strip" class="trajectory-block-strip" aria-label="Trajectory blocks"></div>
+                </div>
+                <div class="trajectory-block-toolbar">
+                  <button id="trajectory-block-add" type="button">Add…</button>
+                  <button id="trajectory-block-remove" type="button">Remove</button>
+                  <button id="trajectory-block-left" type="button" title="Move block left">‹</button>
+                  <button id="trajectory-block-right" type="button" title="Move block right">›</button>
+                  <span id="trajectory-block-count">0 blocks</span>
+                </div>
+                <p id="trajectory-empty">No trajectory in this scene — use File &gt; Open MD Trajectory…</p>
+              </div>
             </div>
             <div class="bottom-tabs" role="tablist">
               <button class="active" type="button" data-bottom-select="output">Output</button>
               <button type="button" data-bottom-select="sequence">Sequence</button>
+              <button type="button" data-bottom-select="trajectory">Trajectory</button>
             </div>
           </section>
         </section>

@@ -50,6 +50,10 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
         "density-content",
         "sequence-view",
         "measure-readout",
+        "trajectory-slider",
+        "trajectory-block-strip",
+        "trajectory-block-add",
+        "trajectory-block-remove",
     ] {
         assert!(HTML.contains(&format!("id=\"{id}\"")), "missing panel {id}");
     }
@@ -62,6 +66,7 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
     ] {
         assert!(JS.contains(command), "missing IPC binding {command}");
     }
+    assert!(JS.contains(r#"extensions: ["dcd", "xtc", "trr", "nc"]"#));
 }
 
 #[test]
@@ -125,6 +130,11 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "save_object",
         "save_view",
         "load_view",
+        "load_trajectory",
+        "set_trajectory_frame",
+        "append_trajectory_block",
+        "remove_trajectory_block",
+        "move_trajectory_block",
     ] {
         assert!(JS.contains(command), "missing menu binding {command}");
     }
