@@ -24,9 +24,10 @@ use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
     apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot_with_style,
     mainchain_line_snapshot, molecule_render_snapshot, na_renderer_snapshot, ribbon_mesh_snapshot,
-    ring_meshes_snapshot_with, scene_style_manager, simple_line_snapshot, AnIsoURenderOptions,
-    DisorderRenderOptions, MainchainLineMode, MoleculeRenderOptions, NARenderOptions, NARenderer,
-    ValenceBondMode, VdwRadii, DEFAULT_STYLE_SCOPE,
+    ring_meshes_snapshot_with, scene_style_manager, selection_overlay_snapshot,
+    simple_line_snapshot, AnIsoURenderOptions, DisorderRenderOptions, MainchainLineMode,
+    MoleculeRenderOptions, NARenderOptions, NARenderer, SelectionOverlayMode,
+    SelectionOverlayOptions, ValenceBondMode, VdwRadii, DEFAULT_STYLE_SCOPE,
 };
 #[cfg(test)]
 use cuemol_molvis::{default_style_manager, disorder_lines_snapshot};
@@ -1259,6 +1260,8 @@ impl DesktopAppState {
                                 selected: false,
                                 screen_width: None,
                                 screen_stipple: false,
+                                screen_offset: [0.0, 0.0],
+                                screen_point: false,
                             });
                         }
                     }
@@ -1694,7 +1697,16 @@ impl DesktopAppState {
             .scene_manager_mut()
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        object.mol_mut().set_selection_text(selection)
+        object.mol_mut().set_selection_text(selection)?;
+        if !selection.trim().is_empty()
+            && !object
+                .renderers()
+                .iter()
+                .any(|renderer| matches!(renderer.renderer_type(), "*selection" | "selection"))
+        {
+            object.add_renderer("*selection", "");
+        }
+        Ok(())
     }
 
     pub fn selected_molecule_center(&self, object_uid: Uid) -> Result<Option<Vector4>> {
@@ -2449,6 +2461,8 @@ impl DesktopAppState {
                         selected: false,
                         screen_width: None,
                         screen_stipple: false,
+                        screen_offset: [0.0, 0.0],
+                        screen_point: false,
                     });
                 }
             }
@@ -2502,6 +2516,8 @@ impl DesktopAppState {
                     selected: false,
                     screen_width: None,
                     screen_stipple: false,
+                    screen_offset: [0.0, 0.0],
+                    screen_point: false,
                 });
             }
         }
@@ -2589,6 +2605,8 @@ impl DesktopAppState {
                                 selected: false,
                                 screen_width: None,
                                 screen_stipple: false,
+                                screen_offset: [0.0, 0.0],
+                                screen_point: false,
                             });
                         }
                     }
@@ -2705,6 +2723,8 @@ impl DesktopAppState {
                                         selected: false,
                                         screen_width: None,
                                         screen_stipple: false,
+                                        screen_offset: [0.0, 0.0],
+                                        screen_point: false,
                                     });
                                 }
                             }
@@ -3558,11 +3578,6 @@ impl DesktopAppState {
         edge_color: impl AsRef<str>,
     ) -> Result<()> {
         let selection_text = selection.as_ref().trim();
-        let selector = if selection_text.is_empty() || selection_text == "*" {
-            Selector::All
-        } else {
-            parse_selector(selection_text)?
-        };
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -3570,16 +3585,26 @@ impl DesktopAppState {
         let renderer = object
             .renderer_mut(renderer_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        let selection_readonly = matches!(renderer.renderer_type(), "*selection" | "selection");
+        let selector = if selection_readonly {
+            None
+        } else if selection_text.is_empty() || selection_text == "*" {
+            Some(Selector::All)
+        } else {
+            Some(parse_selector(selection_text)?)
+        };
         renderer.set_name(name);
-        renderer.set_selection(selector);
-        renderer.set_qsc_attr(
-            "sel",
-            if selection_text.is_empty() {
-                "*"
-            } else {
-                selection_text
-            },
-        );
+        if let Some(selector) = selector {
+            renderer.set_selection(selector);
+            renderer.set_qsc_attr(
+                "sel",
+                if selection_text.is_empty() {
+                    "*"
+                } else {
+                    selection_text
+                },
+            );
+        }
         renderer.set_visible(visible);
         if locked {
             renderer.set_qsc_attr("locked", "true");
@@ -6212,6 +6237,8 @@ impl DesktopAppState {
                             selected: false,
                             screen_width: None,
                             screen_stipple: false,
+                            screen_offset: [0.0, 0.0],
+                            screen_point: false,
                         });
                     }
                 }
@@ -37791,45 +37818,126 @@ fn append_object_snapshot(
     style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
 ) {
-    let selected_indices = selector
-        .map(|selector| object.mol().select_indices(selector))
-        .unwrap_or_default();
-    // Skip internal/overlay renderers (e.g. `*selection`): like the CLI
-    // render-qsc path and C++, these system renderers carry no standalone scene
-    // geometry — the selection overlay is drawn via `selected_indices`
-    // highlighting on the real renderers, so rendering `*selection` itself would
-    // spuriously dump every atom.
+    let selected_indices = if object.mol().selection_text().is_empty() {
+        selector
+            .map(|selector| object.mol().select_indices(selector))
+            .unwrap_or_default()
+    } else {
+        object.mol().select_indices(object.mol().selection())
+    };
+    let selection_renderers = object
+        .renderers()
+        .iter()
+        .filter(|renderer| matches!(renderer.renderer_type(), "*selection" | "selection"))
+        .collect::<Vec<_>>();
+    let visible_selection_renderer = selection_renderers
+        .iter()
+        .copied()
+        .find(|renderer| renderer.is_visible());
+
+    // Internal renderers are projected by their dedicated overlay paths. Normal
+    // renderer geometry stays in its own colors; C++ SelectionRenderer draws a
+    // separate displaced cyan overlay instead of recoloring those primitives.
     let visible_renderers = object
         .renderers()
         .iter()
         .filter(|renderer| renderer.is_visible() && !renderer.renderer_type().starts_with('*'))
+        .filter(|renderer| renderer.renderer_type() != "selection")
         .collect::<Vec<_>>();
-    if visible_renderers.is_empty() && !object.renderers().is_empty() {
-        return;
-    }
-    if visible_renderers.is_empty() {
+    if visible_renderers.is_empty() && object.renderers().is_empty() {
         append_object_renderer_snapshot(
             target,
             object,
             None,
-            &selected_indices,
+            &[],
             styles,
             style_scope_id,
             surface_potential,
         );
-        return;
     }
     for renderer in visible_renderers {
         append_object_renderer_snapshot(
             target,
             object,
             Some(renderer),
-            &selected_indices,
+            &[],
             styles,
             style_scope_id,
             surface_potential,
         );
     }
+
+    // CueMol's GUI auto-creates `*selection` when a molecule selection changes.
+    // Older/imported scenes can lack the serialized renderer, so use its QIF
+    // defaults unless an explicit renderer exists and is hidden.
+    if !selected_indices.is_empty()
+        && (selection_renderers.is_empty() || visible_selection_renderer.is_some())
+    {
+        append_selection_overlay_snapshot(
+            target,
+            object,
+            &selected_indices,
+            visible_selection_renderer,
+            styles,
+            style_scope_id,
+        );
+    }
+}
+
+fn append_selection_overlay_snapshot(
+    target: &mut RenderSceneSnapshot,
+    object: &MolObject,
+    selected_indices: &[usize],
+    renderer: Option<&MolRenderer>,
+    styles: &StyleManager,
+    style_scope_id: u64,
+) {
+    let resolved = |name: &str| {
+        renderer.and_then(|renderer| renderer.resolved_attr(name, styles, style_scope_id))
+    };
+    let line_width = resolved("linew")
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .unwrap_or(3.0);
+    let dispx = resolved("dispx")
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .unwrap_or(3.0);
+    let dispy = resolved("dispy")
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .unwrap_or(3.0);
+    let color = resolved("color")
+        .and_then(|value| resolve_qsc_color(&value, styles))
+        .map(rgba8_render_color)
+        .map(render_color_spec)
+        .unwrap_or_else(|| render_color_spec([0.0, 1.0, 1.0, 0.5]));
+    let mode = match resolved("mode")
+        .unwrap_or_else(|| "stick".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "point" | "1" => SelectionOverlayMode::Point,
+        _ => SelectionOverlayMode::Stick,
+    };
+    let mut snapshot = selection_overlay_snapshot(
+        object.mol(),
+        selected_indices,
+        &SelectionOverlayOptions {
+            line_width,
+            displacement: [dispx, dispy],
+            color,
+            mode,
+            object_uid: Some(object.uid().get()),
+        },
+    );
+    let renderer_xform = renderer
+        .map(MolRenderer::xform_matrix)
+        .unwrap_or(Matrix4::IDENTITY);
+    let xform = renderer_xform.mul_mat(object.xform_matrix());
+    if xform != Matrix4::IDENTITY {
+        snapshot.apply_xform(&xform);
+    }
+    merge_bounds(&mut target.bounds, snapshot.bounds);
+    target.bonds.extend(snapshot.bonds);
 }
 
 fn append_object_renderer_snapshot(
@@ -38563,6 +38671,8 @@ fn append_lw_arrays(
                     selected: false,
                     screen_width: None,
                     screen_stipple: false,
+                    screen_offset: [0.0, 0.0],
+                    screen_point: false,
                 });
             }
         }
@@ -48848,6 +48958,123 @@ end_header
             restricted > 0 && restricted < full,
             "a sel'd trace should cover fewer residues: full={full} restricted={restricted}"
         );
+    }
+
+    #[test]
+    fn selection_renderer_draws_a_separate_configurable_screen_overlay() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("selection-overlay", false).result_scene;
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  C1  GLY A   1       0.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      2  C2  GLY A   1       1.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      3  N1  GLY A   1       3.000   0.000   0.000  1.00 10.00           N  \n\
+             CONECT    1    2\n\
+             END\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let simple_uid = app
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "simple");
+
+        app.set_molecule_selection_text(object_uid, "name C1")
+            .unwrap();
+        let stored_selection = app.active_render_snapshot("").unwrap();
+        assert_eq!(
+            stored_selection
+                .bonds
+                .iter()
+                .filter(|primitive| primitive.screen_offset == [3.0, 3.0])
+                .count(),
+            3
+        );
+
+        app.set_molecule_selection_text(object_uid, "*").unwrap();
+        let automatic = app.active_render_snapshot("").unwrap();
+        let automatic_overlay = automatic
+            .bonds
+            .iter()
+            .filter(|primitive| primitive.screen_offset == [3.0, 3.0])
+            .collect::<Vec<_>>();
+        assert_eq!(automatic_overlay.len(), 4);
+        assert!(automatic
+            .bonds
+            .iter()
+            .filter(|primitive| primitive.screen_offset == [0.0, 0.0])
+            .all(|primitive| !primitive.selected));
+
+        let selection_uid = {
+            let object = app.scene_manager_mut().object_mut(object_uid).unwrap();
+            let uid = object
+                .renderers()
+                .iter()
+                .find(|renderer| renderer.renderer_type() == "*selection")
+                .unwrap()
+                .uid();
+            let renderer = object.renderer_mut(uid).unwrap();
+            renderer.set_qsc_attr("linew", "5");
+            renderer.set_qsc_attr("dispx", "6");
+            renderer.set_qsc_attr("dispy", "-4");
+            renderer.set_qsc_attr("color", "rgba(17,34,51,0.25)");
+            uid
+        };
+        let configured = app.active_render_snapshot("").unwrap();
+        let configured_overlay = configured
+            .bonds
+            .iter()
+            .filter(|primitive| primitive.screen_offset == [6.0, -4.0])
+            .collect::<Vec<_>>();
+        assert_eq!(configured_overlay.len(), 4);
+        assert!(configured_overlay.iter().all(|primitive| {
+            primitive.screen_width == Some(5.0)
+                && primitive
+                    .color
+                    .as_ref()
+                    .and_then(cuemol_gfx::ColorSpec::rgba8)
+                    == Some(cuemol_gfx::Rgba8 {
+                        r: 17,
+                        g: 34,
+                        b: 51,
+                        a: 64,
+                    })
+        }));
+
+        app.scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(selection_uid)
+            .unwrap()
+            .set_qsc_attr("mode", "point");
+        let points = app.active_render_snapshot("").unwrap();
+        assert_eq!(
+            points
+                .bonds
+                .iter()
+                .filter(|primitive| primitive.screen_point)
+                .count(),
+            3
+        );
+
+        app.set_renderer_visible(object_uid, selection_uid, false)
+            .unwrap();
+        assert!(app
+            .active_render_snapshot("")
+            .unwrap()
+            .bonds
+            .iter()
+            .all(|primitive| primitive.screen_offset != [6.0, -4.0]));
+        assert!(app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(simple_uid)
+            .is_some());
     }
 
     #[test]

@@ -1180,6 +1180,8 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         selected: false,
                         screen_width: None,
                         screen_stipple: false,
+                        screen_offset: [0.0, 0.0],
+                        screen_point: false,
                     });
                 }
                 total_bonds += snapshot.bond_count();
@@ -1278,6 +1280,8 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                                 selected: false,
                                 screen_width: None,
                                 screen_stipple: false,
+                                screen_offset: [0.0, 0.0],
+                                screen_point: false,
                             });
                         }
                         total_bonds += snapshot.bond_count();

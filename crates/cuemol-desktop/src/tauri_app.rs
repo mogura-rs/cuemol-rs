@@ -362,6 +362,7 @@ struct ViewportLineDto {
     color: String,
     end_color: Option<String>,
     stipple: bool,
+    point: bool,
 }
 
 #[derive(Serialize)]
@@ -886,7 +887,19 @@ impl AppModel {
                             uid: renderer.uid.get(),
                             name: renderer.name,
                             renderer_type: renderer.renderer_type,
-                            selection: state.qsc_attr("sel").unwrap_or("*").to_string(),
+                            selection: if matches!(
+                                state.renderer_type(),
+                                "*selection" | "selection"
+                            ) {
+                                let selection = object_state.mol().selection_text();
+                                if selection.is_empty() {
+                                    "!*".to_string()
+                                } else {
+                                    selection.to_string()
+                                }
+                            } else {
+                                state.qsc_attr("sel").unwrap_or("*").to_string()
+                            },
                             visible: renderer.visible,
                             locked: state.qsc_attr("locked").is_some_and(config_value_is_true),
                             material: state.qsc_attr("material").unwrap_or("").to_string(),
@@ -2167,7 +2180,9 @@ impl AppModel {
             .map(|renderer| renderer.renderer_type().to_string())
             .ok_or_else(|| format!("renderer {} not found", properties.renderer_uid))?;
         let name = properties.name.trim();
-        if name.is_empty() || name.contains(':') {
+        if (name.is_empty() && !matches!(renderer_type.as_str(), "*selection" | "selection"))
+            || name.contains(':')
+        {
             return Err("renderer name must be non-empty and cannot contain ':'".to_string());
         }
         if !properties.alpha.is_finite() || properties.alpha <= 0.0 || properties.alpha > 1.0 {
@@ -2211,6 +2226,56 @@ impl AppModel {
         }
         let mut specific_updates = Vec::<(String, String, bool)>::new();
         match renderer_type.as_str() {
+            "*selection" | "selection" => {
+                if let Some(raw) = properties.specific.get("mode") {
+                    let value = raw.trim();
+                    if !matches!(value, "stick" | "point") {
+                        return Err(format!("unsupported selection mode: {value}"));
+                    }
+                    specific_updates.push((
+                        "mode".to_string(),
+                        value.to_string(),
+                        value == "stick",
+                    ));
+                }
+                for (key, label, default) in [
+                    ("linew", "selection line width", 3.0),
+                    ("dispx", "selection X displacement", 3.0),
+                    ("dispy", "selection Y displacement", 3.0),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("{label} must be a number"))?;
+                    if !value.is_finite()
+                        || (key == "linew" && !(0.0..=100.0).contains(&value))
+                        || (key != "linew" && !(-10_000.0..=10_000.0).contains(&value))
+                    {
+                        return Err(format!("invalid {label}: {value}"));
+                    }
+                    specific_updates.push((
+                        key.to_string(),
+                        value.to_string(),
+                        (value - default).abs() < f64::EPSILON,
+                    ));
+                }
+                if let Some(raw) = properties.specific.get("color") {
+                    let value = raw.trim();
+                    let color = cuemol_gfx::parse_color(value)
+                        .map_err(|_| format!("invalid selection color: {value}"))?;
+                    let is_default = color.rgba8()
+                        == Some(cuemol_gfx::Rgba8 {
+                            r: 0,
+                            g: 255,
+                            b: 255,
+                            a: 128,
+                        });
+                    specific_updates.push(("color".to_string(), value.to_string(), is_default));
+                }
+            }
             "spline" => {
                 if let Some(raw) = properties.specific.get("axialdetail") {
                     let value = raw
@@ -3426,10 +3491,10 @@ impl AppModel {
                 let (x1, y1) = project_viewport_point(mvp, line.from, width, height)?;
                 let (x2, y2) = project_viewport_point(mvp, line.to, width, height)?;
                 Some(ViewportLineDto {
-                    x1,
-                    y1,
-                    x2,
-                    y2,
+                    x1: x1 + line.screen_offset[0],
+                    y1: y1 + line.screen_offset[1],
+                    x2: x2 + line.screen_offset[0],
+                    y2: y2 + line.screen_offset[1],
                     width: line.screen_width.unwrap_or(1.0),
                     color: line
                         .color
@@ -3443,6 +3508,7 @@ impl AppModel {
                         .and_then(cuemol_gfx::ColorSpec::rgba8)
                         .map(viewport_css_color),
                     stipple: line.screen_stipple,
+                    point: line.screen_point,
                 })
             })
             .take(200_000)
@@ -4328,6 +4394,13 @@ fn renderer_specific_attributes(
     styles: &cuemol_qsys::StyleManager,
 ) -> BTreeMap<String, String> {
     let defaults: Vec<(&str, &str)> = match renderer_type {
+        "*selection" | "selection" => vec![
+            ("mode", "stick"),
+            ("linew", "3"),
+            ("dispx", "3"),
+            ("dispy", "3"),
+            ("color", "rgba(0,255,255,0.5)"),
+        ],
         "atomintr" => vec![
             ("mode", "fancy"),
             ("showlabel", "false"),
@@ -8562,6 +8635,70 @@ mod tests {
     }
 
     #[test]
+    fn selection_properties_are_readonly_for_sel_undoable_and_persisted() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let renderer_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("*selection", "");
+        let mut properties = default_renderer_properties_input(object_uid, renderer_uid, "");
+        properties.selection = "bad selector (".to_string();
+        properties.specific = BTreeMap::from([
+            ("mode".to_string(), "point".to_string()),
+            ("linew".to_string(), "5".to_string()),
+            ("dispx".to_string(), "6".to_string()),
+            ("dispy".to_string(), "-4".to_string()),
+            ("color".to_string(), "rgba(18,52,86,0.25)".to_string()),
+        ]);
+        let response =
+            handle_model_request(&mut model, ModelRequest::SetRendererProperties(properties))
+                .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let dto = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == renderer_uid.get())
+            .unwrap();
+        for (key, value) in [
+            ("mode", "point"),
+            ("linew", "5"),
+            ("dispx", "6"),
+            ("dispy", "-4"),
+            ("color", "rgba(18,52,86,0.25)"),
+        ] {
+            assert_eq!(dto.specific[key], value, "{key}");
+        }
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("sel"), None);
+        assert_eq!(renderer.qsc_attr("mode"), Some("point"));
+
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        for key in ["sel", "mode", "linew", "dispx", "dispy", "color"] {
+            assert_eq!(renderer.qsc_attr(key), None, "{key} restored");
+        }
+    }
+
+    #[test]
     fn ballstick_properties_are_undoable_and_persisted() {
         let (mut model, object_uid, _) = model_with_renderer();
         let scene_uid = model.desktop.active_scene().unwrap();
@@ -8825,6 +8962,26 @@ mod tests {
         assert!(interaction_lines.iter().all(|line| {
             line.x1.is_finite() && line.y1.is_finite() && line.x2.is_finite() && line.y2.is_finite()
         }));
+    }
+
+    #[test]
+    fn viewport_projects_selection_point_with_pixel_displacement() {
+        let mut model = model_without_gpu();
+        let position = Vector4::new3(0.0, 0.0, 0.0);
+        model.screen_lines = vec![RenderBond::new(position, position, 0.03, None)
+            .with_screen_style(5.0, false)
+            .with_screen_offset(6.0, -4.0)
+            .as_screen_point()];
+        let mvp = camera_mvp(&model.camera, 4.0 / 3.0);
+        let projected = project_viewport_point(mvp, position, 800, 600).unwrap();
+        let viewport = model.viewport_metadata(800, 600);
+        assert_eq!(viewport.lines.len(), 1);
+        let point = &viewport.lines[0];
+        assert!(point.point);
+        assert_eq!(point.width, 5.0);
+        assert!((point.x1 - projected.0 - 6.0).abs() < 1.0e-5);
+        assert!((point.y1 - projected.1 + 4.0).abs() < 1.0e-5);
+        assert_eq!((point.x1, point.y1), (point.x2, point.y2));
     }
 
     #[test]
@@ -9811,6 +9968,10 @@ mod tests {
             .unwrap();
         let object = model.desktop.scene_manager().object(object_uid).unwrap();
         assert_eq!(object.mol().selection_text(), selection);
+        assert!(object
+            .renderers()
+            .iter()
+            .any(|renderer| renderer.renderer_type() == "*selection"));
         assert_eq!(model.selection, selection);
         assert!((model.camera.center().x - 5.0).abs() < 1.0e-6);
 

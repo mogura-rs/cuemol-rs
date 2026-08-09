@@ -1430,6 +1430,7 @@ function rendererPropertiesEditor(object, renderer) {
   const surfaceObject = object.className === "MolSurfObj";
   const simpleLike = ["simple", "trace"].includes(renderer.rendererType);
   const splineLike = renderer.rendererType === "spline";
+  const selectionLike = ["*selection", "selection"].includes(renderer.rendererType);
   const atomIntrLike = renderer.rendererType === "atomintr";
   const anisouLike = renderer.rendererType === "anisou";
   const ballStickLike = ["ballstick", "anisou"].includes(renderer.rendererType);
@@ -1448,6 +1449,8 @@ function rendererPropertiesEditor(object, renderer) {
     dialogTitle.textContent = "Trace renderer properties";
   } else if (splineLike) {
     dialogTitle.textContent = "Spline renderer properties";
+  } else if (selectionLike) {
+    dialogTitle.textContent = "Selection renderer properties";
   } else if (atomIntrLike) {
     dialogTitle.textContent = "Interaction renderer properties";
   } else if (anisouLike) {
@@ -1479,6 +1482,8 @@ function rendererPropertiesEditor(object, renderer) {
     ? [renderer.rendererType === "trace" ? "Trace" : "Simple"]
     : splineLike
       ? ["Common", "Spline"]
+    : selectionLike
+      ? ["Selection"]
     : atomIntrLike
       ? ["Common", "Interaction"]
       : anisouLike
@@ -1554,7 +1559,7 @@ function rendererPropertiesEditor(object, renderer) {
     specificControls.push(input);
     return input;
   };
-  const addSpecificColor = (host, key, label, fallback) => {
+  const addSpecificColor = (host, key, label, fallback, pickerFallback = fallback) => {
     const row = document.createElement("div");
     row.className = "edge-color-editor";
     const input = document.createElement("input");
@@ -1562,7 +1567,7 @@ function rendererPropertiesEditor(object, renderer) {
     input.spellcheck = false;
     const picker = document.createElement("input");
     picker.type = "color";
-    picker.value = /^#[0-9a-f]{6}$/i.test(input.value) ? input.value : fallback;
+    picker.value = /^#[0-9a-f]{6}$/i.test(input.value) ? input.value : pickerFallback;
     input.addEventListener("input", () => {
       if (/^#[0-9a-f]{6}$/i.test(input.value)) picker.value = input.value;
     });
@@ -1603,6 +1608,34 @@ function rendererPropertiesEditor(object, renderer) {
       addSpecificText(line, "pivotatom", "Pivot atom:", "");
     }
   }
+  if (selectionLike) {
+    const selectionGroup = document.createElement("fieldset");
+    selectionGroup.className = "property-common-group renderer-specific-group";
+    const selectionLegend = document.createElement("legend");
+    selectionLegend.textContent = "Selection overlay";
+    selectionGroup.append(selectionLegend);
+    addSpecificSelect(
+      selectionGroup,
+      "mode",
+      "Mode:",
+      [
+        ["stick", "Stick"],
+        ["point", "Point"],
+      ],
+      "stick",
+    );
+    addSpecificNumber(selectionGroup, "linew", "Line width:", 0, 20, 0.2, "3");
+    addSpecificNumber(selectionGroup, "dispx", "X displacement:", -100, 100, 0.5, "3");
+    addSpecificNumber(selectionGroup, "dispy", "Y displacement:", -100, 100, 0.5, "3");
+    addSpecificColor(
+      selectionGroup,
+      "color",
+      "Color:",
+      "rgba(0,255,255,0.5)",
+      "#00ffff",
+    );
+    page.append(selectionGroup);
+  }
   const basic = document.createElement("fieldset");
   basic.className = "property-common-group";
   const basicLegend = document.createElement("legend");
@@ -1613,7 +1646,7 @@ function rendererPropertiesEditor(object, renderer) {
   propertyField(basic, "Name:", name);
   const selection = document.createElement("input");
   selection.value = densityMap ? "(not available)" : renderer.selection || "*";
-  selection.disabled = densityMap;
+  selection.disabled = densityMap || selectionLike;
   selection.spellcheck = false;
   propertyField(basic, "Selection:", selection);
   const checks = document.createElement("div");
@@ -2890,7 +2923,7 @@ function rendererPropertiesEditor(object, renderer) {
           objectUid: object.uid,
           rendererUid: renderer.uid,
           name: name.value,
-          selection: densityMap ? "" : selection.value,
+          selection: densityMap || selectionLike ? renderer.selection : selection.value,
           visible: visible.checked,
           locked: locked.checked,
           material: material.value,
@@ -6241,6 +6274,7 @@ function applyViewport(result, sequence) {
   const lineDefs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
   viewportLines.append(lineDefs);
   const solidLineGroups = new Map();
+  const solidPointGroups = new Map();
   for (const [index, line] of (result.lines || []).entries()) {
     const x1 = Number(line.x1) || 0;
     const y1 = Number(line.y1) || 0;
@@ -6248,6 +6282,20 @@ function applyViewport(result, sequence) {
     const y2 = Number(line.y2) || 0;
     const startColor = line.color || "#ffff00";
     const width = Math.max(0.1, Number(line.width) || 1);
+    if (line.point) {
+      const key = `${startColor}|${width}`;
+      const group = solidPointGroups.get(key) || {
+        color: startColor,
+        width,
+        commands: [],
+      };
+      const half = width / 2;
+      group.commands.push(
+        `M ${x1 - half} ${y1 - half} h ${width} v ${width} h ${-width} Z`,
+      );
+      solidPointGroups.set(key, group);
+      continue;
+    }
     if (!line.endColor || line.endColor === startColor) {
       const key = `${startColor}|${width}|${Boolean(line.stipple)}`;
       const group = solidLineGroups.get(key) || {
@@ -6302,6 +6350,12 @@ function applyViewport(result, sequence) {
     path.setAttribute("stroke-linecap", "butt");
     path.setAttribute("vector-effect", "non-scaling-stroke");
     if (group.stipple) path.setAttribute("stroke-dasharray", "8 8");
+    viewportLines.append(path);
+  }
+  for (const group of solidPointGroups.values()) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", group.commands.join(" "));
+    path.setAttribute("fill", group.color);
     viewportLines.append(path);
   }
   viewportLabels.replaceChildren();

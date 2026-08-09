@@ -5024,6 +5024,128 @@ fn same_resolved_color(lhs: &ColorSpec, rhs: &ColorSpec) -> bool {
     lhs.rgba8() == rhs.rgba8()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionOverlayMode {
+    Stick,
+    Point,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectionOverlayOptions {
+    pub line_width: f32,
+    pub displacement: [f32; 2],
+    pub color: ColorSpec,
+    pub mode: SelectionOverlayMode,
+    pub object_uid: Option<u64>,
+}
+
+impl Default for SelectionOverlayOptions {
+    fn default() -> Self {
+        Self {
+            line_width: 3.0,
+            displacement: [3.0, 3.0],
+            color: rgba_to_spec([0.0, 1.0, 1.0, 0.5]),
+            mode: SelectionOverlayMode::Stick,
+            object_uid: None,
+        }
+    }
+}
+
+/// Build the pixel-width overlay of C++ `SelectionRenderer`.
+///
+/// Stick mode draws selected-selected bonds and a three-axis aster for each
+/// selected atom without a selected bond. Point mode emits one square screen
+/// point per selected atom. The displacement is applied after projection.
+pub fn selection_overlay_snapshot(
+    molecule: &MolCoord,
+    selected_indices: &[usize],
+    options: &SelectionOverlayOptions,
+) -> RenderSceneSnapshot {
+    let selected = selected_indices
+        .iter()
+        .copied()
+        .filter(|index| *index < molecule.atom_count())
+        .collect::<std::collections::BTreeSet<_>>();
+    if selected.is_empty() || options.line_width <= 0.0 {
+        return RenderSceneSnapshot::empty();
+    }
+
+    let make_primitive =
+        |from: Vector4, to: Vector4, atom_indices: Option<(usize, usize)>, point: bool| {
+            let primitive = RenderBond::new(
+                from,
+                to,
+                (options.line_width * 0.01).max(0.0025),
+                Some(options.color.clone()),
+            )
+            .with_end_color(Some(options.color.clone()))
+            .with_picking(options.object_uid, atom_indices, false)
+            .with_screen_style(options.line_width, false)
+            .with_screen_offset(options.displacement[0], options.displacement[1]);
+            if point {
+                primitive.as_screen_point()
+            } else {
+                primitive
+            }
+        };
+
+    let mut bonds = Vec::new();
+    match options.mode {
+        SelectionOverlayMode::Point => {
+            for index in &selected {
+                let position = molecule.atoms()[*index].position;
+                bonds.push(make_primitive(
+                    position,
+                    position,
+                    Some((*index, *index)),
+                    true,
+                ));
+            }
+        }
+        SelectionOverlayMode::Stick => {
+            let mut bonded = std::collections::BTreeSet::new();
+            for bond in molecule
+                .bonds()
+                .iter()
+                .filter(|bond| selected.contains(&bond.atom1) && selected.contains(&bond.atom2))
+            {
+                bonded.insert(bond.atom1);
+                bonded.insert(bond.atom2);
+                bonds.push(make_primitive(
+                    molecule.atoms()[bond.atom1].position,
+                    molecule.atoms()[bond.atom2].position,
+                    Some((bond.atom1, bond.atom2)),
+                    false,
+                ));
+            }
+            const ASTER_RADIUS: f64 = 0.25;
+            for index in selected.iter().filter(|index| !bonded.contains(index)) {
+                let center = molecule.atoms()[*index].position;
+                for axis in [
+                    Vector4::new3(ASTER_RADIUS, 0.0, 0.0),
+                    Vector4::new3(0.0, ASTER_RADIUS, 0.0),
+                    Vector4::new3(0.0, 0.0, ASTER_RADIUS),
+                ] {
+                    bonds.push(make_primitive(
+                        center - axis,
+                        center + axis,
+                        Some((*index, *index)),
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+
+    let bounds = bounds_of_atoms(molecule, &selected);
+    RenderSceneSnapshot {
+        atoms: Vec::new(),
+        bonds,
+        meshes: Vec::new(),
+        bounds,
+    }
+}
+
 /// Build the unlit pixel-width geometry of C++ `SimpleRenderer`.
 ///
 /// Bonded atoms are represented only by lines; an unbonded atom gets the
@@ -9919,6 +10041,53 @@ return cuemol.makeColor("#0000ff");
                 "different atom colors must split each line into equal halves"
             );
         }
+    }
+
+    #[test]
+    fn selection_overlay_matches_stick_point_offset_and_isolated_atom_geometry() {
+        let mut molecule = MolCoord::with_atoms(vec![
+            sample_atom("C1", "C", 0.0, 0.0, 0.0),
+            sample_atom("C2", "C", 1.0, 0.0, 0.0),
+            sample_atom("N1", "N", 3.0, 0.0, 0.0),
+        ]);
+        molecule.add_bond(0, 1, BondOrder::Single);
+        let options = SelectionOverlayOptions {
+            line_width: 4.0,
+            displacement: [5.0, -2.0],
+            object_uid: Some(12),
+            ..SelectionOverlayOptions::default()
+        };
+        let stick = selection_overlay_snapshot(&molecule, &[0, 1, 2], &options);
+        assert_eq!(stick.atom_count(), 0);
+        assert_eq!(stick.bond_count(), 4);
+        assert!(stick.bonds.iter().all(|primitive| {
+            primitive.screen_width == Some(4.0)
+                && primitive.screen_offset == [5.0, -2.0]
+                && !primitive.screen_point
+                && primitive.object_uid == Some(12)
+        }));
+        assert_eq!(
+            stick
+                .bonds
+                .iter()
+                .filter(|primitive| primitive.atom_indices == Some((2, 2)))
+                .count(),
+            3
+        );
+
+        let points = selection_overlay_snapshot(
+            &molecule,
+            &[0, 2],
+            &SelectionOverlayOptions {
+                mode: SelectionOverlayMode::Point,
+                ..options
+            },
+        );
+        assert_eq!(points.bond_count(), 2);
+        assert!(points
+            .bonds
+            .iter()
+            .all(|primitive| primitive.screen_point && primitive.from == primitive.to));
     }
 
     #[test]

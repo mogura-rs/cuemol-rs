@@ -2598,51 +2598,124 @@ impl GuiApplication {
                             if ui.checkbox(&mut visible, "Visible").changed() {
                                 self.set_renderer_visibility(object.uid, renderer.uid, visible);
                             }
-                            // Editable geometry overrides (CueMol2 renderer property
-                            // dialog): bond cylinder + atom sphere radius. The inline
-                            // attr wins over the style, so the 3D view updates live.
-                            let mut bondw = self
-                                .state
-                                .renderer_property(object.uid, renderer.uid, "bondw")
-                                .and_then(|value| value.parse::<f32>().ok())
-                                .unwrap_or(0.18);
-                            ui.horizontal(|ui| {
-                                ui.label("Bond radius");
-                                if ui
-                                    .add(egui::DragValue::new(&mut bondw).speed(0.01))
-                                    .changed()
-                                {
-                                    bondw = bondw.clamp(0.01, 2.0);
+                            if matches!(renderer.renderer_type.as_str(), "*selection" | "selection")
+                            {
+                                let mut mode = self
+                                    .state
+                                    .renderer_property(object.uid, renderer.uid, "mode")
+                                    .unwrap_or_else(|| "stick".to_string());
+                                let previous_mode = mode.clone();
+                                egui::ComboBox::from_id_salt(("selection-mode", renderer.uid))
+                                    .selected_text(&mode)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut mode,
+                                            "stick".to_string(),
+                                            "Stick",
+                                        );
+                                        ui.selectable_value(
+                                            &mut mode,
+                                            "point".to_string(),
+                                            "Point",
+                                        );
+                                    });
+                                if mode != previous_mode {
                                     let _ = self.state.set_renderer_property(
                                         object.uid,
                                         renderer.uid,
-                                        "bondw",
-                                        format!("{bondw:.3}"),
+                                        "mode",
+                                        mode,
                                     );
                                     self.rebuild_snapshot();
                                 }
-                            });
-                            let mut sphr = self
-                                .state
-                                .renderer_property(object.uid, renderer.uid, "sphr")
-                                .and_then(|value| value.parse::<f32>().ok())
-                                .unwrap_or(0.30);
-                            ui.horizontal(|ui| {
-                                ui.label("Sphere radius");
-                                if ui
-                                    .add(egui::DragValue::new(&mut sphr).speed(0.01))
-                                    .changed()
-                                {
-                                    sphr = sphr.clamp(0.05, 3.0);
-                                    let _ = self.state.set_renderer_property(
-                                        object.uid,
-                                        renderer.uid,
-                                        "sphr",
-                                        format!("{sphr:.3}"),
-                                    );
-                                    self.rebuild_snapshot();
+                                for (property, label, default) in [
+                                    ("linew", "Line width", 3.0_f32),
+                                    ("dispx", "X displacement", 3.0),
+                                    ("dispy", "Y displacement", 3.0),
+                                ] {
+                                    let mut value = self
+                                        .state
+                                        .renderer_property(object.uid, renderer.uid, property)
+                                        .and_then(|value| value.parse::<f32>().ok())
+                                        .unwrap_or(default);
+                                    ui.horizontal(|ui| {
+                                        ui.label(label);
+                                        if ui
+                                            .add(egui::DragValue::new(&mut value).speed(0.2))
+                                            .changed()
+                                        {
+                                            let _ = self.state.set_renderer_property(
+                                                object.uid,
+                                                renderer.uid,
+                                                property,
+                                                format!("{value:.3}"),
+                                            );
+                                            self.rebuild_snapshot();
+                                        }
+                                    });
                                 }
-                            });
+                                let mut color = self
+                                    .state
+                                    .renderer_property(object.uid, renderer.uid, "color")
+                                    .unwrap_or_else(|| "rgba(0,255,255,0.5)".to_string());
+                                ui.horizontal(|ui| {
+                                    ui.label("Color");
+                                    if ui.text_edit_singleline(&mut color).changed() {
+                                        let _ = self.state.set_renderer_property(
+                                            object.uid,
+                                            renderer.uid,
+                                            "color",
+                                            color,
+                                        );
+                                        self.rebuild_snapshot();
+                                    }
+                                });
+                            } else {
+                                // Editable geometry overrides (CueMol2 renderer
+                                // property dialog). The inline attr wins over style.
+                                let mut bondw = self
+                                    .state
+                                    .renderer_property(object.uid, renderer.uid, "bondw")
+                                    .and_then(|value| value.parse::<f32>().ok())
+                                    .unwrap_or(0.18);
+                                ui.horizontal(|ui| {
+                                    ui.label("Bond radius");
+                                    if ui
+                                        .add(egui::DragValue::new(&mut bondw).speed(0.01))
+                                        .changed()
+                                    {
+                                        bondw = bondw.clamp(0.01, 2.0);
+                                        let _ = self.state.set_renderer_property(
+                                            object.uid,
+                                            renderer.uid,
+                                            "bondw",
+                                            format!("{bondw:.3}"),
+                                        );
+                                        self.rebuild_snapshot();
+                                    }
+                                });
+                                let mut sphr = self
+                                    .state
+                                    .renderer_property(object.uid, renderer.uid, "sphr")
+                                    .and_then(|value| value.parse::<f32>().ok())
+                                    .unwrap_or(0.30);
+                                ui.horizontal(|ui| {
+                                    ui.label("Sphere radius");
+                                    if ui
+                                        .add(egui::DragValue::new(&mut sphr).speed(0.01))
+                                        .changed()
+                                    {
+                                        sphr = sphr.clamp(0.05, 3.0);
+                                        let _ = self.state.set_renderer_property(
+                                            object.uid,
+                                            renderer.uid,
+                                            "sphr",
+                                            format!("{sphr:.3}"),
+                                        );
+                                        self.rebuild_snapshot();
+                                    }
+                                });
+                            }
                             if ui.button("Delete Renderer").clicked() {
                                 self.delete_renderer(object.uid, renderer.uid);
                             }
@@ -3761,6 +3834,9 @@ impl GuiApplication {
             let Some((to, _)) = camera.project_to_viewport(vec3_from_vector(bond.to), rect) else {
                 continue;
             };
+            let offset = egui::vec2(bond.screen_offset[0], bond.screen_offset[1]);
+            let from = from + offset;
+            let to = to + offset;
             let rgba = bond
                 .color
                 .as_ref()
@@ -3776,13 +3852,21 @@ impl GuiApplication {
                 .as_ref()
                 .and_then(cuemol_gfx::ColorSpec::rgba8)
                 .unwrap_or(rgba);
+            let width = bond.screen_width.unwrap_or(1.0).max(0.1);
+            if bond.screen_point {
+                painter.rect_filled(
+                    egui::Rect::from_center_size(from, egui::vec2(width, width)),
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(rgba.r, rgba.g, rgba.b, rgba.a),
+                );
+                continue;
+            }
             let delta = to - from;
             let length = delta.length();
             if length <= f32::EPSILON {
                 continue;
             }
             let direction = delta / length;
-            let width = bond.screen_width.unwrap_or(1.0).max(0.1);
             let gradient = rgba != end_rgba;
             let paint_span = |start: f32, end: f32| {
                 let steps = if gradient {

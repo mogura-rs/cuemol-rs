@@ -39,6 +39,10 @@ pub struct RenderBond {
     pub screen_width: Option<f32>,
     /// Use the C++ simple-line `0x00ff` stipple pattern (8 px on, 8 px off).
     pub screen_stipple: bool,
+    /// Pixel displacement applied after projecting both endpoints.
+    pub screen_offset: [f32; 2],
+    /// Draw the projected `from` endpoint as a square point instead of a line.
+    pub screen_point: bool,
 }
 
 /// A single triangle-mesh vertex for ribbon/cartoon geometry.
@@ -295,6 +299,8 @@ impl RenderBond {
             selected: false,
             screen_width: None,
             screen_stipple: false,
+            screen_offset: [0.0, 0.0],
+            screen_point: false,
         }
     }
 
@@ -313,6 +319,16 @@ impl RenderBond {
     pub fn with_screen_style(mut self, width: f32, stipple: bool) -> Self {
         self.screen_width = Some(width.max(0.0));
         self.screen_stipple = stipple;
+        self
+    }
+
+    pub fn with_screen_offset(mut self, x: f32, y: f32) -> Self {
+        self.screen_offset = [x, y];
+        self
+    }
+
+    pub fn as_screen_point(mut self) -> Self {
+        self.screen_point = true;
         self
     }
 
