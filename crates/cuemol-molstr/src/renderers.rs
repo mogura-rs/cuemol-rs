@@ -559,7 +559,6 @@ impl NameLabelRenderer {
 
     pub fn set_max_label(&mut self, value: i32) {
         self.max_label = value;
-        self.trim_labels();
     }
 
     pub fn set_maxlabel(&mut self, value: i32) {
@@ -1551,10 +1550,12 @@ mod tests {
         assert_eq!(renderer.labels()[1].text(), "custom");
 
         renderer.set_max_label(1);
+        assert_eq!(renderer.label_count(), 2);
+        assert!(renderer.add_label_by_id(3));
         assert_eq!(renderer.label_count(), 1);
-        assert_eq!(renderer.labels()[0].aid(), Some(2));
-        assert!(renderer.remove_label_by_id(2));
-        assert!(!renderer.remove_label_by_id(2));
+        assert_eq!(renderer.labels()[0].aid(), Some(3));
+        assert!(renderer.remove_label_by_id(3));
+        assert!(!renderer.remove_label_by_id(3));
     }
 
     #[test]

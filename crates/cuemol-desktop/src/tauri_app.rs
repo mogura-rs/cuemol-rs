@@ -881,7 +881,12 @@ impl AppModel {
                         }
                         let supports_coloring = !matches!(
                             renderer.renderer_type.as_str(),
-                            "selection" | "sel" | "*selection" | "atomintr"
+                            "selection"
+                                | "sel"
+                                | "*selection"
+                                | "atomintr"
+                                | "*namelabel"
+                                | "name_label"
                         );
                         RendererDto {
                             uid: renderer.uid.get(),
@@ -889,8 +894,10 @@ impl AppModel {
                             renderer_type: renderer.renderer_type,
                             selection: if matches!(
                                 state.renderer_type(),
-                                "*selection" | "selection"
+                                "*namelabel" | "name_label"
                             ) {
+                                String::new()
+                            } else if matches!(state.renderer_type(), "*selection" | "selection") {
                                 let selection = object_state.mol().selection_text();
                                 if selection.is_empty() {
                                     "!*".to_string()
@@ -2226,6 +2233,79 @@ impl AppModel {
         }
         let mut specific_updates = Vec::<(String, String, bool)>::new();
         match renderer_type.as_str() {
+            "*namelabel" | "name_label" => {
+                if let Some(raw) = properties.specific.get("maxlabel") {
+                    let value = raw
+                        .trim()
+                        .parse::<i32>()
+                        .map_err(|_| "maximum labels must be an integer".to_string())?;
+                    if !(0..=1_000_000).contains(&value) {
+                        return Err("maximum labels must be between 0 and 1000000".to_string());
+                    }
+                    specific_updates.push(("maxlabel".to_string(), value.to_string(), value == 50));
+                }
+                for (key, label) in [
+                    ("dispx", "label X displacement"),
+                    ("dispy", "label Y displacement"),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("{label} must be a number"))?;
+                    if !value.is_finite() || !(-10_000.0..=10_000.0).contains(&value) {
+                        return Err(format!("invalid {label}: {value}"));
+                    }
+                    specific_updates.push((
+                        key.to_string(),
+                        value.to_string(),
+                        value.abs() < f64::EPSILON,
+                    ));
+                }
+                if let Some(raw) = properties.specific.get("color") {
+                    let value = raw.trim();
+                    let color = cuemol_gfx::parse_color(value)
+                        .map_err(|_| format!("invalid label color: {value}"))?;
+                    let is_default = color.rgba8()
+                        == Some(cuemol_gfx::Rgba8 {
+                            r: 255,
+                            g: 255,
+                            b: 0,
+                            a: 255,
+                        });
+                    specific_updates.push(("color".to_string(), value.to_string(), is_default));
+                }
+                if let Some(raw) = properties.specific.get("font_size") {
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| "label font size must be a number".to_string())?;
+                    if !value.is_finite() || !(1.0..=512.0).contains(&value) {
+                        return Err("label font size must be between 1 and 512".to_string());
+                    }
+                    specific_updates.push((
+                        "font_size".to_string(),
+                        value.to_string(),
+                        (value - 12.0).abs() < f64::EPSILON,
+                    ));
+                }
+                for (key, label, default) in [
+                    ("font_name", "label font name", "sans-serif"),
+                    ("font_style", "label font style", "normal"),
+                    ("font_weight", "label font weight", "normal"),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw.trim();
+                    if value.is_empty() || value.len() > 128 {
+                        return Err(format!("{label} must contain 1 to 128 characters"));
+                    }
+                    specific_updates.push((key.to_string(), value.to_string(), value == default));
+                }
+            }
             "*selection" | "selection" => {
                 if let Some(raw) = properties.specific.get("mode") {
                     let value = raw.trim();
@@ -4405,6 +4485,16 @@ fn renderer_specific_attributes(
     styles: &cuemol_qsys::StyleManager,
 ) -> BTreeMap<String, String> {
     let defaults: Vec<(&str, &str)> = match renderer_type {
+        "*namelabel" | "name_label" => vec![
+            ("maxlabel", "50"),
+            ("dispx", "0"),
+            ("dispy", "0"),
+            ("color", "#ffff00"),
+            ("font_size", "12"),
+            ("font_name", "sans-serif"),
+            ("font_style", "normal"),
+            ("font_weight", "normal"),
+        ],
         "*selection" | "selection" => vec![
             ("mode", "stick"),
             ("linew", "3"),
@@ -8706,6 +8796,97 @@ mod tests {
             .renderer(renderer_uid)
             .unwrap();
         for key in ["sel", "mode", "linew", "dispx", "dispy", "color"] {
+            assert_eq!(renderer.qsc_attr(key), None, "{key} restored");
+        }
+    }
+
+    #[test]
+    fn name_label_properties_are_selectionless_undoable_and_persisted() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let renderer_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("*namelabel", "labels");
+
+        let initial = model.snapshot();
+        let label = initial.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == renderer_uid.get())
+            .unwrap();
+        assert!(label.selection.is_empty());
+        assert!(!label.supports_coloring);
+        assert_eq!(label.specific["maxlabel"], "50");
+        assert_eq!(label.specific["font_name"], "sans-serif");
+
+        let mut properties = default_renderer_properties_input(object_uid, renderer_uid, "labels");
+        properties.selection = "invalid selector (".to_string();
+        properties.specific = BTreeMap::from([
+            ("maxlabel".to_string(), "25".to_string()),
+            ("dispx".to_string(), "6".to_string()),
+            ("dispy".to_string(), "-4".to_string()),
+            ("color".to_string(), "#123456".to_string()),
+            ("font_size".to_string(), "18".to_string()),
+            ("font_name".to_string(), "monospace".to_string()),
+            ("font_style".to_string(), "italic".to_string()),
+            ("font_weight".to_string(), "bold".to_string()),
+        ]);
+        let response =
+            handle_model_request(&mut model, ModelRequest::SetRendererProperties(properties))
+                .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let label = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == renderer_uid.get())
+            .unwrap();
+        for (key, expected) in [
+            ("maxlabel", "25"),
+            ("dispx", "6"),
+            ("dispy", "-4"),
+            ("color", "#123456"),
+            ("font_size", "18"),
+            ("font_name", "monospace"),
+            ("font_style", "italic"),
+            ("font_weight", "bold"),
+        ] {
+            assert_eq!(label.specific[key], expected, "{key}");
+        }
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("sel"), None);
+
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        for key in [
+            "sel",
+            "maxlabel",
+            "dispx",
+            "dispy",
+            "color",
+            "font_size",
+            "font_name",
+            "font_style",
+            "font_weight",
+        ] {
             assert_eq!(renderer.qsc_attr(key), None, "{key} restored");
         }
     }

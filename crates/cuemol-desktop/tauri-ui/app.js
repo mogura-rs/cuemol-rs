@@ -1430,6 +1430,7 @@ function rendererPropertiesEditor(object, renderer) {
   const surfaceObject = object.className === "MolSurfObj";
   const simpleLike = ["simple", "trace"].includes(renderer.rendererType);
   const splineLike = renderer.rendererType === "spline";
+  const nameLabelLike = ["*namelabel", "name_label"].includes(renderer.rendererType);
   const selectionLike = ["*selection", "selection"].includes(renderer.rendererType);
   const atomIntrLike = renderer.rendererType === "atomintr";
   const anisouLike = renderer.rendererType === "anisou";
@@ -1449,6 +1450,8 @@ function rendererPropertiesEditor(object, renderer) {
     dialogTitle.textContent = "Trace renderer properties";
   } else if (splineLike) {
     dialogTitle.textContent = "Spline renderer properties";
+  } else if (nameLabelLike) {
+    dialogTitle.textContent = "Name label renderer properties";
   } else if (selectionLike) {
     dialogTitle.textContent = "Selection renderer properties";
   } else if (atomIntrLike) {
@@ -1482,6 +1485,8 @@ function rendererPropertiesEditor(object, renderer) {
     ? [renderer.rendererType === "trace" ? "Trace" : "Simple"]
     : splineLike
       ? ["Common", "Spline"]
+    : nameLabelLike
+      ? ["Label"]
     : selectionLike
       ? ["Selection"]
     : atomIntrLike
@@ -1636,6 +1641,41 @@ function rendererPropertiesEditor(object, renderer) {
     );
     page.append(selectionGroup);
   }
+  if (nameLabelLike) {
+    const labelGroup = document.createElement("fieldset");
+    labelGroup.className = "property-common-group renderer-specific-group";
+    const labelLegend = document.createElement("legend");
+    labelLegend.textContent = "Atom labels";
+    labelGroup.append(labelLegend);
+    addSpecificNumber(labelGroup, "maxlabel", "Maximum labels:", 0, 1000000, 1, "50");
+    addSpecificNumber(labelGroup, "dispx", "X displacement:", -100, 100, 0.5, "0");
+    addSpecificNumber(labelGroup, "dispy", "Y displacement:", -100, 100, 0.5, "0");
+    addSpecificColor(labelGroup, "color", "Color:", "#ffff00");
+    addSpecificNumber(labelGroup, "font_size", "Font size:", 1, 512, 0.5, "12");
+    addSpecificText(labelGroup, "font_name", "Font family:", "sans-serif");
+    addSpecificSelect(
+      labelGroup,
+      "font_style",
+      "Font style:",
+      [
+        ["normal", "Normal"],
+        ["italic", "Italic"],
+        ["oblique", "Oblique"],
+      ],
+      "normal",
+    );
+    addSpecificSelect(
+      labelGroup,
+      "font_weight",
+      "Font weight:",
+      [
+        ["normal", "Normal"],
+        ["bold", "Bold"],
+      ],
+      "normal",
+    );
+    page.append(labelGroup);
+  }
   const basic = document.createElement("fieldset");
   basic.className = "property-common-group";
   const basicLegend = document.createElement("legend");
@@ -1645,8 +1685,8 @@ function rendererPropertiesEditor(object, renderer) {
   name.value = renderer.name;
   propertyField(basic, "Name:", name);
   const selection = document.createElement("input");
-  selection.value = densityMap ? "(not available)" : renderer.selection || "*";
-  selection.disabled = densityMap || selectionLike;
+  selection.value = densityMap || nameLabelLike ? "(not available)" : renderer.selection || "*";
+  selection.disabled = densityMap || selectionLike || nameLabelLike;
   selection.spellcheck = false;
   propertyField(basic, "Selection:", selection);
   const checks = document.createElement("div");
@@ -2935,7 +2975,8 @@ function rendererPropertiesEditor(object, renderer) {
           objectUid: object.uid,
           rendererUid: renderer.uid,
           name: name.value,
-          selection: densityMap || selectionLike ? renderer.selection : selection.value,
+          selection:
+            densityMap || selectionLike || nameLabelLike ? renderer.selection : selection.value,
           visible: visible.checked,
           locked: locked.checked,
           material: material.value,

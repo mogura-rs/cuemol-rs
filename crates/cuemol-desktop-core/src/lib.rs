@@ -3585,7 +3585,10 @@ impl DesktopAppState {
         let renderer = object
             .renderer_mut(renderer_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
-        let selection_readonly = matches!(renderer.renderer_type(), "*selection" | "selection");
+        let selection_readonly = matches!(
+            renderer.renderer_type(),
+            "*selection" | "selection" | "*namelabel" | "name_label"
+        );
         let selector = if selection_readonly {
             None
         } else if selection_text.is_empty() || selection_text == "*" {
@@ -5142,13 +5145,10 @@ impl DesktopAppState {
         let mut out = Vec::new();
         for object in scene.objects().iter().filter(|object| object.is_visible()) {
             for renderer in object.renderers().iter().filter(|renderer| {
-                renderer.is_visible() && renderer.renderer_type() == "*namelabel"
+                renderer.is_visible()
+                    && matches!(renderer.renderer_type(), "*namelabel" | "name_label")
             }) {
                 let label_style = gui_renderer_label_style(renderer, &styles);
-                let renderer_max = renderer
-                    .resolved_attr("maxlabel", &styles, DEFAULT_STYLE_SCOPE)
-                    .and_then(|value| value.trim().parse::<usize>().ok())
-                    .unwrap_or(50);
                 let dispx = renderer
                     .resolved_attr("dispx", &styles, DEFAULT_STYLE_SCOPE)
                     .and_then(|value| value.trim().parse::<f32>().ok())
@@ -5158,11 +5158,7 @@ impl DesktopAppState {
                     .and_then(|value| value.trim().parse::<f32>().ok())
                     .unwrap_or(0.0);
                 let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
-                for (mut position, text) in object
-                    .name_label_entries(renderer)
-                    .into_iter()
-                    .take(renderer_max)
-                {
+                for (mut position, text) in object.name_label_entries(renderer) {
                     if out.len() >= max {
                         return out;
                     }
@@ -48532,7 +48528,8 @@ end_header
         let mut app = DesktopAppState::new();
         let scene_uid = app.new_scene("labels", false).result_scene;
         let molecule = cuemol_molstr::read_pdb_str(
-            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00\n",
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      2  N   GLY A   1       0.200   0.000   0.000  1.00 10.00           N  \n",
         )
         .unwrap();
         let object_uid = app
@@ -48545,9 +48542,13 @@ end_header
         object
             .renderer_mut(renderer_uid)
             .unwrap()
-            .set_qsc_children(vec![pse_atom_label_node(0, "PyMOL label")]);
+            .set_qsc_children(vec![
+                pse_atom_label_node(0, "PyMOL label"),
+                pse_atom_label_node(1, "Second label"),
+            ]);
         let renderer = object.renderer_mut(renderer_uid).unwrap();
         for (name, value) in [
+            ("maxlabel", "1"),
             ("dispx", "5"),
             ("dispy", "-3"),
             ("color", "#123456"),
@@ -48566,7 +48567,7 @@ end_header
             [0.0, 0.0, 0.0, 1.0],
         ];
         let labels = app.active_name_labels(mvp, 100.0, 100.0, 10);
-        assert_eq!(labels.len(), 1);
+        assert_eq!(labels.len(), 2);
         assert_eq!(labels[0].text, "PyMOL label");
         assert!((labels[0].x - 55.0).abs() < 1.0e-6);
         assert!((labels[0].y - 47.0).abs() < 1.0e-6);
@@ -48575,6 +48576,8 @@ end_header
         assert_eq!(labels[0].font_name, "monospace");
         assert_eq!(labels[0].font_style, "italic");
         assert_eq!(labels[0].font_weight, "bold");
+        assert_eq!(labels[1].text, "Second label");
+        assert!((labels[1].x - 65.0).abs() < 1.0e-6);
     }
 
     #[test]

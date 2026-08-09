@@ -833,6 +833,7 @@ impl GuiApplication {
                 self.viewport_rect = Some(rect);
                 self.draw_screen_lines(ui, camera, rect);
                 self.draw_center_mark(ui, rect);
+                self.draw_name_labels(ui, camera, rect);
                 self.draw_atom_labels(ui, camera, rect);
                 ui.allocate_ui(rect.size(), |ui| {
                     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -2598,8 +2599,90 @@ impl GuiApplication {
                             if ui.checkbox(&mut visible, "Visible").changed() {
                                 self.set_renderer_visibility(object.uid, renderer.uid, visible);
                             }
-                            if matches!(renderer.renderer_type.as_str(), "*selection" | "selection")
-                            {
+                            if matches!(
+                                renderer.renderer_type.as_str(),
+                                "*namelabel" | "name_label"
+                            ) {
+                                let mut max_labels = self
+                                    .state
+                                    .renderer_property(object.uid, renderer.uid, "maxlabel")
+                                    .and_then(|value| value.parse::<i32>().ok())
+                                    .unwrap_or(50);
+                                ui.horizontal(|ui| {
+                                    ui.label("Maximum labels");
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut max_labels)
+                                                .speed(1)
+                                                .range(0..=1_000_000),
+                                        )
+                                        .changed()
+                                    {
+                                        let _ = self.state.set_renderer_property(
+                                            object.uid,
+                                            renderer.uid,
+                                            "maxlabel",
+                                            max_labels.to_string(),
+                                        );
+                                    }
+                                });
+                                for (property, label, default, speed, range) in [
+                                    ("dispx", "X displacement", 0.0_f32, 0.5, -100.0..=100.0),
+                                    ("dispy", "Y displacement", 0.0, 0.5, -100.0..=100.0),
+                                    ("font_size", "Font size", 12.0, 0.5, 1.0..=512.0),
+                                ] {
+                                    let mut value = self
+                                        .state
+                                        .renderer_property(object.uid, renderer.uid, property)
+                                        .and_then(|value| value.parse::<f32>().ok())
+                                        .unwrap_or(default);
+                                    ui.horizontal(|ui| {
+                                        ui.label(label);
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut value)
+                                                    .speed(speed)
+                                                    .range(range),
+                                            )
+                                            .changed()
+                                        {
+                                            let _ = self.state.set_renderer_property(
+                                                object.uid,
+                                                renderer.uid,
+                                                property,
+                                                format!("{value:.3}"),
+                                            );
+                                            self.rebuild_snapshot();
+                                        }
+                                    });
+                                }
+                                for (property, label, default) in [
+                                    ("color", "Color", "#ffff00"),
+                                    ("font_name", "Font family", "sans-serif"),
+                                    ("font_style", "Font style", "normal"),
+                                    ("font_weight", "Font weight", "normal"),
+                                ] {
+                                    let mut value = self
+                                        .state
+                                        .renderer_property(object.uid, renderer.uid, property)
+                                        .unwrap_or_else(|| default.to_string());
+                                    ui.horizontal(|ui| {
+                                        ui.label(label);
+                                        if ui.text_edit_singleline(&mut value).changed() {
+                                            let _ = self.state.set_renderer_property(
+                                                object.uid,
+                                                renderer.uid,
+                                                property,
+                                                value,
+                                            );
+                                            self.rebuild_snapshot();
+                                        }
+                                    });
+                                }
+                            } else if matches!(
+                                renderer.renderer_type.as_str(),
+                                "*selection" | "selection"
+                            ) {
                                 let mut mode = self
                                     .state
                                     .renderer_property(object.uid, renderer.uid, "mode")
@@ -3935,6 +4018,44 @@ impl GuiApplication {
                 label,
                 egui::FontId::proportional(11.0),
                 color,
+            );
+        }
+    }
+
+    /// Draw serialized `*namelabel` renderer entries independently of the
+    /// temporary selection-label toggle.
+    fn draw_name_labels(&self, ui: &egui::Ui, camera: &CameraController, rect: egui::Rect) {
+        if rect.width() <= 0.0 || rect.height() <= 0.0 {
+            return;
+        }
+        let mvp = camera
+            .view_projection(rect.width() / rect.height().max(1.0))
+            .to_cols_array_2d();
+        let labels = self
+            .state
+            .active_name_labels(mvp, rect.width(), rect.height(), 1_000);
+        let painter = ui.painter();
+        for label in labels {
+            let rgba = cuemol_gfx::parse_color(&label.color)
+                .ok()
+                .and_then(|color| color.rgba8())
+                .unwrap_or(cuemol_gfx::Rgba8 {
+                    r: 255,
+                    g: 255,
+                    b: 0,
+                    a: 255,
+                });
+            let family = if label.font_name.to_ascii_lowercase().contains("mono") {
+                egui::FontFamily::Monospace
+            } else {
+                egui::FontFamily::Proportional
+            };
+            painter.text(
+                egui::pos2(rect.left() + label.x, rect.top() + label.y),
+                egui::Align2::LEFT_BOTTOM,
+                label.text,
+                egui::FontId::new(label.font_size.max(1.0) as f32, family),
+                egui::Color32::from_rgba_unmultiplied(rgba.r, rgba.g, rgba.b, rgba.a),
             );
         }
     }
