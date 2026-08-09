@@ -15,8 +15,9 @@ use cuemol_molstr::{
 use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
     apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot,
-    molecule_render_snapshot, na_renderer_snapshot, ribbon_mesh_snapshot, scene_style_manager,
-    AnIsoURenderOptions, MoleculeRenderOptions, NARenderOptions, NARenderer, DEFAULT_STYLE_SCOPE,
+    molecule_render_options_for_renderer, molecule_render_snapshot, na_renderer_snapshot,
+    ribbon_mesh_snapshot, scene_style_manager, AnIsoURenderOptions, MoleculeRenderOptions,
+    NARenderOptions, NARenderer, DEFAULT_STYLE_SCOPE,
 };
 use cuemol_qsys::{Camera, MultiGradient, ScalarObject};
 use cuemol_render::{
@@ -912,7 +913,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             if rtype.starts_with('*') {
                 continue;
             }
-            let mut options = base_render_options(rtype);
+            let mut options = molecule_render_options_for_renderer(rtype);
             apply_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
             if matches!(rtype, "tube" | "nucl") {
                 apply_tube_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
@@ -1360,38 +1361,6 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         combined.triangle_count()
     );
     Ok(())
-}
-
-/// Renderer-type base render options (the hardcoded per-type look, mirroring the
-/// desktop's `renderer_render_options`) onto which style resolution then layers.
-fn base_render_options(renderer_type: &str) -> MoleculeRenderOptions {
-    let mut options = MoleculeRenderOptions::default();
-    match renderer_type {
-        "cpk" => {
-            options.element_radii = Some(cuemol_molvis::VdwRadii::default());
-            options.sphere_detail = Some(3);
-            options.bond_radius = 0.0;
-            options.draw_bonds = false;
-        }
-        "ballstick" => {
-            options.vdw_scale = 0.16;
-            options.bond_radius = 0.08;
-            options.sphere_detail = Some(3);
-        }
-        "trace" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl" => {
-            options.vdw_scale = 0.12;
-            options.bond_radius = 0.12;
-        }
-        "molsurf" | "dsurface" | "directsurf" | "dsurf2" => {
-            options.vdw_scale = 0.32;
-            options.bond_radius = 0.04;
-        }
-        _ => {}
-    }
-    // `trace` is the angular Cα line strip (C++ TraceRenderer): straight between
-    // pivots, no spline. tube/spline/ribbon/cartoon/nucl keep the smooth spline.
-    options.linear_backbone = renderer_type == "trace";
-    options
 }
 
 fn direct_surface_scene_snapshot(

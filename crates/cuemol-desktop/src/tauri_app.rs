@@ -2484,7 +2484,18 @@ impl AppModel {
                     if !(2..=20).contains(&value) {
                         return Err("detail must be between 2 and 20".to_string());
                     }
-                    specific_updates.push(("detail".to_string(), value.to_string(), value == 3));
+                    specific_updates.push(("detail".to_string(), value.to_string(), value == 10));
+                }
+                if let Some(raw) = properties.specific.get("glrender_mode") {
+                    let value = raw.trim();
+                    if !matches!(value, "default" | "shader" | "vbo" | "glu") {
+                        return Err(format!("unsupported CPK rendering mode: {value}"));
+                    }
+                    specific_updates.push((
+                        "glrender_mode".to_string(),
+                        value.to_string(),
+                        value == "default",
+                    ));
                 }
             }
             "disorder" => {
@@ -4436,7 +4447,8 @@ fn renderer_specific_attributes(
             ("vdwr_S", "1.8"),
             ("vdwr_P", "1.8"),
             ("vdwr_X", "1.7"),
-            ("detail", "3"),
+            ("detail", "10"),
+            ("glrender_mode", "default"),
         ],
         "disorder" => vec![
             ("target", ""),
@@ -8999,6 +9011,15 @@ mod tests {
         object.add_renderer("tube", "backbone");
         let disorder_uid = object.add_renderer("disorder", "disorder 1");
 
+        let initial = model.snapshot();
+        let initial_cpk = initial.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == cpk_uid.get())
+            .unwrap();
+        assert_eq!(initial_cpk.specific["detail"], "10");
+        assert_eq!(initial_cpk.specific["glrender_mode"], "default");
+
         let mut cpk = default_renderer_properties_input(object_uid, cpk_uid, "spacefill");
         cpk.specific = BTreeMap::from([
             ("vdwr_H".to_string(), "0.8".to_string()),
@@ -9009,6 +9030,7 @@ mod tests {
             ("vdwr_P".to_string(), "2.1".to_string()),
             ("vdwr_X".to_string(), "1.9".to_string()),
             ("detail".to_string(), "9".to_string()),
+            ("glrender_mode".to_string(), "shader".to_string()),
         ]);
         let response =
             handle_model_request(&mut model, ModelRequest::SetRendererProperties(cpk)).unwrap();
@@ -9022,6 +9044,7 @@ mod tests {
             .unwrap();
         assert_eq!(cpk.specific["vdwr_C"], "2.4");
         assert_eq!(cpk.specific["detail"], "9");
+        assert_eq!(cpk.specific["glrender_mode"], "shader");
 
         let mut disorder =
             default_renderer_properties_input(object_uid, disorder_uid, "missing loop");
@@ -9065,6 +9088,7 @@ mod tests {
             .unwrap();
         assert_eq!(renderer.qsc_attr("vdwr_C"), None);
         assert_eq!(renderer.qsc_attr("detail"), None);
+        assert_eq!(renderer.qsc_attr("glrender_mode"), None);
     }
 
     #[test]

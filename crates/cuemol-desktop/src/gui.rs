@@ -2670,6 +2670,126 @@ impl GuiApplication {
                                         self.rebuild_snapshot();
                                     }
                                 });
+                            } else if renderer.renderer_type == "cpk" {
+                                ui.label("Atom radii");
+                                for (property, label, default) in [
+                                    ("vdwr_C", "Carbon", 1.7_f32),
+                                    ("vdwr_N", "Nitrogen", 1.55),
+                                    ("vdwr_O", "Oxygen", 1.52),
+                                    ("vdwr_S", "Sulfur", 1.8),
+                                    ("vdwr_P", "Phosphorus", 1.8),
+                                    ("vdwr_H", "Hydrogen", 1.2),
+                                    ("vdwr_X", "Others", 1.7),
+                                ] {
+                                    let mut value = self
+                                        .state
+                                        .renderer_property(object.uid, renderer.uid, property)
+                                        .and_then(|value| value.parse::<f32>().ok())
+                                        .unwrap_or(default);
+                                    ui.horizontal(|ui| {
+                                        ui.label(label);
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut value)
+                                                    .speed(0.01)
+                                                    .range(0.0..=3.0),
+                                            )
+                                            .changed()
+                                        {
+                                            let result = if (value - default).abs() < f32::EPSILON {
+                                                self.state.reset_renderer_property(
+                                                    object.uid,
+                                                    renderer.uid,
+                                                    property,
+                                                )
+                                            } else {
+                                                self.state.set_renderer_property(
+                                                    object.uid,
+                                                    renderer.uid,
+                                                    property,
+                                                    format!("{value:.3}"),
+                                                )
+                                            };
+                                            if result.is_ok() {
+                                                self.rebuild_snapshot();
+                                            }
+                                        }
+                                    });
+                                }
+                                let mut detail = self
+                                    .state
+                                    .renderer_property(object.uid, renderer.uid, "detail")
+                                    .and_then(|value| value.parse::<i32>().ok())
+                                    .unwrap_or(10);
+                                ui.horizontal(|ui| {
+                                    ui.label("Detail");
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut detail)
+                                                .speed(1)
+                                                .range(2..=20),
+                                        )
+                                        .changed()
+                                    {
+                                        let result = if detail == 10 {
+                                            self.state.reset_renderer_property(
+                                                object.uid,
+                                                renderer.uid,
+                                                "detail",
+                                            )
+                                        } else {
+                                            self.state.set_renderer_property(
+                                                object.uid,
+                                                renderer.uid,
+                                                "detail",
+                                                detail.to_string(),
+                                            )
+                                        };
+                                        if result.is_ok() {
+                                            self.rebuild_snapshot();
+                                        }
+                                    }
+                                });
+                                let mut render_mode = self
+                                    .state
+                                    .renderer_property(object.uid, renderer.uid, "glrender_mode")
+                                    .unwrap_or_else(|| "default".to_string());
+                                let previous_mode = render_mode.clone();
+                                egui::ComboBox::from_id_salt(("cpk-render-mode", renderer.uid))
+                                    .selected_text(&render_mode)
+                                    .show_ui(ui, |ui| {
+                                        for (value, caption) in [
+                                            ("default", "Default"),
+                                            ("shader", "Shader"),
+                                            ("vbo", "VBO"),
+                                            ("glu", "GLU"),
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut render_mode,
+                                                value.to_string(),
+                                                caption,
+                                            );
+                                        }
+                                    });
+                                if render_mode != previous_mode {
+                                    let result = if render_mode == "default" {
+                                        self.state.reset_renderer_property(
+                                            object.uid,
+                                            renderer.uid,
+                                            "glrender_mode",
+                                        )
+                                    } else {
+                                        self.state.set_renderer_property(
+                                            object.uid,
+                                            renderer.uid,
+                                            "glrender_mode",
+                                            render_mode,
+                                        )
+                                    };
+                                    if result.is_ok() {
+                                        self.rebuild_snapshot();
+                                    }
+                                }
                             } else {
                                 // Editable geometry overrides (CueMol2 renderer
                                 // property dialog). The inline attr wins over style.

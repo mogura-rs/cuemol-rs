@@ -330,6 +330,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "Show ring",
         "CPK Rend Properties",
         "Atom radii",
+        "OpenGL rendering:",
         "Disorder renderer properties",
         "Dot separation:",
         "Loop size 2:",

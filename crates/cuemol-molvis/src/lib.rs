@@ -3816,6 +3816,41 @@ impl Default for MoleculeRenderOptions {
     }
 }
 
+/// Renderer-factory defaults shared by interactive and file-rendering paths.
+///
+/// The public renderer name `cpk` resolves to CPK2Renderer, while the legacy
+/// CPKRenderer remains script-constructible with its own detail default.
+pub fn molecule_render_options_for_renderer(renderer_type: &str) -> MoleculeRenderOptions {
+    let mut options = MoleculeRenderOptions::default();
+    match renderer_type {
+        "simple" => {
+            options.valence_bond_mode = ValenceBondMode::Simple;
+        }
+        "cpk" => {
+            options.element_radii = Some(VdwRadii::default());
+            options.sphere_detail = Some(10);
+            options.bond_radius = 0.0;
+            options.draw_bonds = false;
+        }
+        "ballstick" => {
+            options.vdw_scale = 0.16;
+            options.bond_radius = 0.08;
+            options.sphere_detail = Some(3);
+        }
+        "trace" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl" => {
+            options.vdw_scale = 0.12;
+            options.bond_radius = 0.12;
+        }
+        "molsurf" | "dsurface" | "directsurf" | "dsurf2" => {
+            options.vdw_scale = 0.32;
+            options.bond_radius = 0.04;
+        }
+        _ => {}
+    }
+    options.linear_backbone = renderer_type == "trace";
+    options
+}
+
 /// Apply a renderer's resolved `<style>` preset onto render options so a scene's
 /// `<renderer style="DefaultBallStick">` inherits the styled geometry instead of
 /// the hardcoded defaults. Mirrors the geometry-bearing half of C++
@@ -10651,6 +10686,15 @@ return cuemol.makeColor("#0000ff");
         renderer.invalidate_display_cache();
         assert!(!renderer.check_shader_ok());
         assert!(!renderer.sphere_gpu_prim_valid());
+
+        let cpk_options = molecule_render_options_for_renderer("cpk");
+        assert_eq!(cpk_options.sphere_detail, Some(10));
+        assert_eq!(cpk_options.element_radii, Some(VdwRadii::default()));
+        assert!(!cpk_options.draw_bonds);
+        assert_eq!(
+            molecule_render_options_for_renderer("simple").valence_bond_mode,
+            ValenceBondMode::Simple
+        );
     }
 
     #[test]

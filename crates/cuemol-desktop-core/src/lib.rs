@@ -23,11 +23,11 @@ use cuemol_molstr::{write_pdb_string_with_selection, AtomIntrLine};
 use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
     apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot_with_style,
-    mainchain_line_snapshot, molecule_render_snapshot, na_renderer_snapshot, ribbon_mesh_snapshot,
-    ring_meshes_snapshot_with, scene_style_manager, selection_overlay_snapshot,
-    simple_line_snapshot, AnIsoURenderOptions, DisorderRenderOptions, MainchainLineMode,
-    MoleculeRenderOptions, NARenderOptions, NARenderer, SelectionOverlayMode,
-    SelectionOverlayOptions, ValenceBondMode, VdwRadii, DEFAULT_STYLE_SCOPE,
+    mainchain_line_snapshot, molecule_render_options_for_renderer, molecule_render_snapshot,
+    na_renderer_snapshot, ribbon_mesh_snapshot, ring_meshes_snapshot_with, scene_style_manager,
+    selection_overlay_snapshot, simple_line_snapshot, AnIsoURenderOptions, DisorderRenderOptions,
+    MainchainLineMode, MoleculeRenderOptions, NARenderOptions, NARenderer, SelectionOverlayMode,
+    SelectionOverlayOptions, ValenceBondMode, DEFAULT_STYLE_SCOPE,
 };
 #[cfg(test)]
 use cuemol_molvis::{default_style_manager, disorder_lines_snapshot};
@@ -39202,40 +39202,10 @@ fn renderer_render_options(
     styles: &StyleManager,
     style_scope_id: u64,
 ) -> MoleculeRenderOptions {
-    let mut options = MoleculeRenderOptions {
-        object_uid: Some(object_uid.get()),
-        selected_indices: selected_indices.to_vec(),
-        ..MoleculeRenderOptions::default()
-    };
     let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
-    match renderer_type {
-        "simple" => {
-            options.valence_bond_mode = ValenceBondMode::Simple;
-        }
-        "cpk" => {
-            options.element_radii = Some(VdwRadii::default());
-            options.sphere_detail = Some(3);
-            options.bond_radius = 0.0;
-            options.draw_bonds = false;
-        }
-        "ballstick" => {
-            options.vdw_scale = 0.16;
-            options.bond_radius = 0.08;
-            options.sphere_detail = Some(3);
-        }
-        "trace" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl" => {
-            options.vdw_scale = 0.12;
-            options.bond_radius = 0.12;
-        }
-        "molsurf" | "dsurface" | "directsurf" | "dsurf2" => {
-            options.vdw_scale = 0.32;
-            options.bond_radius = 0.04;
-        }
-        _ => {}
-    }
-    // `trace` is the angular Cα line strip (C++ TraceRenderer): straight between
-    // pivots, no spline. tube/spline/ribbon/cartoon/nucl keep the smooth spline.
-    options.linear_backbone = renderer_type == "trace";
+    let mut options = molecule_render_options_for_renderer(renderer_type);
+    options.object_uid = Some(object_uid.get());
+    options.selected_indices = selected_indices.to_vec();
     // Layer the scene renderer's resolved `style="..."` geometry (bond/atom radii,
     // ribbon cross-section dims/shape, axial detail) on top of the per-type
     // defaults — the same cascade the CLI `render-qsc` applies. A renderer with no
@@ -49075,6 +49045,47 @@ end_header
             .unwrap()
             .renderer(simple_uid)
             .is_some());
+    }
+
+    #[test]
+    fn cpk_renderer_uses_cpk2_defaults_and_resolved_overrides() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("cpk2-defaults", false).result_scene;
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  H1  GLY A   1       0.000   0.000   0.000  1.00 10.00           H  \n\
+             ATOM      2  C1  GLY A   1       4.000   0.000   0.000  1.00 10.00           C  \n\
+             END\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let renderer_uid = app
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("cpk", "cpk");
+
+        let defaults = app.active_render_snapshot("").unwrap();
+        assert_eq!(defaults.atom_count(), 2);
+        assert_eq!(defaults.bond_count(), 0);
+        assert!(defaults.atoms.iter().all(|atom| atom.detail == Some(10)));
+        assert!((defaults.atoms[0].radius - 1.2).abs() < 1.0e-6);
+        assert!((defaults.atoms[1].radius - 1.7).abs() < 1.0e-6);
+
+        let renderer = app
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap();
+        renderer.set_qsc_attr("detail", "6");
+        renderer.set_qsc_attr("vdwr_C", "2.4");
+        let configured = app.active_render_snapshot("").unwrap();
+        assert!(configured.atoms.iter().all(|atom| atom.detail == Some(6)));
+        assert!((configured.atoms[1].radius - 2.4).abs() < 1.0e-6);
     }
 
     #[test]

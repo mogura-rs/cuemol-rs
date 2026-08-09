@@ -1987,7 +1987,19 @@ function rendererPropertiesEditor(object, renderer) {
     const detailLegend = document.createElement("legend");
     detailLegend.textContent = "Tessellation";
     detailGroup.append(detailLegend);
-    addSpecificNumber(detailGroup, "detail", "Detail:", 2, 20, 1, "3");
+    addSpecificNumber(detailGroup, "detail", "Detail:", 2, 20, 1, "10");
+    addSpecificSelect(
+      detailGroup,
+      "glrender_mode",
+      "OpenGL rendering:",
+      [
+        ["default", "Default"],
+        ["shader", "Shader"],
+        ["vbo", "VBO"],
+        ["glu", "GLU"],
+      ],
+      "default",
+    );
     radiiPage.append(detailGroup);
   }
 
