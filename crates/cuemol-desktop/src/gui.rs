@@ -6358,6 +6358,7 @@ fn mesh_gpu_vertex(vertex: &MeshVertex) -> MeshGpuVertex {
             vertex.normal.z as f32,
         ],
         color: vertex.color,
+        cull_back_faces: f32::from(vertex.culls_back_faces()),
     }
 }
 
@@ -6636,6 +6637,7 @@ struct MeshGpuVertex {
     position: [f32; 3],
     normal: [f32; 3],
     color: [f32; 4],
+    cull_back_faces: f32,
 }
 
 const ATOM_QUAD_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
@@ -6643,8 +6645,8 @@ const ATOM_INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![1 => Float32x4, 2 => Float32x4, 3 => Float32x4];
 const BOND_VERTEX_ATTRS: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
-const MESH_VERTEX_ATTRS: [wgpu::VertexAttribute; 3] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
+const MESH_VERTEX_ATTRS: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32];
 
 const ATOM_QUAD: [QuadVertex; 6] = [
     QuadVertex {
@@ -6746,12 +6748,14 @@ struct MeshVsIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) cull_back_faces: f32,
 };
 
 struct MeshVsOut {
     @builtin(position) position: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) @interpolate(flat) cull_back_faces: f32,
 };
 
 @vertex
@@ -6760,11 +6764,15 @@ fn mesh_vs(input: MeshVsIn) -> MeshVsOut {
     output.position = camera.view_proj * vec4<f32>(input.position, 1.0);
     output.normal = input.normal;
     output.color = input.color;
+    output.cull_back_faces = input.cull_back_faces;
     return output;
 }
 
 @fragment
-fn mesh_fs(input: MeshVsOut) -> @location(0) vec4<f32> {
+fn mesh_fs(input: MeshVsOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    if (input.cull_back_faces > 0.5 && !front_facing) {
+        discard;
+    }
     let n = normalize(input.normal);
     let l = normalize(camera.light.xyz);
     // Two-sided lighting so tube ends and ribbon backs are not left black.

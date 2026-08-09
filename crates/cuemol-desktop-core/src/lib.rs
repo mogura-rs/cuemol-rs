@@ -1268,54 +1268,20 @@ impl DesktopAppState {
                     .and_then(|value| value.parse::<f64>().ok())
                     .unwrap_or(1.2)
                     .clamp(0.1, 10.0);
-                let mut rendered = RenderSceneSnapshot::empty();
-                match attr("drawmode").as_deref().unwrap_or("fill") {
-                    "line" => {
-                        let mut edges = BTreeSet::new();
-                        for triangle in mesh.indices.chunks_exact(3) {
-                            for (lhs, rhs) in [
-                                (triangle[0], triangle[1]),
-                                (triangle[1], triangle[2]),
-                                (triangle[2], triangle[0]),
-                            ] {
-                                edges.insert((lhs.min(rhs), lhs.max(rhs)));
-                            }
-                        }
-                        for (lhs, rhs) in edges {
-                            let lhs = &mesh.vertices[lhs as usize];
-                            let rhs = &mesh.vertices[rhs as usize];
-                            rendered.bonds.push(cuemol_render::RenderBond {
-                                from: lhs.position,
-                                to: rhs.position,
-                                radius: (0.04 * width) as f32,
-                                color: Some(render_color_spec(lhs.color)),
-                                end_color: None,
-                                object_uid: Some(surface.uid.get()),
-                                atom_indices: None,
-                                selected: false,
-                                screen_width: None,
-                                screen_stipple: false,
-                                screen_offset: [0.0, 0.0],
-                                screen_point: false,
-                            });
-                        }
-                    }
-                    "point" => {
-                        for vertex in mesh.vertices {
-                            rendered.atoms.push(cuemol_render::RenderAtom {
-                                center: vertex.position,
-                                radius: (0.06 * width) as f32,
-                                color: Some(render_color_spec(vertex.color)),
-                                object_uid: Some(surface.uid.get()),
-                                atom_index: None,
-                                selected: false,
-                                detail: Some(1),
-                            });
-                        }
-                    }
-                    _ => rendered.meshes.push(mesh),
-                }
-                rendered.recompute_bounds();
+                let draw_mode = match attr("drawmode").as_deref().unwrap_or("fill") {
+                    "line" | "1" => MapSurfaceDrawMode::Line,
+                    "point" | "2" => MapSurfaceDrawMode::Point,
+                    _ => MapSurfaceDrawMode::Fill,
+                };
+                let cull_back_faces = attr("cullface").is_some_and(|value| qsc_bool(&value))
+                    || attr("egtype").is_some_and(|value| value != "none");
+                let mut rendered = surface_mesh_snapshot_for_mode(
+                    mesh,
+                    draw_mode,
+                    width,
+                    Some(surface.uid.get()),
+                    cull_back_faces,
+                );
                 let alpha = attr("alpha")
                     .and_then(|value| value.parse::<f64>().ok())
                     .unwrap_or(1.0)
@@ -2632,13 +2598,13 @@ impl DesktopAppState {
                             rendered.bonds.push(cuemol_render::RenderBond {
                                 from: segment[0],
                                 to: segment[1],
-                                radius: (0.04 * config.width.max(0.1)) as f32,
+                                radius: (0.02 * config.width.max(0.1)) as f32,
                                 color: Some(config.color.clone()),
                                 end_color: None,
                                 object_uid: None,
                                 atom_indices: None,
                                 selected: false,
-                                screen_width: None,
+                                screen_width: Some(config.width.max(0.1) as f32),
                                 screen_stipple: false,
                                 screen_offset: [0.0, 0.0],
                                 screen_point: false,
@@ -2714,69 +2680,21 @@ impl DesktopAppState {
                             .iter()
                             .flat_map(|triangle| triangle.iter().copied())
                             .collect::<Vec<_>>();
-                        let color_spec = |color: [f32; 4]| {
-                            Some(cuemol_gfx::ColorSpec {
-                                base: cuemol_gfx::ColorBase::Html {
-                                    r: (color[0] * 255.0).round() as u8,
-                                    g: (color[1] * 255.0).round() as u8,
-                                    b: (color[2] * 255.0).round() as u8,
-                                    a: (color[3] * 255.0).round() as u8,
-                                },
-                                modifiers: Vec::new(),
-                            })
-                        };
-                        match config.drawmode {
-                            MapSurfaceDrawMode::Fill => {
-                                if !indices.is_empty() {
-                                    rendered
-                                        .meshes
-                                        .push(cuemol_render::RenderMesh { vertices, indices });
-                                }
-                            }
-                            MapSurfaceDrawMode::Line => {
-                                let mut edges = BTreeSet::new();
-                                for triangle in indices.chunks_exact(3) {
-                                    for (lhs, rhs) in [
-                                        (triangle[0], triangle[1]),
-                                        (triangle[1], triangle[2]),
-                                        (triangle[2], triangle[0]),
-                                    ] {
-                                        edges.insert((lhs.min(rhs), lhs.max(rhs)));
-                                    }
-                                }
-                                for (lhs, rhs) in edges {
-                                    let lhs = &vertices[lhs as usize];
-                                    let rhs = &vertices[rhs as usize];
-                                    rendered.bonds.push(cuemol_render::RenderBond {
-                                        from: lhs.position,
-                                        to: rhs.position,
-                                        radius: (0.04 * config.width.max(0.1)) as f32,
-                                        color: color_spec(lhs.color),
-                                        end_color: None,
-                                        object_uid: None,
-                                        atom_indices: None,
-                                        selected: false,
-                                        screen_width: None,
-                                        screen_stipple: false,
-                                        screen_offset: [0.0, 0.0],
-                                        screen_point: false,
-                                    });
-                                }
-                            }
-                            MapSurfaceDrawMode::Point => {
-                                for vertex in vertices {
-                                    rendered.atoms.push(cuemol_render::RenderAtom {
-                                        center: vertex.position,
-                                        radius: (0.06 * config.width.max(0.1)) as f32,
-                                        color: color_spec(vertex.color),
-                                        object_uid: None,
-                                        atom_index: None,
-                                        selected: false,
-                                        detail: Some(1),
-                                    });
-                                }
-                            }
-                        }
+                        let cull_back_faces = config
+                            .attributes
+                            .get("cullface")
+                            .is_some_and(|value| qsc_bool(value))
+                            || config
+                                .attributes
+                                .get("egtype")
+                                .is_some_and(|value| value != "none");
+                        rendered = surface_mesh_snapshot_for_mode(
+                            cuemol_render::RenderMesh { vertices, indices },
+                            config.drawmode,
+                            config.width,
+                            None,
+                            cull_back_faces,
+                        );
                     }
                 }
                 let alpha = config
@@ -38614,12 +38532,23 @@ fn direct_surface_snapshot(
         );
     }
 
-    let mut snapshot = RenderSceneSnapshot::empty();
-    if !render_mesh.indices.is_empty() {
-        snapshot.meshes.push(render_mesh);
-        snapshot.recompute_bounds();
-    }
-    snapshot
+    let draw_mode = match resolved("drawmode").as_deref().unwrap_or("fill") {
+        "line" | "1" => MapSurfaceDrawMode::Line,
+        "point" | "2" => MapSurfaceDrawMode::Point,
+        _ => MapSurfaceDrawMode::Fill,
+    };
+    let width = resolved("width")
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(1.2);
+    let cull_back_faces = resolved("cullface").is_some_and(|value| qsc_bool(&value))
+        || resolved("egtype").is_some_and(|value| value != "none");
+    surface_mesh_snapshot_for_mode(
+        render_mesh,
+        draw_mode,
+        width,
+        Some(object.uid().get()),
+        cull_back_faces,
+    )
 }
 
 fn append_lw_object_snapshot(
@@ -39199,6 +39128,76 @@ fn render_color_spec(color: [f32; 4]) -> cuemol_gfx::ColorSpec {
         },
         modifiers: Vec::new(),
     }
+}
+
+fn surface_mesh_snapshot_for_mode(
+    mut mesh: cuemol_render::RenderMesh,
+    draw_mode: MapSurfaceDrawMode,
+    width: f64,
+    object_uid: Option<u64>,
+    cull_back_faces: bool,
+) -> RenderSceneSnapshot {
+    let width = width.clamp(0.1, 10.0) as f32;
+    let fallback_radius = (0.02 * width).max(0.002);
+    let mut snapshot = RenderSceneSnapshot::empty();
+    match draw_mode {
+        MapSurfaceDrawMode::Fill => {
+            for vertex in &mut mesh.vertices {
+                *vertex = (*vertex).with_back_face_culling(cull_back_faces);
+            }
+            if !mesh.indices.is_empty() {
+                snapshot.meshes.push(mesh);
+            }
+        }
+        MapSurfaceDrawMode::Line => {
+            let mut edges = BTreeSet::new();
+            for triangle in mesh.indices.chunks_exact(3) {
+                for (lhs, rhs) in [
+                    (triangle[0], triangle[1]),
+                    (triangle[1], triangle[2]),
+                    (triangle[2], triangle[0]),
+                ] {
+                    edges.insert((lhs.min(rhs), lhs.max(rhs)));
+                }
+            }
+            for (lhs, rhs) in edges {
+                let Some(lhs) = mesh.vertices.get(lhs as usize) else {
+                    continue;
+                };
+                let Some(rhs) = mesh.vertices.get(rhs as usize) else {
+                    continue;
+                };
+                snapshot.bonds.push(
+                    cuemol_render::RenderBond::new(
+                        lhs.position,
+                        rhs.position,
+                        fallback_radius,
+                        Some(render_color_spec(lhs.color)),
+                    )
+                    .with_end_color(Some(render_color_spec(rhs.color)))
+                    .with_picking(object_uid, None, false)
+                    .with_screen_style(width, false),
+                );
+            }
+        }
+        MapSurfaceDrawMode::Point => {
+            snapshot
+                .bonds
+                .extend(mesh.vertices.into_iter().map(|vertex| {
+                    cuemol_render::RenderBond::new(
+                        vertex.position,
+                        vertex.position,
+                        fallback_radius,
+                        Some(render_color_spec(vertex.color)),
+                    )
+                    .with_picking(object_uid, None, false)
+                    .with_screen_style(width, false)
+                    .as_screen_point()
+                }));
+        }
+    }
+    snapshot.recompute_bounds();
+    snapshot
 }
 
 #[cfg(feature = "scripting")]
@@ -47796,15 +47795,40 @@ end_header
         assert_eq!(summary.renderers[1].specific["drawmode"], "point");
         let rendered = app.active_render_snapshot("").unwrap();
         assert_eq!(rendered.mesh_count(), 0);
-        assert_eq!(rendered.bond_count(), 3);
-        assert_eq!(rendered.atom_count(), 3);
+        assert_eq!(rendered.bond_count(), 6);
+        assert_eq!(rendered.atom_count(), 0);
+        assert_eq!(
+            rendered
+                .bonds
+                .iter()
+                .filter(|primitive| !primitive.screen_point)
+                .count(),
+            3
+        );
+        assert_eq!(
+            rendered
+                .bonds
+                .iter()
+                .filter(|primitive| primitive.screen_point)
+                .count(),
+            3
+        );
+        assert!(rendered
+            .bonds
+            .iter()
+            .all(|primitive| primitive.screen_width.is_some()));
         assert_eq!(
             rendered.bonds[0].color.as_ref().unwrap().rgba8().unwrap().a,
             128
         );
         app.set_surface_renderer_visible(surface_uid, points_uid, false)
             .unwrap();
-        assert_eq!(app.active_render_snapshot("").unwrap().atom_count(), 0);
+        let wire_only = app.active_render_snapshot("").unwrap();
+        assert_eq!(wire_only.bond_count(), 3);
+        assert!(wire_only
+            .bonds
+            .iter()
+            .all(|primitive| !primitive.screen_point));
         app.set_surface_renderer_visible(surface_uid, points_uid, true)
             .unwrap();
         app.set_surface_renderer_coloring(
@@ -47833,8 +47857,16 @@ end_header
         assert_eq!(summary.renderers[1].specific["drawmode"], "point");
         let rendered = reloaded.active_render_snapshot("").unwrap();
         assert_eq!(rendered.mesh_count(), 0);
-        assert_eq!(rendered.bond_count(), 3);
-        assert_eq!(rendered.atom_count(), 3);
+        assert_eq!(rendered.bond_count(), 6);
+        assert_eq!(rendered.atom_count(), 0);
+        assert_eq!(
+            rendered
+                .bonds
+                .iter()
+                .filter(|primitive| primitive.screen_point)
+                .count(),
+            3
+        );
 
         let _ = std::fs::remove_file(qsc_path);
     }
@@ -48006,7 +48038,7 @@ end_header
              <object type=\"MolCoord\" name=\"clip-mol\" src=\"datachunk:00001\" srctype=\"qdfmol\"/>\n\
              <object type=\"DensityMap\" name=\"native-map\" src=\"datachunk:00000\" srctype=\"qdfmap\">\n\
              <renderer type=\"contour\" name=\"wire\" siglevel=\"0\" color=\"Red\" width=\"2\" bndry_molname=\"clip-mol\" bndry_sel=\"name CA\" bndry_rng=\"100\"/>\n\
-             <renderer type=\"isosurf\" name=\"solid\" siglevel=\"0\" color=\"#0000ff\" binning=\"2\" max_grids=\"77\" use_pbc=\"false\" bndry_molname=\"clip-mol\" bndry_sel=\"name CA\" bndry_rng=\"100\" colormode=\"multigrad\" color_mapname=\"native-map\">\n\
+             <renderer type=\"isosurf\" name=\"solid\" siglevel=\"0\" color=\"#0000ff\" binning=\"2\" max_grids=\"77\" use_pbc=\"false\" bndry_molname=\"clip-mol\" bndry_sel=\"name CA\" bndry_rng=\"100\" colormode=\"multigrad\" color_mapname=\"native-map\" cullface=\"true\">\n\
              <multi_grad><gradnode par=\"-1\"><col value=\"#ff0000\"/></gradnode><gradnode par=\"1\"><col value=\"#00ff00\"/></gradnode></multi_grad>\n\
              </renderer>\n\
              <renderer type=\"isosurf\" name=\"lines\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"line\"/>\n\
@@ -48060,12 +48092,22 @@ end_header
             .vertices
             .iter()
             .all(|vertex| vertex.color[2] == 0.0));
-        assert!(snapshot.atom_count() > 0, "point-mode isosurface must draw");
+        assert!(snapshot.meshes[0]
+            .vertices
+            .iter()
+            .all(cuemol_render::MeshVertex::culls_back_faces));
+        assert!(
+            snapshot
+                .bonds
+                .iter()
+                .any(|primitive| primitive.screen_point),
+            "point-mode isosurface must draw"
+        );
         assert!(snapshot.bond_count() > 1, "line-mode isosurface must draw");
         let contour = snapshot
             .bonds
             .iter()
-            .find(|bond| bond.screen_width.is_none())
+            .find(|bond| bond.screen_width == Some(2.0) && !bond.screen_point)
             .expect("saved contour bond");
         assert_eq!(
             contour.color.as_ref().unwrap().rgba8().unwrap(),
@@ -48114,7 +48156,7 @@ end_header
             let moved_contour = moved
                 .bonds
                 .iter()
-                .find(|bond| bond.screen_width.is_none())
+                .find(|bond| bond.screen_width == Some(3.0) && !bond.screen_point)
                 .expect("moved contour bond");
             assert!((moved_contour.from.x - baseline.x - 100.0).abs() < 1.0e-8);
             assert!((moved_contour.from.y - baseline.y - 50.0).abs() < 1.0e-8);
@@ -48735,6 +48777,39 @@ end_header
         assert_eq!(snapshot.bond_count(), 0);
         assert_eq!(snapshot.mesh_count(), 1);
         assert!(snapshot.mesh_triangle_count() > 100);
+
+        app.set_renderer_property(object, renderer_uid, "drawmode", "line")
+            .unwrap();
+        app.set_renderer_property(object, renderer_uid, "width", "2.5")
+            .unwrap();
+        let wire = app.active_render_snapshot("").unwrap();
+        assert_eq!(wire.atom_count(), 0);
+        assert_eq!(wire.mesh_count(), 0);
+        assert!(wire.bond_count() > 100);
+        assert!(wire.bonds.iter().all(|line| {
+            line.screen_width == Some(2.5) && !line.screen_point && line.end_color.is_some()
+        }));
+
+        app.set_renderer_property(object, renderer_uid, "drawmode", "point")
+            .unwrap();
+        let points = app.active_render_snapshot("").unwrap();
+        assert_eq!(points.atom_count(), 0);
+        assert_eq!(points.mesh_count(), 0);
+        assert!(points.bond_count() > 100);
+        assert!(points
+            .bonds
+            .iter()
+            .all(|point| point.screen_width == Some(2.5) && point.screen_point));
+
+        app.set_renderer_property(object, renderer_uid, "drawmode", "fill")
+            .unwrap();
+        app.set_renderer_property(object, renderer_uid, "cullface", "true")
+            .unwrap();
+        let culled = app.active_render_snapshot("").unwrap();
+        assert!(culled.meshes[0]
+            .vertices
+            .iter()
+            .all(cuemol_render::MeshVertex::culls_back_faces));
 
         let size = 80usize;
         app.set_surface_potential_map(DensityMap::from_grid_map(GridMap {

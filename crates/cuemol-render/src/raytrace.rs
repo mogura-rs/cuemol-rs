@@ -863,9 +863,12 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
         }
     }
     for bond in &snapshot.bonds {
-        if let Some((distance, normal)) =
+        let intersection = if bond.screen_point {
+            ray_sphere(ray, bond.from, f64::from(bond.radius))
+        } else {
             ray_cylinder(ray, bond.from, bond.to, f64::from(bond.radius))
-        {
+        };
+        if let Some((distance, normal)) = intersection {
             hits.push(Hit {
                 distance,
                 position: ray.origin + ray.direction * distance,
@@ -885,9 +888,11 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
             let Some(v2) = mesh.vertices.get(triangle[2] as usize) else {
                 continue;
             };
-            if let Some((distance, u, v)) =
-                ray_triangle(ray, [v0.position, v1.position, v2.position])
-            {
+            if let Some((distance, u, v)) = ray_triangle(
+                ray,
+                [v0.position, v1.position, v2.position],
+                v0.culls_back_faces(),
+            ) {
                 let w = 1.0 - u - v;
                 let normal = normalize(v0.normal * w + v1.normal * u + v2.normal * v);
                 let mut color = [0.0; 4];
@@ -969,12 +974,18 @@ fn ray_cylinder(ray: Ray, start: Vector4, end: Vector4, radius: f64) -> Option<(
         .min_by(|left, right| left.0.total_cmp(&right.0))
 }
 
-fn ray_triangle(ray: Ray, triangle: [Vector4; 3]) -> Option<(f64, f64, f64)> {
+fn ray_triangle(
+    ray: Ray,
+    triangle: [Vector4; 3],
+    cull_back_faces: bool,
+) -> Option<(f64, f64, f64)> {
     let edge1 = triangle[1] - triangle[0];
     let edge2 = triangle[2] - triangle[0];
     let p = cross(ray.direction, edge2);
     let determinant = edge1.dot3d(p);
-    if determinant.abs() < 1.0e-12 {
+    if (cull_back_faces && determinant <= 1.0e-12)
+        || (!cull_back_faces && determinant.abs() < 1.0e-12)
+    {
         return None;
     }
     let inverse = determinant.recip();
@@ -1168,6 +1179,45 @@ mod tests {
                 .count()
                 > 500
         );
+    }
+
+    #[test]
+    fn raytracer_honors_mesh_back_face_culling() {
+        let ray = Ray {
+            origin: Vector4::new3(0.0, 0.0, 1.0),
+            direction: Vector4::new3(0.0, 0.0, -1.0),
+        };
+        let front = [
+            Vector4::new3(-1.0, -1.0, 0.0),
+            Vector4::new3(1.0, -1.0, 0.0),
+            Vector4::new3(0.0, 1.0, 0.0),
+        ];
+        let back = [front[0], front[2], front[1]];
+
+        assert!(ray_triangle(ray, front, true).is_some());
+        assert!(ray_triangle(ray, back, true).is_none());
+        assert!(ray_triangle(ray, back, false).is_some());
+    }
+
+    #[test]
+    fn raytracer_treats_screen_points_as_spheres() {
+        let mut snapshot = RenderSceneSnapshot::empty();
+        snapshot.bonds.push(
+            crate::RenderBond::new(
+                Vector4::new3(0.0, 0.0, 0.0),
+                Vector4::new3(0.0, 0.0, 0.0),
+                0.5,
+                color(255, 255, 255, 255),
+            )
+            .with_screen_style(2.0, false)
+            .as_screen_point(),
+        );
+        let ray = Ray {
+            origin: Vector4::new3(0.0, 0.0, 2.0),
+            direction: Vector4::new3(0.0, 0.0, -1.0),
+        };
+
+        assert_eq!(scene_hits(&snapshot, ray).len(), 1);
     }
 
     #[test]

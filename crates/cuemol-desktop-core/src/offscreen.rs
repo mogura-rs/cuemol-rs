@@ -37,6 +37,7 @@ struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) color: vec4<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) @interpolate(flat) cull_back_faces: f32,
 };
 @group(0) @binding(0) var<uniform> mvp: mat4x4<f32>;
 struct DepthParams {
@@ -52,10 +53,14 @@ fn vs(@location(0) position: vec4<f32>, @location(1) normal: vec4<f32>, @locatio
     out.clip = mvp * position;
     out.color = color;
     out.normal = normal.xyz;
+    out.cull_back_faces = normal.w;
     return out;
 }
 @fragment
-fn fs(in: VsOut) -> @location(0) vec4<f32> {
+fn fs(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    if (in.cull_back_faces > 0.5 && !front_facing) {
+        discard;
+    }
     let light = normalize(vec3<f32>(0.0, 0.0, 1.0));
     let n = normalize(in.normal);
     let lambert = abs(dot(n, light));
@@ -63,7 +68,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(in.color.rgb * intensity, in.color.a);
 }
 @fragment
-fn fs_depth(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_depth(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    if (in.cull_back_faces > 0.5 && !front_facing) {
+        discard;
+    }
     let d = in.clip.z;
     var linear_depth = depth_params.near + d * (depth_params.far - depth_params.near);
     if depth_params.perspective > 0.5 {
@@ -699,7 +707,12 @@ fn draw_meshes(
                     v.position.z as f32,
                     1.0,
                 ],
-                normal: [v.normal.x as f32, v.normal.y as f32, v.normal.z as f32, 0.0],
+                normal: [
+                    v.normal.x as f32,
+                    v.normal.y as f32,
+                    v.normal.z as f32,
+                    f32::from(v.culls_back_faces()),
+                ],
                 color: v.color,
             });
         }
@@ -1200,6 +1213,42 @@ mod tests {
             corner[0] < 30 && corner[1] < 30 && corner[2] < 30,
             "corner not background: {corner:?}"
         );
+    }
+
+    #[test]
+    fn offscreen_mesh_culling_discards_only_marked_back_faces() {
+        let green = [0.0, 1.0, 0.0, 1.0];
+        let vertices = vec![
+            vert(-0.9, -0.9, green),
+            vert(0.9, -0.9, green),
+            vert(0.0, 0.9, green),
+        ];
+        let back_facing = RenderMesh {
+            vertices: vertices.clone(),
+            indices: vec![0, 2, 1],
+        };
+        let Some(two_sided) = render_meshes_offscreen(
+            std::slice::from_ref(&back_facing),
+            IDENTITY,
+            64,
+            64,
+            [0.0, 0.0, 0.0, 1.0],
+        ) else {
+            return;
+        };
+        assert!(pixel(&two_sided, 64, 32, 32)[1] > 200);
+
+        let culled = RenderMesh {
+            vertices: vertices
+                .into_iter()
+                .map(|vertex| vertex.with_back_face_culling(true))
+                .collect(),
+            indices: vec![0, 2, 1],
+        };
+        let image =
+            render_meshes_offscreen(&[culled], IDENTITY, 64, 64, [0.0, 0.0, 0.0, 1.0]).unwrap();
+        let centre = pixel(&image, 64, 32, 32);
+        assert!(centre[0] < 30 && centre[1] < 30 && centre[2] < 30);
     }
 
     #[test]

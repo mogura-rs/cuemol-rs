@@ -54,6 +54,20 @@ pub struct MeshVertex {
     pub color: [f32; 4],
 }
 
+impl MeshVertex {
+    /// Mark this vertex as belonging to a mesh that discards back-facing
+    /// fragments. The marker is stored in the otherwise-unused normal `w`
+    /// component so existing mesh interchange remains unchanged.
+    pub fn with_back_face_culling(mut self, enabled: bool) -> Self {
+        self.normal.w = f64::from(enabled);
+        self
+    }
+
+    pub fn culls_back_faces(&self) -> bool {
+        self.normal.w > 0.5
+    }
+}
+
 /// An indexed triangle mesh, used for ribbon/cartoon geometry that cannot be
 /// expressed with the sphere (atom) and line (bond) primitives.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -384,6 +398,7 @@ impl RenderSceneSnapshot {
         for mesh in &mut self.meshes {
             for vertex in &mut mesh.vertices {
                 m.xform3d(&mut vertex.position);
+                let cull_back_faces = vertex.culls_back_faces();
                 // Rotation-only (w=0 drops the translation column).
                 let rotated = m.transform_point(Vector4::new4(
                     vertex.normal.x,
@@ -396,6 +411,7 @@ impl RenderSceneSnapshot {
                 if len > 1.0e-12 {
                     vertex.normal =
                         Vector4::new3(rotated.x / len, rotated.y / len, rotated.z / len);
+                    vertex.normal.w = f64::from(cull_back_faces);
                 }
             }
         }
@@ -2840,13 +2856,22 @@ pub fn tessellate_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
         }
     }
     for bond in &snapshot.bonds {
-        add_cylinder(
-            &mut mesh,
-            bond.from,
-            bond.to,
-            bond.radius as f64,
-            snapshot_color_rgba(&bond.color),
-        );
+        if bond.screen_point {
+            add_sphere(
+                &mut mesh,
+                bond.from,
+                bond.radius as f64,
+                snapshot_color_rgba(&bond.color),
+            );
+        } else {
+            add_cylinder(
+                &mut mesh,
+                bond.from,
+                bond.to,
+                bond.radius as f64,
+                snapshot_color_rgba(&bond.color),
+            );
+        }
     }
     for extra in &snapshot.meshes {
         let base = mesh.vertices.len() as u32;
