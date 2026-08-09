@@ -100,6 +100,22 @@ const RECENT_STORAGE_KEY = "cuemol2.recentFiles.v1";
 const SELECTION_HISTORY_STORAGE_KEY = "cuemol2.selectionHistory.v1";
 const MAX_RECENT_FILES = 10;
 const MAX_SELECTION_HISTORY = 20;
+const MOLECULE_RENDERER_TYPES = [
+  "anisou",
+  "atomintr",
+  "ballstick",
+  "cartoon",
+  "cpk",
+  "disorder",
+  "dsurf2",
+  "dsurface",
+  "nucl",
+  "ribbon",
+  "simple",
+  "spline",
+  "trace",
+  "tube",
+];
 
 let snapshot = null;
 let selectedObjectUid = null;
@@ -1428,6 +1444,8 @@ function objectPropertiesEditor(object) {
 function rendererPropertiesEditor(object, renderer) {
   const densityMap = Array.isArray(object.counts);
   const surfaceObject = object.className === "MolSurfObj";
+  const directSurfaceLike = ["dsurface", "dsurf2"].includes(renderer.rendererType);
+  const surfaceLike = surfaceObject || directSurfaceLike;
   const simpleLike = ["simple", "trace"].includes(renderer.rendererType);
   const splineLike = renderer.rendererType === "spline";
   const nameLabelLike = ["*namelabel", "name_label"].includes(renderer.rendererType);
@@ -1478,7 +1496,7 @@ function rendererPropertiesEditor(object, renderer) {
     dialogTitle.textContent = "Isosurf renderer properties";
   } else if (volumeLike) {
     dialogTitle.textContent = "Volume renderer properties";
-  } else if (surfaceObject) {
+  } else if (surfaceLike) {
     dialogTitle.textContent = "MolSurf Rend Properties";
   }
   const tabNames = simpleLike
@@ -1509,7 +1527,7 @@ function rendererPropertiesEditor(object, renderer) {
                   ? ["Common", "Cartoon", "Helix", "Sheet", "Coil"]
                   : contourLike || isosurfLike || volumeLike
                     ? ["Common", "Map"]
-                  : surfaceObject
+                  : surfaceLike
                     ? ["Common", "MolSurf"]
                   : ["Common"];
   const { editor, page, panes } = workspacePropertyPage(tabNames);
@@ -2237,7 +2255,7 @@ function rendererPropertiesEditor(object, renderer) {
   }
 
   let syncSurfaceState = () => {};
-  if (surfaceObject) {
+  if (surfaceLike) {
     const surfacePage = panes[1];
     const draw = document.createElement("fieldset");
     draw.className = "property-common-group renderer-specific-group";
@@ -2264,29 +2282,46 @@ function rendererPropertiesEditor(object, renderer) {
       0.1,
       "1.2",
     );
-    const surfaceType = document.createElement("select");
-    for (const [value, label] of [
-      ["vdw", "van der Waals"],
-      ["sas", "Solvent accessible"],
-      ["ses", "Solvent excluded"],
-    ]) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = label;
-      surfaceType.append(option);
+    let surfaceType;
+    let surfaceDetail;
+    if (directSurfaceLike) {
+      surfaceType = addSpecificSelect(
+        draw,
+        "surftype",
+        "Surface type:",
+        [
+          ["vdw", "van der Waals"],
+          ["sas", "Solvent accessible"],
+          ["ses", "Solvent excluded"],
+        ],
+        "ses",
+      );
+      surfaceDetail = addSpecificNumber(draw, "detail", "Detail:", 1, 21, 1, "6");
+    } else {
+      surfaceType = document.createElement("select");
+      for (const [value, label] of [
+        ["vdw", "van der Waals"],
+        ["sas", "Solvent accessible"],
+        ["ses", "Solvent excluded"],
+      ]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        surfaceType.append(option);
+      }
+      surfaceType.value = "vdw";
+      surfaceType.disabled = true;
+      propertyField(draw, "Surface type:", surfaceType);
+      surfaceDetail = document.createElement("input");
+      surfaceDetail.type = "number";
+      surfaceDetail.min = "1";
+      surfaceDetail.max = "21";
+      surfaceDetail.step = "1";
+      surfaceDetail.value = "1";
+      surfaceDetail.disabled = true;
+      propertyField(draw, "Detail:", surfaceDetail);
+      specificControls.push(surfaceType, surfaceDetail);
     }
-    surfaceType.value = "vdw";
-    surfaceType.disabled = true;
-    propertyField(draw, "Surface type:", surfaceType);
-    const surfaceDetail = document.createElement("input");
-    surfaceDetail.type = "number";
-    surfaceDetail.min = "1";
-    surfaceDetail.max = "21";
-    surfaceDetail.step = "1";
-    surfaceDetail.value = "1";
-    surfaceDetail.disabled = true;
-    propertyField(draw, "Detail:", surfaceDetail);
-    specificControls.push(surfaceType, surfaceDetail);
     surfacePage.append(draw);
 
     const selected = document.createElement("fieldset");
@@ -2305,6 +2340,7 @@ function rendererPropertiesEditor(object, renderer) {
       target.append(option);
     }
     target.value = currentTarget;
+    target.disabled = directSurfaceLike;
     propertyField(selected, "Selection mol:", target);
     specificInputs.set("target", target);
     specificDefaults.set("target", "");
@@ -2322,12 +2358,17 @@ function rendererPropertiesEditor(object, renderer) {
       surfacePage,
       "colormode",
       "Coloring mode:",
-      [
-        ["solid", "Solid color"],
-        ["molecule", "By molecule"],
-        ["potential", "By potential"],
-      ],
-      "solid",
+      directSurfaceLike
+        ? [
+            ["molecule", "By molecule"],
+            ["potential", "By potential"],
+          ]
+        : [
+            ["solid", "Solid color"],
+            ["molecule", "By molecule"],
+            ["potential", "By potential"],
+          ],
+      directSurfaceLike ? "molecule" : "solid",
     );
     syncSurfaceState = () => {
       surfaceWidth.disabled = drawMode.value === "fill";
@@ -4399,16 +4440,7 @@ function renderInspector() {
       ]
     : surface
       ? [["molsurf", "Molecular surface"]]
-      : [
-        ["simple", "Simple"],
-        ["ballstick", "Ball & stick"],
-        ["cpk", "CPK"],
-        ["ribbon", "Ribbon"],
-        ["cartoon", "Cartoon"],
-        ["trace", "Trace"],
-        ["tube", "Tube"],
-        ["spline", "Spline"],
-      ];
+      : MOLECULE_RENDERER_TYPES.map((rendererType) => [rendererType, rendererType]);
   rendererType.replaceChildren();
   for (const [value, label] of rendererChoices) {
     const option = document.createElement("option");

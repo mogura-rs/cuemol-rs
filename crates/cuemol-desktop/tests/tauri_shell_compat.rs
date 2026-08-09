@@ -395,6 +395,26 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
 }
 
 #[test]
+fn tauri_renderer_picker_exposes_the_reference_molecular_catalog() {
+    assert!(JS.contains("const MOLECULE_RENDERER_TYPES = ["));
+    assert!(
+        JS.contains("MOLECULE_RENDERER_TYPES.map((rendererType) => [rendererType, rendererType])")
+    );
+    for renderer_type in cuemol_desktop::MOLECULE_RENDERER_TYPES {
+        assert!(
+            HTML.contains(&format!(
+                "<option value=\"{renderer_type}\">{renderer_type}</option>"
+            )),
+            "missing initial renderer choice {renderer_type}"
+        );
+        assert!(
+            JS.contains(&format!("\"{renderer_type}\",")),
+            "missing dynamic renderer choice {renderer_type}"
+        );
+    }
+}
+
+#[test]
 fn tauri_view_properties_match_the_reference_generic_editor() {
     for command in ["get_view_properties", "set_view_properties"] {
         assert!(

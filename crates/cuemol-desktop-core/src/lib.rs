@@ -59,6 +59,41 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "offscreen")]
 pub mod offscreen;
 
+/// Public molecular renderer types shown by CueMol2's renderer setup dialog.
+/// Internal `*` renderers and test-only renderers are intentionally excluded.
+pub const MOLECULE_RENDERER_TYPES: &[&str] = &[
+    "anisou",
+    "atomintr",
+    "ballstick",
+    "cartoon",
+    "cpk",
+    "disorder",
+    "dsurf2",
+    "dsurface",
+    "nucl",
+    "ribbon",
+    "simple",
+    "spline",
+    "trace",
+    "tube",
+];
+
+/// Style list applied by CueMol2's `setDefaultStyles()` after creating a
+/// molecular renderer through the GUI.
+pub fn default_molecule_renderer_style(renderer_type: &str) -> Option<&'static str> {
+    match renderer_type {
+        "tube" | "spline" => Some("DefaultHSCPaint"),
+        "ribbon" => Some("DefaultRibbon,DefaultHSCPaint"),
+        "cartoon" => Some("DefaultCartoon,DefaultHSCPaint"),
+        "nucl" => Some("DefaultNucl"),
+        "anisou" => Some("DefaultAnIsoU,DefaultCPKColoring"),
+        "ballstick" => Some("DefaultBallStick,DefaultCPKColoring"),
+        "cpk" => Some("DefaultCPK,DefaultCPKColoring"),
+        "simple" | "trace" | "disorder" | "dsurf2" | "dsurface" => Some("DefaultCPKColoring"),
+        _ => None,
+    }
+}
+
 /// Script-visible runtime classes mirrored from the reference QIF registry.
 #[cfg(feature = "scripting")]
 const SCRIPT_RUNTIME_CLASS_NAMES: &[&str] = &[
@@ -3501,6 +3536,39 @@ impl DesktopAppState {
         self.load_object(scene_uid, file_path, object_name, file_format)
     }
 
+    /// Suggest the first scene-unique renderer name using CueMol2's
+    /// `<type><number>` convention (`simple1`, `simple2`, ...).
+    pub fn suggest_renderer_name(&self, target_scene: Uid, renderer_type: &str) -> Result<String> {
+        let prefix = renderer_type.trim().trim_start_matches('*');
+        if prefix.is_empty() {
+            return Err(CueMolError::invalid_argument("renderer type is empty"));
+        }
+        let scene = self
+            .scene_manager()
+            .scene(target_scene)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", target_scene.get())))?;
+        for index in 1_u64.. {
+            let candidate = format!("{prefix}{index}");
+            let exists = scene.objects().iter().any(|object| {
+                object
+                    .renderers()
+                    .iter()
+                    .any(|renderer| renderer.name() == candidate)
+            });
+            if !exists {
+                return Ok(candidate);
+            }
+        }
+        unreachable!("the renderer name suffix space is inexhaustible")
+    }
+
+    pub fn suggest_renderer_name_in_active_scene(&self, renderer_type: &str) -> Result<String> {
+        let scene_uid = self
+            .active_scene
+            .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
+        self.suggest_renderer_name(scene_uid, renderer_type)
+    }
+
     pub fn new_renderer(
         &mut self,
         target_scene: Uid,
@@ -3515,12 +3583,12 @@ impl DesktopAppState {
             renderer_type.clone(),
             renderer_name,
         )?;
-        if renderer_type == "disorder" {
-            let object = self
-                .scene_manager_mut()
-                .object_mut(target_object)
-                .ok_or_else(|| CueMolError::NotFound(format!("object {}", target_object.get())))?;
-            let target_name = object
+        let object = self
+            .scene_manager_mut()
+            .object_mut(target_object)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", target_object.get())))?;
+        let target_name = if renderer_type == "disorder" {
+            object
                 .renderers()
                 .iter()
                 .find(|renderer| {
@@ -3531,13 +3599,24 @@ impl DesktopAppState {
                         )
                 })
                 .map(|renderer| renderer.name().to_string())
-                .unwrap_or_default();
-            if let Some(renderer) = object.renderer_mut(result.result_renderer) {
-                renderer.set_qsc_attr("style", "DefaultCPKColoring");
-                if !target_name.is_empty() {
-                    renderer.set_qsc_attr("target", target_name);
-                }
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if let Some(renderer) = object.renderer_mut(result.result_renderer) {
+            if let Some(style) = default_molecule_renderer_style(&renderer_type) {
+                renderer.set_qsc_attr("style", style);
             }
+            if !target_name.is_empty() {
+                renderer.set_qsc_attr("target", target_name);
+            }
+        }
+        if !object
+            .renderers()
+            .iter()
+            .any(|renderer| matches!(renderer.renderer_type(), "*selection" | "selection"))
+        {
+            object.add_renderer("*selection", "");
         }
         Ok(result)
     }
@@ -5258,10 +5337,11 @@ impl DesktopAppState {
         for object in scene.objects().iter().filter(|object| {
             object.is_visible()
                 && (object.renderers().is_empty()
-                    || object
-                        .renderers()
-                        .iter()
-                        .any(|renderer| renderer.is_visible()))
+                    || object.renderers().iter().any(|renderer| {
+                        renderer.is_visible()
+                            && !renderer.renderer_type().starts_with('*')
+                            && renderer.renderer_type() != "selection"
+                    }))
         }) {
             let selected = selector
                 .as_ref()
@@ -42851,7 +42931,11 @@ end_header
                 object.uid(),
                 object.name().to_string(),
                 object.mol().clone(),
-                object.renderers().len(),
+                object
+                    .renderers()
+                    .iter()
+                    .filter(|renderer| !renderer.renderer_type().starts_with('*'))
+                    .count(),
             )
         };
         let mut source_lw_data = cuemol_lwview::LWObject::new();
@@ -47421,7 +47505,8 @@ end_header
         assert!(app.active_render_snapshot("").unwrap().bond_count() > 0);
         assert_eq!(app.active_pick_atoms("").unwrap().len(), 327);
         assert!(app.destroy_renderer_in_object(object, renderer).unwrap());
-        assert!(app.active_render_snapshot("").unwrap().bond_count() > 0);
+        assert_eq!(app.active_render_snapshot("").unwrap().bond_count(), 0);
+        assert!(app.active_pick_atoms("").unwrap().is_empty());
 
         let atom = app.atom_summary(object, 0).unwrap();
         assert_eq!(atom.object_uid, object);
@@ -48368,6 +48453,9 @@ end_header
             .unwrap()
             .result_renderer;
 
+        app.reset_renderer_property(object, renderer, "style")
+            .unwrap();
+
         // Before styling: the hardcoded per-type ballstick look (bond radius 0.08).
         let before = app.active_render_snapshot("").unwrap();
         assert!(before.bond_count() > 0, "ballstick should draw bonds");
@@ -48724,6 +48812,89 @@ end_header
     }
 
     #[test]
+    fn gui_renderer_creation_matches_reference_catalog_styles_and_names() {
+        assert_eq!(
+            MOLECULE_RENDERER_TYPES,
+            &[
+                "anisou",
+                "atomintr",
+                "ballstick",
+                "cartoon",
+                "cpk",
+                "disorder",
+                "dsurf2",
+                "dsurface",
+                "nucl",
+                "ribbon",
+                "simple",
+                "spline",
+                "trace",
+                "tube",
+            ]
+        );
+        let cases = [
+            ("tube", Some("DefaultHSCPaint")),
+            ("anisou", Some("DefaultAnIsoU,DefaultCPKColoring")),
+            ("atomintr", None),
+            ("ballstick", Some("DefaultBallStick,DefaultCPKColoring")),
+            ("cartoon", Some("DefaultCartoon,DefaultHSCPaint")),
+            ("cpk", Some("DefaultCPK,DefaultCPKColoring")),
+            ("disorder", Some("DefaultCPKColoring")),
+            ("dsurf2", Some("DefaultCPKColoring")),
+            ("dsurface", Some("DefaultCPKColoring")),
+            ("nucl", Some("DefaultNucl")),
+            ("ribbon", Some("DefaultRibbon,DefaultHSCPaint")),
+            ("simple", Some("DefaultCPKColoring")),
+            ("spline", Some("DefaultHSCPaint")),
+            ("trace", Some("DefaultCPKColoring")),
+        ];
+
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("renderer setup", true).result_scene;
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", MolCoord::new());
+        for (renderer_type, expected_style) in cases {
+            let name = app.suggest_renderer_name(scene_uid, renderer_type).unwrap();
+            assert_eq!(name, format!("{renderer_type}1"));
+            let renderer_uid = app
+                .new_renderer(scene_uid, object_uid, renderer_type, name)
+                .unwrap()
+                .result_renderer;
+            let renderer = app
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(renderer_uid)
+                .unwrap();
+            assert_eq!(renderer.qsc_attr("style"), expected_style);
+        }
+
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert_eq!(
+            object
+                .renderers()
+                .iter()
+                .filter(|renderer| renderer.renderer_type() == "*selection")
+                .count(),
+            1
+        );
+        assert_eq!(
+            object
+                .renderer_by_name("disorder1")
+                .unwrap()
+                .qsc_attr("target"),
+            Some("tube1")
+        );
+        assert_eq!(
+            app.suggest_renderer_name(scene_uid, "simple").unwrap(),
+            "simple2"
+        );
+    }
+
+    #[test]
     fn disorder_renderer_draws_gap_lines_not_the_whole_molecule() {
         // A "disorder" renderer draws dotted Bézier lines bridging unbonded chain
         // gaps, NOT a sphere per atom. On 1CRN (a single fully-bonded chain) it
@@ -48913,7 +49084,7 @@ end_header
             .iter()
             .map(|vertex| (vertex.position - Vector4::new3(0.0, 0.0, 0.0)).length3d())
             .fold(0.0_f64, f64::max);
-        app.set_renderer_property(object, renderer, "sphr", "0.6")
+        app.set_renderer_property(object, renderer, "sphr", "2.0")
             .unwrap();
         let changed = app.active_render_snapshot("").unwrap();
         let changed_extent = changed.meshes[0]
@@ -49266,6 +49437,9 @@ end_header
             .unwrap()
             .result_renderer;
 
+        app.reset_renderer_property(object, renderer, "style")
+            .unwrap();
+
         let tessellated_verts = |app: &DesktopAppState| {
             cuemol_render::tessellate_snapshot(&app.active_render_snapshot("").unwrap())
                 .vertices
@@ -49402,11 +49576,19 @@ end_header
         renderer.set_qsc_attr("show_tube", "false");
         renderer.set_qsc_attr("base_size", "0.8");
         let renderers = app.scene_manager().object(object).unwrap().renderers();
-        assert_eq!(renderers.len(), 1);
-        assert_eq!(renderers[0].renderer_type(), "nucl");
-        assert_eq!(renderers[0].qsc_attr("show_tube"), Some("false"));
+        let public_renderers = renderers
+            .iter()
+            .filter(|renderer| !renderer.renderer_type().starts_with('*'))
+            .collect::<Vec<_>>();
+        assert_eq!(public_renderers.len(), 1);
+        assert_eq!(public_renderers[0].renderer_type(), "nucl");
+        assert_eq!(public_renderers[0].qsc_attr("show_tube"), Some("false"));
         assert_eq!(
-            renderers[0].resolved_attr("show_tube", &default_style_manager(), DEFAULT_STYLE_SCOPE),
+            public_renderers[0].resolved_attr(
+                "show_tube",
+                &default_style_manager(),
+                DEFAULT_STYLE_SCOPE,
+            ),
             Some("false".to_string())
         );
         assert!(!qsc_bool("false"));
@@ -50197,7 +50379,18 @@ end_header
                 .unwrap();
             assert_eq!(summary.atom_count, atoms);
             assert_eq!(summary.bond_count, bonds);
-            assert_eq!(summary.renderer_count, 1);
+            assert_eq!(summary.renderer_count, 2);
+            let renderers = app.renderer_summaries(object_uid);
+            assert_eq!(
+                renderers
+                    .iter()
+                    .filter(|renderer| !renderer.renderer_type.starts_with('*'))
+                    .count(),
+                1
+            );
+            assert!(renderers
+                .iter()
+                .any(|renderer| renderer.renderer_type == "*selection"));
         }
 
         for path in [gro_path, psf_path, mol2_path, amber_path, qdfpdb_path] {

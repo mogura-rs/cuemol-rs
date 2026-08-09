@@ -30,27 +30,7 @@ const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("Square 2K", 2048, 2048),
     ("Print 4K", 3840, 2160),
 ];
-const RENDERER_TYPES: &[(&str, &str)] = &[
-    ("simple", "Simple"),
-    ("cpk", "CPK"),
-    ("ballstick", "Ball & Stick"),
-    ("trace", "Trace"),
-    ("ribbon", "Ribbon"),
-    ("cartoon", "Cartoon"),
-    ("tube", "Tube"),
-    ("spline", "Spline"),
-    ("nucl", "Nucleic Acid"),
-    ("anisou", "Anisotropic U"),
-    ("atomintr", "Atom Interaction"),
-    ("molsurf", "Molecular Surface"),
-    ("dsurface", "Direct Surface"),
-    ("contour", "Map Mesh"),
-    ("isosurf", "Map Surface"),
-    ("gpu_mapmesh", "GPU Map Mesh"),
-    ("gpu_mapvol", "GPU Map Volume"),
-    ("*symm", "Symmetry"),
-    ("*unitcell", "Unit Cell"),
-];
+const RENDERER_TYPES: &[&str] = crate::MOLECULE_RENDERER_TYPES;
 const LEGACY_MENU_SURFACES: &[&str] = &[
     "About CueMol3-tritium",
     "Preferences...",
@@ -1561,8 +1541,7 @@ impl GuiApplication {
                         .map(|object| object.uid)
                 });
                 if let Some(object_uid) = target {
-                    let count = self.state.renderer_summaries(object_uid).len();
-                    self.open_renderer_dialog(object_uid, count + 1);
+                    self.open_renderer_dialog(object_uid);
                 }
             }
             if ui.button("Delete").clicked() {
@@ -2572,7 +2551,7 @@ impl GuiApplication {
                         ui.label(format!("residues: {}", object.residue_count));
                         ui.label(format!("bonds: {}", object.bond_count));
                         if ui.button("Add Renderer").clicked() {
-                            self.open_renderer_dialog(object.uid, object.renderer_count + 1);
+                            self.open_renderer_dialog(object.uid);
                         }
                     }
                 }
@@ -4516,11 +4495,11 @@ impl GuiApplication {
                 egui::ComboBox::from_label("Type")
                     .selected_text(renderer_type_label(&self.new_renderer_type))
                     .show_ui(ui, |ui| {
-                        for (renderer_type, label) in RENDERER_TYPES {
+                        for renderer_type in RENDERER_TYPES {
                             ui.selectable_value(
                                 &mut self.new_renderer_type,
                                 (*renderer_type).to_string(),
-                                *label,
+                                *renderer_type,
                             );
                         }
                     });
@@ -5074,12 +5053,15 @@ impl GuiApplication {
         self.set_status("Panel layout restored");
     }
 
-    fn open_renderer_dialog(&mut self, object_uid: cuemol_core::Uid, next_index: usize) {
+    fn open_renderer_dialog(&mut self, object_uid: cuemol_core::Uid) {
         self.new_renderer_target = Some(object_uid);
         if self.new_renderer_type.trim().is_empty() {
             self.new_renderer_type = "simple".to_string();
         }
-        self.new_renderer_name = format!("{}{}", self.new_renderer_type.trim(), next_index);
+        self.new_renderer_name = self
+            .state
+            .suggest_renderer_name_in_active_scene(&self.new_renderer_type)
+            .unwrap_or_else(|_| format!("{}1", self.new_renderer_type.trim()));
         self.show_renderer_dialog = true;
     }
 
@@ -6417,10 +6399,7 @@ fn vec3_from_vector(value: Vector4) -> Vec3 {
 }
 
 fn renderer_type_label(renderer_type: &str) -> String {
-    RENDERER_TYPES
-        .iter()
-        .find_map(|(value, label)| (*value == renderer_type).then_some((*label).to_string()))
-        .unwrap_or_else(|| renderer_type.to_string())
+    renderer_type.to_string()
 }
 
 fn object_combo_label(
@@ -6805,10 +6784,10 @@ mod tests {
         assert!(LEGACY_MENU_SURFACES.contains(&"Open File..."));
         assert!(LEGACY_MENU_SURFACES.contains(&"Mol surface generation..."));
         assert!(LEGACY_MENU_SURFACES.contains(&"Restore default panel location"));
-        assert!(RENDERER_TYPES
-            .iter()
-            .any(|(value, _)| *value == "ballstick"));
-        assert_eq!(renderer_type_label("cartoon"), "Cartoon");
+        assert!(RENDERER_TYPES.contains(&"ballstick"));
+        assert!(RENDERER_TYPES.contains(&"disorder"));
+        assert!(!RENDERER_TYPES.contains(&"molsurf"));
+        assert_eq!(renderer_type_label("cartoon"), "cartoon");
     }
 
     #[test]

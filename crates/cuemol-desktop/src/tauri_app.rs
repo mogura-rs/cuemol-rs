@@ -15,6 +15,7 @@ use tauri::State;
 use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
     anim_step, atoms_in_screen_rect, pick_atom_screen, AnimKind, AnimObject, DesktopAppState,
+    MOLECULE_RENDERER_TYPES,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
@@ -2625,6 +2626,58 @@ impl AppModel {
                     ));
                 }
             }
+            "dsurface" | "dsurf2" => {
+                for (key, default, allowed) in [
+                    ("drawmode", "fill", &["fill", "line", "point"][..]),
+                    ("surftype", "ses", &["vdw", "sas", "ses"][..]),
+                    ("colormode", "molecule", &["molecule", "potential"][..]),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw.trim();
+                    if !allowed.contains(&value) {
+                        return Err(format!("unsupported direct surface {key}: {value}"));
+                    }
+                    specific_updates.push((key.to_string(), value.to_string(), value == default));
+                }
+                if let Some(raw) = properties.specific.get("detail") {
+                    let value = raw
+                        .trim()
+                        .parse::<i32>()
+                        .map_err(|_| "surface detail must be an integer".to_string())?;
+                    if !(1..=21).contains(&value) {
+                        return Err("surface detail must be between 1 and 21".to_string());
+                    }
+                    specific_updates.push(("detail".to_string(), value.to_string(), value == 6));
+                }
+                if let Some(raw) = properties.specific.get("width") {
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| "surface width must be a number".to_string())?;
+                    if !value.is_finite() || value <= 0.0 || value > 10.0 {
+                        return Err(
+                            "surface width must be greater than 0 and at most 10".to_string()
+                        );
+                    }
+                    specific_updates.push((
+                        "width".to_string(),
+                        value.to_string(),
+                        (value - 1.2).abs() < f64::EPSILON,
+                    ));
+                }
+                for (key, default) in [("target", ""), ("showsel", "*")] {
+                    if let Some(raw) = properties.specific.get(key) {
+                        let value = raw.trim();
+                        specific_updates.push((
+                            key.to_string(),
+                            value.to_string(),
+                            value == default,
+                        ));
+                    }
+                }
+            }
             "ribbon" | "cartoon" => {
                 let cartoon = renderer_type == "cartoon";
                 for (key, label, minimum, maximum, default) in [
@@ -4549,6 +4602,33 @@ fn renderer_specific_attributes(
             ("loopsize2", "-1"),
             ("defaultcolor", "#ffffff"),
         ],
+        "dsurface" | "dsurf2" => vec![
+            ("colormode", "molecule"),
+            ("target", ""),
+            ("detail", "6"),
+            ("proberad", "1.4"),
+            ("surftype", "ses"),
+            ("cullface", "false"),
+            ("drawmode", "fill"),
+            ("width", "1.2"),
+            ("showsel", "*"),
+            ("vdwr_H", "1.2"),
+            ("vdwr_C", "1.7"),
+            ("vdwr_N", "1.55"),
+            ("vdwr_O", "1.52"),
+            ("vdwr_S", "1.8"),
+            ("vdwr_P", "1.8"),
+            ("vdwr_X", "1.7"),
+            ("elepot", ""),
+            ("lowpar", "-10"),
+            ("midpar", "0"),
+            ("highpar", "10"),
+            ("highcol", "#0000ff"),
+            ("midcol", "#ffffff"),
+            ("lowcol", "#ff0000"),
+            ("ramp_above", "false"),
+            ("ramp_value", "1.4"),
+        ],
         "ribbon" => vec![
             ("helix.type", "elliptical"),
             ("helix.width", "0.35"),
@@ -5214,16 +5294,6 @@ fn handle_model_request(
     model: &mut AppModel,
     request: ModelRequest,
 ) -> Result<ModelResponse, String> {
-    const RENDERER_TYPES: &[&str] = &[
-        "simple",
-        "ballstick",
-        "cpk",
-        "ribbon",
-        "cartoon",
-        "trace",
-        "tube",
-        "spline",
-    ];
     match request {
         ModelRequest::GetSnapshot => Ok(ModelResponse::Snapshot(Box::new(model.snapshot()))),
         ModelRequest::GetMoleculeDetails {
@@ -5655,17 +5725,20 @@ fn handle_model_request(
             object_uid,
             renderer_type,
         } => {
-            if !RENDERER_TYPES.contains(&renderer_type.as_str()) {
+            if !MOLECULE_RENDERER_TYPES.contains(&renderer_type.as_str()) {
                 return Err(format!("unsupported renderer type: {renderer_type}"));
             }
             let undo = model.capture_undo();
-            let count = model.desktop.renderer_summaries(Uid::new(object_uid)).len();
+            let renderer_name = model
+                .desktop
+                .suggest_renderer_name_in_active_scene(&renderer_type)
+                .map_err(|error| error.to_string())?;
             model
                 .desktop
                 .new_renderer_in_active_scene(
                     Uid::new(object_uid),
                     renderer_type.clone(),
-                    format!("{renderer_type} {}", count + 1),
+                    renderer_name,
                 )
                 .map_err(|error| error.to_string())?;
             model.status = format!("Added {renderer_type} renderer");
@@ -9175,6 +9248,118 @@ mod tests {
         assert!((point.x1 - projected.0 - 6.0).abs() < 1.0e-5);
         assert!((point.y1 - projected.1 + 4.0).abs() < 1.0e-5);
         assert_eq!((point.x1, point.y1), (point.x2, point.y2));
+    }
+
+    #[test]
+    fn add_renderer_accepts_the_reference_molecular_catalog() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let object_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("renderer target", cuemol_molstr::MolCoord::new());
+
+        for renderer_type in MOLECULE_RENDERER_TYPES {
+            handle_model_request(
+                &mut model,
+                ModelRequest::AddRenderer {
+                    object_uid: object_uid.get(),
+                    renderer_type: (*renderer_type).to_string(),
+                },
+            )
+            .unwrap();
+        }
+
+        let object = model.desktop.scene_manager().object(object_uid).unwrap();
+        for renderer_type in MOLECULE_RENDERER_TYPES {
+            let renderer = object
+                .renderers()
+                .iter()
+                .find(|renderer| renderer.renderer_type() == *renderer_type)
+                .unwrap();
+            assert_eq!(renderer.name(), format!("{renderer_type}1"));
+        }
+        assert_eq!(
+            object
+                .renderers()
+                .iter()
+                .filter(|renderer| renderer.renderer_type() == "*selection")
+                .count(),
+            1
+        );
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::AddRenderer {
+                object_uid: object_uid.get(),
+                renderer_type: "molsurf".to_string(),
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn direct_surface_properties_are_validated_and_persisted() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let renderer_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("dsurface", "surface");
+
+        let initial = model.snapshot();
+        let renderer = initial.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == renderer_uid.get())
+            .unwrap();
+        assert_eq!(renderer.specific["detail"], "6");
+        assert_eq!(renderer.specific["surftype"], "ses");
+        assert_eq!(renderer.specific["colormode"], "molecule");
+        assert!(renderer.supports_electrostatic_coloring);
+
+        let mut properties =
+            default_renderer_properties_input(object_uid, renderer_uid, "wire surface");
+        properties.selection = "chain A".to_string();
+        properties.specific = BTreeMap::from([
+            ("drawmode".to_string(), "line".to_string()),
+            ("width".to_string(), "2.5".to_string()),
+            ("surftype".to_string(), "sas".to_string()),
+            ("detail".to_string(), "9".to_string()),
+            ("target".to_string(), "".to_string()),
+            ("showsel".to_string(), "name CA".to_string()),
+            ("colormode".to_string(), "potential".to_string()),
+        ]);
+        handle_model_request(&mut model, ModelRequest::SetRendererProperties(properties)).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("sel"), Some("chain A"));
+        assert_eq!(renderer.qsc_attr("drawmode"), Some("line"));
+        assert_eq!(renderer.qsc_attr("width"), Some("2.5"));
+        assert_eq!(renderer.qsc_attr("surftype"), Some("sas"));
+        assert_eq!(renderer.qsc_attr("detail"), Some("9"));
+        assert_eq!(renderer.qsc_attr("showsel"), Some("name CA"));
+        assert_eq!(renderer.qsc_attr("colormode"), Some("potential"));
+
+        let mut invalid =
+            default_renderer_properties_input(object_uid, renderer_uid, "wire surface");
+        invalid
+            .specific
+            .insert("detail".to_string(), "22".to_string());
+        assert!(
+            handle_model_request(&mut model, ModelRequest::SetRendererProperties(invalid),)
+                .is_err()
+        );
     }
 
     #[test]
