@@ -897,6 +897,21 @@ const POV_LIGHTING: &str = concat!(
     "}\n",
     "#end\n",
     "\n",
+    "#ifdef (_radiosity)\n",
+    "  #include \"rad_def.inc\"\n",
+    "  global_settings { radiosity { Rad_Settings(_radiosity, off, off) } }\n",
+    "  #ifndef (_light_inten)\n",
+    "    #declare _light_inten=1.6;\n",
+    "    #declare _amb_frac=0.5;\n",
+    "    #declare _flash_frac=0.5;\n",
+    "  #end\n",
+    "  sphere {\n",
+    "    _center, 1\n",
+    "    texture { pigment { color rgb <1,1,1> } finish { diffuse 0 emission _light_inten*_amb_frac } }\n",
+    "    hollow on no_shadow scale _distance*10\n",
+    "  }\n",
+    "#end\n",
+    "\n",
     "#ifndef (_light_inten)\n",
     "    #declare _light_inten=1.3;\n",
     "    #declare _flash_frac=0.8/1.3;\n",
@@ -1136,6 +1151,7 @@ impl PovSceneExporter {
             Vector4::new3(1.0, 0.0, 0.0),
             Vector4::new3(0.0, 1.0, 0.0),
             Vector4::new3(0.0, 0.0, -1.0),
+            self.use_clip_z.then_some(size * 2.0),
         )
     }
 
@@ -1159,6 +1175,7 @@ impl PovSceneExporter {
             right,
             up,
             forward,
+            self.use_clip_z.then_some(camera.slab_depth()),
         ))
     }
 
@@ -1173,12 +1190,21 @@ impl PovSceneExporter {
         right: Vector4,
         up: Vector4,
         forward: Vector4,
+        slab_depth: Option<f64>,
     ) -> String {
         let location = Vector4::new3(
             center.x - forward.x * distance,
             center.y - forward.y * distance,
             center.z - forward.z * distance,
         );
+        let clip_planes = slab_depth.map(|depth| {
+            let half_depth = depth.max(1.0e-3) * 0.5;
+            let front =
+                forward.x * center.x + forward.y * center.y + forward.z * center.z + half_depth;
+            let back =
+                -forward.x * center.x - forward.y * center.y - forward.z * center.z + half_depth;
+            (front, back)
+        });
         let persp = i32::from(perspective);
         let mut out = String::new();
         out.push_str("// CueMol POV-Ray scene\n");
@@ -1266,14 +1292,26 @@ impl PovSceneExporter {
         out.push_str("  }\n");
         writeln!(&mut out, "  texture_list {{ {}", mat_keys.len()).unwrap();
         for c in &mat_keys {
-            writeln!(
-                &mut out,
-                "    texture {{ pigment {{ color rgb <{:.6}, {:.6}, {:.6}> }} }},",
-                c[0] as f32 / 255.0,
-                c[1] as f32 / 255.0,
-                c[2] as f32 / 255.0,
-            )
-            .unwrap();
+            if self.use_post_blend {
+                writeln!(
+                    &mut out,
+                    "    texture {{ pigment {{ color rgbt <{:.6}, {:.6}, {:.6}, {:.6}> }} }},",
+                    c[0] as f32 / 255.0,
+                    c[1] as f32 / 255.0,
+                    c[2] as f32 / 255.0,
+                    1.0 - c[3] as f32 / 255.0,
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    &mut out,
+                    "    texture {{ pigment {{ color rgb <{:.6}, {:.6}, {:.6}> }} }},",
+                    c[0] as f32 / 255.0,
+                    c[1] as f32 / 255.0,
+                    c[2] as f32 / 255.0,
+                )
+                .unwrap();
+            }
         }
         out.push_str("  }\n");
         let tris = mesh.triangles();
@@ -1281,19 +1319,48 @@ impl PovSceneExporter {
         for (f, [i, j, k]) in tris.iter().enumerate() {
             writeln!(&mut out, "    <{i}, {j}, {k}>, {},", face_mat[f]).unwrap();
         }
-        out.push_str("  }\n}\n");
+        out.push_str("  }\n");
+        if let Some((front, back)) = clip_planes {
+            writeln!(
+                &mut out,
+                "  clipped_by {{ plane {{ <{:.6},{:.6},{:.6}>, {:.6} }} plane {{ <{:.6},{:.6},{:.6}>, {:.6} }} }}",
+                forward.x,
+                forward.y,
+                forward.z,
+                front,
+                -forward.x,
+                -forward.y,
+                -forward.z,
+                back
+            )
+            .unwrap();
+        }
+        out.push_str("}\n");
 
         // NPR silhouette/crease edge lines (C++ show_edge_lines / GraphEdge),
         // drawn as thin black cylinders. The camera sits at center + distance·z.
         if self.show_edge_lines {
             let edges = extract_edge_lines(mesh, location, self.crease_limit);
             let ew = (zoom * (0.004 / 1.2)).max(1.0e-4);
+            let clip = clip_planes.map_or_else(String::new, |(front, back)| {
+                format!(
+                    " clipped_by {{ plane {{ <{:.6},{:.6},{:.6}>, {:.6} }} plane {{ <{:.6},{:.6},{:.6}>, {:.6} }} }}",
+                    forward.x,
+                    forward.y,
+                    forward.z,
+                    front,
+                    -forward.x,
+                    -forward.y,
+                    -forward.z,
+                    back
+                )
+            });
             writeln!(&mut out, "// {} edge lines", edges.len()).unwrap();
             for e in &edges {
                 writeln!(
                     &mut out,
-                    "cylinder {{ <{:.6},{:.6},{:.6}>, <{:.6},{:.6},{:.6}>, {ew:.6} pigment {{ color rgb <0,0,0> }} }}",
-                    e.a.x, e.a.y, e.a.z, e.b.x, e.b.y, e.b.z
+                    "cylinder {{ <{:.6},{:.6},{:.6}>, <{:.6},{:.6},{:.6}>, {ew:.6} pigment {{ color rgb <0,0,0> }}{clip} }}",
+                    e.a.x, e.a.y, e.a.z, e.b.x, e.b.y, e.b.z,
                 )
                 .unwrap();
             }
@@ -3942,6 +4009,47 @@ mod tests {
             pov.contains("#declare _camera_pos = <11.000000,2.000000,3.000000>"),
             "{pov}"
         );
+    }
+
+    #[test]
+    fn pov_scene_applies_clip_alpha_edge_and_radiosity_options() {
+        let mesh = RenderMesh {
+            vertices: vec![
+                MeshVertex {
+                    position: Vector4::new3(-1.0, -1.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0, 0.0, 0.0, 0.5],
+                },
+                MeshVertex {
+                    position: Vector4::new3(1.0, -1.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0, 0.0, 0.0, 0.5],
+                },
+                MeshVertex {
+                    position: Vector4::new3(0.0, 1.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0, 0.0, 0.0, 0.5],
+                },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let mut camera = Camera::new();
+        camera.set_slab_depth(2.0);
+        let mut exporter = PovSceneExporter::new();
+        exporter.set_use_clip_z(true);
+        exporter.set_use_post_blend(true);
+        exporter.set_show_edge_lines(false);
+
+        let pov = exporter
+            .write_scene_string_with_camera(&mesh, &camera)
+            .unwrap();
+        assert!(pov.contains("color rgbt <1.000000, 0.000000, 0.000000, 0.498039>"));
+        assert!(pov.contains("clipped_by { plane { <0.000000,0.000000,-1.000000>, 1.000000 }"));
+        assert!(pov.contains("#ifdef (_radiosity)"));
+        assert!(pov.contains("Rad_Settings(_radiosity, off, off)"));
+        assert!(pov.contains("SpecLighting(_light_spread, _distance, _light_inten*(1-_amb_frac)*(1-_flash_frac), _shadow)"));
+        assert!(!pov.contains("edge lines"));
+        assert_eq!(pov.matches('{').count(), pov.matches('}').count());
     }
 
     #[test]

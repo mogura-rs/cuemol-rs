@@ -42,6 +42,20 @@ const ANIMATION_MOVIE_FORMATS: &[(&str, &str)] = &[
     ("wmv2", "WMV"),
     ("gifanim", "GIF animation"),
 ];
+const POV_RADIOSITY_MODES: &[(i32, &str)] = &[
+    (-1, "Disable"),
+    (0, "Default"),
+    (1, "Debug"),
+    (2, "Fast"),
+    (3, "Normal"),
+    (4, "2Bounce"),
+    (5, "Final"),
+    (6, "OutdoorLQ"),
+    (7, "OutdoorHQ"),
+    (8, "OutdoorLight"),
+    (9, "IndoorLQ"),
+    (10, "IndoorHQ"),
+];
 const RENDERER_TYPES: &[&str] = crate::MOLECULE_RENDERER_TYPES;
 const LEGACY_MENU_SURFACES: &[&str] = &[
     "About CueMol3-tritium",
@@ -535,6 +549,12 @@ struct AnimationRenderSettings {
     duplicate_last_frame: bool,
     backend: String,
     povray_executable: String,
+    povray_include_dir: String,
+    pov_clip_plane: bool,
+    pov_post_blend: bool,
+    pov_shadow: bool,
+    pov_edge_lines: bool,
+    pov_radiosity: i32,
     make_movie: bool,
     ffmpeg_executable: String,
     movie_format: String,
@@ -555,6 +575,12 @@ impl Default for AnimationRenderSettings {
             duplicate_last_frame: false,
             backend: "POV-Ray".to_string(),
             povray_executable: "povray".to_string(),
+            povray_include_dir: String::new(),
+            pov_clip_plane: true,
+            pov_post_blend: true,
+            pov_shadow: false,
+            pov_edge_lines: true,
+            pov_radiosity: -1,
             make_movie: false,
             ffmpeg_executable: "ffmpeg".to_string(),
             movie_format: "mp4_h264".to_string(),
@@ -2560,6 +2586,13 @@ impl GuiApplication {
             self.set_status("POV-Ray executable is required");
             return;
         }
+        if settings.backend == "POV-Ray"
+            && !settings.povray_include_dir.trim().is_empty()
+            && !Path::new(settings.povray_include_dir.trim()).is_dir()
+        {
+            self.set_status("POV-Ray include directory does not exist");
+            return;
+        }
         if settings.make_movie && settings.ffmpeg_executable.trim().is_empty() {
             self.set_status("FFmpeg executable is required");
             return;
@@ -3784,9 +3817,53 @@ impl GuiApplication {
             self.animation_render_settings.backend
         ));
         if self.animation_render_settings.backend == "POV-Ray" {
-            ui.label("POV-Ray executable");
-            ui.text_edit_singleline(&mut self.animation_render_settings.povray_executable);
-            ui.label("Each frame is exported as POV and rendered to PNG.");
+            egui::Grid::new("animation-render-pov-grid")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Povray exe file");
+                    ui.text_edit_singleline(&mut self.animation_render_settings.povray_executable);
+                    ui.end_row();
+                    ui.label("Povray inc dir");
+                    ui.text_edit_singleline(&mut self.animation_render_settings.povray_include_dir);
+                    ui.end_row();
+                });
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(
+                    &mut self.animation_render_settings.pov_clip_plane,
+                    "Clipping plane",
+                );
+                ui.checkbox(
+                    &mut self.animation_render_settings.pov_post_blend,
+                    "Post-render alpha blending",
+                );
+                ui.checkbox(&mut self.animation_render_settings.pov_shadow, "Shadow");
+                ui.checkbox(
+                    &mut self.animation_render_settings.pov_edge_lines,
+                    "Edge lines",
+                );
+                let mut labels = false;
+                ui.add_enabled(false, egui::Checkbox::new(&mut labels, "Labels"))
+                    .on_hover_text("Pixel-label export is not available yet");
+            });
+            let radiosity_label = POV_RADIOSITY_MODES
+                .iter()
+                .find(|(value, _)| *value == self.animation_render_settings.pov_radiosity)
+                .map_or("Disable", |(_, label)| *label);
+            ui.horizontal(|ui| {
+                ui.label("Radiosity:");
+                egui::ComboBox::from_id_salt("animation-render-radiosity")
+                    .selected_text(radiosity_label)
+                    .show_ui(ui, |ui| {
+                        for (value, label) in POV_RADIOSITY_MODES {
+                            ui.selectable_value(
+                                &mut self.animation_render_settings.pov_radiosity,
+                                *value,
+                                *label,
+                            );
+                        }
+                    });
+            });
+            ui.weak("POV-Ray frames use quality 11, PNG alpha, and 3-level antialiasing.");
         } else {
             egui::ComboBox::from_label("Denoise")
                 .selected_text(self.umbreon_denoise.label())
@@ -6632,6 +6709,9 @@ fn render_pov_animation_frame(
     let png_path = animation_frame_path(&task.settings, task.index, "png");
     let mesh = tessellate_snapshot(&task.snapshot);
     let mut exporter = PovSceneExporter::new();
+    exporter.set_use_clip_z(task.settings.pov_clip_plane);
+    exporter.set_use_post_blend(task.settings.pov_post_blend);
+    exporter.set_show_edge_lines(task.settings.pov_edge_lines);
     exporter
         .handler_mut()
         .set_path(pov_path.to_string_lossy().into_owned());
@@ -6644,11 +6724,7 @@ fn render_pov_animation_frame(
     update_animation_render_progress(task, 0.25);
 
     let mut child = Command::new(task.settings.povray_executable.trim())
-        .arg(format!("+I{}", pov_path.to_string_lossy()))
-        .arg(format!("+O{}", png_path.to_string_lossy()))
-        .arg(format!("+W{}", task.settings.width))
-        .arg(format!("+H{}", task.settings.height))
-        .args(["+FN", "+UA", "-D"])
+        .args(animation_povray_args(&task.settings, &pov_path, &png_path))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -6683,6 +6759,37 @@ fn render_pov_animation_frame(
         path: png_path,
         log: format!("POV-Ray exited with {status}"),
     })
+}
+
+fn animation_povray_args(
+    settings: &AnimationRenderSettings,
+    pov_path: &Path,
+    png_path: &Path,
+) -> Vec<String> {
+    let mut args = vec![
+        format!("+I{}", pov_path.to_string_lossy()),
+        format!("+O{}", png_path.to_string_lossy()),
+        format!("+W{}", settings.width),
+        format!("+H{}", settings.height),
+        "+FN8".to_string(),
+        "+UA".to_string(),
+        "-D".to_string(),
+        "+WT1".to_string(),
+        "Quality=11".to_string(),
+        "Antialias=On".to_string(),
+        "Antialias_Depth=3".to_string(),
+        "Antialias_Threshold=0.1".to_string(),
+        "Jitter=Off".to_string(),
+        "File_Gamma=1".to_string(),
+        format!("Declare=_shadow={}", u8::from(settings.pov_shadow)),
+    ];
+    if !settings.povray_include_dir.trim().is_empty() {
+        args.push(format!("+L{}", settings.povray_include_dir.trim()));
+    }
+    if settings.pov_radiosity >= 0 {
+        args.push(format!("Declare=_radiosity={}", settings.pov_radiosity));
+    }
+    args
 }
 
 fn spawn_animation_movie_task(
@@ -8008,6 +8115,38 @@ mod tests {
             animation_frame_path(&settings, 7, "png"),
             PathBuf::from("frames/demo_0007.png")
         );
+
+        let pov_settings = AnimationRenderSettings {
+            width: 800,
+            height: 600,
+            povray_include_dir: "/tmp/pov include".to_string(),
+            pov_shadow: true,
+            pov_radiosity: 7,
+            ..Default::default()
+        };
+        let args = animation_povray_args(
+            &pov_settings,
+            Path::new("frames/demo.pov"),
+            Path::new("frames/demo.png"),
+        );
+        for expected in [
+            "+Iframes/demo.pov",
+            "+Oframes/demo.png",
+            "+W800",
+            "+H600",
+            "+FN8",
+            "+WT1",
+            "Quality=11",
+            "Antialias_Depth=3",
+            "Declare=_shadow=1",
+            "+L/tmp/pov include",
+            "Declare=_radiosity=7",
+        ] {
+            assert!(
+                args.iter().any(|argument| argument == expected),
+                "{expected}"
+            );
+        }
     }
 
     #[test]
@@ -9258,6 +9397,24 @@ mod tests {
             harness.run();
             save_harness(&mut harness, &out_dir.join("animation_render_preview.png"));
             fs::remove_file(preview_path).expect("remove animation preview source");
+        }
+
+        // (1f) Reference-density POV-Ray options page: executable/include paths,
+        // render toggles, and radiosity preset in the compact native dialog.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            app.animation_render_settings.tab = AnimationRenderTab::Render;
+            app.animation_render_settings.povray_include_dir =
+                "/usr/local/share/povray/include".to_string();
+            app.tool_dialog = Some("Animation rendering".to_string());
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1000.0, 720.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("animation_render_options.png"));
         }
 
         // (2) Every left-dock panel body expanded at once, so each panel's CONTROLS
