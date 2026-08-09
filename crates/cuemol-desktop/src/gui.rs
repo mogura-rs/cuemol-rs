@@ -4,16 +4,19 @@ use crate::{anim_step, AnimKind, AnimObject, DesktopAppState, GuiLoadedPath, Gui
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::Rgba8;
 use cuemol_render::{
-    MeshVertex, RenderAtom, RenderBond, RenderSceneSnapshot, UmbreonDenoiseMode,
-    UmbreonSceneExporter,
+    tessellate_snapshot, MeshVertex, PovSceneExporter, RenderAtom, RenderBond, RenderSceneSnapshot,
+    UmbreonDenoiseMode, UmbreonSceneExporter,
 };
 use egui_wgpu::ScreenDescriptor;
 use glam::{Mat4, Quat, Vec3, Vec4 as GlamVec4};
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{mpsc, Arc};
+use std::process::{Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU32, Ordering},
+    mpsc, Arc,
+};
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
@@ -29,6 +32,15 @@ const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("Full HD", 1920, 1080),
     ("Square 2K", 2048, 2048),
     ("Print 4K", 3840, 2160),
+];
+const ANIMATION_MOVIE_FORMATS: &[(&str, &str)] = &[
+    ("mov_h264", "QuickTime/H.264"),
+    ("mov_h265", "QuickTime/H.265"),
+    ("mov_raw", "QuickTime/Raw"),
+    ("mp4_h264", "MP4/H.264"),
+    ("mp4_h265", "MP4/H.265"),
+    ("wmv2", "WMV"),
+    ("gifanim", "GIF animation"),
 ];
 const RENDERER_TYPES: &[&str] = crate::MOLECULE_RENDERER_TYPES;
 const LEGACY_MENU_SURFACES: &[&str] = &[
@@ -438,13 +450,15 @@ struct GuiApplication {
     shift_down: bool,
     viewport_menu: Option<ViewportMenu>,
     perf_measure: bool,
-    animation_frames: usize,
     animation_playing: bool,
     animation_loop: bool,
     /// Animation timeline objects (CueMol2 `anim-panel` list) + the elapsed playback
     /// time in seconds while playing.
     animation_objects: Vec<AnimObject>,
     animation_elapsed: f32,
+    animation_render_settings: AnimationRenderSettings,
+    animation_render_job: Option<AnimationRenderJob>,
+    animation_render_log: Vec<String>,
     superpose_reference: Option<cuemol_core::Uid>,
     superpose_moving: Option<cuemol_core::Uid>,
     superpose_algorithm: String,
@@ -498,6 +512,106 @@ struct GuiUndoSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnimationRenderTab {
+    Main,
+    Render,
+    Movie,
+    Preview,
+}
+
+#[derive(Debug, Clone)]
+struct AnimationRenderSettings {
+    tab: AnimationRenderTab,
+    output_dir: String,
+    base_name: String,
+    width: u32,
+    height: u32,
+    perspective: bool,
+    fps: u32,
+    duplicate_last_frame: bool,
+    backend: String,
+    povray_executable: String,
+    make_movie: bool,
+    ffmpeg_executable: String,
+    movie_format: String,
+    bitrate_kbps: u32,
+}
+
+impl Default for AnimationRenderSettings {
+    fn default() -> Self {
+        Self {
+            tab: AnimationRenderTab::Main,
+            output_dir: ".".to_string(),
+            base_name: "output".to_string(),
+            width: 640,
+            height: 480,
+            perspective: true,
+            fps: 30,
+            duplicate_last_frame: false,
+            backend: "POV-Ray".to_string(),
+            povray_executable: "povray".to_string(),
+            make_movie: false,
+            ffmpeg_executable: "ffmpeg".to_string(),
+            movie_format: "mp4_h264".to_string(),
+            bitrate_kbps: 10_240,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum AnimationTaskOutput {
+    Frame {
+        index: u32,
+        path: PathBuf,
+        log: String,
+    },
+    Movie {
+        path: PathBuf,
+        log: String,
+    },
+}
+
+#[derive(Debug)]
+struct AnimationRenderJob {
+    settings: AnimationRenderSettings,
+    restore: AnimationRenderRestore,
+    total_frames: u32,
+    next_frame: u32,
+    completed_frames: u32,
+    frame_paths: Vec<PathBuf>,
+    receiver: Option<mpsc::Receiver<std::result::Result<AnimationTaskOutput, String>>>,
+    progress: Arc<AtomicU32>,
+    cancel: Arc<AtomicBool>,
+    encoding_started: bool,
+}
+
+#[derive(Debug)]
+struct AnimationRenderRestore {
+    renderer_visibility: Vec<(cuemol_core::Uid, cuemol_core::Uid, bool)>,
+    trajectory_frames: Vec<(cuemol_core::Uid, usize)>,
+    camera: CameraController,
+    elapsed: f32,
+}
+
+struct AnimationFrameTask {
+    settings: AnimationRenderSettings,
+    index: u32,
+    total_frames: u32,
+    snapshot: RenderSceneSnapshot,
+    camera: cuemol_qsys::Camera,
+    background: [f32; 4],
+    progress: Arc<AtomicU32>,
+    cancel: Arc<AtomicBool>,
+    denoise: UmbreonDenoiseMode,
+}
+
+struct AnimationMovieTask {
+    settings: AnimationRenderSettings,
+    cancel: Arc<AtomicBool>,
+    progress: Arc<AtomicU32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SceneBackground {
     White,
     Black,
@@ -518,6 +632,13 @@ impl SceneBackground {
                 b: 0.0,
                 a: 1.0,
             },
+        }
+    }
+
+    fn rgba_f32(self) -> [f32; 4] {
+        match self {
+            Self::White => [1.0, 1.0, 1.0, 1.0],
+            Self::Black => [0.0, 0.0, 0.0, 1.0],
         }
     }
 }
@@ -716,11 +837,13 @@ impl GuiApplication {
             shift_down: false,
             viewport_menu: None,
             perf_measure: false,
-            animation_frames: 0,
             animation_playing: false,
             animation_loop: false,
             animation_objects: Vec::new(),
             animation_elapsed: 0.0,
+            animation_render_settings: AnimationRenderSettings::default(),
+            animation_render_job: None,
+            animation_render_log: Vec::new(),
             superpose_reference: None,
             superpose_moving: None,
             superpose_algorithm: "lsq".to_string(),
@@ -770,6 +893,7 @@ impl GuiApplication {
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         self.poll_pdb_download(camera);
         self.poll_url_download(camera);
+        self.poll_animation_render(camera);
         self.pixels_per_point = ctx.pixels_per_point();
         // UI theme (View menu): CueMol2's native XUL look is light by default.
         ctx.set_visuals(if self.light_theme {
@@ -807,7 +931,10 @@ impl GuiApplication {
             self.properties_window(ctx, camera);
         }
         self.dialogs(ctx, camera);
-        if self.pdb_download_receiver.is_some() || self.url_download_receiver.is_some() {
+        if self.pdb_download_receiver.is_some()
+            || self.url_download_receiver.is_some()
+            || self.animation_render_job.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
@@ -2355,6 +2482,15 @@ impl GuiApplication {
             self.animation_elapsed as f64,
             dt as f64,
         );
+        self.apply_animation_frame(frame, dt, camera);
+    }
+
+    fn apply_animation_frame(
+        &mut self,
+        frame: crate::AnimFrame,
+        dt: f32,
+        camera: &mut CameraController,
+    ) {
         self.animation_elapsed = frame.elapsed as f32;
         if frame.rotate_dir != 0.0 {
             camera.rotate_by(frame.rotate_dir as f32 * 120.0 * dt, 0.0);
@@ -2379,6 +2515,234 @@ impl GuiApplication {
                 }
             }
         }
+    }
+
+    fn start_animation_render(&mut self, camera: &CameraController) {
+        if self.animation_render_job.is_some() {
+            return;
+        }
+        if self.animation_objects.is_empty() {
+            self.set_status("No animation in active scene");
+            return;
+        }
+        let mut settings = self.animation_render_settings.clone();
+        settings.width = settings.width.clamp(100, 16_384);
+        settings.height = settings.height.clamp(100, 16_384);
+        settings.fps = settings.fps.clamp(1, 240);
+        settings.base_name = sanitize_animation_base_name(&settings.base_name);
+        if settings.backend == "POV-Ray" && settings.povray_executable.trim().is_empty() {
+            self.set_status("POV-Ray executable is required");
+            return;
+        }
+        if settings.make_movie && settings.ffmpeg_executable.trim().is_empty() {
+            self.set_status("FFmpeg executable is required");
+            return;
+        }
+        let output_dir = PathBuf::from(settings.output_dir.trim());
+        if let Err(error) = fs::create_dir_all(&output_dir) {
+            self.set_status(format!("Error: {error}"));
+            return;
+        }
+        let total_frames = animation_render_frame_count(
+            &self.animation_objects,
+            settings.fps,
+            settings.duplicate_last_frame,
+        );
+        if total_frames == 0 {
+            self.set_status("Animation has no renderable frames");
+            return;
+        }
+
+        self.animation_render_settings = settings.clone();
+        self.animation_render_log.clear();
+        self.animation_render_log.push(format!(
+            "Starting {} frames at {}x{} / {} fps",
+            total_frames, settings.width, settings.height, settings.fps
+        ));
+        let restore = self.capture_animation_render_restore(camera);
+        self.animation_elapsed = 0.0;
+        self.animation_playing = false;
+        self.animation_render_job = Some(AnimationRenderJob {
+            settings,
+            restore,
+            total_frames,
+            next_frame: 0,
+            completed_frames: 0,
+            frame_paths: Vec::with_capacity(total_frames as usize),
+            receiver: None,
+            progress: Arc::new(AtomicU32::new(0)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            encoding_started: false,
+        });
+        self.set_status("Animation rendering started");
+    }
+
+    fn capture_animation_render_restore(
+        &self,
+        camera: &CameraController,
+    ) -> AnimationRenderRestore {
+        let renderer_visibility = self
+            .state
+            .active_object_summaries()
+            .into_iter()
+            .flat_map(|object| {
+                self.state
+                    .renderer_summaries(object.uid)
+                    .into_iter()
+                    .map(move |renderer| (object.uid, renderer.uid, renderer.visible))
+            })
+            .collect();
+        let trajectory_frames = self
+            .state
+            .active_trajectory_summaries()
+            .into_iter()
+            .map(|trajectory| (trajectory.object_uid, trajectory.current_frame))
+            .collect();
+        AnimationRenderRestore {
+            renderer_visibility,
+            trajectory_frames,
+            camera: camera.clone(),
+            elapsed: self.animation_elapsed,
+        }
+    }
+
+    fn poll_animation_render(&mut self, camera: &mut CameraController) {
+        let Some(mut job) = self.animation_render_job.take() else {
+            return;
+        };
+
+        if let Some(receiver) = job.receiver.take() {
+            match receiver.try_recv() {
+                Ok(Ok(AnimationTaskOutput::Frame { index, path, log })) => {
+                    job.completed_frames += 1;
+                    job.frame_paths.push(path.clone());
+                    self.animation_render_log
+                        .push(format!("Frame {index:04}: {}", path.to_string_lossy()));
+                    if !log.trim().is_empty() {
+                        self.animation_render_log.push(log);
+                    }
+                }
+                Ok(Ok(AnimationTaskOutput::Movie { path, log })) => {
+                    if !log.trim().is_empty() {
+                        self.animation_render_log.push(log);
+                    }
+                    self.animation_render_log
+                        .push(format!("Movie: {}", path.to_string_lossy()));
+                    self.finish_animation_render(job, camera, "Animation movie rendered");
+                    return;
+                }
+                Ok(Err(error)) => {
+                    let message = if job.cancel.load(Ordering::Relaxed) {
+                        "Animation rendering cancelled".to_string()
+                    } else {
+                        format!("Animation rendering failed: {error}")
+                    };
+                    self.animation_render_log.push(message.clone());
+                    self.finish_animation_render(job, camera, &message);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    job.receiver = Some(receiver);
+                    self.animation_render_job = Some(job);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let message = "Animation render worker disconnected";
+                    self.animation_render_log.push(message.to_string());
+                    self.finish_animation_render(job, camera, message);
+                    return;
+                }
+            }
+        }
+
+        if job.cancel.load(Ordering::Relaxed) {
+            self.finish_animation_render(job, camera, "Animation rendering cancelled");
+            return;
+        }
+
+        if job.next_frame < job.total_frames {
+            self.schedule_animation_frame(&mut job, camera);
+            self.animation_render_job = Some(job);
+            return;
+        }
+
+        if job.settings.make_movie && !job.encoding_started {
+            match spawn_animation_movie_task(&job) {
+                Ok(receiver) => {
+                    job.encoding_started = true;
+                    job.receiver = Some(receiver);
+                    job.progress.store(990_000, Ordering::Relaxed);
+                    self.animation_render_log
+                        .push("Encoding movie with FFmpeg".to_string());
+                    self.animation_render_job = Some(job);
+                }
+                Err(error) => {
+                    self.animation_render_log.push(error.clone());
+                    self.finish_animation_render(job, camera, &error);
+                }
+            }
+            return;
+        }
+
+        self.finish_animation_render(job, camera, "Animation frames rendered");
+    }
+
+    fn schedule_animation_frame(
+        &mut self,
+        job: &mut AnimationRenderJob,
+        camera: &mut CameraController,
+    ) {
+        let index = job.next_frame;
+        let dt = if index == 0 {
+            0.0
+        } else {
+            1.0 / job.settings.fps as f32
+        };
+        let frame = anim_step(
+            &self.animation_objects,
+            self.animation_elapsed as f64,
+            f64::from(dt),
+        );
+        self.apply_animation_frame(frame, dt, camera);
+        let mut frame_camera = camera.clone();
+        frame_camera.perspective = job.settings.perspective;
+        let qsys_camera = frame_camera.to_qsys_camera("__animation_render");
+        let snapshot = self.snapshot.clone();
+        let background = self.background.rgba_f32();
+        let receiver = spawn_animation_frame_task(AnimationFrameTask {
+            settings: job.settings.clone(),
+            index,
+            total_frames: job.total_frames,
+            snapshot,
+            camera: qsys_camera,
+            background,
+            progress: Arc::clone(&job.progress),
+            cancel: Arc::clone(&job.cancel),
+            denoise: self.umbreon_denoise,
+        });
+        job.next_frame += 1;
+        job.receiver = Some(receiver);
+    }
+
+    fn finish_animation_render(
+        &mut self,
+        job: AnimationRenderJob,
+        camera: &mut CameraController,
+        status: &str,
+    ) {
+        for (object_uid, renderer_uid, visible) in job.restore.renderer_visibility {
+            let _ = self
+                .state
+                .set_renderer_visible(object_uid, renderer_uid, visible);
+        }
+        for (object_uid, frame) in job.restore.trajectory_frames {
+            let _ = self.state.apply_trajectory_frame(object_uid, frame);
+        }
+        *camera = job.restore.camera;
+        self.animation_elapsed = job.restore.elapsed;
+        self.animation_playing = false;
+        self.rebuild_snapshot();
+        self.set_status(status);
     }
 
     /// Set every renderer's visibility for a Show/Hide animation object, re-tessellating
@@ -3183,23 +3547,223 @@ impl GuiApplication {
         }
     }
 
-    fn animation_tab(&mut self, ui: &mut egui::Ui) {
+    fn animation_render_tool_ui(&mut self, ui: &mut egui::Ui, camera: &CameraController) {
         ui.horizontal(|ui| {
-            ui.label(format!("Frames: {}", self.animation_frames));
-            if ui.button("Add Camera").clicked() {
-                self.animation_frames += 1;
-                self.set_status(format!("Animation camera {} added", self.animation_frames));
+            ui.selectable_value(
+                &mut self.animation_render_settings.tab,
+                AnimationRenderTab::Main,
+                "Main options",
+            );
+            ui.selectable_value(
+                &mut self.animation_render_settings.tab,
+                AnimationRenderTab::Render,
+                "Render options",
+            );
+            ui.selectable_value(
+                &mut self.animation_render_settings.tab,
+                AnimationRenderTab::Movie,
+                "Movie options",
+            );
+            ui.selectable_value(
+                &mut self.animation_render_settings.tab,
+                AnimationRenderTab::Preview,
+                "Preview",
+            );
+        });
+        ui.separator();
+
+        let running = self.animation_render_job.is_some();
+        ui.add_enabled_ui(!running, |ui| match self.animation_render_settings.tab {
+            AnimationRenderTab::Main => self.animation_render_main_options_ui(ui),
+            AnimationRenderTab::Render => self.animation_render_backend_options_ui(ui),
+            AnimationRenderTab::Movie => self.animation_render_movie_options_ui(ui),
+            AnimationRenderTab::Preview => self.animation_render_progress_ui(ui),
+        });
+        if running && self.animation_render_settings.tab != AnimationRenderTab::Preview {
+            self.animation_render_progress_ui(ui);
+        }
+
+        ui.separator();
+        let mut start = false;
+        let mut stop = false;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!running, egui::Button::new("Start"))
+                .clicked()
+            {
+                start = true;
             }
-            let label = if self.animation_playing {
-                "Stop"
-            } else {
-                "Play"
-            };
-            if ui.button(label).clicked() {
-                self.animation_playing = !self.animation_playing;
-                self.set_status(format!("Animation playback: {}", self.animation_playing));
+            if ui.add_enabled(running, egui::Button::new("Stop")).clicked() {
+                stop = true;
             }
         });
+        if start {
+            self.start_animation_render(camera);
+        }
+        if stop {
+            if let Some(job) = &self.animation_render_job {
+                job.cancel.store(true, Ordering::Relaxed);
+                self.set_status("Cancelling animation render");
+            }
+        }
+    }
+
+    fn animation_render_main_options_ui(&mut self, ui: &mut egui::Ui) {
+        egui::Grid::new("animation-render-main-grid")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Output dir");
+                ui.text_edit_singleline(&mut self.animation_render_settings.output_dir);
+                ui.end_row();
+                ui.label("Output base name");
+                ui.text_edit_singleline(&mut self.animation_render_settings.base_name);
+                ui.end_row();
+                ui.label("Width");
+                ui.add(
+                    egui::DragValue::new(&mut self.animation_render_settings.width)
+                        .range(100..=16_384)
+                        .suffix(" px"),
+                );
+                ui.end_row();
+                ui.label("Height");
+                ui.add(
+                    egui::DragValue::new(&mut self.animation_render_settings.height)
+                        .range(100..=16_384)
+                        .suffix(" px"),
+                );
+                ui.end_row();
+            });
+        ui.horizontal(|ui| {
+            ui.label("Preset size");
+            for (label, width, height) in [
+                ("VGA", 640, 480),
+                ("SVGA", 800, 600),
+                ("XGA", 1024, 768),
+                ("HD720", 1280, 720),
+                ("HD1080", 1920, 1080),
+            ] {
+                if ui.small_button(label).clicked() {
+                    self.animation_render_settings.width = width;
+                    self.animation_render_settings.height = height;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Projection");
+            ui.radio_value(
+                &mut self.animation_render_settings.perspective,
+                true,
+                "Perspective",
+            );
+            ui.radio_value(
+                &mut self.animation_render_settings.perspective,
+                false,
+                "Orthographic",
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.animation_render_settings.duplicate_last_frame,
+                "Loop",
+            );
+            ui.label("Frame rate");
+            ui.add(
+                egui::DragValue::new(&mut self.animation_render_settings.fps)
+                    .range(1..=240)
+                    .suffix(" fps"),
+            );
+            egui::ComboBox::from_label("Backend")
+                .selected_text(&self.animation_render_settings.backend)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.animation_render_settings.backend,
+                        "POV-Ray".to_string(),
+                        "POV-Ray",
+                    );
+                    ui.selectable_value(
+                        &mut self.animation_render_settings.backend,
+                        "Umbreon".to_string(),
+                        "Umbreon",
+                    );
+                });
+        });
+    }
+
+    fn animation_render_backend_options_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label(format!(
+            "Backend: {}",
+            self.animation_render_settings.backend
+        ));
+        if self.animation_render_settings.backend == "POV-Ray" {
+            ui.label("POV-Ray executable");
+            ui.text_edit_singleline(&mut self.animation_render_settings.povray_executable);
+            ui.label("Each frame is exported as POV and rendered to PNG.");
+        } else {
+            egui::ComboBox::from_label("Denoise")
+                .selected_text(self.umbreon_denoise.label())
+                .show_ui(ui, |ui| {
+                    for mode in UmbreonDenoiseMode::ALL {
+                        ui.selectable_value(&mut self.umbreon_denoise, mode, mode.label());
+                    }
+                });
+            ui.label("Umbreon frames are rendered in-process with cooperative cancellation.");
+        }
+    }
+
+    fn animation_render_movie_options_ui(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.animation_render_settings.make_movie, "Make movie");
+        ui.add_enabled_ui(self.animation_render_settings.make_movie, |ui| {
+            ui.label("FFmpeg executable");
+            ui.text_edit_singleline(&mut self.animation_render_settings.ffmpeg_executable);
+            egui::ComboBox::from_label("Output format")
+                .selected_text(animation_movie_format_label(
+                    &self.animation_render_settings.movie_format,
+                ))
+                .show_ui(ui, |ui| {
+                    for (value, label) in ANIMATION_MOVIE_FORMATS {
+                        ui.selectable_value(
+                            &mut self.animation_render_settings.movie_format,
+                            (*value).to_string(),
+                            *label,
+                        );
+                    }
+                });
+            ui.horizontal(|ui| {
+                ui.label("Bitrate");
+                ui.add(
+                    egui::DragValue::new(&mut self.animation_render_settings.bitrate_kbps)
+                        .range(1..=200_000)
+                        .suffix(" kbps"),
+                );
+            });
+        });
+    }
+
+    fn animation_render_progress_ui(&mut self, ui: &mut egui::Ui) {
+        let (progress, text) = self.animation_render_job.as_ref().map_or_else(
+            || (0.0, "Idle".to_string()),
+            |job| {
+                let progress = job.progress.load(Ordering::Relaxed) as f32 / 1_000_000.0_f32;
+                let phase = if job.encoding_started {
+                    "Encoding movie".to_string()
+                } else {
+                    format!(
+                        "Rendering frame {}/{}",
+                        job.completed_frames.min(job.total_frames),
+                        job.total_frames
+                    )
+                };
+                (progress, phase)
+            },
+        );
+        ui.add(egui::ProgressBar::new(progress.clamp(0.0, 1.0)).text(text));
+        egui::ScrollArea::vertical()
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for line in &self.animation_render_log {
+                    ui.monospace(line);
+                }
+            });
     }
 
     fn render_tab(&mut self, ui: &mut egui::Ui) {
@@ -4553,7 +5117,7 @@ impl GuiApplication {
                     "About config" => self.config_tool_ui(ui),
                     "Addon manager" => self.addon_tool_ui(ui),
                     "POV-Ray rendering" => self.render_tab(ui),
-                    "Animation rendering" => self.animation_tab(ui),
+                    "Animation rendering" => self.animation_render_tool_ui(ui, camera),
                     _ => {
                         ui.label(tool_status_text(&title));
                     }
@@ -5756,6 +6320,294 @@ fn tool_status_text(_title: &str) -> &'static str {
     "No additional action is available."
 }
 
+fn animation_render_frame_count(
+    objects: &[AnimObject],
+    fps: u32,
+    duplicate_last_frame: bool,
+) -> u32 {
+    let duration = objects
+        .iter()
+        .map(|object| object.duration.max(0.01))
+        .sum::<f64>();
+    let intervals = (duration * f64::from(fps.max(1)))
+        .round()
+        .clamp(1.0, f64::from(u32::MAX - 1)) as u32;
+    intervals + u32::from(duplicate_last_frame)
+}
+
+fn sanitize_animation_base_name(value: &str) -> String {
+    let sanitized = value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "output".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn animation_movie_format_label(format: &str) -> &str {
+    ANIMATION_MOVIE_FORMATS
+        .iter()
+        .find(|(value, _)| *value == format)
+        .map_or(format, |(_, label)| *label)
+}
+
+fn animation_movie_extension(format: &str) -> &'static str {
+    match format {
+        "mov_h264" | "mov_h265" | "mov_raw" => "mov",
+        "wmv2" => "wmv",
+        "gifanim" => "gif",
+        _ => "mp4",
+    }
+}
+
+fn animation_frame_path(
+    settings: &AnimationRenderSettings,
+    index: u32,
+    extension: &str,
+) -> PathBuf {
+    PathBuf::from(settings.output_dir.trim())
+        .join(format!("{}_{index:04}.{extension}", settings.base_name))
+}
+
+fn update_animation_render_progress(task: &AnimationFrameTask, frame_progress: f64) {
+    let frames_weight = if task.settings.make_movie { 0.95 } else { 1.0 };
+    let total = f64::from(task.total_frames.max(1));
+    let completed = f64::from(task.index) + frame_progress.clamp(0.0, 1.0);
+    task.progress.store(
+        ((completed / total) * frames_weight * 1_000_000.0)
+            .round()
+            .clamp(0.0, 1_000_000.0) as u32,
+        Ordering::Relaxed,
+    );
+}
+
+fn spawn_animation_frame_task(
+    task: AnimationFrameTask,
+) -> mpsc::Receiver<std::result::Result<AnimationTaskOutput, String>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = render_animation_frame(&task);
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
+fn render_animation_frame(
+    task: &AnimationFrameTask,
+) -> std::result::Result<AnimationTaskOutput, String> {
+    if task.cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".to_string());
+    }
+    if task.settings.backend == "Umbreon" {
+        render_umbreon_animation_frame(task)
+    } else {
+        render_pov_animation_frame(task)
+    }
+}
+
+fn render_umbreon_animation_frame(
+    task: &AnimationFrameTask,
+) -> std::result::Result<AnimationTaskOutput, String> {
+    let path = animation_frame_path(&task.settings, task.index, "png");
+    let mut exporter = UmbreonSceneExporter::new();
+    exporter
+        .handler_mut()
+        .set_path(path.to_string_lossy().into_owned());
+    exporter.set_width(task.settings.width.min(i32::MAX as u32) as i32);
+    exporter.set_height(task.settings.height.min(i32::MAX as u32) as i32);
+    exporter.set_denoise_mode(task.denoise);
+    exporter.set_render_input(task.snapshot.clone(), task.camera.clone(), task.background);
+    exporter.begin_render().map_err(|error| error.to_string())?;
+    while !exporter.is_render_done() {
+        if task.cancel.load(Ordering::Relaxed) {
+            exporter.cancel_render();
+        }
+        update_animation_render_progress(task, exporter.get_render_progress());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let frame = exporter.end_render().map_err(|error| error.to_string())?;
+    if frame.is_none() || task.cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".to_string());
+    }
+    update_animation_render_progress(task, 1.0);
+    Ok(AnimationTaskOutput::Frame {
+        index: task.index,
+        path,
+        log: "Umbreon frame complete".to_string(),
+    })
+}
+
+fn render_pov_animation_frame(
+    task: &AnimationFrameTask,
+) -> std::result::Result<AnimationTaskOutput, String> {
+    let pov_path = animation_frame_path(&task.settings, task.index, "pov");
+    let png_path = animation_frame_path(&task.settings, task.index, "png");
+    let mesh = tessellate_snapshot(&task.snapshot);
+    let mut exporter = PovSceneExporter::new();
+    exporter
+        .handler_mut()
+        .set_path(pov_path.to_string_lossy().into_owned());
+    exporter
+        .write_scene_file(
+            &mesh,
+            task.camera.center(),
+            (task.camera.zoom() / 1.2).max(1.0),
+            task.camera.is_perspective(),
+        )
+        .map_err(|error| error.to_string())?;
+    if task.cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".to_string());
+    }
+    update_animation_render_progress(task, 0.25);
+
+    let mut child = Command::new(task.settings.povray_executable.trim())
+        .arg(format!("+I{}", pov_path.to_string_lossy()))
+        .arg(format!("+O{}", png_path.to_string_lossy()))
+        .arg(format!("+W{}", task.settings.width))
+        .arg(format!("+H{}", task.settings.height))
+        .args(["+FN", "+UA", "-D"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("failed to start POV-Ray: {error}"))?;
+    let status = loop {
+        if task.cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("cancelled".to_string());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                std::thread::sleep(Duration::from_millis(25));
+                update_animation_render_progress(task, 0.5);
+            }
+            Err(error) => return Err(format!("POV-Ray wait failed: {error}")),
+        }
+    };
+    if !status.success() {
+        return Err(format!("POV-Ray exited with {status}"));
+    }
+    if !png_path.is_file() {
+        return Err(format!(
+            "POV-Ray did not create {}",
+            png_path.to_string_lossy()
+        ));
+    }
+    update_animation_render_progress(task, 1.0);
+    Ok(AnimationTaskOutput::Frame {
+        index: task.index,
+        path: png_path,
+        log: format!("POV-Ray exited with {status}"),
+    })
+}
+
+fn spawn_animation_movie_task(
+    job: &AnimationRenderJob,
+) -> std::result::Result<mpsc::Receiver<std::result::Result<AnimationTaskOutput, String>>, String> {
+    if job.frame_paths.len() != job.total_frames as usize
+        || job.frame_paths.iter().any(|path| {
+            path.extension()
+                .is_none_or(|extension| !extension.eq_ignore_ascii_case("png"))
+        })
+    {
+        return Err("Movie encoding requires a complete PNG frame sequence".to_string());
+    }
+    let task = AnimationMovieTask {
+        settings: job.settings.clone(),
+        cancel: Arc::clone(&job.cancel),
+        progress: Arc::clone(&job.progress),
+    };
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = encode_animation_movie(&task);
+        let _ = sender.send(result);
+    });
+    Ok(receiver)
+}
+
+fn encode_animation_movie(
+    task: &AnimationMovieTask,
+) -> std::result::Result<AnimationTaskOutput, String> {
+    let extension = animation_movie_extension(&task.settings.movie_format);
+    let output_dir = PathBuf::from(task.settings.output_dir.trim());
+    let output_file = format!("{}.{}", task.settings.base_name, extension);
+    let output_path = output_dir.join(&output_file);
+    let input_pattern = format!("{}_%04d.png", task.settings.base_name);
+    let mut command = Command::new(task.settings.ffmpeg_executable.trim());
+    command
+        .current_dir(&output_dir)
+        .args(["-y", "-framerate"])
+        .arg(task.settings.fps.to_string())
+        .args(["-start_number", "0", "-i"])
+        .arg(input_pattern);
+    match task.settings.movie_format.as_str() {
+        "mov_h265" | "mp4_h265" => {
+            command.args(["-c:v", "libx265", "-pix_fmt", "yuv420p"]);
+        }
+        "mov_raw" => {
+            command.args(["-c:v", "rawvideo"]);
+        }
+        "wmv2" => {
+            command.args(["-c:v", "wmv2"]);
+        }
+        "gifanim" => {
+            command.args(["-loop", "0"]);
+        }
+        _ => {
+            command.args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+        }
+    }
+    if !matches!(task.settings.movie_format.as_str(), "mov_raw" | "gifanim") {
+        command
+            .arg("-b:v")
+            .arg(format!("{}k", task.settings.bitrate_kbps.max(1)));
+    }
+    command
+        .arg(&output_file)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start FFmpeg: {error}"))?;
+    let status = loop {
+        if task.cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("cancelled".to_string());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(format!("FFmpeg wait failed: {error}")),
+        }
+    };
+    if !status.success() {
+        return Err(format!("FFmpeg exited with {status}"));
+    }
+    if !output_path.is_file() {
+        return Err(format!(
+            "FFmpeg did not create {}",
+            output_path.to_string_lossy()
+        ));
+    }
+    task.progress.store(1_000_000, Ordering::Relaxed);
+    Ok(AnimationTaskOutput::Movie {
+        path: output_path,
+        log: format!("FFmpeg exited with {status}"),
+    })
+}
+
 struct GpuSceneFrame<'a> {
     snapshot: &'a RenderSceneSnapshot,
     revision: u64,
@@ -6948,6 +7800,127 @@ fn mesh_fs(input: MeshVsOut, @builtin(front_facing) front_facing: bool) -> @loca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animation_render_helpers_define_frame_sequence_and_output_names() {
+        let objects = vec![
+            AnimObject {
+                kind: AnimKind::Spin,
+                duration: 1.25,
+            },
+            AnimObject {
+                kind: AnimKind::Pause,
+                duration: 0.75,
+            },
+        ];
+        assert_eq!(animation_render_frame_count(&objects, 30, false), 60);
+        assert_eq!(animation_render_frame_count(&objects, 30, true), 61);
+        assert_eq!(
+            sanitize_animation_base_name("  demo frame/1  "),
+            "demo_frame_1"
+        );
+        assert_eq!(sanitize_animation_base_name("   "), "output");
+        assert_eq!(animation_movie_extension("mov_h265"), "mov");
+        assert_eq!(animation_movie_extension("wmv2"), "wmv");
+        assert_eq!(animation_movie_extension("gifanim"), "gif");
+        assert_eq!(animation_movie_extension("mp4_h264"), "mp4");
+
+        let settings = AnimationRenderSettings {
+            output_dir: "frames".to_string(),
+            base_name: "demo".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            animation_frame_path(&settings, 7, "png"),
+            PathBuf::from("frames/demo_0007.png")
+        );
+    }
+
+    #[test]
+    fn animation_render_cancel_and_restore_are_scoped_to_animation_state() {
+        let mut app = GuiApplication::new();
+        let initial_camera = CameraController {
+            target: Vec3::new(1.0, 2.0, 3.0),
+            ..Default::default()
+        };
+        let mut camera = initial_camera.clone();
+        app.animation_elapsed = 1.25;
+        let restore = app.capture_animation_render_restore(&camera);
+
+        app.background = SceneBackground::Black;
+        app.animation_elapsed = 9.0;
+        camera.rotate_by(20.0, -10.0);
+        let job = AnimationRenderJob {
+            settings: AnimationRenderSettings::default(),
+            restore,
+            total_frames: 1,
+            next_frame: 1,
+            completed_frames: 1,
+            frame_paths: Vec::new(),
+            receiver: None,
+            progress: Arc::new(AtomicU32::new(0)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            encoding_started: false,
+        };
+        app.finish_animation_render(job, &mut camera, "done");
+        assert_eq!(app.background, SceneBackground::Black);
+        assert_eq!(app.animation_elapsed, 1.25);
+        assert!(camera.target.abs_diff_eq(initial_camera.target, 1.0e-6));
+        assert!(camera
+            .orientation
+            .abs_diff_eq(initial_camera.orientation, 1.0e-6));
+
+        let cancel = Arc::new(AtomicBool::new(true));
+        let task = AnimationFrameTask {
+            settings: AnimationRenderSettings {
+                backend: "Umbreon".to_string(),
+                ..Default::default()
+            },
+            index: 0,
+            total_frames: 1,
+            snapshot: app.snapshot.clone(),
+            camera: camera.to_qsys_camera("cancelled"),
+            background: app.background.rgba_f32(),
+            progress: Arc::new(AtomicU32::new(0)),
+            cancel,
+            denoise: UmbreonDenoiseMode::None,
+        };
+        assert_eq!(render_animation_frame(&task).unwrap_err(), "cancelled");
+    }
+
+    #[test]
+    fn animation_render_umbreon_writes_a_png_frame() {
+        let app = GuiApplication::new();
+        let base_name = format!("cuemol-animation-frame-test-{}", std::process::id());
+        let settings = AnimationRenderSettings {
+            output_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            base_name,
+            width: 16,
+            height: 16,
+            backend: "Umbreon".to_string(),
+            ..Default::default()
+        };
+        let path = animation_frame_path(&settings, 0, "png");
+        let task = AnimationFrameTask {
+            settings,
+            index: 0,
+            total_frames: 1,
+            snapshot: app.snapshot.clone(),
+            camera: CameraController::default().to_qsys_camera("test"),
+            background: SceneBackground::White.rgba_f32(),
+            progress: Arc::new(AtomicU32::new(0)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            denoise: UmbreonDenoiseMode::None,
+        };
+        let output = render_animation_frame(&task).expect("render frame");
+        assert!(matches!(
+            output,
+            AnimationTaskOutput::Frame { index: 0, .. }
+        ));
+        let png = fs::read(&path).expect("read rendered PNG");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        fs::remove_file(path).expect("remove rendered PNG");
+    }
 
     #[test]
     fn native_primitive_instances_preserve_edge_and_radius_data() {
