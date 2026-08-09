@@ -2,7 +2,7 @@ pub mod raytrace;
 
 use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
 use cuemol_gfx::{CmsXform, ColorSpec, Rgba8};
-use cuemol_qsys::{InOutHandler, SceneExporter as QsysSceneExporter};
+use cuemol_qsys::{Camera, InOutHandler, SceneExporter as QsysSceneExporter};
 use std::fmt::Write as _;
 
 pub use raytrace::{
@@ -888,7 +888,7 @@ const POV_LIGHTING: &str = concat!(
     "// Flash lighting macro\n",
     "#macro FlashLighting(aInten)\n",
     "light_source {\n",
-    "   _center + <0,0,_distance>\n",
+    "   _camera_pos\n",
     "   color rgb aInten\n",
     "   shadowless\n",
     "#if (!_perspective)\n",
@@ -902,7 +902,7 @@ const POV_LIGHTING: &str = concat!(
     "    #declare _flash_frac=0.8/1.3;\n",
     "    #declare _amb_frac=0;\n",
     "#end\n",
-    "SpecLighting(_light_spread, _distance, _light_inten*(1-_amb_frac)*(1-_flash_frac), 1)\n",
+    "SpecLighting(_light_spread, _distance, _light_inten*(1-_amb_frac)*(1-_flash_frac), _shadow)\n",
     "FlashLighting(_light_inten*(1-_amb_frac)*_flash_frac)\n",
 );
 
@@ -1048,6 +1048,18 @@ impl PovSceneExporter {
         Ok(())
     }
 
+    /// Write a complete POV-Ray scene using the full CueMol camera transform.
+    pub fn write_scene_file_with_camera(
+        &mut self,
+        mesh: &RenderMesh,
+        camera: &Camera,
+    ) -> Result<()> {
+        let output = self.write_scene_string_with_camera(mesh, camera)?;
+        self.handler().write_string(&output)?;
+        self.state.write();
+        Ok(())
+    }
+
     pub fn write_mesh2_string(&self, vertices: &[Vector4], triangles: &[[usize; 3]]) -> String {
         let valid_triangles = triangles
             .iter()
@@ -1115,6 +1127,58 @@ impl PovSceneExporter {
     ) -> String {
         let distance = (size * 3.0).max(1.0);
         let zoom = (size * 1.2).max(1.0);
+        self.write_scene_view_string(
+            mesh,
+            center,
+            distance,
+            zoom,
+            perspective,
+            Vector4::new3(1.0, 0.0, 0.0),
+            Vector4::new3(0.0, 1.0, 0.0),
+            Vector4::new3(0.0, 0.0, -1.0),
+        )
+    }
+
+    /// Serialize a complete POV-Ray scene from a CueMol camera, preserving camera
+    /// rotation, roll, distance, zoom, centre, and projection mode.
+    pub fn write_scene_string_with_camera(
+        &self,
+        mesh: &RenderMesh,
+        camera: &Camera,
+    ) -> Result<String> {
+        let inverse_rotation = camera.rotation().inv()?.to_matrix();
+        let right = inverse_rotation.mul_vec(Vector4::new4(1.0, 0.0, 0.0, 0.0));
+        let up = inverse_rotation.mul_vec(Vector4::new4(0.0, 1.0, 0.0, 0.0));
+        let forward = inverse_rotation.mul_vec(Vector4::new4(0.0, 0.0, -1.0, 0.0));
+        Ok(self.write_scene_view_string(
+            mesh,
+            camera.center(),
+            camera.cam_dist(),
+            camera.zoom(),
+            camera.is_perspective(),
+            right,
+            up,
+            forward,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_scene_view_string(
+        &self,
+        mesh: &RenderMesh,
+        center: Vector4,
+        distance: f64,
+        zoom: f64,
+        perspective: bool,
+        right: Vector4,
+        up: Vector4,
+        forward: Vector4,
+    ) -> String {
+        let location = Vector4::new3(
+            center.x - forward.x * distance,
+            center.y - forward.y * distance,
+            center.z - forward.z * distance,
+        );
         let persp = i32::from(perspective);
         let mut out = String::new();
         out.push_str("// CueMol POV-Ray scene\n");
@@ -1138,17 +1202,52 @@ impl PovSceneExporter {
         writeln!(&mut out, "#declare _zoomy = {zoom:.6};").unwrap();
         out.push_str("#declare _zoomx = _zoomy * image_width/image_height;\n");
         out.push_str("#declare _fovx = 2.0*degrees( atan2(_zoomx, 2.0*_distance) );\n");
+        writeln!(
+            &mut out,
+            "#declare _camera_pos = <{:.6},{:.6},{:.6}> + <{:.6},{:.6},{:.6}>*_stereo*_distance*_iod;",
+            location.x, location.y, location.z, right.x, right.y, right.z
+        )
+        .unwrap();
         out.push_str("camera {\n");
-        out.push_str(" #if (_perspective)\n perspective\n direction <0,0,-1>\n");
-        out.push_str(" up <0,1,0> * image_height/image_width\n right <1,0,0>\n angle _fovx\n");
-        out.push_str(
-            " location _center + <_stereo*_distance*_iod,0,_distance>\n look_at _center\n",
-        );
-        out.push_str(" #else\n orthographic\n direction <0,0,-1>\n");
-        out.push_str(" up <0, _zoomy, 0>\n right <_zoomx, 0, 0>\n");
-        out.push_str(
-            " location _center + <_stereo*_distance*_iod,0,_distance>\n look_at _center\n",
-        );
+        out.push_str(" #if (_perspective)\n perspective\n");
+        writeln!(
+            &mut out,
+            " up <{:.6},{:.6},{:.6}> * image_height/image_width",
+            up.x, up.y, up.z
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            " right <{:.6},{:.6},{:.6}>\n angle _fovx",
+            right.x, right.y, right.z
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            " direction <{:.6},{:.6},{:.6}>\n location _camera_pos",
+            forward.x, forward.y, forward.z
+        )
+        .unwrap();
+        out.push_str(" #else\n orthographic\n");
+        writeln!(
+            &mut out,
+            " direction <{:.6},{:.6},{:.6}>",
+            forward.x, forward.y, forward.z
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            " up <{:.6},{:.6},{:.6}> * _zoomy",
+            up.x, up.y, up.z
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            " right <{:.6},{:.6},{:.6}> * _zoomx",
+            right.x, right.y, right.z
+        )
+        .unwrap();
+        out.push_str(" location _camera_pos\n");
         out.push_str(" #end\n}\n");
         out.push_str("global_settings {\n  assumed_gamma 1.0\n}\n");
         out.push_str(POV_LIGHTING);
@@ -1187,9 +1286,8 @@ impl PovSceneExporter {
         // NPR silhouette/crease edge lines (C++ show_edge_lines / GraphEdge),
         // drawn as thin black cylinders. The camera sits at center + distance·z.
         if self.show_edge_lines {
-            let cam = Vector4::new3(center.x, center.y, center.z + distance);
-            let edges = extract_edge_lines(mesh, cam, self.crease_limit);
-            let ew = (size * 0.004).max(1.0e-4);
+            let edges = extract_edge_lines(mesh, location, self.crease_limit);
+            let ew = (zoom * (0.004 / 1.2)).max(1.0e-4);
             writeln!(&mut out, "// {} edge lines", edges.len()).unwrap();
             for e in &edges {
                 writeln!(
@@ -3807,7 +3905,8 @@ mod tests {
         assert!(pov.contains("light_source {"));
         assert!(pov.contains("background {"));
         assert!(pov.contains("global_settings {"));
-        assert!(pov.contains("look_at _center"));
+        assert!(pov.contains("direction <0.000000,0.000000,-1.000000>"));
+        assert!(pov.contains("#declare _camera_pos = <5.000000,5.000000,17.000000>"));
         // The camera frames the molecule centre, not the origin.
         assert!(pov.contains("#declare _center = <5.000000,5.000000,5.000000>;"));
         // Coloured geometry: a texture_list carrying the red atom colour + mesh2.
@@ -3816,6 +3915,33 @@ mod tests {
         assert!(pov.contains("pigment { color rgb <1.000000, 0.000000, 0.000000> }"));
         // Balanced braces (the macro/camera/mesh nesting closes cleanly).
         assert_eq!(pov.matches('{').count(), pov.matches('}').count());
+    }
+
+    #[test]
+    fn pov_scene_uses_full_cuemol_camera_transform() {
+        let mesh = RenderMesh::new();
+        let mut camera = Camera::new();
+        camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
+        camera.set_cam_dist(10.0);
+        camera.set_zoom(6.0);
+        camera.set_perspective(true);
+        camera.set_rotation(camera.rotation().rotate_y(90.0).unwrap());
+
+        let pov = PovSceneExporter::new()
+            .write_scene_string_with_camera(&mesh, &camera)
+            .unwrap();
+        assert!(pov.contains("#declare _distance = 10.000000;"));
+        assert!(pov.contains("#declare _zoomy = 6.000000;"));
+        assert!(pov.contains("#declare _perspective = 1;"));
+        assert!(
+            pov.contains("direction <-1.000000,0.000000,-0.000000>"),
+            "{pov}"
+        );
+        assert!(pov.contains("right <0.000000,0.000000,-1.000000>"), "{pov}");
+        assert!(
+            pov.contains("#declare _camera_pos = <11.000000,2.000000,3.000000>"),
+            "{pov}"
+        );
     }
 
     #[test]

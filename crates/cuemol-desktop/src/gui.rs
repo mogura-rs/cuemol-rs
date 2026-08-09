@@ -6636,12 +6636,7 @@ fn render_pov_animation_frame(
         .handler_mut()
         .set_path(pov_path.to_string_lossy().into_owned());
     exporter
-        .write_scene_file(
-            &mesh,
-            task.camera.center(),
-            (task.camera.zoom() / 1.2).max(1.0),
-            task.camera.is_perspective(),
-        )
+        .write_scene_file_with_camera(&mesh, &task.camera)
         .map_err(|error| error.to_string())?;
     if task.cancel.load(Ordering::Relaxed) {
         return Err("cancelled".to_string());
@@ -9261,10 +9256,7 @@ mod tests {
                     app.ui(ctx, &mut camera);
                 });
             harness.run();
-            save_harness(
-                &mut harness,
-                &out_dir.join("animation_render_preview.png"),
-            );
+            save_harness(&mut harness, &out_dir.join("animation_render_preview.png"));
             fs::remove_file(preview_path).expect("remove animation preview source");
         }
 
