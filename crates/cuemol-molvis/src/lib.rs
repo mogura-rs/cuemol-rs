@@ -6,6 +6,7 @@ use cuemol_molstr::{
 };
 use cuemol_qsys::{DrawObj, StyleManager};
 use cuemol_render::{MeshVertex, RenderAtom, RenderBond, RenderMesh, RenderSceneSnapshot};
+use std::sync::OnceLock;
 
 pub type CPK2Renderer = Cpk2Renderer;
 pub type CPKRenderer = CpkRenderer;
@@ -3376,9 +3377,14 @@ pub struct MoleculeRenderOptions {
     pub atom_radius: f32,
     pub bond_radius: f32,
     pub vdw_scale: f32,
+    /// Absolute per-element radii used by CPKRenderer. `None` uses the shared
+    /// VDW table multiplied by `vdw_scale` for other renderer types.
+    pub element_radii: Option<VdwRadii>,
     pub draw_atoms: bool,
     pub draw_bonds: bool,
     pub color_mode: MoleculeColorMode,
+    pub uniform_color: Option<ColorSpec>,
+    pub cpk_colors: std::collections::BTreeMap<String, ColorSpec>,
     pub selected_indices: Vec<usize>,
     /// Backbone-trace "putty" width modulation (TubeRenderer): off by default.
     pub putty: PuttyOptions,
@@ -3405,10 +3411,45 @@ pub struct MoleculeRenderOptions {
     /// Ribbon/Spline/Tube `axialdetail`; 8 == the default). Higher = a smoother,
     /// denser backbone mesh. `None` keeps the default subdivision.
     pub ribbon_axial_detail: Option<u32>,
+    /// Number of vertices around a TubeRenderer cross-section (`section.detail`).
+    pub ribbon_radial_detail: Option<u32>,
+    /// TubeRenderer section corner sharpness for roundsquare/fancy profiles.
+    pub ribbon_section_sharp: f64,
     /// Absolute ribbon cross-section dims per SS class, resolved from a style's
     /// `<helix>/<sheet>/<coil>` `width`/`tuber` (C++ `TubeSection`). Overrides the
     /// factor-based [`MoleculeRenderOptions::ribbon_sections`] where present.
     pub styled_ribbon: StyledRibbonSections,
+    /// Per-secondary-structure spline smoothing used by Ribbon/Cartoon.
+    pub ribbon_smoothing: RibbonSectionValues,
+    /// Ribbon head/tail transition tables (C++ `JctTable`).
+    pub helix_head: RibbonJunction,
+    pub helix_tail: RibbonJunction,
+    pub sheet_head: RibbonJunction,
+    pub sheet_tail: RibbonJunction,
+    /// Optional face colors for the helix back and sheet side surfaces.
+    pub helix_back_color: Option<[f32; 4]>,
+    pub sheet_side_color: Option<[f32; 4]>,
+    /// Cartoon anchor selection and its SplineCoeff point weight.
+    pub cartoon_anchor_selection: Option<String>,
+    pub cartoon_anchor_weight: f64,
+    /// Cartoon cylinder/ribbon helix mode and cylinder width parameters.
+    pub cartoon_helix_ribbon: bool,
+    pub cartoon_helix_width: f64,
+    pub cartoon_helix_width_plus: f64,
+    /// Custom MainChainRenderer pivot atom name. `None` uses CA/P/C1'/O5'.
+    pub pivot_atom: Option<String>,
+    /// Interpolate renderer colors along each spline interval.
+    pub smooth_color: bool,
+    /// Tube end-cap geometry.
+    pub start_cap_type: TubeCapType,
+    pub end_cap_type: TubeCapType,
+    /// Fade the first and last tube rings instead of capping a segment end.
+    pub segment_end_fade: bool,
+    /// Use one tube section for every secondary-structure class and suppress
+    /// ribbon sheet arrowheads.
+    pub uniform_backbone: bool,
+    /// Color the backbone from its pivot atoms when no explicit scheme exists.
+    pub backbone_atom_colors: bool,
     /// Atom indices this renderer is restricted to drawing (a renderer's C++
     /// `sel="..."` selection). `None` draws the whole molecule; `Some` draws only
     /// these atoms (and bonds whose both ends are included), keeping each atom's
@@ -3478,7 +3519,7 @@ impl Default for RibbonSections {
 /// aspect ratio equals `tuber`). When `Some`, it OVERRIDES the scale×factor
 /// [`RibbonSections`] model for that class (faithful absolute dims vs the
 /// independently-tuned defaults); `None` keeps the factor model.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StyledRibbonSections {
     pub helix: Option<(f64, f64)>,
     pub sheet: Option<(f64, f64)>,
@@ -3486,6 +3527,31 @@ pub struct StyledRibbonSections {
     pub helix_shape: SectionShape,
     pub sheet_shape: SectionShape,
     pub coil_shape: SectionShape,
+    pub helix_sharp: f64,
+    pub sheet_sharp: f64,
+    pub coil_sharp: f64,
+    pub helix_detail: Option<u32>,
+    pub sheet_detail: Option<u32>,
+    pub coil_detail: Option<u32>,
+}
+
+impl Default for StyledRibbonSections {
+    fn default() -> Self {
+        Self {
+            helix: None,
+            sheet: None,
+            coil: None,
+            helix_shape: SectionShape::Elliptical,
+            sheet_shape: SectionShape::Elliptical,
+            coil_shape: SectionShape::Elliptical,
+            helix_sharp: 0.4,
+            sheet_sharp: 0.4,
+            coil_sharp: 0.4,
+            helix_detail: None,
+            sheet_detail: None,
+            coil_detail: None,
+        }
+    }
 }
 
 impl StyledRibbonSections {
@@ -3504,6 +3570,66 @@ impl StyledRibbonSections {
             Secondary::Coil => self.coil_shape,
         }
     }
+
+    fn sharp_for(&self, ss: Secondary) -> f64 {
+        match ss {
+            Secondary::Helix => self.helix_sharp,
+            Secondary::Sheet => self.sheet_sharp,
+            Secondary::Coil => self.coil_sharp,
+        }
+        .clamp(0.0, 1.0)
+    }
+
+    fn max_detail(&self) -> Option<u32> {
+        [self.helix_detail, self.sheet_detail, self.coil_detail]
+            .into_iter()
+            .flatten()
+            .max()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct RibbonSectionValues {
+    pub helix: f64,
+    pub sheet: f64,
+    pub coil: f64,
+}
+
+impl RibbonSectionValues {
+    fn for_ss(self, ss: Secondary) -> f64 {
+        match ss {
+            Secondary::Helix => self.helix,
+            Secondary::Sheet => self.sheet,
+            Secondary::Coil => self.coil,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RibbonJunctionType {
+    #[default]
+    Smooth,
+    Arrow,
+    Flat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RibbonJunction {
+    pub kind: RibbonJunctionType,
+    pub gamma: f64,
+    pub base_width: f64,
+    pub arrow_width: f64,
+}
+
+impl Default for RibbonJunction {
+    fn default() -> Self {
+        Self {
+            kind: RibbonJunctionType::Smooth,
+            gamma: 2.2,
+            base_width: 0.0,
+            arrow_width: 1.8,
+        }
+    }
 }
 
 /// Ribbon cross-section profile (C++ `TubeSection` `TS_*`): a smooth ellipse vs a
@@ -3514,6 +3640,16 @@ pub enum SectionShape {
     #[default]
     Elliptical,
     Rectangular,
+    RoundSquare,
+    Fancy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TubeCapType {
+    None,
+    Flat,
+    #[default]
+    Sphere,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3611,9 +3747,12 @@ impl Default for MoleculeRenderOptions {
             atom_radius: 0.45,
             bond_radius: 0.08,
             vdw_scale: 0.22,
+            element_radii: None,
             draw_atoms: true,
             draw_bonds: true,
             color_mode: MoleculeColorMode::Element,
+            uniform_color: None,
+            cpk_colors: std::collections::BTreeMap::new(),
             selected_indices: Vec::new(),
             putty: PuttyOptions::default(),
             mainchain_radius: None,
@@ -3622,7 +3761,31 @@ impl Default for MoleculeRenderOptions {
             atom_radius_abs: None,
             sphere_detail: None,
             ribbon_axial_detail: None,
+            ribbon_radial_detail: None,
+            ribbon_section_sharp: 0.4,
             styled_ribbon: StyledRibbonSections::default(),
+            ribbon_smoothing: RibbonSectionValues::default(),
+            helix_head: RibbonJunction::default(),
+            helix_tail: RibbonJunction::default(),
+            sheet_head: RibbonJunction {
+                kind: RibbonJunctionType::Arrow,
+                ..RibbonJunction::default()
+            },
+            sheet_tail: RibbonJunction::default(),
+            helix_back_color: None,
+            sheet_side_color: None,
+            cartoon_anchor_selection: None,
+            cartoon_anchor_weight: 10.0,
+            cartoon_helix_ribbon: false,
+            cartoon_helix_width: 2.3,
+            cartoon_helix_width_plus: 0.2,
+            pivot_atom: None,
+            smooth_color: false,
+            start_cap_type: TubeCapType::None,
+            end_cap_type: TubeCapType::None,
+            segment_end_fade: false,
+            uniform_backbone: false,
+            backbone_atom_colors: false,
             draw_indices: None,
             object_paint: Vec::new(),
             rainbow: None,
@@ -3656,9 +3819,15 @@ pub const DEFAULT_STYLE_SCOPE: u64 = 0;
 /// reading the system style sheet. Use it to resolve a scene renderer's
 /// `style="..."` references when no per-scene style set is present.
 pub fn default_style_manager() -> StyleManager {
-    let mut styles = StyleManager::new();
-    styles.load_builtin_default_styles(DEFAULT_STYLE_SCOPE);
-    styles
+    static DEFAULT_STYLES: OnceLock<StyleManager> = OnceLock::new();
+
+    DEFAULT_STYLES
+        .get_or_init(|| {
+            let mut styles = StyleManager::new();
+            styles.load_builtin_default_styles(DEFAULT_STYLE_SCOPE);
+            styles
+        })
+        .clone()
 }
 
 /// Build the style cascade for a scene. QSC style sets are stored in low-to-high
@@ -3678,10 +3847,8 @@ pub fn scene_style_manager(scene: &MolScene) -> StyleManager {
     styles
 }
 
-/// Build a [`RainbowColoring`] from an object's `<coloring type="RainbowColoring">`
-/// scheme name + attribute accessor (start_hue/end_hue/sat/bri). Returns `None`
-/// for any other (or absent) coloring type. Shared by the desktop GUIs and CLI so
-/// both resolve rainbow coloring identically.
+/// Build a [`RainbowColoring`] from a `<coloring type="RainbowColoring">` node.
+/// Returns `None` for any other or absent coloring type.
 pub fn rainbow_coloring_from_attrs<'a>(
     coloring_type: Option<&str>,
     attr: impl Fn(&str) -> Option<&'a str>,
@@ -3708,12 +3875,18 @@ pub fn rainbow_coloring_from_attrs<'a>(
     if let Some(value) = attr("bri").and_then(|s| s.trim().parse().ok()) {
         rainbow.set_bri(value);
     }
+    if let Some(mode) = attr("incr_mode") {
+        rainbow.set_incr_mode(match mode.trim() {
+            "chain" => RainbowColoring::RBC_INCR_CHAIN,
+            "protss" => RainbowColoring::RBC_INCR_PROTSS,
+            _ => RainbowColoring::RBC_INCR_RESID,
+        });
+    }
     Some(rainbow)
 }
 
-/// Build a [`BfacColoring`] from an object's `<coloring type="BfacColoring">`
-/// scheme name + attribute accessor (lowpar/highpar). Colours + mode keep the
-/// C++ defaults (blue→red, auto-scaled to the molecule). `None` for other types.
+/// Build a [`BfacColoring`] from a `<coloring type="BfacColoring">` node.
+/// Missing properties keep the C++ defaults. Returns `None` for other types.
 pub fn bfac_coloring_from_attrs<'a>(
     coloring_type: Option<&str>,
     attr: impl Fn(&str) -> Option<&'a str>,
@@ -3722,6 +3895,32 @@ pub fn bfac_coloring_from_attrs<'a>(
         return None;
     }
     let mut bfac = BfacColoring::new();
+    if let Some(mode) = attr("mode") {
+        bfac.set_mode(match mode.trim() {
+            "occ" => BfacColoring::BFC_OCC,
+            "center" => BfacColoring::BFC_CENTER,
+            _ => BfacColoring::BFC_BFAC,
+        });
+    }
+    if let Some(mode) = attr("auto") {
+        bfac.set_auto_mode(match mode.trim() {
+            "none" => BfacColoring::BFA_NONE,
+            "rend" => BfacColoring::BFA_REND,
+            _ => BfacColoring::BFA_MOL,
+        });
+    }
+    if let Some(color) = attr("lowcol")
+        .and_then(|value| cuemol_gfx::parse_color(value).ok())
+        .and_then(|value| value.rgba8())
+    {
+        bfac.set_low_color(SolidColor::from_rgba_u8(color.r, color.g, color.b, color.a));
+    }
+    if let Some(color) = attr("highcol")
+        .and_then(|value| cuemol_gfx::parse_color(value).ok())
+        .and_then(|value| value.rgba8())
+    {
+        bfac.set_high_color(SolidColor::from_rgba_u8(color.r, color.g, color.b, color.a));
+    }
     if let Some(value) = attr("lowpar").and_then(|s| s.trim().parse().ok()) {
         bfac.set_low_param(value);
     }
@@ -3729,6 +3928,41 @@ pub fn bfac_coloring_from_attrs<'a>(
         bfac.set_high_param(value);
     }
     Some(bfac)
+}
+
+/// Apply the object-side coloring reached through a renderer's `$molcol` color.
+pub fn apply_object_coloring<'a>(
+    options: &mut MoleculeRenderOptions,
+    coloring_type: Option<&str>,
+    attr: impl Fn(&str) -> Option<&'a str>,
+    paint_entries: &[(String, String)],
+    default_color: &SolidColor,
+) {
+    match coloring_type {
+        Some("RainbowColoring") => {
+            options.rainbow = rainbow_coloring_from_attrs(coloring_type, attr);
+        }
+        Some("BfacColoring") => {
+            options.bfac = bfac_coloring_from_attrs(coloring_type, attr);
+        }
+        Some("PaintColoring") => {
+            options.object_paint = paint_entries.to_vec();
+        }
+        Some("SolidColoring") => {
+            options.object_paint = vec![("*".to_string(), default_color.script_string())];
+        }
+        Some("CPKColoring") => {
+            let carbon = attr("col_C")
+                .filter(|value| value.trim() != "$molcol")
+                .map(str::to_string)
+                .unwrap_or_else(|| default_color.script_string());
+            options.object_paint = vec![("*".to_string(), carbon)];
+        }
+        _ if !paint_entries.is_empty() => {
+            options.object_paint = paint_entries.to_vec();
+        }
+        _ => {}
+    }
 }
 
 pub fn apply_renderer_styles(
@@ -3754,6 +3988,25 @@ pub fn apply_renderer_styles(
         .and_then(|value| value.trim().parse::<u32>().ok())
     {
         options.sphere_detail = Some(detail);
+    }
+    if let Some(mut radii) = options.element_radii {
+        for (element, attribute) in [
+            ("H", "vdwr_H"),
+            ("C", "vdwr_C"),
+            ("N", "vdwr_N"),
+            ("O", "vdwr_O"),
+            ("S", "vdwr_S"),
+            ("P", "vdwr_P"),
+            ("X", "vdwr_X"),
+        ] {
+            if let Some(value) = renderer
+                .resolved_attr(attribute, styles, scope_id)
+                .and_then(|value| value.trim().parse::<f64>().ok())
+            {
+                radii.set_radius_for_element(element, value);
+            }
+        }
+        options.element_radii = Some(radii);
     }
     if let Some(axial) = renderer
         .resolved_attr("axialdetail", styles, scope_id)
@@ -3785,6 +4038,36 @@ pub fn apply_renderer_styles(
     options.styled_ribbon.helix_shape = resolve_section_shape(renderer, styles, scope_id, "helix");
     options.styled_ribbon.sheet_shape = resolve_section_shape(renderer, styles, scope_id, "sheet");
     options.styled_ribbon.coil_shape = resolve_section_shape(renderer, styles, scope_id, "coil");
+    for (tag, sharp, detail) in [
+        (
+            "helix",
+            &mut options.styled_ribbon.helix_sharp,
+            &mut options.styled_ribbon.helix_detail,
+        ),
+        (
+            "sheet",
+            &mut options.styled_ribbon.sheet_sharp,
+            &mut options.styled_ribbon.sheet_detail,
+        ),
+        (
+            "coil",
+            &mut options.styled_ribbon.coil_sharp,
+            &mut options.styled_ribbon.coil_detail,
+        ),
+    ] {
+        if let Some(value) = renderer
+            .resolved_child_attr(tag, "sharp", styles, scope_id)
+            .and_then(|value| value.trim().parse::<f64>().ok())
+        {
+            *sharp = value.clamp(0.0, 1.0);
+        }
+        if let Some(value) = renderer
+            .resolved_child_attr(tag, "detail", styles, scope_id)
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        {
+            *detail = Some(value.max(3));
+        }
+    }
 
     // Putty (C++ TubeRenderer width modulation by B-factor/occupancy): exact qsc
     // attr names + enum values from TubeRenderer.qif.
@@ -3820,11 +4103,10 @@ pub fn apply_renderer_styles(
         options.putty.loscl = lo;
     }
 
-    // Renderer-level `<coloring type="...">` from the renderer's own style — a
-    // concrete scheme (its own Rainbow/Bfac) overrides the object coloring. The
-    // `type` is read via the dedicated reserved-attr resolver; other coloring attrs
-    // (start_hue/…) are normal. CPKColoring is left alone (carbon $molcol defers to
-    // the object, handled in the snapshot).
+    // Renderer-level `<coloring type="...">` from the renderer's own style. The
+    // `type` is read through the reserved-attribute resolver; normal properties use
+    // resolved child attributes. CPK carbon `$molcol` continues to defer to the
+    // object coloring in the render snapshot.
     if let Some(coloring_type) = renderer.resolved_child_type("coloring", styles, scope_id) {
         let attrs: std::collections::BTreeMap<String, String> = [
             "start_hue",
@@ -3832,8 +4114,19 @@ pub fn apply_renderer_styles(
             "sat",
             "bri",
             "mode",
+            "incr_mode",
+            "auto",
+            "lowcol",
+            "highcol",
             "lowpar",
             "highpar",
+            "col_H",
+            "col_C",
+            "col_N",
+            "col_O",
+            "col_P",
+            "col_S",
+            "col_X",
         ]
         .iter()
         .filter_map(|key| {
@@ -3845,13 +4138,341 @@ pub fn apply_renderer_styles(
         let get = |name: &str| attrs.get(name).map(String::as_str);
         if let Some(rainbow) = rainbow_coloring_from_attrs(Some(coloring_type.as_str()), get) {
             options.rainbow = Some(rainbow);
+            options.bfac = None;
+            options.object_paint.clear();
         }
         if let Some(bfac) = bfac_coloring_from_attrs(Some(coloring_type.as_str()), get) {
             options.bfac = Some(bfac);
+            options.rainbow = None;
+            options.object_paint.clear();
+        }
+        if coloring_type == "SolidColoring" {
+            options.color_mode = MoleculeColorMode::Uniform;
+            options.uniform_color = renderer
+                .resolved_attr("defaultcolor", styles, scope_id)
+                .and_then(|value| cuemol_gfx::parse_color(&value).ok());
+            options.rainbow = None;
+            options.bfac = None;
+            options.object_paint.clear();
+        }
+        if coloring_type == "CPKColoring" {
+            options.cpk_colors = ["H", "C", "N", "O", "P", "S", "X"]
+                .into_iter()
+                .filter_map(|element| {
+                    attrs
+                        .get(&format!("col_{element}"))
+                        .filter(|value| value.as_str() != "$molcol")
+                        .and_then(|value| cuemol_gfx::parse_color(value).ok())
+                        .map(|color| (element.to_string(), color))
+                })
+                .collect();
+        }
+        if coloring_type == "PaintColoring" {
+            let node = renderer
+                .qsc_children()
+                .iter()
+                .find(|node| node.tag_name() == "coloring")
+                .or_else(|| {
+                    renderer.style().and_then(|style| {
+                        styles.resolve_style_child_node(scope_id, style, "coloring")
+                    })
+                });
+            options.object_paint = node
+                .into_iter()
+                .flat_map(|node| node.children())
+                .filter(|child| !child.is_attr() && child.tag_name() == "paint")
+                .filter_map(|child| {
+                    let selection = child.str_attr("sel").to_string();
+                    let color = child.str_attr("color").to_string();
+                    (!selection.is_empty() && !color.is_empty()).then_some((selection, color))
+                })
+                .collect();
+            options.rainbow = None;
+            options.bfac = None;
         }
         if coloring_type == "AtomPropColoring" {
             options.atom_color_property = Some("col".to_string());
         }
+    }
+
+    match renderer.renderer_type() {
+        "ribbon" => apply_ribbon_renderer_styles(options, renderer, styles, scope_id),
+        "cartoon" => apply_cartoon_renderer_styles(options, renderer, styles, scope_id),
+        _ => {}
+    }
+}
+
+fn resolved_renderer_bool(
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    scope_id: u64,
+    name: &str,
+    fallback: bool,
+) -> bool {
+    renderer
+        .resolved_attr(name, styles, scope_id)
+        .as_deref()
+        .map(qsc_value_is_true)
+        .unwrap_or(fallback)
+}
+
+fn resolve_ribbon_junction(
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    scope_id: u64,
+    tag: &str,
+) -> RibbonJunction {
+    let child_f64 = |name: &str, fallback: f64| {
+        renderer
+            .resolved_child_attr(tag, name, styles, scope_id)
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .unwrap_or(fallback)
+    };
+    let kind = match renderer
+        .resolved_child_type(tag, styles, scope_id)
+        .or_else(|| renderer.resolved_child_attr(tag, "type", styles, scope_id))
+        .as_deref()
+    {
+        Some("arrow") => RibbonJunctionType::Arrow,
+        Some("flat") => RibbonJunctionType::Flat,
+        _ => RibbonJunctionType::Smooth,
+    };
+    RibbonJunction {
+        kind,
+        gamma: child_f64("gamma", 2.2).clamp(0.1, 10.0),
+        base_width: child_f64("basw", 0.0).clamp(0.0, 1.0),
+        arrow_width: child_f64("arrow", 1.8).clamp(1.0, 3.0),
+    }
+}
+
+fn apply_mainchain_renderer_styles(
+    options: &mut MoleculeRenderOptions,
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    scope_id: u64,
+    smooth_color_default: bool,
+    cap_default: TubeCapType,
+) {
+    options.smooth_color = resolved_renderer_bool(
+        renderer,
+        styles,
+        scope_id,
+        "smoothcolor",
+        smooth_color_default,
+    );
+    options.pivot_atom = renderer
+        .resolved_attr("pivotatom", styles, scope_id)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    options.start_cap_type = renderer
+        .resolved_attr("start_captype", styles, scope_id)
+        .as_deref()
+        .map(parse_tube_cap_type)
+        .unwrap_or(cap_default);
+    options.end_cap_type = renderer
+        .resolved_attr("end_captype", styles, scope_id)
+        .as_deref()
+        .map(parse_tube_cap_type)
+        .unwrap_or(cap_default);
+    options.segment_end_fade =
+        resolved_renderer_bool(renderer, styles, scope_id, "segend_fade", false);
+    options.ribbon_radial_detail = options
+        .styled_ribbon
+        .max_detail()
+        .or(options.ribbon_radial_detail);
+}
+
+pub fn apply_ribbon_renderer_styles(
+    options: &mut MoleculeRenderOptions,
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    scope_id: u64,
+) {
+    apply_mainchain_renderer_styles(
+        options,
+        renderer,
+        styles,
+        scope_id,
+        true,
+        TubeCapType::Sphere,
+    );
+    let resolved_f64 = |name: &str, fallback: f64| {
+        renderer
+            .resolved_attr(name, styles, scope_id)
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .unwrap_or(fallback)
+    };
+    options.ribbon_smoothing = RibbonSectionValues {
+        helix: resolved_f64("helix_smooth", 0.0),
+        sheet: resolved_f64("sheet_smooth", 0.5),
+        coil: resolved_f64("coil_smooth", 0.0),
+    };
+    options.helix_head = resolve_ribbon_junction(renderer, styles, scope_id, "helixhead");
+    options.helix_tail = resolve_ribbon_junction(renderer, styles, scope_id, "helixtail");
+    options.sheet_head = resolve_ribbon_junction(renderer, styles, scope_id, "sheethead");
+    options.sheet_tail = resolve_ribbon_junction(renderer, styles, scope_id, "sheettail");
+    if resolved_renderer_bool(renderer, styles, scope_id, "helix_usebackcol", false) {
+        options.helix_back_color = renderer
+            .resolved_attr("helix_backcol", styles, scope_id)
+            .and_then(|value| resolve_color_name(&value, styles));
+    }
+    if resolved_renderer_bool(renderer, styles, scope_id, "sheet_usesidecol", false) {
+        options.sheet_side_color = renderer
+            .resolved_attr("sheet_sidecol", styles, scope_id)
+            .and_then(|value| resolve_color_name(&value, styles));
+    }
+}
+
+pub fn apply_cartoon_renderer_styles(
+    options: &mut MoleculeRenderOptions,
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    scope_id: u64,
+) {
+    apply_mainchain_renderer_styles(
+        options,
+        renderer,
+        styles,
+        scope_id,
+        false,
+        TubeCapType::Flat,
+    );
+    let resolved_f64 = |name: &str, fallback: f64| {
+        renderer
+            .resolved_attr(name, styles, scope_id)
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .unwrap_or(fallback)
+    };
+    options.ribbon_smoothing = RibbonSectionValues {
+        helix: resolved_f64("helix_smooth", 3.0),
+        sheet: resolved_f64("sheet_smooth", 2.0),
+        coil: resolved_f64("coil_smooth", -1.0),
+    };
+    options.cartoon_anchor_selection = renderer
+        .resolved_attr("anchor_sel", styles, scope_id)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    options.cartoon_anchor_weight = resolved_f64("anchor_weight", 10.0).clamp(0.0, 20.0);
+    options.cartoon_helix_ribbon =
+        resolved_renderer_bool(renderer, styles, scope_id, "helix_ribbon", false);
+    options.cartoon_helix_width = resolved_f64("helix_width", 2.3).max(f64::EPSILON);
+    options.cartoon_helix_width_plus = resolved_f64("helix_wplus", 0.2);
+    if options.cartoon_helix_ribbon {
+        if let Some(section) = resolve_ribbon_section(renderer, styles, scope_id, "ribhelix") {
+            options.styled_ribbon.helix = Some(section);
+        }
+        options.styled_ribbon.helix_shape =
+            resolve_section_shape(renderer, styles, scope_id, "ribhelix");
+        if let Some(value) = renderer
+            .resolved_child_attr("ribhelix", "sharp", styles, scope_id)
+            .and_then(|value| value.trim().parse::<f64>().ok())
+        {
+            options.styled_ribbon.helix_sharp = value.clamp(0.0, 1.0);
+        }
+        if let Some(value) = renderer
+            .resolved_child_attr("ribhelix", "detail", styles, scope_id)
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        {
+            options.styled_ribbon.helix_detail = Some(value.max(3));
+        }
+        options.helix_head = resolve_ribbon_junction(renderer, styles, scope_id, "ribhelix_head");
+        options.helix_tail = resolve_ribbon_junction(renderer, styles, scope_id, "ribhelix_tail");
+    } else {
+        let radius =
+            (options.cartoon_helix_width + options.cartoon_helix_width_plus).max(f64::EPSILON);
+        let tuber = renderer
+            .resolved_child_attr("helix", "tuber", styles, scope_id)
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .unwrap_or(1.0)
+            .max(f64::EPSILON);
+        options.styled_ribbon.helix = Some((radius * tuber, radius));
+    }
+    options.sheet_head = resolve_ribbon_junction(renderer, styles, scope_id, "sheethead");
+    options.ribbon_radial_detail = options
+        .styled_ribbon
+        .max_detail()
+        .or(options.ribbon_radial_detail);
+}
+
+/// Apply TubeRenderer/NARenderer properties that are not shared by RibbonRenderer.
+pub fn apply_tube_renderer_styles(
+    options: &mut MoleculeRenderOptions,
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    scope_id: u64,
+) {
+    let child_f64 = |name: &str, fallback: f64| {
+        renderer
+            .resolved_child_attr("section", name, styles, scope_id)
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .unwrap_or(fallback)
+    };
+    let width = child_f64("width", 0.35).max(f64::EPSILON);
+    let tuber = child_f64("tuber", 1.0).max(f64::EPSILON);
+    let section = (width * tuber, width);
+    options.styled_ribbon.helix = Some(section);
+    options.styled_ribbon.sheet = Some(section);
+    options.styled_ribbon.coil = Some(section);
+    let shape = resolve_section_shape(renderer, styles, scope_id, "section");
+    options.styled_ribbon.helix_shape = shape;
+    options.styled_ribbon.sheet_shape = shape;
+    options.styled_ribbon.coil_shape = shape;
+    options.ribbon_section_sharp = child_f64("sharp", 0.4).clamp(0.0, 1.0);
+    options.styled_ribbon.helix_sharp = options.ribbon_section_sharp;
+    options.styled_ribbon.sheet_sharp = options.ribbon_section_sharp;
+    options.styled_ribbon.coil_sharp = options.ribbon_section_sharp;
+    options.ribbon_radial_detail = renderer
+        .resolved_child_attr("section", "detail", styles, scope_id)
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .or(Some(16));
+    options.styled_ribbon.helix_detail = options.ribbon_radial_detail;
+    options.styled_ribbon.sheet_detail = options.ribbon_radial_detail;
+    options.styled_ribbon.coil_detail = options.ribbon_radial_detail;
+    options.anchor_weight = renderer
+        .resolved_attr("smooth", styles, scope_id)
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    options.smooth_color = renderer
+        .resolved_attr("smoothcolor", styles, scope_id)
+        .as_deref()
+        .map(qsc_value_is_true)
+        .unwrap_or(true);
+    options.pivot_atom = renderer
+        .resolved_attr("pivotatom", styles, scope_id)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    options.start_cap_type = renderer
+        .resolved_attr("start_captype", styles, scope_id)
+        .as_deref()
+        .map(parse_tube_cap_type)
+        .unwrap_or(TubeCapType::Sphere);
+    options.end_cap_type = renderer
+        .resolved_attr("end_captype", styles, scope_id)
+        .as_deref()
+        .map(parse_tube_cap_type)
+        .unwrap_or(TubeCapType::Sphere);
+    options.segment_end_fade = renderer
+        .resolved_attr("segend_fade", styles, scope_id)
+        .as_deref()
+        .map(qsc_value_is_true)
+        .unwrap_or(false);
+    options.uniform_backbone = true;
+    options.backbone_atom_colors = true;
+}
+
+fn qsc_value_is_true(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "false" | "0" | "no" | "off"
+    )
+}
+
+fn parse_tube_cap_type(value: &str) -> TubeCapType {
+    match value.trim() {
+        "none" => TubeCapType::None,
+        "flat" => TubeCapType::Flat,
+        _ => TubeCapType::Sphere,
     }
 }
 
@@ -3864,10 +4485,13 @@ fn resolve_section_shape(
     tag: &str,
 ) -> SectionShape {
     match renderer
-        .resolved_child_attr(tag, "type", styles, scope_id)
+        .resolved_child_type(tag, styles, scope_id)
+        .or_else(|| renderer.resolved_child_attr(tag, "type", styles, scope_id))
         .as_deref()
     {
         Some("rectangle") | Some("rect") => SectionShape::Rectangular,
+        Some("roundsquare") => SectionShape::RoundSquare,
+        Some("fancy1") => SectionShape::Fancy,
         _ => SectionShape::Elliptical,
     }
 }
@@ -3973,7 +4597,15 @@ pub fn resolve_atom_colors(molecule: &MolCoord, options: &MoleculeRenderOptions)
                     .unwrap_or_else(|| SolidColor::from_rgb(0.5, 0.5, 0.5));
                 return solid_color_to_spec(&color);
             }
-            object_carbon_color(index, atom)
+            let element = atom.element.trim().to_ascii_uppercase();
+            let custom_cpk = options.cpk_colors.get(&element).cloned().or_else(|| {
+                (!matches!(element.as_str(), "H" | "C" | "N" | "O" | "P" | "S"))
+                    .then(|| options.cpk_colors.get("X").cloned())
+                    .flatten()
+            });
+            custom_cpk
+                .or_else(|| object_carbon_color(index, atom))
+                .or_else(|| options.uniform_color.clone())
                 .unwrap_or_else(|| atom_color(atom.element.as_str(), options.color_mode))
         })
         .collect()
@@ -4232,7 +4864,7 @@ pub fn mainchain_trace_snapshot(
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
     });
-    let chains = collect_mainchain_pivots(molecule, draw.as_ref());
+    let chains = collect_mainchain_pivots(molecule, draw.as_ref(), options.pivot_atom.as_deref());
     let putty = options.putty;
 
     // Putty statistics (min/max/mean of the target value) over every backbone
@@ -4532,6 +5164,61 @@ fn ribbon_atom_prop_colors(
         .collect()
 }
 
+fn ribbon_resolved_atom_colors(
+    sample_count: usize,
+    pivots: &[MainchainPoint],
+    subdiv: usize,
+    atom_colors: &[ColorSpec],
+) -> Vec<Option<[f32; 4]>> {
+    let pivot_colors = pivots
+        .iter()
+        .map(|pivot| {
+            atom_colors
+                .get(pivot.atom_index)
+                .and_then(ColorSpec::rgba8)
+                .map(|color| {
+                    [
+                        f32::from(color.r) / 255.0,
+                        f32::from(color.g) / 255.0,
+                        f32::from(color.b) / 255.0,
+                        f32::from(color.a) / 255.0,
+                    ]
+                })
+        })
+        .collect::<Vec<_>>();
+    let subdiv = subdiv.max(1);
+    (0..sample_count)
+        .map(|index| {
+            let segment = (index / subdiv).min(pivots.len().saturating_sub(1));
+            pivot_colors.get(segment).copied().flatten()
+        })
+        .collect()
+}
+
+fn interpolate_ribbon_colors(colors: &mut [Option<[f32; 4]>], pivot_count: usize, subdiv: usize) {
+    if pivot_count < 2 || colors.is_empty() {
+        return;
+    }
+    let source = colors.to_vec();
+    let subdiv = subdiv.max(1);
+    for (index, color) in colors.iter_mut().enumerate() {
+        let segment = (index / subdiv).min(pivot_count - 2);
+        let rho = (index - segment * subdiv) as f32 / subdiv as f32;
+        let first = source.get(segment * subdiv).copied().flatten();
+        let second = source
+            .get(((segment + 1) * subdiv).min(source.len() - 1))
+            .copied()
+            .flatten();
+        *color = match (first, second) {
+            (Some(first), Some(second)) => Some(std::array::from_fn(|component| {
+                first[component] * (1.0 - rho) + second[component] * rho
+            })),
+            (Some(color), None) | (None, Some(color)) => Some(color),
+            (None, None) => None,
+        };
+    }
+}
+
 /// The putty target value (B-factor or occupancy) of a backbone pivot.
 fn pivot_target(point: &MainchainPoint, target: PuttyTarget) -> f64 {
     match target {
@@ -4583,6 +5270,7 @@ fn residue_secondary(molecule: &MolCoord, atom: &Atom) -> Secondary {
 fn collect_mainchain_pivots(
     molecule: &MolCoord,
     draw: Option<&std::collections::BTreeSet<usize>>,
+    pivot_atom: Option<&str>,
 ) -> Vec<Vec<MainchainPoint>> {
     let mut runs: Vec<Vec<MainchainPoint>> = Vec::new();
     // Previous accepted pivot: (chain name, position, link cutoff).
@@ -4600,7 +5288,8 @@ fn collect_mainchain_pivots(
                     .any(|index| set.contains(index))
             });
             if included {
-                if let Some((point, cutoff)) = mainchain_pivot_point(molecule, residue) {
+                if let Some((point, cutoff)) = mainchain_pivot_point(molecule, residue, pivot_atom)
+                {
                     let chain = residue.chain_name().to_string();
                     let pos = point.pos;
                     let new_run = match &prev {
@@ -4643,15 +5332,31 @@ const NUCLEIC_PIVOT_LINK_DIST: f64 = 8.0;
 fn mainchain_pivot_point(
     molecule: &MolCoord,
     residue: &ResidueView,
+    pivot_atom: Option<&str>,
 ) -> Option<(MainchainPoint, f64)> {
     let indices = residue.atom_indices();
-    for name in ["CA", "P", "C1'", "O5'"] {
+    let default_names = ["CA", "P", "C1'", "O5'"];
+    let custom_name = pivot_atom.filter(|name| !name.trim().is_empty());
+    let custom_names = [custom_name.unwrap_or_default()];
+    let names = if custom_name.is_some() {
+        &custom_names[..]
+    } else {
+        &default_names[..]
+    };
+    for name in names {
         for &index in indices {
             let Some(atom) = molecule.atoms().get(index) else {
                 continue;
             };
             if atom.name.trim().eq_ignore_ascii_case(name) {
-                let cutoff = if name == "CA" {
+                let is_protein = name.eq_ignore_ascii_case("CA")
+                    || indices.iter().any(|&index| {
+                        molecule
+                            .atoms()
+                            .get(index)
+                            .is_some_and(|atom| atom.name.trim().eq_ignore_ascii_case("CA"))
+                    });
+                let cutoff = if is_protein {
                     PROTEIN_PIVOT_LINK_DIST
                 } else {
                     NUCLEIC_PIVOT_LINK_DIST
@@ -4906,7 +5611,7 @@ pub fn ribbon_mesh_snapshot(
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
     });
-    let chains = collect_mainchain_pivots(molecule, draw.as_ref());
+    let chains = collect_mainchain_pivots(molecule, draw.as_ref(), options.pivot_atom.as_deref());
     // Putty (TubeRenderer): modulate the ribbon width per residue by the B-factor/
     // occupancy, on top of the section width scales. Stats are over all pivots.
     let putty = options.putty;
@@ -4919,6 +5624,19 @@ pub fn ribbon_mesh_snapshot(
         bfac.start_molecule(molecule);
         bfac
     });
+    let backbone_atom_colors = options
+        .backbone_atom_colors
+        .then(|| resolve_atom_colors(molecule, options));
+    let cartoon_anchor_atoms = options
+        .cartoon_anchor_selection
+        .as_deref()
+        .and_then(|selection| parse_selector(selection).ok())
+        .map(|selection| {
+            molecule
+                .select_indices(&selection)
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        });
     // RainbowColoring (when set) is the object's colour scheme and spans the whole
     // molecule's residues (RBC_MOL default), so index pivots globally across chains.
     let total_residues: usize = chains.iter().map(|chain| chain.len()).sum();
@@ -4933,8 +5651,18 @@ pub fn ribbon_mesh_snapshot(
         let (samples, sections, mut width_scales) = sample_backbone(
             pivots,
             subdiv,
-            options.anchor_weight,
-            options.linear_backbone,
+            &BackboneSamplingOptions {
+                anchor_weight: options.anchor_weight,
+                section_smoothing: options.ribbon_smoothing,
+                cartoon_anchor_atoms: cartoon_anchor_atoms.as_ref(),
+                cartoon_anchor_weight: options.cartoon_anchor_weight,
+                linear: options.linear_backbone,
+                uniform_section: options.uniform_backbone,
+                helix_head: options.helix_head,
+                helix_tail: options.helix_tail,
+                sheet_head: options.sheet_head,
+                sheet_tail: options.sheet_tail,
+            },
         );
         if putty.mode != PuttyMode::Off {
             apply_putty_to_width_scales(
@@ -4948,7 +5676,7 @@ pub fn ribbon_mesh_snapshot(
             );
         }
         // Renderer coloring takes precedence, followed by the object scheme.
-        let paint = if let Some(property) = options.atom_color_property.as_deref() {
+        let mut paint = if let Some(property) = options.atom_color_property.as_deref() {
             Some(ribbon_atom_prop_colors(
                 samples.len(),
                 pivots,
@@ -4973,27 +5701,41 @@ pub fn ribbon_mesh_snapshot(
                 bfac,
                 molecule,
             ))
+        } else if let Some(styles) = paint_styles.as_ref() {
+            Some(ribbon_paint_colors(
+                samples.len(),
+                pivots,
+                subdiv,
+                &options.object_paint,
+                molecule,
+                styles,
+            ))
         } else {
-            paint_styles.as_ref().map(|styles| {
-                ribbon_paint_colors(
-                    samples.len(),
-                    pivots,
-                    subdiv,
-                    &options.object_paint,
-                    molecule,
-                    styles,
-                )
-            })
+            backbone_atom_colors
+                .as_ref()
+                .map(|colors| ribbon_resolved_atom_colors(samples.len(), pivots, subdiv, colors))
         };
-        let mesh = ribbon_tube_mesh(
-            &samples,
-            &sections,
-            &width_scales,
+        if options.smooth_color {
+            if let Some(colors) = &mut paint {
+                interpolate_ribbon_colors(colors, pivots.len(), subdiv);
+            }
+        }
+        let mesh_options = RibbonTubeMeshOptions {
             scale,
-            &options.ribbon_sections,
-            &options.styled_ribbon,
-            paint.as_deref(),
-        );
+            sections: &options.ribbon_sections,
+            styled: &options.styled_ribbon,
+            paint: paint.as_deref(),
+            radial_detail: options
+                .ribbon_radial_detail
+                .unwrap_or(TUBE_RADIAL as u32)
+                .max(3) as usize,
+            start_cap: options.start_cap_type,
+            end_cap: options.end_cap_type,
+            segment_end_fade: options.segment_end_fade,
+            helix_back_color: options.helix_back_color,
+            sheet_side_color: options.sheet_side_color,
+        };
+        let mesh = ribbon_tube_mesh(&samples, &sections, &width_scales, &mesh_options);
         if !mesh.vertices.is_empty() {
             meshes.push(mesh);
         }
@@ -5015,27 +5757,52 @@ pub fn ribbon_mesh_snapshot(
 /// A spline segment between two residues keeps its class only when both ends
 /// agree; mixed boundaries fall back to coil so the cross-section tapers
 /// smoothly across secondary-structure transitions.
+struct BackboneSamplingOptions<'a> {
+    anchor_weight: f64,
+    section_smoothing: RibbonSectionValues,
+    cartoon_anchor_atoms: Option<&'a std::collections::BTreeSet<usize>>,
+    cartoon_anchor_weight: f64,
+    linear: bool,
+    uniform_section: bool,
+    helix_head: RibbonJunction,
+    helix_tail: RibbonJunction,
+    sheet_head: RibbonJunction,
+    sheet_tail: RibbonJunction,
+}
+
 fn sample_backbone(
     points: &[MainchainPoint],
     subdiv: usize,
-    anchor_weight: f64,
-    linear: bool,
+    options: &BackboneSamplingOptions<'_>,
 ) -> (Vec<Vector4>, Vec<Secondary>, Vec<f64>) {
     let mut positions = points.iter().map(|point| point.pos).collect::<Vec<_>>();
     // Anchor-weight smoothing (C++ Ribbon2/SplineCoeffSet): blend each interior
     // control point toward the midpoint of its neighbours before splining. The
     // angular `trace` (linear path) keeps the raw pivots — no pre-smoothing.
-    let w = anchor_weight.clamp(0.0, 1.0);
-    if !linear && w > 1.0e-9 && positions.len() >= 3 {
+    if !options.linear && positions.len() >= 3 {
         let orig = positions.clone();
         for i in 1..orig.len() - 1 {
+            let section_value = options.section_smoothing.for_ss(points[i].ss);
+            let mut w = if options.anchor_weight > 1.0e-9 {
+                options.anchor_weight.clamp(0.0, 1.0)
+            } else if section_value > 0.0 {
+                section_value / (section_value + 10.0)
+            } else {
+                0.0
+            };
+            if options
+                .cartoon_anchor_atoms
+                .is_some_and(|atoms| atoms.contains(&points[i].atom_index))
+            {
+                w /= options.cartoon_anchor_weight.max(1.0);
+            }
             let mid = (orig[i - 1] + orig[i + 1]).scale(0.5);
             positions[i] = orig[i].scale(1.0 - w) + mid.scale(w);
         }
     }
     // `trace` runs straight between Cα pivots (C++ TraceRenderer line strip); every
     // other main-chain type smooths the path with a natural cubic spline.
-    let samples = if linear {
+    let samples = if options.linear {
         linear_samples(&positions, subdiv)
     } else {
         cubic_spline_samples(&positions, subdiv)
@@ -5055,7 +5822,18 @@ fn sample_backbone(
     while sections.len() < samples.len() {
         sections.push(points[n - 1].ss);
     }
-    let width_scales = sheet_arrow_widths(&sections, subdiv);
+    let width_scales = if options.uniform_section {
+        vec![1.0; sections.len()]
+    } else {
+        ribbon_junction_widths(
+            &sections,
+            subdiv,
+            options.helix_head,
+            options.helix_tail,
+            options.sheet_head,
+            options.sheet_tail,
+        )
+    };
     (samples, sections, width_scales)
 }
 
@@ -5070,28 +5848,68 @@ fn merge_ss(a: Secondary, b: Secondary) -> Secondary {
 /// Per-sample width multipliers that turn the C-terminal end of each sheet run
 /// into an arrowhead: the last ~residue widens at its root (1.8x) then tapers to
 /// a point (0x) at the tip. All other samples stay at 1.0.
-fn sheet_arrow_widths(sections: &[Secondary], subdiv: usize) -> Vec<f64> {
+fn ribbon_junction_widths(
+    sections: &[Secondary],
+    subdiv: usize,
+    helix_head: RibbonJunction,
+    helix_tail: RibbonJunction,
+    sheet_head: RibbonJunction,
+    sheet_tail: RibbonJunction,
+) -> Vec<f64> {
     let mut widths = vec![1.0; sections.len()];
-    let head = subdiv.max(2);
+    let junction_len = subdiv.max(2);
     let count = sections.len();
     let mut i = 0;
     while i < count {
-        if sections[i] != Secondary::Sheet {
+        let section = sections[i];
+        if section == Secondary::Coil {
             i += 1;
             continue;
         }
         let start = i;
-        while i < count && sections[i] == Secondary::Sheet {
+        while i < count && sections[i] == section {
             i += 1;
         }
         let end = i - 1;
-        let head_len = head.min(end - start + 1);
-        for k in 0..head_len {
-            // k counts back from the tip: tip (k=0) -> 0, root -> 1.8x.
-            widths[end - k] = 1.8 * (k as f64 / head_len as f64);
+        let (head, tail) = match section {
+            Secondary::Helix => (helix_head, helix_tail),
+            Secondary::Sheet => (sheet_head, sheet_tail),
+            Secondary::Coil => unreachable!(),
+        };
+        let head_len = junction_len.min(end - start + 1);
+        if head.kind == RibbonJunctionType::Arrow {
+            let denominator = (head_len - 1).max(1) as f64;
+            for k in 0..head_len {
+                let progress = (k as f64 / denominator).powf(head.gamma.max(0.1));
+                widths[end - k] = head.base_width + (head.arrow_width - head.base_width) * progress;
+            }
+        }
+        let tail_len = junction_len.min(end - start + 1);
+        if tail.kind == RibbonJunctionType::Arrow {
+            let denominator = (tail_len - 1).max(1) as f64;
+            for k in 0..tail_len {
+                let progress = (k as f64 / denominator).powf(tail.gamma.max(0.1));
+                widths[start + k] =
+                    tail.base_width + (tail.arrow_width - tail.base_width) * progress;
+            }
         }
     }
     widths
+}
+
+#[cfg(test)]
+fn sheet_arrow_widths(sections: &[Secondary], subdiv: usize) -> Vec<f64> {
+    ribbon_junction_widths(
+        sections,
+        subdiv,
+        RibbonJunction::default(),
+        RibbonJunction::default(),
+        RibbonJunction {
+            kind: RibbonJunctionType::Arrow,
+            ..RibbonJunction::default()
+        },
+        RibbonJunction::default(),
+    )
 }
 
 /// Cross-section half-width, half-thickness, and color for a secondary-structure
@@ -5145,8 +5963,154 @@ fn rect_ring_point(
     (offset, nrm)
 }
 
-/// Number of radial samples around the ribbon cross-section.
+fn superellipse_ring_point(
+    t: f64,
+    width: f64,
+    thick: f64,
+    binormal: Vector4,
+    normal: Vector4,
+    sharp: f64,
+    fancy: bool,
+) -> (Vector4, Vector4) {
+    let angle = t * std::f64::consts::TAU;
+    let (sin, cos) = angle.sin_cos();
+    let exponent = 2.0 + sharp.clamp(0.0, 1.0) * if fancy { 18.0 } else { 8.0 };
+    let power = 2.0 / exponent;
+    let u = cos.signum() * cos.abs().powf(power) * width;
+    let v = sin.signum() * sin.abs().powf(power) * thick;
+    let safe_width = width.abs().max(f64::EPSILON);
+    let safe_thick = thick.abs().max(f64::EPSILON);
+    let grad_u = u.signum() * (u.abs() / safe_width).powf(exponent - 1.0) / safe_width;
+    let grad_v = v.signum() * (v.abs() / safe_thick).powf(exponent - 1.0) / safe_thick;
+    let offset = binormal.scale(u) + normal.scale(v);
+    let nrm = normalize_or(binormal.scale(grad_u) + normal.scale(grad_v), normal);
+    (offset, nrm)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_tube_cap(
+    vertices: &mut Vec<MeshVertex>,
+    indices: &mut Vec<u32>,
+    base_ring: usize,
+    radial_detail: usize,
+    center: Vector4,
+    tangent: Vector4,
+    normal: Vector4,
+    binormal: Vector4,
+    width: f64,
+    thick: f64,
+    color: [f32; 4],
+    shape: SectionShape,
+    sharp: f64,
+    cap_type: TubeCapType,
+    at_start: bool,
+) {
+    if cap_type == TubeCapType::None {
+        return;
+    }
+    let direction = tangent.scale(if at_start { -1.0 } else { 1.0 });
+    let push_fan = |indices: &mut Vec<u32>, center: u32, ring: usize| {
+        for index in 0..radial_detail {
+            let next = (index + 1) % radial_detail;
+            let current = (ring + index) as u32;
+            let next = (ring + next) as u32;
+            if at_start {
+                indices.extend_from_slice(&[center, current, next]);
+            } else {
+                indices.extend_from_slice(&[center, next, current]);
+            }
+        }
+    };
+    if cap_type == TubeCapType::Flat {
+        let center_index = vertices.len() as u32;
+        vertices.push(MeshVertex {
+            position: center,
+            normal: direction,
+            color,
+        });
+        push_fan(indices, center_index, base_ring);
+        return;
+    }
+
+    let ring_point = |t: f64, width: f64, thick: f64| match shape {
+        SectionShape::Rectangular => rect_ring_point(t, width, thick, binormal, normal),
+        SectionShape::RoundSquare | SectionShape::Fancy => superellipse_ring_point(
+            t,
+            width,
+            thick,
+            binormal,
+            normal,
+            sharp,
+            shape == SectionShape::Fancy,
+        ),
+        SectionShape::Elliptical => {
+            let (sin, cos) = (t * std::f64::consts::TAU).sin_cos();
+            let offset = binormal.scale(cos * width) + normal.scale(sin * thick);
+            let nrm = normalize_or(
+                binormal.scale(cos * thick) + normal.scale(sin * width),
+                normal,
+            );
+            (offset, nrm)
+        }
+    };
+    let levels = (radial_detail / 4).clamp(2, 6);
+    let cap_depth = (width.abs() * thick.abs()).sqrt().max(f64::EPSILON);
+    let mut previous_ring = base_ring;
+    for level in 1..levels {
+        let phi = std::f64::consts::FRAC_PI_2 * level as f64 / levels as f64;
+        let ring_scale = phi.cos();
+        let axial = phi.sin();
+        let ring_start = vertices.len();
+        for index in 0..radial_detail {
+            let t = index as f64 / radial_detail as f64;
+            let (offset, radial_normal) = ring_point(t, width * ring_scale, thick * ring_scale);
+            vertices.push(MeshVertex {
+                position: center + direction.scale(cap_depth * axial) + offset,
+                normal: normalize_or(
+                    radial_normal.scale(ring_scale) + direction.scale(axial),
+                    direction,
+                ),
+                color,
+            });
+        }
+        for index in 0..radial_detail {
+            let next = (index + 1) % radial_detail;
+            let a = (previous_ring + index) as u32;
+            let b = (previous_ring + next) as u32;
+            let c = (ring_start + index) as u32;
+            let d = (ring_start + next) as u32;
+            if at_start {
+                indices.extend_from_slice(&[a, b, c, b, d, c]);
+            } else {
+                indices.extend_from_slice(&[a, c, b, b, c, d]);
+            }
+        }
+        previous_ring = ring_start;
+    }
+    let pole = vertices.len() as u32;
+    vertices.push(MeshVertex {
+        position: center + direction.scale(cap_depth),
+        normal: direction,
+        color,
+    });
+    push_fan(indices, pole, previous_ring);
+}
+
+/// Historical radial detail used when section.detail is not specified.
 const TUBE_RADIAL: usize = 12;
+
+struct RibbonTubeMeshOptions<'a> {
+    scale: f64,
+    sections: &'a RibbonSections,
+    styled: &'a StyledRibbonSections,
+    paint: Option<&'a [Option<[f32; 4]>]>,
+    radial_detail: usize,
+    start_cap: TubeCapType,
+    end_cap: TubeCapType,
+    segment_end_fade: bool,
+    helix_back_color: Option<[f32; 4]>,
+    sheet_side_color: Option<[f32; 4]>,
+}
 
 /// Sweep a per-sample elliptical cross-section along `samples` into a ribbon
 /// mesh. helix/sheet samples get a wide, flat ellipse (a band); coil samples a
@@ -5158,10 +6122,7 @@ fn ribbon_tube_mesh(
     samples: &[Vector4],
     sections: &[Secondary],
     width_scales: &[f64],
-    scale: f64,
-    sec: &RibbonSections,
-    styled: &StyledRibbonSections,
-    paint: Option<&[Option<[f32; 4]>]>,
+    options: &RibbonTubeMeshOptions<'_>,
 ) -> RenderMesh {
     let n = samples.len();
     if n < 2 {
@@ -5193,24 +6154,44 @@ fn ribbon_tube_mesh(
         frames.push((normal, binormal));
     }
 
-    // Ring vertices: TUBE_RADIAL points of the cross-section at each sample, with
+    let radial_detail = options.radial_detail.max(3);
+    // Ring vertices around the cross-section at each sample, with
     // width along the binormal and thickness along the normal. The profile is an
     // ellipse (smooth) or a rectangle (flat-faced) per the resolved style.
-    let mut vertices = Vec::with_capacity(n * TUBE_RADIAL);
+    let mut vertices = Vec::with_capacity(n * radial_detail);
     for (i, &center) in samples.iter().enumerate() {
         let (normal, binormal) = frames[i];
-        let (base_width, thick, section_color) = section_params(sections[i], scale, sec, styled);
+        let (base_width, thick, section_color) =
+            section_params(sections[i], options.scale, options.sections, options.styled);
         // Object paint coloring (when resolved for this sample) overrides the
         // secondary-structure section colour — the $molcol→object cascade.
-        let color = paint
+        let color = options
+            .paint
             .and_then(|colors| colors.get(i).copied().flatten())
             .unwrap_or(section_color);
+        let fade = if options.segment_end_fade {
+            let fade_span = (n / 10).clamp(1, 8);
+            let edge_distance = i.min(n - 1 - i);
+            (edge_distance as f32 / fade_span as f32).min(1.0)
+        } else {
+            1.0
+        };
         let width = base_width * width_scales[i];
-        let shape = styled.shape_for(sections[i]);
-        for j in 0..TUBE_RADIAL {
-            let t = (j as f64) / (TUBE_RADIAL as f64);
+        let shape = options.styled.shape_for(sections[i]);
+        let section_sharp = options.styled.sharp_for(sections[i]);
+        for j in 0..radial_detail {
+            let t = (j as f64) / (radial_detail as f64);
             let (offset, nrm) = match shape {
                 SectionShape::Rectangular => rect_ring_point(t, width, thick, binormal, normal),
+                SectionShape::RoundSquare | SectionShape::Fancy => superellipse_ring_point(
+                    t,
+                    width,
+                    thick,
+                    binormal,
+                    normal,
+                    section_sharp,
+                    shape == SectionShape::Fancy,
+                ),
                 SectionShape::Elliptical => {
                     let (sin, cos) = (t * std::f64::consts::TAU).sin_cos();
                     let offset = binormal.scale(cos * width) + normal.scale(sin * thick);
@@ -5222,55 +6203,129 @@ fn ribbon_tube_mesh(
                     (offset, nrm)
                 }
             };
+            let mut vertex_color = color;
+            if sections[i] == Secondary::Helix && offset.dot3d(normal) < 0.0 {
+                if let Some(back_color) = options.helix_back_color {
+                    vertex_color = back_color;
+                }
+            } else if sections[i] == Secondary::Sheet && nrm.dot3d(binormal).abs() > 0.7 {
+                if let Some(side_color) = options.sheet_side_color {
+                    vertex_color = side_color;
+                }
+            }
+            vertex_color[3] *= fade;
             vertices.push(MeshVertex {
                 position: center + offset,
                 normal: nrm,
-                color,
+                color: vertex_color,
             });
         }
     }
 
     // Triangle indices stitching consecutive rings into quads.
-    let mut indices = Vec::with_capacity((n - 1) * TUBE_RADIAL * 6);
+    let mut indices = Vec::with_capacity((n - 1) * radial_detail * 6);
     for i in 0..n - 1 {
-        for j in 0..TUBE_RADIAL {
-            let j_next = (j + 1) % TUBE_RADIAL;
-            let a = (i * TUBE_RADIAL + j) as u32;
-            let b = (i * TUBE_RADIAL + j_next) as u32;
-            let c = ((i + 1) * TUBE_RADIAL + j) as u32;
-            let d = ((i + 1) * TUBE_RADIAL + j_next) as u32;
+        for j in 0..radial_detail {
+            let j_next = (j + 1) % radial_detail;
+            let a = (i * radial_detail + j) as u32;
+            let b = (i * radial_detail + j_next) as u32;
+            let c = ((i + 1) * radial_detail + j) as u32;
+            let d = ((i + 1) * radial_detail + j_next) as u32;
             indices.extend_from_slice(&[a, c, b, b, c, d]);
         }
+    }
+
+    if !options.segment_end_fade {
+        let append_cap = |at_start: bool,
+                          cap_type: TubeCapType,
+                          vertices: &mut Vec<MeshVertex>,
+                          indices: &mut Vec<u32>| {
+            let sample_index = if at_start { 0 } else { n - 1 };
+            let (normal, binormal) = frames[sample_index];
+            let (base_width, thick, section_color) = section_params(
+                sections[sample_index],
+                options.scale,
+                options.sections,
+                options.styled,
+            );
+            let color = options
+                .paint
+                .and_then(|colors| colors.get(sample_index).copied().flatten())
+                .unwrap_or(section_color);
+            append_tube_cap(
+                vertices,
+                indices,
+                sample_index * radial_detail,
+                radial_detail,
+                samples[sample_index],
+                tangents[sample_index],
+                normal,
+                binormal,
+                base_width * width_scales[sample_index],
+                thick,
+                color,
+                options.styled.shape_for(sections[sample_index]),
+                options.styled.sharp_for(sections[sample_index]),
+                cap_type,
+                at_start,
+            );
+        };
+        append_cap(true, options.start_cap, &mut vertices, &mut indices);
+        append_cap(false, options.end_cap, &mut vertices, &mut indices);
     }
 
     RenderMesh { vertices, indices }
 }
 
-/// Aromatic/saturated ring fills (C++ `BallStickRenderer::drawRings`): for each
-/// residue with ring definitions in the topology props (`TopoDB::rings`), draw
-/// the ring as a flat filled polygon — a triangle fan from the ring centroid to
-/// its member atoms, with the ring's plane normal. Returned as snapshot meshes.
+/// Aromatic/saturated ring fills using the C++ BallStick defaults.
 pub fn ring_meshes_snapshot(molecule: &MolCoord) -> RenderSceneSnapshot {
+    ring_meshes_snapshot_with(molecule, 0.2, [1.0_f32, 1.0, 0.75, 1.0], None)
+}
+
+/// Aromatic/saturated ring fills (C++ `BallStickRenderer::drawRings`): for each
+/// complete selected ring, draw two triangle fans offset from the ring plane by
+/// `thickness`, using the resolved renderer ring color.
+pub fn ring_meshes_snapshot_with(
+    molecule: &MolCoord,
+    thickness: f64,
+    ring_color: [f32; 4],
+    draw_indices: Option<&[usize]>,
+) -> RenderSceneSnapshot {
     let db = cuemol_molstr::toppar::TopoDB::global();
     let summaries = molecule.residue_summaries();
-    let ring_color = [1.0_f32, 1.0, 0.75, 1.0];
+    let draw = draw_indices.map(|indices| {
+        indices
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+    });
     let mut meshes = Vec::new();
     for s in &summaries {
         let rings = db.rings(&s.res_name);
         if rings.is_empty() {
             continue;
         }
-        let pos = |name: &str| -> Option<Vector4> {
+        let atom = |name: &str| -> Option<(usize, Vector4)> {
             s.atom_indices
                 .iter()
                 .find(|&&ai| molecule.atoms()[ai].name.trim().eq_ignore_ascii_case(name))
-                .map(|&ai| molecule.atoms()[ai].position)
+                .map(|&ai| (ai, molecule.atoms()[ai].position))
         };
         for ring in rings {
-            let verts: Vec<Vector4> = ring.iter().filter_map(|n| pos(n)).collect();
-            if verts.len() < 3 {
+            let members: Vec<(usize, Vector4)> =
+                ring.iter().filter_map(|name| atom(name)).collect();
+            if members.len() != ring.len()
+                || members.len() < 3
+                || draw
+                    .as_ref()
+                    .is_some_and(|draw| members.iter().any(|(index, _)| !draw.contains(index)))
+            {
                 continue;
             }
+            let verts = members
+                .iter()
+                .map(|(_, position)| *position)
+                .collect::<Vec<_>>();
             let mut centroid = Vector4::new3(0.0, 0.0, 0.0);
             for v in &verts {
                 centroid = centroid + *v;
@@ -5280,23 +6335,40 @@ pub fn ring_meshes_snapshot(molecule: &MolCoord) -> RenderSceneSnapshot {
                 (verts[1] - verts[0]).cross(verts[2] - verts[0]),
                 Vector4::new3(0.0, 0.0, 1.0),
             );
+            let offset = normal.scale(thickness.max(0.0));
             let mut mesh = RenderMesh::new();
             mesh.vertices.push(MeshVertex {
-                position: centroid,
+                position: centroid + offset,
                 normal,
                 color: ring_color,
             });
             for v in &verts {
                 mesh.vertices.push(MeshVertex {
-                    position: *v,
+                    position: *v + offset,
                     normal,
                     color: ring_color,
                 });
             }
-            // Triangle fan: centroid (vertex 0) to each consecutive ring edge.
             let n = verts.len() as u32;
             for k in 0..n {
                 mesh.indices.extend_from_slice(&[0, 1 + k, 1 + (k + 1) % n]);
+            }
+            let bottom = mesh.vertices.len() as u32;
+            mesh.vertices.push(MeshVertex {
+                position: centroid - offset,
+                normal: -normal,
+                color: ring_color,
+            });
+            for v in &verts {
+                mesh.vertices.push(MeshVertex {
+                    position: *v - offset,
+                    normal: -normal,
+                    color: ring_color,
+                });
+            }
+            for k in 0..n {
+                mesh.indices
+                    .extend_from_slice(&[bottom, bottom + 1 + (k + 1) % n, bottom + 1 + k]);
             }
             meshes.push(mesh);
         }
@@ -5422,13 +6494,64 @@ pub fn disorder_lines_snapshot(
     loopsize: f64,
     loopsize2: f64,
 ) -> RenderSceneSnapshot {
+    disorder_lines_snapshot_with_style(
+        molecule,
+        &DisorderRenderOptions {
+            dot_sep,
+            dot_radius,
+            loopsize,
+            loopsize2,
+            ..DisorderRenderOptions::default()
+        },
+    )
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisorderRenderOptions {
+    pub dot_sep: f64,
+    pub dot_radius: f64,
+    pub loopsize: f64,
+    pub loopsize2: f64,
+    pub detail: Option<u32>,
+    pub color: Option<ColorSpec>,
+    pub draw_indices: Option<Vec<usize>>,
+}
+
+impl Default for DisorderRenderOptions {
+    fn default() -> Self {
+        Self {
+            dot_sep: 1.0,
+            dot_radius: 0.15,
+            loopsize: 2.0,
+            loopsize2: -1.0,
+            detail: Some(5),
+            color: None,
+            draw_indices: None,
+        }
+    }
+}
+
+/// Styled disorder representation with renderer tessellation, color, and
+/// selection applied to the generated dots.
+pub fn disorder_lines_snapshot_with_style(
+    molecule: &MolCoord,
+    options: &DisorderRenderOptions,
+) -> RenderSceneSnapshot {
     // C++ DisoRenderer: loopsize scales the N-terminal Bézier tangent (gap
     // bulge amplitude); loopsize2 the C-terminal one, with a negative loopsize2
     // meaning "reuse loopsize".
-    let loop1 = loopsize;
-    let loop2 = if loopsize2 < 0.0 { loopsize } else { loopsize2 };
+    let loop1 = options.loopsize;
+    let loop2 = if options.loopsize2 < 0.0 {
+        options.loopsize
+    } else {
+        options.loopsize2
+    };
     use std::collections::{HashMap, HashSet};
     let summaries = molecule.residue_summaries();
+    let draw = options
+        .draw_indices
+        .as_ref()
+        .map(|indices| indices.iter().copied().collect::<HashSet<_>>());
 
     // atom index -> residue index (position in `summaries`)
     let mut atom_res: HashMap<usize, usize> = HashMap::new();
@@ -5446,7 +6569,7 @@ pub fn disorder_lines_snapshot(
             }
         }
     }
-    let pivot = |ri: usize| -> Option<Vector4> {
+    let pivot = |ri: usize| -> Option<(usize, Vector4)> {
         let s = &summaries[ri];
         for name in ["CA", "P", "C1'", "O5'"] {
             if let Some(&ai) = s
@@ -5454,7 +6577,7 @@ pub fn disorder_lines_snapshot(
                 .iter()
                 .find(|&&ai| molecule.atoms()[ai].name.trim().eq_ignore_ascii_case(name))
             {
-                return Some(molecule.atoms()[ai].position);
+                return Some((ai, molecule.atoms()[ai].position));
             }
         }
         None
@@ -5466,28 +6589,37 @@ pub fn disorder_lines_snapshot(
         if !same_chain(i - 1, i) || linked.contains(&(i - 1, i)) {
             continue;
         }
-        let (Some(p1), Some(p4)) = (pivot(i - 1), pivot(i)) else {
+        let (Some((pivot1, p1)), Some((pivot2, p4))) = (pivot(i - 1), pivot(i)) else {
             continue;
         };
+        if draw
+            .as_ref()
+            .is_some_and(|draw| !draw.contains(&pivot1) || !draw.contains(&pivot2))
+        {
+            continue;
+        }
         let chord = p4 - p1;
         let third = chord.length3d() / 3.0;
         // Bézier tangents from the surrounding pivots (chord fallback at the ends).
         let tan1 = if i >= 2 && same_chain(i - 2, i - 1) {
-            pivot(i - 2).map(|p0| normalize_or(p1 - p0, chord) * third)
+            pivot(i - 2).map(|(_, p0)| normalize_or(p1 - p0, chord) * third)
         } else {
             None
         }
         .unwrap_or(chord * (1.0 / 3.0));
         let tan4 = if i + 1 < summaries.len() && same_chain(i, i + 1) {
-            pivot(i + 1).map(|p5| normalize_or(p5 - p4, chord) * third)
+            pivot(i + 1).map(|(_, p5)| normalize_or(p5 - p4, chord) * third)
         } else {
             None
         }
         .unwrap_or(chord * (1.0 / 3.0));
         let p2 = p1 + tan1 * loop1;
         let p3 = p4 - tan4 * loop2;
-        for dot in bezier_dots(p1, p2, p3, p4, dot_sep) {
-            atoms.push(RenderAtom::new(dot, dot_radius as f32, None));
+        for dot in bezier_dots(p1, p2, p3, p4, options.dot_sep) {
+            atoms.push(
+                RenderAtom::new(dot, options.dot_radius as f32, options.color.clone())
+                    .with_detail(options.detail),
+            );
         }
     }
     RenderSceneSnapshot {
@@ -6058,6 +7190,9 @@ fn atom_radius(element: &str, options: &MoleculeRenderOptions) -> f32 {
     if let Some(radius) = options.atom_radius_abs {
         return radius;
     }
+    if let Some(radii) = options.element_radii {
+        return radii.radius_for_element(element) as f32;
+    }
     if options.color_mode == MoleculeColorMode::Element {
         (VdwRadii::default().radius_for_element(element) as f32 * options.vdw_scale).max(0.08)
     } else {
@@ -6094,6 +7229,33 @@ mod tests {
 
     fn assert_f64_eq(lhs: f64, rhs: f64) {
         assert!((lhs - rhs).abs() < 1.0e-12, "{lhs} != {rhs}");
+    }
+
+    fn sample_backbone_test(
+        points: &[MainchainPoint],
+        subdiv: usize,
+        smoothing: f64,
+        linear: bool,
+    ) -> (Vec<Vector4>, Vec<Secondary>, Vec<f64>) {
+        sample_backbone(
+            points,
+            subdiv,
+            &BackboneSamplingOptions {
+                anchor_weight: smoothing,
+                section_smoothing: RibbonSectionValues::default(),
+                cartoon_anchor_atoms: None,
+                cartoon_anchor_weight: 10.0,
+                linear,
+                uniform_section: false,
+                helix_head: RibbonJunction::default(),
+                helix_tail: RibbonJunction::default(),
+                sheet_head: RibbonJunction {
+                    kind: RibbonJunctionType::Arrow,
+                    ..RibbonJunction::default()
+                },
+                sheet_tail: RibbonJunction::default(),
+            },
+        )
     }
 
     #[test]
@@ -6165,6 +7327,310 @@ mod tests {
         assert!((rainbow.start_hue() - 240.0).abs() < 1e-9);
         assert!((rainbow.end_hue() - 0.0).abs() < 1e-9);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn renderer_inline_cpk_and_solid_coloring_set_render_colors() {
+        let mut manager = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = manager.new_scene("coloring");
+        let object_uid = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", MolCoord::new());
+        let renderer_uid = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "simple");
+        let renderer = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap();
+        let mut cpk = cuemol_core::LDom2Node::new();
+        cpk.set_tag_name("coloring");
+        cpk.set_type_name("CPKColoring");
+        cpk.set_str_attr("col_C", "$molcol");
+        cpk.set_str_attr("col_O", "#123456");
+        cpk.set_str_attr("col_X", "#808080");
+        renderer.set_qsc_children(vec![cpk]);
+
+        let styles = default_style_manager();
+        let mut options = MoleculeRenderOptions::default();
+        apply_renderer_styles(&mut options, renderer, &styles, scene_uid.get());
+        assert!(!options.cpk_colors.contains_key("C"));
+        assert_eq!(
+            options.cpk_colors["O"].rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+                a: 0xff,
+            }
+        );
+        options.object_paint = vec![("*".to_string(), "#ff00ff".to_string())];
+        let carbon = MolCoord::with_atoms(vec![sample_atom("CA", "C", 0.0, 0.0, 0.0)]);
+        assert_eq!(
+            resolve_atom_colors(&carbon, &options)[0].rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 0xff,
+                g: 0,
+                b: 0xff,
+                a: 0xff,
+            }
+        );
+
+        let mut solid = cuemol_core::LDom2Node::new();
+        solid.set_tag_name("coloring");
+        solid.set_type_name("SolidColoring");
+        renderer.set_qsc_children(vec![solid]);
+        renderer.set_qsc_attr("defaultcolor", "#654321");
+        let mut options = MoleculeRenderOptions::default();
+        apply_renderer_styles(&mut options, renderer, &styles, scene_uid.get());
+        assert_eq!(options.color_mode, MoleculeColorMode::Uniform);
+        assert_eq!(
+            options.uniform_color.unwrap().rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 0x65,
+                g: 0x43,
+                b: 0x21,
+                a: 0xff,
+            }
+        );
+    }
+
+    #[test]
+    fn bfac_coloring_reads_all_panel_properties() {
+        let attrs = std::collections::BTreeMap::from([
+            ("mode", "occ"),
+            ("auto", "none"),
+            ("lowcol", "#112233"),
+            ("highcol", "#abcdef"),
+            ("lowpar", "0.25"),
+            ("highpar", "0.75"),
+        ]);
+        let coloring =
+            bfac_coloring_from_attrs(Some("BfacColoring"), |name| attrs.get(name).copied())
+                .unwrap();
+        assert_eq!(coloring.mode(), BfacColoring::BFC_OCC);
+        assert_eq!(coloring.auto_mode(), BfacColoring::BFA_NONE);
+        assert_f64_eq(coloring.low_param(), 0.25);
+        assert_f64_eq(coloring.high_param(), 0.75);
+    }
+
+    #[test]
+    fn object_solid_coloring_only_replaces_molcol_atoms() {
+        let mut options = MoleculeRenderOptions::default();
+        let default_color = SolidColor::from_rgba_u8(0x65, 0x43, 0x21, 0xff);
+        apply_object_coloring(
+            &mut options,
+            Some("SolidColoring"),
+            |_| None,
+            &[],
+            &default_color,
+        );
+        let molecule = MolCoord::with_atoms(vec![
+            sample_atom("CA", "C", 0.0, 0.0, 0.0),
+            sample_atom("O", "O", 1.0, 0.0, 0.0),
+        ]);
+        let colors = resolve_atom_colors(&molecule, &options);
+        assert_eq!(colors[0].rgba8().unwrap().r, 0x65);
+        assert_eq!(colors[0].rgba8().unwrap().g, 0x43);
+        assert_eq!(colors[0].rgba8().unwrap().b, 0x21);
+        assert_ne!(colors[1].rgba8().unwrap(), colors[0].rgba8().unwrap());
+    }
+
+    #[test]
+    fn tube_renderer_properties_resolve_into_mesh_options() {
+        let mut manager = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = manager.new_scene("tube");
+        let object_uid = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", MolCoord::new());
+        let renderer_uid = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("tube", "tube");
+        let renderer = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap();
+        for (name, value) in [
+            ("type", "roundsquare"),
+            ("width", "0.4"),
+            ("tuber", "2.5"),
+            ("sharp", "0.75"),
+            ("detail", "9"),
+        ] {
+            renderer.set_qsc_child_attr("section", name, value);
+        }
+        for (name, value) in [
+            ("smooth", "0.25"),
+            ("smoothcolor", "false"),
+            ("pivotatom", "N"),
+            ("start_captype", "flat"),
+            ("end_captype", "none"),
+            ("segend_fade", "true"),
+        ] {
+            renderer.set_qsc_attr(name, value);
+        }
+
+        let mut options = MoleculeRenderOptions::default();
+        apply_renderer_styles(&mut options, renderer, &default_style_manager(), 0);
+        apply_tube_renderer_styles(&mut options, renderer, &default_style_manager(), 0);
+        assert_eq!(options.styled_ribbon.helix, Some((1.0, 0.4)));
+        assert_eq!(options.styled_ribbon.sheet, Some((1.0, 0.4)));
+        assert_eq!(options.styled_ribbon.coil_shape, SectionShape::RoundSquare);
+        assert_eq!(options.ribbon_radial_detail, Some(9));
+        assert!((options.ribbon_section_sharp - 0.75).abs() < f64::EPSILON);
+        assert!((options.anchor_weight - 0.25).abs() < f64::EPSILON);
+        assert!(!options.smooth_color);
+        assert_eq!(options.pivot_atom.as_deref(), Some("N"));
+        assert_eq!(options.start_cap_type, TubeCapType::Flat);
+        assert_eq!(options.end_cap_type, TubeCapType::None);
+        assert!(options.segment_end_fade);
+        assert!(options.uniform_backbone);
+        assert!(options.backbone_atom_colors);
+    }
+
+    #[test]
+    fn ribbon_renderer_properties_resolve_sections_junctions_and_face_colors() {
+        let mut manager = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = manager.new_scene("ribbon");
+        let object_uid = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", MolCoord::new());
+        let renderer_uid = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("ribbon", "ribbon");
+        let renderer = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap();
+        for (child, name, value) in [
+            ("helix", "type", "roundsquare"),
+            ("helix", "width", "0.25"),
+            ("helix", "tuber", "4"),
+            ("helix", "sharp", "0.8"),
+            ("helix", "detail", "11"),
+            ("sheethead", "type", "arrow"),
+            ("sheethead", "gamma", "3"),
+            ("sheethead", "basw", "0.2"),
+            ("sheethead", "arrow", "2.1"),
+        ] {
+            renderer.set_qsc_child_attr(child, name, value);
+        }
+        for (name, value) in [
+            ("axialdetail", "7"),
+            ("helix_smooth", "1.5"),
+            ("sheet_smooth", "0.75"),
+            ("coil_smooth", "0.25"),
+            ("helix_usebackcol", "true"),
+            ("helix_backcol", "#112233"),
+            ("sheet_usesidecol", "true"),
+            ("sheet_sidecol", "#445566"),
+        ] {
+            renderer.set_qsc_attr(name, value);
+        }
+
+        let mut options = MoleculeRenderOptions::default();
+        apply_renderer_styles(&mut options, renderer, &default_style_manager(), 0);
+        assert_eq!(options.styled_ribbon.helix, Some((1.0, 0.25)));
+        assert_eq!(options.styled_ribbon.helix_shape, SectionShape::RoundSquare);
+        assert!((options.styled_ribbon.helix_sharp - 0.8).abs() < f64::EPSILON);
+        assert_eq!(options.ribbon_radial_detail, Some(11));
+        assert_eq!(options.ribbon_axial_detail, Some(7));
+        assert_eq!(
+            options.ribbon_smoothing,
+            RibbonSectionValues {
+                helix: 1.5,
+                sheet: 0.75,
+                coil: 0.25,
+            }
+        );
+        assert_eq!(options.sheet_head.kind, RibbonJunctionType::Arrow);
+        assert!((options.sheet_head.gamma - 3.0).abs() < f64::EPSILON);
+        assert!((options.sheet_head.base_width - 0.2).abs() < f64::EPSILON);
+        assert!((options.sheet_head.arrow_width - 2.1).abs() < f64::EPSILON);
+        assert_eq!(
+            options.helix_back_color,
+            Some([17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 1.0])
+        );
+        assert_eq!(
+            options.sheet_side_color,
+            Some([68.0 / 255.0, 85.0 / 255.0, 102.0 / 255.0, 1.0])
+        );
+    }
+
+    #[test]
+    fn cartoon_renderer_properties_resolve_anchor_and_helix_modes() {
+        let mut manager = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = manager.new_scene("cartoon");
+        let object_uid = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", MolCoord::new());
+        let renderer_uid = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("cartoon", "cartoon");
+        let renderer = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap();
+        for (name, value) in [
+            ("anchor_sel", "chain A"),
+            ("anchor_weight", "12"),
+            ("helix_ribbon", "true"),
+            ("helix_width", "2.6"),
+            ("helix_wplus", "0.4"),
+        ] {
+            renderer.set_qsc_attr(name, value);
+        }
+        for (name, value) in [
+            ("type", "rectangle"),
+            ("width", "0.3"),
+            ("tuber", "5"),
+            ("detail", "12"),
+        ] {
+            renderer.set_qsc_child_attr("ribhelix", name, value);
+        }
+        renderer.set_qsc_child_attr("ribhelix_head", "type", "flat");
+
+        let mut options = MoleculeRenderOptions::default();
+        apply_renderer_styles(&mut options, renderer, &default_style_manager(), 0);
+        assert_eq!(options.cartoon_anchor_selection.as_deref(), Some("chain A"));
+        assert!((options.cartoon_anchor_weight - 12.0).abs() < f64::EPSILON);
+        assert!(options.cartoon_helix_ribbon);
+        assert!((options.cartoon_helix_width - 2.6).abs() < f64::EPSILON);
+        assert!((options.cartoon_helix_width_plus - 0.4).abs() < f64::EPSILON);
+        assert_eq!(options.styled_ribbon.helix, Some((1.5, 0.3)));
+        assert_eq!(options.styled_ribbon.helix_shape, SectionShape::Rectangular);
+        assert_eq!(options.ribbon_radial_detail, Some(12));
+        assert_eq!(options.helix_head.kind, RibbonJunctionType::Flat);
+        assert_eq!(options.start_cap_type, TubeCapType::Flat);
+        assert!(!options.smooth_color);
     }
 
     #[test]
@@ -6369,6 +7835,43 @@ mod tests {
         assert!(cpk_vertex_count("", Some(Some(10))) > cpk_vertex_count("", Some(Some(4))));
     }
 
+    #[test]
+    fn cpk_element_radius_attributes_drive_atom_geometry() {
+        let mol = MolCoord::with_atoms(vec![
+            sample_atom("H1", "H", 0.0, 0.0, 0.0),
+            sample_atom("C1", "C", 2.0, 0.0, 0.0),
+            sample_atom("XE", "XE", 5.0, 0.0, 0.0),
+        ]);
+        let mut manager = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = manager.new_scene("scene");
+        let scene = manager.scene_mut(scene_uid).unwrap();
+        let object_uid = scene.add_molecule("molecule", mol);
+        let object = scene.object_mut(object_uid).unwrap();
+        let renderer_uid = object.add_renderer("cpk", "cpk");
+        let renderer = object.renderer_mut(renderer_uid).unwrap();
+        renderer.set_qsc_attr("vdwr_H", "0.8");
+        renderer.set_qsc_attr("vdwr_C", "2.4");
+
+        let object = scene.object(object_uid).unwrap();
+        let renderer = object.renderer(renderer_uid).unwrap();
+        let mut options = MoleculeRenderOptions {
+            draw_bonds: false,
+            element_radii: Some(VdwRadii::default()),
+            ..MoleculeRenderOptions::default()
+        };
+        apply_renderer_styles(
+            &mut options,
+            renderer,
+            &default_style_manager(),
+            DEFAULT_STYLE_SCOPE,
+        );
+        let snapshot = molecule_render_snapshot(object.mol(), &options);
+        assert_eq!(snapshot.atoms.len(), 3);
+        assert!((snapshot.atoms[0].radius - 0.8).abs() < 1.0e-6);
+        assert!((snapshot.atoms[1].radius - 2.4).abs() < 1.0e-6);
+        assert!((snapshot.atoms[2].radius - 1.7).abs() < 1.0e-6);
+    }
+
     /// Resolve a ribbon renderer's style (plus an optional inline `axialdetail`
     /// override) and return the total backbone-mesh vertex count — the geometry
     /// oracle for `axialdetail` (more subdivisions => denser mesh).
@@ -6415,7 +7918,12 @@ mod tests {
             ca_atom(4, 3.0, 0.5, 0.0),
             ca_atom(5, 4.0, 0.0, 0.0),
         ]);
-        let default_count: usize = ribbon_mesh_snapshot(&mol, &MoleculeRenderOptions::default())
+        let reference_defaults = MoleculeRenderOptions {
+            start_cap_type: TubeCapType::Sphere,
+            end_cap_type: TubeCapType::Sphere,
+            ..MoleculeRenderOptions::default()
+        };
+        let default_count: usize = ribbon_mesh_snapshot(&mol, &reference_defaults)
             .meshes
             .iter()
             .map(|mesh| mesh.vertices.len())
@@ -6731,6 +8239,41 @@ mod tests {
             .iter()
             .all(|a| a.center.x > -0.1 && a.center.x < 10.1));
 
+        let styled = disorder_lines_snapshot_with_style(
+            &mol,
+            &DisorderRenderOptions {
+                dot_sep: 1.0,
+                dot_radius: 0.2,
+                loopsize: 1.0,
+                detail: Some(9),
+                color: Some(rgb_spec(0.2, 0.4, 0.6)),
+                draw_indices: Some(vec![0, 1]),
+                ..DisorderRenderOptions::default()
+            },
+        );
+        assert!(styled.atoms.iter().all(|atom| atom.detail == Some(9)));
+        assert!(styled.atoms.iter().all(|atom| {
+            atom.color.as_ref().and_then(ColorSpec::rgba8)
+                == Some(cuemol_gfx::Rgba8 {
+                    r: 51,
+                    g: 102,
+                    b: 153,
+                    a: 255,
+                })
+        }));
+        assert!(disorder_lines_snapshot_with_style(
+            &mol,
+            &DisorderRenderOptions {
+                dot_sep: 1.0,
+                dot_radius: 0.2,
+                loopsize: 1.0,
+                draw_indices: Some(vec![0]),
+                ..DisorderRenderOptions::default()
+            },
+        )
+        .atoms
+        .is_empty());
+
         // Once the residues are bonded (linked), there is no disorder line.
         let mut linked = MolCoord::with_atoms(vec![diso_ca(1, 1, 0.0), diso_ca(2, 2, 10.0)]);
         linked.add_bond(0, 1, cuemol_molstr::BondOrder::Single);
@@ -7007,14 +8550,23 @@ mod tests {
                 })
                 .collect(),
         );
-        let snap = ring_meshes_snapshot(&mol);
+        let snap = ring_meshes_snapshot_with(&mol, 0.2, [0.2, 0.4, 0.6, 1.0], None);
         assert_eq!(snap.meshes.len(), 1, "one ring mesh for PHE");
         let m = &snap.meshes[0];
-        assert_eq!(m.triangle_count(), 6, "hexagon fan = 6 triangles");
-        assert_eq!(m.vertices.len(), 7, "centroid + 6 ring atoms");
-        // All vertices in the z=0 plane; the ring normal is ±z.
-        assert!(m.vertices.iter().all(|v| v.position.z.abs() < 1.0e-9));
+        assert_eq!(m.triangle_count(), 12, "two hexagon fans = 12 triangles");
+        assert_eq!(m.vertices.len(), 14, "two copies of centroid + 6 atoms");
+        assert!(m
+            .vertices
+            .iter()
+            .all(|vertex| (vertex.position.z.abs() - 0.2).abs() < 1.0e-9));
         assert!(m.vertices[0].normal.z.abs() > 0.99);
+        assert_eq!(m.vertices[0].color, [0.2, 0.4, 0.6, 1.0]);
+
+        assert!(
+            ring_meshes_snapshot_with(&mol, 0.2, [1.0; 4], Some(&[0, 1, 2, 3, 4]),)
+                .meshes
+                .is_empty()
+        );
 
         // A non-aromatic residue yields no ring mesh.
         let mut ala = sample_atom("CA", "C", 0.0, 0.0, 0.0);
@@ -7369,8 +8921,8 @@ mod tests {
             max
         };
 
-        let (linear, _, _) = sample_backbone(&pivots, subdiv, 0.0, true);
-        let (spline, _, _) = sample_backbone(&pivots, subdiv, 0.0, false);
+        let (linear, _, _) = sample_backbone_test(&pivots, subdiv, 0.0, true);
+        let (spline, _, _) = sample_backbone_test(&pivots, subdiv, 0.0, false);
         // Same sample count -> a drop-in path swap, the tube machinery is unchanged.
         assert_eq!(linear.len(), spline.len());
         // Linear trace samples lie exactly on the pivot chords.
@@ -7402,7 +8954,7 @@ mod tests {
             .map(|i| ca_atom(i, (i - 1) as f64 * 3.8, 0.0, 0.0))
             .collect();
         let mol = MolCoord::with_atoms(contiguous);
-        let runs = collect_mainchain_pivots(&mol, None);
+        let runs = collect_mainchain_pivots(&mol, None, None);
         assert_eq!(runs.len(), 1, "a contiguous Ca-only chain is one run");
         assert_eq!(runs[0].len(), 5);
 
@@ -7419,7 +8971,7 @@ mod tests {
         for atom in &mut gapped {
             atom.chain_id = "A".to_string();
         }
-        let runs = collect_mainchain_pivots(&MolCoord::with_atoms(gapped), None);
+        let runs = collect_mainchain_pivots(&MolCoord::with_atoms(gapped), None, None);
         assert_eq!(runs.len(), 2, "an internal backbone gap splits the run");
         assert_eq!(runs[0].len(), 3);
         assert_eq!(runs[1].len(), 2);
@@ -7432,7 +8984,7 @@ mod tests {
         b2.chain_id = "B".to_string();
         two_chain.push(b1);
         two_chain.push(b2);
-        let runs = collect_mainchain_pivots(&MolCoord::with_atoms(two_chain), None);
+        let runs = collect_mainchain_pivots(&MolCoord::with_atoms(two_chain), None, None);
         assert_eq!(runs.len(), 2, "two chains are two runs");
     }
 
@@ -7458,7 +9010,7 @@ mod tests {
         })
         .collect();
         let max_y = |w: f64| {
-            sample_backbone(&pivots, 8, w, false)
+            sample_backbone_test(&pivots, 8, w, false)
                 .0
                 .iter()
                 .map(|p| p.y)
@@ -7526,6 +9078,42 @@ mod tests {
             assert!((vertex.normal.length3d() - 1.0).abs() < 1.0e-5);
         }
         assert!(snap.bounds.is_some());
+    }
+
+    #[test]
+    fn tube_mesh_honors_pivot_radial_detail_and_caps() {
+        let mut atoms = Vec::new();
+        for (residue, x) in [(1, 0.0), (2, 3.0), (3, 6.0)] {
+            atoms.push(ca_atom(residue, x, 0.0, 0.0));
+            let mut nitrogen = ca_atom(residue, x, 2.0, 0.0);
+            nitrogen.name = "N".to_string();
+            nitrogen.element = "N".to_string();
+            atoms.push(nitrogen);
+        }
+        let molecule = MolCoord::with_atoms(atoms);
+        let mut options = MoleculeRenderOptions {
+            pivot_atom: Some("N".to_string()),
+            ribbon_axial_detail: Some(2),
+            ribbon_radial_detail: Some(9),
+            start_cap_type: TubeCapType::Flat,
+            end_cap_type: TubeCapType::Flat,
+            uniform_backbone: true,
+            ..MoleculeRenderOptions::default()
+        };
+        options.styled_ribbon.helix = Some((0.4, 0.4));
+        options.styled_ribbon.sheet = Some((0.4, 0.4));
+        options.styled_ribbon.coil = Some((0.4, 0.4));
+        let snapshot = ribbon_mesh_snapshot(&molecule, &options);
+        let mesh = &snapshot.meshes[0];
+        assert_eq!(mesh.vertices.len(), 5 * 9 + 2);
+        assert_eq!(mesh.triangle_count(), 4 * 9 * 2 + 2 * 9);
+        let first_center = mesh.vertices[..9]
+            .iter()
+            .fold(Vector4::new3(0.0, 0.0, 0.0), |sum, vertex| {
+                sum + vertex.position
+            })
+            .scale(1.0 / 9.0);
+        assert!((first_center.y - 2.0).abs() < 1.0e-6);
     }
 
     #[test]

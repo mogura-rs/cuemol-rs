@@ -45,7 +45,15 @@ fn tauri_shell_uses_the_native_light_chrome_and_cuemol_viewport() {
 fn tauri_reference_panels_are_bound_to_shared_core_data() {
     for id in [
         "molstruct-tree",
+        "selection-object",
+        "selection-history",
+        "selection-editor-list",
+        "selection-editor-add",
+        "selection-editor-delete",
+        "selection-editor-clear",
+        "coloring-target",
         "coloring-type",
+        "coloring-deck",
         "symmetry-content",
         "density-content",
         "sequence-view",
@@ -58,14 +66,36 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
         assert!(HTML.contains(&format!("id=\"{id}\"")), "missing panel {id}");
     }
     for command in [
-        "set_object_coloring",
+        "set_coloring",
         "set_display_option",
         "set_density_level",
         "set_background",
         "set_selection",
+        "molecule_selection_action",
+        "get_molecule_details",
+        "open_initial_paths",
     ] {
         assert!(JS.contains(command), "missing IPC binding {command}");
     }
+    for id in [
+        "molstruct-select",
+        "molstruct-center",
+        "molstruct-zoom",
+        "molstruct-properties",
+    ] {
+        assert!(HTML.contains(&format!("id=\"{id}\"")), "missing {id}");
+    }
+    assert!(JS.contains("selectedMolstructExpression()"));
+    assert!(JS.contains("event.shiftKey"));
+    assert!(JS.contains("composeSelectionEditorExpression()"));
+    assert!(JS.contains("selectionActiveTab = element.dataset.selectionTab"));
+    assert!(JS.contains("byres ((${selection}) around ${item.args})"));
+    assert!(JS.contains("await applySelectionCommand()"));
+    assert!(JS.contains("item.supportsColoring"));
+    assert!(JS.contains("PaintColoring"));
+    assert!(JS.contains("CPKColoring"));
+    assert!(JS.contains("RainbowColoring"));
+    assert!(JS.contains("BfacColoring"));
     assert!(JS.contains(r#"extensions: ["dcd", "xtc", "trr", "nc"]"#));
 }
 
@@ -103,6 +133,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "undo",
         "redo",
         "clear_undo",
+        "reload_scene",
         "delete_atoms",
         "change_chain",
         "renumber_residues",
@@ -111,6 +142,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "add_animation_object",
         "animation_control",
         "tick_animation",
+        "tick_animation_frame",
         "superpose_objects",
         "edit_bond",
         "calculate_contacts",
@@ -132,6 +164,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "load_view",
         "load_trajectory",
         "set_trajectory_frame",
+        "set_trajectory_frame_viewport",
         "append_trajectory_block",
         "remove_trajectory_block",
         "move_trajectory_block",
@@ -140,4 +173,295 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     }
     assert!(HTML.contains("data-interaction=\"rotate\""));
     assert!(HTML.contains("data-interaction=\"rect-select\""));
+}
+
+#[test]
+fn tauri_open_recent_matches_the_reference_mru_contract() {
+    assert!(HTML.contains("id=\"recent-menu\""));
+    assert!(HTML.contains("aria-label=\"Open Recent\""));
+    assert!(!HTML.contains("disabled>Open recent</button>"));
+    assert!(CSS.contains(".menu-submenu:hover > .nested-menu"));
+    assert!(JS.contains("const MAX_RECENT_FILES = 10"));
+    assert!(JS.contains("entry.path !== path"));
+    assert!(JS.contains("recentFiles.unshift({ path, ftype })"));
+    assert!(JS.contains("localStorage.setItem(RECENT_STORAGE_KEY"));
+    assert!(JS.contains("button(\"Clear Menu\""));
+    assert!(JS.contains("await openSelectedPaths([entry.path])"));
+    assert!(JS.contains("mutate(\"open_paths\", { paths: objectPaths })"));
+    assert!(JS.contains("snapshot?.openedPaths"));
+}
+
+#[test]
+fn tauri_reload_scene_uses_the_active_scene_source() {
+    assert!(HTML.contains("data-local-action=\"reload-scene\""));
+    assert!(JS.contains("scene?.modified"));
+    assert!(JS.contains("window.confirm(`Do you want to reload the scene:"));
+    assert!(JS.contains("await mutate(\"reload_scene\")"));
+    assert!(!JS.contains("lastOpenedPaths"));
+}
+
+#[test]
+fn tauri_save_and_save_as_use_distinct_reference_flows() {
+    assert!(HTML.contains("data-action=\"save\">Save Scene</button>"));
+    assert!(HTML.contains("data-action=\"save-as\">Save Scene As…</button>"));
+    assert!(JS.contains("snapshot?.scenes.find((scene) => scene.active)?.source"));
+    assert!(JS.contains("await saveScene(true)"));
+    assert!(JS.contains("saveScene(event.shiftKey)"));
+    assert!(JS.contains("mutateWithoutViewport(\"save_scene\""));
+}
+
+#[test]
+fn tauri_animation_frames_use_one_compact_ipc_round_trip() {
+    assert!(JS.contains("invoke(\"tick_animation_frame\", { dt: 0.1, ...size })"));
+    assert!(JS.contains("applyViewport(frame.viewport, sequence)"));
+    assert!(!JS.contains("snapshot = await invoke(\"tick_animation\""));
+}
+
+#[test]
+fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
+    assert!(JS.contains(r#"invoke("get_initial_state", viewportDimensions())"#));
+    assert!(JS.contains("snapshot = initial.snapshot"));
+    assert!(JS.contains("applyViewport(initial.viewport, sequence)"));
+    assert!(JS.contains("scheduleRender(0)"));
+    assert!(JS.contains(r#"invoke("get_molecule_details", {"#));
+    assert!(JS.contains("scheduleMoleculeDetailsRefresh()"));
+    assert!(JS.contains("includeSequence"));
+    assert!(JS.contains("initial.startupPathsPending"));
+    assert!(JS.contains("void mutate(\"open_initial_paths\")"));
+    assert!(JS.contains("if (chainNode.dataset.loaded) return"));
+    assert!(JS.contains("if (residueNode.dataset.loaded) return"));
+    assert!(JS.contains("if (chainNode.open) loadResidues()"));
+    assert!(JS.contains("if (residueNode.open) loadAtoms()"));
+    assert!(!JS.contains("snapshot.structure.map"));
+    assert!(!JS.contains("snapshot.structure.find"));
+    assert!(!JS.contains("snapshot.sequence.length"));
+    assert!(!JS.contains("for (const chain of snapshot.sequence)"));
+    assert!(!JS.contains(r#"snapshot = await invoke("get_snapshot");\n    renderShell();"#));
+}
+
+#[test]
+fn tauri_projection_toggle_uses_the_compact_viewport_response() {
+    assert!(JS.contains("snapshot.perspective = result.perspective"));
+    assert!(JS.contains("renderProjectionControls()"));
+    assert!(!JS.contains(r#"snapshot = await invoke("get_snapshot")"#));
+}
+
+#[test]
+fn tauri_trajectory_frames_use_one_compact_ipc_round_trip() {
+    assert!(JS.contains("invoke(\"set_trajectory_frame_viewport\""));
+    assert!(JS.contains("trajectory.currentFrame = result.frame"));
+    assert!(JS.contains("applyViewport(result.viewport, sequence)"));
+}
+
+#[test]
+fn tauri_coloring_updates_use_one_compact_ipc_round_trip() {
+    assert!(JS.contains(r#"const result = await invoke("set_coloring", {"#));
+    assert!(JS.contains("applyViewport(result.viewport, sequence)"));
+    assert!(!JS.contains(r#"return mutate("set_coloring""#));
+}
+
+#[test]
+fn tauri_undo_redo_toolbar_matches_the_reference_history_contract() {
+    for id in ["undo-history", "redo-history"] {
+        assert!(HTML.contains(&format!("id=\"{id}\"")));
+    }
+    for label in ["Undo history", "Redo history"] {
+        assert!(HTML.contains(&format!("aria-label=\"{label}\"")));
+    }
+    assert!(HTML.contains("data-action=\"undo\" data-depth=\"0\""));
+    assert!(HTML.contains("data-action=\"redo\" data-depth=\"0\""));
+    assert!(CSS.contains(".history-split.open > .history-popup"));
+    assert!(JS.contains("snapshot.undoDescriptions"));
+    assert!(JS.contains("snapshot.redoDescriptions"));
+    assert!(JS.contains("await mutate(kind, { depth })"));
+}
+
+#[test]
+fn tauri_help_surfaces_use_live_runtime_information() {
+    for command in ["get_application_info", "set_config_value"] {
+        assert!(JS.contains(command), "missing Help IPC binding {command}");
+    }
+    for heading in [
+        "Registered I/O plugins",
+        "Application preferences",
+        "Built-in components",
+    ] {
+        assert!(JS.contains(heading), "missing Help surface {heading}");
+    }
+    for selector in [".plugin-catalog", ".config-browser", ".addon-components"] {
+        assert!(CSS.contains(selector), "missing Help styling {selector}");
+    }
+}
+
+#[test]
+fn tauri_workspace_properties_match_the_reference_renderer_pages() {
+    assert!(HTML.contains("id=\"workspace-properties\""));
+    for command in [
+        "set_object_properties",
+        "set_renderer_properties",
+        "set_density_map_properties",
+        "set_density_renderer_properties",
+        "set_density_renderer_visible",
+        "add_density_renderer",
+        "set_surface_properties",
+        "set_surface_renderer_properties",
+        "set_surface_renderer_visible",
+        "add_surface_renderer",
+        "delete_workspace_item",
+        "fit_workspace_item",
+    ] {
+        assert!(
+            JS.contains(command),
+            "missing Workspace IPC binding {command}"
+        );
+    }
+    for label in [
+        "Object properties",
+        "Renderer properties",
+        "Basic settings",
+        "Edge lines:",
+        "Simple Rend Properties",
+        "Ballstick renderer properties",
+        "Ball & Stick",
+        "Bond width:",
+        "Show ring",
+        "CPK Rend Properties",
+        "Atom radii",
+        "Disorder renderer properties",
+        "Dot separation:",
+        "Loop size 2:",
+        "Tube Rend Properties",
+        "Nucl renderer properties",
+        "Ribbon representation properties",
+        "Cartoon representation properties",
+        "Contour renderer properties",
+        "Isosurf renderer properties",
+        "MolSurf Rend Properties",
+        "Drawing Mode:",
+        "Line/Point size:",
+        "Surface type:",
+        "Show selected:",
+        "Selection mol:",
+        "Coloring mode:",
+        "Center update:",
+        "Buffer size:",
+        "Max grid size:",
+        "Back-face culling",
+        "Limit display by",
+        "Helix section",
+        "Sheet section",
+        "Coil section",
+        "Backbone spline",
+        "Base width (%):",
+        "Anchor selection",
+        "Draw helix as ribbon",
+        "Cylindrical helix",
+        "Rounded square",
+        "Axial detail:",
+        "Use a custom pivot atom",
+        "Connect base pair",
+        "Thickness (%):",
+        "Reset all to default",
+    ] {
+        assert!(
+            JS.contains(label),
+            "missing Workspace property field {label}"
+        );
+    }
+    assert!(JS.contains("selectedRendererUid"));
+    assert!(HTML
+        .contains("id=\"workspace-delete\" type=\"button\" data-action=\"delete-workspace-item\""));
+    assert!(
+        HTML.contains("id=\"workspace-zoom\" type=\"button\" data-action=\"fit-workspace-item\"")
+    );
+    assert!(JS.contains("showReferenceDialog(\"Object Properties\")"));
+    assert!(JS.contains("showReferenceDialog(\"Renderer Properties\")"));
+    assert!(CSS.contains(".workspace-property-editor"));
+    assert!(CSS.contains(".property-common-group"));
+    assert!(CSS.contains(".renderer-row.selected"));
+    assert!(CSS.contains(".tree-object.density-map"));
+    assert!(CSS.contains(".tree-renderer.density-renderer"));
+    assert!(CSS.contains(".tree-object.surface-object"));
+    assert!(CSS.contains(".tree-renderer.surface-renderer"));
+}
+
+#[test]
+fn tauri_view_properties_match_the_reference_generic_editor() {
+    for command in ["get_view_properties", "set_view_properties"] {
+        assert!(
+            JS.contains(command),
+            "missing View property IPC binding {command}"
+        );
+    }
+    for column in [
+        r#"["Name", "R", "Type", "Value"]"#,
+        "centerMark",
+        "stereoMode",
+    ] {
+        assert!(JS.contains(column), "missing View property field {column}");
+    }
+    assert!(JS.contains("generic-property-editor"));
+    assert!(CSS.contains(".property-table"));
+    assert!(CSS.contains(".property-detail"));
+    assert!(JS.contains("cameraCommand(`center-mark-${element.dataset.centerMark}`)"));
+    assert!(JS.contains("result.centerMark === \"crosshair\""));
+    assert!(!JS.contains("dialogParagraph(`Projection:"));
+}
+
+#[test]
+fn tauri_scene_properties_match_the_reference_scene_qif_editor() {
+    assert!(JS.contains("set_scene_properties"));
+    for property in [
+        "bgcolor",
+        "aoEnabled",
+        "aoRadius",
+        "aoIntensity",
+        "aoSlices",
+        "aoSteps",
+        "aoHalfRes",
+        "aa_method",
+        "aaJitterLevel",
+        "onload",
+        "use_colproof",
+        "icc_filename",
+        "icc_intent",
+    ] {
+        assert!(
+            JS.contains(property),
+            "missing Scene.qif property {property}"
+        );
+    }
+    assert!(JS.contains("scenePropertyEditor(scene)"));
+    assert!(JS.contains("genericPropertyEditor(info, \"scene\")"));
+    assert!(CSS.contains(".property-color-editor"));
+    assert!(!JS.contains("[\"Objects\", scene?.objectCount"));
+}
+
+#[test]
+fn tauri_options_match_the_reference_misc_key_and_mouse_panes() {
+    assert!(HTML.contains("data-dialog=\"Options\">Options…</button>"));
+    for command in ["get_preferences", "set_preferences"] {
+        assert!(
+            JS.contains(command),
+            "missing Options IPC binding {command}"
+        );
+    }
+    for pane in ["Misc", "Key", "Mouse"] {
+        assert!(JS.contains(&format!("createPane(\"{pane}\")")));
+    }
+    for preset in [
+        "DefaultViewInConf",
+        "CootViewInConf",
+        "PymolViewInConf",
+        "IphoneViewInConf",
+        "TrackpadViewInConf",
+    ] {
+        assert!(JS.contains(preset), "missing mouse preset {preset}");
+    }
+    assert!(JS.contains("preferences = initial.preferences"));
+    assert!(JS.contains("preferences?.trackballRadius"));
+    assert!(JS.contains("preferences?.useHidpi"));
+    assert!(JS.contains("preferences?.shortcuts?.find"));
+    assert!(CSS.contains(".options-tabs"));
+    assert!(CSS.contains(".shortcut-table"));
 }

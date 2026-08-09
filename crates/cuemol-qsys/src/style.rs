@@ -814,6 +814,22 @@ impl StyleManager {
         json_names(names)
     }
 
+    pub fn material_names(&self, scope_id: u64) -> Vec<String> {
+        let mut names = self
+            .scopes
+            .get(&scope_id)
+            .into_iter()
+            .flatten()
+            .flat_map(|set| set.materials.keys().cloned())
+            .collect::<Vec<_>>();
+        if scope_id != 0 {
+            names.extend(self.material_names(0));
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
     pub fn get_material_names_json2(&self, scope_id: u64, style_set_id: u64) -> String {
         self.scopes
             .get(&scope_id)

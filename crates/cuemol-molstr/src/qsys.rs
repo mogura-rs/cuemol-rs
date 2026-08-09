@@ -290,6 +290,68 @@ impl MolRenderer {
         self.qsc_children = children;
     }
 
+    pub fn qsc_child_attr(&self, child_tag: &str, attr: &str) -> Option<String> {
+        let child = self
+            .qsc_children
+            .iter()
+            .find(|child| child.tag_name() == child_tag)?;
+        let value = if attr == "type" && !child.type_name().is_empty() {
+            child.type_name().to_string()
+        } else {
+            child.str_attr(attr).to_string()
+        };
+        (!value.is_empty()).then_some(value)
+    }
+
+    pub fn set_qsc_child_attr(
+        &mut self,
+        child_tag: impl Into<String>,
+        attr: &str,
+        value: impl Into<String>,
+    ) {
+        let child_tag = child_tag.into();
+        let value = value.into();
+        let child = if let Some(index) = self
+            .qsc_children
+            .iter()
+            .position(|child| child.tag_name() == child_tag)
+        {
+            &mut self.qsc_children[index]
+        } else {
+            let mut child = LDom2Node::new();
+            child.set_tag_name(&child_tag);
+            self.qsc_children.push(child);
+            self.qsc_children.last_mut().unwrap()
+        };
+        if attr == "type" {
+            child.set_type_name(value);
+        } else {
+            child.set_str_attr(attr, value);
+        }
+    }
+
+    pub fn remove_qsc_child_attr(&mut self, child_tag: &str, attr: &str) -> bool {
+        let Some(index) = self
+            .qsc_children
+            .iter()
+            .position(|child| child.tag_name() == child_tag)
+        else {
+            return false;
+        };
+        let child = &mut self.qsc_children[index];
+        let removed = if attr == "type" {
+            let changed = !child.type_name().is_empty();
+            child.set_type_name("");
+            changed
+        } else {
+            child.remove_child(attr)
+        };
+        if child.child_count() == 0 && child.type_name().is_empty() && child.contents().is_empty() {
+            self.qsc_children.remove(index);
+        }
+        removed
+    }
+
     pub fn atom_intr_lines(&self) -> &[AtomIntrLine] {
         &self.atom_intr_lines
     }
@@ -1400,6 +1462,9 @@ pub struct LoadedStyle {
 pub struct MolScene {
     uid: Uid,
     name: String,
+    source: String,
+    source_type: String,
+    base_path: String,
     objects: Vec<MolObject>,
     cameras: Vec<Camera>,
     next_object_uid: u64,
@@ -1448,6 +1513,30 @@ impl MolScene {
         self.name = name.into();
     }
 
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn set_source(&mut self, source: impl Into<String>) {
+        self.source = source.into();
+    }
+
+    pub fn source_type(&self) -> &str {
+        &self.source_type
+    }
+
+    pub fn set_source_type(&mut self, source_type: impl Into<String>) {
+        self.source_type = source_type.into();
+    }
+
+    pub fn base_path(&self) -> &str {
+        &self.base_path
+    }
+
+    pub fn set_base_path(&mut self, base_path: impl Into<String>) {
+        self.base_path = base_path.into();
+    }
+
     pub fn objects(&self) -> &[MolObject] {
         &self.objects
     }
@@ -1467,6 +1556,18 @@ impl MolScene {
 
     pub fn loaded_surfaces_mut(&mut self) -> &mut [LoadedSurface] {
         &mut self.loaded_surfaces
+    }
+
+    pub fn loaded_surface(&self, uid: Uid) -> Option<&LoadedSurface> {
+        self.loaded_surfaces
+            .iter()
+            .find(|surface| surface.uid == uid)
+    }
+
+    pub fn loaded_surface_mut(&mut self, uid: Uid) -> Option<&mut LoadedSurface> {
+        self.loaded_surfaces
+            .iter_mut()
+            .find(|surface| surface.uid == uid)
     }
 
     pub fn remove_loaded_surface(&mut self, uid: Uid) -> bool {
@@ -1686,11 +1787,17 @@ impl MolScene {
     pub fn destroy_object(&mut self, uid: Uid) -> bool {
         let previous = self.objects.len();
         self.objects.retain(|object| object.uid != uid);
-        previous != self.objects.len()
+        let changed = previous != self.objects.len();
+        if changed && self.active_object_uid == Some(uid) {
+            self.active_object_uid = None;
+            self.active_renderer_uid = None;
+        }
+        changed
     }
 
     pub fn clear_all_data(&mut self) {
         self.objects.clear();
+        self.next_object_uid = OBJECT_UID_BASE + self.uid.get() * UID_SCENE_STRIDE + 1;
         self.loaded_surfaces.clear();
         self.loaded_density_maps.clear();
         self.loaded_lw_objects.clear();
@@ -1698,7 +1805,11 @@ impl MolScene {
         self.loaded_styles.clear();
         self.cameras.clear();
         self.skipped_qsc_objects.clear();
+        self.scene_attributes.clear();
+        self.active_object_uid = None;
+        self.active_renderer_uid = None;
         self.scene_extension_nodes.clear();
+        self.qsc_options = None;
         self.animation_node = None;
     }
 
@@ -2773,6 +2884,9 @@ impl MolSceneManager {
         self.scenes.push(MolScene {
             uid,
             name: name.into(),
+            source: String::new(),
+            source_type: String::new(),
+            base_path: String::new(),
             objects: Vec::new(),
             cameras: Vec::new(),
             next_object_uid: OBJECT_UID_BASE + uid.get() * UID_SCENE_STRIDE + 1,
@@ -2833,6 +2947,13 @@ impl MolSceneManager {
         self.scenes
             .iter()
             .find(|scene| scene.object(uid).is_some())
+            .map(MolScene::uid)
+    }
+
+    pub fn scene_uid_for_surface(&self, uid: Uid) -> Option<Uid> {
+        self.scenes
+            .iter()
+            .find(|scene| scene.loaded_surface(uid).is_some())
             .map(MolScene::uid)
     }
 
@@ -3015,14 +3136,54 @@ impl MolCommandManager {
             }
         }
 
+        let scene_name = file_path
+            .file_stem()
+            .or_else(|| file_path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "loaded scene".to_string());
         let scene_uid = match target_scene {
-            Some(uid) => uid,
-            None => self.scene_manager.new_scene("loaded scene"),
+            Some(uid) => {
+                let mut loaded = self
+                    .scene_manager
+                    .scene(uid)
+                    .cloned()
+                    .ok_or_else(|| CueMolError::NotFound(format!("scene {}", uid.get())))?;
+                loaded.clear_all_data();
+                loaded.load_qsc_bytes_with_base_path(&input, file_path.parent())?;
+                loaded.set_name(&scene_name);
+                *self
+                    .scene_manager
+                    .scene_mut(uid)
+                    .expect("target scene was validated above") = loaded;
+                uid
+            }
+            None => {
+                let uid = self.scene_manager.new_scene(&scene_name);
+                let load_result = self
+                    .scene_manager
+                    .scene_mut(uid)
+                    .expect("newly created scene must exist")
+                    .load_qsc_bytes_with_base_path(&input, file_path.parent());
+                if let Err(error) = load_result {
+                    self.scene_manager.destroy_scene(uid);
+                    return Err(error);
+                }
+                uid
+            }
         };
-        self.scene_manager
+        let scene = self
+            .scene_manager
             .scene_mut(scene_uid)
-            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?
-            .load_qsc_bytes_with_base_path(&input, file_path.parent())?;
+            .expect("loaded scene must exist");
+        scene.set_source(file_path.to_string_lossy());
+        scene.set_source_type("qsc");
+        scene.set_base_path(
+            file_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_string_lossy(),
+        );
         Ok(LoadSceneResult {
             result_scene: Some(scene_uid),
             status: QscLoadStatus::Loaded { scene_uid },
@@ -3804,6 +3965,22 @@ mod tests {
             .renderer_mut(renderer_uid)
             .unwrap()
             .set_qsc_attr("style", "one&two");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap()
+            .set_qsc_child_attr("section", "type", "roundsquare");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap()
+            .set_qsc_child_attr("section", "width", "0.45");
 
         let qsc = manager.scene(scene_uid).unwrap().write_qsc_string();
         assert!(qsc.contains("name=\"A&amp;B &lt;object&gt;\""));
@@ -3821,6 +3998,14 @@ mod tests {
             .unwrap();
         let renderer = object.renderer_by_name("R&1").unwrap();
         assert_eq!(renderer.qsc_attr("style"), Some("one&two"));
+        assert_eq!(
+            renderer.qsc_child_attr("section", "type").as_deref(),
+            Some("roundsquare")
+        );
+        assert_eq!(
+            renderer.qsc_child_attr("section", "width").as_deref(),
+            Some("0.45")
+        );
     }
 
     #[test]

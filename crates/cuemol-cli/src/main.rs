@@ -13,9 +13,9 @@ use cuemol_molstr::{
     HandlerCategory, LoadedDensityMap, MolCoord, MolSceneManager, QscLoadStatus, StreamManager,
 };
 use cuemol_molvis::{
-    anisou_mesh_snapshot, apply_renderer_styles, disorder_lines_snapshot, molecule_render_snapshot,
-    na_renderer_snapshot, ribbon_mesh_snapshot, scene_style_manager, MoleculeRenderOptions,
-    NARenderOptions, NARenderer, DEFAULT_STYLE_SCOPE,
+    anisou_mesh_snapshot, apply_object_coloring, apply_renderer_styles, apply_tube_renderer_styles,
+    disorder_lines_snapshot, molecule_render_snapshot, na_renderer_snapshot, ribbon_mesh_snapshot,
+    scene_style_manager, MoleculeRenderOptions, NARenderOptions, NARenderer, DEFAULT_STYLE_SCOPE,
 };
 use cuemol_qsys::{Camera, MultiGradient, ScalarObject};
 use cuemol_render::{
@@ -913,6 +913,9 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             }
             let mut options = base_render_options(rtype);
             apply_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
+            if matches!(rtype, "tube" | "nucl") {
+                apply_tube_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
+            }
             // Per-renderer `sel="..."` draw restriction (shared behaviour with the GUI).
             if let Some(sel) = renderer
                 .qsc_attr("sel")
@@ -923,22 +926,19 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                     options.draw_indices = Some(object.mol().select_indices(&selector));
                 }
             }
-            // Object paint coloring (scene `<coloring type="PaintColoring">`).
-            if !object.paint_coloring().is_empty() {
-                options.object_paint = object.paint_coloring().to_vec();
-            }
-            // Object rainbow/bfac coloring — only when the renderer set no own scheme.
-            if options.rainbow.is_none() {
-                options.rainbow =
-                    cuemol_molvis::rainbow_coloring_from_attrs(object.coloring_type(), |name| {
-                        object.coloring_attr(name)
-                    });
-            }
-            if options.bfac.is_none() {
-                options.bfac =
-                    cuemol_molvis::bfac_coloring_from_attrs(object.coloring_type(), |name| {
-                        object.coloring_attr(name)
-                    });
+            let renderer_coloring_type =
+                renderer.resolved_child_type("coloring", &styles, DEFAULT_STYLE_SCOPE);
+            if matches!(
+                renderer_coloring_type.as_deref(),
+                None | Some("CPKColoring")
+            ) {
+                apply_object_coloring(
+                    &mut options,
+                    object.coloring_type(),
+                    |name| object.coloring_attr(name),
+                    object.paint_coloring(),
+                    object.mol().default_color(),
+                );
             }
             let mut snapshot = if rtype == "atomintr" {
                 // Measurement lines between the renderer's atom pairs, not the
@@ -1333,13 +1333,15 @@ fn base_render_options(renderer_type: &str) -> MoleculeRenderOptions {
     let mut options = MoleculeRenderOptions::default();
     match renderer_type {
         "cpk" => {
-            options.vdw_scale = 0.55;
+            options.element_radii = Some(cuemol_molvis::VdwRadii::default());
+            options.sphere_detail = Some(3);
             options.bond_radius = 0.0;
             options.draw_bonds = false;
         }
         "ballstick" => {
             options.vdw_scale = 0.16;
             options.bond_radius = 0.08;
+            options.sphere_detail = Some(3);
         }
         "trace" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl" => {
             options.vdw_scale = 0.12;

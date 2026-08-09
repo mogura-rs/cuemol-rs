@@ -7,6 +7,19 @@ const sceneTabs = document.getElementById("scene-tabs");
 const sceneTree = document.getElementById("scene-tree");
 const rendererList = document.getElementById("renderer-list");
 const selectionInput = document.getElementById("selection-input");
+const selectionObject = document.getElementById("selection-object");
+const selectionCommandPanel = document.getElementById("selection-command-panel");
+const selectionEditorPanel = document.getElementById("selection-editor-panel");
+const selectionHistory = document.getElementById("selection-history");
+const selectionEditorList = document.getElementById("selection-editor-list");
+const selectionEditorApply = document.getElementById("selection-editor-apply");
+const selectionEditorAddKind = document.getElementById("selection-editor-add-kind");
+const selectionEditorDelete = document.getElementById("selection-editor-delete");
+const selectionEditorClear = document.getElementById("selection-editor-clear");
+const selectionChainCandidates = document.getElementById("selection-chain-candidates");
+const selectionResnameCandidates = document.getElementById("selection-resname-candidates");
+const selectionAtomCandidates = document.getElementById("selection-atom-candidates");
+const selectionElementCandidates = document.getElementById("selection-element-candidates");
 const statusText = document.getElementById("status-text");
 const statusHistory = document.getElementById("status-history");
 const metrics = document.getElementById("scene-metrics");
@@ -19,9 +32,13 @@ const toast = document.getElementById("toast");
 const measureReadout = document.getElementById("measure-readout");
 const molstructObject = document.getElementById("molstruct-object");
 const molstructTree = document.getElementById("molstruct-tree");
-const coloringObject = document.getElementById("coloring-object");
+const molstructSelect = document.getElementById("molstruct-select");
+const molstructCenter = document.getElementById("molstruct-center");
+const molstructZoom = document.getElementById("molstruct-zoom");
+const molstructProperties = document.getElementById("molstruct-properties");
+const coloringTarget = document.getElementById("coloring-target");
 const coloringType = document.getElementById("coloring-type");
-const coloringNote = document.getElementById("coloring-note");
+const coloringDeck = document.getElementById("coloring-deck");
 const symmetryContent = document.getElementById("symmetry-content");
 const showUnitCell = document.getElementById("show-unit-cell");
 const showSymmetryMates = document.getElementById("show-symmetry-mates");
@@ -67,20 +84,49 @@ const trajectoryBlockRemove = document.getElementById("trajectory-block-remove")
 const trajectoryBlockLeft = document.getElementById("trajectory-block-left");
 const trajectoryBlockRight = document.getElementById("trajectory-block-right");
 const trajectoryBlockCount = document.getElementById("trajectory-block-count");
+const recentMenu = document.getElementById("recent-menu");
+const workspaceProperties = document.getElementById("workspace-properties");
+const workspaceDelete = document.getElementById("workspace-delete");
+const workspaceZoom = document.getElementById("workspace-zoom");
+const rendererType = document.getElementById("renderer-type");
 
 const tauri = window.__TAURI__;
 const invoke = tauri?.core?.invoke;
 const dialog = tauri?.dialog;
 
+const RECENT_STORAGE_KEY = "cuemol2.recentFiles.v1";
+const SELECTION_HISTORY_STORAGE_KEY = "cuemol2.selectionHistory.v1";
+const MAX_RECENT_FILES = 10;
+const MAX_SELECTION_HISTORY = 20;
+
 let snapshot = null;
 let selectedObjectUid = null;
+let selectedRendererUid = null;
+let selectedDensityMapUid = null;
+let selectedDensityRendererUid = null;
+let selectedSurfaceUid = null;
+let selectedSurfaceRendererUid = null;
+let workspaceSelectionKind = "object";
+let molstructObjectUid = null;
+const molstructSelectedKeys = new Set();
+const molstructOpenKeys = new Set();
+let molstructSelectionAnchor = null;
+let selectionObjectUid = null;
+let selectionActiveTab = "command";
+let selectionEditorItems = [];
+let selectionEditorSelectedIndex = -1;
+let coloringTargetKey = null;
+let coloringPaintSelectedIndex = -1;
+let coloringGradientSelectedIndex = -1;
+let selectionHistoryEntries = loadSelectionHistory();
 let renderTimer = null;
+let renderedViewportSize = "";
 let wheelTimer = null;
+let wheelPending = null;
 let toastTimer = null;
 let requestSequence = 0;
 let drag = null;
 let statusTrail = [];
-let lastOpenedPaths = [];
 let centerMark = "cross";
 let performanceMeasure = false;
 let interactionMode = "rotate";
@@ -96,6 +142,188 @@ let trajectoryTickBusy = false;
 let selectedTrajectoryBlockUid = null;
 let draggedTrajectoryBlockUid = null;
 const trajectoryFrames = new Map();
+let recentFiles = loadRecentFiles();
+let applicationInfoCache = null;
+let preferences = null;
+let moleculeDetails = { structureKey: "", sequenceKey: "", structure: [], sequence: [] };
+let moleculeDetailsTimer = null;
+let moleculeDetailsRequest = null;
+let renderedMolstructKey = "";
+let renderedSequenceKey = "";
+let selectionCandidateCache = { key: "", values: null };
+
+function loadRecentFiles() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(RECENT_STORAGE_KEY) || "[]");
+    if (!Array.isArray(stored)) return [];
+    return stored
+      .filter(
+        (entry) =>
+          entry &&
+          typeof entry.path === "string" &&
+          entry.path.length > 0 &&
+          (entry.ftype === "obj" || entry.ftype === "scene"),
+      )
+      .slice(0, MAX_RECENT_FILES);
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentFiles() {
+  try {
+    localStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(recentFiles));
+  } catch (error) {
+    console.warn("Cannot persist recent files:", error);
+  }
+}
+
+function loadSelectionHistory() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SELECTION_HISTORY_STORAGE_KEY) || "[]");
+    return Array.isArray(stored)
+      ? stored.filter((entry) => typeof entry === "string" && entry).slice(0, MAX_SELECTION_HISTORY)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSelectionHistory() {
+  try {
+    localStorage.setItem(SELECTION_HISTORY_STORAGE_KEY, JSON.stringify(selectionHistoryEntries));
+  } catch (error) {
+    console.warn("Cannot persist selection history:", error);
+  }
+}
+
+function rememberSelection(selection) {
+  const value = selection.trim();
+  if (!value) return;
+  selectionHistoryEntries = selectionHistoryEntries.filter((entry) => entry !== value);
+  selectionHistoryEntries.unshift(value);
+  selectionHistoryEntries = selectionHistoryEntries.slice(0, MAX_SELECTION_HISTORY);
+  saveSelectionHistory();
+  renderSelectionHistory();
+}
+
+function renderSelectionHistory() {
+  selectionHistory.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = selectionHistoryEntries.length ? "History" : "(no history)";
+  selectionHistory.append(placeholder);
+  for (const entry of selectionHistoryEntries) {
+    const option = document.createElement("option");
+    option.value = entry;
+    option.textContent = entry;
+    selectionHistory.append(option);
+  }
+  selectionHistory.value = "";
+  selectionHistory.disabled = selectionHistoryEntries.length === 0;
+}
+
+function recentFileType(path) {
+  return /\.qsc$/i.test(path) ? "scene" : "obj";
+}
+
+function fileBasename(path) {
+  const parts = path.split(/[\\/]/);
+  return parts.at(-1) || path;
+}
+
+function addRecentFile(path, ftype = recentFileType(path)) {
+  if (!path) return;
+  addRecentFiles([{ path, ftype }]);
+}
+
+function addRecentFiles(entries) {
+  for (const { path, ftype = recentFileType(path) } of entries) {
+    if (!path) continue;
+    recentFiles = recentFiles.filter((entry) => entry.path !== path);
+    recentFiles.unshift({ path, ftype });
+  }
+  recentFiles.length = Math.min(recentFiles.length, MAX_RECENT_FILES);
+  saveRecentFiles();
+  renderRecentMenu();
+}
+
+function clearRecentFiles() {
+  recentFiles = [];
+  saveRecentFiles();
+  renderRecentMenu();
+}
+
+function renderRecentMenu() {
+  if (!recentMenu) return;
+  recentMenu.replaceChildren();
+  if (recentFiles.length === 0) {
+    const empty = button("(none)", "", () => {});
+    empty.disabled = true;
+    recentMenu.append(empty);
+  } else {
+    for (const entry of recentFiles) {
+      const open = button(fileBasename(entry.path), "", async () => {
+        closeMenus();
+        const opened = await openSelectedPaths([entry.path]);
+        if (!opened) {
+          recentFiles = recentFiles.filter((item) => item.path !== entry.path);
+          saveRecentFiles();
+          renderRecentMenu();
+        }
+      });
+      open.title = entry.path;
+      open.setAttribute("role", "menuitem");
+      recentMenu.append(open);
+    }
+  }
+  const separator = document.createElement("span");
+  separator.className = "menu-separator";
+  separator.setAttribute("role", "separator");
+  const clear = button("Clear Menu", "", () => {
+    closeMenus();
+    clearRecentFiles();
+  });
+  clear.disabled = recentFiles.length === 0;
+  clear.setAttribute("role", "menuitem");
+  recentMenu.append(separator, clear);
+}
+
+function closeHistoryMenus(except = null) {
+  document.querySelectorAll("[data-history-group]").forEach((group) => {
+    const keepOpen = group.dataset.historyGroup === except;
+    group.classList.toggle("open", keepOpen);
+    group
+      .querySelector("[data-history-toggle]")
+      ?.setAttribute("aria-expanded", String(keepOpen));
+  });
+}
+
+function renderHistoryMenu(kind, descriptions, canExecute) {
+  const group = document.querySelector(`[data-history-group='${kind}']`);
+  const popup = document.getElementById(`${kind}-history`);
+  const caret = document.querySelector(`[data-history-toggle='${kind}']`);
+  const main = group?.querySelector(`[data-action='${kind}']`);
+  const entries = Array.isArray(descriptions) ? descriptions : [];
+  if (!group || !popup || !caret || !main) return;
+
+  popup.replaceChildren();
+  for (const [depth, description] of entries.entries()) {
+    const item = button(description, "", async (event) => {
+      event.stopPropagation();
+      closeHistoryMenus();
+      await mutate(kind, { depth });
+    });
+    item.title = description;
+    item.setAttribute("role", "menuitem");
+    item.dataset.depth = String(depth);
+    popup.append(item);
+  }
+  main.disabled = !canExecute;
+  main.title = canExecute && entries.length ? `${kind === "undo" ? "Undo" : "Redo"}: ${entries[0]}` : "";
+  caret.disabled = entries.length === 0;
+  if (entries.length === 0) closeHistoryMenus();
+}
 
 function setBusy(value) {
   appShell.classList.toggle("busy", value);
@@ -121,6 +349,7 @@ function closeMenus(except = null) {
   document.querySelectorAll(".menu[open]").forEach((menu) => {
     if (menu !== except) menu.removeAttribute("open");
   });
+  closeHistoryMenus();
 }
 
 function showBottomPanel(name) {
@@ -130,6 +359,10 @@ function showBottomPanel(name) {
   document.querySelectorAll("[data-bottom-panel]").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.bottomPanel === name);
   });
+  if (name === "sequence") {
+    renderSequence();
+    scheduleMoleculeDetailsRefresh(0);
+  }
 }
 
 function dialogParagraph(text) {
@@ -210,6 +443,2306 @@ function replaceFileExtension(path, extension) {
   return `${dot > slash ? path.slice(0, dot) : path}${extension}`;
 }
 
+async function getApplicationInfo(refresh = false) {
+  if (!invoke) return null;
+  if (!refresh && applicationInfoCache) return applicationInfoCache;
+  applicationInfoCache = await invoke("get_application_info");
+  return applicationInfoCache;
+}
+
+function applicationDefinitionList(entries) {
+  const properties = document.createElement("dl");
+  properties.className = "dialog-properties application-properties";
+  for (const [term, value] of entries) {
+    const dt = document.createElement("dt");
+    dt.textContent = term;
+    const dd = document.createElement("dd");
+    dd.textContent = String(value);
+    properties.append(dt, dd);
+  }
+  return properties;
+}
+
+function pluginCatalog(info) {
+  const toolbar = document.createElement("div");
+  toolbar.className = "info-toolbar";
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = "Filter plugins";
+  search.setAttribute("aria-label", "Filter plugins");
+  const category = document.createElement("select");
+  category.setAttribute("aria-label", "Plugin category");
+  const categories = ["All", ...new Set(info.plugins.map((plugin) => plugin.category))];
+  for (const name of categories) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    category.append(option);
+  }
+  const count = document.createElement("span");
+  toolbar.append(search, category, count);
+
+  const list = document.createElement("div");
+  list.className = "plugin-catalog";
+  const render = () => {
+    const query = search.value.trim().toLowerCase();
+    const matches = info.plugins.filter(
+      (plugin) =>
+        (category.value === "All" || plugin.category === category.value) &&
+        (!query ||
+          `${plugin.name} ${plugin.description} ${plugin.extensions}`
+            .toLowerCase()
+            .includes(query)),
+    );
+    list.replaceChildren();
+    for (const plugin of matches) {
+      const row = document.createElement("article");
+      row.className = "plugin-row";
+      const name = document.createElement("strong");
+      name.textContent = plugin.name;
+      const description = document.createElement("span");
+      description.textContent = plugin.description || plugin.category;
+      const extensions = document.createElement("code");
+      extensions.textContent = plugin.extensions || "—";
+      const type = document.createElement("small");
+      type.textContent = plugin.category;
+      row.append(name, description, extensions, type);
+      list.append(row);
+    }
+    if (matches.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "info-empty";
+      empty.textContent = "No matching plugins.";
+      list.append(empty);
+    }
+    count.textContent = `${matches.length} / ${info.plugins.length}`;
+  };
+  search.addEventListener("input", render);
+  category.addEventListener("change", render);
+  render();
+  return [toolbar, list];
+}
+
+function configBrowser(info) {
+  const toolbar = document.createElement("div");
+  toolbar.className = "info-toolbar";
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = "Filter preferences";
+  search.setAttribute("aria-label", "Filter preferences");
+  const count = document.createElement("span");
+  toolbar.append(search, count);
+  const list = document.createElement("div");
+  list.className = "config-browser";
+  const render = () => {
+    const query = search.value.trim().toLowerCase();
+    const matches = info.config.filter(
+      (entry) => !query || `${entry.key} ${entry.value}`.toLowerCase().includes(query),
+    );
+    list.replaceChildren();
+    for (const entry of matches) {
+      const row = document.createElement("label");
+      row.className = "config-row";
+      const key = document.createElement("code");
+      key.textContent = entry.key;
+      key.title = entry.key;
+      const value = document.createElement("input");
+      value.value = entry.value;
+      value.setAttribute("aria-label", `${entry.key} value`);
+      const apply = button("Apply", "", async () => {
+        apply.disabled = true;
+        setBusy(true);
+        try {
+          const updated = await invoke("set_config_value", {
+            key: entry.key,
+            value: value.value,
+          });
+          applicationInfoCache = updated;
+          entry.value = value.value;
+          statusText.textContent = updated.status;
+          recordStatus(updated.status);
+        } catch (error) {
+          showError(error);
+        } finally {
+          setBusy(false);
+          apply.disabled = value.value === entry.value;
+        }
+      });
+      apply.disabled = true;
+      value.addEventListener("input", () => {
+        apply.disabled = value.value === entry.value;
+      });
+      row.append(key, value, apply);
+      list.append(row);
+    }
+    if (matches.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "info-empty";
+      empty.textContent = "No matching preferences.";
+      list.append(empty);
+    }
+    count.textContent = `${matches.length} / ${info.config.length}`;
+  };
+  search.addEventListener("input", render);
+  render();
+  return [toolbar, list];
+}
+
+function copyProperties(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function scenePropertyDefinitions() {
+  return [
+    { name: "uid", type: "integer", path: ["uid"], readonly: true },
+    { name: "modified", type: "boolean", path: ["modified"], readonly: true },
+    { name: "name", type: "string", path: ["name"], readonly: true },
+    { name: "src", type: "string", path: ["source"], readonly: true },
+    { name: "srctype", type: "string", path: ["sourceType"], readonly: true },
+    { name: "basePath", type: "string", path: ["basePath"], readonly: true },
+    { name: "bgcolor", type: "color", path: ["background"], defaultValue: "black" },
+    { name: "aoEnabled", type: "boolean", path: ["aoEnabled"], defaultValue: false },
+    { name: "aoRadius", type: "real", path: ["aoRadius"], defaultValue: 4 },
+    { name: "aoIntensity", type: "real", path: ["aoIntensity"], defaultValue: 2.2 },
+    { name: "aoSlices", type: "integer", path: ["aoSlices"], defaultValue: 9 },
+    { name: "aoSteps", type: "integer", path: ["aoSteps"], defaultValue: 3 },
+    { name: "aoHalfRes", type: "boolean", path: ["aoHalfRes"], defaultValue: false },
+    {
+      name: "aa_method",
+      type: "enum",
+      path: ["aaMethod"],
+      defaultValue: "fxaa",
+      options: [
+        ["none", "none"],
+        ["fxaa", "fxaa"],
+        ["smaa", "smaa"],
+      ],
+    },
+    {
+      name: "aaJitterLevel",
+      type: "integer",
+      path: ["aaJitterLevel"],
+      defaultValue: 0,
+    },
+    { name: "onload", type: "string", path: ["onload"], defaultValue: "" },
+    { name: "obj_uids", type: "string", path: ["objectUids"], readonly: true },
+    { name: "activeObjID", type: "integer", path: ["activeObjectId"], readonly: true },
+    { name: "activeRendID", type: "integer", path: ["activeRendererId"], readonly: true },
+    { name: "view_uids", type: "string", path: ["viewUids"], readonly: true },
+    { name: "activeViewID", type: "integer", path: ["activeViewId"], readonly: true },
+    {
+      name: "use_colproof",
+      type: "boolean",
+      path: ["useColorProof"],
+      defaultValue: false,
+    },
+    { name: "icc_filename", type: "string", path: ["iccFilename"], defaultValue: "" },
+    {
+      name: "icc_intent",
+      type: "enum",
+      path: ["iccIntent"],
+      defaultValue: "perceptual",
+      options: [
+        ["perceptual", "perceptual"],
+        ["relative_colorimetric", "relative colorimetric"],
+        ["saturation", "saturation"],
+        ["absolute_colorimetric", "absolute colorimetric"],
+      ],
+    },
+  ];
+}
+
+function genericPropertyEditor(info, kind) {
+  const isScene = kind === "scene";
+  let draft = copyProperties(info);
+  let dirty = false;
+  let selected = null;
+  const definitions = isScene ? scenePropertyDefinitions() : [
+    { name: "name", type: "string", path: ["name"], defaultValue: "" },
+    { name: "uid", type: "integer", path: ["uid"], readonly: true },
+    { name: "active", type: "boolean", path: ["active"], readonly: true },
+    { name: "zoom", type: "real", path: ["zoom"], defaultValue: 50 },
+    { name: "distance", type: "real", path: ["distance"], defaultValue: 200 },
+    { name: "slab", type: "real", path: ["slab"], defaultValue: 50 },
+    { name: "center", type: "Vector", node: true, readonly: true },
+    { name: "center.x", type: "real", path: ["center", 0], defaultValue: 0, level: 1 },
+    { name: "center.y", type: "real", path: ["center", 1], defaultValue: 0, level: 1 },
+    { name: "center.z", type: "real", path: ["center", 2], defaultValue: 0, level: 1 },
+    { name: "rotation", type: "Quat", node: true, readonly: true },
+    { name: "rotation.x", type: "real", path: ["rotation", 0], defaultValue: 0, level: 1 },
+    { name: "rotation.y", type: "real", path: ["rotation", 1], defaultValue: 0, level: 1 },
+    { name: "rotation.z", type: "real", path: ["rotation", 2], defaultValue: 0, level: 1 },
+    { name: "rotation.w", type: "real", path: ["rotation", 3], defaultValue: 1, level: 1 },
+    { name: "perspective", type: "boolean", path: ["perspective"], defaultValue: false },
+    { name: "width", type: "integer", path: ["width"], readonly: true },
+    { name: "height", type: "integer", path: ["height"], readonly: true },
+    { name: "trans_mms", type: "boolean", path: ["transMms"], defaultValue: false },
+    { name: "rot_mms", type: "boolean", path: ["rotMms"], defaultValue: false },
+    {
+      name: "stereoMode",
+      type: "enum",
+      path: ["stereoMode"],
+      defaultValue: "none",
+      options: [
+        ["none", "none"],
+        ["para", "para"],
+        ["cross", "cross"],
+        ["hardware", "hardware"],
+      ],
+    },
+    { name: "hasHWStereo", type: "boolean", path: ["hasHwStereo"], readonly: true },
+    { name: "stereoDist", type: "real", path: ["stereoDist"], defaultValue: 1 },
+    {
+      name: "swapStereoEyes",
+      type: "boolean",
+      path: ["swapStereoEyes"],
+      defaultValue: false,
+    },
+    { name: "up_vec", type: "Vector", node: true, readonly: true },
+    { name: "up_vec.x", type: "real", path: ["upVec", 0], level: 1, readonly: true },
+    { name: "up_vec.y", type: "real", path: ["upVec", 1], level: 1, readonly: true },
+    { name: "up_vec.z", type: "real", path: ["upVec", 2], level: 1, readonly: true },
+    { name: "right_vec", type: "Vector", node: true, readonly: true },
+    { name: "right_vec.x", type: "real", path: ["rightVec", 0], level: 1, readonly: true },
+    { name: "right_vec.y", type: "real", path: ["rightVec", 1], level: 1, readonly: true },
+    { name: "right_vec.z", type: "real", path: ["rightVec", 2], level: 1, readonly: true },
+    { name: "forward_vec", type: "Vector", node: true, readonly: true },
+    {
+      name: "forward_vec.x",
+      type: "real",
+      path: ["forwardVec", 0],
+      level: 1,
+      readonly: true,
+    },
+    {
+      name: "forward_vec.y",
+      type: "real",
+      path: ["forwardVec", 1],
+      level: 1,
+      readonly: true,
+    },
+    {
+      name: "forward_vec.z",
+      type: "real",
+      path: ["forwardVec", 2],
+      level: 1,
+      readonly: true,
+    },
+    {
+      name: "centerMark",
+      type: "enum",
+      path: ["centerMark"],
+      defaultValue: "crosshair",
+      options: [
+        ["none", "none"],
+        ["crosshair", "crosshair"],
+        ["axis", "axis"],
+      ],
+    },
+  ];
+
+  const propertyValue = (definition) => {
+    if (definition.node) return "<node>";
+    return definition.path.reduce((value, key) => value?.[key], draft);
+  };
+  const setPropertyValue = (definition, value) => {
+    const [last, ...parents] = [...definition.path].reverse();
+    const target = parents.reverse().reduce((current, key) => current[key], draft);
+    target[last] = value;
+  };
+  const formatValue = (definition) => {
+    const value = propertyValue(definition);
+    if (definition.node) return value;
+    if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(6);
+    return String(value);
+  };
+  const isDefault = (definition) =>
+    Object.hasOwn(definition, "defaultValue") &&
+    propertyValue(definition) === definition.defaultValue;
+
+  const editor = document.createElement("div");
+  editor.className = "generic-property-editor";
+  const tableFrame = document.createElement("div");
+  tableFrame.className = "property-table-frame";
+  const table = document.createElement("table");
+  table.className = "property-table";
+  const head = document.createElement("thead");
+  const header = document.createElement("tr");
+  for (const label of ["Name", "R", "Type", "Value"]) {
+    const cell = document.createElement("th");
+    cell.textContent = label;
+    header.append(cell);
+  }
+  head.append(header);
+  const body = document.createElement("tbody");
+  const rows = new Map();
+  const valueCells = new Map();
+  for (const definition of definitions) {
+    const row = document.createElement("tr");
+    row.tabIndex = 0;
+    const name = document.createElement("td");
+    name.textContent = definition.name;
+    if (definition.level) name.className = "property-child";
+    const readonly = document.createElement("td");
+    readonly.textContent = definition.readonly ? "R" : "";
+    readonly.className = "property-readonly";
+    const type = document.createElement("td");
+    type.textContent = definition.type;
+    const value = document.createElement("td");
+    value.textContent = formatValue(definition);
+    row.append(name, readonly, type, value);
+    rows.set(definition, row);
+    valueCells.set(definition, value);
+    body.append(row);
+  }
+  table.append(head, body);
+  tableFrame.append(table);
+
+  const detail = document.createElement("div");
+  detail.className = "property-detail";
+  const nameValue = document.createElement("input");
+  nameValue.readOnly = true;
+  const typeValue = document.createElement("input");
+  typeValue.readOnly = true;
+  const controlHost = document.createElement("div");
+  controlHost.className = "property-control-host";
+  const defaultLabel = document.createElement("label");
+  defaultLabel.className = "property-default";
+  const defaultCheck = document.createElement("input");
+  defaultCheck.type = "checkbox";
+  const defaultText = document.createElement("span");
+  defaultText.textContent = "default";
+  defaultLabel.append(defaultCheck, defaultText);
+  for (const [label, control] of [
+    ["Name:", nameValue],
+    ["Type:", typeValue],
+  ]) {
+    const caption = document.createElement("label");
+    caption.textContent = label;
+    detail.append(caption, control);
+  }
+  const valueCaption = document.createElement("label");
+  valueCaption.textContent = "Value:";
+  const valueRow = document.createElement("div");
+  valueRow.className = "property-value-row";
+  valueRow.append(defaultLabel, controlHost);
+  detail.append(valueCaption, valueRow);
+
+  let applyButton;
+  const markDirty = () => {
+    dirty = true;
+    applyButton.disabled = false;
+  };
+  const refreshValueCell = (definition) => {
+    valueCells.get(definition).textContent = formatValue(definition);
+  };
+  const selectDefinition = (definition) => {
+    selected = definition;
+    for (const [item, row] of rows) row.classList.toggle("selected", item === definition);
+    nameValue.value = definition.name;
+    typeValue.value = definition.type;
+    defaultCheck.disabled =
+      definition.readonly || !Object.hasOwn(definition, "defaultValue");
+    defaultCheck.checked = isDefault(definition);
+    controlHost.replaceChildren();
+    let control;
+    const current = propertyValue(definition);
+    if (definition.type === "color") {
+      control = document.createElement("div");
+      control.className = "property-color-editor";
+      const text = document.createElement("input");
+      text.value = current;
+      text.spellcheck = false;
+      const picker = document.createElement("input");
+      picker.type = "color";
+      picker.value = /^#[0-9a-f]{6}$/i.test(current) ? current : "#000000";
+      const update = (value) => {
+        setPropertyValue(definition, value);
+        defaultCheck.checked = isDefault(definition);
+        refreshValueCell(definition);
+        markDirty();
+      };
+      text.addEventListener("input", () => {
+        if (/^#[0-9a-f]{6}$/i.test(text.value)) picker.value = text.value;
+        update(text.value);
+      });
+      picker.addEventListener("input", () => {
+        text.value = picker.value;
+        update(picker.value);
+      });
+      text.disabled = Boolean(definition.readonly);
+      picker.disabled = Boolean(definition.readonly);
+      control.append(text, picker);
+    } else if (definition.type === "boolean") {
+      control = document.createElement("input");
+      control.type = "checkbox";
+      control.checked = Boolean(current);
+      control.addEventListener("change", () => {
+        setPropertyValue(definition, control.checked);
+        defaultCheck.checked = isDefault(definition);
+        refreshValueCell(definition);
+        markDirty();
+      });
+    } else if (definition.options) {
+      control = document.createElement("select");
+      for (const [value, label] of definition.options) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        control.append(option);
+      }
+      control.value = current;
+      control.addEventListener("change", () => {
+        setPropertyValue(definition, control.value);
+        defaultCheck.checked = isDefault(definition);
+        refreshValueCell(definition);
+        markDirty();
+      });
+    } else {
+      control = document.createElement("input");
+      control.type = definition.type === "real" || definition.type === "integer" ? "number" : "text";
+      if (control.type === "number") control.step = definition.type === "integer" ? "1" : "any";
+      control.value = definition.node ? "<node>" : current;
+      control.addEventListener("input", () => {
+        const value = control.type === "number" ? Number(control.value) : control.value;
+        if (control.type === "number" && !Number.isFinite(value)) return;
+        setPropertyValue(definition, value);
+        defaultCheck.checked = isDefault(definition);
+        refreshValueCell(definition);
+        markDirty();
+      });
+    }
+    if (definition.type !== "color") control.disabled = Boolean(definition.readonly);
+    controlHost.append(control);
+  };
+  for (const definition of definitions) {
+    const choose = () => selectDefinition(definition);
+    rows.get(definition).addEventListener("click", choose);
+    rows.get(definition).addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        choose();
+      }
+    });
+  }
+  defaultCheck.addEventListener("change", () => {
+    if (!selected || !defaultCheck.checked || defaultCheck.disabled) return;
+    setPropertyValue(selected, selected.defaultValue);
+    refreshValueCell(selected);
+    selectDefinition(selected);
+    markDirty();
+  });
+
+  const submit = async (closeAfter) => {
+    if (!dirty) {
+      if (closeAfter) referenceDialog.close();
+      return;
+    }
+    setBusy(true);
+    try {
+      if (isScene) {
+        snapshot = await invoke("set_scene_properties", {
+          properties: {
+            sceneUid: draft.uid,
+            background: draft.background,
+            aoEnabled: draft.aoEnabled,
+            aoRadius: draft.aoRadius,
+            aoIntensity: draft.aoIntensity,
+            aoSlices: draft.aoSlices,
+            aoSteps: draft.aoSteps,
+            aoHalfRes: draft.aoHalfRes,
+            aaMethod: draft.aaMethod,
+            aaJitterLevel: draft.aaJitterLevel,
+            onload: draft.onload,
+            useColorProof: draft.useColorProof,
+            iccFilename: draft.iccFilename,
+            iccIntent: draft.iccIntent,
+          },
+        });
+        draft = copyProperties(
+          snapshot.scenes.find((scene) => scene.uid === draft.uid) || draft,
+        );
+        renderShell();
+        await renderViewport();
+      } else {
+        const size = viewportDimensions();
+        const sequence = ++requestSequence;
+        const result = await invoke("set_view_properties", {
+          properties: {
+            name: draft.name,
+            zoom: draft.zoom,
+            distance: draft.distance,
+            slab: draft.slab,
+            center: draft.center,
+            rotation: draft.rotation,
+            perspective: draft.perspective,
+            transMms: draft.transMms,
+            rotMms: draft.rotMms,
+            stereoMode: draft.stereoMode,
+            stereoDist: draft.stereoDist,
+            swapStereoEyes: draft.swapStereoEyes,
+            centerMark: draft.centerMark,
+          },
+          ...size,
+        });
+        snapshot = result.snapshot;
+        draft = copyProperties(result.properties);
+        centerMark = draft.centerMark === "crosshair" ? "cross" : draft.centerMark;
+        applyCenterMark(centerMark);
+        renderShell();
+        applyViewport(result.viewport, sequence);
+      }
+      for (const definition of definitions) refreshValueCell(definition);
+      dirty = false;
+      applyButton.disabled = true;
+      selectDefinition(selected);
+      if (closeAfter) referenceDialog.close();
+    } catch (error) {
+      showError(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const cancel = button("Cancel", "", () => referenceDialog.close());
+  applyButton = button("Apply", "", () => submit(false));
+  applyButton.disabled = true;
+  const ok = button("OK", "dialog-primary", () => submit(true));
+  editor.append(tableFrame, detail);
+  dialogContent.append(editor);
+  dialogActions(cancel, applyButton, ok);
+  selectDefinition(definitions[0]);
+}
+
+function viewPropertyEditor(info) {
+  genericPropertyEditor(info, "view");
+}
+
+function scenePropertyEditor(info) {
+  genericPropertyEditor(info, "scene");
+}
+
+function optionsEditor(source) {
+  const draft = JSON.parse(JSON.stringify(source));
+  const editor = document.createElement("div");
+  editor.className = "options-editor";
+  const tabs = document.createElement("nav");
+  tabs.className = "options-tabs";
+  tabs.setAttribute("aria-label", "Options panes");
+  const paneHost = document.createElement("div");
+  paneHost.className = "options-pane-host";
+  const panes = new Map();
+
+  const createPane = (name) => {
+    const pane = document.createElement("section");
+    pane.className = "options-pane";
+    pane.dataset.optionsPane = name;
+    pane.hidden = name !== "Misc";
+    paneHost.append(pane);
+    panes.set(name, pane);
+    const tab = button(name, name === "Misc" ? "active" : "", () => {
+      for (const [paneName, item] of panes) item.hidden = paneName !== name;
+      tabs.querySelectorAll("button").forEach((item) => {
+        item.classList.toggle("active", item.textContent === name);
+      });
+    });
+    tab.dataset.optionsTab = name;
+    tabs.append(tab);
+    return pane;
+  };
+  const group = (title) => {
+    const fieldset = document.createElement("fieldset");
+    fieldset.className = "options-group";
+    const legend = document.createElement("legend");
+    legend.textContent = title;
+    fieldset.append(legend);
+    return fieldset;
+  };
+  const field = (host, label, control) => {
+    const wrapper = document.createElement("label");
+    wrapper.className = "options-field";
+    const caption = document.createElement("span");
+    caption.textContent = label;
+    wrapper.append(caption, control);
+    host.append(wrapper);
+    return control;
+  };
+  const check = (host, label, checked, onChange) => {
+    const wrapper = document.createElement("label");
+    wrapper.className = "options-check";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = checked;
+    input.addEventListener("change", () => onChange(input.checked));
+    const caption = document.createElement("span");
+    caption.textContent = label;
+    wrapper.append(input, caption);
+    host.append(wrapper);
+    return input;
+  };
+  const select = (items, value) => {
+    const control = document.createElement("select");
+    for (const [optionValue, label] of items) {
+      const option = document.createElement("option");
+      option.value = optionValue;
+      option.textContent = label;
+      control.append(option);
+    }
+    control.value = value;
+    return control;
+  };
+
+  const miscPane = createPane("Misc");
+  const labelGroup = group("Atom label");
+  const font = document.createElement("input");
+  font.value = draft.atomLabelFont;
+  font.addEventListener("input", () => {
+    draft.atomLabelFont = font.value;
+    updateSample();
+  });
+  field(labelGroup, "Font name", font);
+  const size = document.createElement("input");
+  size.type = "number";
+  size.min = "4";
+  size.max = "144";
+  size.step = "1";
+  size.value = draft.atomLabelSize;
+  size.addEventListener("input", () => {
+    draft.atomLabelSize = Number(size.value);
+    updateSample();
+  });
+  field(labelGroup, "Font size", size);
+  const color = document.createElement("input");
+  color.type = "color";
+  const namedColors = { yellow: "#ffff00", white: "#ffffff", black: "#000000" };
+  color.value = namedColors[String(draft.atomLabelColor).toLowerCase()] ||
+    (/^#[0-9a-f]{6}$/i.test(draft.atomLabelColor) ? draft.atomLabelColor : "#ffff00");
+  color.addEventListener("input", () => {
+    draft.atomLabelColor = color.value;
+    updateSample();
+  });
+  field(labelGroup, "Color", color);
+  const styleRow = document.createElement("div");
+  styleRow.className = "options-check-row";
+  check(styleRow, "Italic", draft.atomLabelItalic, (value) => {
+    draft.atomLabelItalic = value;
+    updateSample();
+  });
+  check(styleRow, "Bold", draft.atomLabelBold, (value) => {
+    draft.atomLabelBold = value;
+    updateSample();
+  });
+  labelGroup.append(styleRow);
+  const sample = document.createElement("div");
+  sample.className = "atom-label-sample";
+  sample.textContent = "Atom label sample: CA 123";
+  labelGroup.append(sample);
+  function updateSample() {
+    sample.style.fontFamily = draft.atomLabelFont;
+    sample.style.fontSize = `${Math.max(4, Number(draft.atomLabelSize) || 12)}px`;
+    sample.style.color = draft.atomLabelColor;
+    sample.style.fontStyle = draft.atomLabelItalic ? "italic" : "normal";
+    sample.style.fontWeight = draft.atomLabelBold ? "bold" : "normal";
+  }
+  updateSample();
+
+  const miscGroup = group("Misc settings");
+  const language = select(
+    [
+      ["en-US", "English (en-US)"],
+      ["ja", "Japanese (ja)"],
+    ],
+    draft.uiLanguage,
+  );
+  language.addEventListener("change", () => {
+    draft.uiLanguage = language.value;
+  });
+  field(miscGroup, "UI language", language);
+  check(miscGroup, "Use HiDPI rendering", draft.useHidpi, (value) => {
+    draft.useHidpi = value;
+  });
+  miscPane.append(labelGroup, miscGroup);
+
+  const keyPane = createPane("Key");
+  const keyGroup = group("Key bindings");
+  const keyTable = document.createElement("table");
+  keyTable.className = "shortcut-table";
+  keyTable.innerHTML = "<thead><tr><th>Name</th><th>Key</th><th>Ctrl</th><th>Alt</th><th>Shift</th></tr></thead>";
+  const keyBody = document.createElement("tbody");
+  keyTable.append(keyBody);
+  const shortcutNames = {
+    "view-trans-plusx": "Translate view +X",
+    "view-trans-minusx": "Translate view −X",
+  };
+  let selectedShortcut = 0;
+  const shortcutDetail = document.createElement("div");
+  shortcutDetail.className = "shortcut-detail";
+  const keySelect = select(
+    ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].map((key) => [key, key]),
+    draft.shortcuts[0]?.key,
+  );
+  const ctrl = document.createElement("input");
+  ctrl.type = "checkbox";
+  const alt = document.createElement("input");
+  alt.type = "checkbox";
+  const shift = document.createElement("input");
+  shift.type = "checkbox";
+  const refreshShortcutDetail = () => {
+    const shortcut = draft.shortcuts[selectedShortcut];
+    keySelect.value = shortcut.key;
+    ctrl.checked = shortcut.ctrl;
+    alt.checked = shortcut.alt;
+    shift.checked = shortcut.shift;
+  };
+  const refreshShortcutRows = () => {
+    keyBody.replaceChildren();
+    draft.shortcuts.forEach((shortcut, index) => {
+      const row = document.createElement("tr");
+      row.classList.toggle("selected", index === selectedShortcut);
+      row.tabIndex = 0;
+      for (const value of [
+        shortcutNames[shortcut.id] || shortcut.id,
+        shortcut.key,
+        shortcut.ctrl ? "✓" : "",
+        shortcut.alt ? "✓" : "",
+        shortcut.shift ? "✓" : "",
+      ]) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      }
+      const choose = () => {
+        selectedShortcut = index;
+        refreshShortcutRows();
+        refreshShortcutDetail();
+      };
+      row.addEventListener("click", choose);
+      row.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") choose();
+      });
+      keyBody.append(row);
+    });
+  };
+  const updateShortcut = () => {
+    const shortcut = draft.shortcuts[selectedShortcut];
+    shortcut.key = keySelect.value;
+    shortcut.ctrl = ctrl.checked;
+    shortcut.alt = alt.checked;
+    shortcut.shift = shift.checked;
+    refreshShortcutRows();
+  };
+  keySelect.addEventListener("change", updateShortcut);
+  ctrl.addEventListener("change", updateShortcut);
+  alt.addEventListener("change", updateShortcut);
+  shift.addEventListener("change", updateShortcut);
+  field(shortcutDetail, "Key", keySelect);
+  for (const [label, control] of [["Ctrl", ctrl], ["Alt", alt], ["Shift", shift]]) {
+    const wrapper = document.createElement("label");
+    wrapper.className = "options-check";
+    const caption = document.createElement("span");
+    caption.textContent = label;
+    wrapper.append(control, caption);
+    shortcutDetail.append(wrapper);
+  }
+  refreshShortcutRows();
+  refreshShortcutDetail();
+  keyGroup.append(keyTable, shortcutDetail);
+  keyPane.append(keyGroup);
+
+  const mousePane = createPane("Mouse");
+  const presetGroup = group("Mouse configuration");
+  const preset = select(
+    [
+      ["DefaultViewInConf", "Default"],
+      ["CootViewInConf", "Coot"],
+      ["PymolViewInConf", "Pymol"],
+      ["IphoneViewInConf", "iPhone"],
+      ["TrackpadViewInConf", "Trackpad"],
+    ],
+    draft.mousePreset,
+  );
+  preset.addEventListener("change", () => {
+    draft.mousePreset = preset.value;
+  });
+  field(presetGroup, "Style", preset);
+  const trackball = document.createElement("input");
+  trackball.type = "number";
+  trackball.min = "0.1";
+  trackball.max = "10";
+  trackball.step = "0.1";
+  trackball.value = draft.trackballRadius;
+  trackball.addEventListener("input", () => {
+    draft.trackballRadius = Number(trackball.value);
+  });
+  field(presetGroup, "Trackball radius", trackball);
+  const hitPrecision = document.createElement("input");
+  hitPrecision.type = "number";
+  hitPrecision.min = "0";
+  hitPrecision.max = "100";
+  hitPrecision.step = "1";
+  hitPrecision.value = draft.hitPrecision;
+  hitPrecision.addEventListener("input", () => {
+    draft.hitPrecision = Number(hitPrecision.value);
+  });
+  field(presetGroup, "Hit precision", hitPrecision);
+  check(presetGroup, "Momentum scroll", draft.momentumScroll, (value) => {
+    draft.momentumScroll = value;
+  });
+  check(presetGroup, "Multitouch trackpad", draft.multitouchPad, (value) => {
+    draft.multitouchPad = value;
+  });
+  check(presetGroup, "Emulate right mouse button", draft.emulateRightButton, (value) => {
+    draft.emulateRightButton = value;
+  });
+  mousePane.append(presetGroup);
+
+  const cancel = button("Cancel", "", () => referenceDialog.close());
+  const ok = button("OK", "dialog-primary", async () => {
+    setBusy(true);
+    try {
+      const result = await invoke("set_preferences", { preferences: draft });
+      preferences = result.preferences;
+      recordStatus(result.status);
+      referenceDialog.close();
+      scheduleRender(0);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setBusy(false);
+    }
+  });
+  editor.append(tabs, paneHost);
+  dialogContent.append(editor);
+  dialogActions(cancel, ok);
+}
+
+function workspacePropertyPage(tabNames = ["Common"]) {
+  const editor = document.createElement("div");
+  editor.className = "workspace-property-editor";
+  const tabs = document.createElement("div");
+  tabs.className = "property-dialog-tabs";
+  tabs.setAttribute("role", "tablist");
+  const pageHost = document.createElement("div");
+  pageHost.className = "property-dialog-pages";
+  const panes = [];
+  const tabButtons = [];
+  const activate = (index) => {
+    tabButtons.forEach((tab, tabIndex) => {
+      const active = tabIndex === index;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", String(active));
+      tab.tabIndex = active ? 0 : -1;
+      panes[tabIndex].hidden = !active;
+    });
+  };
+  tabNames.forEach((name, index) => {
+    const tab = button(name, index === 0 ? "active" : "", () => activate(index));
+    tab.type = "button";
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(index === 0));
+    const pane = document.createElement("section");
+    pane.className = "property-common-page";
+    pane.setAttribute("role", "tabpanel");
+    pane.hidden = index !== 0;
+    tabButtons.push(tab);
+    panes.push(pane);
+    tabs.append(tab);
+    pageHost.append(pane);
+  });
+  editor.append(tabs, pageHost);
+  return { editor, page: panes[0], panes, activate };
+}
+
+function propertyField(host, label, control) {
+  const wrapper = document.createElement("label");
+  wrapper.className = "property-common-field";
+  const caption = document.createElement("span");
+  caption.textContent = label;
+  wrapper.append(caption, control);
+  host.append(wrapper);
+  return control;
+}
+
+function propertyCheckbox(host, label, checked) {
+  const wrapper = document.createElement("label");
+  wrapper.className = "property-common-check";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  const caption = document.createElement("span");
+  caption.textContent = label;
+  wrapper.append(input, caption);
+  host.append(wrapper);
+  return input;
+}
+
+function objectPropertiesEditor(object) {
+  const densityMap = Array.isArray(object.counts);
+  const surfaceObject = object.className === "MolSurfObj";
+  const { editor, page } = workspacePropertyPage();
+  const name = document.createElement("input");
+  name.value = object.name;
+  propertyField(page, "Name:", name);
+  const selection = document.createElement("input");
+  selection.value = "(not available)";
+  selection.disabled = true;
+  propertyField(page, "Selection:", selection);
+  const checks = document.createElement("div");
+  checks.className = "property-common-checks";
+  const visible = propertyCheckbox(checks, "Visible", object.visible);
+  const locked = propertyCheckbox(checks, "Locked", object.locked);
+  page.append(checks);
+  const linked = document.createElement("input");
+  linked.disabled = true;
+  linked.value =
+    !object.source || object.source.startsWith("datachunk:")
+      ? "(embeded)"
+      : `${object.source}${object.sourceType || object.format ? `  (${object.sourceType || object.format})` : ""}`;
+  propertyField(page, "Linked:", linked);
+
+  const submit = async () => {
+    const changed = await mutate(
+      densityMap
+        ? "set_density_map_properties"
+        : surfaceObject
+          ? "set_surface_properties"
+          : "set_object_properties",
+      {
+        properties: {
+          objectUid: object.uid,
+          name: name.value,
+          visible: visible.checked,
+          locked: locked.checked,
+        },
+      },
+    );
+    if (changed) referenceDialog.close();
+  };
+  const cancel = button("Cancel", "", () => referenceDialog.close());
+  const ok = button("OK", "dialog-primary", submit);
+  dialogContent.append(editor);
+  dialogActions(cancel, ok);
+}
+
+function rendererPropertiesEditor(object, renderer) {
+  const densityMap = Array.isArray(object.counts);
+  const surfaceObject = object.className === "MolSurfObj";
+  const simpleLike = ["simple", "trace"].includes(renderer.rendererType);
+  const ballStickLike = ["ballstick", "anisou"].includes(renderer.rendererType);
+  const cpkLike = renderer.rendererType === "cpk";
+  const disorderLike = renderer.rendererType === "disorder";
+  const tubeLike = renderer.rendererType === "tube";
+  const nuclLike = renderer.rendererType === "nucl";
+  const ribbonLike = renderer.rendererType === "ribbon";
+  const cartoonLike = renderer.rendererType === "cartoon";
+  const contourLike = densityMap && ["contour", "gpu_mapmesh"].includes(renderer.rendererType);
+  const isosurfLike = densityMap && renderer.rendererType === "isosurf";
+  const volumeLike = densityMap && renderer.rendererType === "gpu_mapvol";
+  if (renderer.rendererType === "simple") {
+    dialogTitle.textContent = "Simple Rend Properties";
+  } else if (renderer.rendererType === "trace") {
+    dialogTitle.textContent = "Trace renderer properties";
+  } else if (ballStickLike) {
+    dialogTitle.textContent = "Ballstick renderer properties";
+  } else if (cpkLike) {
+    dialogTitle.textContent = "CPK Rend Properties";
+  } else if (disorderLike) {
+    dialogTitle.textContent = "Disorder renderer properties";
+  } else if (tubeLike) {
+    dialogTitle.textContent = "Tube Rend Properties";
+  } else if (nuclLike) {
+    dialogTitle.textContent = "Nucl renderer properties";
+  } else if (ribbonLike) {
+    dialogTitle.textContent = "Ribbon representation properties";
+  } else if (cartoonLike) {
+    dialogTitle.textContent = "Cartoon representation properties";
+  } else if (contourLike) {
+    dialogTitle.textContent = "Contour renderer properties";
+  } else if (isosurfLike) {
+    dialogTitle.textContent = "Isosurf renderer properties";
+  } else if (volumeLike) {
+    dialogTitle.textContent = "Volume renderer properties";
+  } else if (surfaceObject) {
+    dialogTitle.textContent = "MolSurf Rend Properties";
+  }
+  const tabNames = simpleLike
+    ? [renderer.rendererType === "trace" ? "Trace" : "Simple"]
+    : ballStickLike
+      ? ["Common", "Ball & Stick"]
+      : cpkLike
+        ? ["Common", "Atom radii"]
+        : disorderLike
+          ? ["Common", "Disorder"]
+          : tubeLike
+            ? ["Common", "Tube"]
+            : nuclLike
+              ? ["Common", "Nucleic acid", "Tube"]
+              : ribbonLike
+                ? ["Common", "Helix", "Sheet", "Coil"]
+                : cartoonLike
+                  ? ["Common", "Cartoon", "Helix", "Sheet", "Coil"]
+                  : contourLike || isosurfLike || volumeLike
+                    ? ["Common", "Map"]
+                  : surfaceObject
+                    ? ["Common", "MolSurf"]
+                  : ["Common"];
+  const { editor, page, panes } = workspacePropertyPage(tabNames);
+  const specificControls = [];
+  const specificInputs = new Map();
+  const specificDefaults = new Map();
+  const specificReaders = new Map();
+  const specificResetters = [];
+  const addSpecificNumber = (host, key, label, minimum, maximum, step, fallback) => {
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = String(minimum);
+    input.max = String(maximum);
+    input.step = String(step);
+    input.value = renderer.specific?.[key] ?? fallback;
+    propertyField(host, label, input);
+    specificInputs.set(key, input);
+    specificDefaults.set(key, String(fallback));
+    specificControls.push(input);
+    return input;
+  };
+  const addSpecificSelect = (host, key, label, choices, fallback) => {
+    const select = document.createElement("select");
+    for (const [value, caption] of choices) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = caption;
+      select.append(option);
+    }
+    select.value = renderer.specific?.[key] ?? fallback;
+    propertyField(host, label, select);
+    specificInputs.set(key, select);
+    specificDefaults.set(key, fallback);
+    specificControls.push(select);
+    return select;
+  };
+  const addSpecificCheckbox = (host, key, label, fallback) => {
+    const checked = (renderer.specific?.[key] ?? String(fallback)) === "true";
+    const input = propertyCheckbox(host, label, checked);
+    specificInputs.set(key, input);
+    specificDefaults.set(key, String(fallback));
+    specificControls.push(input);
+    return input;
+  };
+  const addSpecificColor = (host, key, label, fallback) => {
+    const row = document.createElement("div");
+    row.className = "edge-color-editor";
+    const input = document.createElement("input");
+    input.value = renderer.specific?.[key] ?? fallback;
+    input.spellcheck = false;
+    const picker = document.createElement("input");
+    picker.type = "color";
+    picker.value = /^#[0-9a-f]{6}$/i.test(input.value) ? input.value : fallback;
+    input.addEventListener("input", () => {
+      if (/^#[0-9a-f]{6}$/i.test(input.value)) picker.value = input.value;
+    });
+    picker.addEventListener("input", () => {
+      input.value = picker.value;
+    });
+    row.append(input, picker);
+    propertyField(host, label, row);
+    specificInputs.set(key, input);
+    specificDefaults.set(key, fallback);
+    specificControls.push(input, picker);
+    return { input, picker };
+  };
+  let lineWidth = null;
+  if (simpleLike) {
+    const line = document.createElement("fieldset");
+    line.className = "property-common-group renderer-specific-group";
+    const legend = document.createElement("legend");
+    legend.textContent = renderer.rendererType === "trace" ? "Trace" : "Simple";
+    line.append(legend);
+    lineWidth = document.createElement("input");
+    lineWidth.type = "number";
+    lineWidth.min = "0.2";
+    lineWidth.max = "10";
+    lineWidth.step = "0.2";
+    lineWidth.value = renderer.lineWidth;
+    propertyField(line, "Line width:", lineWidth);
+    page.append(line);
+    specificControls.push(lineWidth);
+  }
+  const basic = document.createElement("fieldset");
+  basic.className = "property-common-group";
+  const basicLegend = document.createElement("legend");
+  basicLegend.textContent = "Basic settings";
+  basic.append(basicLegend);
+  const name = document.createElement("input");
+  name.value = renderer.name;
+  propertyField(basic, "Name:", name);
+  const selection = document.createElement("input");
+  selection.value = densityMap ? "(not available)" : renderer.selection || "*";
+  selection.disabled = densityMap;
+  selection.spellcheck = false;
+  propertyField(basic, "Selection:", selection);
+  const checks = document.createElement("div");
+  checks.className = "property-common-checks";
+  const visible = propertyCheckbox(checks, "Visible", renderer.visible);
+  const locked = propertyCheckbox(checks, "Locked", renderer.locked);
+  basic.append(checks);
+  const material = document.createElement("select");
+  const materialNames = ["", ...(snapshot.materialNames || [])];
+  if (renderer.material && !materialNames.includes(renderer.material)) {
+    materialNames.push(renderer.material);
+  }
+  for (const value of materialNames) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value || "(none)";
+    material.append(option);
+  }
+  material.value = renderer.material;
+  propertyField(basic, "Material:", material);
+  const alpha = document.createElement("input");
+  alpha.type = "number";
+  alpha.min = "0.1";
+  alpha.max = "1";
+  alpha.step = "0.1";
+  alpha.value = renderer.alpha;
+  propertyField(basic, "Opacity:", alpha);
+  page.append(basic);
+
+  const edge = document.createElement("fieldset");
+  edge.className = "property-common-group edge-properties";
+  const edgeLegend = document.createElement("legend");
+  edgeLegend.textContent = "Edge lines:";
+  const edgeType = document.createElement("select");
+  for (const value of ["none", "edges", "silhouette"]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    edgeType.append(option);
+  }
+  edgeType.value = renderer.edgeType;
+  edgeLegend.append(edgeType);
+  edge.append(edgeLegend);
+  const edgeWidth = document.createElement("input");
+  edgeWidth.type = "number";
+  edgeWidth.min = "0";
+  edgeWidth.max = "1";
+  edgeWidth.step = "0.01";
+  edgeWidth.value = renderer.edgeWidth;
+  propertyField(edge, "Width:", edgeWidth);
+  const edgeColorRow = document.createElement("div");
+  edgeColorRow.className = "edge-color-editor";
+  const edgeColor = document.createElement("input");
+  edgeColor.value = renderer.edgeColor;
+  edgeColor.spellcheck = false;
+  const edgeColorPicker = document.createElement("input");
+  edgeColorPicker.type = "color";
+  edgeColorPicker.value = /^#[0-9a-f]{6}$/i.test(renderer.edgeColor)
+    ? renderer.edgeColor
+    : "#000000";
+  edgeColor.addEventListener("input", () => {
+    if (/^#[0-9a-f]{6}$/i.test(edgeColor.value)) edgeColorPicker.value = edgeColor.value;
+  });
+  edgeColorPicker.addEventListener("input", () => {
+    edgeColor.value = edgeColorPicker.value;
+  });
+  edgeColorRow.append(edgeColor, edgeColorPicker);
+  propertyField(edge, "Color:", edgeColorRow);
+  page.append(edge);
+
+  const syncEdgeState = () => {
+    const disabled = edgeType.value === "none";
+    edgeWidth.disabled = disabled;
+    edgeColor.disabled = disabled;
+    edgeColorPicker.disabled = disabled;
+  };
+  edgeType.addEventListener("change", syncEdgeState);
+  syncEdgeState();
+
+  let detail = null;
+  let bondWidth = null;
+  let sphereRadius = null;
+  let showRing = null;
+  let ringThickness = null;
+  let ringColor = null;
+  let ringColorPicker = null;
+  if (ballStickLike) {
+    const ballStickPage = panes[1];
+    const geometry = document.createElement("fieldset");
+    geometry.className = "property-common-group renderer-specific-group";
+    const geometryLegend = document.createElement("legend");
+    geometryLegend.textContent = "Ball & Stick settings";
+    geometry.append(geometryLegend);
+    detail = document.createElement("input");
+    detail.type = "number";
+    detail.min = "2";
+    detail.max = "20";
+    detail.step = "1";
+    detail.value = renderer.detail;
+    propertyField(geometry, "Detail:", detail);
+    bondWidth = document.createElement("input");
+    bondWidth.type = "number";
+    bondWidth.min = "0";
+    bondWidth.max = "3";
+    bondWidth.step = "0.01";
+    bondWidth.value = renderer.bondWidth;
+    propertyField(geometry, "Bond width:", bondWidth);
+    sphereRadius = document.createElement("input");
+    sphereRadius.type = "number";
+    sphereRadius.min = "0";
+    sphereRadius.max = "3";
+    sphereRadius.step = "0.01";
+    sphereRadius.value = renderer.sphereRadius;
+    propertyField(geometry, "Atom radius:", sphereRadius);
+    ballStickPage.append(geometry);
+
+    const ring = document.createElement("fieldset");
+    ring.className = "property-common-group renderer-specific-group";
+    const ringLegend = document.createElement("legend");
+    ringLegend.textContent = "Ring settings";
+    ring.append(ringLegend);
+    showRing = propertyCheckbox(ring, "Show ring", renderer.showRing);
+    ringThickness = document.createElement("input");
+    ringThickness.type = "number";
+    ringThickness.min = "0";
+    ringThickness.max = "3";
+    ringThickness.step = "0.01";
+    ringThickness.value = renderer.ringThickness;
+    propertyField(ring, "Thickness:", ringThickness);
+    const ringColorRow = document.createElement("div");
+    ringColorRow.className = "edge-color-editor";
+    ringColor = document.createElement("input");
+    ringColor.value = renderer.ringColor;
+    ringColor.spellcheck = false;
+    ringColorPicker = document.createElement("input");
+    ringColorPicker.type = "color";
+    ringColorPicker.value = /^#[0-9a-f]{6}$/i.test(renderer.ringColor)
+      ? renderer.ringColor
+      : "#ffffbf";
+    ringColor.addEventListener("input", () => {
+      if (/^#[0-9a-f]{6}$/i.test(ringColor.value)) ringColorPicker.value = ringColor.value;
+    });
+    ringColorPicker.addEventListener("input", () => {
+      ringColor.value = ringColorPicker.value;
+    });
+    ringColorRow.append(ringColor, ringColorPicker);
+    propertyField(ring, "Color:", ringColorRow);
+    const syncRingState = () => {
+      ringThickness.disabled = !showRing.checked;
+      ringColor.disabled = !showRing.checked;
+      ringColorPicker.disabled = !showRing.checked;
+    };
+    showRing.addEventListener("change", syncRingState);
+    syncRingState();
+    ballStickPage.append(ring);
+    specificControls.push(
+      detail,
+      bondWidth,
+      sphereRadius,
+      showRing,
+      ringThickness,
+      ringColor,
+      ringColorPicker,
+    );
+  }
+
+  let disorderColorPicker = null;
+  if (cpkLike) {
+    const radiiPage = panes[1];
+    const radii = document.createElement("fieldset");
+    radii.className = "property-common-group renderer-specific-group";
+    const legend = document.createElement("legend");
+    legend.textContent = "Atom radii";
+    radii.append(legend);
+    for (const [key, label, fallback] of [
+      ["vdwr_C", "Carbon:", "1.7"],
+      ["vdwr_N", "Nitrogen:", "1.55"],
+      ["vdwr_O", "Oxygen:", "1.52"],
+      ["vdwr_S", "Sulfur:", "1.8"],
+      ["vdwr_P", "Phosphorus:", "1.8"],
+      ["vdwr_H", "Hydrogen:", "1.2"],
+      ["vdwr_X", "Others:", "1.7"],
+    ]) {
+      addSpecificNumber(radii, key, label, 0, 3, 0.01, fallback);
+    }
+    radiiPage.append(radii);
+    const detailGroup = document.createElement("fieldset");
+    detailGroup.className = "property-common-group renderer-specific-group compact-group";
+    const detailLegend = document.createElement("legend");
+    detailLegend.textContent = "Tessellation";
+    detailGroup.append(detailLegend);
+    addSpecificNumber(detailGroup, "detail", "Detail:", 2, 20, 1, "3");
+    radiiPage.append(detailGroup);
+  }
+
+  if (disorderLike) {
+    const disorderPage = panes[1];
+    const settings = document.createElement("fieldset");
+    settings.className = "property-common-group renderer-specific-group";
+    const legend = document.createElement("legend");
+    legend.textContent = "Disorder settings";
+    settings.append(legend);
+    const target = document.createElement("select");
+    const targetNames = [
+      "",
+      ...object.renderers
+        .filter((candidate) => ["tube", "ribbon", "cartoon", "nucl"].includes(candidate.rendererType))
+        .map((candidate) => candidate.name),
+    ];
+    const currentTarget = renderer.specific?.target ?? "";
+    if (currentTarget && !targetNames.includes(currentTarget)) targetNames.push(currentTarget);
+    for (const value of targetNames) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value || "(none)";
+      target.append(option);
+    }
+    target.value = currentTarget;
+    propertyField(settings, "Target:", target);
+    specificInputs.set("target", target);
+    specificDefaults.set("target", "");
+    specificControls.push(target);
+    addSpecificNumber(settings, "detail", "Detail:", 2, 20, 1, "5");
+    addSpecificNumber(settings, "width", "Dot size:", 0, 3, 0.1, "0.3");
+    addSpecificNumber(settings, "dotsep", "Dot separation:", 0, 3, 0.1, "1");
+    addSpecificNumber(settings, "loopsize", "Loop size:", 0, 10, 0.1, "2");
+    addSpecificNumber(settings, "loopsize2", "Loop size 2:", -1, 10, 0.1, "-1");
+    const colorRow = document.createElement("div");
+    colorRow.className = "edge-color-editor";
+    const color = document.createElement("input");
+    color.value = renderer.specific?.defaultcolor ?? "#ffffff";
+    color.spellcheck = false;
+    disorderColorPicker = document.createElement("input");
+    disorderColorPicker.type = "color";
+    disorderColorPicker.value = /^#[0-9a-f]{6}$/i.test(color.value) ? color.value : "#ffffff";
+    color.addEventListener("input", () => {
+      if (/^#[0-9a-f]{6}$/i.test(color.value)) disorderColorPicker.value = color.value;
+    });
+    disorderColorPicker.addEventListener("input", () => {
+      color.value = disorderColorPicker.value;
+    });
+    colorRow.append(color, disorderColorPicker);
+    propertyField(settings, "Color:", colorRow);
+    specificInputs.set("defaultcolor", color);
+    specificDefaults.set("defaultcolor", "#ffffff");
+    specificControls.push(color, disorderColorPicker);
+    disorderPage.append(settings);
+  }
+
+  let syncDensityMapState = () => {};
+  if (contourLike || isosurfLike || volumeLike) {
+    const mapPage = panes[1];
+    const settings = document.createElement("fieldset");
+    settings.className = "property-common-group renderer-specific-group";
+    const settingsLegend = document.createElement("legend");
+    settingsLegend.textContent = "Map";
+    settings.append(settingsLegend);
+
+    const updateMode = document.createElement("select");
+    for (const [value, label] of [
+      ["none", "None"],
+      ["auto", "Automatic"],
+      ["drag", "Automatic (drag)"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      updateMode.append(option);
+    }
+    const autoUpdate = renderer.specific?.autoupdate !== "false";
+    const dragUpdate = renderer.specific?.dragupdate === "true";
+    updateMode.value = autoUpdate ? (dragUpdate ? "drag" : "auto") : "none";
+    propertyField(settings, "Center update:", updateMode);
+    specificInputs.set("autoupdate", updateMode);
+    specificDefaults.set("autoupdate", "auto");
+    specificReaders.set("autoupdate", () => String(updateMode.value !== "none"));
+    specificInputs.set("dragupdate", updateMode);
+    specificDefaults.set("dragupdate", "auto");
+    specificReaders.set("dragupdate", () => String(updateMode.value === "drag"));
+    specificControls.push(updateMode);
+
+    let mapWidth = null;
+    let drawMode = null;
+    if (isosurfLike) {
+      drawMode = addSpecificSelect(
+        settings,
+        "drawmode",
+        "Drawing Mode:",
+        [
+          ["fill", "fill"],
+          ["line", "line"],
+          ["point", "point"],
+        ],
+        "fill",
+      );
+      mapWidth = addSpecificNumber(
+        settings,
+        "width",
+        "Line/Point size:",
+        0.1,
+        10,
+        0.1,
+        "1.2",
+      );
+      addSpecificNumber(settings, "max_grids", "Max grid size:", 10, 2000, 10, "100");
+      addSpecificCheckbox(settings, "cullface", "Back-face culling", false);
+    } else if (contourLike) {
+      mapWidth = addSpecificNumber(settings, "width", "Line width:", 0.1, 10, 0.1, "1");
+      addSpecificNumber(settings, "bufsize", "Buffer size:", 50, 200, 10, "100");
+    } else {
+      addSpecificSelect(
+        settings,
+        "xferfn_type",
+        "Transfer function:",
+        [
+          ["rainbow1", "Rainbow"],
+          ["auto2", "Automatic"],
+          ["multigrad", "Multi-gradient"],
+        ],
+        "rainbow1",
+      );
+    }
+    addSpecificCheckbox(settings, "use_pbc", "Use periodic boundary", true);
+    mapPage.append(settings);
+
+    const boundary = document.createElement("fieldset");
+    boundary.className = "property-common-group renderer-specific-group";
+    const boundaryLegend = document.createElement("legend");
+    boundaryLegend.textContent = "Display boundary";
+    boundary.append(boundaryLegend);
+    const targetNames = ["", ...activeObjects().map((candidate) => candidate.name)];
+    const currentTarget = renderer.specific?.bndry_molname ?? "";
+    if (currentTarget && !targetNames.includes(currentTarget)) targetNames.push(currentTarget);
+    const target = document.createElement("select");
+    for (const value of targetNames) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value || "(none)";
+      target.append(option);
+    }
+    target.value = currentTarget;
+    propertyField(boundary, "Target:", target);
+    const boundarySelection = document.createElement("input");
+    boundarySelection.value = renderer.specific?.bndry_sel ?? "all";
+    boundarySelection.spellcheck = false;
+    propertyField(boundary, "Selection:", boundarySelection);
+    const boundaryRange = addSpecificNumber(
+      boundary,
+      "bndry_rng",
+      "Distance:",
+      0.1,
+      100,
+      0.1,
+      "5",
+    );
+    const limitDisplay = propertyCheckbox(
+      boundary,
+      "Limit display by",
+      currentTarget.trim() !== "",
+    );
+    specificInputs.set("bndry_molname", target);
+    specificDefaults.set("bndry_molname", "");
+    specificReaders.set("bndry_molname", () =>
+      limitDisplay.checked ? target.value : "",
+    );
+    specificInputs.set("bndry_sel", boundarySelection);
+    specificDefaults.set("bndry_sel", "all");
+    specificReaders.set("bndry_sel", () =>
+      limitDisplay.checked ? boundarySelection.value.trim() || "all" : "",
+    );
+    specificControls.push(target, boundarySelection, limitDisplay);
+    specificResetters.push(() => {
+      limitDisplay.checked = false;
+    });
+    mapPage.append(boundary);
+
+    syncDensityMapState = () => {
+      const boundaryDisabled = !limitDisplay.checked;
+      target.disabled = boundaryDisabled;
+      boundarySelection.disabled = boundaryDisabled;
+      boundaryRange.disabled = boundaryDisabled;
+      if (drawMode && mapWidth) mapWidth.disabled = drawMode.value === "fill";
+    };
+    limitDisplay.addEventListener("change", syncDensityMapState);
+    drawMode?.addEventListener("change", syncDensityMapState);
+    syncDensityMapState();
+  }
+
+  let syncSurfaceState = () => {};
+  if (surfaceObject) {
+    const surfacePage = panes[1];
+    const draw = document.createElement("fieldset");
+    draw.className = "property-common-group renderer-specific-group";
+    const drawLegend = document.createElement("legend");
+    drawLegend.textContent = "Draw";
+    draw.append(drawLegend);
+    const drawMode = addSpecificSelect(
+      draw,
+      "drawmode",
+      "Drawing Mode:",
+      [
+        ["fill", "fill"],
+        ["line", "line"],
+        ["point", "point"],
+      ],
+      "fill",
+    );
+    const surfaceWidth = addSpecificNumber(
+      draw,
+      "width",
+      "Line/Point size:",
+      0.1,
+      10,
+      0.1,
+      "1.2",
+    );
+    const surfaceType = document.createElement("select");
+    for (const [value, label] of [
+      ["vdw", "van der Waals"],
+      ["sas", "Solvent accessible"],
+      ["ses", "Solvent excluded"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      surfaceType.append(option);
+    }
+    surfaceType.value = "vdw";
+    surfaceType.disabled = true;
+    propertyField(draw, "Surface type:", surfaceType);
+    const surfaceDetail = document.createElement("input");
+    surfaceDetail.type = "number";
+    surfaceDetail.min = "1";
+    surfaceDetail.max = "21";
+    surfaceDetail.step = "1";
+    surfaceDetail.value = "1";
+    surfaceDetail.disabled = true;
+    propertyField(draw, "Detail:", surfaceDetail);
+    specificControls.push(surfaceType, surfaceDetail);
+    surfacePage.append(draw);
+
+    const selected = document.createElement("fieldset");
+    selected.className = "property-common-group renderer-specific-group";
+    const selectedLegend = document.createElement("legend");
+    selectedLegend.textContent = "Show selected:";
+    selected.append(selectedLegend);
+    const target = document.createElement("select");
+    const targetNames = ["", ...activeObjects().map((candidate) => candidate.name)];
+    const currentTarget = renderer.specific?.target ?? "";
+    if (currentTarget && !targetNames.includes(currentTarget)) targetNames.push(currentTarget);
+    for (const value of targetNames) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value || "(none)";
+      target.append(option);
+    }
+    target.value = currentTarget;
+    propertyField(selected, "Selection mol:", target);
+    specificInputs.set("target", target);
+    specificDefaults.set("target", "");
+    specificControls.push(target);
+    const showSelection = document.createElement("input");
+    showSelection.value = renderer.specific?.showsel ?? "*";
+    showSelection.spellcheck = false;
+    propertyField(selected, "Selection:", showSelection);
+    specificInputs.set("showsel", showSelection);
+    specificDefaults.set("showsel", "*");
+    specificControls.push(showSelection);
+    surfacePage.append(selected);
+
+    addSpecificSelect(
+      surfacePage,
+      "colormode",
+      "Coloring mode:",
+      [
+        ["solid", "Solid color"],
+        ["molecule", "By molecule"],
+        ["potential", "By potential"],
+      ],
+      "solid",
+    );
+    syncSurfaceState = () => {
+      surfaceWidth.disabled = drawMode.value === "fill";
+    };
+    drawMode.addEventListener("change", syncSurfaceState);
+    syncSurfaceState();
+  }
+
+  let syncRibbonState = () => {};
+  if (ribbonLike || cartoonLike) {
+    const sectionChoices = [
+      ["elliptical", "Elliptical"],
+      ["roundsquare", "Rounded square"],
+      ["rectangle", "Rectangle"],
+      ["fancy1", "Fancy"],
+    ];
+    const junctionChoices = [
+      ["smooth", "Smooth"],
+      ["flat", "Flat"],
+      ["arrow", "Arrow"],
+    ];
+    const stateSyncers = [];
+    const addSpecificText = (host, key, label, fallback) => {
+      const input = document.createElement("input");
+      input.value = renderer.specific?.[key] ?? fallback;
+      input.spellcheck = false;
+      propertyField(host, label, input);
+      specificInputs.set(key, input);
+      specificDefaults.set(key, fallback);
+      specificControls.push(input);
+      return input;
+    };
+    const addPercentNumber = (host, key, label, minimum, maximum, fallback) => {
+      const input = document.createElement("input");
+      input.type = "number";
+      input.min = String(minimum);
+      input.max = String(maximum);
+      input.step = "5";
+      input.value = String(Number(renderer.specific?.[key] ?? fallback) * 100);
+      propertyField(host, label, input);
+      specificInputs.set(key, input);
+      specificDefaults.set(key, String(Number(fallback) * 100));
+      specificReaders.set(key, () => String(Number(input.value) / 100));
+      specificControls.push(input);
+      return input;
+    };
+    const addSectionEditor = (host, key, title) => {
+      const group = document.createElement("fieldset");
+      group.className = "property-common-group renderer-specific-group tube-section-group";
+      const legend = document.createElement("legend");
+      legend.textContent = title;
+      group.append(legend);
+      const type = addSpecificSelect(group, `${key}.type`, "Type:", sectionChoices, "elliptical");
+      addSpecificNumber(group, `${key}.detail`, "Detail:", 2, 20, 1, "16");
+      const width1 = addSpecificNumber(group, `${key}.width`, "Width 1:", 0.01, 10, 0.01, "0.35");
+      const width2 = document.createElement("input");
+      width2.type = "number";
+      width2.min = "0.01";
+      width2.max = "10";
+      width2.step = "0.01";
+      width2.value = String(
+        Number(renderer.specific?.[`${key}.width`] ?? 0.35) *
+          Number(renderer.specific?.[`${key}.tuber`] ?? 1),
+      );
+      propertyField(group, "Width 2:", width2);
+      specificInputs.set(`${key}.tuber`, width2);
+      specificDefaults.set(`${key}.tuber`, "0.35");
+      specificReaders.set(`${key}.tuber`, () =>
+        String(Number(width2.value) / Math.max(Number(width1.value), Number.EPSILON)),
+      );
+      specificControls.push(width2);
+      const sharp = addSpecificNumber(
+        group,
+        `${key}.sharp`,
+        "Sharpness:",
+        0,
+        1,
+        0.05,
+        "0.4",
+      );
+      sharp.classList.add("section-sharpness");
+      const sync = () => {
+        sharp.disabled = !["roundsquare", "fancy1"].includes(type.value);
+      };
+      type.addEventListener("change", sync);
+      stateSyncers.push(sync);
+      host.append(group);
+      return group;
+    };
+    const addJunctionEditor = (host, key, title) => {
+      const group = document.createElement("fieldset");
+      group.className = "property-common-group renderer-specific-group compact-group";
+      const legend = document.createElement("legend");
+      legend.textContent = title;
+      group.append(legend);
+      const type = addSpecificSelect(group, `${key}.type`, "Type:", junctionChoices, "smooth");
+      const gamma = addSpecificNumber(group, `${key}.gamma`, "Gamma:", 0.1, 10, 0.1, "2.2");
+      const baseWidth = addPercentNumber(group, `${key}.basw`, "Base width (%):", 0, 100, "0");
+      const arrowWidth = addPercentNumber(
+        group,
+        `${key}.arrow`,
+        "Arrow width (%):",
+        100,
+        300,
+        "1.8",
+      );
+      for (const control of [gamma, baseWidth, arrowWidth]) {
+        control.classList.add("junction-parameter");
+      }
+      const sync = () => {
+        const disabled = type.value !== "arrow";
+        gamma.disabled = disabled;
+        baseWidth.disabled = disabled;
+        arrowWidth.disabled = disabled;
+      };
+      type.addEventListener("change", sync);
+      stateSyncers.push(sync);
+      host.append(group);
+      return group;
+    };
+    const addBackboneEditor = (host, axialFallback, smoothColorFallback, capFallback) => {
+      const spline = document.createElement("fieldset");
+      spline.className = "property-common-group renderer-specific-group";
+      const splineLegend = document.createElement("legend");
+      splineLegend.textContent = "Backbone spline";
+      spline.append(splineLegend);
+      addSpecificNumber(spline, "axialdetail", "Axial detail:", 2, 20, 1, axialFallback);
+      addSpecificCheckbox(spline, "smoothcolor", "Smooth color", smoothColorFallback);
+      addSpecificCheckbox(spline, "segend_fade", "Fade at segment ends", false);
+      addSpecificSelect(
+        spline,
+        "start_captype",
+        "Start cap:",
+        [
+          ["flat", "Flat"],
+          ["sphere", "Sphere"],
+          ["none", "None"],
+        ],
+        capFallback,
+      );
+      addSpecificSelect(
+        spline,
+        "end_captype",
+        "End cap:",
+        [
+          ["flat", "Flat"],
+          ["sphere", "Sphere"],
+          ["none", "None"],
+        ],
+        capFallback,
+      );
+      host.append(spline);
+
+      const pivot = document.createElement("fieldset");
+      pivot.className = "property-common-group renderer-specific-group pivot-atom-group";
+      const pivotLegend = document.createElement("legend");
+      pivotLegend.textContent = "Pivot atom";
+      pivot.append(pivotLegend);
+      const pivotName = addSpecificText(pivot, "pivotatom", "Atom name:", "");
+      const pivotEnabled = propertyCheckbox(
+        pivot,
+        "Use a custom pivot atom",
+        pivotName.value.trim() !== "",
+      );
+      specificReaders.set("pivotatom", () => (pivotEnabled.checked ? pivotName.value.trim() : ""));
+      specificResetters.push(() => {
+        pivotEnabled.checked = false;
+      });
+      specificControls.push(pivotEnabled);
+      const sync = () => {
+        pivotName.disabled = !pivotEnabled.checked;
+      };
+      pivotEnabled.addEventListener("change", sync);
+      stateSyncers.push(sync);
+      host.append(pivot);
+    };
+
+    if (ribbonLike) {
+      addBackboneEditor(page, "6", true, "sphere");
+
+      const helixPage = panes[1];
+      addSectionEditor(helixPage, "helix", "Helix section");
+      const helixSpline = document.createElement("fieldset");
+      helixSpline.className = "property-common-group renderer-specific-group compact-group";
+      const helixSplineLegend = document.createElement("legend");
+      helixSplineLegend.textContent = "Helix spline";
+      helixSpline.append(helixSplineLegend);
+      addSpecificNumber(helixSpline, "helix_smooth", "Smoothing:", 0, 5, 0.1, "0");
+      const useBackColor = addSpecificCheckbox(
+        helixSpline,
+        "helix_usebackcol",
+        "Use back-face color",
+        false,
+      );
+      const backColor = addSpecificColor(helixSpline, "helix_backcol", "Back-face color:", "#ffffff");
+      const syncBackColor = () => {
+        backColor.input.disabled = !useBackColor.checked;
+        backColor.picker.disabled = !useBackColor.checked;
+      };
+      useBackColor.addEventListener("change", syncBackColor);
+      stateSyncers.push(syncBackColor);
+      helixPage.append(helixSpline);
+      addJunctionEditor(helixPage, "helixhead", "Helix head");
+      addJunctionEditor(helixPage, "helixtail", "Helix tail");
+
+      const sheetPage = panes[2];
+      addSectionEditor(sheetPage, "sheet", "Sheet section");
+      const sheetSpline = document.createElement("fieldset");
+      sheetSpline.className = "property-common-group renderer-specific-group compact-group";
+      const sheetSplineLegend = document.createElement("legend");
+      sheetSplineLegend.textContent = "Sheet spline";
+      sheetSpline.append(sheetSplineLegend);
+      addSpecificNumber(sheetSpline, "sheet_smooth", "Smoothing:", 0, 5, 0.1, "0.5");
+      const useSideColor = addSpecificCheckbox(
+        sheetSpline,
+        "sheet_usesidecol",
+        "Use side-face color",
+        false,
+      );
+      const sideColor = addSpecificColor(sheetSpline, "sheet_sidecol", "Side-face color:", "#ffffff");
+      const syncSideColor = () => {
+        sideColor.input.disabled = !useSideColor.checked;
+        sideColor.picker.disabled = !useSideColor.checked;
+      };
+      useSideColor.addEventListener("change", syncSideColor);
+      stateSyncers.push(syncSideColor);
+      sheetPage.append(sheetSpline);
+      addJunctionEditor(sheetPage, "sheethead", "Sheet head");
+      addJunctionEditor(sheetPage, "sheettail", "Sheet tail");
+
+      const coilPage = panes[3];
+      addSectionEditor(coilPage, "coil", "Coil section");
+      const coilSpline = document.createElement("fieldset");
+      coilSpline.className = "property-common-group renderer-specific-group compact-group";
+      const coilSplineLegend = document.createElement("legend");
+      coilSplineLegend.textContent = "Coil spline";
+      coilSpline.append(coilSplineLegend);
+      addSpecificNumber(coilSpline, "coil_smooth", "Smoothing:", 0, 5, 0.1, "0");
+      coilPage.append(coilSpline);
+    } else {
+      const cartoonPage = panes[1];
+      addBackboneEditor(cartoonPage, "8", false, "flat");
+      const anchor = document.createElement("fieldset");
+      anchor.className = "property-common-group renderer-specific-group";
+      const anchorLegend = document.createElement("legend");
+      anchorLegend.textContent = "Anchor selection";
+      anchor.append(anchorLegend);
+      addSpecificText(anchor, "anchor_sel", "Selection:", "");
+      addSpecificNumber(anchor, "anchor_weight", "Weight:", 0, 20, 0.5, "10");
+      cartoonPage.append(anchor);
+
+      const helixPage = panes[2];
+      const helixMode = document.createElement("fieldset");
+      helixMode.className = "property-common-group renderer-specific-group";
+      const helixModeLegend = document.createElement("legend");
+      helixModeLegend.textContent = "Helix";
+      helixMode.append(helixModeLegend);
+      const ribbonHelix = addSpecificCheckbox(
+        helixMode,
+        "helix_ribbon",
+        "Draw helix as ribbon",
+        false,
+      );
+      addSpecificNumber(helixMode, "helix_smooth", "Smoothing:", -5, 5, 0.1, "3");
+      helixPage.append(helixMode);
+
+      const cylinder = document.createElement("fieldset");
+      cylinder.className = "property-common-group renderer-specific-group";
+      const cylinderLegend = document.createElement("legend");
+      cylinderLegend.textContent = "Cylindrical helix";
+      cylinder.append(cylinderLegend);
+      const cylinderControls = [
+        addSpecificSelect(
+          cylinder,
+          "helix_width_mode",
+          "Width mode:",
+          [
+            ["const", "Constant"],
+            ["average", "Average"],
+            ["wavy", "Wavy"],
+          ],
+          "average",
+        ),
+        addSpecificNumber(cylinder, "helix_width", "Width:", 0.01, 10, 0.1, "2.3"),
+        addSpecificNumber(cylinder, "helix_extend", "Extension:", 0, 3, 0.1, "0.5"),
+        addSpecificNumber(cylinder, "helix_wsmooth", "Width smoothing:", -5, 5, 0.1, "5"),
+        addSpecificNumber(cylinder, "helix_wplus", "Width adjustment:", -2, 3, 0.1, "0.2"),
+      ];
+      helixPage.append(cylinder);
+      const ribbonSection = addSectionEditor(helixPage, "ribhelix", "Ribbon helix section");
+      const ribbonHead = addJunctionEditor(helixPage, "ribhelix_head", "Ribbon helix head");
+      const ribbonTail = addJunctionEditor(helixPage, "ribhelix_tail", "Ribbon helix tail");
+      const syncHelixMode = () => {
+        for (const control of cylinderControls) control.disabled = ribbonHelix.checked;
+        const ribbonGroups = [ribbonSection, ribbonHead, ribbonTail];
+        for (const group of ribbonGroups) {
+          for (const control of group.querySelectorAll("input, select")) {
+            control.disabled = !ribbonHelix.checked;
+          }
+        }
+        if (ribbonHelix.checked) {
+          const sectionSharp = ribbonSection.querySelector(".section-sharpness");
+          const sectionType = ribbonSection.querySelector("select");
+          sectionSharp.disabled = !["roundsquare", "fancy1"].includes(sectionType.value);
+          for (const group of [ribbonHead, ribbonTail]) {
+            const junctionDisabled = group.querySelector("select").value !== "arrow";
+            for (const control of group.querySelectorAll(".junction-parameter")) {
+              control.disabled = junctionDisabled;
+            }
+          }
+        }
+      };
+      ribbonHelix.addEventListener("change", syncHelixMode);
+      stateSyncers.push(syncHelixMode);
+
+      const sheetPage = panes[3];
+      addSectionEditor(sheetPage, "sheet", "Sheet section");
+      const sheetSpline = document.createElement("fieldset");
+      sheetSpline.className = "property-common-group renderer-specific-group compact-group";
+      const sheetSplineLegend = document.createElement("legend");
+      sheetSplineLegend.textContent = "Sheet spline";
+      sheetSpline.append(sheetSplineLegend);
+      addSpecificNumber(sheetSpline, "sheet_smooth", "Smoothing:", -5, 5, 0.1, "2");
+      addSpecificNumber(sheetSpline, "sheet_wsmooth", "Width smoothing:", -5, 5, 0.1, "5");
+      sheetPage.append(sheetSpline);
+      addJunctionEditor(sheetPage, "sheethead", "Sheet head");
+
+      const coilPage = panes[4];
+      addSectionEditor(coilPage, "coil", "Coil section");
+      const coilSpline = document.createElement("fieldset");
+      coilSpline.className = "property-common-group renderer-specific-group compact-group";
+      const coilSplineLegend = document.createElement("legend");
+      coilSplineLegend.textContent = "Coil spline";
+      coilSpline.append(coilSplineLegend);
+      addSpecificNumber(coilSpline, "coil_smooth", "Smoothing:", -5, 5, 0.1, "-1");
+      coilPage.append(coilSpline);
+    }
+    syncRibbonState = () => {
+      for (const sync of stateSyncers) sync();
+    };
+    syncRibbonState();
+  }
+
+  let syncTubeState = () => {};
+  let syncNuclState = () => {};
+  if (tubeLike || nuclLike) {
+    const tubePage = panes[nuclLike ? 2 : 1];
+    const tubeControls = [];
+    const rememberTubeControl = (control) => {
+      tubeControls.push(control);
+      return control;
+    };
+
+    const sectionGroup = document.createElement("fieldset");
+    sectionGroup.className = "property-common-group renderer-specific-group tube-section-group";
+    const sectionLegend = document.createElement("legend");
+    sectionLegend.textContent = "Section";
+    sectionGroup.append(sectionLegend);
+    const sectionType = rememberTubeControl(
+      addSpecificSelect(
+        sectionGroup,
+        "section.type",
+        "Type:",
+        [
+          ["elliptical", "Elliptical"],
+          ["roundsquare", "Rounded square"],
+          ["rectangle", "Rectangle"],
+          ["fancy1", "Fancy"],
+        ],
+        "elliptical",
+      ),
+    );
+    rememberTubeControl(
+      addSpecificNumber(sectionGroup, "section.detail", "Detail:", 2, 20, 1, "16"),
+    );
+    const sectionWidth = rememberTubeControl(
+      addSpecificNumber(sectionGroup, "section.width", "Width 1:", 0.01, 10, 0.01, "0.35"),
+    );
+    const width2 = document.createElement("input");
+    width2.type = "number";
+    width2.min = "0.01";
+    width2.max = "10";
+    width2.step = "0.01";
+    width2.value = String(
+      Number(renderer.specific?.["section.width"] ?? 0.35) *
+        Number(renderer.specific?.["section.tuber"] ?? 1),
+    );
+    propertyField(sectionGroup, "Width 2:", width2);
+    specificInputs.set("section.tuber", width2);
+    specificDefaults.set("section.tuber", "0.35");
+    specificReaders.set("section.tuber", () =>
+      String(Number(width2.value) / Math.max(Number(sectionWidth.value), Number.EPSILON)),
+    );
+    specificControls.push(width2);
+    rememberTubeControl(width2);
+    const sectionSharp = rememberTubeControl(
+      addSpecificNumber(sectionGroup, "section.sharp", "Sharpness:", 0, 1, 0.05, "0.4"),
+    );
+    tubePage.append(sectionGroup);
+
+    const splineGroup = document.createElement("fieldset");
+    splineGroup.className = "property-common-group renderer-specific-group";
+    const splineLegend = document.createElement("legend");
+    splineLegend.textContent = "Spline";
+    splineGroup.append(splineLegend);
+    rememberTubeControl(
+      addSpecificNumber(splineGroup, "axialdetail", "Axial detail:", 2, 20, 1, "6"),
+    );
+    rememberTubeControl(
+      addSpecificNumber(splineGroup, "smooth", "Smoothing:", 0, 0.5, 0.05, "0"),
+    );
+    rememberTubeControl(addSpecificCheckbox(splineGroup, "smoothcolor", "Smooth color", true));
+    rememberTubeControl(
+      addSpecificCheckbox(splineGroup, "segend_fade", "Fade at segment ends", false),
+    );
+    const capType = rememberTubeControl(
+      addSpecificSelect(
+        splineGroup,
+        "start_captype",
+        "Cap type:",
+        [
+          ["flat", "Flat"],
+          ["sphere", "Sphere"],
+          ["none", "None"],
+        ],
+        "sphere",
+      ),
+    );
+    specificInputs.set("end_captype", capType);
+    specificDefaults.set("end_captype", "sphere");
+    tubePage.append(splineGroup);
+
+    const pivotGroup = document.createElement("fieldset");
+    pivotGroup.className = "property-common-group renderer-specific-group pivot-atom-group";
+    const pivotLegend = document.createElement("legend");
+    pivotLegend.textContent = "Pivot atom";
+    pivotGroup.append(pivotLegend);
+    const pivotName = document.createElement("input");
+    pivotName.value = renderer.specific?.pivotatom ?? "";
+    pivotName.spellcheck = false;
+    propertyField(pivotGroup, "Atom name:", pivotName);
+    const pivotEnabled = propertyCheckbox(
+      pivotGroup,
+      "Use a custom pivot atom",
+      pivotName.value.trim() !== "",
+    );
+    specificInputs.set("pivotatom", pivotName);
+    specificDefaults.set("pivotatom", "");
+    specificReaders.set("pivotatom", () => (pivotEnabled.checked ? pivotName.value.trim() : ""));
+    specificResetters.push(() => {
+      pivotEnabled.checked = false;
+    });
+    specificControls.push(pivotEnabled, pivotName);
+    rememberTubeControl(pivotEnabled);
+    rememberTubeControl(pivotName);
+    tubePage.append(pivotGroup);
+
+    const puttyGroup = document.createElement("fieldset");
+    puttyGroup.className = "property-common-group renderer-specific-group";
+    const puttyLegend = document.createElement("legend");
+    puttyLegend.textContent = "Putty";
+    puttyGroup.append(puttyLegend);
+    const puttyMode = rememberTubeControl(
+      addSpecificSelect(
+        puttyGroup,
+        "putty_mode",
+        "Mode:",
+        [
+          ["none", "None"],
+          ["linear1", "Linear"],
+          ["scale1", "Scaled"],
+        ],
+        "none",
+      ),
+    );
+    const puttyTarget = rememberTubeControl(
+      addSpecificSelect(
+        puttyGroup,
+        "putty_tgt",
+        "Target:",
+        [
+          ["bfac", "B-factor"],
+          ["occ", "Occupancy"],
+        ],
+        "bfac",
+      ),
+    );
+    const puttyLow = rememberTubeControl(
+      addSpecificNumber(puttyGroup, "putty_loscl", "Low scale:", 0.01, 10, 0.1, "3"),
+    );
+    const puttyHigh = rememberTubeControl(
+      addSpecificNumber(puttyGroup, "putty_hiscl", "High scale:", 0.01, 10, 0.1, "3"),
+    );
+    tubePage.append(puttyGroup);
+
+    let showTube = null;
+    if (nuclLike) {
+      const nuclPage = panes[1];
+      const displayGroup = document.createElement("fieldset");
+      displayGroup.className = "property-common-group renderer-specific-group";
+      const displayLegend = document.createElement("legend");
+      displayLegend.textContent = "Nucleic acid";
+      displayGroup.append(displayLegend);
+      showTube = addSpecificCheckbox(displayGroup, "show_tube", "Show tube", true);
+      const showBasePair = addSpecificCheckbox(
+        displayGroup,
+        "show_basepair",
+        "Connect base pair",
+        true,
+      );
+      nuclPage.append(displayGroup);
+
+      const baseGroup = document.createElement("fieldset");
+      baseGroup.className = "property-common-group renderer-specific-group";
+      const baseLegend = document.createElement("legend");
+      baseLegend.textContent = "Base";
+      baseGroup.append(baseLegend);
+      const baseType = addSpecificSelect(
+        baseGroup,
+        "base_type",
+        "Type:",
+        [
+          ["basepair", "Base pair"],
+          ["simple1", "Simple"],
+          ["detail1", "Detailed 1"],
+          ["detail2", "Detailed 2"],
+        ],
+        "basepair",
+      );
+      const baseDetail = addSpecificNumber(baseGroup, "base_detail", "Detail:", 2, 20, 1, "3");
+      const baseSize = addSpecificNumber(baseGroup, "base_size", "Size:", 0, 10, 0.05, "0.5");
+      const baseThickness = document.createElement("input");
+      baseThickness.type = "number";
+      baseThickness.min = "0";
+      baseThickness.max = "100";
+      baseThickness.step = "5";
+      const currentBaseSize = Math.max(Number(renderer.specific?.base_size ?? 0.5), Number.EPSILON);
+      baseThickness.value = String(
+        (Number(renderer.specific?.base_thick ?? 0.5) * 100) / currentBaseSize,
+      );
+      propertyField(baseGroup, "Thickness (%):", baseThickness);
+      specificInputs.set("base_thick", baseThickness);
+      specificDefaults.set("base_thick", "100");
+      specificReaders.set("base_thick", () =>
+        String((Number(baseThickness.value) * Number(baseSize.value)) / 100),
+      );
+      specificControls.push(baseThickness);
+      nuclPage.append(baseGroup);
+      const baseControls = [baseType, baseDetail, baseSize, baseThickness];
+      syncNuclState = () => {
+        for (const control of baseControls) control.disabled = !showBasePair.checked;
+      };
+      showBasePair.addEventListener("change", syncNuclState);
+    }
+
+    syncTubeState = () => {
+      const pageDisabled = showTube ? !showTube.checked : false;
+      for (const control of tubeControls) control.disabled = pageDisabled;
+      if (pageDisabled) return;
+      sectionSharp.disabled = !["roundsquare", "fancy1"].includes(sectionType.value);
+      pivotName.disabled = !pivotEnabled.checked;
+      const puttyDisabled = puttyMode.value === "none";
+      puttyTarget.disabled = puttyDisabled;
+      puttyLow.disabled = puttyDisabled;
+      puttyHigh.disabled = puttyDisabled;
+    };
+    for (const control of [sectionType, pivotEnabled, puttyMode, showTube].filter(Boolean)) {
+      control.addEventListener("change", syncTubeState);
+    }
+    syncTubeState();
+    syncNuclState();
+  }
+
+  let dirty = false;
+  let apply;
+  const markDirty = () => {
+    dirty = true;
+    apply.disabled = false;
+  };
+  for (const control of [
+    name,
+    selection,
+    visible,
+    locked,
+    material,
+    alpha,
+    edgeType,
+    edgeWidth,
+    edgeColor,
+    edgeColorPicker,
+    ...specificControls,
+  ]) {
+    control.addEventListener("input", markDirty);
+    control.addEventListener("change", markDirty);
+  }
+  const reset = button("Reset all to default", "dialog-reset", () => {
+    selection.value = densityMap ? "(not available)" : "*";
+    visible.checked = true;
+    locked.checked = false;
+    material.value = "";
+    alpha.value = "1";
+    edgeType.value = "none";
+    edgeWidth.value = "0.01";
+    edgeColor.value = "#000000";
+    edgeColorPicker.value = "#000000";
+    if (lineWidth) lineWidth.value = "1.2";
+    if (detail) detail.value = "3";
+    if (bondWidth) bondWidth.value = "0.2";
+    if (sphereRadius) sphereRadius.value = "0.3";
+    if (showRing) showRing.checked = false;
+    if (ringThickness) ringThickness.value = "0.2";
+    if (ringColor) ringColor.value = "#ffffbf";
+    if (ringColorPicker) ringColorPicker.value = "#ffffbf";
+    for (const [key, control] of specificInputs) {
+      const fallback = specificDefaults.get(key);
+      if (control.type === "checkbox") control.checked = fallback === "true";
+      else control.value = fallback;
+    }
+    for (const resetSpecific of specificResetters) resetSpecific();
+    if (disorderColorPicker) disorderColorPicker.value = "#ffffff";
+    syncEdgeState();
+    if (showRing) showRing.dispatchEvent(new Event("change"));
+    syncDensityMapState();
+    syncSurfaceState();
+    syncRibbonState();
+    syncTubeState();
+    syncNuclState();
+    markDirty();
+  });
+  const submit = async (closeAfter) => {
+    if (!dirty) {
+      if (closeAfter) referenceDialog.close();
+      return;
+    }
+    const changed = await mutate(
+      densityMap
+        ? "set_density_renderer_properties"
+        : surfaceObject
+          ? "set_surface_renderer_properties"
+          : "set_renderer_properties",
+      {
+        properties: {
+          objectUid: object.uid,
+          rendererUid: renderer.uid,
+          name: name.value,
+          selection: densityMap ? "" : selection.value,
+          visible: visible.checked,
+          locked: locked.checked,
+          material: material.value,
+          alpha: Number(alpha.value),
+          edgeType: edgeType.value,
+          edgeWidth: Number(edgeWidth.value),
+          edgeColor: edgeColor.value,
+          lineWidth: lineWidth ? Number(lineWidth.value) : renderer.lineWidth,
+          detail: detail ? Number(detail.value) : renderer.detail,
+          bondWidth: bondWidth ? Number(bondWidth.value) : renderer.bondWidth,
+          sphereRadius: sphereRadius ? Number(sphereRadius.value) : renderer.sphereRadius,
+          showRing: showRing ? showRing.checked : renderer.showRing,
+          ringThickness: ringThickness ? Number(ringThickness.value) : renderer.ringThickness,
+          ringColor: ringColor ? ringColor.value : renderer.ringColor,
+          specific: Object.fromEntries(
+            [...specificInputs].map(([key, control]) => [
+              key,
+              specificReaders.has(key)
+                ? specificReaders.get(key)()
+                : control.type === "checkbox"
+                  ? String(control.checked)
+                  : control.value,
+            ]),
+          ),
+        },
+      },
+    );
+    if (!changed) return;
+    dirty = false;
+    apply.disabled = true;
+    if (closeAfter) referenceDialog.close();
+  };
+  const cancel = button("Cancel", "", () => referenceDialog.close());
+  apply = button("Apply", "", () => submit(false));
+  apply.disabled = true;
+  const ok = button("OK", "dialog-primary", () => submit(true));
+  dialogContent.append(editor);
+  dialogActions(reset, cancel, apply, ok);
+}
+
 async function chooseOutputPath(defaultPath, name, extensions) {
   if (!dialog?.save) {
     showError("The Tauri dialog plugin is unavailable.");
@@ -221,41 +2754,184 @@ async function chooseOutputPath(defaultPath, name, extensions) {
   });
 }
 
-function showReferenceDialog(title) {
+async function showReferenceDialog(title) {
   dialogTitle.textContent = title;
   dialogContent.replaceChildren();
   dialogFooter.hidden = false;
   referenceDialog.classList.remove("has-actions");
-  if (title === "About CueMol2") {
+  const usesApplicationInfo = [
+    "About plugins",
+    "About config",
+    "Addon manager",
+    "About CueMol2",
+  ].includes(title);
+  const usesViewProperties = title === "View Property";
+  const usesGenericProperties = usesViewProperties || title === "Scene Properties";
+  const usesPreferences = title === "Options";
+  const usesWorkspaceProperties = ["Object Properties", "Renderer Properties"].includes(title);
+  referenceDialog.classList.toggle("property-editor", usesGenericProperties);
+  referenceDialog.classList.toggle("options-dialog", usesPreferences);
+  referenceDialog.classList.toggle("workspace-property-dialog", usesWorkspaceProperties);
+  referenceDialog.classList.toggle(
+    "wide",
+    usesGenericProperties ||
+      usesPreferences ||
+      (usesApplicationInfo && title !== "About CueMol2"),
+  );
+  let applicationInfo = null;
+  let viewProperties = null;
+  let optionPreferences = null;
+  if (usesApplicationInfo) {
+    try {
+      applicationInfo = await getApplicationInfo();
+    } catch (error) {
+      showError(error);
+    }
+  }
+  if (usesViewProperties) {
+    try {
+      viewProperties = await invoke("get_view_properties");
+    } catch (error) {
+      showError(error);
+    }
+  }
+  if (usesPreferences) {
+    try {
+      optionPreferences = await invoke("get_preferences");
+      preferences = optionPreferences;
+    } catch (error) {
+      showError(error);
+    }
+  }
+  if (title === "About plugins") {
+    const heading = document.createElement("h2");
+    heading.textContent = "Registered I/O plugins";
+    if (!applicationInfo) {
+      dialogContent.append(heading, dialogParagraph("Plugin information is unavailable."));
+    } else {
+      const catalog = pluginCatalog(applicationInfo);
+      dialogContent.append(
+        heading,
+        dialogParagraph(
+          `${applicationInfo.plugins.length} readers, writers, and exporters are registered.`,
+        ),
+        ...catalog,
+      );
+    }
+  } else if (title === "About config") {
+    const heading = document.createElement("h2");
+    heading.textContent = "Application preferences";
+    if (!applicationInfo) {
+      dialogContent.append(heading, dialogParagraph("Configuration is unavailable."));
+    } else {
+      const browser = configBrowser(applicationInfo);
+      dialogContent.append(
+        heading,
+        dialogParagraph("Edit the active SysConfig values. Changes apply immediately."),
+        ...browser,
+      );
+    }
+  } else if (title === "Addon manager") {
+    const heading = document.createElement("h2");
+    heading.textContent = "Built-in components";
+    dialogContent.append(heading);
+    if (!applicationInfo) {
+      dialogContent.append(dialogParagraph("Component information is unavailable."));
+    } else {
+      dialogContent.append(
+        applicationDefinitionList([
+          ["Runtime", applicationInfo.target],
+          ["Components", applicationInfo.features.length],
+          ["I/O plugins", applicationInfo.plugins.length],
+          ["Installation", "Built-in; no external addons installed"],
+        ]),
+      );
+      const features = document.createElement("div");
+      features.className = "addon-components";
+      for (const feature of applicationInfo.features) {
+        const row = document.createElement("article");
+        const state = document.createElement("span");
+        state.className = "addon-state";
+        state.textContent = "Enabled";
+        const name = document.createElement("strong");
+        name.textContent = feature;
+        const source = document.createElement("small");
+        source.textContent = "Bundled with CueMol2";
+        row.append(name, source, state);
+        features.append(row);
+      }
+      dialogContent.append(features);
+    }
+  } else if (title === "About CueMol2") {
     const heading = document.createElement("h2");
     heading.textContent = "CueMol2";
     dialogContent.append(
       heading,
       dialogParagraph("Molecular visualization system — Rust desktop implementation."),
     );
+    if (applicationInfo) {
+      dialogContent.append(
+        applicationDefinitionList([
+          ["Version", applicationInfo.version],
+          ["Target", applicationInfo.target],
+          ["Frontend", "Tauri"],
+          ["Renderer", "wgpu"],
+        ]),
+      );
+    }
+  } else if (title === "Options") {
+    if (optionPreferences) {
+      optionsEditor(optionPreferences);
+    } else {
+      dialogContent.append(dialogParagraph("Options are unavailable."));
+    }
+  } else if (title === "Object Properties") {
+    dialogTitle.textContent = "Object properties";
+    const object =
+      workspaceSelectionKind === "densityMap"
+        ? selectedDensityMap()
+        : workspaceSelectionKind === "surface"
+          ? selectedSurface()
+          : selectedObject();
+    if (object) {
+      objectPropertiesEditor(object);
+    } else {
+      dialogContent.append(dialogParagraph("Select an object first."));
+    }
+  } else if (title === "Renderer Properties") {
+    dialogTitle.textContent = "Renderer properties";
+    const densityRenderer = workspaceSelectionKind === "densityRenderer";
+    const surfaceRenderer = workspaceSelectionKind === "surfaceRenderer";
+    const object = densityRenderer
+      ? selectedDensityMap()
+      : surfaceRenderer
+        ? selectedSurface()
+        : selectedObject();
+    const renderer = densityRenderer
+      ? selectedDensityRenderer()
+      : surfaceRenderer
+        ? selectedSurfaceRenderer()
+        : selectedRenderer();
+    if (object && renderer) {
+      rendererPropertiesEditor(object, renderer);
+    } else {
+      dialogContent.append(dialogParagraph("Select a renderer first."));
+    }
   } else if (title === "Scene Properties") {
     const scene = snapshot?.scenes.find((item) => item.active);
-    const properties = document.createElement("dl");
-    properties.className = "dialog-properties";
-    for (const [term, value] of [
-      ["Name", scene?.name || "(none)"],
-      ["UID", scene?.uid ?? "—"],
-      ["Objects", scene?.objectCount ?? 0],
-      ["Maps", scene?.mapCount ?? 0],
-    ]) {
-      const dt = document.createElement("dt");
-      dt.textContent = term;
-      const dd = document.createElement("dd");
-      dd.textContent = String(value);
-      properties.append(dt, dd);
+    dialogTitle.textContent = "Object properties";
+    if (scene) {
+      scenePropertyEditor(scene);
+    } else {
+      dialogContent.append(dialogParagraph("No active scene is available."));
     }
-    dialogContent.append(properties);
   } else if (title === "View Property") {
-    dialogContent.append(
-      dialogParagraph(`Projection: ${snapshot?.perspective ? "Perspective" : "Orthographic"}`),
-      dialogParagraph(`Background: ${snapshot?.background || "black"}`),
-      dialogParagraph(`Center mark: ${centerMark}`),
-    );
+    dialogTitle.textContent = "Object properties";
+    if (viewProperties) {
+      viewPropertyEditor(viewProperties);
+    } else {
+      dialogContent.append(dialogParagraph("View properties are unavailable."));
+    }
   } else if (title === "Molecular superposition") {
     const objects = activeObjects();
     if (objects.length < 2) {
@@ -617,17 +3293,21 @@ function showReferenceDialog(title) {
     const savePov = button("Save POV scene…", "", async () => {
       const path = await chooseOutputPath("cuemol.pov", "POV-Ray scene", ["pov"]);
       if (!path) return;
-      await mutate("export_pov", { path });
+      await mutateWithoutViewport("export_pov", { path }, renderStatusAndLog);
       referenceDialog.close();
     });
     const saveImage = button("Save image…", "dialog-primary", async () => {
       const path = await chooseOutputPath("cuemol.png", "PNG image", ["png"]);
       if (!path) return;
-      await mutate("export_png", {
-        path,
-        width: Number(width.value),
-        height: Number(height.value),
-      });
+      await mutateWithoutViewport(
+        "export_png",
+        {
+          path,
+          width: Number(width.value),
+          height: Number(height.value),
+        },
+        renderStatusAndLog,
+      );
       referenceDialog.close();
     });
     dialogActions(savePov, saveImage);
@@ -663,13 +3343,17 @@ function showReferenceDialog(title) {
       if (path) outputDir.value = path;
     });
     const start = button("Start", "dialog-primary", async () => {
-      await mutate("render_animation", {
-        outputDir: outputDir.value,
-        baseName: baseName.value,
-        width: Number(width.value),
-        height: Number(height.value),
-        frameRate: Number(frameRate.value),
-      });
+      await mutateWithoutViewport(
+        "render_animation",
+        {
+          outputDir: outputDir.value,
+          baseName: baseName.value,
+          width: Number(width.value),
+          height: Number(height.value),
+          frameRate: Number(frameRate.value),
+        },
+        renderStatusAndLog,
+      );
       showBottomPanel("output");
       referenceDialog.close();
     });
@@ -703,7 +3387,11 @@ function showReferenceDialog(title) {
           ],
         });
         if (!path) return;
-        await mutate("save_object", { objectUid: object.uid, path });
+        await mutateWithoutViewport(
+          "save_object",
+          { objectUid: object.uid, path },
+          renderStatusAndLog,
+        );
         referenceDialog.close();
       });
       dialogActions(save);
@@ -712,7 +3400,7 @@ function showReferenceDialog(title) {
     const save = button("Save…", "dialog-primary", async () => {
       const path = await chooseOutputPath("current.view", "CueMol view", ["view", "cam"]);
       if (!path) return;
-      await mutate("save_view", { path });
+      await mutateWithoutViewport("save_view", { path }, renderStatusAndLog);
       referenceDialog.close();
     });
     dialogActions(save);
@@ -951,6 +3639,9 @@ function applyCenterMark(value) {
   centerMark = value;
   centerMarkElement.classList.toggle("axis", value === "axis");
   centerMarkElement.classList.toggle("none", value === "none");
+  document.querySelectorAll("[data-center-mark]").forEach((item) => {
+    item.classList.toggle("checked", item.dataset.centerMark === value);
+  });
 }
 
 function restoreDefaultPanels() {
@@ -986,10 +3677,17 @@ async function handleLocalAction(action) {
       });
       break;
     }
-    case "reload-scene":
-      if (lastOpenedPaths.length) await mutate("open_paths", { paths: lastOpenedPaths });
-      else showError("No loaded path to reload.");
+    case "reload-scene": {
+      const scene = snapshot?.scenes.find((item) => item.active);
+      if (
+        scene?.modified &&
+        !window.confirm(`Do you want to reload the scene: ${scene.name || ""}?`)
+      ) {
+        break;
+      }
+      await mutate("reload_scene");
       break;
+    }
     case "color-proof":
       if (snapshot) {
         await mutate("set_display_option", {
@@ -1008,7 +3706,7 @@ async function handleLocalAction(action) {
       scheduleRender(140);
       break;
     case "clear-log":
-      await mutate("clear_log");
+      await mutateWithoutViewport("clear_log", {}, renderStatusAndLog);
       break;
     case "restore-panels":
       restoreDefaultPanels();
@@ -1036,14 +3734,132 @@ function activeObjects() {
   return snapshot.objects.filter((object) => object.sceneUid === snapshot.activeSceneUid);
 }
 
+function activeSurfaces() {
+  if (!snapshot) return [];
+  return (snapshot.surfaces || []).filter(
+    (surface) => surface.sceneUid === snapshot.activeSceneUid,
+  );
+}
+
 function selectedObject() {
   return activeObjects().find((object) => object.uid === selectedObjectUid) || null;
 }
 
+function selectedRenderer() {
+  return selectedObject()?.renderers.find((renderer) => renderer.uid === selectedRendererUid) || null;
+}
+
+function selectedDensityMap() {
+  return snapshot?.densityMaps.find((map) => map.uid === selectedDensityMapUid) || null;
+}
+
+function selectedDensityRenderer() {
+  return (
+    selectedDensityMap()?.renderers.find(
+      (renderer) => renderer.uid === selectedDensityRendererUid,
+    ) || null
+  );
+}
+
+function selectedSurface() {
+  return activeSurfaces().find((surface) => surface.uid === selectedSurfaceUid) || null;
+}
+
+function selectedSurfaceRenderer() {
+  return (
+    selectedSurface()?.renderers.find(
+      (renderer) => renderer.uid === selectedSurfaceRendererUid,
+    ) || null
+  );
+}
+
+function selectedWorkspaceTarget() {
+  if (workspaceSelectionKind === "object") {
+    const object = selectedObject();
+    return object ? { kind: "object", objectUid: object.uid, rendererUid: null } : null;
+  }
+  if (workspaceSelectionKind === "renderer") {
+    const object = selectedObject();
+    const renderer = selectedRenderer();
+    return object && renderer
+      ? { kind: "renderer", objectUid: object.uid, rendererUid: renderer.uid }
+      : null;
+  }
+  if (workspaceSelectionKind === "densityMap") {
+    const map = selectedDensityMap();
+    return map ? { kind: "densityMap", objectUid: map.uid, rendererUid: null } : null;
+  }
+  if (workspaceSelectionKind === "densityRenderer") {
+    const map = selectedDensityMap();
+    const renderer = selectedDensityRenderer();
+    return map && renderer
+      ? { kind: "densityRenderer", objectUid: map.uid, rendererUid: renderer.uid }
+      : null;
+  }
+  if (workspaceSelectionKind === "surface") {
+    const surface = selectedSurface();
+    return surface ? { kind: "surface", objectUid: surface.uid, rendererUid: null } : null;
+  }
+  if (workspaceSelectionKind === "surfaceRenderer") {
+    const surface = selectedSurface();
+    const renderer = selectedSurfaceRenderer();
+    return surface && renderer
+      ? { kind: "surfaceRenderer", objectUid: surface.uid, rendererUid: renderer.uid }
+      : null;
+  }
+  return null;
+}
+
 function normalizeSelection() {
+  if (["densityMap", "densityRenderer"].includes(workspaceSelectionKind)) {
+    if (!selectedDensityMap()) {
+      selectedDensityMapUid = null;
+      selectedDensityRendererUid = null;
+      workspaceSelectionKind = snapshot.objects.length > 0 ? "object" : "scene";
+    } else if (workspaceSelectionKind === "densityRenderer" && !selectedDensityRenderer()) {
+      selectedDensityRendererUid = null;
+      workspaceSelectionKind = "densityMap";
+    }
+  }
+  if (["surface", "surfaceRenderer"].includes(workspaceSelectionKind)) {
+    if (!selectedSurface()) {
+      selectedSurfaceUid = null;
+      selectedSurfaceRendererUid = null;
+      workspaceSelectionKind = snapshot.objects.length > 0 ? "object" : "scene";
+    } else if (workspaceSelectionKind === "surfaceRenderer" && !selectedSurfaceRenderer()) {
+      selectedSurfaceRendererUid = null;
+      workspaceSelectionKind = "surface";
+    }
+  }
   const objects = activeObjects();
   if (!objects.some((object) => object.uid === selectedObjectUid)) {
     selectedObjectUid = objects[0]?.uid ?? null;
+    selectedRendererUid = null;
+    if (
+      !["scene", "densityMap", "densityRenderer", "surface", "surfaceRenderer"].includes(
+        workspaceSelectionKind,
+      )
+    ) {
+      const surface = activeSurfaces()[0];
+      const map = snapshot.densityMaps.find(
+        (candidate) => candidate.sceneUid === snapshot.activeSceneUid,
+      );
+      if (objects.length > 0) {
+        workspaceSelectionKind = "object";
+      } else if (surface) {
+        selectedSurfaceUid = surface.uid;
+        workspaceSelectionKind = "surface";
+      } else if (map) {
+        selectedDensityMapUid = map.uid;
+        workspaceSelectionKind = "densityMap";
+      } else {
+        workspaceSelectionKind = "scene";
+      }
+    }
+  }
+  if (selectedRendererUid !== null && !selectedRenderer()) {
+    selectedRendererUid = null;
+    if (workspaceSelectionKind === "renderer") workspaceSelectionKind = "object";
   }
 }
 
@@ -1061,6 +3877,9 @@ function renderSceneTabs() {
 function renderSceneTree() {
   sceneTree.replaceChildren();
   if (snapshot.scenes.length === 0) {
+    workspaceProperties.disabled = true;
+    workspaceDelete.disabled = true;
+    workspaceZoom.disabled = true;
     const empty = document.createElement("div");
     empty.className = "tree-empty";
     empty.textContent = "No scenes";
@@ -1068,77 +3887,344 @@ function renderSceneTree() {
     return;
   }
   for (const scene of snapshot.scenes) {
-    const sceneRow = document.createElement("div");
-    sceneRow.className = "tree-scene";
-    sceneRow.textContent = scene.name || `Scene ${scene.uid}`;
+    const sceneRow = button(
+      scene.name || `Scene ${scene.uid}`,
+      `tree-scene${workspaceSelectionKind === "scene" && scene.active ? " active" : ""}`,
+      async () => {
+        workspaceSelectionKind = "scene";
+        selectedRendererUid = null;
+        selectedDensityMapUid = null;
+        selectedDensityRendererUid = null;
+        selectedSurfaceUid = null;
+        selectedSurfaceRendererUid = null;
+        if (!scene.active) {
+          await mutate("activate_scene", { sceneUid: scene.uid });
+        } else {
+          renderShell();
+        }
+      },
+    );
+    sceneRow.addEventListener("dblclick", () => showReferenceDialog("Scene Properties"));
     sceneTree.append(sceneRow);
     for (const object of snapshot.objects.filter((item) => item.sceneUid === scene.uid)) {
-      const objectRow = button(object.name, `tree-object${object.uid === selectedObjectUid ? " active" : ""}`, () => {
-        selectedObjectUid = object.uid;
-        renderShell();
-      });
+      const objectRow = button(
+        object.name,
+        `tree-object${
+          workspaceSelectionKind === "object" && object.uid === selectedObjectUid ? " active" : ""
+        }${object.visible ? "" : " hidden"}`,
+        () => {
+          selectedObjectUid = object.uid;
+          selectedRendererUid = null;
+          selectedDensityMapUid = null;
+          selectedDensityRendererUid = null;
+          selectedSurfaceUid = null;
+          selectedSurfaceRendererUid = null;
+          workspaceSelectionKind = "object";
+          renderShell();
+        },
+      );
+      objectRow.addEventListener("dblclick", () => showReferenceDialog("Object Properties"));
       const count = document.createElement("small");
       count.textContent = `${object.atomCount} AT`;
       objectRow.append(count);
       sceneTree.append(objectRow);
       for (const renderer of object.renderers) {
-        const rendererRow = document.createElement("div");
-        rendererRow.className = "tree-renderer";
-        rendererRow.textContent = `${renderer.rendererType} · ${renderer.name}`;
+        const rendererRow = button(
+          `${renderer.rendererType} · ${renderer.name}`,
+          `tree-renderer${
+            workspaceSelectionKind === "renderer" && renderer.uid === selectedRendererUid
+              ? " active"
+              : ""
+          }${renderer.visible ? "" : " hidden"}`,
+          () => {
+            selectedObjectUid = object.uid;
+            selectedRendererUid = renderer.uid;
+            selectedDensityMapUid = null;
+            selectedDensityRendererUid = null;
+            selectedSurfaceUid = null;
+            selectedSurfaceRendererUid = null;
+            workspaceSelectionKind = "renderer";
+            renderShell();
+          },
+        );
+        rendererRow.addEventListener("dblclick", () =>
+          showReferenceDialog("Renderer Properties"),
+        );
+        sceneTree.append(rendererRow);
+      }
+    }
+    for (const surface of (snapshot.surfaces || []).filter(
+      (item) => item.sceneUid === scene.uid,
+    )) {
+      const surfaceRow = button(
+        surface.name,
+        `tree-object surface-object${
+          workspaceSelectionKind === "surface" && surface.uid === selectedSurfaceUid
+            ? " active"
+            : ""
+        }${surface.visible ? "" : " hidden"}`,
+        () => {
+          selectedObjectUid = null;
+          selectedRendererUid = null;
+          selectedDensityMapUid = null;
+          selectedDensityRendererUid = null;
+          selectedSurfaceUid = surface.uid;
+          selectedSurfaceRendererUid = null;
+          workspaceSelectionKind = "surface";
+          renderShell();
+        },
+      );
+      surfaceRow.addEventListener("dblclick", () => showReferenceDialog("Object Properties"));
+      const count = document.createElement("small");
+      count.textContent = "SURF";
+      surfaceRow.append(count);
+      sceneTree.append(surfaceRow);
+      for (const renderer of surface.renderers) {
+        const rendererRow = button(
+          `${renderer.rendererType} · ${renderer.name}`,
+          `tree-renderer surface-renderer${
+            workspaceSelectionKind === "surfaceRenderer" &&
+            renderer.uid === selectedSurfaceRendererUid
+              ? " active"
+              : ""
+          }${renderer.visible ? "" : " hidden"}`,
+          () => {
+            selectedObjectUid = null;
+            selectedRendererUid = null;
+            selectedDensityMapUid = null;
+            selectedDensityRendererUid = null;
+            selectedSurfaceUid = surface.uid;
+            selectedSurfaceRendererUid = renderer.uid;
+            workspaceSelectionKind = "surfaceRenderer";
+            renderShell();
+          },
+        );
+        rendererRow.addEventListener("dblclick", () =>
+          showReferenceDialog("Renderer Properties"),
+        );
+        sceneTree.append(rendererRow);
+      }
+    }
+    for (const map of snapshot.densityMaps.filter((item) => item.sceneUid === scene.uid)) {
+      const mapRow = button(
+        map.name,
+        `tree-object density-map${
+          workspaceSelectionKind === "densityMap" && map.uid === selectedDensityMapUid
+            ? " active"
+            : ""
+        }${map.visible ? "" : " hidden"}`,
+        () => {
+          selectedObjectUid = null;
+          selectedRendererUid = null;
+          selectedDensityMapUid = map.uid;
+          selectedDensityRendererUid = null;
+          selectedSurfaceUid = null;
+          selectedSurfaceRendererUid = null;
+          workspaceSelectionKind = "densityMap";
+          renderShell();
+        },
+      );
+      mapRow.addEventListener("dblclick", () => showReferenceDialog("Object Properties"));
+      const count = document.createElement("small");
+      count.textContent = `${map.counts.join("×")} MAP`;
+      mapRow.append(count);
+      sceneTree.append(mapRow);
+      for (const renderer of map.renderers) {
+        const rendererRow = button(
+          `${renderer.rendererType} · ${renderer.name}`,
+          `tree-renderer density-renderer${
+            workspaceSelectionKind === "densityRenderer" &&
+            renderer.uid === selectedDensityRendererUid
+              ? " active"
+              : ""
+          }${renderer.visible ? "" : " hidden"}`,
+          () => {
+            selectedObjectUid = null;
+            selectedRendererUid = null;
+            selectedDensityMapUid = map.uid;
+            selectedDensityRendererUid = renderer.uid;
+            selectedSurfaceUid = null;
+            selectedSurfaceRendererUid = null;
+            workspaceSelectionKind = "densityRenderer";
+            renderShell();
+          },
+        );
+        rendererRow.addEventListener("dblclick", () =>
+          showReferenceDialog("Renderer Properties"),
+        );
         sceneTree.append(rendererRow);
       }
     }
   }
+  workspaceProperties.disabled =
+    workspaceSelectionKind === "renderer"
+      ? !selectedRenderer()
+      : workspaceSelectionKind === "densityRenderer"
+        ? !selectedDensityRenderer()
+        : workspaceSelectionKind === "surfaceRenderer"
+          ? !selectedSurfaceRenderer()
+        : workspaceSelectionKind === "densityMap"
+          ? !selectedDensityMap()
+          : workspaceSelectionKind === "surface"
+            ? !selectedSurface()
+          : workspaceSelectionKind === "object"
+            ? !selectedObject()
+            : !snapshot.scenes.some((scene) => scene.active);
+  workspaceDelete.disabled =
+    workspaceSelectionKind === "renderer"
+      ? !selectedRenderer()
+      : workspaceSelectionKind === "densityRenderer"
+        ? !selectedDensityRenderer()
+        : workspaceSelectionKind === "surfaceRenderer"
+          ? !selectedSurfaceRenderer()
+          : workspaceSelectionKind === "densityMap"
+            ? !selectedDensityMap()
+            : workspaceSelectionKind === "surface"
+              ? !selectedSurface()
+              : workspaceSelectionKind === "object"
+                ? !selectedObject()
+                : true;
+  workspaceZoom.disabled = workspaceDelete.disabled;
 }
 
 function renderInspector() {
-  const object = selectedObject();
-  inspectorTitle.textContent = object?.name || "No object";
+  const map = ["densityMap", "densityRenderer"].includes(workspaceSelectionKind)
+    ? selectedDensityMap()
+    : null;
+  const surface = ["surface", "surfaceRenderer"].includes(workspaceSelectionKind)
+    ? selectedSurface()
+    : null;
+  const object =
+    !map && !surface && ["object", "renderer"].includes(workspaceSelectionKind)
+      ? selectedObject()
+      : null;
+  inspectorTitle.textContent = object?.name || map?.name || surface?.name || "No object";
+  const labels = map
+    ? ["Columns", "Rows", "Sections"]
+    : surface
+      ? ["Type", "Format", "Renderers"]
+      : ["Atoms", "Residues", "Bonds"];
   const values = object
     ? [object.atomCount, object.residueCount, object.bondCount]
-    : ["—", "—", "—"];
+    : map
+      ? map.counts
+      : surface
+        ? [surface.className, surface.format || "—", surface.renderers.length]
+        : ["—", "—", "—"];
+  objectStats.querySelectorAll("dt").forEach((node, index) => {
+    node.textContent = labels[index];
+  });
   objectStats.querySelectorAll("dd").forEach((node, index) => {
     node.textContent = String(values[index]);
   });
+  const rendererChoices = map
+    ? [
+        ["contour", "Contour"],
+        ["isosurf", "Isosurface"],
+        ["gpu_mapvol", "Volume"],
+      ]
+    : surface
+      ? [["molsurf", "Molecular surface"]]
+      : [
+        ["simple", "Simple"],
+        ["ballstick", "Ball & stick"],
+        ["cpk", "CPK"],
+        ["ribbon", "Ribbon"],
+        ["cartoon", "Cartoon"],
+        ["trace", "Trace"],
+        ["tube", "Tube"],
+        ["spline", "Spline"],
+      ];
+  rendererType.replaceChildren();
+  for (const [value, label] of rendererChoices) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    rendererType.append(option);
+  }
   rendererList.replaceChildren();
-  if (!object) {
+  if (!object && !map && !surface) {
     const empty = document.createElement("div");
     empty.className = "renderer-empty";
-    empty.textContent = "Select a molecular object.";
+    empty.textContent = "Select an object.";
     rendererList.append(empty);
     return;
   }
-  if (object.renderers.length === 0) {
+  const renderers = object?.renderers || map?.renderers || surface.renderers;
+  if (renderers.length === 0) {
     const empty = document.createElement("div");
     empty.className = "renderer-empty";
     empty.textContent = "No render representations.";
     rendererList.append(empty);
   }
-  for (const renderer of object.renderers) {
-    const row = document.createElement("label");
-    row.className = "renderer-row";
+  for (const renderer of renderers) {
+    const row = document.createElement("div");
+    const selectedUid = map
+      ? selectedDensityRendererUid
+      : surface
+        ? selectedSurfaceRendererUid
+        : selectedRendererUid;
+    row.className = `renderer-row${renderer.uid === selectedUid ? " selected" : ""}`;
+    row.tabIndex = 0;
     const visible = document.createElement("input");
     visible.type = "checkbox";
     visible.checked = renderer.visible;
-    visible.addEventListener("change", () =>
-      mutate("set_renderer_visible", {
-        objectUid: object.uid,
-        rendererUid: renderer.uid,
-        visible: visible.checked,
-      }),
-    );
+    visible.disabled = renderer.locked;
+    visible.addEventListener("click", (event) => event.stopPropagation());
+    visible.addEventListener("change", () => {
+      if (map) {
+        mutate("set_density_renderer_visible", {
+          mapUid: map.uid,
+          rendererUid: renderer.uid,
+          visible: visible.checked,
+        });
+      } else if (surface) {
+        mutate("set_surface_renderer_visible", {
+          surfaceUid: surface.uid,
+          rendererUid: renderer.uid,
+          visible: visible.checked,
+        });
+      } else {
+        mutate("set_renderer_visible", {
+          objectUid: object.uid,
+          rendererUid: renderer.uid,
+          visible: visible.checked,
+        });
+      }
+    });
     const description = document.createElement("span");
     const name = document.createElement("strong");
     name.textContent = renderer.name;
     const type = document.createElement("small");
-    type.textContent = renderer.rendererType;
+    type.textContent = `${renderer.rendererType}${renderer.locked ? " · locked" : ""}`;
     description.append(name, type);
     row.append(visible, description);
+    const selectRow = () => {
+      if (map) {
+        selectedDensityMapUid = map.uid;
+        selectedDensityRendererUid = renderer.uid;
+        workspaceSelectionKind = "densityRenderer";
+      } else if (surface) {
+        selectedSurfaceUid = surface.uid;
+        selectedSurfaceRendererUid = renderer.uid;
+        workspaceSelectionKind = "surfaceRenderer";
+      } else {
+        selectedRendererUid = renderer.uid;
+        workspaceSelectionKind = "renderer";
+      }
+      renderSceneTree();
+      renderInspector();
+    };
+    row.addEventListener("click", selectRow);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") selectRow();
+    });
+    row.addEventListener("dblclick", () => showReferenceDialog("Renderer Properties"));
     rendererList.append(row);
   }
 }
 
-function replaceOptions(select, objects) {
+function replaceOptions(select, objects, selectedUid = selectedObjectUid) {
   select.replaceChildren();
   for (const object of objects) {
     const option = document.createElement("option");
@@ -1147,70 +4233,1340 @@ function replaceOptions(select, objects) {
     select.append(option);
   }
   select.disabled = objects.length === 0;
-  if (selectedObjectUid !== null) select.value = String(selectedObjectUid);
+  if (selectedUid !== null) select.value = String(selectedUid);
+}
+
+function moleculeStructureIsCurrent() {
+  return Boolean(snapshot && moleculeDetails.structureKey === snapshot.structureKey);
+}
+
+function syncEmptyMoleculeDetails() {
+  if (
+    snapshot &&
+    !snapshot.objects.some((object) => object.sceneUid === snapshot.activeSceneUid)
+  ) {
+    moleculeDetails = {
+      structureKey: snapshot.structureKey,
+      sequenceKey: snapshot.sequenceKey,
+      structure: [],
+      sequence: [],
+    };
+  }
+}
+
+function moleculeSequenceIsCurrent() {
+  return Boolean(snapshot && moleculeDetails.sequenceKey === snapshot.sequenceKey);
+}
+
+function sequencePanelIsActive() {
+  return Boolean(
+    document.querySelector('[data-bottom-panel="sequence"]')?.classList.contains("active"),
+  );
+}
+
+function moleculeDetailsAreCurrent() {
+  return moleculeStructureIsCurrent() &&
+    (!sequencePanelIsActive() || moleculeSequenceIsCurrent());
+}
+
+function scheduleMoleculeDetailsRefresh(delay = 80) {
+  if (!invoke || !snapshot || moleculeDetailsAreCurrent() || moleculeDetailsRequest) return;
+  clearTimeout(moleculeDetailsTimer);
+  moleculeDetailsTimer = setTimeout(() => {
+    moleculeDetailsTimer = null;
+    refreshMoleculeDetails();
+  }, delay);
+}
+
+async function refreshMoleculeDetails() {
+  if (!invoke || !snapshot || moleculeDetailsAreCurrent() || moleculeDetailsRequest) return;
+  const expectedStructureKey = snapshot.structureKey;
+  const expectedSequenceKey = snapshot.sequenceKey;
+  const includeSequence = sequencePanelIsActive();
+  moleculeDetailsRequest = invoke("get_molecule_details", {
+    structureKey: moleculeDetails.structureKey,
+    sequenceKey: moleculeDetails.sequenceKey,
+    includeSequence,
+  });
+  try {
+    const details = await moleculeDetailsRequest;
+    const structureMatches =
+      snapshot?.structureKey === details.structureKey &&
+      details.structureKey === expectedStructureKey;
+    const sequenceMatches =
+      snapshot?.sequenceKey === details.sequenceKey &&
+      details.sequenceKey === expectedSequenceKey;
+    if (structureMatches) {
+      moleculeDetails = {
+        structureKey: details.structureKey,
+        sequenceKey:
+          includeSequence && details.sequence && sequenceMatches
+            ? details.sequenceKey
+            : moleculeDetails.sequenceKey,
+        structure: details.structure || moleculeDetails.structure,
+        sequence:
+          includeSequence && details.sequence && sequenceMatches
+            ? details.sequence
+            : moleculeDetails.sequence,
+      };
+      renderMolStruct();
+      renderSelectionPanel();
+      if (includeSequence && sequenceMatches) renderSequence();
+    }
+  } catch (error) {
+    showError(error);
+  } finally {
+    moleculeDetailsRequest = null;
+    if (!moleculeDetailsAreCurrent()) scheduleMoleculeDetailsRefresh();
+  }
+}
+
+function visibleMolstructRows() {
+  return [...molstructTree.querySelectorAll("[data-molstruct-key]")].filter(
+    (row) => row.getClientRects().length > 0,
+  );
+}
+
+function updateMolstructSelectionUi() {
+  for (const row of molstructTree.querySelectorAll("[data-molstruct-key]")) {
+    row.classList.toggle("selected", molstructSelectedKeys.has(row.dataset.molstructKey));
+  }
+  const enabled = visibleMolstructRows().some((row) =>
+    molstructSelectedKeys.has(row.dataset.molstructKey),
+  );
+  molstructSelect.disabled = !enabled;
+  molstructCenter.disabled = !enabled;
+  molstructZoom.disabled = !enabled;
+  molstructProperties.disabled = !molstructObjectUid;
+}
+
+function selectMolstructRow(event, row) {
+  const key = row.dataset.molstructKey;
+  const rows = visibleMolstructRows();
+  const rangeStart = rows.findIndex(
+    (item) => item.dataset.molstructKey === molstructSelectionAnchor,
+  );
+  const rangeEnd = rows.indexOf(row);
+  if (event.shiftKey && rangeStart >= 0 && rangeEnd >= 0) {
+    if (!(event.metaKey || event.ctrlKey)) molstructSelectedKeys.clear();
+    const [start, end] = [rangeStart, rangeEnd].sort((lhs, rhs) => lhs - rhs);
+    for (const item of rows.slice(start, end + 1)) {
+      molstructSelectedKeys.add(item.dataset.molstructKey);
+    }
+  } else if (event.metaKey || event.ctrlKey) {
+    if (molstructSelectedKeys.has(key)) molstructSelectedKeys.delete(key);
+    else molstructSelectedKeys.add(key);
+  } else {
+    molstructSelectedKeys.clear();
+    molstructSelectedKeys.add(key);
+  }
+  molstructSelectionAnchor = key;
+  updateMolstructSelectionUi();
+}
+
+function molstructSelectorForRow(row) {
+  switch (row.dataset.molstructType) {
+    case "chain":
+      return `c;'${row.dataset.chain}'`;
+    case "residue":
+      return `'${row.dataset.chain}'.${row.dataset.residueIndex}.*`;
+    case "atom":
+      return `aid ${row.dataset.atomId}`;
+    default:
+      return "";
+  }
+}
+
+function selectedMolstructExpression() {
+  const rows = visibleMolstructRows();
+  const selectors = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    if (!molstructSelectedKeys.has(row.dataset.molstructKey)) continue;
+    if (row.dataset.molstructType === "residue") {
+      let end = index;
+      while (
+        end + 1 < rows.length &&
+        molstructSelectedKeys.has(rows[end + 1].dataset.molstructKey) &&
+        rows[end + 1].dataset.molstructType === "residue" &&
+        rows[end + 1].dataset.chain === row.dataset.chain
+      ) {
+        end += 1;
+      }
+      const endRow = rows[end];
+      selectors.push(
+        end === index
+          ? molstructSelectorForRow(row)
+          : `'${row.dataset.chain}'.${row.dataset.residueIndex}:${endRow.dataset.residueIndex}.*`,
+      );
+      index = end;
+    } else {
+      selectors.push(molstructSelectorForRow(row));
+    }
+  }
+  return selectors.filter(Boolean).join("|");
+}
+
+async function runMoleculeSelectionAction(objectUid, selection, mode = "select") {
+  setBusy(true);
+  const sequence = ++requestSequence;
+  try {
+    const update = await invoke("molecule_selection_action", {
+      objectUid,
+      selection,
+      mode,
+      ...viewportDimensions(),
+    });
+    snapshot = update.snapshot;
+    syncEmptyMoleculeDetails();
+    renderShell();
+    applyViewport(update.viewport, sequence);
+    rememberSelection(selection);
+    scheduleMoleculeDetailsRefresh();
+    return true;
+  } catch (error) {
+    showError(error);
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function runMolstructAction(mode, selectionOverride = null) {
+  const objectUid = Number(molstructObject.value) || null;
+  const selection = selectionOverride ?? selectedMolstructExpression();
+  if (!objectUid || !selection) {
+    showError("Select a molecular structure row first.");
+    return false;
+  }
+  return runMoleculeSelectionAction(objectUid, selection, mode);
+}
+
+function configureMolstructRow(row, properties) {
+  row.dataset.molstructKey = properties.key;
+  row.dataset.molstructType = properties.type;
+  if (properties.chain !== undefined) row.dataset.chain = properties.chain;
+  if (properties.residueIndex !== undefined) {
+    row.dataset.residueIndex = properties.residueIndex;
+  }
+  if (properties.atomId !== undefined) row.dataset.atomId = properties.atomId;
+  row.classList.add("molstruct-row");
+  row.classList.toggle("selected", molstructSelectedKeys.has(properties.key));
+  row.addEventListener("click", (event) => {
+    const disclosureClick =
+      row.tagName === "SUMMARY" && event.clientX - row.getBoundingClientRect().left <= 18;
+    if (row.tagName === "SUMMARY" && !disclosureClick) event.preventDefault();
+    selectMolstructRow(event, row);
+  });
+  row.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    molstructSelectedKeys.clear();
+    molstructSelectedKeys.add(properties.key);
+    molstructSelectionAnchor = properties.key;
+    updateMolstructSelectionUi();
+    void runMolstructAction("center", molstructSelectorForRow(row));
+  });
 }
 
 function renderMolStruct() {
+  const structure = moleculeStructureIsCurrent() ? moleculeDetails.structure : [];
+  const previousObjectUid = molstructObjectUid;
+  if (!structure.some((object) => object.objectUid === molstructObjectUid)) {
+    molstructObjectUid = structure.some((object) => object.objectUid === selectedObjectUid)
+      ? selectedObjectUid
+      : structure[0]?.objectUid ?? null;
+  }
+  if (previousObjectUid !== null && previousObjectUid !== molstructObjectUid) {
+    molstructSelectedKeys.clear();
+    molstructOpenKeys.clear();
+    molstructSelectionAnchor = null;
+  }
   replaceOptions(
     molstructObject,
-    snapshot.structure.map((object) => ({ uid: object.objectUid, name: object.objectName })),
+    structure.map((object) => ({ uid: object.objectUid, name: object.objectName })),
+    molstructObjectUid,
   );
+  const renderKey = moleculeStructureIsCurrent()
+    ? `${moleculeDetails.structureKey}|${molstructObjectUid ?? ""}`
+    : `loading|${snapshot?.structureKey ?? ""}`;
+  if (renderedMolstructKey === renderKey) {
+    updateMolstructSelectionUi();
+    return;
+  }
+  renderedMolstructKey = renderKey;
   molstructTree.replaceChildren();
-  const object = snapshot.structure.find((item) => item.objectUid === selectedObjectUid);
+  if (!moleculeStructureIsCurrent()) {
+    const loading = document.createElement("p");
+    loading.textContent = "Loading molecular hierarchy…";
+    molstructTree.append(loading);
+    updateMolstructSelectionUi();
+    return;
+  }
+  const object = structure.find((item) => item.objectUid === molstructObjectUid);
   if (!object) {
     const empty = document.createElement("p");
     empty.textContent = "No molecule selected.";
     molstructTree.append(empty);
+    updateMolstructSelectionUi();
     return;
   }
+
   for (const chain of object.chains) {
     const chainNode = document.createElement("details");
     chainNode.className = "structure-node chain-node";
     const chainLabel = chain.chainId || "_";
-    const residueCount = chain.residues.length;
+    const chainKey = `chain:${chain.chainId}`;
+    chainNode.open = molstructOpenKeys.has(chainKey);
     const chainSummary = document.createElement("summary");
-    chainSummary.textContent = `Chain ${chainLabel} (${residueCount} res)`;
+    chainSummary.textContent = `chain "${chainLabel}"`;
+    configureMolstructRow(chainSummary, {
+      key: chainKey,
+      type: "chain",
+      chain: chain.chainId,
+    });
     chainNode.append(chainSummary);
-    for (const residue of chain.residues) {
-      const residueNode = document.createElement("details");
-      residueNode.className = "structure-node residue-node";
-      const residueSummary = document.createElement("summary");
-      residueSummary.textContent = `${residue.resName} ${residue.resId}${residue.insCode || ""}`;
-      residueNode.append(residueSummary);
-      const atomList = document.createElement("div");
-      atomList.className = "atom-list";
-      for (const atom of residue.atoms) {
-        const atomButton = button(`${atom.name}  ${atom.element || "?"}  #${atom.serial}`, "atom-row", () => {
-          mutate("set_selection", { selection: `aid ${atom.serial}` });
+
+    const loadResidues = () => {
+      if (chainNode.dataset.loaded) return;
+      chainNode.dataset.loaded = "true";
+      for (const residue of chain.residues) {
+        const residueIndex = `${residue.resId}${residue.insCode || ""}`;
+        const residueKey = `residue:${chain.chainId}:${residueIndex}`;
+        const residueNode = document.createElement("details");
+        residueNode.className = "structure-node residue-node";
+        residueNode.open = molstructOpenKeys.has(residueKey);
+        const residueSummary = document.createElement("summary");
+        residueSummary.textContent = `${residueIndex} ${residue.resName}`;
+        configureMolstructRow(residueSummary, {
+          key: residueKey,
+          type: "residue",
+          chain: chain.chainId,
+          residueIndex,
         });
-        atomButton.title = `atom index ${atom.atomIndex}`;
-        atomList.append(atomButton);
+        residueNode.append(residueSummary);
+
+        const loadAtoms = () => {
+          if (residueNode.dataset.loaded) return;
+          residueNode.dataset.loaded = "true";
+          const atomList = document.createElement("div");
+          atomList.className = "atom-list";
+          for (const atom of residue.atoms) {
+            const atomButton = document.createElement("button");
+            atomButton.type = "button";
+            atomButton.className = "atom-row";
+            atomButton.textContent = `${atom.name} (${atom.element || "?"})`;
+            atomButton.title = `atom index ${atom.atomIndex}`;
+            configureMolstructRow(atomButton, {
+              key: `atom:${atom.serial}`,
+              type: "atom",
+              atomId: atom.serial,
+            });
+            atomList.append(atomButton);
+          }
+          residueNode.append(atomList);
+        };
+        residueNode.addEventListener("toggle", () => {
+          if (residueNode.open) {
+            molstructOpenKeys.add(residueKey);
+            loadAtoms();
+          } else {
+            molstructOpenKeys.delete(residueKey);
+          }
+          updateMolstructSelectionUi();
+        });
+        if (residueNode.open) loadAtoms();
+        chainNode.append(residueNode);
       }
-      residueNode.append(atomList);
-      chainNode.append(residueNode);
-    }
+    };
+    chainNode.addEventListener("toggle", () => {
+      if (chainNode.open) {
+        molstructOpenKeys.add(chainKey);
+        loadResidues();
+      } else {
+        molstructOpenKeys.delete(chainKey);
+      }
+      updateMolstructSelectionUi();
+    });
+    if (chainNode.open) loadResidues();
     molstructTree.append(chainNode);
+  }
+  updateMolstructSelectionUi();
+}
+
+function replaceDatalist(datalist, values, cacheKey) {
+  if (datalist.dataset.cacheKey === cacheKey) return;
+  datalist.replaceChildren();
+  for (const value of values) {
+    const option = document.createElement("option");
+    option.value = value;
+    datalist.append(option);
+  }
+  datalist.dataset.cacheKey = cacheKey;
+}
+
+function selectionCandidateValues() {
+  const cacheKey = `${moleculeDetails.structureKey}|${selectionObjectUid ?? ""}`;
+  if (selectionCandidateCache.key === cacheKey && selectionCandidateCache.values) {
+    return selectionCandidateCache.values;
+  }
+  const structure = moleculeStructureIsCurrent() ? moleculeDetails.structure : [];
+  const object = structure.find((item) => item.objectUid === selectionObjectUid);
+  if (!object) {
+    const values = {
+      chains: ["A", "B", "C"],
+      residueNames: [],
+      atomNames: ["CA", "CB", "CG"],
+      elements: ["C", "N", "O", "S"],
+    };
+    selectionCandidateCache = { key: cacheKey, values };
+    return values;
+  }
+  const residueNames = new Set();
+  const atomNames = new Set();
+  const elements = new Set();
+  for (const chain of object.chains) {
+    for (const residue of chain.residues) {
+      residueNames.add(residue.resName);
+      for (const atom of residue.atoms) {
+        atomNames.add(atom.name);
+        if (atom.element) elements.add(atom.element);
+      }
+    }
+  }
+  const values = {
+    chains: object.chains.map((chain) => chain.chainId),
+    residueNames: [...residueNames].sort(),
+    atomNames: [...atomNames].sort(),
+    elements: [...elements].sort(),
+  };
+  selectionCandidateCache = { key: cacheKey, values };
+  return values;
+}
+
+function selectionTermDefault(command, candidates = selectionCandidateValues()) {
+  switch (command) {
+    case "c;":
+      return candidates.chains[0] || "A";
+    case "r;":
+      return candidates.residueNames[0] || "ALA";
+    case "n;":
+      return candidates.atomNames[0] || "CA";
+    case "e;":
+      return candidates.elements[0] || "C";
+    default:
+      return "1:100";
+  }
+}
+
+function selectionTermDatalist(command) {
+  return {
+    "c;": "selection-chain-candidates",
+    "r;": "selection-resname-candidates",
+    "n;": "selection-atom-candidates",
+    "e;": "selection-element-candidates",
+  }[command];
+}
+
+function newSelectionEditorItem(type) {
+  if (type === "hier") {
+    return { type, boolOp: "|", chain: "*", residue: "10:100", atom: "*" };
+  }
+  if (type === "term") {
+    return {
+      type,
+      boolOp: "|",
+      command: "c;",
+      args: selectionTermDefault("c;"),
+    };
+  }
+  return { type: "around", command: "around", args: "5" };
+}
+
+function addSelectionEditorItem(type) {
+  if (type === "around" && selectionEditorItems.length === 0) return;
+  const index =
+    selectionEditorItems.length === 0
+      ? 0
+      : Math.min(selectionEditorSelectedIndex + 1, selectionEditorItems.length);
+  selectionEditorItems.splice(index, 0, newSelectionEditorItem(type));
+  selectionEditorSelectedIndex = index;
+  renderSelectionEditor();
+}
+
+function deleteSelectionEditorItem() {
+  if (selectionEditorSelectedIndex < 0) return;
+  selectionEditorItems.splice(selectionEditorSelectedIndex, 1);
+  if (selectionEditorItems[0]?.type === "around") selectionEditorItems.shift();
+  selectionEditorSelectedIndex = selectionEditorItems.length
+    ? Math.min(selectionEditorSelectedIndex, selectionEditorItems.length - 1)
+    : -1;
+  renderSelectionEditor();
+}
+
+function composeSelectionEditorExpression() {
+  let selection = "";
+  for (const item of selectionEditorItems) {
+    if (item.type === "around") {
+      if (!selection) continue;
+      if (item.command === "around" || item.command === "expand") {
+        selection = `(${selection}) ${item.command} ${item.args}`;
+      } else if (item.command === "around byres") {
+        selection = `byres ((${selection}) around ${item.args})`;
+      } else if (item.command === "extend byres") {
+        selection = `byres ((${selection}) extend ${item.args})`;
+      }
+      continue;
+    }
+    const term =
+      item.type === "hier"
+        ? `${item.chain}.${item.residue}.${item.atom}`
+        : `${item.command} ${item.args}`;
+    selection = selection ? `${selection} ${item.boolOp || "|"} ${term}` : term;
+  }
+  return selection;
+}
+
+function updateSelectionEditorUi() {
+  for (const [index, row] of [...selectionEditorList.children].entries()) {
+    row.classList.toggle("selected", index === selectionEditorSelectedIndex);
+  }
+  const selected = selectionEditorSelectedIndex >= 0;
+  selectionEditorApply.disabled = !selectionObjectUid || !selected;
+  selectionEditorDelete.disabled = !selected;
+  selectionEditorClear.disabled = !selected;
+  const aroundOption = selectionEditorAddKind.querySelector('option[value="around"]');
+  if (aroundOption) aroundOption.disabled = selectionEditorItems.length === 0;
+}
+
+function selectionBoolOpControl(item, index) {
+  if (index === 0 || item.type === "around") {
+    const spacer = document.createElement("span");
+    spacer.className = "selection-boolop";
+    return spacer;
+  }
+  const select = document.createElement("select");
+  select.className = "selection-boolop";
+  for (const [value, label] of [
+    ["&", "&"],
+    ["|", "|"],
+  ]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    select.append(option);
+  }
+  select.value = item.boolOp;
+  select.addEventListener("change", () => {
+    item.boolOp = select.value;
+  });
+  return select;
+}
+
+function selectionInputControl(value, className, onInput, list = null) {
+  const input = document.createElement("input");
+  input.className = className;
+  input.value = value;
+  input.spellcheck = false;
+  if (list) input.setAttribute("list", list);
+  input.addEventListener("input", () => onInput(input.value));
+  return input;
+}
+
+function renderSelectionEditor() {
+  selectionEditorList.replaceChildren();
+  if (selectionEditorItems.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "selection-editor-empty";
+    empty.textContent = "No selection items.";
+    selectionEditorList.append(empty);
+    updateSelectionEditorUi();
+    return;
+  }
+  for (const [index, item] of selectionEditorItems.entries()) {
+    const row = document.createElement("div");
+    row.className = `selection-editor-row${index === selectionEditorSelectedIndex ? " selected" : ""}`;
+    row.append(selectionBoolOpControl(item, index));
+    if (item.type === "hier") {
+      row.append(
+        selectionInputControl(
+          item.chain,
+          "selection-hier-chain",
+          (value) => {
+            item.chain = value;
+          },
+          "selection-chain-candidates",
+        ),
+      );
+      const dot1 = document.createElement("span");
+      dot1.textContent = ".";
+      row.append(dot1);
+      row.append(
+        selectionInputControl(item.residue, "selection-hier-residue", (value) => {
+          item.residue = value;
+        }),
+      );
+      const dot2 = document.createElement("span");
+      dot2.textContent = ".";
+      row.append(dot2);
+      row.append(
+        selectionInputControl(
+          item.atom,
+          "selection-hier-atom",
+          (value) => {
+            item.atom = value;
+          },
+          "selection-atom-candidates",
+        ),
+      );
+    } else {
+      const command = document.createElement("select");
+      command.className = "selection-item-command";
+      const commands =
+        item.type === "term"
+          ? [
+              ["c;", "chain"],
+              ["i;", "resid"],
+              ["r;", "resname"],
+              ["n;", "atom"],
+              ["e;", "element"],
+              ["aid", "aid"],
+            ]
+          : [
+              ["around", "around"],
+              ["expand", "expand"],
+              ["around byres", "around byres"],
+              ["extend byres", "extend byres"],
+            ];
+      for (const [value, label] of commands) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        command.append(option);
+      }
+      command.value = item.command;
+      const args = selectionInputControl(
+        item.args,
+        "selection-item-args",
+        (value) => {
+          item.args = value;
+        },
+        item.type === "term" ? selectionTermDatalist(item.command) : null,
+      );
+      command.addEventListener("change", () => {
+        item.command = command.value;
+        item.args =
+          item.type === "term" ? selectionTermDefault(item.command) : item.args || "5";
+        renderSelectionEditor();
+      });
+      row.append(command, args);
+    }
+    row.addEventListener("click", () => {
+      selectionEditorSelectedIndex = index;
+      updateSelectionEditorUi();
+    });
+    selectionEditorList.append(row);
+  }
+  updateSelectionEditorUi();
+}
+
+function renderSelectionPanel() {
+  const structure = moleculeStructureIsCurrent() ? moleculeDetails.structure : [];
+  if (!structure.some((object) => object.objectUid === selectionObjectUid)) {
+    selectionObjectUid = structure.some((object) => object.objectUid === selectedObjectUid)
+      ? selectedObjectUid
+      : structure[0]?.objectUid ?? null;
+  }
+  replaceOptions(
+    selectionObject,
+    structure.map((object) => ({ uid: object.objectUid, name: object.objectName })),
+    selectionObjectUid,
+  );
+  document.querySelectorAll("[data-selection-tab]").forEach((tab) => {
+    const active = tab.dataset.selectionTab === selectionActiveTab;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+  selectionCommandPanel.hidden = selectionActiveTab !== "command";
+  selectionEditorPanel.hidden = selectionActiveTab !== "editor";
+  renderSelectionHistory();
+  const candidates = selectionCandidateValues();
+  const candidateKey = `${moleculeDetails.structureKey}|${selectionObjectUid ?? ""}`;
+  replaceDatalist(selectionChainCandidates, candidates.chains, `${candidateKey}|chain`);
+  replaceDatalist(
+    selectionResnameCandidates,
+    candidates.residueNames,
+    `${candidateKey}|resname`,
+  );
+  replaceDatalist(selectionAtomCandidates, candidates.atomNames, `${candidateKey}|atom`);
+  replaceDatalist(selectionElementCandidates, candidates.elements, `${candidateKey}|element`);
+  if (selectionActiveTab === "editor" && selectionEditorList.childElementCount === 0) {
+    renderSelectionEditor();
+  } else {
+    updateSelectionEditorUi();
+  }
+}
+
+async function applySelectionCommand() {
+  const objectUid = Number(selectionObject.value) || null;
+  if (!objectUid) {
+    showError("Select a molecule first.");
+    return false;
+  }
+  return runMoleculeSelectionAction(objectUid, selectionInput.value, "select");
+}
+
+async function applySelectionEditor() {
+  const objectUid = Number(selectionObject.value) || null;
+  const selection = composeSelectionEditorExpression();
+  if (!objectUid || !selection) {
+    showError("Add and select an editor item first.");
+    return false;
+  }
+  return runMoleculeSelectionAction(objectUid, selection, "select");
+}
+
+function coloringTargets() {
+  const targets = [];
+  for (const object of activeObjects()) {
+    targets.push({
+      key: `object:${object.uid}`,
+      kind: "object",
+      objectUid: object.uid,
+      rendererUid: null,
+      name: object.name,
+      state: object,
+    });
+    for (const renderer of object.renderers.filter((item) =>
+      item.supportsColoring || item.supportsElectrostaticColoring || item.supportsMultiGradient
+    )) {
+      targets.push({
+        key: `renderer:${object.uid}:${renderer.uid}`,
+        kind: "renderer",
+        objectUid: object.uid,
+        rendererUid: renderer.uid,
+        name: `  ↳ ${renderer.name}`,
+        state: renderer,
+      });
+    }
+  }
+  for (const map of snapshot?.densityMaps || []) {
+    for (const renderer of map.renderers.filter((item) =>
+      item.supportsSolidColoring || item.supportsMultiGradient
+    )) {
+      targets.push({
+        key: `densityRenderer:${map.uid}:${renderer.uid}`,
+        kind: "densityRenderer",
+        objectUid: map.uid,
+        rendererUid: renderer.uid,
+        name: `${map.name} → ${renderer.name}`,
+        state: renderer,
+      });
+    }
+  }
+  for (const surface of snapshot?.surfaces || []) {
+    for (const renderer of surface.renderers.filter((item) =>
+      item.supportsSolidColoring || item.supportsElectrostaticColoring || item.supportsMultiGradient
+    )) {
+      targets.push({
+        key: `surfaceRenderer:${surface.uid}:${renderer.uid}`,
+        kind: "surfaceRenderer",
+        objectUid: surface.uid,
+        rendererUid: renderer.uid,
+        name: `${surface.name} → ${renderer.name}`,
+        state: renderer,
+      });
+    }
+  }
+  return targets;
+}
+
+function coloringTypeOptions(target) {
+  const options = [["", "Reset to default"]];
+  if (target?.state.supportsColoring || target?.kind === "object") {
+    options.push(
+      ["PaintColoring", "Paint coloring"],
+      ["SolidColoring", "Solid color"],
+      ["CPKColoring", "CPK coloring"],
+      ["BfacColoring", "B-factor / Occupancy"],
+      ["RainbowColoring", "Rainbow"],
+    );
+  } else if (target?.state.supportsSolidColoring) {
+    options.push(["SolidColoring", "Solid color"]);
+  }
+  if (target?.state.supportsElectrostaticColoring) {
+    options.push(["ElectrostaticColoring", "Electrostatic potential"]);
+  }
+  if (target?.state.supportsMultiGradient) {
+    options.push(["MultiGradientColoring", "Multi-gradient"]);
+  }
+  return options;
+}
+
+function selectedColoringTarget() {
+  return coloringTargets().find((target) => target.key === coloringTargetKey) || null;
+}
+
+function coloringMapOptions(electrostaticOnly = false) {
+  return (snapshot?.densityMaps || [])
+    .filter((map) => !electrostaticOnly || map.className === "ElePotMap")
+    .map((map) => [map.name, map.name]);
+}
+
+function coloringMapByName(name) {
+  return (snapshot?.densityMaps || []).find((map) => map.name === name) || null;
+}
+
+function rainbowGradientForMap(name) {
+  const map = coloringMapByName(name);
+  const minimum = Number.isFinite(map?.minDensity) ? map.minDensity : -1;
+  const maximum = Number.isFinite(map?.maxDensity) ? map.maxDensity : 1;
+  const delta = (maximum - minimum) / 5;
+  return ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff"]
+    .map((color, index) => ({ value: minimum + delta * index, color }));
+}
+
+function defaultColoringState(type, target) {
+  switch (type) {
+    case "PaintColoring":
+      return {
+        attrs: {},
+        paintEntries: [
+          { selection: "sheet", color: "#4682b4" },
+          { selection: "helix", color: "#f0e68c" },
+          { selection: "nucleic", color: "#ffff00" },
+          { selection: "*", color: "#fffaf0" },
+        ],
+        defaultColor: null,
+      };
+    case "SolidColoring":
+      return { attrs: {}, paintEntries: [], defaultColor: target.state.defaultColor || "#ffffff" };
+    case "CPKColoring":
+      return {
+        attrs: {
+          col_H: "#ffffff",
+          col_C: "$molcol",
+          col_N: "#0000ff",
+          col_O: "#ff0000",
+          col_P: "#ffff00",
+          col_S: "#00ff00",
+          col_X: "#808080",
+        },
+        paintEntries: [],
+        defaultColor: null,
+      };
+    case "RainbowColoring":
+      return {
+        attrs: {
+          mode: "mol",
+          incr_mode: "resid",
+          start_hue: "240",
+          end_hue: "0",
+          sat: "1",
+          bri: "1",
+        },
+        paintEntries: [],
+        defaultColor: null,
+      };
+    case "BfacColoring":
+      return {
+        attrs: {
+          mode: "bfac",
+          auto: "rend",
+          lowcol: "#0000ff",
+          highcol: "#ff0000",
+          lowpar: "-2",
+          highpar: "2",
+        },
+        paintEntries: [],
+        defaultColor: null,
+      };
+    case "ElectrostaticColoring":
+      return {
+        attrs: {
+          elepot: coloringMapOptions(true)[0]?.[0] || "",
+          lowpar: "-10",
+          midpar: "0",
+          highpar: "10",
+          lowcol: "#ff0000",
+          midcol: "#ffffff",
+          highcol: "#0000ff",
+          ramp_above: "false",
+          ramp_value: "1.4",
+        },
+        paintEntries: [],
+        gradientEntries: [],
+        defaultColor: null,
+      };
+    case "MultiGradientColoring": {
+      const mapName = coloringMapOptions(false)[0]?.[0] || "";
+      return {
+        attrs: { color_mapname: mapName, ramp_above: "false", ramp_value: "1.4" },
+        paintEntries: [],
+        gradientEntries: rainbowGradientForMap(mapName),
+        defaultColor: null,
+      };
+    }
+    default:
+      return { attrs: {}, paintEntries: [], gradientEntries: [], defaultColor: null };
+  }
+}
+
+function coloringState(target) {
+  return {
+    type: target.state.coloringType || "",
+    attrs: { ...(target.state.coloringAttrs || {}) },
+    paintEntries: (target.state.paintEntries || []).map((entry) => ({ ...entry })),
+    gradientEntries: (target.state.gradientEntries || []).map((entry) => ({ ...entry })),
+    defaultColor: target.state.defaultColor || "#ffffff",
+  };
+}
+
+async function commitColoring(target, type, state) {
+  if (!invoke) {
+    showError("Tauri IPC is unavailable. Run this frontend through the Tauri binary.");
+    return false;
+  }
+  setBusy(true);
+  const sequence = ++requestSequence;
+  try {
+    const result = await invoke("set_coloring", {
+      update: {
+        kind: target.kind,
+        objectUid: target.objectUid,
+        rendererUid: target.rendererUid,
+        coloringType: type || null,
+        attrs: state.attrs || {},
+        paintEntries: state.paintEntries || [],
+        gradientEntries: state.gradientEntries || [],
+        defaultColor: state.defaultColor || null,
+      },
+      ...viewportDimensions(),
+    });
+    snapshot = result.snapshot;
+    syncEmptyMoleculeDetails();
+    renderShell();
+    applyViewport(result.viewport, sequence);
+    scheduleMoleculeDetailsRefresh();
+    return true;
+  } catch (error) {
+    showError(error);
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+function coloringControlRow(labelText, control) {
+  const row = document.createElement("label");
+  row.className = "coloring-control-row";
+  const label = document.createElement("span");
+  label.textContent = labelText;
+  row.append(label, control);
+  coloringDeck.append(row);
+  return control;
+}
+
+function coloringSelect(id, value, entries, onChange) {
+  const select = document.createElement("select");
+  select.id = id;
+  for (const [optionValue, label] of entries) {
+    const option = document.createElement("option");
+    option.value = optionValue;
+    option.textContent = label;
+    select.append(option);
+  }
+  select.value = value;
+  select.addEventListener("change", () => onChange(select.value));
+  return select;
+}
+
+function coloringInput(id, value, type, onChange) {
+  const input = document.createElement("input");
+  input.id = id;
+  input.type = type;
+  input.value = String(value);
+  input.addEventListener("change", () => onChange(input.value));
+  return input;
+}
+
+function renderPaintColoring(target, state) {
+  const list = document.createElement("div");
+  list.id = "coloring-paint-list";
+  list.className = "coloring-paint-list";
+  if (coloringPaintSelectedIndex >= state.paintEntries.length) {
+    coloringPaintSelectedIndex = state.paintEntries.length - 1;
+  }
+  state.paintEntries.forEach((entry, index) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "coloring-paint-row";
+    row.classList.toggle("selected", index === coloringPaintSelectedIndex);
+    row.dataset.paintIndex = String(index);
+    const swatch = document.createElement("span");
+    swatch.className = "coloring-swatch";
+    swatch.style.background = entry.color;
+    const selection = document.createElement("span");
+    selection.textContent = entry.selection;
+    const color = document.createElement("code");
+    color.textContent = entry.color;
+    row.append(swatch, selection, color);
+    row.addEventListener("click", () => {
+      coloringPaintSelectedIndex = index;
+      renderColoring();
+    });
+    list.append(row);
+  });
+  coloringDeck.append(list);
+
+  const selected = state.paintEntries[coloringPaintSelectedIndex] || { selection: "*", color: "#ffffff" };
+  const editor = document.createElement("div");
+  editor.className = "coloring-paint-editor";
+  const selection = coloringInput("coloring-paint-selection", selected.selection, "text", () => {});
+  selection.placeholder = "Selection";
+  const color = coloringInput("coloring-paint-color", selected.color, "text", () => {});
+  color.placeholder = "Color";
+  editor.append(selection, color);
+  coloringDeck.append(editor);
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "coloring-paint-toolbar";
+  const action = (label, title, handler, disabled = false) => {
+    const control = button(label, "", handler);
+    control.title = title;
+    control.disabled = disabled;
+    toolbar.append(control);
+  };
+  action("＋", "Add before selected", () => {
+    const index = coloringPaintSelectedIndex < 0 ? state.paintEntries.length : coloringPaintSelectedIndex;
+    state.paintEntries.splice(index, 0, { selection: selection.value || "*", color: color.value || "#ffffff" });
+    coloringPaintSelectedIndex = index;
+    commitColoring(target, "PaintColoring", state);
+  });
+  action("−", "Delete selected", () => {
+    state.paintEntries.splice(coloringPaintSelectedIndex, 1);
+    commitColoring(target, "PaintColoring", state);
+  }, coloringPaintSelectedIndex < 0);
+  action("×", "Delete all", () => {
+    coloringPaintSelectedIndex = -1;
+    state.paintEntries = [];
+    commitColoring(target, "PaintColoring", state);
+  }, state.paintEntries.length === 0);
+  action("Change", "Change selected", () => {
+    state.paintEntries[coloringPaintSelectedIndex] = {
+      selection: selection.value || "*",
+      color: color.value || "#ffffff",
+    };
+    commitColoring(target, "PaintColoring", state);
+  }, coloringPaintSelectedIndex < 0);
+  action("↑", "Move up", () => {
+    const index = coloringPaintSelectedIndex;
+    [state.paintEntries[index - 1], state.paintEntries[index]] = [state.paintEntries[index], state.paintEntries[index - 1]];
+    coloringPaintSelectedIndex -= 1;
+    commitColoring(target, "PaintColoring", state);
+  }, coloringPaintSelectedIndex <= 0);
+  action("↓", "Move down", () => {
+    const index = coloringPaintSelectedIndex;
+    [state.paintEntries[index], state.paintEntries[index + 1]] = [state.paintEntries[index + 1], state.paintEntries[index]];
+    coloringPaintSelectedIndex += 1;
+    commitColoring(target, "PaintColoring", state);
+  }, coloringPaintSelectedIndex < 0 || coloringPaintSelectedIndex >= state.paintEntries.length - 1);
+  coloringDeck.append(toolbar);
+}
+
+function renderElectrostaticColoring(target, state) {
+  const mapOptions = coloringMapOptions(true);
+  coloringControlRow(
+    "Potential map",
+    coloringSelect(
+      "coloring-electrostatic-map",
+      state.attrs.elepot || "",
+      mapOptions.length ? mapOptions : [["", "(none)"]],
+      (value) => {
+        state.attrs.elepot = value;
+        commitColoring(target, state.type, state);
+      },
+    ),
+  );
+  for (const [name, label, fallback, type] of [
+    ["lowpar", "Low value", "-10", "number"],
+    ["midpar", "Middle value", "0", "number"],
+    ["highpar", "High value", "10", "number"],
+    ["lowcol", "Low color", "#ff0000", "text"],
+    ["midcol", "Middle color", "#ffffff", "text"],
+    ["highcol", "High color", "#0000ff", "text"],
+  ]) {
+    coloringControlRow(
+      label,
+      coloringInput(`coloring-electrostatic-${name}`, state.attrs[name] || fallback, type, (value) => {
+        state.attrs[name] = value;
+        commitColoring(target, state.type, state);
+      }),
+    );
+  }
+  coloringControlRow(
+    "Ramp above",
+    coloringSelect(
+      "coloring-electrostatic-ramp-above",
+      state.attrs.ramp_above || "false",
+      [["false", "No"], ["true", "Yes"]],
+      (value) => {
+        state.attrs.ramp_above = value;
+        commitColoring(target, state.type, state);
+      },
+    ),
+  );
+  coloringControlRow(
+    "Ramp distance",
+    coloringInput(
+      "coloring-electrostatic-ramp-value",
+      state.attrs.ramp_value || "1.4",
+      "number",
+      (value) => {
+        state.attrs.ramp_value = value;
+        commitColoring(target, state.type, state);
+      },
+    ),
+  );
+}
+
+function gradientPreset(name, mapName) {
+  const map = coloringMapByName(mapName);
+  const minimum = Number.isFinite(map?.minDensity) ? map.minDensity : -1;
+  const maximum = Number.isFinite(map?.maxDensity) ? map.maxDensity : 1;
+  if (name === "resmap1") {
+    const delta = (maximum - minimum) / 4;
+    return ["#0f77cf", "#87e3e7", "#ffffff", "#cf8faf", "#9e205e"]
+      .map((color, index) => ({ value: minimum + delta * index, color }));
+  }
+  if (name === "heatmap1") {
+    return [
+      { value: minimum, color: "#ff0000" },
+      { value: minimum + (maximum - minimum) * 0.6666, color: "#ffff00" },
+      { value: maximum, color: "#ffffff" },
+    ];
+  }
+  return rainbowGradientForMap(mapName);
+}
+
+function renderMultiGradientColoring(target, state) {
+  const mapOptions = coloringMapOptions(false);
+  coloringControlRow(
+    "Color map",
+    coloringSelect(
+      "coloring-gradient-map",
+      state.attrs.color_mapname || "",
+      mapOptions.length ? mapOptions : [["", "(none)"]],
+      (value) => {
+        state.attrs.color_mapname = value;
+        commitColoring(target, state.type, state);
+      },
+    ),
+  );
+  if (coloringGradientSelectedIndex >= state.gradientEntries.length) {
+    coloringGradientSelectedIndex = state.gradientEntries.length - 1;
+  }
+  const list = document.createElement("div");
+  list.id = "coloring-gradient-list";
+  list.className = "coloring-paint-list";
+  state.gradientEntries.forEach((entry, index) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "coloring-paint-row";
+    row.classList.toggle("selected", index === coloringGradientSelectedIndex);
+    row.dataset.gradientIndex = String(index);
+    const swatch = document.createElement("span");
+    swatch.className = "coloring-swatch";
+    swatch.style.background = entry.color;
+    const value = document.createElement("span");
+    value.textContent = Number(entry.value).toPrecision(6);
+    const color = document.createElement("code");
+    color.textContent = entry.color;
+    row.append(swatch, value, color);
+    row.addEventListener("click", () => {
+      coloringGradientSelectedIndex = index;
+      renderColoring();
+    });
+    list.append(row);
+  });
+  coloringDeck.append(list);
+
+  const selected = state.gradientEntries[coloringGradientSelectedIndex] || { value: 0, color: "#ffffff" };
+  const editor = document.createElement("div");
+  editor.className = "coloring-paint-editor";
+  const value = coloringInput("coloring-gradient-value", selected.value, "number", () => {});
+  value.step = "any";
+  const color = coloringInput("coloring-gradient-color", selected.color, "text", () => {});
+  editor.append(value, color);
+  coloringDeck.append(editor);
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "coloring-paint-toolbar";
+  const action = (label, title, handler, disabled = false) => {
+    const control = button(label, "", handler);
+    control.title = title;
+    control.disabled = disabled;
+    toolbar.append(control);
+  };
+  const sortedEntries = () => state.gradientEntries.sort((left, right) => left.value - right.value);
+  action("＋", "Add gradient node", () => {
+    state.gradientEntries.push({ value: Number(value.value), color: color.value || "#ffffff" });
+    sortedEntries();
+    coloringGradientSelectedIndex = state.gradientEntries.findIndex((entry) => entry.value === Number(value.value));
+    commitColoring(target, state.type, state);
+  });
+  action("−", "Delete gradient node", () => {
+    state.gradientEntries.splice(coloringGradientSelectedIndex, 1);
+    commitColoring(target, state.type, state);
+  }, coloringGradientSelectedIndex < 0);
+  action("×", "Delete all gradient nodes", () => {
+    state.gradientEntries = [];
+    coloringGradientSelectedIndex = -1;
+    commitColoring(target, state.type, state);
+  }, state.gradientEntries.length === 0);
+  action("Change", "Change gradient node", () => {
+    state.gradientEntries[coloringGradientSelectedIndex] = {
+      value: Number(value.value),
+      color: color.value || "#ffffff",
+    };
+    sortedEntries();
+    coloringGradientSelectedIndex = state.gradientEntries.findIndex((entry) => entry.value === Number(value.value));
+    commitColoring(target, state.type, state);
+  }, coloringGradientSelectedIndex < 0);
+  coloringDeck.append(toolbar);
+
+  const preset = coloringSelect(
+    "coloring-gradient-preset",
+    "rainbow1",
+    [["rainbow1", "Rainbow"], ["resmap1", "ResMap"], ["heatmap1", "Heat map"]],
+    () => {},
+  );
+  const applyPreset = button("Apply", "", () => {
+    state.gradientEntries = gradientPreset(preset.value, state.attrs.color_mapname || "");
+    coloringGradientSelectedIndex = -1;
+    commitColoring(target, state.type, state);
+  });
+  const presetRow = document.createElement("div");
+  presetRow.className = "coloring-paint-editor";
+  presetRow.append(preset, applyPreset);
+  coloringDeck.append(presetRow);
+}
+
+function renderColoringDeck(target) {
+  coloringDeck.replaceChildren();
+  const state = coloringState(target);
+  const updateAttr = (name, value) => {
+    state.attrs[name] = value;
+    commitColoring(target, state.type, state);
+  };
+  switch (state.type) {
+    case "SolidColoring":
+      coloringControlRow(
+        "Color",
+        coloringInput("coloring-solid-color", state.defaultColor, "text", (value) => {
+          state.defaultColor = value;
+          commitColoring(target, state.type, state);
+        }),
+      );
+      break;
+    case "CPKColoring":
+      for (const element of ["H", "C", "N", "O", "P", "S", "X"]) {
+        coloringControlRow(
+          element === "X" ? "Other" : element,
+          coloringInput(
+            `coloring-cpk-${element.toLowerCase()}`,
+            state.attrs[`col_${element}`] || defaultColoringState(state.type, target).attrs[`col_${element}`],
+            "text",
+            (value) => updateAttr(`col_${element}`, value),
+          ),
+        );
+      }
+      break;
+    case "RainbowColoring":
+      coloringControlRow(
+        "Mode",
+        coloringSelect("coloring-rainbow-mode", state.attrs.mode || "mol", [["mol", "Molecule"], ["chain", "Chain"]], (value) => updateAttr("mode", value)),
+      );
+      coloringControlRow(
+        "Increment",
+        coloringSelect("coloring-rainbow-increment", state.attrs.incr_mode || "resid", [["chain", "Chain"], ["resid", "Residue"], ["protss", "Secondary structure"]], (value) => updateAttr("incr_mode", value)),
+      );
+      for (const [name, label, fallback] of [["start_hue", "Start hue", "240"], ["end_hue", "End hue", "0"]]) {
+        coloringControlRow(label, coloringInput(`coloring-rainbow-${name.replace("_", "-")}`, state.attrs[name] || fallback, "number", (value) => updateAttr(name, value)));
+      }
+      for (const [name, label] of [["sat", "Saturation %"], ["bri", "Brightness %"]]) {
+        const percent = Math.round(Number(state.attrs[name] ?? 1) * 100);
+        coloringControlRow(label, coloringInput(`coloring-rainbow-${name}`, percent, "number", (value) => updateAttr(name, String(Number(value) / 100))));
+      }
+      break;
+    case "BfacColoring":
+      coloringControlRow(
+        "Source",
+        coloringSelect("coloring-bfac-mode", state.attrs.mode || "bfac", [["bfac", "B-factor"], ["occ", "Occupancy"], ["center", "Distance from center"]], (value) => updateAttr("mode", value)),
+      );
+      coloringControlRow(
+        "Auto range",
+        coloringSelect("coloring-bfac-auto", state.attrs.auto || "rend", [["none", "None"], ["mol", "Molecule"], ["rend", "Renderer"]], (value) => updateAttr("auto", value)),
+      );
+      for (const [name, label, fallback, type] of [
+        ["lowcol", "Low color", "#0000ff", "text"],
+        ["highcol", "High color", "#ff0000", "text"],
+        ["lowpar", "Low value", "-2", "number"],
+        ["highpar", "High value", "2", "number"],
+      ]) {
+        coloringControlRow(label, coloringInput(`coloring-bfac-${name}`, state.attrs[name] || fallback, type, (value) => updateAttr(name, value)));
+      }
+      break;
+    case "PaintColoring":
+      renderPaintColoring(target, state);
+      break;
+    case "ElectrostaticColoring":
+      renderElectrostaticColoring(target, state);
+      break;
+    case "MultiGradientColoring":
+      renderMultiGradientColoring(target, state);
+      break;
+    default: {
+      const note = document.createElement("p");
+      note.className = "coloring-note";
+      note.textContent = "The target inherits its default coloring.";
+      coloringDeck.append(note);
+      break;
+    }
   }
 }
 
 function renderColoring() {
-  const objects = activeObjects();
-  replaceOptions(coloringObject, objects);
-  const object = selectedObject();
-  const value =
-    object?.coloringType === "RainbowColoring"
-      ? "rainbow"
-      : object?.coloringType === "BfacColoring"
-        ? "bfac"
-        : "element";
-  coloringType.value = value;
-  coloringType.disabled = !object;
-  coloringNote.textContent =
-    value === "rainbow"
-      ? "N-terminus blue → C-terminus red."
-      : value === "bfac"
-        ? "Blue (low) → red (high), auto-scaled."
-        : "Per-element CPK colors.";
+  const targets = coloringTargets();
+  if (!targets.some((target) => target.key === coloringTargetKey)) {
+    const rendererKey = selectedRendererUid === null ? null : `renderer:${selectedObjectUid}:${selectedRendererUid}`;
+    coloringTargetKey = targets.some((target) => target.key === rendererKey)
+      ? rendererKey
+      : targets.find((target) => target.objectUid === selectedObjectUid)?.key || targets[0]?.key || null;
+    coloringPaintSelectedIndex = -1;
+    coloringGradientSelectedIndex = -1;
+  }
+  coloringTarget.replaceChildren();
+  for (const target of targets) {
+    const option = document.createElement("option");
+    option.value = target.key;
+    option.textContent = target.name;
+    coloringTarget.append(option);
+  }
+  coloringTarget.disabled = targets.length === 0;
+  if (coloringTargetKey) coloringTarget.value = coloringTargetKey;
+  const target = selectedColoringTarget();
+  coloringType.replaceChildren();
+  for (const [value, label] of coloringTypeOptions(target)) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    coloringType.append(option);
+  }
+  coloringType.disabled = !target;
+  coloringType.value = target?.state.coloringType || "";
+  if (target) renderColoringDeck(target);
+  else coloringDeck.replaceChildren();
 }
 
 function renderSymmetry() {
@@ -1271,14 +5627,27 @@ function renderDensity() {
 }
 
 function renderSequence() {
+  if (!document.querySelector('[data-bottom-panel="sequence"]')?.classList.contains("active")) {
+    return;
+  }
+  if (!moleculeSequenceIsCurrent()) {
+    renderedSequenceKey = "";
+    sequenceView.replaceChildren();
+    const loading = document.createElement("p");
+    loading.textContent = "Loading sequence…";
+    sequenceView.append(loading);
+    return;
+  }
+  if (renderedSequenceKey === moleculeDetails.sequenceKey) return;
+  renderedSequenceKey = moleculeDetails.sequenceKey;
   sequenceView.replaceChildren();
-  if (snapshot.sequence.length === 0) {
+  if (moleculeDetails.sequence.length === 0) {
     const empty = document.createElement("p");
     empty.textContent = "No molecule loaded.";
     sequenceView.append(empty);
     return;
   }
-  for (const chain of snapshot.sequence) {
+  for (const chain of moleculeDetails.sequence) {
     const row = document.createElement("section");
     row.className = "sequence-chain";
     const title = document.createElement("strong");
@@ -1311,9 +5680,15 @@ function syncAnimationTimer() {
       if (animationTickBusy) return;
       animationTickBusy = true;
       try {
-        snapshot = await invoke("tick_animation", { dt: 0.1 });
-        renderShell();
-        await renderViewport();
+        const size = viewportDimensions();
+        const sequence = ++requestSequence;
+        const frame = await invoke("tick_animation_frame", { dt: 0.1, ...size });
+        snapshot.animationElapsed = frame.animationElapsed;
+        snapshot.animationDuration = frame.animationDuration;
+        snapshot.animationPlaying = frame.animationPlaying;
+        snapshot.status = frame.status;
+        renderAnimation();
+        applyViewport(frame.viewport, sequence);
       } catch (error) {
         showError(error);
       } finally {
@@ -1381,14 +5756,30 @@ function selectedTrajectory() {
 
 async function seekTrajectory(frame) {
   const trajectory = selectedTrajectory();
-  if (!trajectory) return;
+  if (!trajectory || !invoke) return false;
   const last = Math.max(0, trajectory.frameCount - 1);
   const target = Math.max(0, Math.min(last, Math.round(Number(frame) || 0)));
   trajectoryFrames.set(trajectory.objectUid, target);
-  await mutate("set_trajectory_frame", {
-    objectUid: trajectory.objectUid,
-    frame: target,
-  });
+  const size = viewportDimensions();
+  const sequence = ++requestSequence;
+  setBusy(true);
+  try {
+    const result = await invoke("set_trajectory_frame_viewport", {
+      objectUid: trajectory.objectUid,
+      frame: target,
+      ...size,
+    });
+    trajectory.currentFrame = result.frame;
+    snapshot.status = result.status;
+    renderTrajectory();
+    applyViewport(result.viewport, sequence);
+    return true;
+  } catch (error) {
+    showError(error);
+    return false;
+  } finally {
+    setBusy(false);
+  }
 }
 
 function syncTrajectoryTimer() {
@@ -1543,16 +5934,10 @@ function renderTrajectory() {
   syncTrajectoryTimer();
 }
 
-function renderShell() {
-  if (!snapshot) return;
-  normalizeSelection();
-  selectionInput.value = snapshot.selection;
+function renderProjectionControls() {
   projectionReadout.textContent = snapshot.perspective ? "PERSPECTIVE" : "ORTHO";
   document.querySelectorAll("input[name='projection']").forEach((input) => {
     input.checked = input.value === (snapshot.perspective ? "perspective" : "orthographic");
-  });
-  document.querySelectorAll("input[name='background']").forEach((input) => {
-    input.checked = input.value === snapshot.background;
   });
   document.querySelectorAll("[data-projection]").forEach((item) => {
     item.classList.toggle(
@@ -1560,19 +5945,50 @@ function renderShell() {
       item.dataset.projection === (snapshot.perspective ? "perspective" : "orthographic"),
     );
   });
+}
+
+function renderShell() {
+  if (!snapshot) return;
+  normalizeSelection();
+  renderProjectionControls();
+  document.querySelectorAll("input[name='background']").forEach((input) => {
+    input.checked = input.value === snapshot.background;
+  });
   document.querySelectorAll("[data-background]").forEach((item) => {
     item.classList.toggle("checked", item.dataset.background === snapshot.background);
   });
   document
     .querySelector("[data-local-action='color-proof']")
     ?.classList.toggle("checked", snapshot.colorProofing);
+  renderUndoControls();
+  measureReadout.textContent = snapshot.measureResult || "Select 2 / 3 / 4 atoms";
+  renderStatusAndLog();
+  metrics.textContent = `${snapshot.scenes.length} scenes / ${snapshot.objects.length} objects`;
+  renderSceneTabs();
+  renderSceneTree();
+  renderInspector();
+  renderMolStruct();
+  renderSelectionPanel();
+  renderColoring();
+  renderSymmetry();
+  renderDensity();
+  renderSequence();
+  renderTrajectory();
+  renderAnimation();
+}
+
+function renderUndoControls() {
   document.querySelectorAll("[data-action='undo']").forEach((item) => {
     item.disabled = !snapshot.canUndo;
   });
   document.querySelectorAll("[data-action='redo']").forEach((item) => {
     item.disabled = !snapshot.canRedo;
   });
-  measureReadout.textContent = snapshot.measureResult || "Select 2 / 3 / 4 atoms";
+  renderHistoryMenu("undo", snapshot.undoDescriptions, snapshot.canUndo);
+  renderHistoryMenu("redo", snapshot.redoDescriptions, snapshot.canRedo);
+}
+
+function renderStatusAndLog() {
   statusText.textContent = snapshot.status;
   const modelLog = snapshot.logLines || [];
   if (modelLog.length < lastModelLogCount) {
@@ -1583,32 +5999,40 @@ function renderShell() {
   for (const line of modelLog.slice(lastModelLogCount)) recordStatus(line);
   lastModelLogCount = modelLog.length;
   recordStatus(snapshot.status);
-  metrics.textContent = `${snapshot.scenes.length} scenes / ${snapshot.objects.length} objects`;
-  renderSceneTabs();
-  renderSceneTree();
-  renderInspector();
-  renderMolStruct();
-  renderColoring();
-  renderSymmetry();
-  renderDensity();
-  renderSequence();
-  renderTrajectory();
-  renderAnimation();
+}
+
+function renderUndoAndStatus() {
+  renderUndoControls();
+  renderStatusAndLog();
 }
 
 function viewportDimensions() {
   const bounds = viewport.getBoundingClientRect();
+  const pixelRatio = preferences?.useHidpi ? window.devicePixelRatio || 1 : 1;
   return {
-    width: Math.max(64, Math.round(bounds.width)),
-    height: Math.max(64, Math.round(bounds.height)),
+    width: Math.max(64, Math.round(bounds.width * pixelRatio)),
+    height: Math.max(64, Math.round(bounds.height * pixelRatio)),
   };
 }
 
 function applyViewport(result, sequence) {
   if (sequence !== requestSequence) return;
+  renderedViewportSize = `${result.width}x${result.height}`;
   viewport.classList.toggle("has-image", Boolean(result.image));
   if (result.image) viewportImage.src = result.image;
   renderSize.textContent = `${result.width} × ${result.height}`;
+  if (
+    snapshot &&
+    typeof result.perspective === "boolean" &&
+    snapshot.perspective !== result.perspective
+  ) {
+    snapshot.perspective = result.perspective;
+    renderProjectionControls();
+  }
+  if (typeof result.centerMark === "string") {
+    const mark = result.centerMark === "crosshair" ? "cross" : result.centerMark;
+    if (mark !== centerMark) applyCenterMark(mark);
+  }
   if (result.status) {
     statusText.textContent = result.status;
     recordStatus(result.status);
@@ -1617,6 +6041,8 @@ function applyViewport(result, sequence) {
 
 async function renderViewport() {
   if (!invoke) return;
+  clearTimeout(renderTimer);
+  renderTimer = null;
   const size = viewportDimensions();
   const sequence = ++requestSequence;
   try {
@@ -1632,7 +6058,7 @@ function scheduleRender(delay = 100) {
   renderTimer = setTimeout(renderViewport, delay);
 }
 
-async function mutate(command, args = {}) {
+async function mutate(command, args = {}, render = renderShell, refreshViewport = true) {
   if (!invoke) {
     showError("Tauri IPC is unavailable. Run this frontend through the Tauri binary.");
     return false;
@@ -1640,8 +6066,10 @@ async function mutate(command, args = {}) {
   setBusy(true);
   try {
     snapshot = await invoke(command, args);
-    renderShell();
-    await renderViewport();
+    syncEmptyMoleculeDetails();
+    render();
+    if (refreshViewport) await renderViewport();
+    scheduleMoleculeDetailsRefresh();
     return true;
   } catch (error) {
     showError(error);
@@ -1651,17 +6079,34 @@ async function mutate(command, args = {}) {
   }
 }
 
-async function cameraCommand(action, x = 0, y = 0, refreshSnapshot = false) {
+function mutateWithoutViewport(command, args = {}, render = renderShell) {
+  return mutate(command, args, render, false);
+}
+
+async function cameraCommand(action, x = 0, y = 0) {
   if (!invoke) return;
   const size = viewportDimensions();
   const sequence = ++requestSequence;
   try {
     const result = await invoke("update_camera", { action, x, y, ...size });
     applyViewport(result, sequence);
-    if (refreshSnapshot) {
-      snapshot = await invoke("get_snapshot");
-      renderShell();
-    }
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function fitWorkspaceItem() {
+  if (!invoke) return;
+  const target = selectedWorkspaceTarget();
+  if (!target) {
+    showError("Select an object or renderer first.");
+    return;
+  }
+  const size = viewportDimensions();
+  const sequence = ++requestSequence;
+  try {
+    const result = await invoke("fit_workspace_item", { target, ...size });
+    applyViewport(result, sequence);
   } catch (error) {
     showError(error);
   }
@@ -1684,21 +6129,37 @@ async function openFiles() {
   });
   if (!chosen) return;
   const paths = Array.isArray(chosen) ? chosen : [chosen];
-  const viewPaths = paths.filter((path) => /\.(view|cam)$/i.test(path));
-  const objectPaths = paths.filter((path) => !/\.(view|cam)$/i.test(path));
-  if (objectPaths.length) {
-    lastOpenedPaths = objectPaths;
-    await mutate("open_paths", { paths: objectPaths });
-  }
-  for (const path of viewPaths) await mutate("load_view", { path });
+  await openSelectedPaths(paths);
 }
 
-async function saveScene() {
+async function openSelectedPaths(paths) {
+  const viewPaths = paths.filter((path) => /\.(view|cam)$/i.test(path));
+  const objectPaths = paths.filter((path) => !/\.(view|cam)$/i.test(path));
+  let opened = false;
+  if (objectPaths.length && (await mutate("open_paths", { paths: objectPaths }))) {
+    const openedPaths = Array.isArray(snapshot?.openedPaths) ? snapshot.openedPaths : [];
+    addRecentFiles(openedPaths.map((path) => ({ path })));
+    opened = openedPaths.length > 0;
+  }
+  for (const path of viewPaths) {
+    opened = (await mutate("load_view", { path })) || opened;
+  }
+  return opened;
+}
+
+async function saveScene(saveAs = false) {
+  const source = snapshot?.scenes.find((scene) => scene.active)?.source || "";
+  if (!saveAs && source) {
+    await mutateWithoutViewport("save_scene", { path: source });
+    return;
+  }
   const path = await dialog?.save?.({
     defaultPath: "scene.qsc",
     filters: [{ name: "CueMol scene", extensions: ["qsc"] }],
   });
-  if (path) await mutate("save_scene", { path });
+  if (path && (await mutateWithoutViewport("save_scene", { path }))) {
+    addRecentFile(path, "scene");
+  }
 }
 
 async function exportPng() {
@@ -1707,25 +6168,32 @@ async function exportPng() {
     filters: [{ name: "PNG image", extensions: ["png"] }],
   });
   if (!path) return;
-  await mutate("export_png", { path, ...viewportDimensions() });
+  await mutateWithoutViewport(
+    "export_png",
+    { path, ...viewportDimensions() },
+    renderStatusAndLog,
+  );
 }
 
-async function handleAction(action) {
+async function handleAction(action, depth = 0) {
   switch (action) {
     case "open":
       await openFiles();
       break;
     case "undo":
-      await mutate("undo");
+      await mutate("undo", { depth });
       break;
     case "redo":
-      await mutate("redo");
+      await mutate("redo", { depth });
       break;
     case "clear-undo":
-      await mutate("clear_undo");
+      await mutateWithoutViewport("clear_undo", {}, renderUndoAndStatus);
       break;
     case "save":
       await saveScene();
+      break;
+    case "save-as":
+      await saveScene(true);
       break;
     case "export":
       await exportPng();
@@ -1740,35 +6208,107 @@ async function handleAction(action) {
       await cameraCommand("fit");
       break;
     case "projection":
-      await cameraCommand("projection", 0, 0, true);
+      await cameraCommand("projection");
       break;
-    case "select":
-      await mutate("set_selection", { selection: selectionInput.value });
+    case "selection-command-apply":
+      await applySelectionCommand();
       break;
-    case "clear-selection":
-      await mutate("set_selection", { selection: "" });
+    case "selection-command-clear":
+      selectionInput.value = "";
+      break;
+    case "selection-editor-apply":
+      await applySelectionEditor();
+      break;
+    case "selection-editor-add":
+      addSelectionEditorItem(selectionEditorAddKind.value);
+      break;
+    case "selection-editor-delete":
+      deleteSelectionEditorItem();
+      break;
+    case "selection-editor-clear":
+      selectionEditorItems = [];
+      selectionEditorSelectedIndex = -1;
+      renderSelectionEditor();
       break;
     case "add-renderer": {
-      const object = selectedObject();
-      if (!object) {
-        showError("Select a molecular object first.");
+      const object = ["object", "renderer"].includes(workspaceSelectionKind)
+        ? selectedObject()
+        : null;
+      const map = ["densityMap", "densityRenderer"].includes(workspaceSelectionKind)
+        ? selectedDensityMap()
+        : null;
+      const surface = ["surface", "surfaceRenderer"].includes(workspaceSelectionKind)
+        ? selectedSurface()
+        : null;
+      if (!object && !map && !surface) {
+        showError("Select an object first.");
         return;
       }
-      const rendererType = document.getElementById("renderer-type").value;
-      await mutate("add_renderer", { objectUid: object.uid, rendererType });
+      const rendererTypeValue = rendererType.value;
+      if (map) {
+        await mutate("add_density_renderer", {
+          mapUid: map.uid,
+          rendererType: rendererTypeValue,
+        });
+      } else if (surface) {
+        await mutate("add_surface_renderer", {
+          surfaceUid: surface.uid,
+        });
+      } else {
+        await mutate("add_renderer", {
+          objectUid: object.uid,
+          rendererType: rendererTypeValue,
+        });
+      }
       break;
     }
-    case "select-object":
-      selectedObjectUid = Number(molstructObject.value) || null;
-      renderShell();
+    case "delete-workspace-item": {
+      const target = selectedWorkspaceTarget();
+      if (!target) {
+        showError("Select an object or renderer first.");
+        return;
+      }
+      await mutate("delete_workspace_item", { target });
+      break;
+    }
+    case "fit-workspace-item": {
+      await fitWorkspaceItem();
+      break;
+    }
+    case "molstruct-select":
+      await runMolstructAction("select");
+      break;
+    case "molstruct-center":
+      await runMolstructAction("center");
+      break;
+    case "molstruct-zoom":
+      await runMolstructAction("zoom");
+      break;
+    case "molstruct-properties":
       break;
   }
 }
 
+document.querySelectorAll("[data-history-toggle]").forEach((element) => {
+  element.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const group = element.closest("[data-history-group]");
+    const kind = element.dataset.historyToggle;
+    const open = !group.classList.contains("open");
+    closeMenus();
+    if (open) closeHistoryMenus(kind);
+  });
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (!event.target.closest("[data-history-group]")) closeHistoryMenus();
+});
+
 document.querySelectorAll("[data-action]").forEach((element) => {
   element.addEventListener("click", () => {
     closeMenus();
-    handleAction(element.dataset.action);
+    const depth = Number(element.dataset.depth || 0);
+    handleAction(element.dataset.action, Number.isFinite(depth) ? depth : 0);
   });
 });
 
@@ -1777,6 +6317,24 @@ document.querySelectorAll("[data-dialog]").forEach((element) => {
     closeMenus();
     showReferenceDialog(element.dataset.dialog);
   });
+});
+
+workspaceProperties.addEventListener("click", () => {
+  if (workspaceSelectionKind === "renderer" && selectedRenderer()) {
+    showReferenceDialog("Renderer Properties");
+  } else if (workspaceSelectionKind === "densityRenderer" && selectedDensityRenderer()) {
+    showReferenceDialog("Renderer Properties");
+  } else if (workspaceSelectionKind === "surfaceRenderer" && selectedSurfaceRenderer()) {
+    showReferenceDialog("Renderer Properties");
+  } else if (workspaceSelectionKind === "object" && selectedObject()) {
+    showReferenceDialog("Object Properties");
+  } else if (workspaceSelectionKind === "densityMap" && selectedDensityMap()) {
+    showReferenceDialog("Object Properties");
+  } else if (workspaceSelectionKind === "surface" && selectedSurface()) {
+    showReferenceDialog("Object Properties");
+  } else {
+    showReferenceDialog("Scene Properties");
+  }
 });
 
 document.querySelectorAll("[data-local-action]").forEach((element) => {
@@ -1800,7 +6358,7 @@ document.querySelectorAll("[data-projection]").forEach((element) => {
     closeMenus();
     const wantsPerspective = element.dataset.projection === "perspective";
     if (snapshot && snapshot.perspective !== wantsPerspective) {
-      cameraCommand("projection", 0, 0, true);
+      cameraCommand("projection");
     }
   });
 });
@@ -1808,10 +6366,7 @@ document.querySelectorAll("[data-projection]").forEach((element) => {
 document.querySelectorAll("[data-center-mark]").forEach((element) => {
   element.addEventListener("click", () => {
     closeMenus();
-    applyCenterMark(element.dataset.centerMark);
-    document.querySelectorAll("[data-center-mark]").forEach((item) => {
-      item.classList.toggle("checked", item === element);
-    });
+    cameraCommand(`center-mark-${element.dataset.centerMark}`);
   });
 });
 
@@ -1829,6 +6384,10 @@ document.querySelectorAll("[data-panel-menu]").forEach((element) => {
     const disclosure = card.querySelector(".disclosure");
     if (disclosure) disclosure.textContent = "▾";
     card.scrollIntoView({ block: "nearest" });
+    if (element.dataset.panelMenu === "MolStruct") {
+      renderMolStruct();
+      scheduleMoleculeDetailsRefresh(0);
+    }
     scheduleRender(140);
   });
 });
@@ -1866,6 +6425,10 @@ document.querySelectorAll("[data-panel-toggle]").forEach((element) => {
     const open = card.classList.toggle("open");
     element.setAttribute("aria-expanded", String(open));
     element.querySelector(".disclosure").textContent = open ? "▾" : "▸";
+    if (open && element.textContent.includes("MolStruct")) {
+      renderMolStruct();
+      scheduleMoleculeDetailsRefresh(0);
+    }
     scheduleRender(140);
   });
 });
@@ -1890,32 +6453,44 @@ document.querySelectorAll("[data-bottom-select]").forEach((element) => {
   });
 });
 
-document.querySelectorAll(".selection-tabs button").forEach((element) => {
+document.querySelectorAll("[data-selection-tab]").forEach((element) => {
   element.addEventListener("click", () => {
-    document.querySelectorAll(".selection-tabs button").forEach((tab) => {
-      tab.classList.toggle("active", tab === element);
-    });
+    selectionActiveTab = element.dataset.selectionTab;
+    renderSelectionPanel();
   });
 });
 
-molstructObject.addEventListener("change", () => {
-  selectedObjectUid = Number(molstructObject.value) || null;
-  renderShell();
+selectionObject.addEventListener("change", () => {
+  selectionObjectUid = Number(selectionObject.value) || null;
+  renderSelectionPanel();
 });
 
-coloringObject.addEventListener("change", () => {
-  selectedObjectUid = Number(coloringObject.value) || null;
-  renderShell();
+selectionHistory.addEventListener("change", () => {
+  if (selectionHistory.value) selectionInput.value = selectionHistory.value;
+  selectionHistory.value = "";
+});
+
+molstructObject.addEventListener("change", () => {
+  molstructObjectUid = Number(molstructObject.value) || null;
+  molstructSelectedKeys.clear();
+  molstructOpenKeys.clear();
+  molstructSelectionAnchor = null;
+  renderMolStruct();
+});
+
+coloringTarget.addEventListener("change", () => {
+  coloringTargetKey = coloringTarget.value || null;
+  coloringPaintSelectedIndex = -1;
+  coloringGradientSelectedIndex = -1;
+  renderColoring();
 });
 
 coloringType.addEventListener("change", () => {
-  const object = selectedObject();
-  if (object) {
-    mutate("set_object_coloring", {
-      objectUid: object.uid,
-      coloring: coloringType.value,
-    });
-  }
+  const target = selectedColoringTarget();
+  if (!target) return;
+  coloringPaintSelectedIndex = -1;
+  coloringGradientSelectedIndex = -1;
+  commitColoring(target, coloringType.value, defaultColoringState(coloringType.value, target));
 });
 
 showUnitCell.addEventListener("change", () => {
@@ -2105,7 +6680,7 @@ document.querySelectorAll("input[name='projection']").forEach((input) => {
   input.addEventListener("change", () => {
     const wantsPerspective = input.value === "perspective";
     if (input.checked && snapshot && snapshot.perspective !== wantsPerspective) {
-      cameraCommand("projection", 0, 0, true);
+      cameraCommand("projection");
     }
   });
 });
@@ -2123,21 +6698,46 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 selectionInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") handleAction("select");
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    void applySelectionCommand();
+  }
 });
 
 viewport.addEventListener("contextmenu", (event) => event.preventDefault());
+function configuredPointerAction(event) {
+  if (event.button === 0 && interactionMode === "rect-select" && !event.shiftKey) {
+    return "rect-select";
+  }
+  const button =
+    preferences?.emulateRightButton && event.button === 0 && event.ctrlKey ? 2 : event.button;
+  switch (preferences?.mousePreset) {
+    case "CootViewInConf":
+      if (button === 2) return "zoom";
+      if (button === 0 && event.ctrlKey) return "pan";
+      if (button === 0 && event.shiftKey) return "slab";
+      return button === 0 ? "rotate" : null;
+    case "PymolViewInConf":
+      if (button === 1) return "pan";
+      if (button === 2) return "zoom";
+      return button === 0 ? "rotate" : null;
+    case "IphoneViewInConf":
+      if (button === 2) return "pan";
+      if (button === 0 && event.shiftKey) return "slab";
+      return button === 0 ? "rotate" : null;
+    case "TrackpadViewInConf":
+    case "DefaultViewInConf":
+    default:
+      if (button === 2) return "pan";
+      if (button === 0 && event.shiftKey) return "zoom-slab";
+      return button === 0 ? "rotate" : null;
+  }
+}
+
 viewport.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0 && event.button !== 2) return;
+  const action = configuredPointerAction(event);
+  if (!action) return;
   viewport.setPointerCapture(event.pointerId);
-  const action =
-    event.button === 2
-      ? "pan"
-      : event.shiftKey
-        ? "zoom"
-        : interactionMode === "rect-select"
-          ? "rect-select"
-          : "rotate";
   drag = {
     pointerId: event.pointerId,
     x: event.clientX,
@@ -2193,10 +6793,18 @@ function finishDrag(event) {
       y2: startY + completed.dy,
       ...viewportDimensions(),
     });
-  } else if (completed.action === "zoom") {
-    cameraCommand("zoom", Math.exp(completed.dy * 0.01));
+  } else if (completed.action === "zoom" || completed.action === "slab") {
+    const delta = Math.abs(completed.dx) > Math.abs(completed.dy) ? completed.dx : completed.dy;
+    cameraCommand(completed.action, Math.exp(delta * 0.01));
+  } else if (completed.action === "zoom-slab") {
+    if (Math.abs(completed.dx) > Math.abs(completed.dy)) {
+      cameraCommand("slab", Math.exp(completed.dx * 0.01));
+    } else {
+      cameraCommand("zoom", Math.exp(completed.dy * 0.01));
+    }
   } else {
-    const scale = completed.action === "rotate" ? 0.35 : 1;
+    const radius = Math.max(0.1, preferences?.trackballRadius || 0.8);
+    const scale = completed.action === "rotate" ? 0.35 * (0.8 / radius) : 1;
     cameraCommand(completed.action, completed.dx * scale, completed.dy * scale);
   }
 }
@@ -2212,25 +6820,64 @@ viewport.addEventListener(
   "wheel",
   (event) => {
     event.preventDefault();
+    const preset = preferences?.mousePreset || "DefaultViewInConf";
+    const trackpad = preset === "TrackpadViewInConf" || preferences?.multitouchPad;
+    let action = "zoom";
+    let x = Math.exp(Math.max(-500, Math.min(500, event.deltaY)) * 0.001);
+    let y = 0;
+    if (trackpad && !event.ctrlKey) {
+      action = "pan";
+      x = event.deltaX;
+      y = event.deltaY;
+    } else if (preset === "PymolViewInConf" && !(event.ctrlKey && event.shiftKey)) {
+      action = "slab";
+    }
+    if (!preferences?.momentumScroll) {
+      cameraCommand(action, x, y);
+      return;
+    }
     clearTimeout(wheelTimer);
-    const factor = Math.exp(Math.max(-500, Math.min(500, event.deltaY)) * 0.001);
-    wheelTimer = setTimeout(() => cameraCommand("zoom", factor), 28);
+    if (wheelPending?.action === action) {
+      if (action === "pan") {
+        wheelPending.x += x;
+        wheelPending.y += y;
+      } else {
+        wheelPending.x *= x;
+      }
+    } else {
+      wheelPending = { action, x, y };
+    }
+    wheelTimer = setTimeout(() => {
+      const pending = wheelPending;
+      wheelPending = null;
+      if (pending) cameraCommand(pending.action, pending.x, pending.y);
+    }, 28);
   },
   { passive: false },
 );
 
 window.addEventListener("keydown", (event) => {
   const editing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "o") {
+  const shortcut = !editing && preferences?.shortcuts?.find(
+    (item) =>
+      item.key === event.key &&
+      item.ctrl === event.ctrlKey &&
+      item.alt === event.altKey &&
+      item.shift === event.shiftKey,
+  );
+  if (shortcut) {
+    event.preventDefault();
+    cameraCommand("pan", shortcut.id === "view-trans-plusx" ? 1 : -1, 0);
+  } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "o") {
     event.preventDefault();
     openFiles();
   } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
-    saveScene();
+    saveScene(event.shiftKey);
   } else if (!editing && event.key.toLowerCase() === "f") {
     cameraCommand("fit");
   } else if (!editing && event.key.toLowerCase() === "p") {
-    cameraCommand("projection", 0, 0, true);
+    cameraCommand("projection");
   }
 });
 
@@ -2239,12 +6886,9 @@ window.addEventListener("drop", (event) => {
   event.preventDefault();
   const paths = [...event.dataTransfer.files].map((file) => file.path).filter(Boolean);
   if (paths.length) {
-    lastOpenedPaths = paths;
-    mutate("open_paths", { paths });
+    openSelectedPaths(paths);
   }
 });
-
-new ResizeObserver(() => scheduleRender(140)).observe(viewport);
 
 async function start() {
   if (!invoke) {
@@ -2253,9 +6897,34 @@ async function start() {
     return;
   }
   try {
-    snapshot = await invoke("get_snapshot");
+    renderRecentMenu();
+    const sequence = ++requestSequence;
+    const initial = await invoke("get_initial_state", viewportDimensions());
+    preferences = initial.preferences;
+    snapshot = initial.snapshot;
+    syncEmptyMoleculeDetails();
     renderShell();
-    await renderViewport();
+    applyViewport(initial.viewport, sequence);
+    if (
+      initial.snapshot.objects.length ||
+      initial.snapshot.densityMaps.length ||
+      initial.snapshot.surfaces.length
+    ) {
+      scheduleRender(0);
+    }
+    scheduleMoleculeDetailsRefresh();
+    new ResizeObserver(() => {
+      const size = viewportDimensions();
+      if (`${size.width}x${size.height}` !== renderedViewportSize) scheduleRender(140);
+    }).observe(viewport);
+    if (initial.startupPathsPending) {
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          statusText.textContent = "Loading startup files…";
+          void mutate("open_initial_paths");
+        }, 0);
+      });
+    }
   } catch (error) {
     showError(error);
   }

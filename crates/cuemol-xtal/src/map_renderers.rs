@@ -214,7 +214,11 @@ impl DensityMap {
     }
 
     pub fn fit_view(&self, view: &mut View, _dummy: bool) {
-        let orth = self.get_orth_mat();
+        self.fit_view_with_xform(view, Matrix4::IDENTITY);
+    }
+
+    pub fn fit_view_with_xform(&self, view: &mut View, object_xform: Matrix4) {
+        let orth = object_xform.mul_mat(self.get_orth_mat());
         let eye = orth.mul_mat(Matrix4::make_rot_mat(view.rot_quat()));
         let corners = [
             Vector4::new4(0.0, 0.0, 0.0, 1.0),
@@ -2279,6 +2283,25 @@ attribute \"dep\" string \"positions\"
         assert!((view.zoom() - 15.0).abs() < 1.0e-10);
         assert!((view.slab_depth() - 40.0).abs() < 1.0e-10);
         assert!((view.view_dist() - 200.0).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn density_map_fit_view_applies_object_transform() {
+        let mut map = DensityMap::from_grid_map(test_grid());
+        map.set_xtal_params(30.0, 10.0, 40.0, 90.0, 90.0, 90.0);
+        let mut view = View::new(cuemol_core::Uid::new(1), cuemol_core::Uid::new(1));
+        view.set_view_size(200, 100);
+
+        map.fit_view_with_xform(
+            &mut view,
+            Matrix4::make_trans_mat(Vector4::new3(7.0, -3.0, 11.0)),
+        );
+
+        let center = view.view_center();
+        assert!((center.x - 22.0).abs() < 1.0e-10);
+        assert!((center.y - 2.0).abs() < 1.0e-10);
+        assert!((center.z - 31.0).abs() < 1.0e-10);
+        assert!((view.zoom() - 15.0).abs() < 1.0e-10);
     }
 
     #[test]

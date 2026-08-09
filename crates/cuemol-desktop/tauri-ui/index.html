@@ -13,13 +13,23 @@
       <header class="application-menu">
         <details class="menu">
           <summary>File</summary>
-          <div class="menu-popup">
+          <div class="menu-popup file-menu-popup">
             <button type="button" data-local-action="new-window">New Window</button>
             <button type="button" data-action="new-scene">New Tab</button>
             <button type="button" data-action="open">Open File…</button>
             <button type="button" data-dialog="Open PDB">Open PDB…</button>
             <button type="button" data-dialog="Open MD Trajectory">Open MD Trajectory…</button>
-            <button type="button" disabled>Open recent</button>
+            <div class="menu-submenu">
+              <button
+                type="button"
+                class="menu-submenu-trigger"
+                aria-haspopup="menu"
+                aria-label="Open Recent"
+              >
+                <span>Open Recent</span><span class="menu-arrow" aria-hidden="true">›</span>
+              </button>
+              <div class="menu-popup nested-menu" id="recent-menu" role="menu"></div>
+            </div>
             <button type="button" data-dialog="Save File As">Save File As…</button>
             <button type="button" data-dialog="Save Current View">Save current view…</button>
             <button type="button" data-action="close-scene">Close Tab</button>
@@ -27,7 +37,7 @@
             <button type="button" data-action="open">Open Scene…</button>
             <button type="button" data-local-action="reload-scene">Reload Scene</button>
             <button type="button" data-action="save">Save Scene</button>
-            <button type="button" data-action="save">Save Scene As…</button>
+            <button type="button" data-action="save-as">Save Scene As…</button>
           </div>
         </details>
         <details class="menu">
@@ -41,6 +51,8 @@
             <button type="button" data-dialog="Delete mol atoms">Delete mol atoms…</button>
             <button type="button" data-dialog="Change chain ID">Change chain ID…</button>
             <button type="button" data-dialog="Change residue number">Change residue number…</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-dialog="Options">Options…</button>
           </div>
         </details>
         <details class="menu">
@@ -165,12 +177,40 @@
             </div>
             <div class="toolbar-separator"></div>
             <div class="toolbar-group history-tools">
-              <button class="tool-button compact" type="button" disabled>
-                <span class="tool-icon">↶</span><span>Undo</span>
-              </button>
-              <button class="tool-button compact" type="button" disabled>
-                <span class="tool-icon">↷</span><span>Redo</span>
-              </button>
+              <div class="history-split" data-history-group="undo">
+                <button class="tool-button compact history-step" type="button" data-action="undo" data-depth="0" disabled>
+                  <span class="tool-icon">↶</span><span>Undo</span>
+                </button>
+                <button
+                  class="history-caret"
+                  type="button"
+                  aria-label="Undo history"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  data-history-toggle="undo"
+                  disabled
+                >
+                  ▾
+                </button>
+                <div class="history-popup" id="undo-history" role="menu"></div>
+              </div>
+              <div class="history-split" data-history-group="redo">
+                <button class="tool-button compact history-step" type="button" data-action="redo" data-depth="0" disabled>
+                  <span class="tool-icon">↷</span><span>Redo</span>
+                </button>
+                <button
+                  class="history-caret"
+                  type="button"
+                  aria-label="Redo history"
+                  aria-haspopup="menu"
+                  aria-expanded="false"
+                  data-history-toggle="redo"
+                  disabled
+                >
+                  ▾
+                </button>
+                <div class="history-popup" id="redo-history" role="menu"></div>
+              </div>
             </div>
             <div class="toolbar-separator"></div>
             <div class="toolbar-group mode-tools" role="radiogroup" aria-label="Navigation mode">
@@ -227,10 +267,10 @@
               <div class="tree-columns"><span>V</span><span>Name</span></div>
               <div id="scene-tree" class="scene-tree"></div>
               <div class="workspace-tools">
-                <button type="button" data-action="fit" title="Zoom at">⌕</button>
+                <button id="workspace-zoom" type="button" data-action="fit-workspace-item" title="Zoom at" disabled>⌕</button>
                 <button type="button" data-action="add-renderer" title="Add renderer">＋</button>
-                <button type="button" data-action="close-scene" title="Delete">−</button>
-                <button type="button" title="Properties">⚙</button>
+                <button id="workspace-delete" type="button" data-action="delete-workspace-item" title="Delete" disabled>−</button>
+                <button id="workspace-properties" type="button" title="Property" disabled>⚙</button>
               </div>
               <div class="workspace-properties">
                 <strong id="inspector-title">No object</strong>
@@ -263,12 +303,14 @@
               <span class="disclosure">▾</span><span>MolStruct</span><span class="panel-close">×</span>
             </button>
             <div class="side-body molstruct-body">
-              <div class="panel-toolbar">
-                <select id="molstruct-object" aria-label="Molecule"></select>
-                <button type="button" data-action="select-object">Select</button>
-                <button type="button" data-action="fit">Zoom</button>
-              </div>
+              <select id="molstruct-object" aria-label="Molecule"></select>
               <div id="molstruct-tree" class="molstruct-tree"></div>
+              <div class="workspace-tools molstruct-tools">
+                <button id="molstruct-select" type="button" data-action="molstruct-select" title="Select atoms" disabled>↖</button>
+                <button id="molstruct-center" type="button" data-action="molstruct-center" title="Center at" disabled>⌖</button>
+                <button id="molstruct-zoom" type="button" data-action="molstruct-zoom" title="Zoom at" disabled>⌕</button>
+                <button id="molstruct-properties" type="button" data-action="molstruct-properties" title="Properties">⚙</button>
+              </div>
             </div>
           </section>
 
@@ -277,13 +319,37 @@
               <span class="disclosure">▾</span><span>Selection</span><span class="panel-close">×</span>
             </button>
             <div class="side-body selection-body">
-              <div class="selection-tabs"><button class="active" type="button">Command</button><button type="button">Editor</button></div>
-              <label for="selection-input">Selection command</label>
-              <input id="selection-input" type="text" spellcheck="false" placeholder="chain A and name CA" />
-              <div class="selection-actions">
-                <button type="button" data-action="select">Apply</button>
-                <button type="button" data-action="clear-selection">Clear</button>
+              <select id="selection-object" aria-label="Molecule"></select>
+              <div class="selection-tabs" role="tablist">
+                <button class="active" type="button" role="tab" data-selection-tab="command" aria-selected="true" title="Input command">Command</button>
+                <button type="button" role="tab" data-selection-tab="editor" aria-selected="false" title="Editor">Editor</button>
               </div>
+              <div id="selection-command-panel" class="selection-tab-panel">
+                <textarea id="selection-input" rows="3" spellcheck="false" placeholder="Input selection command"></textarea>
+                <div class="workspace-tools selection-tools">
+                  <select id="selection-history" aria-label="Selection history" title="History"><option value="">History</option></select>
+                  <button id="selection-command-apply" type="button" data-action="selection-command-apply" title="Select">↖</button>
+                  <button id="selection-command-clear" type="button" data-action="selection-command-clear" title="Clear input">×</button>
+                </div>
+              </div>
+              <div id="selection-editor-panel" class="selection-tab-panel" hidden>
+                <div id="selection-editor-list" class="selection-editor-list"></div>
+                <div class="workspace-tools selection-editor-tools">
+                  <button id="selection-editor-apply" type="button" data-action="selection-editor-apply" title="Select" disabled>↖</button>
+                  <select id="selection-editor-add-kind" aria-label="Selection item type" title="Add item">
+                    <option value="hier">Hierarchical</option>
+                    <option value="term">Terminal</option>
+                    <option value="around">Around/Expand</option>
+                  </select>
+                  <button id="selection-editor-add" type="button" data-action="selection-editor-add" title="Add">＋</button>
+                  <button id="selection-editor-delete" type="button" data-action="selection-editor-delete" title="Delete" disabled>−</button>
+                  <button id="selection-editor-clear" type="button" data-action="selection-editor-clear" title="Delete all" disabled>×</button>
+                </div>
+              </div>
+              <datalist id="selection-chain-candidates"></datalist>
+              <datalist id="selection-resname-candidates"></datalist>
+              <datalist id="selection-atom-candidates"></datalist>
+              <datalist id="selection-element-candidates"></datalist>
             </div>
           </section>
 
@@ -292,15 +358,20 @@
               <span class="disclosure">▾</span><span>Coloring</span><span class="panel-close">×</span>
             </button>
             <div class="side-body coloring-body">
-              <label for="coloring-object">Molecule</label>
-              <select id="coloring-object"></select>
+              <label for="coloring-target">Target</label>
+              <select id="coloring-target"></select>
               <label for="coloring-type">Coloring</label>
               <select id="coloring-type">
-                <option value="element">Element (CPK)</option>
-                <option value="rainbow">Rainbow</option>
-                <option value="bfac">B-factor</option>
+                <option value="">Reset to default</option>
+                <option value="PaintColoring">Paint coloring</option>
+                <option value="SolidColoring">Solid color</option>
+                <option value="CPKColoring">CPK coloring</option>
+                <option value="BfacColoring">B-factor / Occupancy</option>
+                <option value="RainbowColoring">Rainbow</option>
+                <option value="ElectrostaticColoring">Electrostatic potential</option>
+                <option value="MultiGradientColoring">Multi-gradient</option>
               </select>
-              <p id="coloring-note">Per-element CPK colors.</p>
+              <div id="coloring-deck" class="coloring-deck"></div>
             </div>
           </section>
 

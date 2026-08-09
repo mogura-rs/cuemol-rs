@@ -119,7 +119,10 @@ fn cannot_open(path: &Path) -> CueMolError {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Default)]
     struct ByteCollector {
@@ -151,7 +154,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("cuemol-data-source-{nonce}"));
+        let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-data-source-{}-{nonce}-{id}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).unwrap();
         path
     }

@@ -13,7 +13,7 @@ use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
@@ -23,6 +23,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+static NEXT_DOWNLOAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("HD 720", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -359,6 +360,7 @@ struct GuiApplication {
     export_path: String,
     log_save_path: String,
     pdb_id: String,
+    pdb_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
     console_input: String,
     selection_text: String,
@@ -660,6 +662,7 @@ impl GuiApplication {
             export_path: "scene.pov".to_string(),
             log_save_path: "cuemol.log".to_string(),
             pdb_id: "1CRN".to_string(),
+            pdb_download_receiver: None,
             script_path: "script.js".to_string(),
             console_input: String::new(),
             selection_text: String::new(),
@@ -776,6 +779,7 @@ impl GuiApplication {
     }
 
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        self.poll_pdb_download(camera);
         self.pixels_per_point = ctx.pixels_per_point();
         // UI theme (View menu): CueMol2's native XUL look is light by default.
         ctx.set_visuals(if self.light_theme {
@@ -2827,7 +2831,7 @@ impl GuiApplication {
             return;
         }
         let path = if is_network_url(&open_path) {
-            match download_url_to_temp(&open_path) {
+            match download_url_to_cache(&open_path) {
                 Ok(path) => path,
                 Err(error) => {
                     self.set_error(error);
@@ -3104,27 +3108,57 @@ impl GuiApplication {
         }
     }
 
-    fn download_pdb(&mut self, camera: &mut CameraController) {
-        let pdb_id = self.pdb_id.trim().to_ascii_uppercase();
-        if pdb_id.len() != 4 || !pdb_id.chars().all(|ch| ch.is_ascii_alphanumeric()) {
-            self.set_status("PDB ID must be four alphanumeric characters");
+    fn start_pdb_download(&mut self, ctx: &egui::Context) {
+        if self.pdb_download_receiver.is_some() {
+            self.set_status("PDB download is already running");
             return;
         }
-        let url = format!("https://files.rcsb.org/download/{pdb_id}.pdb");
-        let path = std::env::temp_dir().join(format!("cuemol-{pdb_id}.pdb"));
-        match Command::new("curl")
-            .arg("-fsSL")
-            .arg("-o")
-            .arg(&path)
-            .arg(&url)
-            .status()
-        {
-            Ok(status) if status.success() => {
+        let (pdb_id, url, path) = match pdb_download_target(&self.pdb_id) {
+            Ok(target) => target,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let (sender, receiver) = mpsc::channel();
+        let repaint = ctx.clone();
+        let spawn = std::thread::Builder::new()
+            .name(format!("cuemol-pdb-{pdb_id}"))
+            .spawn(move || {
+                let result = download_to_cache(&url, &path).map_err(|error| error.to_string());
+                let _ = sender.send(result);
+                repaint.request_repaint();
+            });
+        match spawn {
+            Ok(_) => {
+                self.pdb_download_receiver = Some(receiver);
+                self.set_status(format!("Downloading PDB {pdb_id}…"));
+            }
+            Err(error) => self.set_status(format!("Error: failed to start PDB download: {error}")),
+        }
+    }
+
+    fn poll_pdb_download(&mut self, camera: &mut CameraController) {
+        let result = self
+            .pdb_download_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match result {
+            Some(Ok(Ok(path))) => {
+                self.pdb_download_receiver = None;
                 self.open_path = path.to_string_lossy().to_string();
                 self.open_current_path(camera);
+                self.show_get_pdb = false;
             }
-            Ok(status) => self.set_status(format!("curl failed with status {status}")),
-            Err(error) => self.set_status(format!("Error: {error}")),
+            Some(Ok(Err(error))) => {
+                self.pdb_download_receiver = None;
+                self.set_status(format!("Error: {error}"));
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.pdb_download_receiver = None;
+                self.set_status("Error: PDB download task stopped");
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
         }
     }
 
@@ -3715,7 +3749,7 @@ impl GuiApplication {
         self.chain_dialog(ctx);
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx);
-        self.get_pdb_dialog(ctx, camera);
+        self.get_pdb_dialog(ctx);
         self.script_dialog(ctx);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
@@ -4274,7 +4308,7 @@ impl GuiApplication {
         }
     }
 
-    fn get_pdb_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+    fn get_pdb_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_get_pdb {
             return;
         }
@@ -4288,18 +4322,24 @@ impl GuiApplication {
                     egui::TextEdit::singleline(&mut self.pdb_id),
                 );
                 ui.label(format!(
-                    "https://files.rcsb.org/download/{}.pdb",
+                    "https://files.rcsb.org/download/{}.cif.gz",
                     self.pdb_id.trim().to_ascii_uppercase()
                 ));
                 if ui.button("Use as Open Path").clicked() {
                     self.open_path = format!(
-                        "https://files.rcsb.org/download/{}.pdb",
+                        "https://files.rcsb.org/download/{}.cif.gz",
                         self.pdb_id.trim().to_ascii_uppercase()
                     );
                     self.set_status("URL copied to Open path");
                 }
-                if ui.button("Download and Open").clicked() {
-                    self.download_pdb(camera);
+                if ui
+                    .add_enabled(
+                        self.pdb_download_receiver.is_none(),
+                        egui::Button::new("Download and Open"),
+                    )
+                    .clicked()
+                {
+                    self.start_pdb_download(ctx);
                 }
             });
         self.show_get_pdb = open;
@@ -5828,24 +5868,83 @@ fn is_view_file(path: &Path) -> bool {
         .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "cam" | "view"))
 }
 
-fn download_url_to_temp(url: &str) -> Result<PathBuf> {
-    let path = url_temp_path(url);
-    let status = Command::new("curl")
-        .arg("-fsSL")
-        .arg("-o")
-        .arg(&path)
-        .arg(url)
-        .status()?;
-    if status.success() {
-        Ok(path)
-    } else {
-        Err(CueMolError::invalid_argument(format!(
-            "curl failed with status {status}"
-        )))
-    }
+fn download_url_to_cache(url: &str) -> Result<PathBuf> {
+    let path = url_cache_path(url);
+    download_to_cache(url, &path)
 }
 
-fn url_temp_path(url: &str) -> PathBuf {
+fn pdb_download_target(pdb_id: &str) -> Result<(String, String, PathBuf)> {
+    let pdb_id = pdb_id.trim().to_ascii_uppercase();
+    if pdb_id.len() != 4 || !pdb_id.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return Err(CueMolError::invalid_argument(
+            "PDB ID must be four alphanumeric characters",
+        ));
+    }
+    let url = format!("https://files.rcsb.org/download/{pdb_id}.cif.gz");
+    let filename = format!("cuemol-pdb-{pdb_id}.cif.gz");
+    let path = cached_download_path(&filename);
+    Ok((pdb_id, url, path))
+}
+
+fn download_to_cache(url: &str, path: &Path) -> Result<PathBuf> {
+    if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
+        return Ok(path.to_path_buf());
+    }
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("download");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let download_id = NEXT_DOWNLOAD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let partial_path = path.with_file_name(format!(
+        "{filename}.{}.{download_id}.partial",
+        std::process::id(),
+    ));
+    let output = Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--compressed",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "30",
+        ])
+        .arg("--output")
+        .arg(&partial_path)
+        .arg(url)
+        .output()?;
+    if !output.status.success() {
+        let _ = fs::remove_file(&partial_path);
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(CueMolError::invalid_argument(if detail.is_empty() {
+            format!("curl failed with status {}", output.status)
+        } else {
+            format!("curl failed: {detail}")
+        }));
+    }
+    if !fs::metadata(&partial_path).is_ok_and(|metadata| metadata.len() > 0) {
+        let _ = fs::remove_file(&partial_path);
+        return Err(CueMolError::invalid_argument(
+            "download returned an empty file",
+        ));
+    }
+    if let Err(error) = fs::rename(&partial_path, path) {
+        if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
+            let _ = fs::remove_file(&partial_path);
+        } else {
+            let _ = fs::remove_file(&partial_path);
+            return Err(error.into());
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+fn url_cache_path(url: &str) -> PathBuf {
     let basename = url
         .split('?')
         .next()
@@ -5854,7 +5953,26 @@ fn url_temp_path(url: &str) -> PathBuf {
         .next()
         .filter(|value| !value.is_empty())
         .unwrap_or("download.pdb");
-    std::env::temp_dir().join(format!("cuemol-url-{}", sanitize_filename(basename)))
+    cached_download_path(&format!("cuemol-url-{}", sanitize_filename(basename)))
+}
+
+fn cached_download_path(filename: &str) -> PathBuf {
+    let persistent = crate::download_cache_path(filename);
+    let temporary = std::env::temp_dir().join(filename);
+    if fs::metadata(&persistent).is_ok_and(|metadata| metadata.len() > 0) {
+        return persistent;
+    }
+    if fs::metadata(&temporary).is_ok_and(|metadata| metadata.len() > 0) {
+        return temporary;
+    }
+    if persistent
+        .parent()
+        .is_some_and(|parent| fs::create_dir_all(parent).is_ok())
+    {
+        persistent
+    } else {
+        temporary
+    }
 }
 
 fn sanitize_filename(value: &str) -> String {
@@ -6181,9 +6299,33 @@ mod tests {
         assert!(is_view_file(Path::new("current.cam")));
         assert_eq!(sanitize_filename("a/b?c.pdb"), "a_b_c.pdb");
         assert!(
-            url_temp_path("https://example.test/foo/1CRN.pdb?download=1")
+            url_cache_path("https://example.test/foo/1CRN.pdb?download=1")
                 .ends_with("cuemol-url-1CRN.pdb")
         );
+    }
+
+    #[test]
+    fn native_gui_reuses_a_nonempty_download_cache() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-gui-cache-test-{}-{}.pdb",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("unnamed")
+        ));
+        fs::write(&path, b"cached PDB").unwrap();
+        assert_eq!(
+            download_to_cache("invalid://must-not-be-fetched", &path).unwrap(),
+            path
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn native_gui_pdb_download_uses_shared_compressed_cache() {
+        let (pdb_id, url, path) = pdb_download_target(" 1crn ").unwrap();
+        assert_eq!(pdb_id, "1CRN");
+        assert_eq!(url, "https://files.rcsb.org/download/1CRN.cif.gz");
+        assert!(path.ends_with("cuemol-pdb-1CRN.cif.gz"));
+        assert!(pdb_download_target("bad").is_err());
     }
 
     #[test]

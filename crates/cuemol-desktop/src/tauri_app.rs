@@ -1,31 +1,55 @@
 //! Tauri desktop shell backed by the shared [`DesktopAppState`].
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex};
 
-use cuemol_core::{Quat, Uid, Vector4};
-use cuemol_qsys::Camera;
+use cuemol_core::{LDom2Node, Quat, Uid, Vector4};
+use cuemol_qsys::{Camera, CenterMark, StereoMode, View};
 use cuemol_render::{tessellate_snapshot, RenderMesh, RenderSceneSnapshot};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::offscreen::{camera_mvp, encode_rgba_png, SceneRenderer};
+use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
     anim_step, atoms_in_screen_rect, pick_atom_screen, AnimKind, AnimObject, DesktopAppState,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
+static NEXT_DOWNLOAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SceneDto {
     uid: u64,
     name: String,
+    source: String,
+    source_type: String,
+    base_path: String,
+    modified: bool,
     object_count: usize,
     map_count: usize,
     active: bool,
+    background: String,
+    ao_enabled: bool,
+    ao_radius: f64,
+    ao_intensity: f64,
+    ao_slices: i32,
+    ao_steps: i32,
+    ao_half_res: bool,
+    aa_method: String,
+    aa_jitter_level: i32,
+    onload: String,
+    object_uids: String,
+    active_object_id: u64,
+    active_renderer_id: u64,
+    view_uids: String,
+    active_view_id: u64,
+    use_color_proof: bool,
+    icc_filename: String,
+    icc_intent: String,
 }
 
 #[derive(Serialize)]
@@ -34,7 +58,64 @@ struct RendererDto {
     uid: u64,
     name: String,
     renderer_type: String,
+    selection: String,
     visible: bool,
+    locked: bool,
+    material: String,
+    alpha: f64,
+    edge_type: String,
+    edge_width: f64,
+    edge_color: String,
+    line_width: f64,
+    detail: i32,
+    bond_width: f64,
+    sphere_radius: f64,
+    show_ring: bool,
+    ring_thickness: f64,
+    ring_color: String,
+    supports_coloring: bool,
+    supports_solid_coloring: bool,
+    supports_electrostatic_coloring: bool,
+    supports_multi_gradient: bool,
+    coloring_type: Option<String>,
+    coloring_attrs: BTreeMap<String, String>,
+    paint_entries: Vec<PaintEntryDto>,
+    gradient_entries: Vec<GradientEntryDto>,
+    default_color: String,
+    specific: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PaintEntryDto {
+    selection: String,
+    color: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GradientEntryDto {
+    value: f64,
+    color: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ColoringUpdateInput {
+    kind: String,
+    object_uid: u64,
+    #[serde(default)]
+    renderer_uid: Option<u64>,
+    #[serde(default)]
+    coloring_type: Option<String>,
+    #[serde(default)]
+    attrs: BTreeMap<String, String>,
+    #[serde(default)]
+    paint_entries: Vec<PaintEntryDto>,
+    #[serde(default)]
+    gradient_entries: Vec<GradientEntryDto>,
+    #[serde(default)]
+    default_color: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -43,10 +124,17 @@ struct ObjectDto {
     uid: u64,
     scene_uid: u64,
     name: String,
+    source: String,
+    source_type: String,
+    visible: bool,
+    locked: bool,
     atom_count: usize,
     residue_count: usize,
     bond_count: usize,
     coloring_type: Option<String>,
+    coloring_attrs: BTreeMap<String, String>,
+    paint_entries: Vec<PaintEntryDto>,
+    default_color: String,
     renderers: Vec<RendererDto>,
 }
 
@@ -121,13 +209,37 @@ struct CrystalDto {
 #[serde(rename_all = "camelCase")]
 struct DensityMapDto {
     uid: u64,
+    scene_uid: u64,
     name: String,
+    class_name: String,
     format: String,
+    visible: bool,
+    locked: bool,
+    source: String,
     counts: [usize; 3],
     min_density: f64,
     max_density: f64,
     mean_density: f64,
     rmsd_density: f64,
+    renderers: Vec<RendererDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SurfaceDto {
+    uid: u64,
+    scene_uid: u64,
+    name: String,
+    class_name: String,
+    format: String,
+    visible: bool,
+    locked: bool,
+    source: String,
+    original_molecule: String,
+    original_selection: String,
+    original_density: f64,
+    original_probe_radius: f64,
+    renderers: Vec<RendererDto>,
 }
 
 #[derive(Serialize)]
@@ -183,10 +295,11 @@ struct TrajectoryDto {
 struct AppSnapshot {
     scenes: Vec<SceneDto>,
     objects: Vec<ObjectDto>,
-    structure: Vec<StructObjectDto>,
-    sequence: Vec<SequenceChainDto>,
+    structure_key: String,
+    sequence_key: String,
     crystals: Vec<CrystalDto>,
     density_maps: Vec<DensityMapDto>,
+    surfaces: Vec<SurfaceDto>,
     active_scene_uid: Option<u64>,
     selection: String,
     measure_result: Option<String>,
@@ -206,8 +319,23 @@ struct AppSnapshot {
     trajectories: Vec<TrajectoryDto>,
     can_undo: bool,
     can_redo: bool,
+    undo_descriptions: Vec<String>,
+    redo_descriptions: Vec<String>,
+    opened_paths: Vec<String>,
+    material_names: Vec<String>,
     log_lines: Vec<String>,
     status: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MoleculeDetailsDto {
+    structure_key: String,
+    sequence_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    structure: Option<Vec<StructObjectDto>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sequence: Option<Vec<SequenceChainDto>>,
 }
 
 #[derive(Serialize)]
@@ -216,14 +344,240 @@ struct ViewportDto {
     image: Option<String>,
     width: u32,
     height: u32,
+    perspective: bool,
+    center_mark: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InitialStateDto {
+    snapshot: AppSnapshot,
+    viewport: ViewportDto,
+    preferences: PreferencesDto,
+    startup_paths_pending: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MolStructUpdateDto {
+    snapshot: AppSnapshot,
+    viewport: ViewportDto,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnimationFrameDto {
+    animation_elapsed: f64,
+    animation_duration: f64,
+    animation_playing: bool,
+    status: String,
+    viewport: ViewportDto,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrajectoryFrameDto {
+    object_uid: u64,
+    frame: usize,
+    status: String,
+    viewport: ViewportDto,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginDto {
+    name: String,
+    description: String,
+    extensions: String,
+    category: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigEntryDto {
+    key: String,
+    value: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApplicationInfoDto {
+    product_name: &'static str,
+    version: &'static str,
+    target: String,
+    features: Vec<&'static str>,
+    plugins: Vec<PluginDto>,
+    config: Vec<ConfigEntryDto>,
+    status: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewPropertiesDto {
+    name: String,
+    uid: u64,
+    active: bool,
+    zoom: f64,
+    distance: f64,
+    slab: f64,
+    center: [f64; 3],
+    rotation: [f64; 4],
+    perspective: bool,
+    width: u32,
+    height: u32,
+    trans_mms: bool,
+    rot_mms: bool,
+    stereo_mode: String,
+    has_hw_stereo: bool,
+    stereo_dist: f64,
+    swap_stereo_eyes: bool,
+    up_vec: [f64; 3],
+    right_vec: [f64; 3],
+    forward_vec: [f64; 3],
+    center_mark: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewPropertiesInput {
+    name: String,
+    zoom: f64,
+    distance: f64,
+    slab: f64,
+    center: [f64; 3],
+    rotation: [f64; 4],
+    perspective: bool,
+    trans_mms: bool,
+    rot_mms: bool,
+    stereo_mode: String,
+    stereo_dist: f64,
+    swap_stereo_eyes: bool,
+    center_mark: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScenePropertiesInput {
+    scene_uid: u64,
+    background: String,
+    ao_enabled: bool,
+    ao_radius: f64,
+    ao_intensity: f64,
+    ao_slices: i32,
+    ao_steps: i32,
+    ao_half_res: bool,
+    aa_method: String,
+    aa_jitter_level: i32,
+    onload: String,
+    use_color_proof: bool,
+    icc_filename: String,
+    icc_intent: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewPropertiesUpdateDto {
+    properties: ViewPropertiesDto,
+    snapshot: AppSnapshot,
+    viewport: ViewportDto,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectPropertiesInput {
+    object_uid: u64,
+    name: String,
+    visible: bool,
+    locked: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceDeleteInput {
+    kind: String,
+    object_uid: u64,
+    #[serde(default)]
+    renderer_uid: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceFitInput {
+    kind: String,
+    object_uid: u64,
+    #[serde(default)]
+    renderer_uid: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RendererPropertiesInput {
+    object_uid: u64,
+    renderer_uid: u64,
+    name: String,
+    selection: String,
+    visible: bool,
+    locked: bool,
+    material: String,
+    alpha: f64,
+    edge_type: String,
+    edge_width: f64,
+    edge_color: String,
+    line_width: f64,
+    detail: i32,
+    bond_width: f64,
+    sphere_radius: f64,
+    show_ring: bool,
+    ring_thickness: f64,
+    ring_color: String,
+    #[serde(default)]
+    specific: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShortcutDto {
+    id: String,
+    key: String,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreferencesDto {
+    atom_label_font: String,
+    atom_label_size: f64,
+    atom_label_color: String,
+    atom_label_italic: bool,
+    atom_label_bold: bool,
+    ui_language: String,
+    use_hidpi: bool,
+    mouse_preset: String,
+    trackball_radius: f64,
+    hit_precision: f64,
+    momentum_scroll: bool,
+    multitouch_pad: bool,
+    emulate_right_button: bool,
+    shortcuts: Vec<ShortcutDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreferencesUpdateDto {
+    preferences: PreferencesDto,
     status: String,
 }
 
 struct AppModel {
     desktop: DesktopAppState,
+    config_path: Option<PathBuf>,
     camera: Camera,
     renderer: Option<SceneRenderer>,
     mesh: Option<RenderMesh>,
+    mesh_refit_pending: bool,
     selection: String,
     background: String,
     show_unit_cell: bool,
@@ -236,8 +590,16 @@ struct AppModel {
     animation_playing: bool,
     animation_loop: bool,
     animation_start_camera: Option<Camera>,
-    undo_stack: Vec<AppModelUndo>,
-    redo_stack: Vec<AppModelUndo>,
+    view_width: u32,
+    view_height: u32,
+    trans_mms: bool,
+    rot_mms: bool,
+    swap_stereo_eyes: bool,
+    opened_paths: Vec<String>,
+    structure_revision: u64,
+    modified_scenes: BTreeSet<Uid>,
+    undo_stack: Vec<AppModelUndoEntry>,
+    redo_stack: Vec<AppModelUndoEntry>,
     log_lines: Vec<String>,
     status: String,
 }
@@ -256,14 +618,34 @@ struct AppModelUndo {
     animation_objects: Vec<AnimObject>,
     animation_elapsed: f64,
     animation_loop: bool,
+    trans_mms: bool,
+    rot_mms: bool,
+    swap_stereo_eyes: bool,
+    modified_scenes: BTreeSet<Uid>,
+}
+
+#[derive(Clone)]
+struct AppModelUndoEntry {
+    snapshot: AppModelUndo,
+    description: String,
 }
 
 impl AppModel {
+    #[cfg(test)]
     fn new(open_paths: Vec<PathBuf>) -> Self {
+        Self::new_with_config(open_paths, None)
+    }
+
+    fn new_with_config(open_paths: Vec<PathBuf>, config_path: Option<PathBuf>) -> Self {
         let mut desktop = DesktopAppState::new();
+        let mut failures = Vec::new();
+        if let Some(path) = config_path.as_ref().filter(|path| path.exists()) {
+            if let Err(error) = desktop.load_config_file(path) {
+                failures.push(format!("{}: {error}", path.display()));
+            }
+        }
         desktop.ensure_active_scene();
         let mut loaded = 0usize;
-        let mut failures = Vec::new();
         for path in open_paths {
             match desktop.open_path(&path) {
                 Ok(_) => loaded += 1,
@@ -281,9 +663,11 @@ impl AppModel {
         };
         let mut model = Self {
             desktop,
+            config_path,
             camera: Camera::new(),
-            renderer: SceneRenderer::new(),
+            renderer: None,
             mesh: None,
+            mesh_refit_pending: loaded > 0,
             selection: String::new(),
             background: "black".to_string(),
             show_unit_cell: false,
@@ -296,110 +680,229 @@ impl AppModel {
             animation_playing: false,
             animation_loop: false,
             animation_start_camera: None,
+            view_width: 100,
+            view_height: 100,
+            trans_mms: false,
+            rot_mms: false,
+            swap_stereo_eyes: false,
+            opened_paths: Vec::new(),
+            structure_revision: 1,
+            modified_scenes: BTreeSet::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             log_lines: Vec::new(),
             status,
         };
-        let _ = model.rebuild_mesh(true);
+        model.apply_stored_preferences();
+        model.sync_active_scene_properties();
         model
     }
 
     fn snapshot(&self) -> AppSnapshot {
-        let scenes = self
-            .desktop
-            .scene_summaries()
-            .into_iter()
-            .map(|scene| SceneDto {
-                uid: scene.uid.get(),
-                name: scene.name,
-                object_count: scene.object_count,
-                map_count: scene.map_count,
-                active: scene.active,
+        let scene_summaries = self.desktop.scene_summaries();
+        let scenes = scene_summaries
+            .iter()
+            .map(|summary| {
+                let scene = self
+                    .desktop
+                    .scene_manager()
+                    .scene(summary.uid)
+                    .expect("scene summary must reference a live scene");
+                let object_uids = scene
+                    .objects()
+                    .iter()
+                    .map(|object| object.uid().get().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let view_uids = scene
+                    .active_view_uid()
+                    .map(|uid| uid.get().to_string())
+                    .unwrap_or_default();
+                SceneDto {
+                    uid: summary.uid.get(),
+                    name: summary.name.clone(),
+                    source: scene.source().to_string(),
+                    source_type: scene.source_type().to_string(),
+                    base_path: scene.base_path().to_string(),
+                    modified: self.modified_scenes.contains(&summary.uid),
+                    object_count: summary.object_count,
+                    map_count: summary.map_count,
+                    active: summary.active,
+                    background: scene
+                        .scene_attribute("bgcolor")
+                        .unwrap_or("black")
+                        .to_string(),
+                    ao_enabled: scene_attr_bool(scene.scene_attribute("aoEnabled"), false),
+                    ao_radius: scene_attr_f64(scene.scene_attribute("aoRadius"), 4.0),
+                    ao_intensity: scene_attr_f64(scene.scene_attribute("aoIntensity"), 2.2),
+                    ao_slices: scene_attr_i32(scene.scene_attribute("aoSlices"), 9),
+                    ao_steps: scene_attr_i32(scene.scene_attribute("aoSteps"), 3),
+                    ao_half_res: scene_attr_bool(scene.scene_attribute("aoHalfRes"), false),
+                    aa_method: scene
+                        .scene_attribute("aa_method")
+                        .unwrap_or("fxaa")
+                        .to_string(),
+                    aa_jitter_level: scene_attr_i32(scene.scene_attribute("aaJitterLevel"), 0),
+                    onload: scene.scene_attribute("onload").unwrap_or("").to_string(),
+                    object_uids,
+                    active_object_id: scene.active_object_uid().map_or(0, Uid::get),
+                    active_renderer_id: scene.active_renderer_uid().map_or(0, Uid::get),
+                    view_uids,
+                    active_view_id: scene.active_view_uid().map_or(0, Uid::get),
+                    use_color_proof: scene_attr_bool(scene.scene_attribute("use_colproof"), false),
+                    icc_filename: scene
+                        .scene_attribute("icc_filename")
+                        .unwrap_or("")
+                        .to_string(),
+                    icc_intent: scene
+                        .scene_attribute("icc_intent")
+                        .unwrap_or("perceptual")
+                        .to_string(),
+                }
             })
             .collect::<Vec<_>>();
         let mut objects = Vec::new();
-        for scene in self.desktop.scene_summaries() {
+        for scene in scene_summaries {
+            let styles = self
+                .desktop
+                .scene_manager()
+                .scene(scene.uid)
+                .map(cuemol_molvis::scene_style_manager)
+                .unwrap_or_else(cuemol_molvis::default_style_manager);
             for object in self.desktop.object_summaries(scene.uid) {
+                let object_state = self
+                    .desktop
+                    .scene_manager()
+                    .object(object.uid)
+                    .expect("object summary must reference a live object");
                 let renderers = self
                     .desktop
                     .renderer_summaries(object.uid)
                     .into_iter()
-                    .map(|renderer| RendererDto {
-                        uid: renderer.uid.get(),
-                        name: renderer.name,
-                        renderer_type: renderer.renderer_type,
-                        visible: renderer.visible,
+                    .map(|renderer| {
+                        let state = object_state
+                            .renderer(renderer.uid)
+                            .expect("renderer summary must reference a live renderer");
+                        let specific = renderer_specific_attributes(
+                            state,
+                            renderer.renderer_type.as_str(),
+                            &styles,
+                        );
+                        let (mut coloring_type, mut coloring_attrs, paint_entries) =
+                            renderer_coloring_details(state, &styles, scene.uid.get());
+                        let direct_surface = matches!(
+                            renderer.renderer_type.as_str(),
+                            "dsurface" | "directsurf" | "dsurf2"
+                        );
+                        if direct_surface
+                            && specific
+                                .get("colormode")
+                                .is_some_and(|mode| mode == "potential" || mode == "1")
+                        {
+                            coloring_type = Some("ElectrostaticColoring".to_string());
+                            coloring_attrs = coloring_attrs_from_specific(
+                                &specific,
+                                &[
+                                    "elepot",
+                                    "lowpar",
+                                    "midpar",
+                                    "highpar",
+                                    "lowcol",
+                                    "midcol",
+                                    "highcol",
+                                    "ramp_above",
+                                    "ramp_value",
+                                ],
+                            );
+                        }
+                        let supports_coloring = !matches!(
+                            renderer.renderer_type.as_str(),
+                            "selection" | "sel" | "*selection" | "atomintr"
+                        );
+                        RendererDto {
+                            uid: renderer.uid.get(),
+                            name: renderer.name,
+                            renderer_type: renderer.renderer_type,
+                            selection: state.qsc_attr("sel").unwrap_or("*").to_string(),
+                            visible: renderer.visible,
+                            locked: state.qsc_attr("locked").is_some_and(config_value_is_true),
+                            material: state.qsc_attr("material").unwrap_or("").to_string(),
+                            alpha: state
+                                .qsc_attr("alpha")
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(1.0),
+                            edge_type: state.qsc_attr("egtype").unwrap_or("none").to_string(),
+                            edge_width: state
+                                .qsc_attr("eglinew")
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(0.01),
+                            edge_color: state.qsc_attr("egcolor").unwrap_or("#000000").to_string(),
+                            line_width: state
+                                .qsc_attr("width")
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(1.2),
+                            detail: state
+                                .qsc_attr("detail")
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(3),
+                            bond_width: state
+                                .qsc_attr("bondw")
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(0.2),
+                            sphere_radius: state
+                                .qsc_attr("sphr")
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(0.3),
+                            show_ring: state.qsc_attr("ring").is_some_and(config_value_is_true),
+                            ring_thickness: state
+                                .qsc_attr("thickness")
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(0.2),
+                            ring_color: state
+                                .qsc_attr("ringcolor")
+                                .unwrap_or("#ffffbf")
+                                .to_string(),
+                            supports_coloring,
+                            supports_solid_coloring: false,
+                            supports_electrostatic_coloring: direct_surface,
+                            supports_multi_gradient: false,
+                            coloring_type,
+                            coloring_attrs,
+                            paint_entries,
+                            gradient_entries: Vec::new(),
+                            default_color: state
+                                .resolved_attr("defaultcolor", &styles, scene.uid.get())
+                                .unwrap_or_else(|| state.default_color().script_string()),
+                            specific,
+                        }
                     })
                     .collect();
                 objects.push(ObjectDto {
                     uid: object.uid.get(),
                     scene_uid: scene.uid.get(),
                     name: object.name,
+                    source: object_state.source().to_string(),
+                    source_type: object_state.source_type().to_string(),
+                    visible: object_state.is_visible(),
+                    locked: object_state.is_ui_locked(),
                     atom_count: object.atom_count,
                     residue_count: object.residue_count,
                     bond_count: object.bond_count,
                     coloring_type: self.desktop.object_coloring_type(object.uid),
+                    coloring_attrs: object_state.coloring_attrs().clone(),
+                    paint_entries: object_state
+                        .paint_coloring()
+                        .iter()
+                        .map(|(selection, color)| PaintEntryDto {
+                            selection: selection.clone(),
+                            color: color.clone(),
+                        })
+                        .collect(),
+                    default_color: object_state.mol().default_color().script_string(),
                     renderers,
                 });
             }
         }
-        let structure = self
-            .desktop
-            .active_structure_tree()
-            .into_iter()
-            .map(|object| StructObjectDto {
-                object_uid: object.object_uid.get(),
-                object_name: object.object_name,
-                chains: object
-                    .chains
-                    .into_iter()
-                    .map(|chain| StructChainDto {
-                        chain_id: chain.chain_id,
-                        residues: chain
-                            .residues
-                            .into_iter()
-                            .map(|residue| StructResidueDto {
-                                res_name: residue.res_name,
-                                res_id: residue.res_id,
-                                ins_code: residue.ins_code,
-                                atoms: residue
-                                    .atoms
-                                    .into_iter()
-                                    .map(|atom| StructAtomDto {
-                                        atom_index: atom.atom_index,
-                                        serial: atom.serial,
-                                        name: atom.name,
-                                        element: atom.element,
-                                    })
-                                    .collect(),
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-            })
-            .collect();
-        let sequence = self
-            .desktop
-            .active_sequence_view(&self.selection)
-            .into_iter()
-            .map(|chain| SequenceChainDto {
-                object_uid: chain.object_uid.get(),
-                object_name: chain.object_name,
-                chain_id: chain.chain_id,
-                residues: chain
-                    .residues
-                    .into_iter()
-                    .map(|residue| SequenceResidueDto {
-                        letter: residue.letter,
-                        res_id: residue.res_id,
-                        res_name: residue.res_name,
-                        selection: residue.selection,
-                        selected: residue.selected,
-                    })
-                    .collect(),
-            })
-            .collect();
         let crystals = self
             .desktop
             .active_crystal_summaries()
@@ -421,15 +924,134 @@ impl AppModel {
             .desktop
             .active_density_map_summaries()
             .into_iter()
-            .map(|map| DensityMapDto {
-                uid: map.uid.get(),
-                name: map.name,
-                format: map.format,
-                counts: map.counts,
-                min_density: map.min_density,
-                max_density: map.max_density,
-                mean_density: map.mean_density,
-                rmsd_density: map.rmsd_density,
+            .map(|map| {
+                let renderers = map
+                    .renderers
+                    .into_iter()
+                    .map(|renderer| {
+                        let coloring_type = scalar_coloring_type(&renderer.specific);
+                        let coloring_attrs = scalar_coloring_attrs(&renderer.specific);
+                        RendererDto {
+                            uid: renderer.uid.get(),
+                            name: renderer.name,
+                            renderer_type: renderer.renderer_type,
+                            selection: String::new(),
+                            visible: renderer.visible,
+                            locked: renderer.locked,
+                            material: renderer.material,
+                            alpha: renderer.alpha,
+                            edge_type: renderer.edge_type,
+                            edge_width: renderer.edge_width,
+                            edge_color: renderer.edge_color,
+                            line_width: 1.2,
+                            detail: 3,
+                            bond_width: 0.2,
+                            sphere_radius: 0.3,
+                            show_ring: false,
+                            ring_thickness: 0.2,
+                            ring_color: "#ffffbf".to_string(),
+                            supports_coloring: false,
+                            supports_solid_coloring: true,
+                            supports_electrostatic_coloring: false,
+                            supports_multi_gradient: true,
+                            coloring_type,
+                            coloring_attrs,
+                            paint_entries: Vec::new(),
+                            gradient_entries: renderer
+                                .multi_gradient
+                                .into_iter()
+                                .map(|(value, color)| GradientEntryDto { value, color })
+                                .collect(),
+                            default_color: renderer
+                                .specific
+                                .get("color")
+                                .cloned()
+                                .unwrap_or_else(|| "#c0c0ff".to_string()),
+                            specific: renderer.specific,
+                        }
+                    })
+                    .collect();
+                DensityMapDto {
+                    uid: map.uid.get(),
+                    scene_uid: map.scene_uid.get(),
+                    name: map.name,
+                    class_name: map.class_name,
+                    format: map.format,
+                    visible: map.visible,
+                    locked: map.locked,
+                    source: map.source,
+                    counts: map.counts,
+                    min_density: map.min_density,
+                    max_density: map.max_density,
+                    mean_density: map.mean_density,
+                    rmsd_density: map.rmsd_density,
+                    renderers,
+                }
+            })
+            .collect();
+        let surfaces = self
+            .desktop
+            .active_surface_summaries()
+            .into_iter()
+            .map(|surface| SurfaceDto {
+                uid: surface.uid.get(),
+                scene_uid: surface.scene_uid.get(),
+                name: surface.name,
+                class_name: surface.class_name,
+                format: surface.format,
+                visible: surface.visible,
+                locked: surface.locked,
+                source: surface.source,
+                original_molecule: surface.original_molecule,
+                original_selection: surface.original_selection,
+                original_density: surface.original_density,
+                original_probe_radius: surface.original_probe_radius,
+                renderers: surface
+                    .renderers
+                    .into_iter()
+                    .map(|renderer| {
+                        let coloring_type = scalar_coloring_type(&renderer.specific);
+                        let coloring_attrs = scalar_coloring_attrs(&renderer.specific);
+                        RendererDto {
+                            uid: renderer.uid.get(),
+                            name: renderer.name,
+                            renderer_type: renderer.renderer_type,
+                            selection: renderer.selection,
+                            visible: renderer.visible,
+                            locked: renderer.locked,
+                            material: renderer.material,
+                            alpha: renderer.alpha,
+                            edge_type: renderer.edge_type,
+                            edge_width: renderer.edge_width,
+                            edge_color: renderer.edge_color,
+                            line_width: 1.2,
+                            detail: 3,
+                            bond_width: 0.2,
+                            sphere_radius: 0.3,
+                            show_ring: false,
+                            ring_thickness: 0.2,
+                            ring_color: "#ffffbf".to_string(),
+                            supports_coloring: false,
+                            supports_solid_coloring: true,
+                            supports_electrostatic_coloring: true,
+                            supports_multi_gradient: true,
+                            coloring_type,
+                            coloring_attrs,
+                            paint_entries: Vec::new(),
+                            gradient_entries: renderer
+                                .multi_gradient
+                                .into_iter()
+                                .map(|(value, color)| GradientEntryDto { value, color })
+                                .collect(),
+                            default_color: renderer
+                                .specific
+                                .get("defaultcolor")
+                                .cloned()
+                                .unwrap_or_else(|| "#c0c0ff".to_string()),
+                            specific: renderer.specific,
+                        }
+                    })
+                    .collect(),
             })
             .collect();
         let mut animation_start = 0.0;
@@ -493,14 +1115,18 @@ impl AppModel {
                     .collect(),
             })
             .collect();
+        let active_scene_uid = self.desktop.active_scene().map(Uid::get);
+        let structure_key = self.molecule_structure_key_from_objects(active_scene_uid, &objects);
+        let sequence_key = format!("{structure_key}|{}", self.selection);
         AppSnapshot {
             scenes,
             objects,
-            structure,
-            sequence,
+            structure_key,
+            sequence_key,
             crystals,
             density_maps,
-            active_scene_uid: self.desktop.active_scene().map(Uid::get),
+            surfaces,
+            active_scene_uid,
             selection: self.selection.clone(),
             measure_result: self.desktop.active_measure(&self.selection),
             perspective: self.camera.is_perspective(),
@@ -519,9 +1145,1821 @@ impl AppModel {
             trajectories,
             can_undo: !self.undo_stack.is_empty(),
             can_redo: !self.redo_stack.is_empty(),
+            undo_descriptions: self
+                .undo_stack
+                .iter()
+                .rev()
+                .map(|entry| entry.description.clone())
+                .collect(),
+            redo_descriptions: self
+                .redo_stack
+                .iter()
+                .rev()
+                .map(|entry| entry.description.clone())
+                .collect(),
+            opened_paths: self.opened_paths.clone(),
+            material_names: self
+                .desktop
+                .material_names(self.desktop.active_scene().map_or(0, Uid::get)),
             log_lines: self.log_lines.clone(),
             status: self.status.clone(),
         }
+    }
+
+    fn molecule_structure_key(&self) -> String {
+        let object_key = self
+            .desktop
+            .active_object_summaries()
+            .into_iter()
+            .map(|object| {
+                format!(
+                    "{}:{}:{}:{}:{}",
+                    object.uid.get(),
+                    object.name,
+                    object.atom_count,
+                    object.residue_count,
+                    object.bond_count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        format!(
+            "{}|{}|{object_key}",
+            self.structure_revision,
+            self.desktop.active_scene().map_or(0, Uid::get)
+        )
+    }
+
+    fn molecule_structure_key_from_objects(
+        &self,
+        active_scene_uid: Option<u64>,
+        objects: &[ObjectDto],
+    ) -> String {
+        let object_key = objects
+            .iter()
+            .filter(|object| Some(object.scene_uid) == active_scene_uid)
+            .map(|object| {
+                format!(
+                    "{}:{}:{}:{}:{}",
+                    object.uid,
+                    object.name,
+                    object.atom_count,
+                    object.residue_count,
+                    object.bond_count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        format!(
+            "{}|{}|{object_key}",
+            self.structure_revision,
+            active_scene_uid.unwrap_or(0)
+        )
+    }
+
+    fn touch_structure_details(&mut self) {
+        self.structure_revision = self.structure_revision.wrapping_add(1).max(1);
+    }
+
+    fn molecule_details(
+        &self,
+        known_structure_key: &str,
+        known_sequence_key: &str,
+        include_sequence: bool,
+    ) -> MoleculeDetailsDto {
+        let structure_key = self.molecule_structure_key();
+        let structure = (known_structure_key != structure_key).then(|| {
+            self.desktop
+                .active_structure_tree()
+                .into_iter()
+                .map(|object| StructObjectDto {
+                    object_uid: object.object_uid.get(),
+                    object_name: object.object_name,
+                    chains: object
+                        .chains
+                        .into_iter()
+                        .map(|chain| StructChainDto {
+                            chain_id: chain.chain_id,
+                            residues: chain
+                                .residues
+                                .into_iter()
+                                .map(|residue| StructResidueDto {
+                                    res_name: residue.res_name,
+                                    res_id: residue.res_id,
+                                    ins_code: residue.ins_code,
+                                    atoms: residue
+                                        .atoms
+                                        .into_iter()
+                                        .map(|atom| StructAtomDto {
+                                            atom_index: atom.atom_index,
+                                            serial: atom.serial,
+                                            name: atom.name,
+                                            element: atom.element,
+                                        })
+                                        .collect(),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+                .collect()
+        });
+        let sequence_key = format!("{structure_key}|{}", self.selection);
+        let sequence = (include_sequence && known_sequence_key != sequence_key).then(|| {
+            self.desktop
+                .active_sequence_view(&self.selection)
+                .into_iter()
+                .map(|chain| SequenceChainDto {
+                    object_uid: chain.object_uid.get(),
+                    object_name: chain.object_name,
+                    chain_id: chain.chain_id,
+                    residues: chain
+                        .residues
+                        .into_iter()
+                        .map(|residue| SequenceResidueDto {
+                            letter: residue.letter,
+                            res_id: residue.res_id,
+                            res_name: residue.res_name,
+                            selection: residue.selection,
+                            selected: residue.selected,
+                        })
+                        .collect(),
+                })
+                .collect()
+        });
+        MoleculeDetailsDto {
+            sequence_key,
+            structure_key,
+            structure,
+            sequence,
+        }
+    }
+
+    fn application_info(&self) -> ApplicationInfoDto {
+        let mut features = Vec::new();
+        if cfg!(feature = "tauri-gui") {
+            features.push("Tauri GUI");
+        }
+        if cfg!(feature = "egui-gui") {
+            features.push("egui GUI");
+        }
+        features.push("wgpu offscreen renderer");
+        features.push("JavaScript scripting");
+        let plugins = self
+            .desktop
+            .stream_manager()
+            .handlers()
+            .iter()
+            .map(|handler| PluginDto {
+                name: handler.nickname.clone(),
+                description: handler.descr.clone(),
+                extensions: handler.fext.clone(),
+                category: match handler.category.code() {
+                    0 => "Object reader",
+                    1 => "Object writer",
+                    2 => "Renderer exporter",
+                    3 => "Scene reader",
+                    4 => "Scene writer",
+                    _ => "Unknown",
+                }
+                .to_string(),
+            })
+            .collect();
+        let config = self
+            .desktop
+            .config_entries()
+            .into_iter()
+            .map(|entry| ConfigEntryDto {
+                key: entry.key,
+                value: entry.value,
+            })
+            .collect();
+        ApplicationInfoDto {
+            product_name: "CueMol2",
+            version: env!("CARGO_PKG_VERSION"),
+            target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+            features,
+            plugins,
+            config,
+            status: self.status.clone(),
+        }
+    }
+
+    fn preferences(&self) -> PreferencesDto {
+        let font = self.desktop.style_value(0, "", "DefaultLabel.font_name");
+        let size = self.desktop.style_value(0, "", "DefaultLabel.font_size");
+        let color = self.desktop.style_value(0, "", "DefaultLabel.color");
+        let font_style = self.desktop.style_value(0, "", "DefaultLabel.font_style");
+        let font_weight = self.desktop.style_value(0, "", "DefaultLabel.font_weight");
+        let input = self.desktop.view_input_config();
+        PreferencesDto {
+            atom_label_font: nonempty_or(font, "san-serif"),
+            atom_label_size: size.parse().unwrap_or(12.0),
+            atom_label_color: nonempty_or(color, "Yellow"),
+            atom_label_italic: matches!(font_style.as_str(), "italic" | "oblique"),
+            atom_label_bold: font_weight == "bold",
+            ui_language: nonempty_or(
+                self.desktop.config_value("general.useragent.locale"),
+                "en-US",
+            ),
+            use_hidpi: config_bool(&self.desktop, "cuemol2.ui.view.use_hidpi", false),
+            mouse_preset: nonempty_or(
+                self.desktop.config_value("cuemol2.ui.viewinconf"),
+                "DefaultViewInConf",
+            ),
+            trackball_radius: input.tbrad(),
+            hit_precision: input.hitprec(),
+            momentum_scroll: config_bool(&self.desktop, "cuemol2.ui.mouse-momentum-scroll", false),
+            multitouch_pad: config_bool(&self.desktop, "cuemol2.ui.mouse-multitouch-pad", false),
+            emulate_right_button: config_bool(
+                &self.desktop,
+                "cuemol2.ui.mouse-emulate-rbutton",
+                false,
+            ),
+            shortcuts: ["view-trans-plusx", "view-trans-minusx"]
+                .into_iter()
+                .map(|id| ShortcutDto {
+                    id: id.to_string(),
+                    key: self.desktop.config_value(&format!("shortcut:{id}:key")),
+                    ctrl: config_bool(&self.desktop, &format!("shortcut:{id}:ctrl"), true),
+                    alt: config_bool(&self.desktop, &format!("shortcut:{id}:alt"), false),
+                    shift: config_bool(&self.desktop, &format!("shortcut:{id}:shift"), false),
+                })
+                .collect(),
+        }
+    }
+
+    fn set_preferences(&mut self, preferences: PreferencesDto) -> Result<(), String> {
+        if preferences.atom_label_font.trim().is_empty() {
+            return Err("an atom-label font is required".to_string());
+        }
+        if !preferences.atom_label_size.is_finite()
+            || !(4.0..=144.0).contains(&preferences.atom_label_size)
+        {
+            return Err("atom-label size must be between 4 and 144".to_string());
+        }
+        if preferences.atom_label_color.trim().is_empty() {
+            return Err("an atom-label color is required".to_string());
+        }
+        if !matches!(preferences.ui_language.as_str(), "en-US" | "ja") {
+            return Err(format!(
+                "unsupported UI language: {}",
+                preferences.ui_language
+            ));
+        }
+        if !matches!(
+            preferences.mouse_preset.as_str(),
+            "DefaultViewInConf"
+                | "CootViewInConf"
+                | "PymolViewInConf"
+                | "IphoneViewInConf"
+                | "TrackpadViewInConf"
+        ) {
+            return Err(format!(
+                "unknown mouse preset: {}",
+                preferences.mouse_preset
+            ));
+        }
+        if !preferences.trackball_radius.is_finite()
+            || !(0.1..=10.0).contains(&preferences.trackball_radius)
+        {
+            return Err("trackball radius must be between 0.1 and 10".to_string());
+        }
+        if !preferences.hit_precision.is_finite()
+            || !(0.0..=100.0).contains(&preferences.hit_precision)
+        {
+            return Err("pick precision must be between 0 and 100".to_string());
+        }
+        validate_shortcuts(&preferences.shortcuts)?;
+
+        self.desktop.set_style_value(
+            0,
+            "user",
+            "DefaultLabel.font_name",
+            preferences.atom_label_font.trim(),
+        );
+        self.desktop.set_style_value(
+            0,
+            "user",
+            "DefaultLabel.font_size",
+            preferences.atom_label_size.to_string(),
+        );
+        self.desktop.set_style_value(
+            0,
+            "user",
+            "DefaultLabel.color",
+            preferences.atom_label_color.trim(),
+        );
+        self.desktop.set_style_value(
+            0,
+            "user",
+            "DefaultLabel.font_style",
+            if preferences.atom_label_italic {
+                "italic"
+            } else {
+                "normal"
+            },
+        );
+        self.desktop.set_style_value(
+            0,
+            "user",
+            "DefaultLabel.font_weight",
+            if preferences.atom_label_bold {
+                "bold"
+            } else {
+                "normal"
+            },
+        );
+        {
+            let input = self.desktop.view_input_config_mut();
+            input.set_style(preferences.mouse_preset.clone());
+            input.set_tbrad(preferences.trackball_radius);
+            input.set_hitprec(preferences.hit_precision);
+        }
+        for (key, value) in [
+            (
+                "style:DefaultLabel.font_name",
+                preferences.atom_label_font.clone(),
+            ),
+            (
+                "style:DefaultLabel.font_size",
+                preferences.atom_label_size.to_string(),
+            ),
+            (
+                "style:DefaultLabel.color",
+                preferences.atom_label_color.clone(),
+            ),
+            (
+                "style:DefaultLabel.font_style",
+                if preferences.atom_label_italic {
+                    "italic".to_string()
+                } else {
+                    "normal".to_string()
+                },
+            ),
+            (
+                "style:DefaultLabel.font_weight",
+                if preferences.atom_label_bold {
+                    "bold".to_string()
+                } else {
+                    "normal".to_string()
+                },
+            ),
+            ("general.useragent.locale", preferences.ui_language.clone()),
+            (
+                "cuemol2.ui.view.use_hidpi",
+                preferences.use_hidpi.to_string(),
+            ),
+            ("cuemol2.ui.viewinconf", preferences.mouse_preset.clone()),
+            ("view_input:tbrad", preferences.trackball_radius.to_string()),
+            ("view_input:hitprec", preferences.hit_precision.to_string()),
+            (
+                "cuemol2.ui.mouse-momentum-scroll",
+                preferences.momentum_scroll.to_string(),
+            ),
+            (
+                "cuemol2.ui.mouse-multitouch-pad",
+                preferences.multitouch_pad.to_string(),
+            ),
+            (
+                "cuemol2.ui.mouse-emulate-rbutton",
+                preferences.emulate_right_button.to_string(),
+            ),
+        ] {
+            self.desktop.put_config_value(key, value);
+        }
+        for shortcut in &preferences.shortcuts {
+            self.desktop.put_config_value(
+                &format!("shortcut:{}:key", shortcut.id),
+                shortcut.key.clone(),
+            );
+            self.desktop.put_config_value(
+                &format!("shortcut:{}:ctrl", shortcut.id),
+                shortcut.ctrl.to_string(),
+            );
+            self.desktop.put_config_value(
+                &format!("shortcut:{}:alt", shortcut.id),
+                shortcut.alt.to_string(),
+            );
+            self.desktop.put_config_value(
+                &format!("shortcut:{}:shift", shortcut.id),
+                shortcut.shift.to_string(),
+            );
+        }
+        self.save_config()?;
+        self.status = "Options updated".to_string();
+        Ok(())
+    }
+
+    fn set_object_properties(&mut self, properties: ObjectPropertiesInput) -> Result<(), String> {
+        let name = properties.name.trim();
+        if name.is_empty() || name.contains(':') {
+            return Err("object name must be non-empty and cannot contain ':'".to_string());
+        }
+        self.desktop
+            .set_object_common_properties(
+                Uid::new(properties.object_uid),
+                name,
+                properties.visible,
+                properties.locked,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = "Object properties updated".to_string();
+        self.rebuild_mesh(false)
+    }
+
+    fn set_density_map_properties(
+        &mut self,
+        properties: ObjectPropertiesInput,
+    ) -> Result<(), String> {
+        let name = properties.name.trim();
+        if name.is_empty() || name.contains(':') {
+            return Err("density map name must be non-empty and cannot contain ':'".to_string());
+        }
+        self.desktop
+            .set_density_map_common_properties(
+                Uid::new(properties.object_uid),
+                name,
+                properties.visible,
+                properties.locked,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = "Density map properties updated".to_string();
+        self.rebuild_mesh(false)
+    }
+
+    fn set_density_renderer_visible(
+        &mut self,
+        map_uid: u64,
+        renderer_uid: u64,
+        visible: bool,
+    ) -> Result<(), String> {
+        self.desktop
+            .set_density_renderer_visible(Uid::new(map_uid), Uid::new(renderer_uid), visible)
+            .map_err(|error| error.to_string())?;
+        self.status = "Density renderer visibility updated".to_string();
+        self.rebuild_mesh(false)
+    }
+
+    fn add_density_renderer(&mut self, map_uid: u64, renderer_type: &str) -> Result<(), String> {
+        self.desktop
+            .add_density_renderer(Uid::new(map_uid), renderer_type)
+            .map_err(|error| error.to_string())?;
+        self.status = format!("Added {renderer_type} renderer");
+        self.rebuild_mesh(false)
+    }
+
+    fn set_density_renderer_properties(
+        &mut self,
+        properties: RendererPropertiesInput,
+    ) -> Result<(), String> {
+        let name = properties.name.trim();
+        if name.is_empty() || name.contains(':') {
+            return Err(
+                "density renderer name must be non-empty and cannot contain ':'".to_string(),
+            );
+        }
+        if !properties.alpha.is_finite() || properties.alpha <= 0.0 || properties.alpha > 1.0 {
+            return Err("opacity must be between 0 and 1".to_string());
+        }
+        if !properties.edge_width.is_finite() || !(0.0..=1.0).contains(&properties.edge_width) {
+            return Err("edge width must be between 0 and 1".to_string());
+        }
+        if !matches!(
+            properties.edge_type.as_str(),
+            "none" | "edges" | "silhouette"
+        ) {
+            return Err(format!("unsupported edge type: {}", properties.edge_type));
+        }
+        if cuemol_gfx::parse_color(properties.edge_color.trim()).is_err() {
+            return Err(format!("invalid edge color: {}", properties.edge_color));
+        }
+        for (key, minimum, maximum) in [
+            ("siglevel", -1_000_000.0, 1_000_000.0),
+            ("extent", f64::EPSILON, 10_000.0),
+            ("width", f64::EPSILON, 10.0),
+            ("bndry_rng", f64::EPSILON, 100.0),
+        ] {
+            let Some(raw) = properties.specific.get(key) else {
+                continue;
+            };
+            let value = raw
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| format!("{key} must be a number"))?;
+            if !value.is_finite() || !(minimum..=maximum).contains(&value) {
+                return Err(format!("{key} must be between {minimum} and {maximum}"));
+            }
+        }
+        for (key, minimum, maximum) in [
+            ("bufsize", 50, 200),
+            ("binning", 1, 16),
+            ("max_grids", 10, 2_000),
+        ] {
+            let Some(raw) = properties.specific.get(key) else {
+                continue;
+            };
+            let value = raw
+                .trim()
+                .parse::<i32>()
+                .map_err(|_| format!("{key} must be an integer"))?;
+            if !(minimum..=maximum).contains(&value) {
+                return Err(format!("{key} must be between {minimum} and {maximum}"));
+            }
+        }
+        for key in ["use_pbc", "autoupdate", "dragupdate", "cullface"] {
+            if properties
+                .specific
+                .get(key)
+                .is_some_and(|value| !matches!(value.as_str(), "true" | "false"))
+            {
+                return Err(format!("{key} must be true or false"));
+            }
+        }
+        if properties
+            .specific
+            .get("drawmode")
+            .is_some_and(|value| !matches!(value.as_str(), "fill" | "line" | "point"))
+        {
+            return Err("drawmode must be fill, line, or point".to_string());
+        }
+        if properties
+            .specific
+            .get("colormode")
+            .is_some_and(|value| !matches!(value.as_str(), "solid" | "molecule" | "multigrad"))
+        {
+            return Err("colormode must be solid, molecule, or multigrad".to_string());
+        }
+        if let Some(color) = properties.specific.get("color") {
+            if cuemol_gfx::parse_color(color.trim()).is_err() {
+                return Err(format!("invalid density color: {color}"));
+            }
+        }
+        self.desktop
+            .set_density_renderer_properties(
+                Uid::new(properties.object_uid),
+                Uid::new(properties.renderer_uid),
+                name,
+                properties.visible,
+                properties.locked,
+                properties.material,
+                properties.alpha,
+                properties.edge_type,
+                properties.edge_width,
+                properties.edge_color.trim(),
+                &properties.specific,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = "Density renderer properties updated".to_string();
+        self.rebuild_mesh(false)
+    }
+
+    fn set_surface_properties(&mut self, properties: ObjectPropertiesInput) -> Result<(), String> {
+        let name = properties.name.trim();
+        if name.is_empty() || name.contains(':') {
+            return Err("surface name must be non-empty and cannot contain ':'".to_string());
+        }
+        self.desktop
+            .set_surface_common_properties(
+                Uid::new(properties.object_uid),
+                name,
+                properties.visible,
+                properties.locked,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = "Surface properties updated".to_string();
+        self.rebuild_mesh(false)
+    }
+
+    fn set_surface_renderer_visible(
+        &mut self,
+        surface_uid: u64,
+        renderer_uid: u64,
+        visible: bool,
+    ) -> Result<(), String> {
+        self.desktop
+            .set_surface_renderer_visible(Uid::new(surface_uid), Uid::new(renderer_uid), visible)
+            .map_err(|error| error.to_string())?;
+        self.status = "Surface renderer visibility updated".to_string();
+        self.rebuild_mesh(false)
+    }
+
+    fn add_surface_renderer(&mut self, surface_uid: u64) -> Result<(), String> {
+        self.desktop
+            .add_surface_renderer(Uid::new(surface_uid))
+            .map_err(|error| error.to_string())?;
+        self.status = "Added molsurf renderer".to_string();
+        self.rebuild_mesh(false)
+    }
+
+    fn delete_workspace_item(&mut self, target: WorkspaceDeleteInput) -> Result<(), String> {
+        let object_uid = Uid::new(target.object_uid);
+        match target.kind.as_str() {
+            "object" => {
+                let name = self
+                    .desktop
+                    .scene_manager()
+                    .object(object_uid)
+                    .map(|object| object.name().to_string())
+                    .ok_or_else(|| format!("object {} not found", target.object_uid))?;
+                if !self
+                    .desktop
+                    .destroy_object(object_uid)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!("object {} could not be deleted", target.object_uid));
+                }
+                self.status = format!("Destroy object {name}");
+            }
+            "renderer" => {
+                let renderer_uid = Uid::new(
+                    target
+                        .renderer_uid
+                        .ok_or_else(|| "renderer UID is required".to_string())?,
+                );
+                let object = self
+                    .desktop
+                    .scene_manager()
+                    .object(object_uid)
+                    .ok_or_else(|| format!("object {} not found", target.object_uid))?;
+                let object_name = object.name().to_string();
+                let renderer_name = object
+                    .renderer(renderer_uid)
+                    .map(|renderer| renderer.name().to_string())
+                    .ok_or_else(|| format!("renderer {} not found", renderer_uid.get()))?;
+                if !self
+                    .desktop
+                    .destroy_renderer_in_object(object_uid, renderer_uid)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!(
+                        "renderer {} could not be deleted",
+                        renderer_uid.get()
+                    ));
+                }
+                self.status = format!("Delete renderer: {object_name}/{renderer_name}");
+            }
+            "densityMap" => {
+                let name = self
+                    .desktop
+                    .density_map_summary(object_uid)
+                    .map(|map| map.name)
+                    .ok_or_else(|| format!("density map {} not found", target.object_uid))?;
+                if !self
+                    .desktop
+                    .destroy_density_map(object_uid)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!(
+                        "density map {} could not be deleted",
+                        target.object_uid
+                    ));
+                }
+                self.status = format!("Destroy object {name}");
+            }
+            "densityRenderer" => {
+                let renderer_uid = Uid::new(
+                    target
+                        .renderer_uid
+                        .ok_or_else(|| "renderer UID is required".to_string())?,
+                );
+                let map = self
+                    .desktop
+                    .density_map_summary(object_uid)
+                    .ok_or_else(|| format!("density map {} not found", target.object_uid))?;
+                let renderer_name = map
+                    .renderers
+                    .iter()
+                    .find(|renderer| renderer.uid == renderer_uid)
+                    .map(|renderer| renderer.name.clone())
+                    .ok_or_else(|| format!("density renderer {} not found", renderer_uid.get()))?;
+                if !self
+                    .desktop
+                    .destroy_density_renderer(object_uid, renderer_uid)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!(
+                        "density renderer {} could not be deleted",
+                        renderer_uid.get()
+                    ));
+                }
+                self.status = format!("Delete renderer: {}/{renderer_name}", map.name);
+            }
+            "surface" => {
+                let name = self
+                    .desktop
+                    .surface_summary(object_uid)
+                    .map(|surface| surface.name)
+                    .ok_or_else(|| format!("surface {} not found", target.object_uid))?;
+                if !self
+                    .desktop
+                    .destroy_surface(object_uid)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!(
+                        "surface {} could not be deleted",
+                        target.object_uid
+                    ));
+                }
+                self.status = format!("Destroy object {name}");
+            }
+            "surfaceRenderer" => {
+                let renderer_uid = Uid::new(
+                    target
+                        .renderer_uid
+                        .ok_or_else(|| "renderer UID is required".to_string())?,
+                );
+                let surface = self
+                    .desktop
+                    .surface_summary(object_uid)
+                    .ok_or_else(|| format!("surface {} not found", target.object_uid))?;
+                let renderer_name = surface
+                    .renderers
+                    .iter()
+                    .find(|renderer| renderer.uid == renderer_uid)
+                    .map(|renderer| renderer.name.clone())
+                    .ok_or_else(|| format!("surface renderer {} not found", renderer_uid.get()))?;
+                if !self
+                    .desktop
+                    .destroy_surface_renderer(object_uid, renderer_uid)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!(
+                        "surface renderer {} could not be deleted",
+                        renderer_uid.get()
+                    ));
+                }
+                self.status = format!("Delete renderer: {}/{renderer_name}", surface.name);
+            }
+            kind => return Err(format!("unsupported Workspace item type: {kind}")),
+        }
+        self.rebuild_mesh(false)
+    }
+
+    fn fit_workspace_item(
+        &mut self,
+        target: WorkspaceFitInput,
+        width: u32,
+        height: u32,
+    ) -> Result<bool, String> {
+        let scene_uid = self
+            .desktop
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        let mut view = View::new(Uid::new(1), scene_uid);
+        view.set_camera(&self.camera);
+        view.set_view_size(width, height);
+        let object_uid = Uid::new(target.object_uid);
+        let fitted = match target.kind.as_str() {
+            "object" => self
+                .desktop
+                .fit_molecule_view(object_uid, None, &mut view)
+                .map_err(|error| error.to_string())?,
+            "renderer" => {
+                let renderer_uid = Uid::new(
+                    target
+                        .renderer_uid
+                        .ok_or_else(|| "renderer UID is required".to_string())?,
+                );
+                self.desktop
+                    .fit_molecule_view(object_uid, Some(renderer_uid), &mut view)
+                    .map_err(|error| error.to_string())?
+            }
+            "densityMap" | "densityRenderer" => {
+                self.desktop
+                    .fit_density_map_view(object_uid, &mut view)
+                    .map_err(|error| error.to_string())?;
+                true
+            }
+            "surface" | "surfaceRenderer" => false,
+            kind => return Err(format!("unsupported Workspace item type: {kind}")),
+        };
+        if fitted {
+            self.camera = view.camera();
+            self.status = "View fitted".to_string();
+        }
+        Ok(fitted)
+    }
+
+    fn apply_molecule_selection_action(
+        &mut self,
+        object_uid: u64,
+        selection: &str,
+        mode: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        if !matches!(mode, "select" | "center" | "zoom") {
+            return Err(format!("unsupported MolStruct action: {mode}"));
+        }
+        let object_uid = Uid::new(object_uid);
+        self.desktop
+            .set_molecule_selection_text(object_uid, selection)
+            .map_err(|error| error.to_string())?;
+        self.selection = selection.to_string();
+
+        match mode {
+            "select" => {}
+            "center" => {
+                if let Some(center) = self
+                    .desktop
+                    .selected_molecule_center(object_uid)
+                    .map_err(|error| error.to_string())?
+                {
+                    self.camera.set_center(center);
+                }
+            }
+            "zoom" => {
+                let scene_uid = self
+                    .desktop
+                    .active_scene()
+                    .ok_or_else(|| "no active scene".to_string())?;
+                let mut view = View::new(Uid::new(1), scene_uid);
+                view.set_camera(&self.camera);
+                view.set_view_size(width, height);
+                if self
+                    .desktop
+                    .fit_selected_molecule_view(object_uid, &mut view)
+                    .map_err(|error| error.to_string())?
+                {
+                    self.camera = view.camera();
+                }
+            }
+            _ => unreachable!("MolStruct action was validated"),
+        }
+
+        self.status = "Change mol selection".to_string();
+        self.rebuild_mesh(false)
+    }
+
+    fn set_surface_renderer_properties(
+        &mut self,
+        properties: RendererPropertiesInput,
+    ) -> Result<(), String> {
+        let name = properties.name.trim();
+        if name.is_empty() || name.contains(':') {
+            return Err(
+                "surface renderer name must be non-empty and cannot contain ':'".to_string(),
+            );
+        }
+        if !properties.alpha.is_finite() || properties.alpha <= 0.0 || properties.alpha > 1.0 {
+            return Err("opacity must be between 0 and 1".to_string());
+        }
+        if !properties.edge_width.is_finite() || !(0.0..=1.0).contains(&properties.edge_width) {
+            return Err("edge width must be between 0 and 1".to_string());
+        }
+        if !matches!(
+            properties.edge_type.as_str(),
+            "none" | "edges" | "silhouette"
+        ) {
+            return Err(format!("unsupported edge type: {}", properties.edge_type));
+        }
+        if cuemol_gfx::parse_color(properties.edge_color.trim()).is_err() {
+            return Err(format!("invalid edge color: {}", properties.edge_color));
+        }
+        if properties
+            .specific
+            .get("drawmode")
+            .is_some_and(|value| !matches!(value.as_str(), "fill" | "line" | "point"))
+        {
+            return Err("drawmode must be fill, line, or point".to_string());
+        }
+        if properties.specific.get("colormode").is_some_and(|value| {
+            !matches!(
+                value.as_str(),
+                "solid" | "molecule" | "potential" | "multigrad"
+            )
+        }) {
+            return Err("colormode must be solid, molecule, potential, or multigrad".to_string());
+        }
+        for key in ["cullface", "ramp_above"] {
+            if properties
+                .specific
+                .get(key)
+                .is_some_and(|value| !matches!(value.as_str(), "true" | "false"))
+            {
+                return Err(format!("{key} must be true or false"));
+            }
+        }
+        for (key, minimum, maximum) in [
+            ("width", f64::EPSILON, 10.0),
+            ("lowpar", -1_000_000.0, 1_000_000.0),
+            ("midpar", -1_000_000.0, 1_000_000.0),
+            ("highpar", -1_000_000.0, 1_000_000.0),
+            ("ramp_value", 0.0, 1_000.0),
+        ] {
+            let Some(raw) = properties.specific.get(key) else {
+                continue;
+            };
+            let value = raw
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| format!("{key} must be a number"))?;
+            if !value.is_finite() || !(minimum..=maximum).contains(&value) {
+                return Err(format!("{key} must be between {minimum} and {maximum}"));
+            }
+        }
+        for key in ["defaultcolor", "lowcol", "midcol", "highcol"] {
+            if let Some(color) = properties.specific.get(key) {
+                if cuemol_gfx::parse_color(color.trim()).is_err() {
+                    return Err(format!("invalid surface color: {color}"));
+                }
+            }
+        }
+        self.desktop
+            .set_surface_renderer_properties(
+                Uid::new(properties.object_uid),
+                Uid::new(properties.renderer_uid),
+                name,
+                properties.selection.trim(),
+                properties.visible,
+                properties.locked,
+                properties.material,
+                properties.alpha,
+                properties.edge_type,
+                properties.edge_width,
+                properties.edge_color.trim(),
+                &properties.specific,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = "Surface renderer properties updated".to_string();
+        self.rebuild_mesh(false)
+    }
+
+    fn set_renderer_properties(
+        &mut self,
+        properties: RendererPropertiesInput,
+    ) -> Result<(), String> {
+        let object_uid = Uid::new(properties.object_uid);
+        let renderer_uid = Uid::new(properties.renderer_uid);
+        let renderer_type = self
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .and_then(|object| object.renderer(renderer_uid))
+            .map(|renderer| renderer.renderer_type().to_string())
+            .ok_or_else(|| format!("renderer {} not found", properties.renderer_uid))?;
+        let name = properties.name.trim();
+        if name.is_empty() || name.contains(':') {
+            return Err("renderer name must be non-empty and cannot contain ':'".to_string());
+        }
+        if !properties.alpha.is_finite() || properties.alpha <= 0.0 || properties.alpha > 1.0 {
+            return Err("opacity must be between 0 and 1".to_string());
+        }
+        if !properties.edge_width.is_finite() || !(0.0..=1.0).contains(&properties.edge_width) {
+            return Err("edge width must be between 0 and 1".to_string());
+        }
+        if !matches!(
+            properties.edge_type.as_str(),
+            "none" | "edges" | "silhouette"
+        ) {
+            return Err(format!("unsupported edge type: {}", properties.edge_type));
+        }
+        if cuemol_gfx::parse_color(properties.edge_color.trim()).is_err() {
+            return Err(format!("invalid edge color: {}", properties.edge_color));
+        }
+        if matches!(renderer_type.as_str(), "simple" | "trace")
+            && (!properties.line_width.is_finite()
+                || properties.line_width <= 0.0
+                || properties.line_width > 10.0)
+        {
+            return Err("line width must be greater than 0 and at most 10".to_string());
+        }
+        if matches!(renderer_type.as_str(), "ballstick" | "anisou") {
+            if !(2..=20).contains(&properties.detail) {
+                return Err("detail must be between 2 and 20".to_string());
+            }
+            for (label, value) in [
+                ("bond width", properties.bond_width),
+                ("atom radius", properties.sphere_radius),
+                ("ring thickness", properties.ring_thickness),
+            ] {
+                if !value.is_finite() || !(0.0..=10.0).contains(&value) {
+                    return Err(format!("{label} must be between 0 and 10"));
+                }
+            }
+            if cuemol_gfx::parse_color(properties.ring_color.trim()).is_err() {
+                return Err(format!("invalid ring color: {}", properties.ring_color));
+            }
+        }
+        let mut specific_updates = Vec::<(String, String, bool)>::new();
+        match renderer_type.as_str() {
+            "cpk" => {
+                for (key, label, default) in [
+                    ("vdwr_H", "hydrogen radius", 1.2),
+                    ("vdwr_C", "carbon radius", 1.7),
+                    ("vdwr_N", "nitrogen radius", 1.55),
+                    ("vdwr_O", "oxygen radius", 1.52),
+                    ("vdwr_S", "sulfur radius", 1.8),
+                    ("vdwr_P", "phosphorus radius", 1.8),
+                    ("vdwr_X", "other atom radius", 1.7),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("{label} must be a number"))?;
+                    if !value.is_finite() || !(0.0..=3.0).contains(&value) {
+                        return Err(format!("{label} must be between 0 and 3"));
+                    }
+                    specific_updates.push((
+                        key.to_string(),
+                        value.to_string(),
+                        (value - default).abs() < f64::EPSILON,
+                    ));
+                }
+                if let Some(raw) = properties.specific.get("detail") {
+                    let value = raw
+                        .trim()
+                        .parse::<i32>()
+                        .map_err(|_| "detail must be an integer".to_string())?;
+                    if !(2..=20).contains(&value) {
+                        return Err("detail must be between 2 and 20".to_string());
+                    }
+                    specific_updates.push(("detail".to_string(), value.to_string(), value == 3));
+                }
+            }
+            "disorder" => {
+                for (key, label, minimum, default) in [
+                    ("width", "dot size", 0.0, 0.3),
+                    ("dotsep", "dot separation", 0.0, 1.0),
+                    ("loopsize", "loop size", 0.0, 2.0),
+                    ("loopsize2", "loop size 2", -1.0, -1.0),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("{label} must be a number"))?;
+                    if !value.is_finite() || !(minimum..=10.0).contains(&value) {
+                        return Err(format!("{label} must be between {minimum} and 10"));
+                    }
+                    specific_updates.push((
+                        key.to_string(),
+                        value.to_string(),
+                        (value - default).abs() < f64::EPSILON,
+                    ));
+                }
+                if let Some(raw) = properties.specific.get("detail") {
+                    let value = raw
+                        .trim()
+                        .parse::<i32>()
+                        .map_err(|_| "detail must be an integer".to_string())?;
+                    if !(2..=20).contains(&value) {
+                        return Err("detail must be between 2 and 20".to_string());
+                    }
+                    specific_updates.push(("detail".to_string(), value.to_string(), value == 5));
+                }
+                if let Some(value) = properties.specific.get("target") {
+                    specific_updates.push(("target".to_string(), value.clone(), value.is_empty()));
+                }
+                if let Some(value) = properties.specific.get("defaultcolor") {
+                    if cuemol_gfx::parse_color(value.trim()).is_err() {
+                        return Err(format!("invalid disorder color: {value}"));
+                    }
+                    specific_updates.push((
+                        "defaultcolor".to_string(),
+                        value.trim().to_string(),
+                        value.trim().eq_ignore_ascii_case("#ffffff"),
+                    ));
+                }
+            }
+            "ribbon" | "cartoon" => {
+                let cartoon = renderer_type == "cartoon";
+                for (key, label, minimum, maximum, default) in [
+                    ("helix.width", "helix width", 0.001, 10.0, 0.35),
+                    ("helix.tuber", "helix width ratio", 0.1, 10.0, 1.0),
+                    ("helix.sharp", "helix sharpness", 0.0, 1.0, 0.4),
+                    ("sheet.width", "sheet width", 0.001, 10.0, 0.35),
+                    ("sheet.tuber", "sheet width ratio", 0.1, 10.0, 1.0),
+                    ("sheet.sharp", "sheet sharpness", 0.0, 1.0, 0.4),
+                    ("coil.width", "coil width", 0.001, 10.0, 0.35),
+                    ("coil.tuber", "coil width ratio", 0.1, 10.0, 1.0),
+                    ("coil.sharp", "coil sharpness", 0.0, 1.0, 0.4),
+                    ("ribhelix.width", "ribbon helix width", 0.001, 10.0, 0.35),
+                    ("ribhelix.tuber", "ribbon helix width ratio", 0.1, 10.0, 1.0),
+                    ("ribhelix.sharp", "ribbon helix sharpness", 0.0, 1.0, 0.4),
+                    ("helixhead.gamma", "helix head gamma", 0.1, 10.0, 2.2),
+                    ("helixhead.basw", "helix head base width", 0.0, 1.0, 0.0),
+                    ("helixhead.arrow", "helix head arrow width", 1.0, 3.0, 1.8),
+                    ("helixtail.gamma", "helix tail gamma", 0.1, 10.0, 2.2),
+                    ("helixtail.basw", "helix tail base width", 0.0, 1.0, 0.0),
+                    ("helixtail.arrow", "helix tail arrow width", 1.0, 3.0, 1.8),
+                    ("sheethead.gamma", "sheet head gamma", 0.1, 10.0, 2.2),
+                    ("sheethead.basw", "sheet head base width", 0.0, 1.0, 0.0),
+                    ("sheethead.arrow", "sheet head arrow width", 1.0, 3.0, 1.8),
+                    ("sheettail.gamma", "sheet tail gamma", 0.1, 10.0, 2.2),
+                    ("sheettail.basw", "sheet tail base width", 0.0, 1.0, 0.0),
+                    ("sheettail.arrow", "sheet tail arrow width", 1.0, 3.0, 1.8),
+                    (
+                        "ribhelix_head.gamma",
+                        "ribbon helix head gamma",
+                        0.1,
+                        10.0,
+                        2.2,
+                    ),
+                    (
+                        "ribhelix_head.basw",
+                        "ribbon helix head base width",
+                        0.0,
+                        1.0,
+                        0.0,
+                    ),
+                    (
+                        "ribhelix_head.arrow",
+                        "ribbon helix head arrow width",
+                        1.0,
+                        3.0,
+                        1.8,
+                    ),
+                    (
+                        "ribhelix_tail.gamma",
+                        "ribbon helix tail gamma",
+                        0.1,
+                        10.0,
+                        2.2,
+                    ),
+                    (
+                        "ribhelix_tail.basw",
+                        "ribbon helix tail base width",
+                        0.0,
+                        1.0,
+                        0.0,
+                    ),
+                    (
+                        "ribhelix_tail.arrow",
+                        "ribbon helix tail arrow width",
+                        1.0,
+                        3.0,
+                        1.8,
+                    ),
+                    ("anchor_weight", "anchor weight", 0.0, 20.0, 10.0),
+                    ("helix_width", "helix width", 0.001, 10.0, 2.3),
+                    ("helix_extend", "helix extension", 0.0, 3.0, 0.5),
+                    ("helix_wplus", "helix width adjustment", -2.0, 3.0, 0.2),
+                    ("helix_wsmooth", "helix width smoothing", -5.0, 5.0, 5.0),
+                    ("sheet_wsmooth", "sheet width smoothing", -5.0, 5.0, 5.0),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("{label} must be a number"))?;
+                    if !value.is_finite() || !(minimum..=maximum).contains(&value) {
+                        return Err(format!("{label} must be between {minimum} and {maximum}"));
+                    }
+                    specific_updates.push((
+                        key.to_string(),
+                        value.to_string(),
+                        (value - default).abs() < f64::EPSILON,
+                    ));
+                }
+                for (key, label, minimum, maximum, default) in [
+                    (
+                        "helix_smooth",
+                        "helix smoothing",
+                        if cartoon { -5.0 } else { 0.0 },
+                        5.0,
+                        if cartoon { 3.0 } else { 0.0 },
+                    ),
+                    (
+                        "sheet_smooth",
+                        "sheet smoothing",
+                        if cartoon { -5.0 } else { 0.0 },
+                        5.0,
+                        if cartoon { 2.0 } else { 0.5 },
+                    ),
+                    (
+                        "coil_smooth",
+                        "coil smoothing",
+                        if cartoon { -5.0 } else { 0.0 },
+                        5.0,
+                        if cartoon { -1.0 } else { 0.0 },
+                    ),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("{label} must be a number"))?;
+                    if !value.is_finite() || !(minimum..=maximum).contains(&value) {
+                        return Err(format!("{label} must be between {minimum} and {maximum}"));
+                    }
+                    specific_updates.push((
+                        key.to_string(),
+                        value.to_string(),
+                        (value - default).abs() < f64::EPSILON,
+                    ));
+                }
+                for (key, default) in [
+                    ("helix.detail", 16),
+                    ("sheet.detail", 16),
+                    ("coil.detail", 16),
+                    ("ribhelix.detail", 16),
+                    ("axialdetail", if cartoon { 8 } else { 6 }),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw
+                        .trim()
+                        .parse::<i32>()
+                        .map_err(|_| format!("{key} must be an integer"))?;
+                    if !(2..=20).contains(&value) {
+                        return Err(format!("{key} must be between 2 and 20"));
+                    }
+                    specific_updates.push((key.to_string(), value.to_string(), value == default));
+                }
+                for key in ["helix.type", "sheet.type", "coil.type", "ribhelix.type"] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw.trim();
+                    if !matches!(value, "elliptical" | "roundsquare" | "rectangle" | "fancy1") {
+                        return Err(format!("unsupported section type: {value}"));
+                    }
+                    specific_updates.push((
+                        key.to_string(),
+                        value.to_string(),
+                        value == "elliptical",
+                    ));
+                }
+                for key in [
+                    "helixhead.type",
+                    "helixtail.type",
+                    "sheethead.type",
+                    "sheettail.type",
+                    "ribhelix_head.type",
+                    "ribhelix_tail.type",
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw.trim();
+                    if !matches!(value, "smooth" | "flat" | "arrow") {
+                        return Err(format!("unsupported junction type: {value}"));
+                    }
+                    specific_updates.push((key.to_string(), value.to_string(), value == "smooth"));
+                }
+                for (key, default) in [
+                    ("smoothcolor", !cartoon),
+                    ("segend_fade", false),
+                    ("helix_usebackcol", false),
+                    ("sheet_usesidecol", false),
+                    ("helix_ribbon", false),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = match raw.trim() {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err(format!("{key} must be true or false")),
+                    };
+                    specific_updates.push((key.to_string(), value.to_string(), value == default));
+                }
+                for (key, default) in [
+                    ("start_captype", if cartoon { "flat" } else { "sphere" }),
+                    ("end_captype", if cartoon { "flat" } else { "sphere" }),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw.trim();
+                    if !matches!(value, "flat" | "sphere" | "none") {
+                        return Err(format!("unsupported cap type: {value}"));
+                    }
+                    specific_updates.push((key.to_string(), value.to_string(), value == default));
+                }
+                if let Some(raw) = properties.specific.get("helix_width_mode") {
+                    let value = raw.trim();
+                    if !matches!(value, "const" | "average" | "wavy") {
+                        return Err(format!("unsupported helix width mode: {value}"));
+                    }
+                    specific_updates.push((
+                        "helix_width_mode".to_string(),
+                        value.to_string(),
+                        value == "average",
+                    ));
+                }
+                for key in ["pivotatom", "anchor_sel"] {
+                    if let Some(raw) = properties.specific.get(key) {
+                        let value = raw.trim();
+                        specific_updates.push((
+                            key.to_string(),
+                            value.to_string(),
+                            value.is_empty(),
+                        ));
+                    }
+                }
+                for key in ["helix_backcol", "sheet_sidecol"] {
+                    if let Some(raw) = properties.specific.get(key) {
+                        let value = raw.trim();
+                        if cuemol_gfx::parse_color(value).is_err() {
+                            return Err(format!("invalid ribbon color: {value}"));
+                        }
+                        specific_updates.push((
+                            key.to_string(),
+                            value.to_string(),
+                            value.eq_ignore_ascii_case("#ffffff"),
+                        ));
+                    }
+                }
+            }
+            "tube" | "nucl" => {
+                for (key, label, minimum, maximum, default) in [
+                    ("section.width", "section width", f64::EPSILON, 10.0, 0.35),
+                    (
+                        "section.tuber",
+                        "section width ratio",
+                        f64::EPSILON,
+                        100.0,
+                        1.0,
+                    ),
+                    ("section.sharp", "section sharpness", 0.0, 1.0, 0.4),
+                    ("smooth", "smoothing", 0.0, 1.0, 0.0),
+                    ("putty_hiscl", "putty high scale", 0.01, 10.0, 3.0),
+                    ("putty_loscl", "putty low scale", 0.01, 10.0, 3.0),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("{label} must be a number"))?;
+                    if !value.is_finite() || !(minimum..=maximum).contains(&value) {
+                        return Err(format!("{label} must be between {minimum} and {maximum}"));
+                    }
+                    specific_updates.push((
+                        key.to_string(),
+                        value.to_string(),
+                        (value - default).abs() < f64::EPSILON,
+                    ));
+                }
+                for (key, label, default) in [
+                    ("section.detail", "section detail", 16),
+                    ("axialdetail", "axial detail", 6),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw
+                        .trim()
+                        .parse::<i32>()
+                        .map_err(|_| format!("{label} must be an integer"))?;
+                    if !(2..=20).contains(&value) {
+                        return Err(format!("{label} must be between 2 and 20"));
+                    }
+                    specific_updates.push((key.to_string(), value.to_string(), value == default));
+                }
+                for (key, label, default, allowed) in [
+                    (
+                        "section.type",
+                        "section type",
+                        "elliptical",
+                        &["elliptical", "roundsquare", "rectangle", "fancy1"][..],
+                    ),
+                    (
+                        "start_captype",
+                        "start cap type",
+                        "sphere",
+                        &["flat", "sphere", "none"][..],
+                    ),
+                    (
+                        "end_captype",
+                        "end cap type",
+                        "sphere",
+                        &["flat", "sphere", "none"][..],
+                    ),
+                    (
+                        "putty_mode",
+                        "putty mode",
+                        "none",
+                        &["none", "linear1", "scale1"][..],
+                    ),
+                    ("putty_tgt", "putty target", "bfac", &["bfac", "occ"][..]),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw.trim();
+                    if !allowed.contains(&value) {
+                        return Err(format!("unsupported {label}: {value}"));
+                    }
+                    specific_updates.push((key.to_string(), value.to_string(), value == default));
+                }
+                for (key, default) in [("smoothcolor", true), ("segend_fade", false)] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = match raw.trim() {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err(format!("{key} must be true or false")),
+                    };
+                    specific_updates.push((key.to_string(), value.to_string(), value == default));
+                }
+                if let Some(value) = properties.specific.get("pivotatom") {
+                    let value = value.trim();
+                    specific_updates.push((
+                        "pivotatom".to_string(),
+                        value.to_string(),
+                        value.is_empty(),
+                    ));
+                }
+                if renderer_type == "nucl" {
+                    for (key, label, minimum, maximum, default) in [
+                        ("base_size", "base size", 0.0, 10.0, 0.5),
+                        ("base_thick", "base thickness", 0.0, 10.0, 0.5),
+                    ] {
+                        let Some(raw) = properties.specific.get(key) else {
+                            continue;
+                        };
+                        let value = raw
+                            .trim()
+                            .parse::<f64>()
+                            .map_err(|_| format!("{label} must be a number"))?;
+                        if !value.is_finite() || !(minimum..=maximum).contains(&value) {
+                            return Err(format!("{label} must be between {minimum} and {maximum}"));
+                        }
+                        specific_updates.push((
+                            key.to_string(),
+                            value.to_string(),
+                            (value - default).abs() < f64::EPSILON,
+                        ));
+                    }
+                    if let Some(raw) = properties.specific.get("base_detail") {
+                        let value = raw
+                            .trim()
+                            .parse::<i32>()
+                            .map_err(|_| "base detail must be an integer".to_string())?;
+                        if !(2..=20).contains(&value) {
+                            return Err("base detail must be between 2 and 20".to_string());
+                        }
+                        specific_updates.push((
+                            "base_detail".to_string(),
+                            value.to_string(),
+                            value == 3,
+                        ));
+                    }
+                    if let Some(raw) = properties.specific.get("base_type") {
+                        let value = raw.trim();
+                        if !matches!(value, "basepair" | "simple1" | "detail1" | "detail2") {
+                            return Err(format!("unsupported base type: {value}"));
+                        }
+                        specific_updates.push((
+                            "base_type".to_string(),
+                            value.to_string(),
+                            value == "basepair",
+                        ));
+                    }
+                    for (key, default) in [("show_tube", true), ("show_basepair", true)] {
+                        let Some(raw) = properties.specific.get(key) else {
+                            continue;
+                        };
+                        let value = match raw.trim() {
+                            "true" => true,
+                            "false" => false,
+                            _ => return Err(format!("{key} must be true or false")),
+                        };
+                        specific_updates.push((
+                            key.to_string(),
+                            value.to_string(),
+                            value == default,
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.desktop
+            .set_renderer_common_properties(
+                object_uid,
+                renderer_uid,
+                name,
+                properties.selection,
+                properties.visible,
+                properties.locked,
+                properties.material,
+                properties.alpha,
+                properties.edge_type,
+                properties.edge_width,
+                properties.edge_color,
+            )
+            .map_err(|error| error.to_string())?;
+        let mut set_property = |key: &str, value: String, is_default: bool| {
+            let result = if let Some((child, attribute)) = key.split_once('.') {
+                if is_default {
+                    self.desktop.reset_renderer_child_property(
+                        object_uid,
+                        renderer_uid,
+                        child,
+                        attribute,
+                    )
+                } else {
+                    self.desktop.set_renderer_child_property(
+                        object_uid,
+                        renderer_uid,
+                        child,
+                        attribute,
+                        value,
+                    )
+                }
+            } else if is_default {
+                self.desktop
+                    .reset_renderer_property(object_uid, renderer_uid, key)
+            } else {
+                self.desktop
+                    .set_renderer_property(object_uid, renderer_uid, key, value)
+            };
+            result.map_err(|error| error.to_string())
+        };
+        match renderer_type.as_str() {
+            "simple" | "trace" => set_property(
+                "width",
+                properties.line_width.to_string(),
+                (properties.line_width - 1.2).abs() < f64::EPSILON,
+            )?,
+            "ballstick" | "anisou" => {
+                set_property(
+                    "detail",
+                    properties.detail.to_string(),
+                    properties.detail == 3,
+                )?;
+                set_property(
+                    "bondw",
+                    properties.bond_width.to_string(),
+                    (properties.bond_width - 0.2).abs() < f64::EPSILON,
+                )?;
+                set_property(
+                    "sphr",
+                    properties.sphere_radius.to_string(),
+                    (properties.sphere_radius - 0.3).abs() < f64::EPSILON,
+                )?;
+                set_property(
+                    "ring",
+                    properties.show_ring.to_string(),
+                    !properties.show_ring,
+                )?;
+                set_property(
+                    "thickness",
+                    properties.ring_thickness.to_string(),
+                    (properties.ring_thickness - 0.2).abs() < f64::EPSILON,
+                )?;
+                set_property(
+                    "ringcolor",
+                    properties.ring_color.trim().to_string(),
+                    properties.ring_color.trim().eq_ignore_ascii_case("#ffffbf"),
+                )?;
+            }
+            _ => {}
+        }
+        for (key, value, is_default) in specific_updates {
+            set_property(&key, value, is_default)?;
+        }
+        self.status = "Renderer properties updated".to_string();
+        self.rebuild_mesh(false)
+    }
+
+    fn apply_stored_preferences(&mut self) {
+        let font_values = [
+            ("DefaultLabel.font_name", "style:DefaultLabel.font_name"),
+            ("DefaultLabel.font_size", "style:DefaultLabel.font_size"),
+            ("DefaultLabel.color", "style:DefaultLabel.color"),
+            ("DefaultLabel.font_style", "style:DefaultLabel.font_style"),
+            ("DefaultLabel.font_weight", "style:DefaultLabel.font_weight"),
+        ];
+        for (style_key, config_key) in font_values {
+            let value = self.desktop.config_value(config_key);
+            if !value.is_empty() {
+                self.desktop.set_style_value(0, "user", style_key, value);
+            }
+        }
+        let style = self.desktop.config_value("cuemol2.ui.viewinconf");
+        let tbrad = self
+            .desktop
+            .config_value("view_input:tbrad")
+            .parse()
+            .unwrap_or(0.8);
+        let hitprec = self
+            .desktop
+            .config_value("view_input:hitprec")
+            .parse()
+            .unwrap_or(10.0);
+        let input = self.desktop.view_input_config_mut();
+        input.set_style(nonempty_or(style, "DefaultViewInConf"));
+        input.set_tbrad(tbrad);
+        input.set_hitprec(hitprec);
+    }
+
+    fn save_config(&self) -> Result<(), String> {
+        let Some(path) = self.config_path.as_ref() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create config directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        self.desktop
+            .save_config_file(path)
+            .map_err(|error| format!("failed to save config {}: {error}", path.display()))
+    }
+
+    fn sync_active_scene_properties(&mut self) {
+        let Some(scene) = self
+            .desktop
+            .active_scene()
+            .and_then(|uid| self.desktop.scene_manager().scene(uid))
+        else {
+            self.background = "black".to_string();
+            self.color_proofing = false;
+            return;
+        };
+        self.background = scene
+            .scene_attribute("bgcolor")
+            .unwrap_or("black")
+            .to_string();
+        self.color_proofing = scene_attr_bool(scene.scene_attribute("use_colproof"), false);
+    }
+
+    fn set_scene_properties(&mut self, properties: ScenePropertiesInput) -> Result<(), String> {
+        let scene_uid = Uid::new(properties.scene_uid);
+        if self.desktop.scene_manager().scene(scene_uid).is_none() {
+            return Err(format!("scene {} was not found", properties.scene_uid));
+        }
+        let background = properties.background.trim();
+        if background.is_empty() {
+            return Err("scene background color is required".to_string());
+        }
+        background_rgba(background)?;
+        if !properties.ao_radius.is_finite() || properties.ao_radius <= 0.0 {
+            return Err("AO radius must be a positive finite number".to_string());
+        }
+        if !properties.ao_intensity.is_finite() || properties.ao_intensity <= 0.0 {
+            return Err("AO intensity must be a positive finite number".to_string());
+        }
+        if !(1..=64).contains(&properties.ao_slices) {
+            return Err("AO slices must be between 1 and 64".to_string());
+        }
+        if !(1..=32).contains(&properties.ao_steps) {
+            return Err("AO steps must be between 1 and 32".to_string());
+        }
+        if !matches!(properties.aa_method.as_str(), "none" | "fxaa" | "smaa") {
+            return Err(format!("unsupported AA method: {}", properties.aa_method));
+        }
+        if !(0..=5).contains(&properties.aa_jitter_level) {
+            return Err("AA jitter level must be between 0 and 5".to_string());
+        }
+        if icc_intent_index(&properties.icc_intent).is_none() {
+            return Err(format!("unsupported ICC intent: {}", properties.icc_intent));
+        }
+
+        let scene = self
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .expect("validated scene must remain live");
+        set_scene_attr_default(scene, "bgcolor", background, "black");
+        set_scene_attr_default(
+            scene,
+            "aoEnabled",
+            &properties.ao_enabled.to_string(),
+            "false",
+        );
+        set_scene_attr_default(scene, "aoRadius", &properties.ao_radius.to_string(), "4");
+        set_scene_attr_default(
+            scene,
+            "aoIntensity",
+            &properties.ao_intensity.to_string(),
+            "2.2",
+        );
+        set_scene_attr_default(scene, "aoSlices", &properties.ao_slices.to_string(), "9");
+        set_scene_attr_default(scene, "aoSteps", &properties.ao_steps.to_string(), "3");
+        set_scene_attr_default(
+            scene,
+            "aoHalfRes",
+            &properties.ao_half_res.to_string(),
+            "false",
+        );
+        set_scene_attr_default(scene, "aa_method", &properties.aa_method, "fxaa");
+        set_scene_attr_default(
+            scene,
+            "aaJitterLevel",
+            &properties.aa_jitter_level.to_string(),
+            "0",
+        );
+        set_scene_attr_default(scene, "onload", &properties.onload, "");
+        set_scene_attr_default(
+            scene,
+            "use_colproof",
+            &properties.use_color_proof.to_string(),
+            "false",
+        );
+        set_scene_attr_default(scene, "icc_filename", &properties.icc_filename, "");
+        set_scene_attr_default(scene, "icc_intent", &properties.icc_intent, "perceptual");
+
+        if self.desktop.active_scene() == Some(scene_uid) {
+            self.sync_active_scene_properties();
+        }
+        self.status = "Scene properties updated".to_string();
+        self.rebuild_mesh(false)
+    }
+
+    fn view_properties(&self) -> ViewPropertiesDto {
+        let scene_uid = self.desktop.active_scene().unwrap_or(Uid::new(1));
+        let mut view = View::new(Uid::new(1), scene_uid);
+        view.set_camera(&self.camera);
+        view.set_view_size(self.view_width, self.view_height);
+        view.set_trans_mms(self.trans_mms);
+        view.set_rot_mms(self.rot_mms);
+        view.set_swap_stereo_eyes(self.swap_stereo_eyes);
+        let center = self.camera.center();
+        let rotation = self.camera.rotation();
+        ViewPropertiesDto {
+            name: self.camera.name().to_string(),
+            uid: view.uid().get(),
+            active: view.is_active(),
+            zoom: self.camera.zoom(),
+            distance: self.camera.cam_dist(),
+            slab: self.camera.slab_depth(),
+            center: [center.x, center.y, center.z],
+            rotation: [rotation.x, rotation.y, rotation.z, rotation.w],
+            perspective: self.camera.is_perspective(),
+            width: self.view_width,
+            height: self.view_height,
+            trans_mms: self.trans_mms,
+            rot_mms: self.rot_mms,
+            stereo_mode: stereo_mode_name(self.camera.stereo_mode()).to_string(),
+            has_hw_stereo: view.has_hw_stereo(),
+            stereo_dist: self.camera.stereo_distance(),
+            swap_stereo_eyes: self.swap_stereo_eyes,
+            up_vec: vector3_array(view.up_vector()),
+            right_vec: vector3_array(view.right_vector()),
+            forward_vec: vector3_array(view.forward_vector()),
+            center_mark: center_mark_name(self.camera.center_mark()).to_string(),
+        }
+    }
+
+    fn set_view_properties(&mut self, input: ViewPropertiesInput) -> Result<(), String> {
+        if !input.zoom.is_finite() || input.zoom <= 0.0 {
+            return Err("view zoom must be a positive finite number".to_string());
+        }
+        if !input.distance.is_finite() || input.distance <= 0.0 {
+            return Err("view distance must be a positive finite number".to_string());
+        }
+        if !input.slab.is_finite() || input.slab <= 0.0 {
+            return Err("view slab must be a positive finite number".to_string());
+        }
+        if !input.stereo_dist.is_finite() || input.stereo_dist < 0.0 {
+            return Err("stereo distance must be a non-negative finite number".to_string());
+        }
+        if !input.center.iter().all(|value| value.is_finite())
+            || !input.rotation.iter().all(|value| value.is_finite())
+        {
+            return Err("view vectors must contain finite numbers".to_string());
+        }
+        let rotation = Quat::new(
+            input.rotation[0],
+            input.rotation[1],
+            input.rotation[2],
+            input.rotation[3],
+        )
+        .normalize()
+        .map_err(|error| error.to_string())?;
+        let stereo_mode = parse_stereo_mode(&input.stereo_mode)?;
+        let center_mark = parse_center_mark(&input.center_mark)?;
+        self.camera.set_name(input.name);
+        self.camera.set_zoom(input.zoom);
+        self.camera.set_cam_dist(input.distance);
+        self.camera.set_slab_depth(input.slab);
+        self.camera.set_center(Vector4::new3(
+            input.center[0],
+            input.center[1],
+            input.center[2],
+        ));
+        self.camera.set_rotation(rotation);
+        self.camera.set_perspective(input.perspective);
+        self.camera.set_stereo_mode(stereo_mode);
+        self.camera.set_stereo_distance(input.stereo_dist);
+        self.camera.set_center_mark(center_mark);
+        self.trans_mms = input.trans_mms;
+        self.rot_mms = input.rot_mms;
+        self.swap_stereo_eyes = input.swap_stereo_eyes;
+        self.status = "View properties updated".to_string();
+        Ok(())
     }
 
     fn rebuild_mesh(&mut self, refit: bool) -> Result<(), String> {
@@ -539,8 +2977,25 @@ impl AppModel {
             self.density_level,
             self.show_density_contour,
         );
-        if self.color_proofing && self.desktop.apply_color_proof(&mut snapshot).is_err() {
-            cuemol_render::apply_generic_color_proof(&mut snapshot);
+        if self.color_proofing {
+            let scene = self
+                .desktop
+                .active_scene()
+                .and_then(|uid| self.desktop.scene_manager().scene(uid));
+            let profile = scene
+                .and_then(|scene| scene.scene_attribute("icc_filename"))
+                .unwrap_or("");
+            let intent = scene
+                .and_then(|scene| scene.scene_attribute("icc_intent"))
+                .and_then(icc_intent_index)
+                .unwrap_or(0);
+            if self
+                .desktop
+                .apply_color_proof_with(&mut snapshot, profile, intent)
+                .is_err()
+            {
+                cuemol_render::apply_generic_color_proof(&mut snapshot);
+            }
         }
         if refit {
             self.camera = self
@@ -549,19 +3004,29 @@ impl AppModel {
                 .unwrap_or_else(|| frame_camera(&snapshot));
         }
         self.mesh = Some(tessellate_snapshot(&snapshot));
+        self.mesh_refit_pending = false;
         Ok(())
     }
 
-    fn open_paths(&mut self, paths: Vec<String>) {
-        let mut loaded = 0usize;
+    fn prepare_mesh_if_needed(&mut self) -> Result<(), String> {
+        if self.mesh.is_none() {
+            self.rebuild_mesh(self.mesh_refit_pending)?;
+        }
+        Ok(())
+    }
+
+    fn open_paths(&mut self, paths: Vec<String>) -> Result<usize, String> {
+        self.opened_paths.clear();
         let mut failures = Vec::new();
         for path in paths {
             match self.desktop.open_path(&path) {
-                Ok(_) => loaded += 1,
+                Ok(_) => self.opened_paths.push(path),
                 Err(error) => failures.push(format!("{path}: {error}")),
             }
         }
+        let loaded = self.opened_paths.len();
         self.selection.clear();
+        self.sync_active_scene_properties();
         self.status = if failures.is_empty() {
             format!("Loaded {loaded} file(s)")
         } else {
@@ -570,41 +3035,142 @@ impl AppModel {
         if let Err(error) = self.rebuild_mesh(true) {
             self.status = format!("{}; render state failed: {error}", self.status);
         }
+        if loaded == 0 {
+            return Err(self.status.clone());
+        }
+        Ok(loaded)
+    }
+
+    fn set_trajectory_frame(&mut self, object_uid: u64, frame: usize) -> Result<(), String> {
+        self.desktop
+            .apply_trajectory_frame(Uid::new(object_uid), frame)
+            .map_err(|error| error.to_string())?;
+        self.status = format!("Trajectory frame: {frame}");
+        self.rebuild_mesh(false)
+    }
+
+    fn render_mesh_rgba(
+        &self,
+        renderer: &SceneRenderer,
+        mesh: &RenderMesh,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<u8>> {
+        let scene = self
+            .desktop
+            .active_scene()
+            .and_then(|uid| self.desktop.scene_manager().scene(uid));
+        let jitter_level = scene_attr_i32(
+            scene.and_then(|scene| scene.scene_attribute("aaJitterLevel")),
+            0,
+        )
+        .clamp(0, 5);
+        let aa_method = scene
+            .and_then(|scene| scene.scene_attribute("aa_method"))
+            .unwrap_or("fxaa");
+        let mvp = camera_mvp(&self.camera, f64::from(width) / f64::from(height));
+        let mut clear = background_rgba(&self.background).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        clear[3] = 1.0;
+        let mut rgba = renderer.render_supersampled(
+            std::slice::from_ref(mesh),
+            mvp,
+            width,
+            height,
+            clear,
+            jitter_level,
+        )?;
+
+        if scene_attr_bool(
+            scene.and_then(|scene| scene.scene_attribute("aoEnabled")),
+            false,
+        ) {
+            let (near, far) = camera_depth_range(&self.camera);
+            if let Some(depth) = renderer.render_depth(
+                std::slice::from_ref(mesh),
+                mvp,
+                width,
+                height,
+                near,
+                far,
+                self.camera.is_perspective(),
+            ) {
+                let radius = scene_attr_f64(
+                    scene.and_then(|scene| scene.scene_attribute("aoRadius")),
+                    4.0,
+                );
+                let intensity = scene_attr_f64(
+                    scene.and_then(|scene| scene.scene_attribute("aoIntensity")),
+                    2.2,
+                );
+                let slices =
+                    scene_attr_i32(scene.and_then(|scene| scene.scene_attribute("aoSlices")), 9);
+                let steps =
+                    scene_attr_i32(scene.and_then(|scene| scene.scene_attribute("aoSteps")), 3);
+                let radius_pixels = ((radius / self.camera.slab_depth())
+                    * f64::from(width.min(height)))
+                .round()
+                .clamp(1.0, 64.0) as usize;
+                apply_screen_space_ao(
+                    &mut rgba,
+                    &depth,
+                    width,
+                    height,
+                    radius_pixels,
+                    intensity,
+                    slices,
+                    steps,
+                );
+            }
+        }
+        if aa_method != "none" {
+            apply_fast_post_aa(&mut rgba, width, height, aa_method == "smaa");
+        }
+        Some(rgba)
     }
 
     fn render(&mut self, width: u32, height: u32) -> ViewportDto {
+        if let Err(error) = self.prepare_mesh_if_needed() {
+            self.status = format!("Render state failed: {error}");
+        }
+        let mut viewport = self.viewport_metadata(width, height);
+        let width = viewport.width;
+        let height = viewport.height;
+        if self.renderer.is_none()
+            && self
+                .mesh
+                .as_ref()
+                .is_some_and(|mesh| !mesh.indices.is_empty())
+        {
+            self.renderer = SceneRenderer::new();
+        }
+        viewport.image =
+            self.renderer
+                .as_ref()
+                .zip(self.mesh.as_ref())
+                .and_then(|(renderer, mesh)| {
+                    if mesh.indices.is_empty() {
+                        return None;
+                    }
+                    self.render_mesh_rgba(renderer, mesh, width, height)
+                        .map(|rgba| {
+                            let png = encode_rgba_png(&rgba, width, height);
+                            format!("data:image/png;base64,{}", base64_encode(&png))
+                        })
+                });
+        viewport
+    }
+
+    fn viewport_metadata(&mut self, width: u32, height: u32) -> ViewportDto {
         let width = width.clamp(64, MAX_VIEW_DIM);
         let height = height.clamp(64, MAX_VIEW_DIM);
-        let image = self
-            .renderer
-            .as_ref()
-            .zip(self.mesh.as_ref())
-            .and_then(|(renderer, mesh)| {
-                if mesh.indices.is_empty() {
-                    return None;
-                }
-                let mvp = camera_mvp(&self.camera, f64::from(width) / f64::from(height));
-                renderer
-                    .render(
-                        std::slice::from_ref(mesh),
-                        mvp,
-                        width,
-                        height,
-                        if self.background == "white" {
-                            [1.0, 1.0, 1.0, 1.0]
-                        } else {
-                            [0.0, 0.0, 0.0, 1.0]
-                        },
-                    )
-                    .map(|rgba| {
-                        let png = encode_rgba_png(&rgba, width, height);
-                        format!("data:image/png;base64,{}", base64_encode(&png))
-                    })
-            });
+        self.view_width = width;
+        self.view_height = height;
         ViewportDto {
-            image,
+            image: None,
             width,
             height,
+            perspective: self.camera.is_perspective(),
+            center_mark: center_mark_name(self.camera.center_mark()).to_string(),
             status: self.status.clone(),
         }
     }
@@ -621,19 +3187,8 @@ impl AppModel {
             .as_ref()
             .filter(|mesh| !mesh.indices.is_empty())
             .ok_or_else(|| "the active scene has no renderable geometry".to_string())?;
-        let mvp = camera_mvp(&self.camera, f64::from(width) / f64::from(height));
-        let rgba = renderer
-            .render(
-                std::slice::from_ref(mesh),
-                mvp,
-                width,
-                height,
-                if self.background == "white" {
-                    [1.0, 1.0, 1.0, 1.0]
-                } else {
-                    [0.0, 0.0, 0.0, 1.0]
-                },
-            )
+        let rgba = self
+            .render_mesh_rgba(renderer, mesh, width, height)
             .ok_or_else(|| "rendering the animation frame failed".to_string())?;
         Ok(encode_rgba_png(&rgba, width, height))
     }
@@ -668,6 +3223,10 @@ impl AppModel {
         }
         let output_dir = Path::new(output_dir);
         fs::create_dir_all(output_dir).map_err(|error| error.to_string())?;
+        self.prepare_mesh_if_needed()?;
+        if self.renderer.is_none() {
+            self.renderer = SceneRenderer::new();
+        }
 
         let original_desktop = self.desktop.clone();
         let original_camera = self.camera.clone();
@@ -726,6 +3285,11 @@ impl AppModel {
                 self.camera
                     .set_zoom((self.camera.zoom() * x.clamp(0.2, 5.0)).clamp(0.5, 1.0e6));
             }
+            "slab" => {
+                self.camera.set_slab_depth(
+                    (self.camera.slab_depth() * x.clamp(0.2, 5.0)).clamp(0.1, 10_000.0),
+                );
+            }
             "fit" => {
                 let snapshot = self
                     .desktop
@@ -741,6 +3305,18 @@ impl AppModel {
                 } else {
                     "Projection: orthographic".to_string()
                 };
+            }
+            "center-mark-cross" => {
+                self.camera.set_center_mark(CenterMark::Cross);
+                self.status = "Center mark: crosshair".to_string();
+            }
+            "center-mark-axis" => {
+                self.camera.set_center_mark(CenterMark::Axis);
+                self.status = "Center mark: axis".to_string();
+            }
+            "center-mark-none" => {
+                self.camera.set_center_mark(CenterMark::None);
+                self.status = "Center mark: none".to_string();
             }
             _ => return Err(format!("unknown camera action: {action}")),
         }
@@ -769,7 +3345,7 @@ impl AppModel {
             mvp,
             (x, y),
             (f64::from(width), f64::from(height)),
-            10.0,
+            self.desktop.view_input_config().hitprec(),
         ) else {
             self.status = "No atom at cursor".to_string();
             return Ok(());
@@ -929,13 +3505,28 @@ impl AppModel {
             animation_objects: self.animation_objects.clone(),
             animation_elapsed: self.animation_elapsed,
             animation_loop: self.animation_loop,
+            trans_mms: self.trans_mms,
+            rot_mms: self.rot_mms,
+            swap_stereo_eyes: self.swap_stereo_eyes,
+            modified_scenes: self.modified_scenes.clone(),
         }
     }
 
     fn push_undo(&mut self, snapshot: AppModelUndo) {
-        self.undo_stack.push(snapshot);
+        let description = if self.status.trim().is_empty() {
+            "Edit".to_string()
+        } else {
+            self.status.clone()
+        };
+        self.undo_stack.push(AppModelUndoEntry {
+            snapshot,
+            description,
+        });
         if self.undo_stack.len() > 50 {
             self.undo_stack.remove(0);
+        }
+        if let Some(scene_uid) = self.desktop.active_scene() {
+            self.modified_scenes.insert(scene_uid);
         }
         self.redo_stack.clear();
     }
@@ -953,32 +3544,54 @@ impl AppModel {
         self.animation_objects = snapshot.animation_objects;
         self.animation_elapsed = snapshot.animation_elapsed;
         self.animation_loop = snapshot.animation_loop;
+        self.trans_mms = snapshot.trans_mms;
+        self.rot_mms = snapshot.rot_mms;
+        self.swap_stereo_eyes = snapshot.swap_stereo_eyes;
+        self.modified_scenes = snapshot.modified_scenes;
         self.animation_playing = false;
         self.animation_start_camera = None;
         self.rebuild_mesh(false)
     }
 
-    fn undo(&mut self) -> Result<(), String> {
-        let Some(snapshot) = self.undo_stack.pop() else {
+    fn undo(&mut self, depth: usize) -> Result<(), String> {
+        let count = depth.saturating_add(1).min(self.undo_stack.len());
+        if count == 0 {
             self.status = "Nothing to undo".to_string();
             return Ok(());
-        };
-        let redo = self.capture_undo();
-        self.restore_undo(snapshot)?;
-        self.redo_stack.push(redo);
-        self.status = "Undo".to_string();
+        }
+        let mut description = String::new();
+        for _ in 0..count {
+            let entry = self.undo_stack.pop().expect("undo count is bounded");
+            let redo = self.capture_undo();
+            description = entry.description.clone();
+            self.restore_undo(entry.snapshot)?;
+            self.redo_stack.push(AppModelUndoEntry {
+                snapshot: redo,
+                description: entry.description,
+            });
+        }
+        self.status = format!("Undo: {description}");
         Ok(())
     }
 
-    fn redo(&mut self) -> Result<(), String> {
-        let Some(snapshot) = self.redo_stack.pop() else {
+    fn redo(&mut self, depth: usize) -> Result<(), String> {
+        let count = depth.saturating_add(1).min(self.redo_stack.len());
+        if count == 0 {
             self.status = "Nothing to redo".to_string();
             return Ok(());
-        };
-        let undo = self.capture_undo();
-        self.restore_undo(snapshot)?;
-        self.undo_stack.push(undo);
-        self.status = "Redo".to_string();
+        }
+        let mut description = String::new();
+        for _ in 0..count {
+            let entry = self.redo_stack.pop().expect("redo count is bounded");
+            let undo = self.capture_undo();
+            description = entry.description.clone();
+            self.restore_undo(entry.snapshot)?;
+            self.undo_stack.push(AppModelUndoEntry {
+                snapshot: undo,
+                description: entry.description,
+            });
+        }
+        self.status = format!("Redo: {description}");
         Ok(())
     }
 
@@ -991,11 +3604,67 @@ impl AppModel {
 
 enum ModelRequest {
     GetSnapshot,
-    Undo,
-    Redo,
+    GetMoleculeDetails {
+        structure_key: String,
+        sequence_key: String,
+        include_sequence: bool,
+    },
+    GetInitialState {
+        width: u32,
+        height: u32,
+    },
+    GetApplicationInfo,
+    GetPreferences,
+    SetPreferences(PreferencesDto),
+    GetViewProperties,
+    SetViewProperties {
+        properties: ViewPropertiesInput,
+        width: u32,
+        height: u32,
+    },
+    SetSceneProperties(ScenePropertiesInput),
+    SetObjectProperties(ObjectPropertiesInput),
+    SetRendererProperties(RendererPropertiesInput),
+    SetDensityMapProperties(ObjectPropertiesInput),
+    SetDensityRendererProperties(RendererPropertiesInput),
+    SetDensityRendererVisible {
+        map_uid: u64,
+        renderer_uid: u64,
+        visible: bool,
+    },
+    AddDensityRenderer {
+        map_uid: u64,
+        renderer_type: String,
+    },
+    SetSurfaceProperties(ObjectPropertiesInput),
+    SetSurfaceRendererProperties(RendererPropertiesInput),
+    SetSurfaceRendererVisible {
+        surface_uid: u64,
+        renderer_uid: u64,
+        visible: bool,
+    },
+    AddSurfaceRenderer {
+        surface_uid: u64,
+    },
+    DeleteWorkspaceItem(WorkspaceDeleteInput),
+    FitWorkspaceItem {
+        target: WorkspaceFitInput,
+        width: u32,
+        height: u32,
+    },
+    SetConfigValue {
+        key: String,
+        value: String,
+    },
+    Undo(usize),
+    Redo(usize),
     ClearUndo,
     OpenPaths(Vec<String>),
-    OpenPdb(String),
+    ReloadScene,
+    OpenPdb {
+        pdb_id: String,
+        path: PathBuf,
+    },
     LoadTrajectory {
         topology_path: String,
         trajectory_paths: Vec<String>,
@@ -1005,6 +3674,12 @@ enum ModelRequest {
     SetTrajectoryFrame {
         object_uid: u64,
         frame: usize,
+    },
+    SetTrajectoryFrameViewport {
+        object_uid: u64,
+        frame: usize,
+        width: u32,
+        height: u32,
     },
     AppendTrajectoryBlock {
         object_uid: u64,
@@ -1024,6 +3699,13 @@ enum ModelRequest {
     ActivateScene(u64),
     CloseActiveScene,
     SetSelection(String),
+    MolStructAction {
+        object_uid: u64,
+        selection: String,
+        mode: String,
+        width: u32,
+        height: u32,
+    },
     SetRendererVisible {
         object_uid: u64,
         renderer_uid: u64,
@@ -1036,6 +3718,11 @@ enum ModelRequest {
     SetObjectColoring {
         object_uid: u64,
         coloring: String,
+    },
+    SetColoring {
+        input: ColoringUpdateInput,
+        width: u32,
+        height: u32,
     },
     DeleteAtoms {
         object_uid: u64,
@@ -1155,6 +3842,11 @@ enum ModelRequest {
     SetAnimationLoop(bool),
     SeekAnimation(f64),
     TickAnimation(f64),
+    TickAnimationFrame {
+        dt: f64,
+        width: u32,
+        height: u32,
+    },
     ClearLog,
     ExecuteScript(String),
     ExportPov {
@@ -1194,7 +3886,17 @@ enum ModelRequest {
 
 enum ModelResponse {
     Snapshot(Box<AppSnapshot>),
+    MoleculeDetails(Box<MoleculeDetailsDto>),
+    InitialState(Box<InitialStateDto>),
+    MolStructUpdate(Box<MolStructUpdateDto>),
     Viewport(ViewportDto),
+    AnimationFrame(AnimationFrameDto),
+    TrajectoryFrame(TrajectoryFrameDto),
+    ApplicationInfo(ApplicationInfoDto),
+    Preferences(Box<PreferencesDto>),
+    PreferencesUpdate(Box<PreferencesUpdateDto>),
+    ViewProperties(ViewPropertiesDto),
+    ViewPropertiesUpdate(Box<ViewPropertiesUpdateDto>),
 }
 
 struct ModelEnvelope {
@@ -1204,6 +3906,544 @@ struct ModelEnvelope {
 
 struct ManagedState {
     sender: mpsc::Sender<ModelEnvelope>,
+    startup_paths: Mutex<Option<Vec<PathBuf>>>,
+}
+
+fn nonempty_or(value: String, fallback: &str) -> String {
+    if value.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        value
+    }
+}
+
+fn config_bool(desktop: &DesktopAppState, key: &str, fallback: bool) -> bool {
+    match desktop.config_value(key).trim() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" => false,
+        _ => fallback,
+    }
+}
+
+fn config_value_is_true(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
+}
+
+fn scene_attr_bool(value: Option<&str>, fallback: bool) -> bool {
+    value.map(config_value_is_true).unwrap_or(fallback)
+}
+
+fn scene_attr_f64(value: Option<&str>, fallback: f64) -> f64 {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .unwrap_or(fallback)
+}
+
+fn scene_attr_i32(value: Option<&str>, fallback: i32) -> i32 {
+    value
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(fallback)
+}
+
+fn coloring_node_details(
+    node: Option<&LDom2Node>,
+) -> (Option<String>, BTreeMap<String, String>, Vec<PaintEntryDto>) {
+    let Some(node) = node else {
+        return (None, BTreeMap::new(), Vec::new());
+    };
+    let coloring_type = if node.type_name().is_empty() {
+        let value = node.str_attr("type").to_string();
+        (!value.is_empty()).then_some(value)
+    } else {
+        Some(node.type_name().to_string())
+    };
+    let attrs = node
+        .children()
+        .iter()
+        .filter(|child| child.is_attr() && child.tag_name() != "type")
+        .map(|child| (child.tag_name().to_string(), child.value().to_string()))
+        .collect();
+    let paint_entries = node
+        .children()
+        .iter()
+        .filter(|child| !child.is_attr() && child.tag_name() == "paint")
+        .filter_map(|child| {
+            let selection = child.str_attr("sel").to_string();
+            let color = child.str_attr("color").to_string();
+            (!selection.is_empty() && !color.is_empty())
+                .then_some(PaintEntryDto { selection, color })
+        })
+        .collect();
+    (coloring_type, attrs, paint_entries)
+}
+
+fn renderer_coloring_details(
+    renderer: &cuemol_molstr::MolRenderer,
+    styles: &cuemol_qsys::StyleManager,
+    scope_id: u64,
+) -> (Option<String>, BTreeMap<String, String>, Vec<PaintEntryDto>) {
+    let node = renderer
+        .qsc_children()
+        .iter()
+        .find(|node| node.tag_name() == "coloring")
+        .or_else(|| {
+            renderer
+                .style()
+                .and_then(|style| styles.resolve_style_child_node(scope_id, style, "coloring"))
+        });
+    coloring_node_details(node)
+}
+
+fn renderer_specific_attributes(
+    renderer: &cuemol_molstr::MolRenderer,
+    renderer_type: &str,
+    styles: &cuemol_qsys::StyleManager,
+) -> BTreeMap<String, String> {
+    let defaults: Vec<(&str, &str)> = match renderer_type {
+        "cpk" => vec![
+            ("vdwr_H", "1.2"),
+            ("vdwr_C", "1.7"),
+            ("vdwr_N", "1.55"),
+            ("vdwr_O", "1.52"),
+            ("vdwr_S", "1.8"),
+            ("vdwr_P", "1.8"),
+            ("vdwr_X", "1.7"),
+            ("detail", "3"),
+        ],
+        "disorder" => vec![
+            ("target", ""),
+            ("detail", "5"),
+            ("width", "0.3"),
+            ("dotsep", "1"),
+            ("loopsize", "2"),
+            ("loopsize2", "-1"),
+            ("defaultcolor", "#ffffff"),
+        ],
+        "ribbon" => vec![
+            ("helix.type", "elliptical"),
+            ("helix.width", "0.35"),
+            ("helix.tuber", "1"),
+            ("helix.sharp", "0.4"),
+            ("helix.detail", "16"),
+            ("sheet.type", "elliptical"),
+            ("sheet.width", "0.35"),
+            ("sheet.tuber", "1"),
+            ("sheet.sharp", "0.4"),
+            ("sheet.detail", "16"),
+            ("coil.type", "elliptical"),
+            ("coil.width", "0.35"),
+            ("coil.tuber", "1"),
+            ("coil.sharp", "0.4"),
+            ("coil.detail", "16"),
+            ("helixhead.type", "smooth"),
+            ("helixhead.gamma", "2.2"),
+            ("helixhead.basw", "0"),
+            ("helixhead.arrow", "1.8"),
+            ("helixtail.type", "smooth"),
+            ("helixtail.gamma", "2.2"),
+            ("helixtail.basw", "0"),
+            ("helixtail.arrow", "1.8"),
+            ("sheethead.type", "smooth"),
+            ("sheethead.gamma", "2.2"),
+            ("sheethead.basw", "0"),
+            ("sheethead.arrow", "1.8"),
+            ("sheettail.type", "smooth"),
+            ("sheettail.gamma", "2.2"),
+            ("sheettail.basw", "0"),
+            ("sheettail.arrow", "1.8"),
+            ("axialdetail", "6"),
+            ("smoothcolor", "true"),
+            ("pivotatom", ""),
+            ("start_captype", "sphere"),
+            ("end_captype", "sphere"),
+            ("segend_fade", "false"),
+            ("helix_smooth", "0"),
+            ("sheet_smooth", "0.5"),
+            ("coil_smooth", "0"),
+            ("helix_usebackcol", "false"),
+            ("helix_backcol", "#ffffff"),
+            ("sheet_usesidecol", "false"),
+            ("sheet_sidecol", "#ffffff"),
+        ],
+        "cartoon" => vec![
+            ("helix.type", "elliptical"),
+            ("helix.tuber", "1"),
+            ("helix.sharp", "0.4"),
+            ("helix.detail", "16"),
+            ("sheet.type", "elliptical"),
+            ("sheet.width", "0.35"),
+            ("sheet.tuber", "1"),
+            ("sheet.sharp", "0.4"),
+            ("sheet.detail", "16"),
+            ("coil.type", "elliptical"),
+            ("coil.width", "0.35"),
+            ("coil.tuber", "1"),
+            ("coil.sharp", "0.4"),
+            ("coil.detail", "16"),
+            ("sheethead.type", "smooth"),
+            ("sheethead.gamma", "2.2"),
+            ("sheethead.basw", "0"),
+            ("sheethead.arrow", "1.8"),
+            ("ribhelix.type", "elliptical"),
+            ("ribhelix.width", "0.35"),
+            ("ribhelix.tuber", "1"),
+            ("ribhelix.sharp", "0.4"),
+            ("ribhelix.detail", "16"),
+            ("ribhelix_head.type", "smooth"),
+            ("ribhelix_head.gamma", "2.2"),
+            ("ribhelix_head.basw", "0"),
+            ("ribhelix_head.arrow", "1.8"),
+            ("ribhelix_tail.type", "smooth"),
+            ("ribhelix_tail.gamma", "2.2"),
+            ("ribhelix_tail.basw", "0"),
+            ("ribhelix_tail.arrow", "1.8"),
+            ("axialdetail", "8"),
+            ("smoothcolor", "false"),
+            ("pivotatom", ""),
+            ("start_captype", "flat"),
+            ("end_captype", "flat"),
+            ("segend_fade", "false"),
+            ("anchor_sel", ""),
+            ("anchor_weight", "10"),
+            ("helix_ribbon", "false"),
+            ("helix_smooth", "3"),
+            ("helix_width_mode", "average"),
+            ("helix_width", "2.3"),
+            ("helix_extend", "0.5"),
+            ("helix_wsmooth", "5"),
+            ("helix_wplus", "0.2"),
+            ("sheet_smooth", "2"),
+            ("sheet_wsmooth", "5"),
+            ("coil_smooth", "-1"),
+        ],
+        "tube" | "nucl" => {
+            let mut defaults = vec![
+                ("section.type", "elliptical"),
+                ("section.width", "0.35"),
+                ("section.tuber", "1"),
+                ("section.sharp", "0.4"),
+                ("section.detail", "16"),
+                ("axialdetail", "6"),
+                ("smooth", "0"),
+                ("smoothcolor", "true"),
+                ("pivotatom", ""),
+                ("start_captype", "sphere"),
+                ("end_captype", "sphere"),
+                ("segend_fade", "false"),
+                ("putty_mode", "none"),
+                ("putty_tgt", "bfac"),
+                ("putty_hiscl", "3"),
+                ("putty_loscl", "3"),
+            ];
+            if renderer_type == "nucl" {
+                defaults.extend([
+                    ("show_tube", "true"),
+                    ("show_basepair", "true"),
+                    ("base_size", "0.5"),
+                    ("base_detail", "3"),
+                    ("base_thick", "0.5"),
+                    ("base_type", "basepair"),
+                ]);
+            }
+            defaults
+        }
+        _ => Vec::new(),
+    };
+    defaults
+        .iter()
+        .map(|(name, default)| {
+            let value = if let Some((child, attribute)) = name.split_once('.') {
+                if attribute == "type" {
+                    renderer.resolved_child_type(child, styles, cuemol_molvis::DEFAULT_STYLE_SCOPE)
+                } else {
+                    renderer.resolved_child_attr(
+                        child,
+                        attribute,
+                        styles,
+                        cuemol_molvis::DEFAULT_STYLE_SCOPE,
+                    )
+                }
+            } else {
+                renderer.resolved_attr(name, styles, cuemol_molvis::DEFAULT_STYLE_SCOPE)
+            };
+            (
+                (*name).to_string(),
+                value.unwrap_or_else(|| (*default).to_string()),
+            )
+        })
+        .collect()
+}
+
+fn background_rgba(value: &str) -> Result<[f64; 4], String> {
+    let named = match value.trim().to_ascii_lowercase().as_str() {
+        "black" => Some([0, 0, 0, 255]),
+        "white" => Some([255, 255, 255, 255]),
+        "red" => Some([255, 0, 0, 255]),
+        "green" => Some([0, 128, 0, 255]),
+        "lime" => Some([0, 255, 0, 255]),
+        "blue" => Some([0, 0, 255, 255]),
+        "yellow" => Some([255, 255, 0, 255]),
+        "cyan" | "aqua" => Some([0, 255, 255, 255]),
+        "magenta" | "fuchsia" => Some([255, 0, 255, 255]),
+        "gray" | "grey" => Some([128, 128, 128, 255]),
+        "orange" => Some([255, 165, 0, 255]),
+        _ => None,
+    };
+    let rgba = if let Some(rgba) = named {
+        rgba
+    } else {
+        let color = cuemol_gfx::parse_color(value.trim()).map_err(|error| error.to_string())?;
+        let rgba = color
+            .rgba8()
+            .ok_or_else(|| format!("unresolved background color: {value}"))?;
+        [rgba.r, rgba.g, rgba.b, rgba.a]
+    };
+    Ok([
+        f64::from(rgba[0]) / 255.0,
+        f64::from(rgba[1]) / 255.0,
+        f64::from(rgba[2]) / 255.0,
+        f64::from(rgba[3]) / 255.0,
+    ])
+}
+
+fn icc_intent_index(value: &str) -> Option<i32> {
+    match value {
+        "perceptual" => Some(0),
+        "relative_colorimetric" => Some(1),
+        "saturation" => Some(2),
+        "absolute_colorimetric" => Some(3),
+        _ => None,
+    }
+}
+
+fn set_scene_attr_default(
+    scene: &mut cuemol_molstr::MolScene,
+    name: &str,
+    value: &str,
+    default_value: &str,
+) {
+    if value == default_value {
+        scene.remove_scene_attribute(name);
+    } else {
+        scene.set_scene_attribute(name, value);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_screen_space_ao(
+    rgba: &mut [u8],
+    depth: &[u8],
+    width: u32,
+    height: u32,
+    radius_pixels: usize,
+    intensity: f64,
+    slices: i32,
+    steps: i32,
+) {
+    let width = width as usize;
+    let height = height as usize;
+    if width < 3 || height < 3 || rgba.len() != width * height * 4 || depth.len() != rgba.len() {
+        return;
+    }
+    let slices = slices.clamp(1, 64) as usize;
+    let steps = steps.clamp(1, 32) as usize;
+    let radius_pixels = radius_pixels.clamp(1, 64);
+    let mut offsets = BTreeSet::new();
+    for slice in 0..slices {
+        let angle = std::f64::consts::TAU * slice as f64 / slices as f64;
+        for step in 1..=steps {
+            let distance = (radius_pixels * step).div_ceil(steps) as f64;
+            let dx = (angle.cos() * distance).round() as isize;
+            let dy = (angle.sin() * distance).round() as isize;
+            if dx != 0 || dy != 0 {
+                offsets.insert((dx, dy));
+            }
+        }
+    }
+    if offsets.is_empty() {
+        return;
+    }
+    let strength = (intensity / 2.2).clamp(0.1, 3.0);
+    for y in 0..height {
+        for x in 0..width {
+            let index = (y * width + x) * 4;
+            let center = depth[index] as f64;
+            if center <= 1.0 {
+                continue;
+            }
+            let mut occlusion = 0.0;
+            let mut samples = 0usize;
+            for &(dx, dy) in &offsets {
+                let sx = x as isize + dx;
+                let sy = y as isize + dy;
+                if sx < 0 || sy < 0 || sx >= width as isize || sy >= height as isize {
+                    continue;
+                }
+                let sample = depth[(sy as usize * width + sx as usize) * 4] as f64;
+                if sample > center + 2.0 {
+                    occlusion += ((sample - center) / 64.0).min(1.0);
+                }
+                samples += 1;
+            }
+            if samples == 0 {
+                continue;
+            }
+            let shade = (1.0 - 0.65 * strength * occlusion / samples as f64).clamp(0.15, 1.0);
+            for channel in &mut rgba[index..index + 3] {
+                *channel = (f64::from(*channel) * shade).round() as u8;
+            }
+        }
+    }
+}
+
+fn apply_fast_post_aa(rgba: &mut [u8], width: u32, height: u32, high_quality: bool) {
+    let width = width as usize;
+    let height = height as usize;
+    if width < 3 || height < 3 || rgba.len() != width * height * 4 {
+        return;
+    }
+    let row_stride = width * 4;
+    let mut north = rgba[..row_stride].to_vec();
+    let mut current = rgba[row_stride..row_stride * 2].to_vec();
+    let mut south = rgba[row_stride * 2..row_stride * 3].to_vec();
+    let threshold = if high_quality { 10 } else { 18 };
+    let luma = |row: &[u8], index: usize| -> i32 {
+        (i32::from(row[index]) * 54
+            + i32::from(row[index + 1]) * 183
+            + i32::from(row[index + 2]) * 19)
+            / 256
+    };
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let column = x * 4;
+            let center_luma = luma(&current, column);
+            let neighbor_luma = [
+                luma(&current, column - 4),
+                luma(&current, column + 4),
+                luma(&north, column),
+                luma(&south, column),
+            ];
+            let min_luma = neighbor_luma.into_iter().fold(center_luma, i32::min);
+            let max_luma = neighbor_luma.into_iter().fold(center_luma, i32::max);
+            if max_luma - min_luma < threshold {
+                continue;
+            }
+            let target = (y * width + x) * 4;
+            for channel in 0..3 {
+                let sum = u32::from(current[column - 4 + channel])
+                    + u32::from(current[column + 4 + channel])
+                    + u32::from(north[column + channel])
+                    + u32::from(south[column + channel]);
+                rgba[target + channel] =
+                    ((u32::from(current[column + channel]) * 2 + sum) / 6) as u8;
+            }
+        }
+        std::mem::swap(&mut north, &mut current);
+        std::mem::swap(&mut current, &mut south);
+        if y + 2 < height {
+            let start = (y + 2) * row_stride;
+            south.copy_from_slice(&rgba[start..start + row_stride]);
+        }
+    }
+}
+
+fn validate_shortcuts(shortcuts: &[ShortcutDto]) -> Result<(), String> {
+    const IDS: [&str; 2] = ["view-trans-plusx", "view-trans-minusx"];
+    const KEYS: [&str; 4] = ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"];
+    if shortcuts.len() != IDS.len()
+        || !IDS
+            .iter()
+            .all(|id| shortcuts.iter().any(|shortcut| shortcut.id == *id))
+    {
+        return Err("the complete reference shortcut set is required".to_string());
+    }
+    for shortcut in shortcuts {
+        if !KEYS.contains(&shortcut.key.as_str()) {
+            return Err(format!("unsupported shortcut key: {}", shortcut.key));
+        }
+    }
+    for (index, shortcut) in shortcuts.iter().enumerate() {
+        if shortcuts.iter().skip(index + 1).any(|other| {
+            shortcut.key == other.key
+                && shortcut.ctrl == other.ctrl
+                && shortcut.alt == other.alt
+                && shortcut.shift == other.shift
+        }) {
+            return Err(format!("duplicate shortcut: {}", shortcut.key));
+        }
+    }
+    Ok(())
+}
+
+fn default_config_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("CUEMOL2_CONFIG_FILE") {
+        return Some(PathBuf::from(path));
+    }
+    if cfg!(target_os = "windows") {
+        return std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|path| path.join("CueMol2").join("config.tsv"));
+    }
+    if cfg!(target_os = "macos") {
+        return std::env::var_os("HOME").map(PathBuf::from).map(|path| {
+            path.join("Library")
+                .join("Application Support")
+                .join("CueMol2")
+                .join("config.tsv")
+        });
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|path| path.join(".config"))
+        })
+        .map(|path| path.join("cuemol2").join("config.tsv"))
+}
+
+fn vector3_array(value: Vector4) -> [f64; 3] {
+    [value.x, value.y, value.z]
+}
+
+fn stereo_mode_name(value: StereoMode) -> &'static str {
+    match value {
+        StereoMode::None => "none",
+        StereoMode::Parallel => "para",
+        StereoMode::Cross => "cross",
+        StereoMode::Hardware => "hardware",
+    }
+}
+
+fn parse_stereo_mode(value: &str) -> Result<StereoMode, String> {
+    match value {
+        "none" => Ok(StereoMode::None),
+        "para" | "parallel" => Ok(StereoMode::Parallel),
+        "cross" => Ok(StereoMode::Cross),
+        "hardware" => Ok(StereoMode::Hardware),
+        _ => Err(format!("unknown stereo mode: {value}")),
+    }
+}
+
+fn center_mark_name(value: CenterMark) -> &'static str {
+    match value {
+        CenterMark::None => "none",
+        CenterMark::Cross => "crosshair",
+        CenterMark::Axis => "axis",
+    }
+}
+
+fn parse_center_mark(value: &str) -> Result<CenterMark, String> {
+    match value {
+        "none" => Ok(CenterMark::None),
+        "cross" | "crosshair" => Ok(CenterMark::Cross),
+        "axis" => Ok(CenterMark::Axis),
+        _ => Err(format!("unknown center mark: {value}")),
+    }
 }
 
 fn animation_kind(value: &str) -> Option<AnimKind> {
@@ -1219,6 +4459,206 @@ fn animation_kind(value: &str) -> Option<AnimKind> {
         "noop" => Some(AnimKind::Pause),
         _ => None,
     }
+}
+
+fn coloring_attrs_from_specific(
+    specific: &BTreeMap<String, String>,
+    names: &[&str],
+) -> BTreeMap<String, String> {
+    names
+        .iter()
+        .filter_map(|name| {
+            specific
+                .get(*name)
+                .map(|value| ((*name).to_string(), value.clone()))
+        })
+        .collect()
+}
+
+fn scalar_coloring_type(specific: &BTreeMap<String, String>) -> Option<String> {
+    match specific.get("colormode").map(String::as_str) {
+        Some("potential" | "1") => Some("ElectrostaticColoring".to_string()),
+        Some("multigrad" | "4") => Some("MultiGradientColoring".to_string()),
+        _ => Some("SolidColoring".to_string()),
+    }
+}
+
+fn scalar_coloring_attrs(specific: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    match specific.get("colormode").map(String::as_str) {
+        Some("potential" | "1") => coloring_attrs_from_specific(
+            specific,
+            &[
+                "elepot",
+                "lowpar",
+                "midpar",
+                "highpar",
+                "lowcol",
+                "midcol",
+                "highcol",
+                "ramp_above",
+                "ramp_value",
+            ],
+        ),
+        Some("multigrad" | "4") => {
+            coloring_attrs_from_specific(specific, &["color_mapname", "ramp_above", "ramp_value"])
+        }
+        _ => BTreeMap::new(),
+    }
+}
+
+fn validate_coloring_update(input: &ColoringUpdateInput) -> Result<(), String> {
+    if !matches!(
+        input.kind.as_str(),
+        "object" | "renderer" | "surfaceRenderer" | "densityRenderer"
+    ) {
+        return Err(format!("unsupported coloring target: {}", input.kind));
+    }
+    if input.kind != "object" && input.renderer_uid.is_none() {
+        return Err("renderer coloring requires a renderer UID".to_string());
+    }
+    let Some(coloring_type) = input.coloring_type.as_deref() else {
+        if !input.attrs.is_empty()
+            || !input.paint_entries.is_empty()
+            || !input.gradient_entries.is_empty()
+            || input.default_color.is_some()
+        {
+            return Err("reset coloring cannot contain properties".to_string());
+        }
+        return Ok(());
+    };
+    let scalar_target = matches!(input.kind.as_str(), "surfaceRenderer" | "densityRenderer");
+    if scalar_target
+        && !matches!(
+            coloring_type,
+            "SolidColoring" | "ElectrostaticColoring" | "MultiGradientColoring"
+        )
+    {
+        return Err(format!("unsupported scalar coloring type: {coloring_type}"));
+    }
+    if input.kind == "object"
+        && matches!(
+            coloring_type,
+            "ElectrostaticColoring" | "MultiGradientColoring"
+        )
+    {
+        return Err(format!("unsupported object coloring type: {coloring_type}"));
+    }
+    if input.kind == "densityRenderer" && coloring_type == "ElectrostaticColoring" {
+        return Err("density renderers do not support electrostatic coloring".to_string());
+    }
+    if input.kind == "renderer" && coloring_type == "MultiGradientColoring" {
+        return Err("molecular renderers do not support multi-gradient coloring".to_string());
+    }
+    let allowed_attrs: &[&str] = match coloring_type {
+        "SolidColoring" | "PaintColoring" => &[],
+        "CPKColoring" => &[
+            "col_H", "col_C", "col_N", "col_O", "col_P", "col_S", "col_X",
+        ],
+        "RainbowColoring" => &["mode", "incr_mode", "start_hue", "end_hue", "sat", "bri"],
+        "BfacColoring" => &["mode", "auto", "lowcol", "highcol", "lowpar", "highpar"],
+        "ElectrostaticColoring" => &[
+            "elepot",
+            "lowpar",
+            "midpar",
+            "highpar",
+            "lowcol",
+            "midcol",
+            "highcol",
+            "ramp_above",
+            "ramp_value",
+        ],
+        "MultiGradientColoring" => &["color_mapname", "ramp_above", "ramp_value"],
+        _ => return Err(format!("unsupported coloring type: {coloring_type}")),
+    };
+    if let Some(name) = input
+        .attrs
+        .keys()
+        .find(|name| !allowed_attrs.contains(&name.as_str()))
+    {
+        return Err(format!("unsupported {coloring_type} property: {name}"));
+    }
+    for name in [
+        "col_H", "col_C", "col_N", "col_O", "col_P", "col_S", "col_X", "lowcol", "midcol",
+        "highcol",
+    ] {
+        if let Some(color) = input.attrs.get(name) {
+            cuemol_gfx::parse_color(color).map_err(|error| error.to_string())?;
+        }
+    }
+    for name in [
+        "start_hue",
+        "end_hue",
+        "sat",
+        "bri",
+        "lowpar",
+        "midpar",
+        "highpar",
+        "ramp_value",
+    ] {
+        if let Some(value) = input.attrs.get(name) {
+            let value = value
+                .parse::<f64>()
+                .map_err(|_| format!("{name} must be numeric"))?;
+            if !value.is_finite() {
+                return Err(format!("{name} must be finite"));
+            }
+            if matches!(name, "start_hue" | "end_hue") && !(0.0..=360.0).contains(&value) {
+                return Err(format!("{name} must be between 0 and 360"));
+            }
+            if matches!(name, "sat" | "bri") && !(0.0..=1.0).contains(&value) {
+                return Err(format!("{name} must be between 0 and 1"));
+            }
+        }
+    }
+    if let Some(mode) = input.attrs.get("mode") {
+        let valid = match coloring_type {
+            "RainbowColoring" => matches!(mode.as_str(), "mol" | "chain"),
+            "BfacColoring" => matches!(mode.as_str(), "bfac" | "occ" | "center"),
+            _ => true,
+        };
+        if !valid {
+            return Err(format!("invalid {coloring_type} mode: {mode}"));
+        }
+    }
+    if let Some(mode) = input.attrs.get("incr_mode") {
+        if !matches!(mode.as_str(), "chain" | "resid" | "protss") {
+            return Err(format!("invalid rainbow increment mode: {mode}"));
+        }
+    }
+    if let Some(mode) = input.attrs.get("auto") {
+        if !matches!(mode.as_str(), "none" | "mol" | "rend") {
+            return Err(format!("invalid B-factor auto mode: {mode}"));
+        }
+    }
+    if let Some(value) = input.attrs.get("ramp_above") {
+        if !matches!(value.as_str(), "true" | "false") {
+            return Err("ramp_above must be true or false".to_string());
+        }
+    }
+    if let Some(color) = input.default_color.as_deref() {
+        cuemol_gfx::parse_color(color).map_err(|error| error.to_string())?;
+    }
+    if coloring_type != "PaintColoring" && !input.paint_entries.is_empty() {
+        return Err("paint entries require PaintColoring".to_string());
+    }
+    for entry in &input.paint_entries {
+        cuemol_molstr::parse_selector(&entry.selection).map_err(|error| error.to_string())?;
+        cuemol_gfx::parse_color(&entry.color).map_err(|error| error.to_string())?;
+    }
+    if coloring_type != "MultiGradientColoring" && !input.gradient_entries.is_empty() {
+        return Err("gradient entries require MultiGradientColoring".to_string());
+    }
+    let mut gradient_values = BTreeSet::new();
+    for entry in &input.gradient_entries {
+        if !entry.value.is_finite() {
+            return Err("multi-gradient values must be finite".to_string());
+        }
+        if !gradient_values.insert(entry.value.to_bits()) {
+            return Err(format!("duplicate multi-gradient value: {}", entry.value));
+        }
+        cuemol_gfx::parse_color(&entry.color).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn handle_model_request(
@@ -1237,12 +4677,167 @@ fn handle_model_request(
     ];
     match request {
         ModelRequest::GetSnapshot => Ok(ModelResponse::Snapshot(Box::new(model.snapshot()))),
-        ModelRequest::Undo => {
-            model.undo()?;
+        ModelRequest::GetMoleculeDetails {
+            structure_key,
+            sequence_key,
+            include_sequence,
+        } => Ok(ModelResponse::MoleculeDetails(Box::new(
+            model.molecule_details(&structure_key, &sequence_key, include_sequence),
+        ))),
+        ModelRequest::GetInitialState { width, height } => {
+            let viewport = model.viewport_metadata(width, height);
+            Ok(ModelResponse::InitialState(Box::new(InitialStateDto {
+                snapshot: model.snapshot(),
+                viewport,
+                preferences: model.preferences(),
+                startup_paths_pending: false,
+            })))
+        }
+        ModelRequest::GetApplicationInfo => {
+            Ok(ModelResponse::ApplicationInfo(model.application_info()))
+        }
+        ModelRequest::GetPreferences => {
+            Ok(ModelResponse::Preferences(Box::new(model.preferences())))
+        }
+        ModelRequest::SetPreferences(preferences) => {
+            model.set_preferences(preferences)?;
+            Ok(ModelResponse::PreferencesUpdate(Box::new(
+                PreferencesUpdateDto {
+                    preferences: model.preferences(),
+                    status: model.status.clone(),
+                },
+            )))
+        }
+        ModelRequest::GetViewProperties => {
+            Ok(ModelResponse::ViewProperties(model.view_properties()))
+        }
+        ModelRequest::SetViewProperties {
+            properties,
+            width,
+            height,
+        } => {
+            let undo = model.capture_undo();
+            model.set_view_properties(properties)?;
+            model.push_undo(undo);
+            let viewport = model.render(width, height);
+            Ok(ModelResponse::ViewPropertiesUpdate(Box::new(
+                ViewPropertiesUpdateDto {
+                    properties: model.view_properties(),
+                    snapshot: model.snapshot(),
+                    viewport,
+                },
+            )))
+        }
+        ModelRequest::SetSceneProperties(properties) => {
+            let undo = model.capture_undo();
+            model.set_scene_properties(properties)?;
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::Redo => {
-            model.redo()?;
+        ModelRequest::SetObjectProperties(properties) => {
+            let undo = model.capture_undo();
+            model.set_object_properties(properties)?;
+            model.push_undo(undo);
+            model.touch_structure_details();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetRendererProperties(properties) => {
+            let undo = model.capture_undo();
+            model.set_renderer_properties(properties)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetDensityMapProperties(properties) => {
+            let undo = model.capture_undo();
+            model.set_density_map_properties(properties)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetDensityRendererProperties(properties) => {
+            let undo = model.capture_undo();
+            model.set_density_renderer_properties(properties)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetDensityRendererVisible {
+            map_uid,
+            renderer_uid,
+            visible,
+        } => {
+            let undo = model.capture_undo();
+            model.set_density_renderer_visible(map_uid, renderer_uid, visible)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::AddDensityRenderer {
+            map_uid,
+            renderer_type,
+        } => {
+            let undo = model.capture_undo();
+            model.add_density_renderer(map_uid, &renderer_type)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetSurfaceProperties(properties) => {
+            let undo = model.capture_undo();
+            model.set_surface_properties(properties)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetSurfaceRendererProperties(properties) => {
+            let undo = model.capture_undo();
+            model.set_surface_renderer_properties(properties)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetSurfaceRendererVisible {
+            surface_uid,
+            renderer_uid,
+            visible,
+        } => {
+            let undo = model.capture_undo();
+            model.set_surface_renderer_visible(surface_uid, renderer_uid, visible)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::AddSurfaceRenderer { surface_uid } => {
+            let undo = model.capture_undo();
+            model.add_surface_renderer(surface_uid)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::DeleteWorkspaceItem(target) => {
+            let undo = model.capture_undo();
+            model.delete_workspace_item(target)?;
+            model.push_undo(undo);
+            model.touch_structure_details();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::FitWorkspaceItem {
+            target,
+            width,
+            height,
+        } => {
+            model.fit_workspace_item(target, width, height)?;
+            Ok(ModelResponse::Viewport(model.render(width, height)))
+        }
+        ModelRequest::SetConfigValue { key, value } => {
+            if key.trim().is_empty() {
+                return Err("a config key is required".to_string());
+            }
+            model.desktop.put_config_value(key.trim(), value);
+            model.save_config()?;
+            model.status = format!("Config updated: {}", key.trim());
+            Ok(ModelResponse::ApplicationInfo(model.application_info()))
+        }
+        ModelRequest::Undo(depth) => {
+            model.undo(depth)?;
+            model.touch_structure_details();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::Redo(depth) => {
+            model.redo(depth)?;
+            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ClearUndo => {
@@ -1251,23 +4846,66 @@ fn handle_model_request(
         }
         ModelRequest::OpenPaths(paths) => {
             let undo = model.capture_undo();
-            model.open_paths(paths);
-            model.push_undo(undo);
+            model.open_paths(paths)?;
+            model.sync_active_scene_properties();
+            let loaded_scene = model
+                .desktop
+                .active_scene_source_path()
+                .map(|source| source.to_string_lossy())
+                .is_some_and(|source| model.opened_paths.iter().any(|path| path == &source));
+            if loaded_scene {
+                model.undo_stack.clear();
+                model.redo_stack.clear();
+                if let Some(scene_uid) = model.desktop.active_scene() {
+                    model.modified_scenes.remove(&scene_uid);
+                }
+            } else {
+                model.push_undo(undo);
+            }
+            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::OpenPdb(pdb_id) => {
-            let path = download_pdb_to_temp(&pdb_id)?;
+        ModelRequest::ReloadScene => {
+            let path = model
+                .desktop
+                .active_scene_source_path()
+                .ok_or_else(|| "active scene has no source path".to_string())?
+                .to_path_buf();
+            model
+                .desktop
+                .reload_active_scene_qsc()
+                .map_err(|error| error.to_string())?;
+            model.selection.clear();
+            model.animation_elapsed = 0.0;
+            model.animation_playing = false;
+            model.animation_start_camera = None;
+            model.undo_stack.clear();
+            model.redo_stack.clear();
+            if let Some(scene_uid) = model.desktop.active_scene() {
+                model.modified_scenes.remove(&scene_uid);
+            }
+            model.sync_active_scene_properties();
+            model.rebuild_mesh(true)?;
+            model.status = format!("Scene file: [{}] is reloaded.", path.display());
+            model.log_lines.push(model.status.clone());
+            model.touch_structure_details();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::OpenPdb { pdb_id, path } => {
             let undo = model.capture_undo();
             let result = model
                 .desktop
                 .open_path(&path)
                 .map_err(|error| error.to_string());
-            let _ = fs::remove_file(&path);
+            if result.is_err() {
+                let _ = fs::remove_file(&path);
+            }
             result?;
             model.selection.clear();
             model.status = format!("Opened PDB {}", pdb_id.trim().to_ascii_uppercase());
             model.rebuild_mesh(true)?;
             model.push_undo(undo);
+            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::LoadTrajectory {
@@ -1295,16 +4933,28 @@ fn handle_model_request(
             );
             model.rebuild_mesh(true)?;
             model.push_undo(undo);
+            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetTrajectoryFrame { object_uid, frame } => {
-            model
-                .desktop
-                .apply_trajectory_frame(Uid::new(object_uid), frame)
-                .map_err(|error| error.to_string())?;
-            model.status = format!("Trajectory frame: {frame}");
-            model.rebuild_mesh(false)?;
+            model.set_trajectory_frame(object_uid, frame)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetTrajectoryFrameViewport {
+            object_uid,
+            frame,
+            width,
+            height,
+        } => {
+            model.set_trajectory_frame(object_uid, frame)?;
+            let status = model.status.clone();
+            let viewport = model.render(width, height);
+            Ok(ModelResponse::TrajectoryFrame(TrajectoryFrameDto {
+                object_uid,
+                frame,
+                status,
+                viewport,
+            }))
         }
         ModelRequest::AppendTrajectoryBlock {
             object_uid,
@@ -1361,9 +5011,11 @@ fn handle_model_request(
                 .unwrap_or_else(|| "Untitled".to_string());
             model.desktop.new_scene(name, true);
             model.selection.clear();
+            model.sync_active_scene_properties();
             model.status = "New scene".to_string();
             model.rebuild_mesh(true)?;
             model.push_undo(undo);
+            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ActivateScene(scene_uid) => {
@@ -1371,8 +5023,10 @@ fn handle_model_request(
                 return Err(format!("scene {scene_uid} was not found"));
             }
             model.selection.clear();
+            model.sync_active_scene_properties();
             model.status = format!("Activated scene {scene_uid}");
             model.rebuild_mesh(true)?;
+            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::CloseActiveScene => {
@@ -1383,9 +5037,14 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.desktop.ensure_active_scene();
             model.selection.clear();
+            model.sync_active_scene_properties();
             model.status = "Scene closed".to_string();
             model.rebuild_mesh(true)?;
             model.push_undo(undo);
+            if let Some(scene_uid) = model.desktop.active_scene() {
+                model.modified_scenes.remove(&scene_uid);
+            }
+            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetSelection(selection) => {
@@ -1401,6 +5060,24 @@ fn handle_model_request(
                 format!("Selection: {}", model.selection)
             };
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::MolStructAction {
+            object_uid,
+            selection,
+            mode,
+            width,
+            height,
+        } => {
+            let undo = model.capture_undo();
+            model.apply_molecule_selection_action(object_uid, &selection, &mode, width, height)?;
+            model.push_undo(undo);
+            let viewport = model.render(width, height);
+            Ok(ModelResponse::MolStructUpdate(Box::new(
+                MolStructUpdateDto {
+                    snapshot: model.snapshot(),
+                    viewport,
+                },
+            )))
         }
         ModelRequest::SetRendererVisible {
             object_uid,
@@ -1474,6 +5151,121 @@ fn handle_model_request(
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::SetColoring {
+            input,
+            width,
+            height,
+        } => {
+            validate_coloring_update(&input)?;
+            let undo = model.capture_undo();
+            let paint_entries = input
+                .paint_entries
+                .into_iter()
+                .map(|entry| (entry.selection, entry.color))
+                .collect();
+            let gradient_entries = input
+                .gradient_entries
+                .into_iter()
+                .map(|entry| (entry.value, entry.color))
+                .collect::<Vec<_>>();
+            let renderer_uid = input
+                .renderer_uid
+                .map(Uid::new)
+                .unwrap_or_else(|| Uid::new(0));
+            match input.kind.as_str() {
+                "object" => model
+                    .desktop
+                    .set_object_coloring_details(
+                        Uid::new(input.object_uid),
+                        input.coloring_type,
+                        input.attrs,
+                        paint_entries,
+                        input.default_color,
+                    )
+                    .map_err(|error| error.to_string())?,
+                "renderer" if input.coloring_type.as_deref() == Some("ElectrostaticColoring") => {
+                    model
+                        .desktop
+                        .set_renderer_electrostatic_coloring(
+                            Uid::new(input.object_uid),
+                            renderer_uid,
+                            &input.attrs,
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+                "renderer" => model
+                    .desktop
+                    .set_renderer_coloring_details(
+                        Uid::new(input.object_uid),
+                        renderer_uid,
+                        input.coloring_type,
+                        input.attrs,
+                        paint_entries,
+                        input.default_color,
+                    )
+                    .map_err(|error| error.to_string())?,
+                "surfaceRenderer" => {
+                    let color_mode = match input.coloring_type.as_deref() {
+                        Some("ElectrostaticColoring") => "potential",
+                        Some("MultiGradientColoring") => "multigrad",
+                        _ => "solid",
+                    };
+                    let mut attrs = input.attrs;
+                    if color_mode == "solid" {
+                        if let Some(color) = input.default_color {
+                            attrs.insert("defaultcolor".to_string(), color);
+                        }
+                    }
+                    model
+                        .desktop
+                        .set_surface_renderer_coloring(
+                            Uid::new(input.object_uid),
+                            renderer_uid,
+                            color_mode,
+                            &attrs,
+                            &gradient_entries,
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+                "densityRenderer" => {
+                    let color_mode =
+                        if input.coloring_type.as_deref() == Some("MultiGradientColoring") {
+                            "multigrad"
+                        } else {
+                            "solid"
+                        };
+                    let mut attrs = input.attrs;
+                    attrs.remove("ramp_above");
+                    attrs.remove("ramp_value");
+                    if color_mode == "solid" {
+                        if let Some(color) = input.default_color {
+                            attrs.insert("color".to_string(), color);
+                        }
+                    }
+                    model
+                        .desktop
+                        .set_density_renderer_coloring(
+                            Uid::new(input.object_uid),
+                            renderer_uid,
+                            color_mode,
+                            &attrs,
+                            &gradient_entries,
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+                _ => unreachable!("coloring target was validated"),
+            }
+            model.status = "Changed coloring".to_string();
+            model.rebuild_mesh(false)?;
+            model.push_undo(undo);
+            let viewport = model.render(width, height);
+            Ok(ModelResponse::MolStructUpdate(Box::new(
+                MolStructUpdateDto {
+                    snapshot: model.snapshot(),
+                    viewport,
+                },
+            )))
+        }
         ModelRequest::DeleteAtoms {
             object_uid,
             selection,
@@ -1487,12 +5279,13 @@ fn handle_model_request(
                 .desktop
                 .delete_atoms_in_object(Uid::new(object_uid), selection)
                 .map_err(|error| error.to_string())?;
+            model.status = format!("Deleted {count} atom(s)");
             if count > 0 {
                 model.selection.clear();
                 model.rebuild_mesh(true)?;
                 model.push_undo(undo);
+                model.touch_structure_details();
             }
-            model.status = format!("Deleted {count} atom(s)");
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ChangeChain {
@@ -1509,11 +5302,12 @@ fn handle_model_request(
                 .desktop
                 .change_chain_in_object(Uid::new(object_uid), selection, &chain_name)
                 .map_err(|error| error.to_string())?;
+            model.status = format!("Changed chain ID for {count} atom(s)");
             if count > 0 {
                 model.rebuild_mesh(false)?;
                 model.push_undo(undo);
+                model.touch_structure_details();
             }
-            model.status = format!("Changed chain ID for {count} atom(s)");
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::RenumberResidues {
@@ -1530,11 +5324,12 @@ fn handle_model_request(
                 .desktop
                 .renumber_residues_in_object(Uid::new(object_uid), selection, start)
                 .map_err(|error| error.to_string())?;
+            model.status = format!("Renumbered residues for {count} atom(s)");
             if count > 0 {
                 model.rebuild_mesh(false)?;
                 model.push_undo(undo);
+                model.touch_structure_details();
             }
-            model.status = format!("Renumbered residues for {count} atom(s)");
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::MergeMolecules {
@@ -1559,6 +5354,7 @@ fn handle_model_request(
             );
             model.rebuild_mesh(true)?;
             model.push_undo(undo);
+            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SuperposeObjects {
@@ -1610,10 +5406,6 @@ fn handle_model_request(
                     .remove_bond_in_object(Uid::new(object_uid), aid1, aid2)
             }
             .map_err(|error| error.to_string())?;
-            if changed {
-                model.rebuild_mesh(false)?;
-                model.push_undo(undo);
-            }
             model.status = if changed {
                 if make {
                     "Bond created"
@@ -1624,6 +5416,10 @@ fn handle_model_request(
                 "Bond was unchanged"
             }
             .to_string();
+            if changed {
+                model.rebuild_mesh(false)?;
+                model.push_undo(undo);
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::CalculateContacts {
@@ -1827,7 +5623,16 @@ fn handle_model_request(
                 "unit-cell" => model.show_unit_cell = value,
                 "symmetry-mates" => model.show_symmetry_mates = value,
                 "density-contour" => model.show_density_contour = value,
-                "color-proof" => model.color_proofing = value,
+                "color-proof" => {
+                    model.color_proofing = value;
+                    if let Some(scene) = model
+                        .desktop
+                        .active_scene()
+                        .and_then(|uid| model.desktop.scene_manager_mut().scene_mut(uid))
+                    {
+                        set_scene_attr_default(scene, "use_colproof", &value.to_string(), "false");
+                    }
+                }
                 _ => return Err(format!("unsupported display option: {option}")),
             }
             model.status = format!("{option}: {}", if value { "shown" } else { "hidden" });
@@ -1847,11 +5652,16 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetBackground(background) => {
-            if !matches!(background.as_str(), "black" | "white") {
-                return Err(format!("unsupported background: {background}"));
-            }
+            background_rgba(&background)?;
             let undo = model.capture_undo();
-            model.background = background;
+            model.background = background.trim().to_string();
+            if let Some(scene) = model
+                .desktop
+                .active_scene()
+                .and_then(|uid| model.desktop.scene_manager_mut().scene_mut(uid))
+            {
+                set_scene_attr_default(scene, "bgcolor", &model.background, "black");
+            }
             model.status = format!("Background: {}", model.background);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -1988,6 +5798,21 @@ fn handle_model_request(
             model.tick_animation(dt)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::TickAnimationFrame { dt, width, height } => {
+            model.tick_animation(dt)?;
+            let animation_elapsed = model.animation_elapsed;
+            let animation_duration = model.animation_duration();
+            let animation_playing = model.animation_playing;
+            let status = model.status.clone();
+            let viewport = model.render(width, height);
+            Ok(ModelResponse::AnimationFrame(AnimationFrameDto {
+                animation_elapsed,
+                animation_duration,
+                animation_playing,
+                status,
+                viewport,
+            }))
+        }
         ModelRequest::ClearLog => {
             model.log_lines.clear();
             model.status = "Output log cleared".to_string();
@@ -2009,8 +5834,9 @@ fn handle_model_request(
                 model.selection = selection;
             }
             model.rebuild_mesh(false)?;
-            model.push_undo(undo);
             model.status = "Script executed".to_string();
+            model.push_undo(undo);
+            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ExportPov { path } => {
@@ -2061,11 +5887,29 @@ fn handle_model_request(
         }
         ModelRequest::SaveScene(path) => {
             model.persist_camera()?;
+            let path_buf = PathBuf::from(&path);
+            let save_in_place = model
+                .desktop
+                .active_scene_source_path()
+                .is_some_and(|source| source == path_buf.as_path());
+            if save_in_place {
+                if let Err(error) = backup_scene_file(&path_buf) {
+                    model
+                        .log_lines
+                        .push(format!("WARNING: Cannot create backup file, {error}"));
+                }
+            }
             model
                 .desktop
-                .save_active_scene_qsc(&path)
+                .save_active_scene_qsc(&path_buf)
                 .map_err(|error| error.to_string())?;
-            model.status = format!("Saved scene: {path}");
+            model.undo_stack.clear();
+            model.redo_stack.clear();
+            if let Some(scene_uid) = model.desktop.active_scene() {
+                model.modified_scenes.remove(&scene_uid);
+            }
+            model.status = format!("Scene file: [{path}] is saved.");
+            model.log_lines.push(model.status.clone());
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SaveObject { object_uid, path } => {
@@ -2117,17 +5961,21 @@ fn handle_model_request(
 
 fn spawn_model(initial_paths: Vec<PathBuf>) -> ManagedState {
     let (sender, receiver) = mpsc::channel::<ModelEnvelope>();
+    let config_path = default_config_path();
     std::thread::Builder::new()
         .name("cuemol-tauri-model".to_string())
         .spawn(move || {
-            let mut model = AppModel::new(initial_paths);
+            let mut model = AppModel::new_with_config(Vec::new(), config_path);
             while let Ok(envelope) = receiver.recv() {
                 let result = handle_model_request(&mut model, envelope.request);
                 let _ = envelope.response.send(result);
             }
         })
         .expect("spawn CueMol Tauri model thread");
-    ManagedState { sender }
+    ManagedState {
+        sender,
+        startup_paths: Mutex::new(Some(initial_paths)),
+    }
 }
 
 fn request_model(
@@ -2150,14 +5998,220 @@ fn request_model(
 fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
     match response {
         ModelResponse::Snapshot(snapshot) => Ok(*snapshot),
-        ModelResponse::Viewport(_) => Err("unexpected viewport response".to_string()),
+        ModelResponse::MoleculeDetails(_)
+        | ModelResponse::InitialState(_)
+        | ModelResponse::MolStructUpdate(_)
+        | ModelResponse::Viewport(_)
+        | ModelResponse::AnimationFrame(_)
+        | ModelResponse::TrajectoryFrame(_)
+        | ModelResponse::ApplicationInfo(_)
+        | ModelResponse::Preferences(_)
+        | ModelResponse::PreferencesUpdate(_)
+        | ModelResponse::ViewProperties(_)
+        | ModelResponse::ViewPropertiesUpdate(_) => {
+            Err("unexpected non-snapshot response".to_string())
+        }
+    }
+}
+
+fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsDto, String> {
+    match response {
+        ModelResponse::MoleculeDetails(details) => Ok(*details),
+        ModelResponse::Snapshot(_)
+        | ModelResponse::InitialState(_)
+        | ModelResponse::MolStructUpdate(_)
+        | ModelResponse::Viewport(_)
+        | ModelResponse::AnimationFrame(_)
+        | ModelResponse::TrajectoryFrame(_)
+        | ModelResponse::ApplicationInfo(_)
+        | ModelResponse::Preferences(_)
+        | ModelResponse::PreferencesUpdate(_)
+        | ModelResponse::ViewProperties(_)
+        | ModelResponse::ViewPropertiesUpdate(_) => {
+            Err("unexpected non-molecule-details response".to_string())
+        }
     }
 }
 
 fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
     match response {
         ModelResponse::Viewport(viewport) => Ok(viewport),
-        ModelResponse::Snapshot(_) => Err("unexpected snapshot response".to_string()),
+        ModelResponse::Snapshot(_)
+        | ModelResponse::MoleculeDetails(_)
+        | ModelResponse::InitialState(_)
+        | ModelResponse::MolStructUpdate(_)
+        | ModelResponse::AnimationFrame(_)
+        | ModelResponse::TrajectoryFrame(_)
+        | ModelResponse::ApplicationInfo(_)
+        | ModelResponse::Preferences(_)
+        | ModelResponse::PreferencesUpdate(_)
+        | ModelResponse::ViewProperties(_)
+        | ModelResponse::ViewPropertiesUpdate(_) => {
+            Err("unexpected non-viewport response".to_string())
+        }
+    }
+}
+
+fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto, String> {
+    match response {
+        ModelResponse::AnimationFrame(frame) => Ok(frame),
+        ModelResponse::Snapshot(_)
+        | ModelResponse::MoleculeDetails(_)
+        | ModelResponse::InitialState(_)
+        | ModelResponse::MolStructUpdate(_)
+        | ModelResponse::Viewport(_)
+        | ModelResponse::TrajectoryFrame(_)
+        | ModelResponse::ApplicationInfo(_)
+        | ModelResponse::Preferences(_)
+        | ModelResponse::PreferencesUpdate(_)
+        | ModelResponse::ViewProperties(_)
+        | ModelResponse::ViewPropertiesUpdate(_) => {
+            Err("unexpected animation frame response".to_string())
+        }
+    }
+}
+
+fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameDto, String> {
+    match response {
+        ModelResponse::TrajectoryFrame(frame) => Ok(frame),
+        ModelResponse::Snapshot(_)
+        | ModelResponse::MoleculeDetails(_)
+        | ModelResponse::InitialState(_)
+        | ModelResponse::MolStructUpdate(_)
+        | ModelResponse::Viewport(_)
+        | ModelResponse::AnimationFrame(_)
+        | ModelResponse::ApplicationInfo(_)
+        | ModelResponse::Preferences(_)
+        | ModelResponse::PreferencesUpdate(_)
+        | ModelResponse::ViewProperties(_)
+        | ModelResponse::ViewPropertiesUpdate(_) => {
+            Err("unexpected trajectory frame response".to_string())
+        }
+    }
+}
+
+fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoDto, String> {
+    match response {
+        ModelResponse::ApplicationInfo(info) => Ok(info),
+        ModelResponse::Snapshot(_)
+        | ModelResponse::MoleculeDetails(_)
+        | ModelResponse::InitialState(_)
+        | ModelResponse::MolStructUpdate(_)
+        | ModelResponse::Viewport(_)
+        | ModelResponse::AnimationFrame(_)
+        | ModelResponse::TrajectoryFrame(_)
+        | ModelResponse::Preferences(_)
+        | ModelResponse::PreferencesUpdate(_)
+        | ModelResponse::ViewProperties(_)
+        | ModelResponse::ViewPropertiesUpdate(_) => {
+            Err("unexpected application info response".to_string())
+        }
+    }
+}
+
+fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, String> {
+    match response {
+        ModelResponse::Preferences(preferences) => Ok(*preferences),
+        ModelResponse::Snapshot(_)
+        | ModelResponse::MoleculeDetails(_)
+        | ModelResponse::InitialState(_)
+        | ModelResponse::MolStructUpdate(_)
+        | ModelResponse::Viewport(_)
+        | ModelResponse::AnimationFrame(_)
+        | ModelResponse::TrajectoryFrame(_)
+        | ModelResponse::ApplicationInfo(_)
+        | ModelResponse::PreferencesUpdate(_)
+        | ModelResponse::ViewProperties(_)
+        | ModelResponse::ViewPropertiesUpdate(_) => {
+            Err("unexpected non-preferences response".to_string())
+        }
+    }
+}
+
+fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpdateDto, String> {
+    match response {
+        ModelResponse::PreferencesUpdate(update) => Ok(*update),
+        ModelResponse::Snapshot(_)
+        | ModelResponse::MoleculeDetails(_)
+        | ModelResponse::InitialState(_)
+        | ModelResponse::MolStructUpdate(_)
+        | ModelResponse::Viewport(_)
+        | ModelResponse::AnimationFrame(_)
+        | ModelResponse::TrajectoryFrame(_)
+        | ModelResponse::ApplicationInfo(_)
+        | ModelResponse::Preferences(_)
+        | ModelResponse::ViewProperties(_)
+        | ModelResponse::ViewPropertiesUpdate(_) => {
+            Err("unexpected non-preferences-update response".to_string())
+        }
+    }
+}
+
+fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, String> {
+    match response {
+        ModelResponse::InitialState(initial) => Ok(*initial),
+        ModelResponse::Snapshot(_)
+        | ModelResponse::MoleculeDetails(_)
+        | ModelResponse::MolStructUpdate(_)
+        | ModelResponse::Viewport(_)
+        | ModelResponse::AnimationFrame(_)
+        | ModelResponse::TrajectoryFrame(_)
+        | ModelResponse::ApplicationInfo(_)
+        | ModelResponse::Preferences(_)
+        | ModelResponse::PreferencesUpdate(_)
+        | ModelResponse::ViewProperties(_)
+        | ModelResponse::ViewPropertiesUpdate(_) => {
+            Err("unexpected non-initial-state response".to_string())
+        }
+    }
+}
+
+fn molecule_selection_update_response(
+    response: ModelResponse,
+) -> Result<MolStructUpdateDto, String> {
+    match response {
+        ModelResponse::MolStructUpdate(update) => Ok(*update),
+        _ => Err("unexpected non-MolStruct-update response".to_string()),
+    }
+}
+
+fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto, String> {
+    match response {
+        ModelResponse::ViewProperties(properties) => Ok(properties),
+        ModelResponse::Snapshot(_)
+        | ModelResponse::MoleculeDetails(_)
+        | ModelResponse::InitialState(_)
+        | ModelResponse::MolStructUpdate(_)
+        | ModelResponse::Viewport(_)
+        | ModelResponse::AnimationFrame(_)
+        | ModelResponse::TrajectoryFrame(_)
+        | ModelResponse::ApplicationInfo(_)
+        | ModelResponse::Preferences(_)
+        | ModelResponse::PreferencesUpdate(_)
+        | ModelResponse::ViewPropertiesUpdate(_) => {
+            Err("unexpected non-view-properties response".to_string())
+        }
+    }
+}
+
+fn view_properties_update_response(
+    response: ModelResponse,
+) -> Result<ViewPropertiesUpdateDto, String> {
+    match response {
+        ModelResponse::ViewPropertiesUpdate(update) => Ok(*update),
+        ModelResponse::Snapshot(_)
+        | ModelResponse::MoleculeDetails(_)
+        | ModelResponse::InitialState(_)
+        | ModelResponse::MolStructUpdate(_)
+        | ModelResponse::Viewport(_)
+        | ModelResponse::AnimationFrame(_)
+        | ModelResponse::TrajectoryFrame(_)
+        | ModelResponse::ApplicationInfo(_)
+        | ModelResponse::Preferences(_)
+        | ModelResponse::PreferencesUpdate(_)
+        | ModelResponse::ViewProperties(_) => {
+            Err("unexpected non-view-properties-update response".to_string())
+        }
     }
 }
 
@@ -2167,13 +6221,269 @@ fn get_snapshot(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
-fn undo(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
-    snapshot_response(request_model(&state, ModelRequest::Undo)?)
+fn get_molecule_details(
+    structure_key: String,
+    sequence_key: String,
+    include_sequence: bool,
+    state: State<'_, ManagedState>,
+) -> Result<MoleculeDetailsDto, String> {
+    molecule_details_response(request_model(
+        &state,
+        ModelRequest::GetMoleculeDetails {
+            structure_key,
+            sequence_key,
+            include_sequence,
+        },
+    )?)
 }
 
 #[tauri::command]
-fn redo(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
-    snapshot_response(request_model(&state, ModelRequest::Redo)?)
+fn get_initial_state(
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<InitialStateDto, String> {
+    let mut initial = initial_state_response(request_model(
+        &state,
+        ModelRequest::GetInitialState { width, height },
+    )?)?;
+    initial.startup_paths_pending = state
+        .startup_paths
+        .lock()
+        .map_err(|_| "startup path state is unavailable".to_string())?
+        .as_ref()
+        .is_some_and(|paths| !paths.is_empty());
+    Ok(initial)
+}
+
+#[tauri::command]
+fn get_application_info(state: State<'_, ManagedState>) -> Result<ApplicationInfoDto, String> {
+    application_info_response(request_model(&state, ModelRequest::GetApplicationInfo)?)
+}
+
+#[tauri::command]
+fn get_preferences(state: State<'_, ManagedState>) -> Result<PreferencesDto, String> {
+    preferences_response(request_model(&state, ModelRequest::GetPreferences)?)
+}
+
+#[tauri::command]
+fn set_preferences(
+    preferences: PreferencesDto,
+    state: State<'_, ManagedState>,
+) -> Result<PreferencesUpdateDto, String> {
+    preferences_update_response(request_model(
+        &state,
+        ModelRequest::SetPreferences(preferences),
+    )?)
+}
+
+#[tauri::command]
+fn get_view_properties(state: State<'_, ManagedState>) -> Result<ViewPropertiesDto, String> {
+    view_properties_response(request_model(&state, ModelRequest::GetViewProperties)?)
+}
+
+#[tauri::command]
+fn set_view_properties(
+    properties: ViewPropertiesInput,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<ViewPropertiesUpdateDto, String> {
+    view_properties_update_response(request_model(
+        &state,
+        ModelRequest::SetViewProperties {
+            properties,
+            width,
+            height,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn set_scene_properties(
+    properties: ScenePropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetSceneProperties(properties),
+    )?)
+}
+
+#[tauri::command]
+fn set_object_properties(
+    properties: ObjectPropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetObjectProperties(properties),
+    )?)
+}
+
+#[tauri::command]
+fn set_renderer_properties(
+    properties: RendererPropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetRendererProperties(properties),
+    )?)
+}
+
+#[tauri::command]
+fn set_density_map_properties(
+    properties: ObjectPropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetDensityMapProperties(properties),
+    )?)
+}
+
+#[tauri::command]
+fn set_density_renderer_properties(
+    properties: RendererPropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetDensityRendererProperties(properties),
+    )?)
+}
+
+#[tauri::command]
+fn set_density_renderer_visible(
+    map_uid: u64,
+    renderer_uid: u64,
+    visible: bool,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetDensityRendererVisible {
+            map_uid,
+            renderer_uid,
+            visible,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn add_density_renderer(
+    map_uid: u64,
+    renderer_type: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::AddDensityRenderer {
+            map_uid,
+            renderer_type,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn set_surface_properties(
+    properties: ObjectPropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetSurfaceProperties(properties),
+    )?)
+}
+
+#[tauri::command]
+fn set_surface_renderer_properties(
+    properties: RendererPropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetSurfaceRendererProperties(properties),
+    )?)
+}
+
+#[tauri::command]
+fn set_surface_renderer_visible(
+    surface_uid: u64,
+    renderer_uid: u64,
+    visible: bool,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetSurfaceRendererVisible {
+            surface_uid,
+            renderer_uid,
+            visible,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn add_surface_renderer(
+    surface_uid: u64,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::AddSurfaceRenderer { surface_uid },
+    )?)
+}
+
+#[tauri::command]
+fn delete_workspace_item(
+    target: WorkspaceDeleteInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::DeleteWorkspaceItem(target),
+    )?)
+}
+
+#[tauri::command]
+fn fit_workspace_item(
+    target: WorkspaceFitInput,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<ViewportDto, String> {
+    viewport_response(request_model(
+        &state,
+        ModelRequest::FitWorkspaceItem {
+            target,
+            width,
+            height,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn set_config_value(
+    key: String,
+    value: String,
+    state: State<'_, ManagedState>,
+) -> Result<ApplicationInfoDto, String> {
+    application_info_response(request_model(
+        &state,
+        ModelRequest::SetConfigValue { key, value },
+    )?)
+}
+
+#[tauri::command]
+fn undo(depth: usize, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::Undo(depth))?)
+}
+
+#[tauri::command]
+fn redo(depth: usize, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::Redo(depth))?)
 }
 
 #[tauri::command]
@@ -2187,8 +6497,42 @@ fn open_paths(paths: Vec<String>, state: State<'_, ManagedState>) -> Result<AppS
 }
 
 #[tauri::command]
-fn open_pdb(pdb_id: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
-    snapshot_response(request_model(&state, ModelRequest::OpenPdb(pdb_id))?)
+fn open_initial_paths(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    let paths = state
+        .startup_paths
+        .lock()
+        .map_err(|_| "startup path state is unavailable".to_string())?
+        .take()
+        .unwrap_or_default();
+    if paths.is_empty() {
+        return snapshot_response(request_model(&state, ModelRequest::GetSnapshot)?);
+    }
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::OpenPaths(
+            paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+        ),
+    )?)
+}
+
+#[tauri::command]
+fn reload_scene(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::ReloadScene)?)
+}
+
+#[tauri::command]
+async fn open_pdb(pdb_id: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    let download_id = pdb_id.clone();
+    let path = tauri::async_runtime::spawn_blocking(move || download_pdb_to_cache(&download_id))
+        .await
+        .map_err(|error| format!("PDB download task failed: {error}"))??;
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::OpenPdb { pdb_id, path },
+    )?)
 }
 
 #[tauri::command]
@@ -2219,6 +6563,25 @@ fn set_trajectory_frame(
     snapshot_response(request_model(
         &state,
         ModelRequest::SetTrajectoryFrame { object_uid, frame },
+    )?)
+}
+
+#[tauri::command]
+fn set_trajectory_frame_viewport(
+    object_uid: u64,
+    frame: usize,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<TrajectoryFrameDto, String> {
+    trajectory_frame_response(request_model(
+        &state,
+        ModelRequest::SetTrajectoryFrameViewport {
+            object_uid,
+            frame,
+            width,
+            height,
+        },
     )?)
 }
 
@@ -2295,6 +6658,27 @@ fn set_selection(selection: String, state: State<'_, ManagedState>) -> Result<Ap
 }
 
 #[tauri::command]
+fn molecule_selection_action(
+    object_uid: u64,
+    selection: String,
+    mode: String,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<MolStructUpdateDto, String> {
+    molecule_selection_update_response(request_model(
+        &state,
+        ModelRequest::MolStructAction {
+            object_uid,
+            selection,
+            mode,
+            width,
+            height,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn set_renderer_visible(
     object_uid: u64,
     renderer_uid: u64,
@@ -2337,6 +6721,23 @@ fn set_object_coloring(
         ModelRequest::SetObjectColoring {
             object_uid,
             coloring,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn set_coloring(
+    update: ColoringUpdateInput,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<MolStructUpdateDto, String> {
+    molecule_selection_update_response(request_model(
+        &state,
+        ModelRequest::SetColoring {
+            input: update,
+            width,
+            height,
         },
     )?)
 }
@@ -2750,6 +7151,19 @@ fn tick_animation(dt: f64, state: State<'_, ManagedState>) -> Result<AppSnapshot
 }
 
 #[tauri::command]
+fn tick_animation_frame(
+    dt: f64,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<AnimationFrameDto, String> {
+    animation_frame_response(request_model(
+        &state,
+        ModelRequest::TickAnimationFrame { dt, width, height },
+    )?)
+}
+
+#[tauri::command]
 fn clear_log(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::ClearLog)?)
 }
@@ -2862,7 +7276,7 @@ fn export_png(
     )?)
 }
 
-fn download_pdb_to_temp(pdb_id: &str) -> Result<PathBuf, String> {
+fn download_pdb_to_cache(pdb_id: &str) -> Result<PathBuf, String> {
     let pdb_id = pdb_id.trim().to_ascii_uppercase();
     if !(4..=16).contains(&pdb_id.len())
         || !pdb_id
@@ -2871,19 +7285,54 @@ fn download_pdb_to_temp(pdb_id: &str) -> Result<PathBuf, String> {
     {
         return Err("PDB ID must contain 4-16 letters, digits, or underscores".to_string());
     }
-    let path = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif"));
-    let url = format!("https://files.rcsb.org/download/{pdb_id}.cif");
+    let filename = format!("cuemol-pdb-{pdb_id}.cif.gz");
+    let persistent_path = crate::download_cache_path(&filename);
+    let persistent_legacy_path = crate::download_cache_path(&format!("cuemol-pdb-{pdb_id}.cif"));
+    let temporary_path = std::env::temp_dir().join(&filename);
+    let temporary_legacy_path = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif"));
+    for path in [
+        &persistent_path,
+        &persistent_legacy_path,
+        &temporary_path,
+        &temporary_legacy_path,
+    ] {
+        if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
+            return Ok(path.clone());
+        }
+    }
+    let path = if persistent_path
+        .parent()
+        .is_some_and(|parent| fs::create_dir_all(parent).is_ok())
+    {
+        persistent_path
+    } else {
+        temporary_path
+    };
+    let download_id = NEXT_DOWNLOAD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let partial_path = path.with_file_name(format!(
+        "{filename}.{}.{download_id}.partial",
+        std::process::id(),
+    ));
+    let url = format!("https://files.rcsb.org/download/{pdb_id}.cif.gz");
     let output = Command::new("curl")
-        .args(["--fail", "--silent", "--show-error", "--location"])
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--compressed",
+        ])
+        .arg("--connect-timeout")
+        .arg("5")
         .arg("--max-time")
         .arg("30")
         .arg("--output")
-        .arg(&path)
+        .arg(&partial_path)
         .arg(&url)
         .output()
         .map_err(|error| format!("failed to start curl: {error}"))?;
     if !output.status.success() {
-        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&partial_path);
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if detail.is_empty() {
             format!("RCSB download failed with {}", output.status)
@@ -2891,7 +7340,42 @@ fn download_pdb_to_temp(pdb_id: &str) -> Result<PathBuf, String> {
             format!("RCSB download failed: {detail}")
         });
     }
+    if !fs::metadata(&partial_path).is_ok_and(|metadata| metadata.len() > 0) {
+        let _ = fs::remove_file(&partial_path);
+        return Err("RCSB download returned an empty file".to_string());
+    }
+    if let Err(error) = fs::rename(&partial_path, &path) {
+        if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 0) {
+            let _ = fs::remove_file(&partial_path);
+        } else {
+            let _ = fs::remove_file(&partial_path);
+            return Err(format!("failed to cache RCSB download: {error}"));
+        }
+    }
     Ok(path)
+}
+
+fn backup_scene_file(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut backup_name = path.as_os_str().to_os_string();
+    backup_name.push(".bak");
+    let backup_path = PathBuf::from(backup_name);
+    if backup_path.exists() {
+        fs::remove_file(&backup_path).map_err(|error| {
+            format!(
+                "cannot remove old backup file {}: {error}",
+                backup_path.display()
+            )
+        })?;
+    }
+    fs::rename(path, &backup_path).map_err(|error| {
+        format!(
+            "cannot create backup file {}: {error}",
+            backup_path.display()
+        )
+    })
 }
 
 fn camera_to_view_data(camera: &Camera) -> String {
@@ -2899,12 +7383,16 @@ fn camera_to_view_data(camera: &Camera) -> String {
     let rotation = camera.rotation();
     let ortho_scale = 1000.0 / camera.zoom().max(0.1);
     format!(
-        "cuemol2-rs-view\t2\n\
+        "cuemol2-rs-view\t3\n\
 target\t{:.6}\t{:.6}\t{:.6}\n\
 rotation\t{:.6}\t{:.6}\t{:.6}\t{:.6}\n\
 distance\t{:.6}\n\
+slab\t{:.6}\n\
 ortho_scale\t{:.6}\n\
-perspective\t{}\n",
+perspective\t{}\n\
+stereo_mode\t{}\n\
+stereo_distance\t{:.6}\n\
+center_mark\t{}\n",
         center.x,
         center.y,
         center.z,
@@ -2913,8 +7401,12 @@ perspective\t{}\n",
         rotation.z,
         rotation.w,
         camera.cam_dist(),
+        camera.slab_depth(),
         ortho_scale,
-        camera.is_perspective()
+        camera.is_perspective(),
+        stereo_mode_name(camera.stereo_mode()),
+        camera.stereo_distance(),
+        center_mark_name(camera.center_mark()),
     )
 }
 
@@ -2925,7 +7417,7 @@ fn camera_from_view_data(data: &str) -> Result<Camera, String> {
         let fields = line.split_whitespace().collect::<Vec<_>>();
         match fields.as_slice() {
             [] => {}
-            ["cuemol2-rs-view", "1" | "2"] => saw_header = true,
+            ["cuemol2-rs-view", "1" | "2" | "3"] => saw_header = true,
             ["target", x, y, z] => {
                 camera.set_center(Vector4::new3(
                     parse_view_number(x)?,
@@ -2945,6 +7437,7 @@ fn camera_from_view_data(data: &str) -> Result<Camera, String> {
                 camera.set_rotation(rotation);
             }
             ["distance", value] => camera.set_cam_dist(parse_view_number(value)?),
+            ["slab", value] => camera.set_slab_depth(parse_view_number(value)?),
             ["ortho_scale", value] => {
                 let scale = parse_view_number(value)?;
                 if scale <= 0.0 {
@@ -2954,6 +7447,9 @@ fn camera_from_view_data(data: &str) -> Result<Camera, String> {
             }
             ["perspective", "true"] => camera.set_perspective(true),
             ["perspective", "false"] => camera.set_perspective(false),
+            ["stereo_mode", value] => camera.set_stereo_mode(parse_stereo_mode(value)?),
+            ["stereo_distance", value] => camera.set_stereo_distance(parse_view_number(value)?),
+            ["center_mark", value] => camera.set_center_mark(parse_center_mark(value)?),
             _ => return Err(format!("invalid view line: {line}")),
         }
     }
@@ -3031,13 +7527,37 @@ pub fn run() -> Result<(), tauri::Error> {
         .manage(spawn_model(initial_paths))
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_molecule_details,
+            get_initial_state,
+            get_application_info,
+            get_preferences,
+            set_preferences,
+            get_view_properties,
+            set_view_properties,
+            set_scene_properties,
+            set_object_properties,
+            set_renderer_properties,
+            set_density_map_properties,
+            set_density_renderer_properties,
+            set_density_renderer_visible,
+            add_density_renderer,
+            set_surface_properties,
+            set_surface_renderer_properties,
+            set_surface_renderer_visible,
+            add_surface_renderer,
+            delete_workspace_item,
+            fit_workspace_item,
+            set_config_value,
             undo,
             redo,
             clear_undo,
             open_paths,
+            open_initial_paths,
+            reload_scene,
             open_pdb,
             load_trajectory,
             set_trajectory_frame,
+            set_trajectory_frame_viewport,
             append_trajectory_block,
             remove_trajectory_block,
             move_trajectory_block,
@@ -3045,9 +7565,11 @@ pub fn run() -> Result<(), tauri::Error> {
             activate_scene,
             close_active_scene,
             set_selection,
+            molecule_selection_action,
             set_renderer_visible,
             add_renderer,
             set_object_coloring,
+            set_coloring,
             delete_atoms,
             change_chain,
             renumber_residues,
@@ -3075,6 +7597,7 @@ pub fn run() -> Result<(), tauri::Error> {
             set_animation_loop,
             seek_animation,
             tick_animation,
+            tick_animation_frame,
             clear_log,
             execute_script,
             export_pov,
@@ -3099,9 +7622,11 @@ mod tests {
         desktop.ensure_active_scene();
         AppModel {
             desktop,
+            config_path: None,
             camera: Camera::new(),
             renderer: None,
             mesh: None,
+            mesh_refit_pending: false,
             selection: String::new(),
             background: "black".to_string(),
             show_unit_cell: false,
@@ -3114,10 +7639,63 @@ mod tests {
             animation_playing: false,
             animation_loop: false,
             animation_start_camera: None,
+            view_width: 100,
+            view_height: 100,
+            trans_mms: false,
+            rot_mms: false,
+            swap_stereo_eyes: false,
+            opened_paths: Vec::new(),
+            structure_revision: 1,
+            modified_scenes: BTreeSet::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             log_lines: Vec::new(),
             status: "Ready".to_string(),
+        }
+    }
+
+    fn model_with_renderer() -> (AppModel, Uid, Uid) {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let scene = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap();
+        let object_uid =
+            scene.add_molecule_with_source_type("molecule", cuemol_molstr::MolCoord::new(), "pdb");
+        let renderer_uid = scene
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "simple 1");
+        (model, object_uid, renderer_uid)
+    }
+
+    fn default_renderer_properties_input(
+        object_uid: Uid,
+        renderer_uid: Uid,
+        name: &str,
+    ) -> RendererPropertiesInput {
+        RendererPropertiesInput {
+            object_uid: object_uid.get(),
+            renderer_uid: renderer_uid.get(),
+            name: name.to_string(),
+            selection: "*".to_string(),
+            visible: true,
+            locked: false,
+            material: String::new(),
+            alpha: 1.0,
+            edge_type: "none".to_string(),
+            edge_width: 0.01,
+            edge_color: "#000000".to_string(),
+            line_width: 1.2,
+            detail: 3,
+            bond_width: 0.2,
+            sphere_radius: 0.3,
+            show_ring: false,
+            ring_thickness: 0.2,
+            ring_color: "#ffffbf".to_string(),
+            specific: BTreeMap::new(),
         }
     }
 
@@ -3139,20 +7717,976 @@ mod tests {
         camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
         camera.set_cam_dist(80.0);
         camera.set_zoom(25.0);
+        camera.set_slab_depth(42.0);
         camera.set_perspective(true);
+        camera.set_stereo_mode(StereoMode::Cross);
+        camera.set_stereo_distance(2.5);
+        camera.set_center_mark(CenterMark::Axis);
         camera.set_rotation(Quat::new(0.0, 0.0, 0.0, 1.0));
         let restored = camera_from_view_data(&camera_to_view_data(&camera)).unwrap();
         assert_eq!(restored.center(), camera.center());
         assert_eq!(restored.cam_dist(), camera.cam_dist());
         assert_eq!(restored.zoom(), camera.zoom());
+        assert_eq!(restored.slab_depth(), camera.slab_depth());
         assert_eq!(restored.rotation(), camera.rotation());
         assert!(restored.is_perspective());
+        assert_eq!(restored.stereo_mode(), StereoMode::Cross);
+        assert_eq!(restored.stereo_distance(), 2.5);
+        assert_eq!(restored.center_mark(), CenterMark::Axis);
     }
 
     #[test]
     fn base64_encoder_uses_standard_padding() {
         assert_eq!(base64_encode(b"CueMol"), "Q3VlTW9s");
         assert_eq!(base64_encode(b"rs"), "cnM=");
+    }
+
+    #[test]
+    fn startup_defers_mesh_and_gpu_initialization_until_viewport_render() {
+        let mut model = AppModel::new(Vec::new());
+        assert!(model.renderer.is_none());
+        assert!(model.mesh.is_none());
+        model.prepare_mesh_if_needed().unwrap();
+        assert!(model
+            .mesh
+            .as_ref()
+            .is_some_and(|mesh| mesh.indices.is_empty()));
+    }
+
+    #[test]
+    fn initial_state_combines_snapshot_and_viewport_without_starting_the_gpu() {
+        let mut model = model_without_gpu();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::GetInitialState {
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        let ModelResponse::InitialState(initial) = response else {
+            panic!("expected the combined initial state");
+        };
+        assert_eq!(initial.viewport.width, 800);
+        assert_eq!(initial.viewport.height, 600);
+        assert!(initial.viewport.image.is_none());
+        assert!(!initial.startup_paths_pending);
+        assert_eq!(initial.snapshot.scenes.len(), 1);
+        assert!(!initial.snapshot.structure_key.is_empty());
+        assert!(!initial.snapshot.sequence_key.is_empty());
+        let ModelResponse::MoleculeDetails(details) = handle_model_request(
+            &mut model,
+            ModelRequest::GetMoleculeDetails {
+                structure_key: String::new(),
+                sequence_key: String::new(),
+                include_sequence: false,
+            },
+        )
+        .unwrap() else {
+            panic!("expected molecule details");
+        };
+        assert_eq!(details.structure_key, initial.snapshot.structure_key);
+        assert_eq!(details.sequence_key, initial.snapshot.sequence_key);
+        assert!(details.structure.is_some());
+        assert!(details.sequence.is_none());
+        let ModelResponse::MoleculeDetails(cached) = handle_model_request(
+            &mut model,
+            ModelRequest::GetMoleculeDetails {
+                structure_key: initial.snapshot.structure_key.clone(),
+                sequence_key: String::new(),
+                include_sequence: true,
+            },
+        )
+        .unwrap() else {
+            panic!("expected cached molecule details");
+        };
+        assert!(cached.structure.is_none());
+        assert!(cached.sequence.is_some());
+        let ModelResponse::MoleculeDetails(unchanged) = handle_model_request(
+            &mut model,
+            ModelRequest::GetMoleculeDetails {
+                structure_key: initial.snapshot.structure_key.clone(),
+                sequence_key: initial.snapshot.sequence_key.clone(),
+                include_sequence: true,
+            },
+        )
+        .unwrap() else {
+            panic!("expected molecule details");
+        };
+        assert!(unchanged.structure.is_none());
+        assert!(unchanged.sequence.is_none());
+        assert!(model.renderer.is_none());
+    }
+
+    #[test]
+    fn selection_refresh_reuses_the_cached_molecule_hierarchy() {
+        let mut model = model_without_gpu();
+        let before = model.snapshot();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetSelection("chain A".to_string()),
+        )
+        .unwrap();
+        let after = model.snapshot();
+        assert_eq!(after.structure_key, before.structure_key);
+        assert_ne!(after.sequence_key, before.sequence_key);
+        let details = model.molecule_details(&after.structure_key, &before.sequence_key, true);
+        assert!(details.structure.is_none());
+        assert!(details.sequence.is_some());
+        assert_eq!(details.sequence_key, after.sequence_key);
+    }
+
+    #[test]
+    fn help_dialog_info_uses_registered_plugins_and_live_config() {
+        let mut model = model_without_gpu();
+        let response = handle_model_request(&mut model, ModelRequest::GetApplicationInfo).unwrap();
+        let ModelResponse::ApplicationInfo(info) = response else {
+            panic!("expected application information");
+        };
+        assert_eq!(info.product_name, "CueMol2");
+        assert!(!info.plugins.is_empty());
+        assert!(info
+            .plugins
+            .iter()
+            .any(|plugin| plugin.category == "Object reader"));
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetConfigValue {
+                key: "ui:test_value".to_string(),
+                value: "enabled".to_string(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::ApplicationInfo(info) = response else {
+            panic!("expected updated application information");
+        };
+        assert!(info
+            .config
+            .iter()
+            .any(|entry| entry.key == "ui:test_value" && entry.value == "enabled"));
+        assert_eq!(info.status, "Config updated: ui:test_value");
+    }
+
+    #[test]
+    fn options_roundtrip_through_the_persistent_config_and_runtime_services() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("cuemol-options-{}-{nonce}.tsv", std::process::id()));
+        let mut model = AppModel::new_with_config(Vec::new(), Some(path.clone()));
+        let mut preferences = model.preferences();
+        preferences.atom_label_font = "monospace".to_string();
+        preferences.atom_label_size = 18.0;
+        preferences.atom_label_color = "#33aa55".to_string();
+        preferences.atom_label_italic = true;
+        preferences.ui_language = "ja".to_string();
+        preferences.mouse_preset = "PymolViewInConf".to_string();
+        preferences.trackball_radius = 1.25;
+        preferences.hit_precision = 6.0;
+        preferences.momentum_scroll = true;
+        preferences.shortcuts[0].key = "ArrowUp".to_string();
+        preferences.shortcuts[1].key = "ArrowDown".to_string();
+        model.set_preferences(preferences).unwrap();
+        assert_eq!(model.desktop.view_input_config().tbrad(), 1.25);
+        assert_eq!(model.desktop.view_input_config().hitprec(), 6.0);
+        assert!(path.is_file());
+
+        let restored = AppModel::new_with_config(Vec::new(), Some(path.clone())).preferences();
+        assert_eq!(restored.atom_label_font, "monospace");
+        assert_eq!(restored.atom_label_size, 18.0);
+        assert_eq!(restored.atom_label_color, "#33aa55");
+        assert!(restored.atom_label_italic);
+        assert_eq!(restored.ui_language, "ja");
+        assert_eq!(restored.mouse_preset, "PymolViewInConf");
+        assert_eq!(restored.trackball_radius, 1.25);
+        assert_eq!(restored.hit_precision, 6.0);
+        assert!(restored.momentum_scroll);
+        assert_eq!(restored.shortcuts[0].key, "ArrowUp");
+        assert_eq!(restored.shortcuts[1].key, "ArrowDown");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn scene_properties_are_undoable_and_persist_as_qsc_attributes() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetSceneProperties(ScenePropertiesInput {
+                scene_uid: scene_uid.get(),
+                background: "#123456".to_string(),
+                ao_enabled: true,
+                ao_radius: 6.5,
+                ao_intensity: 1.7,
+                ao_slices: 12,
+                ao_steps: 5,
+                ao_half_res: true,
+                aa_method: "smaa".to_string(),
+                aa_jitter_level: 2,
+                onload: "print('ready');".to_string(),
+                use_color_proof: true,
+                icc_filename: "GenericCMYK.icm".to_string(),
+                icc_intent: "relative_colorimetric".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected scene property snapshot");
+        };
+        let scene = &snapshot.scenes[0];
+        assert_eq!(scene.background, "#123456");
+        assert!(scene.ao_enabled);
+        assert_eq!(scene.ao_radius, 6.5);
+        assert_eq!(scene.aa_method, "smaa");
+        assert_eq!(scene.aa_jitter_level, 2);
+        assert!(scene.use_color_proof);
+        assert_eq!(model.background, "#123456");
+        assert!(model.color_proofing);
+        assert_eq!(snapshot.undo_descriptions, ["Scene properties updated"]);
+
+        let qsc = model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .write_qsc_string();
+        assert!(qsc.contains("bgcolor=\"#123456\""));
+        assert!(qsc.contains("aoEnabled=\"true\""));
+        assert!(qsc.contains("aa_method=\"smaa\""));
+        assert!(qsc.contains("icc_intent=\"relative_colorimetric\""));
+
+        model.undo(0).unwrap();
+        let scene = model.desktop.scene_manager().scene(scene_uid).unwrap();
+        assert_eq!(scene.scene_attribute("bgcolor"), None);
+        assert_eq!(model.background, "black");
+        assert!(!model.color_proofing);
+    }
+
+    #[test]
+    fn scene_post_processing_applies_ao_and_edge_aa() {
+        let mut rgba = vec![200_u8; 5 * 5 * 4];
+        let mut depth = vec![0_u8; 5 * 5 * 4];
+        for channel in 0..4 {
+            depth[(2 * 5 + 2) * 4 + channel] = 100;
+            depth[(2 * 5 + 3) * 4 + channel] = 220;
+        }
+        apply_screen_space_ao(&mut rgba, &depth, 5, 5, 1, 2.2, 4, 1);
+        assert!(rgba[(2 * 5 + 2) * 4] < 200);
+
+        let mut edge = vec![0_u8; 5 * 5 * 4];
+        for y in 0..5 {
+            for x in 2..5 {
+                let index = (y * 5 + x) * 4;
+                edge[index..index + 4].fill(255);
+            }
+        }
+        apply_fast_post_aa(&mut edge, 5, 5, false);
+        assert!(edge[(2 * 5 + 1) * 4] > 0);
+        assert!(edge[(2 * 5 + 2) * 4] < 255);
+        assert_eq!(background_rgba("#123456").unwrap()[0], 18.0 / 255.0);
+    }
+
+    #[test]
+    fn workspace_object_and_renderer_properties_are_undoable_and_persisted() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetObjectProperties(ObjectPropertiesInput {
+                object_uid: object_uid.get(),
+                name: "renamed molecule".to_string(),
+                visible: false,
+                locked: true,
+            }),
+        )
+        .unwrap();
+        let object = model.desktop.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.name(), "renamed molecule");
+        assert!(!object.is_visible());
+        assert!(object.is_ui_locked());
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetRendererProperties(RendererPropertiesInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                name: "carbon atoms".to_string(),
+                selection: "elem C".to_string(),
+                visible: true,
+                locked: true,
+                material: "matte".to_string(),
+                alpha: 0.4,
+                edge_type: "silhouette".to_string(),
+                edge_width: 0.2,
+                edge_color: "#123456".to_string(),
+                line_width: 2.4,
+                detail: 3,
+                bond_width: 0.2,
+                sphere_radius: 0.3,
+                show_ring: false,
+                ring_thickness: 0.2,
+                ring_color: "#ffffbf".to_string(),
+                specific: BTreeMap::new(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let renderer = &snapshot.objects[0].renderers[0];
+        assert_eq!(renderer.name, "carbon atoms");
+        assert_eq!(renderer.selection, "elem C");
+        assert!(renderer.locked);
+        assert_eq!(renderer.material, "matte");
+        assert_eq!(renderer.alpha, 0.4);
+        assert_eq!(renderer.edge_type, "silhouette");
+        assert_eq!(renderer.edge_width, 0.2);
+        assert_eq!(renderer.edge_color, "#123456");
+        assert_eq!(renderer.line_width, 2.4);
+        assert_eq!(snapshot.undo_descriptions.len(), 2);
+
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        assert_eq!(renderer.name(), "simple 1");
+        assert_eq!(renderer.qsc_attr("alpha"), None);
+        assert_eq!(renderer.qsc_attr("width"), None);
+    }
+
+    #[test]
+    fn ballstick_properties_are_undoable_and_persisted() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let renderer_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("ballstick", "ballstick 1");
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetRendererProperties(RendererPropertiesInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                name: "rings".to_string(),
+                selection: "*".to_string(),
+                visible: true,
+                locked: false,
+                material: String::new(),
+                alpha: 1.0,
+                edge_type: "none".to_string(),
+                edge_width: 0.01,
+                edge_color: "#000000".to_string(),
+                line_width: 1.2,
+                detail: 8,
+                bond_width: 0.4,
+                sphere_radius: 0.5,
+                show_ring: true,
+                ring_thickness: 0.25,
+                ring_color: "#abcdef".to_string(),
+                specific: BTreeMap::new(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let renderer = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == renderer_uid.get())
+            .unwrap();
+        assert_eq!(renderer.detail, 8);
+        assert_eq!(renderer.bond_width, 0.4);
+        assert_eq!(renderer.sphere_radius, 0.5);
+        assert!(renderer.show_ring);
+        assert_eq!(renderer.ring_thickness, 0.25);
+        assert_eq!(renderer.ring_color, "#abcdef");
+
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        for key in ["detail", "bondw", "sphr", "ring", "thickness", "ringcolor"] {
+            assert_eq!(renderer.qsc_attr(key), None, "{key} restored");
+        }
+    }
+
+    #[test]
+    fn cpk_and_disorder_properties_are_undoable_and_persisted() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let object = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap();
+        let cpk_uid = object.add_renderer("cpk", "cpk 1");
+        object.add_renderer("tube", "backbone");
+        let disorder_uid = object.add_renderer("disorder", "disorder 1");
+
+        let mut cpk = default_renderer_properties_input(object_uid, cpk_uid, "spacefill");
+        cpk.specific = BTreeMap::from([
+            ("vdwr_H".to_string(), "0.8".to_string()),
+            ("vdwr_C".to_string(), "2.4".to_string()),
+            ("vdwr_N".to_string(), "1.6".to_string()),
+            ("vdwr_O".to_string(), "1.4".to_string()),
+            ("vdwr_S".to_string(), "2".to_string()),
+            ("vdwr_P".to_string(), "2.1".to_string()),
+            ("vdwr_X".to_string(), "1.9".to_string()),
+            ("detail".to_string(), "9".to_string()),
+        ]);
+        let response =
+            handle_model_request(&mut model, ModelRequest::SetRendererProperties(cpk)).unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let cpk = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == cpk_uid.get())
+            .unwrap();
+        assert_eq!(cpk.specific["vdwr_C"], "2.4");
+        assert_eq!(cpk.specific["detail"], "9");
+
+        let mut disorder =
+            default_renderer_properties_input(object_uid, disorder_uid, "missing loop");
+        disorder.specific = BTreeMap::from([
+            ("target".to_string(), "backbone".to_string()),
+            ("detail".to_string(), "8".to_string()),
+            ("width".to_string(), "0.6".to_string()),
+            ("dotsep".to_string(), "0.5".to_string()),
+            ("loopsize".to_string(), "3".to_string()),
+            ("loopsize2".to_string(), "4".to_string()),
+            ("defaultcolor".to_string(), "#123456".to_string()),
+        ]);
+        handle_model_request(&mut model, ModelRequest::SetRendererProperties(disorder)).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(disorder_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("target"), Some("backbone"));
+        assert_eq!(renderer.qsc_attr("defaultcolor"), Some("#123456"));
+        assert_eq!(renderer.qsc_attr("dotsep"), Some("0.5"));
+
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(disorder_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("target"), None);
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(cpk_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("vdwr_C"), None);
+        assert_eq!(renderer.qsc_attr("detail"), None);
+    }
+
+    #[test]
+    fn tube_and_nucl_properties_are_undoable_and_persisted() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let object = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap();
+        let tube_uid = object.add_renderer("tube", "tube 1");
+        let nucl_uid = object.add_renderer("nucl", "nucl 1");
+        object
+            .renderer_mut(nucl_uid)
+            .unwrap()
+            .set_qsc_attr("style", "DefaultNucl");
+
+        let mut tube = default_renderer_properties_input(object_uid, tube_uid, "putty tube");
+        tube.specific = BTreeMap::from([
+            ("section.type".to_string(), "roundsquare".to_string()),
+            ("section.width".to_string(), "0.4".to_string()),
+            ("section.tuber".to_string(), "2.5".to_string()),
+            ("section.sharp".to_string(), "0.7".to_string()),
+            ("section.detail".to_string(), "9".to_string()),
+            ("axialdetail".to_string(), "12".to_string()),
+            ("smooth".to_string(), "0.25".to_string()),
+            ("smoothcolor".to_string(), "false".to_string()),
+            ("pivotatom".to_string(), "N".to_string()),
+            ("start_captype".to_string(), "flat".to_string()),
+            ("end_captype".to_string(), "none".to_string()),
+            ("segend_fade".to_string(), "true".to_string()),
+            ("putty_mode".to_string(), "linear1".to_string()),
+            ("putty_tgt".to_string(), "occ".to_string()),
+            ("putty_hiscl".to_string(), "4".to_string()),
+            ("putty_loscl".to_string(), "2".to_string()),
+        ]);
+        let response =
+            handle_model_request(&mut model, ModelRequest::SetRendererProperties(tube)).unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let tube = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == tube_uid.get())
+            .unwrap();
+        assert_eq!(tube.specific["section.type"], "roundsquare");
+        assert_eq!(tube.specific["section.width"], "0.4");
+        assert_eq!(tube.specific["section.tuber"], "2.5");
+        assert_eq!(tube.specific["putty_mode"], "linear1");
+        let nucl = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == nucl_uid.get())
+            .unwrap();
+        assert_eq!(nucl.specific["section.width"], "0.5");
+        assert_eq!(nucl.specific["section.tuber"], "2.5");
+        assert_eq!(nucl.specific["axialdetail"], "8");
+        assert_eq!(nucl.specific["pivotatom"], "P");
+        let qsc = model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .write_qsc_string();
+        assert!(qsc.contains("<section type=\"roundsquare\""));
+        assert!(qsc.contains("width=\"0.4\""));
+
+        let mut nucl = default_renderer_properties_input(object_uid, nucl_uid, "bases");
+        nucl.specific = BTreeMap::from([
+            ("show_tube".to_string(), "false".to_string()),
+            ("show_basepair".to_string(), "false".to_string()),
+            ("base_size".to_string(), "0.8".to_string()),
+            ("base_detail".to_string(), "7".to_string()),
+            ("base_thick".to_string(), "0.3".to_string()),
+            ("base_type".to_string(), "detail2".to_string()),
+        ]);
+        handle_model_request(&mut model, ModelRequest::SetRendererProperties(nucl)).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(nucl_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("show_tube"), Some("false"));
+        assert_eq!(renderer.qsc_attr("base_type"), Some("detail2"));
+
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(nucl_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("show_tube"), None);
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(tube_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_child_attr("section", "width"), None);
+        assert_eq!(renderer.qsc_attr("putty_mode"), None);
+    }
+
+    #[test]
+    fn ribbon_and_cartoon_properties_are_undoable_and_persisted() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let object = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap();
+        let ribbon_uid = object.add_renderer("ribbon", "ribbon 1");
+        let cartoon_uid = object.add_renderer("cartoon", "cartoon 1");
+
+        let mut ribbon = default_renderer_properties_input(object_uid, ribbon_uid, "wide ribbon");
+        ribbon.specific = BTreeMap::from([
+            ("helix.type".to_string(), "roundsquare".to_string()),
+            ("helix.width".to_string(), "0.4".to_string()),
+            ("helix.tuber".to_string(), "3".to_string()),
+            ("helix.sharp".to_string(), "0.7".to_string()),
+            ("helix.detail".to_string(), "12".to_string()),
+            ("sheethead.type".to_string(), "arrow".to_string()),
+            ("sheethead.gamma".to_string(), "3".to_string()),
+            ("sheethead.basw".to_string(), "0.2".to_string()),
+            ("sheethead.arrow".to_string(), "2.1".to_string()),
+            ("helix_smooth".to_string(), "1.5".to_string()),
+            ("helix_usebackcol".to_string(), "true".to_string()),
+            ("helix_backcol".to_string(), "#123456".to_string()),
+        ]);
+        let response =
+            handle_model_request(&mut model, ModelRequest::SetRendererProperties(ribbon)).unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let ribbon = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == ribbon_uid.get())
+            .unwrap();
+        assert_eq!(ribbon.specific["helix.type"], "roundsquare");
+        assert_eq!(ribbon.specific["helix.width"], "0.4");
+        assert_eq!(ribbon.specific["sheethead.type"], "arrow");
+        assert_eq!(ribbon.specific["helix_backcol"], "#123456");
+
+        let mut cartoon =
+            default_renderer_properties_input(object_uid, cartoon_uid, "anchored cartoon");
+        cartoon.specific = BTreeMap::from([
+            ("anchor_sel".to_string(), "chain A".to_string()),
+            ("anchor_weight".to_string(), "12".to_string()),
+            ("helix_ribbon".to_string(), "true".to_string()),
+            ("helix_width_mode".to_string(), "wavy".to_string()),
+            ("helix_width".to_string(), "2.6".to_string()),
+            ("helix_wplus".to_string(), "0.4".to_string()),
+            ("ribhelix.type".to_string(), "rectangle".to_string()),
+            ("ribhelix.width".to_string(), "0.3".to_string()),
+            ("ribhelix.tuber".to_string(), "5".to_string()),
+            ("ribhelix.detail".to_string(), "13".to_string()),
+            ("ribhelix_head.type".to_string(), "flat".to_string()),
+        ]);
+        let response =
+            handle_model_request(&mut model, ModelRequest::SetRendererProperties(cartoon)).unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let cartoon = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == cartoon_uid.get())
+            .unwrap();
+        assert_eq!(cartoon.specific["anchor_sel"], "chain A");
+        assert_eq!(cartoon.specific["anchor_weight"], "12");
+        assert_eq!(cartoon.specific["helix_ribbon"], "true");
+        assert_eq!(cartoon.specific["ribhelix.type"], "rectangle");
+        assert_eq!(cartoon.specific["ribhelix_head.type"], "flat");
+
+        let qsc = model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .write_qsc_string();
+        assert!(qsc.contains("anchor_sel=\"chain A\""));
+        assert!(qsc.contains("<ribhelix type=\"rectangle\""));
+
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(cartoon_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("anchor_sel"), None);
+        assert_eq!(renderer.qsc_child_attr("ribhelix", "type"), None);
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(ribbon_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("helix_backcol"), None);
+        assert_eq!(renderer.qsc_child_attr("helix", "width"), None);
+    }
+
+    #[test]
+    fn slab_mouse_action_scales_the_camera_clipping_depth() {
+        let mut model = model_without_gpu();
+        model.camera.set_slab_depth(50.0);
+        model.update_camera("slab", 0.5, 0.0, 480).unwrap();
+        assert_eq!(model.camera.slab_depth(), 25.0);
+    }
+
+    #[test]
+    fn view_property_editor_roundtrips_the_reference_view_fields() {
+        let mut model = model_without_gpu();
+        let response = handle_model_request(&mut model, ModelRequest::GetViewProperties).unwrap();
+        let ModelResponse::ViewProperties(properties) = response else {
+            panic!("expected view properties");
+        };
+        assert_eq!(properties.zoom, 50.0);
+        assert_eq!(properties.stereo_mode, "none");
+        assert_eq!(properties.center_mark, "crosshair");
+        assert!(!properties.has_hw_stereo);
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetViewProperties {
+                properties: ViewPropertiesInput {
+                    name: "detail".to_string(),
+                    zoom: 75.0,
+                    distance: 300.0,
+                    slab: 80.0,
+                    center: [1.0, 2.0, 3.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    perspective: true,
+                    trans_mms: true,
+                    rot_mms: true,
+                    stereo_mode: "cross".to_string(),
+                    stereo_dist: 2.5,
+                    swap_stereo_eyes: true,
+                    center_mark: "axis".to_string(),
+                },
+                width: 640,
+                height: 480,
+            },
+        )
+        .unwrap();
+        let ModelResponse::ViewPropertiesUpdate(update) = response else {
+            panic!("expected updated view properties");
+        };
+        assert_eq!(update.properties.name, "detail");
+        assert_eq!(update.properties.center, [1.0, 2.0, 3.0]);
+        assert_eq!(update.properties.stereo_mode, "cross");
+        assert_eq!(update.properties.center_mark, "axis");
+        assert!(update.properties.swap_stereo_eyes);
+        assert!(update.viewport.perspective);
+        assert!(update.snapshot.can_undo);
+        assert!(update.snapshot.scenes[0].modified);
+
+        model.undo(0).unwrap();
+        let restored = model.view_properties();
+        assert_eq!(restored.zoom, 50.0);
+        assert_eq!(restored.center_mark, "crosshair");
+        assert!(!restored.swap_stereo_eyes);
+
+        model
+            .update_camera("center-mark-none", 0.0, 0.0, 480)
+            .unwrap();
+        let viewport = model.render(640, 480);
+        assert_eq!(viewport.center_mark, "none");
+    }
+
+    #[test]
+    fn pdb_download_reuses_a_nonempty_cached_file() {
+        let pdb_id = format!("T{:X}", std::process::id());
+        let path = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif"));
+        fs::write(&path, b"cached mmCIF").unwrap();
+        assert_eq!(download_pdb_to_cache(&pdb_id).unwrap(), path);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn pdb_download_prefers_the_compressed_cache() {
+        let pdb_id = format!("G{:X}", std::process::id());
+        let compressed = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif.gz"));
+        let legacy = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif"));
+        fs::write(&compressed, b"cached gzip mmCIF").unwrap();
+        fs::write(&legacy, b"cached plain mmCIF").unwrap();
+        assert_eq!(download_pdb_to_cache(&pdb_id).unwrap(), compressed);
+        fs::remove_file(compressed).unwrap();
+        fs::remove_file(legacy).unwrap();
+    }
+
+    #[test]
+    fn opening_a_missing_path_fails_without_creating_an_undo_entry() {
+        let mut model = model_without_gpu();
+        let missing = std::env::temp_dir()
+            .join(format!("cuemol-missing-{}.pdb", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+        let error = handle_model_request(&mut model, ModelRequest::OpenPaths(vec![missing]))
+            .err()
+            .expect("missing paths must fail");
+        assert!(error.contains("Loaded 0; failed:"));
+        assert!(model.undo_stack.is_empty());
+        assert!(model.desktop.active_object_summaries().is_empty());
+    }
+
+    #[test]
+    fn reload_scene_replaces_the_active_scene_and_clears_undo_history() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-reload-scene-{}.qsc", std::process::id()));
+        fs::write(
+            &path,
+            b"<?xml version=\"1.0\"?><scene marker=\"file\"><qsc_opts version=\"QDF0\"/></scene>",
+        )
+        .unwrap();
+        let mut model = model_without_gpu();
+        handle_model_request(
+            &mut model,
+            ModelRequest::OpenPaths(vec![path.to_string_lossy().into_owned()]),
+        )
+        .unwrap();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let scene_count = model.desktop.scene_summaries().len();
+        model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .set_scene_attribute("marker", "dirty");
+        handle_model_request(&mut model, ModelRequest::SetBackground("white".to_string())).unwrap();
+
+        let response = handle_model_request(&mut model, ModelRequest::ReloadScene).unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(model.desktop.active_scene(), Some(scene_uid));
+        assert_eq!(model.desktop.scene_summaries().len(), scene_count);
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .scene_attribute("marker"),
+            Some("file")
+        );
+        assert!(!snapshot.can_undo);
+        assert!(!snapshot.can_redo);
+        assert!(
+            !snapshot
+                .scenes
+                .iter()
+                .find(|scene| scene.active)
+                .unwrap()
+                .modified
+        );
+        assert!(snapshot.status.ends_with("] is reloaded."));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reload_scene_rejects_an_unsaved_scene() {
+        let mut model = model_without_gpu();
+        let error = handle_model_request(&mut model, ModelRequest::ReloadScene)
+            .err()
+            .expect("an unsaved scene must not be reloaded");
+        assert_eq!(error, "active scene has no source path");
+    }
+
+    #[test]
+    fn failed_reload_preserves_the_current_scene_and_undo_history() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-reload-failure-{}.qsc", std::process::id()));
+        fs::write(
+            &path,
+            b"<?xml version=\"1.0\"?><scene marker=\"file\"><qsc_opts version=\"QDF0\"/></scene>",
+        )
+        .unwrap();
+        let mut model = model_without_gpu();
+        handle_model_request(
+            &mut model,
+            ModelRequest::OpenPaths(vec![path.to_string_lossy().into_owned()]),
+        )
+        .unwrap();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .set_scene_attribute("marker", "dirty");
+        handle_model_request(&mut model, ModelRequest::SetBackground("white".to_string())).unwrap();
+        let undo_count = model.undo_stack.len();
+        assert!(model.modified_scenes.contains(&scene_uid));
+        fs::write(&path, b"not a QSC file").unwrap();
+
+        assert!(handle_model_request(&mut model, ModelRequest::ReloadScene).is_err());
+        assert_eq!(model.undo_stack.len(), undo_count);
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .scene_attribute("marker"),
+            Some("dirty")
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn saving_to_the_scene_source_creates_a_backup_and_clears_undo() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-save-backup-{}.qsc", std::process::id()));
+        let backup_path = PathBuf::from(format!("{}.bak", path.display()));
+        let mut model = model_without_gpu();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SaveScene(path.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        let first_contents = fs::read(&path).unwrap();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .set_scene_attribute("saved_version", "second");
+        handle_model_request(&mut model, ModelRequest::SetBackground("white".to_string())).unwrap();
+        assert!(!model.undo_stack.is_empty());
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SaveScene(path.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(fs::read(&backup_path).unwrap(), first_contents);
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("saved_version=\"second\""));
+        assert!(!snapshot.can_undo);
+        assert!(!snapshot.can_redo);
+        assert!(
+            !snapshot
+                .scenes
+                .iter()
+                .find(|scene| scene.active)
+                .unwrap()
+                .modified
+        );
+        assert_eq!(
+            snapshot
+                .scenes
+                .iter()
+                .find(|scene| scene.active)
+                .unwrap()
+                .source,
+            path.to_string_lossy()
+        );
+        fs::remove_file(path).unwrap();
+        fs::remove_file(backup_path).unwrap();
     }
 
     #[test]
@@ -3191,13 +8725,422 @@ mod tests {
     fn model_undo_and_redo_restore_gui_mutations() {
         let mut model = model_without_gpu();
         handle_model_request(&mut model, ModelRequest::SetBackground("white".to_string())).unwrap();
-        assert!(model.snapshot().can_undo);
-        handle_model_request(&mut model, ModelRequest::Undo).unwrap();
+        handle_model_request(&mut model, ModelRequest::SetDensityLevel(2.4)).unwrap();
+        assert_eq!(
+            model.snapshot().undo_descriptions,
+            ["Density level: 2.40 σ", "Background: white"]
+        );
+        handle_model_request(&mut model, ModelRequest::Undo(1)).unwrap();
         let snapshot = model.snapshot();
         assert_eq!(snapshot.background, "black");
+        assert_eq!(snapshot.density_level, 1.5);
+        assert!(!snapshot.can_undo);
         assert!(snapshot.can_redo);
-        handle_model_request(&mut model, ModelRequest::Redo).unwrap();
-        assert_eq!(model.snapshot().background, "white");
+        assert_eq!(
+            snapshot.redo_descriptions,
+            ["Background: white", "Density level: 2.40 σ"]
+        );
+        assert_eq!(snapshot.status, "Undo: Background: white");
+        handle_model_request(&mut model, ModelRequest::Redo(1)).unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.background, "white");
+        assert_eq!(snapshot.density_level, 2.4);
+        assert_eq!(snapshot.status, "Redo: Density level: 2.40 σ");
+    }
+
+    #[test]
+    fn density_map_workspace_commands_update_snapshot_and_support_undo() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let mut map = cuemol_xtal::DensityMap::new();
+        map.set_map_byte_array(
+            &[0, 255, 255, 0, 255, 0, 0, 255],
+            [2, 2, 2],
+            -1.0,
+            1.0,
+            0.0,
+            0.5,
+        );
+        map.set_map_params([0, 0, 0], [2, 2, 2]);
+        map.set_xtal_params(2.0, 2.0, 2.0, 90.0, 90.0, 90.0);
+        let map_uid = model.desktop.add_density_map(scene_uid, "density", map);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddDensityRenderer {
+                map_uid: map_uid.get(),
+                renderer_type: "contour".to_string(),
+            },
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.density_maps.len(), 1);
+        assert_eq!(snapshot.density_maps[0].scene_uid, scene_uid.get());
+        assert_eq!(snapshot.density_maps[0].class_name, "DensityMap");
+        assert_eq!(snapshot.density_maps[0].renderers.len(), 1);
+        let renderer_uid = snapshot.density_maps[0].renderers[0].uid;
+
+        let mut properties =
+            default_renderer_properties_input(map_uid, Uid::new(renderer_uid), "edited contour");
+        properties.selection.clear();
+        properties.material = "glass".to_string();
+        properties.alpha = 0.5;
+        properties.specific = BTreeMap::from([
+            ("siglevel".to_string(), "0".to_string()),
+            ("width".to_string(), "2.5".to_string()),
+            ("bufsize".to_string(), "150".to_string()),
+            ("autoupdate".to_string(), "false".to_string()),
+        ]);
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetDensityRendererProperties(properties),
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        let renderer = &snapshot.density_maps[0].renderers[0];
+        assert_eq!(renderer.name, "edited contour");
+        assert_eq!(renderer.material, "glass");
+        assert_eq!(renderer.alpha, 0.5);
+        assert_eq!(renderer.specific["width"], "2.5");
+        assert_eq!(renderer.specific["bufsize"], "150");
+        assert!(snapshot.can_undo);
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.density_maps[0].renderers[0].name, "contour 1");
+        assert_eq!(snapshot.density_maps[0].renderers[0].alpha, 1.0);
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert_eq!(
+            model.snapshot().density_maps[0].renderers[0].name,
+            "edited contour"
+        );
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetDensityMapProperties(ObjectPropertiesInput {
+                object_uid: map_uid.get(),
+                name: "renamed density".to_string(),
+                visible: false,
+                locked: true,
+            }),
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.density_maps[0].name, "renamed density");
+        assert!(!snapshot.density_maps[0].visible);
+        assert!(snapshot.density_maps[0].locked);
+    }
+
+    #[test]
+    fn surface_workspace_commands_update_snapshot_and_support_undo() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let data = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+        let surface_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(cuemol_molstr::LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: data.to_string(),
+                raw_data: data.as_bytes().to_vec(),
+                qsc_node: None,
+            });
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.surfaces.len(), 1);
+        assert_eq!(snapshot.surfaces[0].class_name, "MolSurfObj");
+        assert_eq!(snapshot.surfaces[0].renderers.len(), 1);
+        let renderer_uid = snapshot.surfaces[0].renderers[0].uid;
+
+        let mut properties =
+            default_renderer_properties_input(surface_uid, Uid::new(renderer_uid), "surface wire");
+        properties.material = "glass".to_string();
+        properties.alpha = 0.5;
+        properties.specific = BTreeMap::from([
+            ("drawmode".to_string(), "line".to_string()),
+            ("width".to_string(), "2".to_string()),
+            ("defaultcolor".to_string(), "#ff0000".to_string()),
+            ("colormode".to_string(), "solid".to_string()),
+            ("showsel".to_string(), "*".to_string()),
+        ]);
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetSurfaceRendererProperties(properties),
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        let renderer = &snapshot.surfaces[0].renderers[0];
+        assert_eq!(renderer.name, "surface wire");
+        assert_eq!(renderer.material, "glass");
+        assert_eq!(renderer.alpha, 0.5);
+        assert_eq!(renderer.specific["drawmode"], "line");
+        assert_eq!(renderer.specific["width"], "2");
+        assert!(snapshot.can_undo);
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().surfaces[0].renderers[0].name, "molsurf 1");
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert_eq!(
+            model.snapshot().surfaces[0].renderers[0].name,
+            "surface wire"
+        );
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetSurfaceProperties(ObjectPropertiesInput {
+                object_uid: surface_uid.get(),
+                name: "renamed surface".to_string(),
+                visible: false,
+                locked: true,
+            }),
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.surfaces[0].name, "renamed surface");
+        assert!(!snapshot.surfaces[0].visible);
+        assert!(snapshot.surfaces[0].locked);
+    }
+
+    #[test]
+    fn workspace_delete_removes_each_item_kind_and_supports_undo() {
+        let (mut molecule_model, object_uid, renderer_uid) = model_with_renderer();
+        handle_model_request(
+            &mut molecule_model,
+            ModelRequest::DeleteWorkspaceItem(WorkspaceDeleteInput {
+                kind: "renderer".to_string(),
+                object_uid: object_uid.get(),
+                renderer_uid: Some(renderer_uid.get()),
+            }),
+        )
+        .unwrap();
+        assert!(molecule_model.snapshot().objects[0].renderers.is_empty());
+        handle_model_request(&mut molecule_model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(molecule_model.snapshot().objects[0].renderers.len(), 1);
+        handle_model_request(
+            &mut molecule_model,
+            ModelRequest::DeleteWorkspaceItem(WorkspaceDeleteInput {
+                kind: "object".to_string(),
+                object_uid: object_uid.get(),
+                renderer_uid: None,
+            }),
+        )
+        .unwrap();
+        assert!(molecule_model.snapshot().objects.is_empty());
+        handle_model_request(&mut molecule_model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(molecule_model.snapshot().objects.len(), 1);
+
+        let mut density_model = model_without_gpu();
+        let scene_uid = density_model.desktop.active_scene().unwrap();
+        let mut map = cuemol_xtal::DensityMap::new();
+        map.set_map_byte_array(&[0, 255], [2, 1, 1], 0.0, 1.0, 0.5, 0.5);
+        map.set_map_params([0, 0, 0], [2, 1, 1]);
+        let map_uid = density_model
+            .desktop
+            .add_density_map(scene_uid, "density", map);
+        let density_renderer_uid = density_model
+            .desktop
+            .add_density_renderer(map_uid, "contour")
+            .unwrap();
+        handle_model_request(
+            &mut density_model,
+            ModelRequest::DeleteWorkspaceItem(WorkspaceDeleteInput {
+                kind: "densityRenderer".to_string(),
+                object_uid: map_uid.get(),
+                renderer_uid: Some(density_renderer_uid.get()),
+            }),
+        )
+        .unwrap();
+        assert!(density_model.snapshot().density_maps[0]
+            .renderers
+            .is_empty());
+        handle_model_request(&mut density_model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(density_model.snapshot().density_maps[0].renderers.len(), 1);
+        handle_model_request(
+            &mut density_model,
+            ModelRequest::DeleteWorkspaceItem(WorkspaceDeleteInput {
+                kind: "densityMap".to_string(),
+                object_uid: map_uid.get(),
+                renderer_uid: None,
+            }),
+        )
+        .unwrap();
+        assert!(density_model.snapshot().density_maps.is_empty());
+        handle_model_request(&mut density_model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(density_model.snapshot().density_maps.len(), 1);
+
+        let mut surface_model = model_without_gpu();
+        let scene_uid = surface_model.desktop.active_scene().unwrap();
+        let data = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+        let surface_uid = surface_model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(cuemol_molstr::LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: data.to_string(),
+                raw_data: data.as_bytes().to_vec(),
+                qsc_node: None,
+            });
+        let surface_renderer_uid = surface_model.snapshot().surfaces[0].renderers[0].uid;
+        handle_model_request(
+            &mut surface_model,
+            ModelRequest::DeleteWorkspaceItem(WorkspaceDeleteInput {
+                kind: "surfaceRenderer".to_string(),
+                object_uid: surface_uid.get(),
+                renderer_uid: Some(surface_renderer_uid),
+            }),
+        )
+        .unwrap();
+        assert!(surface_model.snapshot().surfaces[0].renderers.is_empty());
+        handle_model_request(&mut surface_model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(surface_model.snapshot().surfaces[0].renderers.len(), 1);
+        handle_model_request(
+            &mut surface_model,
+            ModelRequest::DeleteWorkspaceItem(WorkspaceDeleteInput {
+                kind: "surface".to_string(),
+                object_uid: surface_uid.get(),
+                renderer_uid: None,
+            }),
+        )
+        .unwrap();
+        assert!(surface_model.snapshot().surfaces.is_empty());
+        handle_model_request(&mut surface_model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(surface_model.snapshot().surfaces.len(), 1);
+    }
+
+    #[test]
+    fn workspace_zoom_fits_renderer_selection_object_and_density_map() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      2  CA  GLY A   2      10.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      3  CA  GLY B   1     100.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule_with_source_type("molecule", molecule, "pdb");
+        let renderer_uid = {
+            let object = model
+                .desktop
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .unwrap();
+            let uid = object.add_renderer("simple", "chain A");
+            object
+                .renderer_mut(uid)
+                .unwrap()
+                .set_selection(cuemol_molstr::parse_selector("chain A").unwrap());
+            uid
+        };
+
+        assert!(model
+            .fit_workspace_item(
+                WorkspaceFitInput {
+                    kind: "renderer".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: Some(renderer_uid.get()),
+                },
+                800,
+                400,
+            )
+            .unwrap());
+        assert!((model.camera.center().x - 5.0).abs() < 1.0e-6);
+        assert!((model.camera.zoom() - 7.0).abs() < 1.0e-6);
+
+        assert!(model
+            .fit_workspace_item(
+                WorkspaceFitInput {
+                    kind: "object".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: None,
+                },
+                800,
+                400,
+            )
+            .unwrap());
+        assert!((model.camera.center().x - 50.0).abs() < 1.0e-6);
+        assert!((model.camera.zoom() - 70.0).abs() < 1.0e-6);
+
+        let mut map = cuemol_xtal::DensityMap::new();
+        map.set_map_byte_array(&[0, 255], [2, 1, 1], 0.0, 1.0, 0.5, 0.5);
+        map.set_map_params([0, 0, 0], [2, 1, 1]);
+        map.set_xtal_params(20.0, 10.0, 10.0, 90.0, 90.0, 90.0);
+        let map_uid = model.desktop.add_density_map(scene_uid, "density", map);
+        assert!(model
+            .fit_workspace_item(
+                WorkspaceFitInput {
+                    kind: "densityMap".to_string(),
+                    object_uid: map_uid.get(),
+                    renderer_uid: None,
+                },
+                800,
+                400,
+            )
+            .unwrap());
+        assert!((model.camera.center().x - 10.0).abs() < 1.0e-6);
+        assert!((model.camera.center().y - 5.0).abs() < 1.0e-6);
+        assert!((model.camera.zoom() - 10.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn molstruct_actions_select_center_and_zoom_selected_atoms() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      2  CA  GLY A   2      10.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      3  CA  GLY B   1     100.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule_with_source_type("molecule", molecule, "pdb");
+        let selection = "'A'.1:2.*";
+
+        model
+            .apply_molecule_selection_action(object_uid.get(), selection, "center", 800, 400)
+            .unwrap();
+        let object = model.desktop.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.mol().selection_text(), selection);
+        assert_eq!(model.selection, selection);
+        assert!((model.camera.center().x - 5.0).abs() < 1.0e-6);
+
+        model
+            .apply_molecule_selection_action(object_uid.get(), selection, "zoom", 800, 400)
+            .unwrap();
+        assert!((model.camera.center().x - 5.0).abs() < 1.0e-6);
+        assert!((model.camera.zoom() - 7.0).abs() < 1.0e-6);
+        assert!(
+            model
+                .apply_molecule_selection_action(
+                    object_uid.get(),
+                    "bad selector (",
+                    "select",
+                    800,
+                    400,
+                )
+                .is_err()
+        );
+        assert!(model
+            .apply_molecule_selection_action(object_uid.get(), "'B'.1.*", "invalid", 800, 400)
+            .is_err());
+        assert_eq!(model.selection, selection);
     }
 
     #[test]
@@ -3225,14 +9168,104 @@ mod tests {
         let ModelResponse::Snapshot(snapshot) = response else {
             panic!("expected a snapshot");
         };
-        assert_eq!(snapshot.structure[0].object_name, "1CRN");
-        assert_eq!(snapshot.structure[0].chains[0].chain_id, "A");
-        assert_eq!(snapshot.sequence[0].residues[0].letter, "T");
-        assert!(snapshot.sequence[0].residues[0].selected);
+        let details = model.molecule_details("", "", true);
+        assert_eq!(snapshot.structure_key, details.structure_key);
+        assert_eq!(snapshot.sequence_key, details.sequence_key);
+        let structure = details.structure.as_ref().unwrap();
+        assert_eq!(structure[0].object_name, "1CRN");
+        assert_eq!(structure[0].chains[0].chain_id, "A");
+        let sequence = details.sequence.as_ref().unwrap();
+        assert_eq!(sequence[0].residues[0].letter, "T");
+        assert!(sequence[0].residues[0].selected);
         assert_eq!(
             snapshot.objects[0].coloring_type.as_deref(),
             Some("RainbowColoring")
         );
+    }
+
+    #[test]
+    fn detailed_renderer_coloring_is_serialized_and_undoable() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetColoring {
+                input: ColoringUpdateInput {
+                    kind: "renderer".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: Some(renderer_uid.get()),
+                    coloring_type: Some("PaintColoring".to_string()),
+                    attrs: BTreeMap::new(),
+                    paint_entries: vec![
+                        PaintEntryDto {
+                            selection: "sheet".to_string(),
+                            color: "#4682b4".to_string(),
+                        },
+                        PaintEntryDto {
+                            selection: "*".to_string(),
+                            color: "#fffaf0".to_string(),
+                        },
+                    ],
+                    gradient_entries: Vec::new(),
+                    default_color: None,
+                },
+                width: 100,
+                height: 100,
+            },
+        )
+        .unwrap();
+        let ModelResponse::MolStructUpdate(update) = response else {
+            panic!("expected a snapshot with viewport");
+        };
+        assert_eq!(update.viewport.width, 100);
+        assert_eq!(update.viewport.height, 100);
+        let snapshot = update.snapshot;
+        let renderer = &snapshot.objects[0].renderers[0];
+        assert_eq!(renderer.coloring_type.as_deref(), Some("PaintColoring"));
+        assert_eq!(renderer.paint_entries[0].selection, "sheet");
+        assert_eq!(renderer.paint_entries[0].color, "#4682b4");
+        let renderer_state = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        assert_eq!(
+            renderer_state.qsc_children()[0].type_name(),
+            "PaintColoring"
+        );
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model.snapshot().objects[0].renderers[0]
+            .coloring_type
+            .is_none());
+    }
+
+    #[test]
+    fn invalid_detailed_coloring_does_not_create_undo_data() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let result = handle_model_request(
+            &mut model,
+            ModelRequest::SetColoring {
+                input: ColoringUpdateInput {
+                    kind: "renderer".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: Some(renderer_uid.get()),
+                    coloring_type: Some("CPKColoring".to_string()),
+                    attrs: BTreeMap::from([("col_C".to_string(), "not-a-color".to_string())]),
+                    paint_entries: Vec::new(),
+                    gradient_entries: Vec::new(),
+                    default_color: None,
+                },
+                width: 100,
+                height: 100,
+            },
+        );
+        assert!(result.is_err());
+        assert!(model.undo_stack.is_empty());
+        assert!(model.snapshot().objects[0].renderers[0]
+            .coloring_type
+            .is_none());
     }
 
     #[test]
@@ -3256,8 +9289,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(model.snapshot().objects[0].atom_count, 326);
-        handle_model_request(&mut model, ModelRequest::Undo).unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.objects[0].atom_count, 326);
+        assert_eq!(snapshot.undo_descriptions[0], "Deleted 1 atom(s)");
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().objects[0].atom_count, 327);
     }
 
@@ -3315,6 +9350,22 @@ mod tests {
         assert!(snapshot.animation_elapsed > 0.0);
         assert!(snapshot.animation_playing);
         assert_ne!(model.camera.rotation(), before);
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::TickAnimationFrame {
+                dt: 0.1,
+                width: 320,
+                height: 240,
+            },
+        )
+        .unwrap();
+        let ModelResponse::AnimationFrame(frame) = response else {
+            panic!("expected a compact animation frame");
+        };
+        assert!(frame.animation_elapsed > snapshot.animation_elapsed);
+        assert_eq!(frame.animation_duration, 3.0);
+        assert!(frame.animation_playing);
+        assert_eq!(frame.viewport.width, 320);
         handle_model_request(
             &mut model,
             ModelRequest::AnimationControl("stop".to_string()),
@@ -3371,6 +9422,23 @@ mod tests {
                 .position,
             Vector4::new3(9.0, 8.0, 7.0)
         );
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetTrajectoryFrameViewport {
+                object_uid: object.uid.get(),
+                frame: 0,
+                width: 320,
+                height: 240,
+            },
+        )
+        .unwrap();
+        let ModelResponse::TrajectoryFrame(frame) = response else {
+            panic!("expected a compact trajectory frame");
+        };
+        assert_eq!(frame.object_uid, object.uid.get());
+        assert_eq!(frame.frame, 0);
+        assert_eq!(frame.viewport.height, 240);
+        assert_eq!(model.snapshot().trajectories[0].current_frame, 0);
     }
 
     #[test]
@@ -3679,7 +9747,10 @@ mod tests {
         let output_dir =
             std::env::temp_dir().join(format!("cuemol-tauri-animation-{}", std::process::id()));
         let mut model = AppModel::new(vec![pdb]);
+        assert!(model.mesh.is_none());
+        let viewport = model.render(64, 64);
         assert!(model.renderer.is_some());
+        assert!(viewport.image.is_some());
         model.animation_objects.push(AnimObject {
             kind: AnimKind::Spin,
             duration: 0.1,
