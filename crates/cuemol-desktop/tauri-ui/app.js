@@ -3788,7 +3788,7 @@ async function showReferenceDialog(title) {
     const open = button("Download and Open", "dialog-primary", async () => {
       const id = pdbId.value.trim().toUpperCase();
       if (!id) return;
-      await mutate("open_pdb", { pdbId: id });
+      await mutateWithViewport("open_pdb", { pdbId: id });
       referenceDialog.close();
     });
     dialogActions(open);
@@ -6299,6 +6299,30 @@ function mutateWithoutViewport(command, args = {}, render = renderShell) {
   return mutate(command, args, render, false);
 }
 
+async function mutateWithViewport(command, args = {}, render = renderShell) {
+  if (!invoke) {
+    showError("Tauri IPC is unavailable. Run this frontend through the Tauri binary.");
+    return false;
+  }
+  setBusy(true);
+  const size = viewportDimensions();
+  const sequence = ++requestSequence;
+  try {
+    const update = await invoke(command, { ...args, ...size });
+    snapshot = update.snapshot;
+    syncEmptyMoleculeDetails();
+    render();
+    applyViewport(update.viewport, sequence);
+    scheduleMoleculeDetailsRefresh();
+    return true;
+  } catch (error) {
+    showError(error);
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function cameraCommand(action, x = 0, y = 0) {
   if (!invoke) return;
   const size = viewportDimensions();
@@ -6352,7 +6376,7 @@ async function openSelectedPaths(paths) {
   const viewPaths = paths.filter((path) => /\.(view|cam)$/i.test(path));
   const objectPaths = paths.filter((path) => !/\.(view|cam)$/i.test(path));
   let opened = false;
-  if (objectPaths.length && (await mutate("open_paths", { paths: objectPaths }))) {
+  if (objectPaths.length && (await mutateWithViewport("open_paths", { paths: objectPaths }))) {
     const openedPaths = Array.isArray(snapshot?.openedPaths) ? snapshot.openedPaths : [];
     addRecentFiles(openedPaths.map((path) => ({ path })));
     opened = openedPaths.length > 0;
@@ -7137,7 +7161,7 @@ async function start() {
       requestAnimationFrame(() => {
         setTimeout(() => {
           statusText.textContent = "Loading startup files…";
-          void mutate("open_initial_paths");
+          void mutateWithViewport("open_initial_paths");
         }, 0);
       });
     }

@@ -3899,11 +3899,17 @@ enum ModelRequest {
     Undo(usize),
     Redo(usize),
     ClearUndo,
-    OpenPaths(Vec<String>),
+    OpenPathsViewport {
+        paths: Vec<String>,
+        width: u32,
+        height: u32,
+    },
     ReloadScene,
     OpenPdb {
         pdb_id: String,
         path: PathBuf,
+        width: u32,
+        height: u32,
     },
     LoadTrajectory {
         topology_path: String,
@@ -4943,6 +4949,28 @@ fn validate_coloring_update(input: &ColoringUpdateInput) -> Result<(), String> {
     Ok(())
 }
 
+fn apply_open_paths(model: &mut AppModel, paths: Vec<String>) -> Result<(), String> {
+    let undo = model.capture_undo();
+    model.open_paths(paths)?;
+    model.sync_active_scene_properties();
+    let loaded_scene = model
+        .desktop
+        .active_scene_source_path()
+        .map(|source| source.to_string_lossy())
+        .is_some_and(|source| model.opened_paths.iter().any(|path| path == &source));
+    if loaded_scene {
+        model.undo_stack.clear();
+        model.redo_stack.clear();
+        if let Some(scene_uid) = model.desktop.active_scene() {
+            model.modified_scenes.remove(&scene_uid);
+        }
+    } else {
+        model.push_undo(undo);
+    }
+    model.touch_structure_details();
+    Ok(())
+}
+
 fn handle_model_request(
     model: &mut AppModel,
     request: ModelRequest,
@@ -5126,26 +5154,19 @@ fn handle_model_request(
             model.clear_undo();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::OpenPaths(paths) => {
-            let undo = model.capture_undo();
-            model.open_paths(paths)?;
-            model.sync_active_scene_properties();
-            let loaded_scene = model
-                .desktop
-                .active_scene_source_path()
-                .map(|source| source.to_string_lossy())
-                .is_some_and(|source| model.opened_paths.iter().any(|path| path == &source));
-            if loaded_scene {
-                model.undo_stack.clear();
-                model.redo_stack.clear();
-                if let Some(scene_uid) = model.desktop.active_scene() {
-                    model.modified_scenes.remove(&scene_uid);
-                }
-            } else {
-                model.push_undo(undo);
-            }
-            model.touch_structure_details();
-            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        ModelRequest::OpenPathsViewport {
+            paths,
+            width,
+            height,
+        } => {
+            apply_open_paths(model, paths)?;
+            let viewport = model.render(width, height);
+            Ok(ModelResponse::MolStructUpdate(Box::new(
+                MolStructUpdateDto {
+                    snapshot: model.snapshot(),
+                    viewport,
+                },
+            )))
         }
         ModelRequest::ReloadScene => {
             let path = model
@@ -5173,7 +5194,12 @@ fn handle_model_request(
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::OpenPdb { pdb_id, path } => {
+        ModelRequest::OpenPdb {
+            pdb_id,
+            path,
+            width,
+            height,
+        } => {
             let undo = model.capture_undo();
             let result = model
                 .desktop
@@ -5188,7 +5214,13 @@ fn handle_model_request(
             model.rebuild_mesh(true)?;
             model.push_undo(undo);
             model.touch_structure_details();
-            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+            let viewport = model.render(width, height);
+            Ok(ModelResponse::MolStructUpdate(Box::new(
+                MolStructUpdateDto {
+                    snapshot: model.snapshot(),
+                    viewport,
+                },
+            )))
         }
         ModelRequest::LoadTrajectory {
             topology_path,
@@ -6774,12 +6806,28 @@ fn clear_undo(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
-fn open_paths(paths: Vec<String>, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
-    snapshot_response(request_model(&state, ModelRequest::OpenPaths(paths))?)
+fn open_paths(
+    paths: Vec<String>,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<MolStructUpdateDto, String> {
+    molecule_selection_update_response(request_model(
+        &state,
+        ModelRequest::OpenPathsViewport {
+            paths,
+            width,
+            height,
+        },
+    )?)
 }
 
 #[tauri::command]
-fn open_initial_paths(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+fn open_initial_paths(
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<MolStructUpdateDto, String> {
     let paths = state
         .startup_paths
         .lock()
@@ -6787,16 +6835,25 @@ fn open_initial_paths(state: State<'_, ManagedState>) -> Result<AppSnapshot, Str
         .take()
         .unwrap_or_default();
     if paths.is_empty() {
-        return snapshot_response(request_model(&state, ModelRequest::GetSnapshot)?);
+        let response = request_model(&state, ModelRequest::GetInitialState { width, height })?;
+        return match response {
+            ModelResponse::InitialState(initial) => Ok(MolStructUpdateDto {
+                snapshot: initial.snapshot,
+                viewport: initial.viewport,
+            }),
+            _ => Err("unexpected initial-path response".to_string()),
+        };
     }
-    snapshot_response(request_model(
+    molecule_selection_update_response(request_model(
         &state,
-        ModelRequest::OpenPaths(
-            paths
+        ModelRequest::OpenPathsViewport {
+            paths: paths
                 .into_iter()
                 .map(|path| path.to_string_lossy().into_owned())
                 .collect(),
-        ),
+            width,
+            height,
+        },
     )?)
 }
 
@@ -6806,14 +6863,24 @@ fn reload_scene(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
-async fn open_pdb(pdb_id: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+async fn open_pdb(
+    pdb_id: String,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<MolStructUpdateDto, String> {
     let download_id = pdb_id.clone();
     let path = tauri::async_runtime::spawn_blocking(move || download_pdb_to_cache(&download_id))
         .await
         .map_err(|error| format!("PDB download task failed: {error}"))??;
-    snapshot_response(request_model(
+    molecule_selection_update_response(request_model(
         &state,
-        ModelRequest::OpenPdb { pdb_id, path },
+        ModelRequest::OpenPdb {
+            pdb_id,
+            path,
+            width,
+            height,
+        },
     )?)
 }
 
@@ -9004,9 +9071,8 @@ mod tests {
             .join(format!("cuemol-missing-{}.pdb", std::process::id()))
             .to_string_lossy()
             .to_string();
-        let error = handle_model_request(&mut model, ModelRequest::OpenPaths(vec![missing]))
-            .err()
-            .expect("missing paths must fail");
+        let error =
+            apply_open_paths(&mut model, vec![missing]).expect_err("missing paths must fail");
         assert!(error.contains("Loaded 0; failed:"));
         assert!(model.undo_stack.is_empty());
         assert!(model.desktop.active_object_summaries().is_empty());
@@ -9022,11 +9088,7 @@ mod tests {
         )
         .unwrap();
         let mut model = model_without_gpu();
-        handle_model_request(
-            &mut model,
-            ModelRequest::OpenPaths(vec![path.to_string_lossy().into_owned()]),
-        )
-        .unwrap();
+        apply_open_paths(&mut model, vec![path.to_string_lossy().into_owned()]).unwrap();
         let scene_uid = model.desktop.active_scene().unwrap();
         let scene_count = model.desktop.scene_summaries().len();
         model
@@ -9085,11 +9147,7 @@ mod tests {
         )
         .unwrap();
         let mut model = model_without_gpu();
-        handle_model_request(
-            &mut model,
-            ModelRequest::OpenPaths(vec![path.to_string_lossy().into_owned()]),
-        )
-        .unwrap();
+        apply_open_paths(&mut model, vec![path.to_string_lossy().into_owned()]).unwrap();
         let scene_uid = model.desktop.active_scene().unwrap();
         model
             .desktop

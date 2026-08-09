@@ -361,6 +361,7 @@ struct GuiApplication {
     log_save_path: String,
     pdb_id: String,
     pdb_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
+    url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
     console_input: String,
     selection_text: String,
@@ -663,6 +664,7 @@ impl GuiApplication {
             log_save_path: "cuemol.log".to_string(),
             pdb_id: "1CRN".to_string(),
             pdb_download_receiver: None,
+            url_download_receiver: None,
             script_path: "script.js".to_string(),
             console_input: String::new(),
             selection_text: String::new(),
@@ -780,6 +782,7 @@ impl GuiApplication {
 
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         self.poll_pdb_download(camera);
+        self.poll_url_download(camera);
         self.pixels_per_point = ctx.pixels_per_point();
         // UI theme (View menu): CueMol2's native XUL look is light by default.
         ctx.set_visuals(if self.light_theme {
@@ -817,6 +820,9 @@ impl GuiApplication {
             self.properties_window(ctx, camera);
         }
         self.dialogs(ctx, camera);
+        if self.pdb_download_receiver.is_some() || self.url_download_receiver.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
     }
 
     fn central_view(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
@@ -2832,13 +2838,8 @@ impl GuiApplication {
             return;
         }
         let path = if is_network_url(&open_path) {
-            match download_url_to_cache(&open_path) {
-                Ok(path) => path,
-                Err(error) => {
-                    self.set_error(error);
-                    return;
-                }
-            }
+            self.start_url_download(open_path);
+            return;
         } else {
             PathBuf::from(&open_path)
         };
@@ -3158,6 +3159,51 @@ impl GuiApplication {
             Some(Err(mpsc::TryRecvError::Disconnected)) => {
                 self.pdb_download_receiver = None;
                 self.set_status("Error: PDB download task stopped");
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
+    }
+
+    fn start_url_download(&mut self, url: String) {
+        if self.url_download_receiver.is_some() {
+            self.set_status("URL download is already running");
+            return;
+        }
+        let status_url = url.clone();
+        let (sender, receiver) = mpsc::channel();
+        let spawn = std::thread::Builder::new()
+            .name("cuemol-url-download".to_string())
+            .spawn(move || {
+                let result = download_url_to_cache(&url).map_err(|error| error.to_string());
+                let _ = sender.send(result);
+            });
+        match spawn {
+            Ok(_) => {
+                self.url_download_receiver = Some(receiver);
+                self.set_status(format!("Downloading {status_url}…"));
+            }
+            Err(error) => self.set_status(format!("Error: failed to start URL download: {error}")),
+        }
+    }
+
+    fn poll_url_download(&mut self, camera: &mut CameraController) {
+        let result = self
+            .url_download_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match result {
+            Some(Ok(Ok(path))) => {
+                self.url_download_receiver = None;
+                self.open_path = path.to_string_lossy().to_string();
+                self.open_current_path(camera);
+            }
+            Some(Ok(Err(error))) => {
+                self.url_download_receiver = None;
+                self.set_status(format!("Error: {error}"));
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.url_download_receiver = None;
+                self.set_status("Error: URL download task stopped");
             }
             Some(Err(mpsc::TryRecvError::Empty)) | None => {}
         }

@@ -187,7 +187,7 @@ fn tauri_open_recent_matches_the_reference_mru_contract() {
     assert!(JS.contains("localStorage.setItem(RECENT_STORAGE_KEY"));
     assert!(JS.contains("button(\"Clear Menu\""));
     assert!(JS.contains("await openSelectedPaths([entry.path])"));
-    assert!(JS.contains("mutate(\"open_paths\", { paths: objectPaths })"));
+    assert!(JS.contains("mutateWithViewport(\"open_paths\", { paths: objectPaths })"));
     assert!(JS.contains("snapshot?.openedPaths"));
 }
 
@@ -227,7 +227,10 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(JS.contains("scheduleMoleculeDetailsRefresh()"));
     assert!(JS.contains("includeSequence"));
     assert!(JS.contains("initial.startupPathsPending"));
-    assert!(JS.contains("void mutate(\"open_initial_paths\")"));
+    assert!(JS.contains("void mutateWithViewport(\"open_initial_paths\")"));
+    assert!(JS.contains("mutateWithViewport(\"open_paths\""));
+    assert!(JS.contains("mutateWithViewport(\"open_pdb\""));
+    assert!(JS.contains("applyViewport(update.viewport, sequence)"));
     assert!(JS.contains("if (chainNode.dataset.loaded) return"));
     assert!(JS.contains("if (residueNode.dataset.loaded) return"));
     assert!(JS.contains("if (chainNode.open) loadResidues()"));
