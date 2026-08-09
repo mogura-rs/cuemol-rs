@@ -255,12 +255,15 @@ impl NativeRunner {
                     .egui_ctx
                     .tessellate(full_output.shapes, full_output.pixels_per_point);
                 match gpu.render(
-                    &self.app.snapshot,
-                    self.app.background.clear_color(),
+                    GpuSceneFrame {
+                        snapshot: &self.app.snapshot,
+                        revision: self.app.snapshot_revision,
+                        background: self.app.background.clear_color(),
+                        viewport: self.app.viewport_rect,
+                    },
                     &paint_jobs,
                     &full_output.textures_delta,
                     full_output.pixels_per_point,
-                    self.app.viewport_rect,
                 ) {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -397,6 +400,9 @@ struct GuiApplication {
     coloring_start_hue: f32,
     coloring_end_hue: f32,
     snapshot: RenderSceneSnapshot,
+    /// Monotonic generation used to avoid rebuilding immutable GPU scene buffers
+    /// during camera-only and egui-only redraws.
+    snapshot_revision: u64,
     background: SceneBackground,
     center_mark: CenterMark,
     color_proofing: bool,
@@ -673,6 +679,7 @@ impl GuiApplication {
             coloring_end_hue: 0.0,
             selected_renderer: None,
             snapshot: RenderSceneSnapshot::empty(),
+            snapshot_revision: 0,
             background: SceneBackground::Black,
             center_mark: CenterMark::Cross,
             color_proofing: false,
@@ -3922,6 +3929,7 @@ impl GuiApplication {
         if self.color_proofing && self.state.apply_color_proof(&mut self.snapshot).is_err() {
             cuemol_render::apply_generic_color_proof(&mut self.snapshot);
         }
+        self.snapshot_revision = self.snapshot_revision.wrapping_add(1);
     }
 
     /// Grow the live snapshot bounds to enclose every vertex of a mesh (so Fit frames
@@ -5748,6 +5756,53 @@ fn tool_status_text(_title: &str) -> &'static str {
     "No additional action is available."
 }
 
+struct GpuSceneFrame<'a> {
+    snapshot: &'a RenderSceneSnapshot,
+    revision: u64,
+    background: wgpu::Color,
+    viewport: Option<egui::Rect>,
+}
+
+struct ReusableGpuBuffer {
+    buffer: wgpu::Buffer,
+    capacity: wgpu::BufferAddress,
+    label: &'static str,
+    usage: wgpu::BufferUsages,
+}
+
+impl ReusableGpuBuffer {
+    fn new(device: &wgpu::Device, label: &'static str, usage: wgpu::BufferUsages) -> Self {
+        Self {
+            buffer: create_scene_buffer(device, label, usage, MIN_SCENE_BUFFER_CAPACITY),
+            capacity: MIN_SCENE_BUFFER_CAPACITY,
+            label,
+            usage,
+        }
+    }
+
+    fn upload<T: bytemuck::Pod>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        values: &[T],
+    ) {
+        let bytes = bytemuck::cast_slice(values);
+        if bytes.is_empty() {
+            return;
+        }
+        let required = bytes.len() as wgpu::BufferAddress;
+        if required > self.capacity {
+            self.capacity = scene_buffer_capacity(required);
+            self.buffer = create_scene_buffer(device, self.label, self.usage, self.capacity);
+        }
+        queue.write_buffer(&self.buffer, 0, bytes);
+    }
+
+    fn slice(&self) -> wgpu::BufferSlice<'_> {
+        self.buffer.slice(..)
+    }
+}
+
 struct GpuState {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -5761,14 +5816,15 @@ struct GpuState {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     atom_quad_buffer: wgpu::Buffer,
-    atom_instance_buffer: wgpu::Buffer,
+    atom_instance_buffer: ReusableGpuBuffer,
     atom_instance_count: u32,
-    bond_instance_buffer: wgpu::Buffer,
+    bond_instance_buffer: ReusableGpuBuffer,
     bond_instance_count: u32,
     mesh_pipeline: wgpu::RenderPipeline,
-    mesh_vertex_buffer: wgpu::Buffer,
-    mesh_index_buffer: wgpu::Buffer,
+    mesh_vertex_buffer: ReusableGpuBuffer,
+    mesh_index_buffer: ReusableGpuBuffer,
     mesh_index_count: u32,
+    uploaded_snapshot_revision: Option<u64>,
     egui_renderer: egui_wgpu::Renderer,
 }
 
@@ -5858,11 +5914,15 @@ impl GpuState {
             contents: bytemuck::cast_slice(&ATOM_QUAD),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let atom_instance_buffer = empty_buffer(&device, "atom-instance-buffer");
-        let bond_instance_buffer = empty_buffer(&device, "bond-instance-buffer");
+        let atom_instance_buffer =
+            ReusableGpuBuffer::new(&device, "atom-instance-buffer", wgpu::BufferUsages::VERTEX);
+        let bond_instance_buffer =
+            ReusableGpuBuffer::new(&device, "bond-instance-buffer", wgpu::BufferUsages::VERTEX);
         let mesh_pipeline = create_mesh_pipeline(&device, &shader, &camera_layout, config.format);
-        let mesh_vertex_buffer = empty_buffer(&device, "mesh-vertex-buffer");
-        let mesh_index_buffer = empty_index_buffer(&device, "mesh-index-buffer");
+        let mesh_vertex_buffer =
+            ReusableGpuBuffer::new(&device, "mesh-vertex-buffer", wgpu::BufferUsages::VERTEX);
+        let mesh_index_buffer =
+            ReusableGpuBuffer::new(&device, "mesh-index-buffer", wgpu::BufferUsages::INDEX);
         let egui_renderer = egui_wgpu::Renderer::new(
             &device,
             config.format,
@@ -5890,6 +5950,7 @@ impl GpuState {
             mesh_vertex_buffer,
             mesh_index_buffer,
             mesh_index_count: 0,
+            uploaded_snapshot_revision: None,
             egui_renderer,
         })
     }
@@ -5907,20 +5968,21 @@ impl GpuState {
 
     fn render(
         &mut self,
-        snapshot: &RenderSceneSnapshot,
-        background: wgpu::Color,
+        scene: GpuSceneFrame<'_>,
         paint_jobs: &[egui::ClippedPrimitive],
         textures_delta: &egui::TexturesDelta,
         pixels_per_point: f32,
-        viewport: Option<egui::Rect>,
     ) -> std::result::Result<(), wgpu::SurfaceError> {
-        self.prepare_snapshot(snapshot);
+        if snapshot_upload_required(self.uploaded_snapshot_revision, scene.revision) {
+            self.prepare_snapshot(scene.snapshot);
+            self.uploaded_snapshot_revision = Some(scene.revision);
+        }
         // Confine the 3D scene to the central viewport region (everything but the
         // docked panels), in physical pixels, so the molecule is centred in the
         // visible area and its on-screen position matches the picking projection
         // (which also uses `viewport_rect`). Without this the scene is centred on
         // the whole window and appears shifted once the left dock takes space.
-        let (vx, vy, vw, vh) = match viewport {
+        let (vx, vy, vw, vh) = match scene.viewport {
             Some(rect) => {
                 let x = (rect.left() * pixels_per_point).max(0.0);
                 let y = (rect.top() * pixels_per_point).max(0.0);
@@ -5974,7 +6036,7 @@ impl GpuState {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(background),
+                        load: wgpu::LoadOp::Clear(scene.background),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -5993,21 +6055,21 @@ impl GpuState {
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             if self.mesh_index_count > 0 {
                 render_pass.set_pipeline(&self.mesh_pipeline);
-                render_pass.set_vertex_buffer(0, self.mesh_vertex_buffer.slice(..));
+                render_pass.set_vertex_buffer(0, self.mesh_vertex_buffer.slice());
                 render_pass
-                    .set_index_buffer(self.mesh_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    .set_index_buffer(self.mesh_index_buffer.slice(), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.mesh_index_count, 0, 0..1);
             }
             if self.bond_instance_count > 0 {
                 render_pass.set_pipeline(&self.bond_pipeline);
                 render_pass.set_vertex_buffer(0, self.atom_quad_buffer.slice(..));
-                render_pass.set_vertex_buffer(1, self.bond_instance_buffer.slice(..));
+                render_pass.set_vertex_buffer(1, self.bond_instance_buffer.slice());
                 render_pass.draw(0..6, 0..self.bond_instance_count);
             }
             if self.atom_instance_count > 0 {
                 render_pass.set_pipeline(&self.atom_pipeline);
                 render_pass.set_vertex_buffer(0, self.atom_quad_buffer.slice(..));
-                render_pass.set_vertex_buffer(1, self.atom_instance_buffer.slice(..));
+                render_pass.set_vertex_buffer(1, self.atom_instance_buffer.slice());
                 render_pass.draw(0..6, 0..self.atom_instance_count);
             }
         }
@@ -6045,16 +6107,8 @@ impl GpuState {
     fn prepare_snapshot(&mut self, snapshot: &RenderSceneSnapshot) {
         let atoms = snapshot.atoms.iter().map(atom_instance).collect::<Vec<_>>();
         self.atom_instance_count = atoms.len() as u32;
-        self.atom_instance_buffer = if atoms.is_empty() {
-            empty_buffer(&self.device, "atom-instance-buffer")
-        } else {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("atom-instance-buffer"),
-                    contents: bytemuck::cast_slice(&atoms),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        };
+        self.atom_instance_buffer
+            .upload(&self.device, &self.queue, &atoms);
 
         let bonds = snapshot
             .bonds
@@ -6063,16 +6117,8 @@ impl GpuState {
             .map(bond_instance)
             .collect::<Vec<_>>();
         self.bond_instance_count = bonds.len() as u32;
-        self.bond_instance_buffer = if bonds.is_empty() {
-            empty_buffer(&self.device, "bond-instance-buffer")
-        } else {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("bond-instance-buffer"),
-                    contents: bytemuck::cast_slice(&bonds),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        };
+        self.bond_instance_buffer
+            .upload(&self.device, &self.queue, &bonds);
 
         // Ribbon/cartoon triangle meshes: concatenate all chain meshes into one
         // vertex + index buffer, offsetting each mesh's indices by its base.
@@ -6084,26 +6130,10 @@ impl GpuState {
             mesh_indices.extend(mesh.indices.iter().map(|index| base + index));
         }
         self.mesh_index_count = mesh_indices.len() as u32;
-        self.mesh_vertex_buffer = if mesh_vertices.is_empty() {
-            empty_buffer(&self.device, "mesh-vertex-buffer")
-        } else {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("mesh-vertex-buffer"),
-                    contents: bytemuck::cast_slice(&mesh_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        };
-        self.mesh_index_buffer = if mesh_indices.is_empty() {
-            empty_index_buffer(&self.device, "mesh-index-buffer")
-        } else {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("mesh-index-buffer"),
-                    contents: bytemuck::cast_slice(&mesh_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                })
-        };
+        self.mesh_vertex_buffer
+            .upload(&self.device, &self.queue, &mesh_vertices);
+        self.mesh_index_buffer
+            .upload(&self.device, &self.queue, &mesh_indices);
     }
 }
 
@@ -6302,19 +6332,30 @@ fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
         .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-fn empty_buffer(device: &wgpu::Device, label: &'static str) -> wgpu::Buffer {
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(label),
-        contents: &[0, 0, 0, 0],
-        usage: wgpu::BufferUsages::VERTEX,
-    })
+const MIN_SCENE_BUFFER_CAPACITY: wgpu::BufferAddress = 256;
+
+fn snapshot_upload_required(uploaded: Option<u64>, current: u64) -> bool {
+    uploaded != Some(current)
 }
 
-fn empty_index_buffer(device: &wgpu::Device, label: &'static str) -> wgpu::Buffer {
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+fn scene_buffer_capacity(required: wgpu::BufferAddress) -> wgpu::BufferAddress {
+    required
+        .max(MIN_SCENE_BUFFER_CAPACITY)
+        .checked_next_power_of_two()
+        .unwrap_or(required)
+}
+
+fn create_scene_buffer(
+    device: &wgpu::Device,
+    label: &str,
+    usage: wgpu::BufferUsages,
+    capacity: wgpu::BufferAddress,
+) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
-        contents: &[0, 0, 0, 0],
-        usage: wgpu::BufferUsages::INDEX,
+        size: capacity.max(MIN_SCENE_BUFFER_CAPACITY),
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
     })
 }
 
@@ -6937,6 +6978,25 @@ mod tests {
     }
 
     #[test]
+    fn scene_upload_revision_and_capacity_avoid_per_frame_reallocation() {
+        let mut app = GuiApplication::new();
+        let revision = app.snapshot_revision;
+        assert!(snapshot_upload_required(None, revision));
+        assert!(!snapshot_upload_required(Some(revision), revision));
+        app.rebuild_snapshot();
+        assert_eq!(app.snapshot_revision, revision.wrapping_add(1));
+        assert!(snapshot_upload_required(
+            Some(revision),
+            app.snapshot_revision
+        ));
+
+        assert_eq!(scene_buffer_capacity(0), MIN_SCENE_BUFFER_CAPACITY);
+        assert_eq!(scene_buffer_capacity(256), 256);
+        assert_eq!(scene_buffer_capacity(257), 512);
+        assert_eq!(scene_buffer_capacity(513), 1024);
+    }
+
+    #[test]
     fn native_molecule_shader_and_primitive_pipelines_validate() {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let Ok(adapter) =
@@ -6948,7 +7008,7 @@ mod tests {
         else {
             return;
         };
-        let Ok((device, _queue)) =
+        let Ok((device, queue)) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("molecule-shader-test-device"),
                 required_features: wgpu::Features::empty(),
@@ -6985,6 +7045,21 @@ mod tests {
             error.is_none(),
             "molecule shader validation failed: {error:?}"
         );
+
+        let mut buffer = ReusableGpuBuffer::new(
+            &device,
+            "scene-buffer-reuse-test",
+            wgpu::BufferUsages::VERTEX,
+        );
+        buffer.upload(&device, &queue, &[0_u32; 4]);
+        assert_eq!(buffer.capacity, 256);
+        assert_eq!(buffer.buffer.size(), 256);
+        buffer.upload(&device, &queue, &[0_u32; 100]);
+        assert_eq!(buffer.capacity, 512);
+        assert_eq!(buffer.buffer.size(), 512);
+        buffer.upload(&device, &queue, &[1_u32; 8]);
+        assert_eq!(buffer.capacity, 512);
+        assert_eq!(buffer.buffer.size(), 512);
     }
 
     #[test]
