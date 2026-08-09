@@ -6129,9 +6129,10 @@ fn pivot_distance(a: Vector4, b: Vector4) -> f64 {
 const PROTEIN_PIVOT_LINK_DIST: f64 = 5.0;
 const NUCLEIC_PIVOT_LINK_DIST: f64 = 8.0;
 
-/// Pick the residue's backbone pivot atom: CA (protein) then nucleic-acid
-/// fallbacks. Returns the pivot point and its link-distance cutoff (protein vs
-/// nucleic), used to break the backbone run at chain gaps.
+/// Pick the residue's configured backbone pivot atom, falling back to CA
+/// (protein) and then nucleic-acid defaults when the configured atom is absent.
+/// Returns the pivot point and its link-distance cutoff (protein vs nucleic),
+/// used to break the backbone run at chain gaps.
 fn mainchain_pivot_point(
     molecule: &MolCoord,
     residue: &ResidueView,
@@ -6141,12 +6142,11 @@ fn mainchain_pivot_point(
     let default_names = ["CA", "P", "C1'", "O5'"];
     let custom_name = pivot_atom.filter(|name| !name.trim().is_empty());
     let custom_names = [custom_name.unwrap_or_default()];
-    let names = if custom_name.is_some() {
-        &custom_names[..]
-    } else {
-        &default_names[..]
-    };
-    for name in names {
+    for name in custom_names
+        .iter()
+        .filter(|_| custom_name.is_some())
+        .chain(default_names.iter())
+    {
         for &index in indices {
             let Some(atom) = molecule.atoms().get(index) else {
                 continue;
@@ -7262,24 +7262,53 @@ fn cubic_bezier_point(p1: Vector4, p2: Vector4, p3: Vector4, p4: Vector4, t: f64
     p1 * (it * it * it) + p2 * (3.0 * t * it * it) + p3 * (3.0 * t * t * it) + p4 * (t * t * t)
 }
 
+fn cubic_bezier_derivative_length(
+    p1: Vector4,
+    p2: Vector4,
+    p3: Vector4,
+    p4: Vector4,
+    t: f64,
+) -> f64 {
+    let it = 1.0 - t;
+    ((p4 - p3).scale(3.0 * t * t) + (p3 - p2).scale(6.0 * t * it) + (p2 - p1).scale(3.0 * it * it))
+        .length3d()
+}
+
 /// Dots spaced (by arc length) `dot_sep` apart along the cubic Bézier through
 /// `p1..p4`. Port of C++ `DisoRenderer::renderBezierDots` (accumulate the
 /// differential length, emit a dot each time it crosses a `dot_sep` threshold).
-fn bezier_dots(p1: Vector4, p2: Vector4, p3: Vector4, p4: Vector4, dot_sep: f64) -> Vec<Vector4> {
-    let ndiv = 200usize;
-    let dot_sep = dot_sep.max(0.05);
+fn bezier_dots(
+    p1: Vector4,
+    p2: Vector4,
+    p3: Vector4,
+    p4: Vector4,
+    dot_sep: f64,
+) -> Vec<(Vector4, f64)> {
+    if !dot_sep.is_finite() || dot_sep <= 0.0 {
+        return Vec::new();
+    }
+    let estimated_length = (p1 - p2).length3d() + (p2 - p3).length3d() + (p3 - p4).length3d();
+    let ndiv = ((estimated_length.floor() as usize).saturating_mul(10)).max(100);
+    let delta = 1.0 / ndiv as f64;
+    let total_length = (1..=ndiv)
+        .map(|index| {
+            cubic_bezier_derivative_length(p1, p2, p3, p4, index as f64 / ndiv as f64) * delta
+        })
+        .sum::<f64>();
+    if !total_length.is_finite() || total_length <= 0.0 {
+        return Vec::new();
+    }
+    let dot_count = (total_length / dot_sep).ceil().max(1.0) as usize;
+    let actual_separation = total_length / dot_count as f64;
     let mut dots = Vec::new();
-    let mut prev = p1;
     let mut len = 0.0;
-    let mut thres = dot_sep;
+    let mut threshold = actual_separation;
     for i in 1..ndiv {
         let t = i as f64 / ndiv as f64;
-        let v = cubic_bezier_point(p1, p2, p3, p4, t);
-        len += (v - prev).length3d();
-        prev = v;
-        if len > thres {
-            thres += dot_sep;
-            dots.push(v);
+        len += cubic_bezier_derivative_length(p1, p2, p3, p4, t) * delta;
+        if len > threshold {
+            threshold += actual_separation;
+            dots.push((cubic_bezier_point(p1, p2, p3, p4, t), t));
         }
     }
     dots
@@ -7287,8 +7316,8 @@ fn bezier_dots(p1: Vector4, p2: Vector4, p3: Vector4, p4: Vector4, dot_sep: f64)
 
 /// Disorder representation (C++ `DisoRenderer`): a dotted Bézier line bridging
 /// each chain gap — consecutive same-chain residues that are NOT bonded to each
-/// other (a missing/disordered stretch). The curve runs through the residues'
-/// pivot atoms, with the neighbouring pivots giving the Bézier tangents.
+/// other (a missing/disordered stretch). The curve endpoints and tangents come
+/// from the target main-chain renderer's spline at the adjacent residues.
 pub fn disorder_lines_snapshot(
     molecule: &MolCoord,
     dot_sep: f64,
@@ -7316,6 +7345,12 @@ pub struct DisorderRenderOptions {
     pub loopsize2: f64,
     pub detail: Option<u32>,
     pub color: Option<ColorSpec>,
+    /// Per-atom colors resolved from the disorder renderer's coloring scheme.
+    pub atom_colors: Option<Vec<ColorSpec>>,
+    /// Pivot atom inherited from the target MainChainRenderer.
+    pub pivot_atom: Option<String>,
+    /// Target SplineRenderer axis smoothing.
+    pub smoothing: f64,
     pub draw_indices: Option<Vec<usize>>,
 }
 
@@ -7323,11 +7358,14 @@ impl Default for DisorderRenderOptions {
     fn default() -> Self {
         Self {
             dot_sep: 1.0,
-            dot_radius: 0.15,
+            dot_radius: 0.3,
             loopsize: 2.0,
             loopsize2: -1.0,
             detail: Some(5),
             color: None,
+            atom_colors: None,
+            pivot_atom: None,
+            smoothing: 0.0,
             draw_indices: None,
         }
     }
@@ -7373,7 +7411,28 @@ pub fn disorder_lines_snapshot_with_style(
     }
     let pivot = |ri: usize| -> Option<(usize, Vector4)> {
         let s = &summaries[ri];
-        for name in ["CA", "P", "C1'", "O5'"] {
+        let configured = options
+            .pivot_atom
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .and_then(|name| {
+                s.atom_indices
+                    .iter()
+                    .find(|&&ai| molecule.atoms()[ai].name.trim().eq_ignore_ascii_case(name))
+                    .copied()
+            });
+        let topology = cuemol_molstr::toppar::TopoDB::global()
+            .pivot_atom(&s.res_name)
+            .and_then(|name| {
+                s.atom_indices
+                    .iter()
+                    .find(|&&ai| molecule.atoms()[ai].name.trim().eq_ignore_ascii_case(name))
+                    .copied()
+            });
+        if let Some(ai) = configured.or(topology) {
+            return Some((ai, molecule.atoms()[ai].position));
+        }
+        for name in ["CA", "P", "C1'", "C1*", "O5'"] {
             if let Some(&ai) = s
                 .atom_indices
                 .iter()
@@ -7386,41 +7445,92 @@ pub fn disorder_lines_snapshot_with_style(
     };
     let same_chain = |a: usize, b: usize| summaries[a].key.chain_id == summaries[b].key.chain_id;
 
+    let pivots = (0..summaries.len()).map(pivot).collect::<Vec<_>>();
+    let mut diff_vectors = vec![None; summaries.len()];
+    let finish_run = |run: &mut Vec<usize>, diff_vectors: &mut Vec<Option<(Vector4, Vector4)>>| {
+        if run.len() >= 3 {
+            let mut points = run
+                .iter()
+                .filter_map(|&index| pivots[index].map(|(_, point)| point))
+                .collect::<Vec<_>>();
+            let smoothing = options.smoothing.clamp(0.0, 1.0);
+            if smoothing > 0.0 {
+                let original = points.clone();
+                for index in 1..original.len() - 1 {
+                    let midpoint = (original[index - 1] + original[index + 1]).scale(0.5);
+                    points[index] =
+                        original[index].scale(1.0 - smoothing) + midpoint.scale(smoothing);
+                }
+            }
+            if let Some(spline) = CubicSpline::generate(&points) {
+                for (offset, &residue_index) in run.iter().enumerate() {
+                    let sample = spline.interpolate(offset as f64);
+                    diff_vectors[residue_index] = Some((sample.position, sample.tangent));
+                }
+            }
+        }
+        run.clear();
+    };
+    let mut run = Vec::new();
+    for (index, pivot_point) in pivots.iter().enumerate() {
+        if pivot_point.is_none() {
+            finish_run(&mut run, &mut diff_vectors);
+            continue;
+        }
+        let continues = run.last().is_some_and(|&previous| {
+            same_chain(previous, index)
+                && linked.contains(&(previous.min(index), previous.max(index)))
+        });
+        if !continues {
+            finish_run(&mut run, &mut diff_vectors);
+        }
+        run.push(index);
+    }
+    finish_run(&mut run, &mut diff_vectors);
+
     let mut atoms = Vec::new();
     for i in 1..summaries.len() {
         if !same_chain(i - 1, i) || linked.contains(&(i - 1, i)) {
             continue;
         }
-        let (Some((pivot1, p1)), Some((pivot2, p4))) = (pivot(i - 1), pivot(i)) else {
+        let (Some((pivot1, _)), Some((pivot2, _))) = (pivots[i - 1], pivots[i]) else {
             continue;
         };
-        if draw
-            .as_ref()
-            .is_some_and(|draw| !draw.contains(&pivot1) || !draw.contains(&pivot2))
-        {
+        if draw.as_ref().is_some_and(|draw| {
+            !summaries[i - 1]
+                .atom_indices
+                .iter()
+                .any(|index| draw.contains(index))
+                || !summaries[i]
+                    .atom_indices
+                    .iter()
+                    .any(|index| draw.contains(index))
+        }) {
             continue;
         }
-        let chord = p4 - p1;
-        let third = chord.length3d() / 3.0;
-        // Bézier tangents from the surrounding pivots (chord fallback at the ends).
-        let tan1 = if i >= 2 && same_chain(i - 2, i - 1) {
-            pivot(i - 2).map(|(_, p0)| normalize_or(p1 - p0, chord) * third)
-        } else {
-            None
-        }
-        .unwrap_or(chord * (1.0 / 3.0));
-        let tan4 = if i + 1 < summaries.len() && same_chain(i, i + 1) {
-            pivot(i + 1).map(|(_, p5)| normalize_or(p5 - p4, chord) * third)
-        } else {
-            None
-        }
-        .unwrap_or(chord * (1.0 / 3.0));
+        let (Some((p1, tan1)), Some((p4, tan4))) = (diff_vectors[i - 1], diff_vectors[i]) else {
+            continue;
+        };
         let p2 = p1 + tan1 * loop1;
         let p3 = p4 - tan4 * loop2;
-        for dot in bezier_dots(p1, p2, p3, p4, options.dot_sep) {
+        let endpoint_color = |atom_index: usize| {
+            options
+                .atom_colors
+                .as_ref()
+                .and_then(|colors| colors.get(atom_index))
+                .cloned()
+                .or_else(|| options.color.clone())
+        };
+        let color1 = endpoint_color(pivot1);
+        let color2 = endpoint_color(pivot2);
+        for (dot, parameter) in bezier_dots(p1, p2, p3, p4, options.dot_sep) {
+            let color = match (&color1, &color2) {
+                (Some(color1), Some(color2)) => Some(interpolate_color(color1, color2, parameter)),
+                (Some(color), None) | (None, Some(color)) => Some(color.clone()),
+                (None, None) => None,
+            };
             atoms.push(
-                RenderAtom::new(dot, options.dot_radius as f32, options.color.clone())
-                    .with_detail(options.detail),
+                RenderAtom::new(dot, options.dot_radius as f32, color).with_detail(options.detail),
             );
         }
     }
@@ -9375,11 +9485,25 @@ return cuemol.makeColor("#0000ff");
         a
     }
 
+    fn disorder_gap_molecule() -> MolCoord {
+        let mut molecule = MolCoord::with_atoms(vec![
+            diso_ca(1, 1, 0.0),
+            diso_ca(2, 2, 2.0),
+            diso_ca(3, 3, 4.0),
+            diso_ca(4, 4, 14.0),
+            diso_ca(5, 5, 16.0),
+            diso_ca(6, 6, 18.0),
+        ]);
+        for (atom1, atom2) in [(0, 1), (1, 2), (3, 4), (4, 5)] {
+            molecule.add_bond(atom1, atom2, cuemol_molstr::BondOrder::Single);
+        }
+        molecule
+    }
+
     #[test]
     fn disorder_lines_bridge_unbonded_chain_gaps_only() {
-        // Two same-chain residues 10 Å apart with NO bond between them = a
-        // disordered gap -> a dotted Bézier line bridges them.
-        let mol = MolCoord::with_atoms(vec![diso_ca(1, 1, 0.0), diso_ca(2, 2, 10.0)]);
+        // Both sides need a target-renderer spline, as in C++ getDiffVec().
+        let mol = disorder_gap_molecule();
         let snap = disorder_lines_snapshot(&mol, 1.0, 0.2, 1.0, -1.0);
         assert!(!snap.atoms.is_empty(), "gap should be dotted");
         // ~10 dots (10 Å / 1 Å spacing), all between the two pivots.
@@ -9391,7 +9515,7 @@ return cuemol.makeColor("#0000ff");
         assert!(snap
             .atoms
             .iter()
-            .all(|a| a.center.x > -0.1 && a.center.x < 10.1));
+            .all(|a| a.center.x > 3.9 && a.center.x < 14.1));
 
         let styled = disorder_lines_snapshot_with_style(
             &mol,
@@ -9401,7 +9525,7 @@ return cuemol.makeColor("#0000ff");
                 loopsize: 1.0,
                 detail: Some(9),
                 color: Some(rgb_spec(0.2, 0.4, 0.6)),
-                draw_indices: Some(vec![0, 1]),
+                draw_indices: Some(vec![2, 3]),
                 ..DisorderRenderOptions::default()
             },
         );
@@ -9421,7 +9545,7 @@ return cuemol.makeColor("#0000ff");
                 dot_sep: 1.0,
                 dot_radius: 0.2,
                 loopsize: 1.0,
-                draw_indices: Some(vec![0]),
+                draw_indices: Some(vec![2]),
                 ..DisorderRenderOptions::default()
             },
         )
@@ -9429,15 +9553,61 @@ return cuemol.makeColor("#0000ff");
         .is_empty());
 
         // Once the residues are bonded (linked), there is no disorder line.
-        let mut linked = MolCoord::with_atoms(vec![diso_ca(1, 1, 0.0), diso_ca(2, 2, 10.0)]);
-        linked.add_bond(0, 1, cuemol_molstr::BondOrder::Single);
+        let mut linked = disorder_gap_molecule();
+        linked.add_bond(2, 3, cuemol_molstr::BondOrder::Single);
         let snap2 = disorder_lines_snapshot(&linked, 1.0, 0.2, 1.0, -1.0);
         assert!(snap2.atoms.is_empty(), "linked residues are not disordered");
+
+        let isolated = MolCoord::with_atoms(vec![diso_ca(1, 1, 0.0), diso_ca(2, 2, 10.0)]);
+        assert!(disorder_lines_snapshot(&isolated, 1.0, 0.2, 1.0, -1.0)
+            .atoms
+            .is_empty());
+    }
+
+    #[test]
+    fn disorder_dots_follow_target_pivot_and_endpoint_colors() {
+        let base = disorder_gap_molecule();
+        let mut atoms = Vec::new();
+        for (index, atom) in base.atoms().iter().cloned().enumerate() {
+            let mut nitrogen = atom.clone();
+            nitrogen.serial += 100;
+            nitrogen.name = "N".to_string();
+            nitrogen.element = "N".to_string();
+            nitrogen.position.y = if index < 3 {
+                index as f64
+            } else {
+                (5 - index) as f64
+            };
+            atoms.extend([atom, nitrogen]);
+        }
+        let mut molecule = MolCoord::with_atoms(atoms);
+        for (atom1, atom2) in [(0, 2), (2, 4), (6, 8), (8, 10)] {
+            molecule.add_bond(atom1, atom2, cuemol_molstr::BondOrder::Single);
+        }
+        let mut colors = vec![rgb_spec(1.0, 1.0, 1.0); molecule.atom_count()];
+        colors[5] = rgb_spec(1.0, 0.0, 0.0);
+        colors[7] = rgb_spec(0.0, 0.0, 1.0);
+        let snapshot = disorder_lines_snapshot_with_style(
+            &molecule,
+            &DisorderRenderOptions {
+                pivot_atom: Some("N".to_string()),
+                atom_colors: Some(colors),
+                // Selecting any atom in both endpoint residues includes the gap;
+                // it does not require selecting the target pivot atoms themselves.
+                draw_indices: Some(vec![4, 6]),
+                ..DisorderRenderOptions::default()
+            },
+        );
+        assert!(!snapshot.atoms.is_empty());
+        assert!(snapshot.atoms.iter().any(|atom| atom.center.y > 0.1));
+        let first = snapshot.atoms.first().unwrap().color.as_ref().unwrap();
+        let last = snapshot.atoms.last().unwrap().color.as_ref().unwrap();
+        assert_ne!(first.rgba8(), last.rgba8());
     }
 
     #[test]
     fn disorder_loopsize_scales_the_gap_arc_amplitude() {
-        // res1-res2 and res3-res4 are bonded; res2-res3 is the unbonded gap. The
+        // Three residues on each side form target splines around one unbonded gap. The
         // neighbours bend the Bézier tangents off the chord (+y), so a larger
         // loopsize bulges the disorder arc higher in +y.
         fn bent_ca(serial: i32, res_id: i32, x: f64, y: f64) -> Atom {
@@ -9447,13 +9617,16 @@ return cuemol.makeColor("#0000ff");
             a
         }
         let mut mol = MolCoord::with_atoms(vec![
-            bent_ca(1, 1, 0.0, -2.0),
-            bent_ca(2, 2, 0.0, 0.0),
-            bent_ca(3, 3, 10.0, 0.0),
-            bent_ca(4, 4, 10.0, -2.0),
+            bent_ca(1, 1, -4.0, -2.0),
+            bent_ca(2, 2, -2.0, -1.0),
+            bent_ca(3, 3, 0.0, 0.0),
+            bent_ca(4, 4, 10.0, 0.0),
+            bent_ca(5, 5, 12.0, -1.0),
+            bent_ca(6, 6, 14.0, -2.0),
         ]);
-        mol.add_bond(0, 1, cuemol_molstr::BondOrder::Single);
-        mol.add_bond(2, 3, cuemol_molstr::BondOrder::Single);
+        for (atom1, atom2) in [(0, 1), (1, 2), (3, 4), (4, 5)] {
+            mol.add_bond(atom1, atom2, cuemol_molstr::BondOrder::Single);
+        }
         let max_y = |loopsize: f64| {
             disorder_lines_snapshot(&mol, 1.0, 0.2, loopsize, -1.0)
                 .atoms
@@ -10476,6 +10649,16 @@ return cuemol.makeColor("#0000ff");
             })
             .scale(1.0 / 9.0);
         assert!((first_center.y - 2.0).abs() < 1.0e-6);
+
+        options.pivot_atom = Some("MISSING".to_string());
+        let fallback = ribbon_mesh_snapshot(&molecule, &options);
+        let fallback_center = fallback.meshes[0].vertices[..9]
+            .iter()
+            .fold(Vector4::new3(0.0, 0.0, 0.0), |sum, vertex| {
+                sum + vertex.position
+            })
+            .scale(1.0 / 9.0);
+        assert!(fallback_center.y.abs() < 1.0e-6);
     }
 
     #[test]

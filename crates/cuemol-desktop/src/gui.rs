@@ -2753,6 +2753,153 @@ impl GuiApplication {
                                         self.rebuild_snapshot();
                                     }
                                 });
+                            } else if renderer.renderer_type == "disorder" {
+                                ui.label("Disorder");
+                                let mut target = self
+                                    .state
+                                    .renderer_property(object.uid, renderer.uid, "target")
+                                    .unwrap_or_default();
+                                let previous_target = target.clone();
+                                egui::ComboBox::from_id_salt(("disorder-target", renderer.uid))
+                                    .selected_text(if target.is_empty() {
+                                        "(none)"
+                                    } else {
+                                        &target
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut target, String::new(), "(none)");
+                                        for candidate in self
+                                            .state
+                                            .renderer_summaries(object.uid)
+                                            .into_iter()
+                                            .filter(|candidate| {
+                                                matches!(
+                                                    candidate.renderer_type.as_str(),
+                                                    "tube" | "ribbon" | "cartoon" | "nucl"
+                                                )
+                                            })
+                                        {
+                                            ui.selectable_value(
+                                                &mut target,
+                                                candidate.name.clone(),
+                                                candidate.name,
+                                            );
+                                        }
+                                    });
+                                if target != previous_target {
+                                    let result = if target.is_empty() {
+                                        self.state.reset_renderer_property(
+                                            object.uid,
+                                            renderer.uid,
+                                            "target",
+                                        )
+                                    } else {
+                                        self.state.set_renderer_property(
+                                            object.uid,
+                                            renderer.uid,
+                                            "target",
+                                            target,
+                                        )
+                                    };
+                                    if result.is_ok() {
+                                        self.rebuild_snapshot();
+                                    }
+                                }
+                                let mut detail = self
+                                    .state
+                                    .renderer_property(object.uid, renderer.uid, "detail")
+                                    .and_then(|value| value.parse::<i32>().ok())
+                                    .unwrap_or(5);
+                                ui.horizontal(|ui| {
+                                    ui.label("Detail");
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut detail)
+                                                .speed(1)
+                                                .range(2..=20),
+                                        )
+                                        .changed()
+                                    {
+                                        let result = if detail == 5 {
+                                            self.state.reset_renderer_property(
+                                                object.uid,
+                                                renderer.uid,
+                                                "detail",
+                                            )
+                                        } else {
+                                            self.state.set_renderer_property(
+                                                object.uid,
+                                                renderer.uid,
+                                                "detail",
+                                                detail.to_string(),
+                                            )
+                                        };
+                                        if result.is_ok() {
+                                            self.rebuild_snapshot();
+                                        }
+                                    }
+                                });
+                                for (property, label, default, minimum, maximum) in [
+                                    ("width", "Dot size", 0.3_f32, 0.0, 3.0),
+                                    ("dotsep", "Dot separation", 1.0, 0.0, 3.0),
+                                    ("loopsize", "Loop size", 2.0, 0.0, 10.0),
+                                    ("loopsize2", "Loop size 2", -1.0, -1.0, 10.0),
+                                ] {
+                                    let mut value = self
+                                        .state
+                                        .renderer_property(object.uid, renderer.uid, property)
+                                        .and_then(|value| value.parse::<f32>().ok())
+                                        .unwrap_or(default);
+                                    ui.horizontal(|ui| {
+                                        ui.label(label);
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut value)
+                                                    .speed(0.1)
+                                                    .range(minimum..=maximum),
+                                            )
+                                            .changed()
+                                        {
+                                            let result = if (value - default).abs() < f32::EPSILON {
+                                                self.state.reset_renderer_property(
+                                                    object.uid,
+                                                    renderer.uid,
+                                                    property,
+                                                )
+                                            } else {
+                                                self.state.set_renderer_property(
+                                                    object.uid,
+                                                    renderer.uid,
+                                                    property,
+                                                    format!("{value:.3}"),
+                                                )
+                                            };
+                                            if result.is_ok() {
+                                                self.rebuild_snapshot();
+                                            }
+                                        }
+                                    });
+                                }
+                                let mut color = self
+                                    .state
+                                    .renderer_property(object.uid, renderer.uid, "defaultcolor")
+                                    .unwrap_or_else(|| "#ffffff".to_string());
+                                ui.horizontal(|ui| {
+                                    ui.label("Color");
+                                    if ui.text_edit_singleline(&mut color).changed()
+                                        && self
+                                            .state
+                                            .set_renderer_property(
+                                                object.uid,
+                                                renderer.uid,
+                                                "defaultcolor",
+                                                color,
+                                            )
+                                            .is_ok()
+                                    {
+                                        self.rebuild_snapshot();
+                                    }
+                                });
                             } else if renderer.renderer_type == "cpk" {
                                 ui.label("Atom radii");
                                 for (property, label, default) in [

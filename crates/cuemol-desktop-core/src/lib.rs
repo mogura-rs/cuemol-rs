@@ -24,10 +24,10 @@ use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
     apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot_with_style,
     mainchain_line_snapshot, molecule_render_options_for_renderer, molecule_render_snapshot,
-    na_renderer_snapshot, ribbon_mesh_snapshot, ring_meshes_snapshot_with, scene_style_manager,
-    selection_overlay_snapshot, simple_line_snapshot, AnIsoURenderOptions, DisorderRenderOptions,
-    MainchainLineMode, MoleculeRenderOptions, NARenderOptions, NARenderer, SelectionOverlayMode,
-    SelectionOverlayOptions, ValenceBondMode, DEFAULT_STYLE_SCOPE,
+    na_renderer_snapshot, resolve_atom_colors, ribbon_mesh_snapshot, ring_meshes_snapshot_with,
+    scene_style_manager, selection_overlay_snapshot, simple_line_snapshot, AnIsoURenderOptions,
+    DisorderRenderOptions, MainchainLineMode, MoleculeRenderOptions, NARenderOptions, NARenderer,
+    SelectionOverlayMode, SelectionOverlayOptions, ValenceBondMode, DEFAULT_STYLE_SCOPE,
 };
 #[cfg(test)]
 use cuemol_molvis::{default_style_manager, disorder_lines_snapshot};
@@ -3508,12 +3508,38 @@ impl DesktopAppState {
         renderer_type: impl Into<String>,
         renderer_name: impl Into<String>,
     ) -> Result<NewRendererResult> {
-        self.command_manager.new_renderer_command(
+        let renderer_type = renderer_type.into();
+        let result = self.command_manager.new_renderer_command(
             target_scene,
             target_object,
-            renderer_type,
+            renderer_type.clone(),
             renderer_name,
-        )
+        )?;
+        if renderer_type == "disorder" {
+            let object = self
+                .scene_manager_mut()
+                .object_mut(target_object)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", target_object.get())))?;
+            let target_name = object
+                .renderers()
+                .iter()
+                .find(|renderer| {
+                    renderer.uid() != result.result_renderer
+                        && matches!(
+                            renderer.renderer_type(),
+                            "tube" | "ribbon" | "cartoon" | "nucl"
+                        )
+                })
+                .map(|renderer| renderer.name().to_string())
+                .unwrap_or_default();
+            if let Some(renderer) = object.renderer_mut(result.result_renderer) {
+                renderer.set_qsc_attr("style", "DefaultCPKColoring");
+                if !target_name.is_empty() {
+                    renderer.set_qsc_attr("target", target_name);
+                }
+            }
+        }
+        Ok(result)
     }
 
     pub fn new_renderer_in_active_scene(
@@ -38085,7 +38111,7 @@ fn append_object_renderer_snapshot(
                         )
                     })
                 });
-            let Some(_) = target else {
+            let Some(target) = target else {
                 return;
             };
             let detail = renderer
@@ -38105,7 +38131,7 @@ fn append_object_renderer_snapshot(
                 object.mol(),
                 &DisorderRenderOptions {
                     dot_sep: resolved("dotsep", 1.0),
-                    dot_radius: resolved("width", 0.3) / 2.0,
+                    dot_radius: resolved("width", 0.3),
                     loopsize: resolved("loopsize", 2.0),
                     loopsize2: resolved("loopsize2", -1.0),
                     detail: Some(detail),
@@ -38118,6 +38144,17 @@ fn append_object_renderer_snapshot(
                         },
                         modifiers: Vec::new(),
                     }),
+                    atom_colors: renderer_coloring_type
+                        .is_some()
+                        .then(|| resolve_atom_colors(object.mol(), &options)),
+                    pivot_atom: target
+                        .resolved_attr("pivotatom", styles, style_scope_id)
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty()),
+                    smoothing: target
+                        .resolved_attr("smooth", styles, style_scope_id)
+                        .and_then(|value| value.trim().parse::<f64>().ok())
+                        .unwrap_or(0.0),
                     draw_indices: options.draw_indices.clone(),
                 },
             )
@@ -48714,10 +48751,9 @@ end_header
             .renderer_mut(target)
             .unwrap()
             .set_visible(false);
-        object_state
-            .renderer_mut(disorder)
-            .unwrap()
-            .set_qsc_attr("target", "backbone");
+        let disorder_state = object_state.renderer(disorder).unwrap();
+        assert_eq!(disorder_state.qsc_attr("target"), Some("backbone"));
+        assert_eq!(disorder_state.qsc_attr("style"), Some("DefaultCPKColoring"));
 
         let snapshot = app.active_render_snapshot("").unwrap();
         // Routes to the disorder geometry (matches the molvis function), which is
@@ -48725,7 +48761,7 @@ end_header
         let direct = disorder_lines_snapshot(
             app.scene_manager().object(object).unwrap().mol(),
             1.0,
-            0.15,
+            0.3,
             2.0,
             -1.0,
         );
@@ -48739,6 +48775,76 @@ end_header
             "disorder on a fully-bonded chain must not dump all 327 atoms, got {}",
             snapshot.atom_count()
         );
+    }
+
+    #[test]
+    fn disorder_renderer_uses_target_spline_and_full_dot_radius() {
+        let atom = |serial: i32, residue: i32, x: f64| cuemol_molstr::Atom {
+            serial,
+            name: "CA".to_string(),
+            alt_loc: None,
+            res_name: "GLY".to_string(),
+            chain_id: "A".to_string(),
+            res_id: residue,
+            ins_code: None,
+            position: Vector4::new3(x, 0.0, 0.0),
+            occupancy: 1.0,
+            b_factor: 10.0,
+            element: "C".to_string(),
+            formal_charge: None,
+            int_props: BTreeMap::new(),
+            real_props: BTreeMap::new(),
+        };
+        let mut molecule = MolCoord::with_atoms(
+            [0.0, 2.0, 4.0, 14.0, 16.0, 18.0]
+                .into_iter()
+                .enumerate()
+                .map(|(index, x)| atom(index as i32 + 1, index as i32 + 1, x))
+                .collect(),
+        );
+        for (atom1, atom2) in [(0, 1), (1, 2), (3, 4), (4, 5)] {
+            molecule.add_bond(atom1, atom2, cuemol_molstr::BondOrder::Single);
+        }
+
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("disorder", false).result_scene;
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("gap", molecule);
+        let target_uid = app
+            .new_renderer_in_active_scene(object_uid, "tube", "backbone")
+            .unwrap()
+            .result_renderer;
+        let disorder_uid = app
+            .new_renderer_in_active_scene(object_uid, "disorder", "gap dots")
+            .unwrap()
+            .result_renderer;
+        let object = app.scene_manager_mut().object_mut(object_uid).unwrap();
+        object.renderer_mut(target_uid).unwrap().set_visible(false);
+        let disorder = object.renderer_mut(disorder_uid).unwrap();
+        disorder.set_qsc_attr("detail", "7");
+
+        let snapshot = app.active_render_snapshot("").unwrap();
+        assert!(snapshot.atom_count() >= 8 && snapshot.atom_count() <= 12);
+        assert!(snapshot
+            .atoms
+            .iter()
+            .all(|atom| (atom.radius - 0.3).abs() < f32::EPSILON));
+        assert!(snapshot.atoms.iter().all(|atom| atom.detail == Some(7)));
+
+        app.scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(disorder_uid)
+            .unwrap()
+            .set_qsc_attr("width", "0.6");
+        let wider = app.active_render_snapshot("").unwrap();
+        assert!(wider
+            .atoms
+            .iter()
+            .all(|atom| (atom.radius - 0.6).abs() < f32::EPSILON));
     }
 
     #[test]
