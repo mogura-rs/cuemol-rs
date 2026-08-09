@@ -5,7 +5,10 @@ use cuemol_molstr::{
     ResidIterator, ResidueView,
 };
 use cuemol_qsys::{DrawObj, StyleManager};
-use cuemol_render::{MeshVertex, RenderAtom, RenderBond, RenderMesh, RenderSceneSnapshot};
+use cuemol_render::{
+    AtomIntrCapType, AtomIntrRenderMode, AtomIntrRenderOptions, MeshVertex, RenderAtom, RenderBond,
+    RenderMesh, RenderSceneSnapshot,
+};
 use std::sync::OnceLock;
 
 pub type CPK2Renderer = Cpk2Renderer;
@@ -3860,6 +3863,55 @@ pub fn scene_style_manager(scene: &MolScene) -> StyleManager {
         styles.load_style_set_from_xml(DEFAULT_STYLE_SCOPE, name, &loaded.data, read_only);
     }
     styles
+}
+
+/// Resolve the complete QIF property set used by C++ `AtomIntrRenderer`.
+pub fn atom_intr_render_options(
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    scope_id: u64,
+) -> AtomIntrRenderOptions {
+    let resolved = |name: &str| renderer.resolved_attr(name, styles, scope_id);
+    let real = |name: &str, fallback: f64| {
+        resolved(name)
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(fallback)
+    };
+    let cap = |name: &str| match resolved(name)
+        .unwrap_or_else(|| "sphere".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "flat" | "0" => AtomIntrCapType::Flat,
+        "arrow" | "2" => AtomIntrCapType::Arrow,
+        _ => AtomIntrCapType::Sphere,
+    };
+    let color = resolved("color").unwrap_or_else(|| "#ffff00".to_string());
+    AtomIntrRenderOptions {
+        mode: match resolved("mode")
+            .unwrap_or_else(|| "fancy".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "simple" | "0" => AtomIntrRenderMode::Simple,
+            _ => AtomIntrRenderMode::Fancy,
+        },
+        detail: real("detail", 5.0).max(0.0) as u32,
+        stipples: std::array::from_fn(|index| {
+            real(
+                &format!("stipple{index}"),
+                if index < 2 { 1.0 } else { -1.0 },
+            )
+        }),
+        width: real("width", 0.1) as f32,
+        color: solid_color_to_spec(&styles.compile_color(&color, scope_id)),
+        start_cap: cap("captype_start"),
+        end_cap: cap("captype_end"),
+        arrow_height: real("arrowheight", 1.0),
+        arrow_width: real("arrowwidth", 2.0),
+    }
 }
 
 /// Build a [`RainbowColoring`] from a `<coloring type="RainbowColoring">` node.

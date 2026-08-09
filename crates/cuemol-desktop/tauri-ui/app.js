@@ -3,6 +3,8 @@
 const appShell = document.querySelector(".app-shell");
 const viewport = document.getElementById("viewport");
 const viewportImage = document.getElementById("viewport-image");
+const viewportLines = document.getElementById("viewport-lines");
+const viewportLabels = document.getElementById("viewport-labels");
 const sceneTabs = document.getElementById("scene-tabs");
 const sceneTree = document.getElementById("scene-tree");
 const rendererList = document.getElementById("renderer-list");
@@ -1427,6 +1429,7 @@ function rendererPropertiesEditor(object, renderer) {
   const densityMap = Array.isArray(object.counts);
   const surfaceObject = object.className === "MolSurfObj";
   const simpleLike = ["simple", "trace"].includes(renderer.rendererType);
+  const atomIntrLike = renderer.rendererType === "atomintr";
   const anisouLike = renderer.rendererType === "anisou";
   const ballStickLike = ["ballstick", "anisou"].includes(renderer.rendererType);
   const cpkLike = renderer.rendererType === "cpk";
@@ -1442,6 +1445,8 @@ function rendererPropertiesEditor(object, renderer) {
     dialogTitle.textContent = "Simple Rend Properties";
   } else if (renderer.rendererType === "trace") {
     dialogTitle.textContent = "Trace renderer properties";
+  } else if (atomIntrLike) {
+    dialogTitle.textContent = "Interaction renderer properties";
   } else if (anisouLike) {
     dialogTitle.textContent = "Anisotropic U renderer properties";
   } else if (ballStickLike) {
@@ -1469,7 +1474,9 @@ function rendererPropertiesEditor(object, renderer) {
   }
   const tabNames = simpleLike
     ? [renderer.rendererType === "trace" ? "Trace" : "Simple"]
-    : anisouLike
+    : atomIntrLike
+      ? ["Common", "Interaction"]
+      : anisouLike
       ? ["Common", "Ball & Stick", "Anisotropic U"]
       : ballStickLike
       ? ["Common", "Ball & Stick"]
@@ -1749,6 +1756,119 @@ function rendererPropertiesEditor(object, renderer) {
   }
 
   let disorderColorPicker = null;
+  let syncAtomIntrState = () => {};
+  if (atomIntrLike) {
+    const interactionPage = panes[1];
+    const basicSettings = document.createElement("fieldset");
+    basicSettings.className = "property-common-group renderer-specific-group";
+    const basicLegend = document.createElement("legend");
+    basicLegend.textContent = "Interaction";
+    basicSettings.append(basicLegend);
+    const mode = addSpecificSelect(
+      basicSettings,
+      "mode",
+      "Mode:",
+      [
+        ["simple", "Simple line"],
+        ["fancy", "3D tube"],
+      ],
+      "fancy",
+    );
+    addSpecificCheckbox(basicSettings, "showlabel", "Show label", false);
+    const width = addSpecificNumber(basicSettings, "width", "Width (Å):", 0, 5, 0.05, "0.1");
+    const widthCaption = width.closest("label").querySelector("span");
+    addSpecificColor(basicSettings, "color", "Color:", "#ffff00");
+    interactionPage.append(basicSettings);
+
+    const dashedGroup = document.createElement("fieldset");
+    dashedGroup.className = "property-common-group renderer-specific-group";
+    const stippleValues = Array.from({ length: 6 }, (_, index) =>
+      Number(renderer.specific?.[`stipple${index}`] ?? (index < 2 ? 1 : -1)),
+    );
+    const dashed = propertyCheckbox(
+      dashedGroup,
+      "Dashed line",
+      stippleValues.some((value) => value >= 0),
+    );
+    const stippleGrid = document.createElement("div");
+    stippleGrid.className = "interaction-stipple-grid";
+    const stippleInputs = [];
+    const stippleDefaults = ["1", "1", "", "", "", ""];
+    for (let index = 0; index < 6; index += 1) {
+      const cell = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "number";
+      input.min = "0";
+      input.max = "100";
+      input.step = "0.05";
+      const current = stippleValues[index];
+      input.value = current >= 0 ? String(current) : "";
+      const caption = document.createElement("span");
+      caption.textContent = index % 2 === 0 ? "dash" : "gap";
+      cell.append(input, caption);
+      stippleGrid.append(cell);
+      specificInputs.set(`stipple${index}`, input);
+      specificDefaults.set(`stipple${index}`, stippleDefaults[index]);
+      specificReaders.set(`stipple${index}`, () =>
+        dashed.checked && input.value.trim() !== "" ? input.value : "-1",
+      );
+      specificControls.push(input);
+      stippleInputs.push(input);
+    }
+    dashedGroup.append(stippleGrid);
+    specificControls.push(dashed);
+    interactionPage.append(dashedGroup);
+
+    const tubeOptions = document.createElement("fieldset");
+    tubeOptions.className = "property-common-group renderer-specific-group";
+    const tubeLegend = document.createElement("legend");
+    tubeLegend.textContent = "3D tube options";
+    tubeOptions.append(tubeLegend);
+    const intrDetail = addSpecificNumber(tubeOptions, "detail", "Detail:", 0, 20, 1, "5");
+    const startCap = addSpecificSelect(
+      tubeOptions,
+      "captype_start",
+      "Start cap:",
+      [
+        ["flat", "Flat"],
+        ["sphere", "Round"],
+        ["arrow", "Arrow"],
+      ],
+      "sphere",
+    );
+    const endCap = addSpecificSelect(
+      tubeOptions,
+      "captype_end",
+      "End cap:",
+      [
+        ["flat", "Flat"],
+        ["sphere", "Round"],
+        ["arrow", "Arrow"],
+      ],
+      "sphere",
+    );
+    interactionPage.append(tubeOptions);
+
+    syncAtomIntrState = () => {
+      const simple = mode.value === "simple";
+      widthCaption.textContent = simple ? "Width (px):" : "Width (Å):";
+      intrDetail.disabled = simple;
+      startCap.disabled = simple;
+      endCap.disabled = simple;
+      for (const input of stippleInputs) input.disabled = !dashed.checked;
+    };
+    mode.addEventListener("change", syncAtomIntrState);
+    dashed.addEventListener("change", () => {
+      if (dashed.checked && (!stippleInputs[0].value || Number(stippleInputs[0].value) < 0)) {
+        stippleInputs[0].value = "1";
+      }
+      syncAtomIntrState();
+    });
+    specificResetters.push(() => {
+      dashed.checked = true;
+    });
+    syncAtomIntrState();
+  }
   let syncAnisouState = () => {};
   if (anisouLike) {
     const anisouPage = panes[2];
@@ -2722,6 +2842,7 @@ function rendererPropertiesEditor(object, renderer) {
     if (showRing) showRing.dispatchEvent(new Event("change"));
     syncDensityMapState();
     syncSurfaceState();
+    syncAtomIntrState();
     syncAnisouState();
     syncRibbonState();
     syncTubeState();
@@ -6086,6 +6207,35 @@ function applyViewport(result, sequence) {
   renderedViewportSize = `${result.width}x${result.height}`;
   viewport.classList.toggle("has-image", Boolean(result.image));
   if (result.image) viewportImage.src = result.image;
+  viewportLines.replaceChildren();
+  viewportLines.setAttribute("viewBox", `0 0 ${result.width} ${result.height}`);
+  for (const line of result.lines || []) {
+    const element = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    element.setAttribute("x1", String(Number(line.x1) || 0));
+    element.setAttribute("y1", String(Number(line.y1) || 0));
+    element.setAttribute("x2", String(Number(line.x2) || 0));
+    element.setAttribute("y2", String(Number(line.y2) || 0));
+    element.setAttribute("stroke", line.color || "#ffff00");
+    element.setAttribute("stroke-width", String(Math.max(0.1, Number(line.width) || 1)));
+    element.setAttribute("stroke-linecap", "butt");
+    element.setAttribute("vector-effect", "non-scaling-stroke");
+    if (line.stipple) element.setAttribute("stroke-dasharray", "8 8");
+    viewportLines.append(element);
+  }
+  viewportLabels.replaceChildren();
+  for (const label of result.labels || []) {
+    const element = document.createElement("span");
+    element.className = "viewport-label";
+    element.textContent = label.text;
+    element.style.left = `${(Number(label.x) / Math.max(1, result.width)) * 100}%`;
+    element.style.top = `${(Number(label.y) / Math.max(1, result.height)) * 100}%`;
+    element.style.color = label.color || "#ffff00";
+    element.style.fontSize = `${Number(label.fontSize) || 12}px`;
+    element.style.fontFamily = label.fontName || "sans-serif";
+    element.style.fontStyle = label.fontStyle || "normal";
+    element.style.fontWeight = label.fontWeight || "normal";
+    viewportLabels.append(element);
+  }
   renderSize.textContent = `${result.width} × ${result.height}`;
   if (
     snapshot &&

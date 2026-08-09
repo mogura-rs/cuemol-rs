@@ -14,9 +14,9 @@ use cuemol_molstr::{
 };
 use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
-    apply_tube_renderer_styles, disorder_lines_snapshot, molecule_render_snapshot,
-    na_renderer_snapshot, ribbon_mesh_snapshot, scene_style_manager, AnIsoURenderOptions,
-    MoleculeRenderOptions, NARenderOptions, NARenderer, DEFAULT_STYLE_SCOPE,
+    apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot,
+    molecule_render_snapshot, na_renderer_snapshot, ribbon_mesh_snapshot, scene_style_manager,
+    AnIsoURenderOptions, MoleculeRenderOptions, NARenderOptions, NARenderer, DEFAULT_STYLE_SCOPE,
 };
 use cuemol_qsys::{Camera, MultiGradient, ScalarObject};
 use cuemol_render::{
@@ -944,7 +944,11 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             let mut snapshot = if rtype == "atomintr" {
                 // Measurement lines between the renderer's atom pairs, not the
                 // whole molecule (the single source of truth shared with the GUI).
-                cuemol_render::atom_intr_snapshot(&object.atom_intr_segments(renderer), None)
+                cuemol_render::atom_intr_snapshot_with_options(
+                    &object.atom_intr_segments(renderer),
+                    None,
+                    &atom_intr_render_options(renderer, &styles, DEFAULT_STYLE_SCOPE),
+                )
             } else if rtype == "anisou" {
                 let resolved =
                     |name: &str| renderer.resolved_attr(name, &styles, DEFAULT_STYLE_SCOPE);
@@ -1173,6 +1177,8 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         object_uid: None,
                         atom_indices: None,
                         selected: false,
+                        screen_width: None,
+                        screen_stipple: false,
                     });
                 }
                 total_bonds += snapshot.bond_count();
@@ -1268,6 +1274,8 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                                 object_uid: None,
                                 atom_indices: None,
                                 selected: false,
+                                screen_width: None,
+                                screen_stipple: false,
                             });
                         }
                         total_bonds += snapshot.bond_count();

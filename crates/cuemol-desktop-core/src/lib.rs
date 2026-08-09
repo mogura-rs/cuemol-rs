@@ -22,10 +22,11 @@ use cuemol_molstr::{
 use cuemol_molstr::{write_pdb_string_with_selection, AtomIntrLine};
 use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
-    apply_tube_renderer_styles, disorder_lines_snapshot_with_style, molecule_render_snapshot,
-    na_renderer_snapshot, ribbon_mesh_snapshot, ring_meshes_snapshot_with, scene_style_manager,
-    AnIsoURenderOptions, DisorderRenderOptions, MoleculeRenderOptions, NARenderOptions, NARenderer,
-    ValenceBondMode, VdwRadii, DEFAULT_STYLE_SCOPE,
+    apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot_with_style,
+    molecule_render_snapshot, na_renderer_snapshot, ribbon_mesh_snapshot,
+    ring_meshes_snapshot_with, scene_style_manager, AnIsoURenderOptions, DisorderRenderOptions,
+    MoleculeRenderOptions, NARenderOptions, NARenderer, ValenceBondMode, VdwRadii,
+    DEFAULT_STYLE_SCOPE,
 };
 #[cfg(test)]
 use cuemol_molvis::{default_style_manager, disorder_lines_snapshot};
@@ -644,6 +645,86 @@ pub struct GuiAtomLabel {
     pub x: f32,
     pub y: f32,
     pub text: String,
+    pub color: String,
+    pub font_size: f64,
+    pub font_name: String,
+    pub font_style: String,
+    pub font_weight: String,
+}
+
+/// A projected screen-space line for renderers whose width is defined in pixels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuiScreenLine {
+    pub x1: f32,
+    pub y1: f32,
+    pub x2: f32,
+    pub y2: f32,
+    pub width: f32,
+    pub color: String,
+    pub stipple: bool,
+}
+
+#[derive(Clone)]
+struct GuiLabelStyle {
+    color: String,
+    font_size: f64,
+    font_name: String,
+    font_style: String,
+    font_weight: String,
+}
+
+impl Default for GuiLabelStyle {
+    fn default() -> Self {
+        Self {
+            color: "#ffff00".to_string(),
+            font_size: 12.0,
+            font_name: "sans-serif".to_string(),
+            font_style: "normal".to_string(),
+            font_weight: "normal".to_string(),
+        }
+    }
+}
+
+impl GuiAtomLabel {
+    fn with_style(x: f32, y: f32, text: String, style: &GuiLabelStyle) -> Self {
+        Self {
+            x,
+            y,
+            text,
+            color: style.color.clone(),
+            font_size: style.font_size,
+            font_name: style.font_name.clone(),
+            font_style: style.font_style.clone(),
+            font_weight: style.font_weight.clone(),
+        }
+    }
+}
+
+fn gui_renderer_label_style(renderer: &MolRenderer, styles: &StyleManager) -> GuiLabelStyle {
+    let resolved = |name: &str| renderer.resolved_attr(name, styles, DEFAULT_STYLE_SCOPE);
+    let color = resolved("color").unwrap_or_else(|| "#ffff00".to_string());
+    GuiLabelStyle {
+        color: styles
+            .compile_color(&color, DEFAULT_STYLE_SCOPE)
+            .script_string(),
+        font_size: resolved("font_size")
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(12.0),
+        font_name: resolved("font_name").unwrap_or_else(|| "sans-serif".to_string()),
+        font_style: resolved("font_style").unwrap_or_else(|| "normal".to_string()),
+        font_weight: resolved("font_weight").unwrap_or_else(|| "normal".to_string()),
+    }
+}
+
+fn gui_css_color(color: cuemol_gfx::Rgba8) -> String {
+    if color.a == u8::MAX {
+        format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)
+    } else {
+        format!(
+            "#{:02X}{:02X}{:02X}{:02X}",
+            color.r, color.g, color.b, color.a
+        )
+    }
 }
 
 /// One residue cell in the interactive sequence viewer (CueMol2 `seqpanel`).
@@ -1175,6 +1256,8 @@ impl DesktopAppState {
                                 object_uid: Some(surface.uid.get()),
                                 atom_indices: None,
                                 selected: false,
+                                screen_width: None,
+                                screen_stipple: false,
                             });
                         }
                     }
@@ -2362,6 +2445,8 @@ impl DesktopAppState {
                         object_uid: None,
                         atom_indices: None,
                         selected: false,
+                        screen_width: None,
+                        screen_stipple: false,
                     });
                 }
             }
@@ -2412,6 +2497,8 @@ impl DesktopAppState {
                     object_uid: None,
                     atom_indices: None,
                     selected: false,
+                    screen_width: None,
+                    screen_stipple: false,
                 });
             }
         }
@@ -2496,6 +2583,8 @@ impl DesktopAppState {
                                 object_uid: None,
                                 atom_indices: None,
                                 selected: false,
+                                screen_width: None,
+                                screen_stipple: false,
                             });
                         }
                     }
@@ -2609,6 +2698,8 @@ impl DesktopAppState {
                                         object_uid: None,
                                         atom_indices: None,
                                         selected: false,
+                                        screen_width: None,
+                                        screen_stipple: false,
                                     });
                                 }
                             }
@@ -4858,16 +4949,17 @@ impl DesktopAppState {
                 continue;
             };
             if let Ok(info) = self.atom_summary(Uid::new(object_uid), atom_index) {
-                out.push(GuiAtomLabel {
-                    x: sx,
-                    y: sy,
-                    text: format!(
+                out.push(GuiAtomLabel::with_style(
+                    sx,
+                    sy,
+                    format!(
                         "{}{}:{}",
                         info.residue_name.trim(),
                         info.residue_id,
                         info.name
                     ),
-                });
+                    &GuiLabelStyle::default(),
+                ));
             }
         }
         out
@@ -4905,6 +4997,7 @@ impl DesktopAppState {
                 if !show_label {
                     continue;
                 }
+                let label_style = gui_renderer_label_style(renderer, &styles);
                 let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
                 for (mut position, text) in object.atom_intr_labels(renderer) {
                     if out.len() >= max {
@@ -4921,7 +5014,80 @@ impl DesktopAppState {
                     ) else {
                         continue;
                     };
-                    out.push(GuiAtomLabel { x, y, text });
+                    out.push(GuiAtomLabel::with_style(x, y, text, &label_style));
+                }
+            }
+        }
+        out
+    }
+
+    /// Project simple-mode AtomIntr measurements as pixel-width viewport lines.
+    pub fn active_atom_intr_lines(
+        &self,
+        mvp: [[f32; 4]; 4],
+        width: f32,
+        height: f32,
+        max: usize,
+    ) -> Vec<GuiScreenLine> {
+        let Some(scene_uid) = self.active_scene else {
+            return Vec::new();
+        };
+        let Some(scene) = self.scene_manager().scene(scene_uid) else {
+            return Vec::new();
+        };
+        let styles = scene_style_manager(scene);
+        let mut out = Vec::new();
+        for object in scene.objects().iter().filter(|object| object.is_visible()) {
+            for renderer in object
+                .renderers()
+                .iter()
+                .filter(|renderer| renderer.is_visible() && renderer.renderer_type() == "atomintr")
+            {
+                let options = atom_intr_render_options(renderer, &styles, DEFAULT_STYLE_SCOPE);
+                if options.mode != cuemol_render::AtomIntrRenderMode::Simple || options.width <= 0.0
+                {
+                    continue;
+                }
+                let color = gui_css_color(options.color.rgba8().unwrap_or(cuemol_gfx::Rgba8 {
+                    r: 255,
+                    g: 255,
+                    b: 0,
+                    a: 255,
+                }));
+                let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
+                for (mut from, mut to) in object.atom_intr_segments(renderer) {
+                    if out.len() >= max {
+                        return out;
+                    }
+                    if xform != Matrix4::IDENTITY {
+                        xform.xform3d(&mut from);
+                        xform.xform3d(&mut to);
+                    }
+                    let Some((x1, y1)) = project_to_image_unclipped(
+                        mvp,
+                        [from.x as f32, from.y as f32, from.z as f32],
+                        width,
+                        height,
+                    ) else {
+                        continue;
+                    };
+                    let Some((x2, y2)) = project_to_image_unclipped(
+                        mvp,
+                        [to.x as f32, to.y as f32, to.z as f32],
+                        width,
+                        height,
+                    ) else {
+                        continue;
+                    };
+                    out.push(GuiScreenLine {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        width: options.width,
+                        color: color.clone(),
+                        stipple: options.stipples[0] >= 0.0,
+                    });
                 }
             }
         }
@@ -4942,13 +5108,31 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
         };
+        let styles = scene_style_manager(scene);
         let mut out = Vec::new();
         for object in scene.objects().iter().filter(|object| object.is_visible()) {
             for renderer in object.renderers().iter().filter(|renderer| {
                 renderer.is_visible() && renderer.renderer_type() == "*namelabel"
             }) {
+                let label_style = gui_renderer_label_style(renderer, &styles);
+                let renderer_max = renderer
+                    .resolved_attr("maxlabel", &styles, DEFAULT_STYLE_SCOPE)
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(50);
+                let dispx = renderer
+                    .resolved_attr("dispx", &styles, DEFAULT_STYLE_SCOPE)
+                    .and_then(|value| value.trim().parse::<f32>().ok())
+                    .unwrap_or(0.0);
+                let dispy = renderer
+                    .resolved_attr("dispy", &styles, DEFAULT_STYLE_SCOPE)
+                    .and_then(|value| value.trim().parse::<f32>().ok())
+                    .unwrap_or(0.0);
                 let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
-                for (mut position, text) in object.name_label_entries(renderer) {
+                for (mut position, text) in object
+                    .name_label_entries(renderer)
+                    .into_iter()
+                    .take(renderer_max)
+                {
                     if out.len() >= max {
                         return out;
                     }
@@ -4963,7 +5147,12 @@ impl DesktopAppState {
                     ) else {
                         continue;
                     };
-                    out.push(GuiAtomLabel { x, y, text });
+                    out.push(GuiAtomLabel::with_style(
+                        x + dispx,
+                        y + dispy,
+                        text,
+                        &label_style,
+                    ));
                 }
             }
         }
@@ -5960,6 +6149,8 @@ impl DesktopAppState {
                             object_uid: None,
                             atom_indices: None,
                             selected: false,
+                            screen_width: None,
+                            screen_stipple: false,
                         });
                     }
                 }
@@ -37629,9 +37820,10 @@ fn append_object_renderer_snapshot(
         // An atom-interaction renderer draws measurement lines between its atom
         // pairs, NOT the whole molecule — route it to the measurement geometry so
         // it stops dumping every atom (the gap this closes).
-        ("atomintr", Some(renderer)) => cuemol_render::atom_intr_snapshot(
+        ("atomintr", Some(renderer)) => cuemol_render::atom_intr_snapshot_with_options(
             &object.atom_intr_segments(renderer),
             Some(object.uid().get()),
+            &atom_intr_render_options(renderer, styles, style_scope_id),
         ),
         // Anisotropic thermal ellipsoids with the C++ ORTEP disc controls.
         ("anisou", renderer) => {
@@ -38257,6 +38449,8 @@ fn append_lw_arrays(
                     object_uid: None,
                     atom_indices: None,
                     selected: false,
+                    screen_width: None,
+                    screen_stipple: false,
                 });
             }
         }
@@ -38884,6 +39078,19 @@ fn project_to_image(
     width: f32,
     height: f32,
 ) -> Option<(f32, f32)> {
+    let (sx, sy) = project_to_image_unclipped(mvp, point, width, height)?;
+    if sx < 0.0 || sx > width || sy < 0.0 || sy > height {
+        return None;
+    }
+    Some((sx, sy))
+}
+
+fn project_to_image_unclipped(
+    mvp: [[f32; 4]; 4],
+    point: [f32; 3],
+    width: f32,
+    height: f32,
+) -> Option<(f32, f32)> {
     let v = [point[0], point[1], point[2], 1.0];
     let mut clip = [0.0f32; 4];
     for (row, clip_component) in clip.iter_mut().enumerate() {
@@ -38896,9 +39103,6 @@ fn project_to_image(
     }
     let sx = (clip[0] / clip[3] + 1.0) * 0.5 * width;
     let sy = (1.0 - clip[1] / clip[3]) * 0.5 * height;
-    if sx < 0.0 || sx > width || sy < 0.0 || sy > height {
-        return None;
-    }
     Some((sx, sy))
 }
 
@@ -48034,12 +48238,22 @@ end_header
             let (anchor, text) = object.atom_intr_labels(renderer)[0].clone();
             (object.uid(), renderer.uid(), anchor, text)
         };
-        app.scene_manager_mut()
+        let renderer = app
+            .scene_manager_mut()
             .object_mut(object_uid)
             .unwrap()
             .renderer_mut(renderer_uid)
-            .unwrap()
-            .set_qsc_attr("showlabel", "true");
+            .unwrap();
+        for (name, value) in [
+            ("showlabel", "true"),
+            ("color", "#00ff00"),
+            ("font_size", "18"),
+            ("font_name", "serif"),
+            ("font_style", "italic"),
+            ("font_weight", "bold"),
+        ] {
+            renderer.set_qsc_attr(name, value);
+        }
         let scale = 0.01_f32;
         let mvp = [
             [scale, 0.0, 0.0, 0.0],
@@ -48053,10 +48267,54 @@ end_header
             ],
         ];
         let labels = app.active_atom_intr_labels(mvp, 100.0, 100.0, 10);
-        assert!(labels.iter().any(|label| {
-            label.text == expected_text
-                && (label.x - 50.0).abs() < 1.0e-4
-                && (label.y - 50.0).abs() < 1.0e-4
+        assert!(
+            labels.iter().any(|label| {
+                label.text == expected_text
+                    && (label.x - 50.0).abs() < 1.0e-4
+                    && (label.y - 50.0).abs() < 1.0e-4
+                    && label.color.eq_ignore_ascii_case("#00ff00")
+                    && (label.font_size - 18.0).abs() < f64::EPSILON
+                    && label.font_name == "serif"
+                    && label.font_style == "italic"
+                    && label.font_weight == "bold"
+            }),
+            "projected labels: {labels:?}"
+        );
+        let lines = app.active_atom_intr_lines(mvp, 100.0, 100.0, 10);
+        assert!(lines.iter().any(|line| {
+            line.color.eq_ignore_ascii_case("#00ff00")
+                && (line.width - 1.0).abs() < f32::EPSILON
+                && line.stipple
+        }));
+
+        let renderer = app
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap();
+        for (name, value) in [
+            ("mode", "fancy"),
+            ("stipple0", "-1"),
+            ("stipple1", "-1"),
+            ("width", "0.25"),
+            ("color", "#ff00ff"),
+            ("captype_start", "arrow"),
+            ("captype_end", "flat"),
+            ("detail", "8"),
+        ] {
+            renderer.set_qsc_attr(name, value);
+        }
+        let styled = app.render_snapshot(scene_uid, "").unwrap();
+        assert_eq!(
+            styled.bond_count(),
+            1,
+            "the other interaction remains simple"
+        );
+        assert!(styled.meshes.iter().any(|mesh| {
+            mesh.vertices
+                .iter()
+                .any(|vertex| vertex.color == [1.0, 0.0, 1.0, 1.0])
         }));
     }
 
@@ -48079,6 +48337,18 @@ end_header
             .renderer_mut(renderer_uid)
             .unwrap()
             .set_qsc_children(vec![pse_atom_label_node(0, "PyMOL label")]);
+        let renderer = object.renderer_mut(renderer_uid).unwrap();
+        for (name, value) in [
+            ("dispx", "5"),
+            ("dispy", "-3"),
+            ("color", "#123456"),
+            ("font_size", "16"),
+            ("font_name", "monospace"),
+            ("font_style", "italic"),
+            ("font_weight", "bold"),
+        ] {
+            renderer.set_qsc_attr(name, value);
+        }
 
         let mvp = [
             [1.0, 0.0, 0.0, 0.0],
@@ -48089,8 +48359,13 @@ end_header
         let labels = app.active_name_labels(mvp, 100.0, 100.0, 10);
         assert_eq!(labels.len(), 1);
         assert_eq!(labels[0].text, "PyMOL label");
-        assert!((labels[0].x - 50.0).abs() < 1.0e-6);
-        assert!((labels[0].y - 50.0).abs() < 1.0e-6);
+        assert!((labels[0].x - 55.0).abs() < 1.0e-6);
+        assert!((labels[0].y - 47.0).abs() < 1.0e-6);
+        assert_eq!(labels[0].color, "#123456");
+        assert_eq!(labels[0].font_size, 16.0);
+        assert_eq!(labels[0].font_name, "monospace");
+        assert_eq!(labels[0].font_style, "italic");
+        assert_eq!(labels[0].font_weight, "bold");
     }
 
     #[test]

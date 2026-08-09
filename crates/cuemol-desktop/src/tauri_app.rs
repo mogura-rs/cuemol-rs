@@ -8,7 +8,7 @@ use std::sync::{mpsc, Mutex};
 
 use cuemol_core::{LDom2Node, Quat, Uid, Vector4};
 use cuemol_qsys::{Camera, CenterMark, StereoMode, View};
-use cuemol_render::{tessellate_snapshot, RenderMesh, RenderSceneSnapshot};
+use cuemol_render::{tessellate_snapshot, RenderBond, RenderMesh, RenderSceneSnapshot};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -340,13 +340,73 @@ struct MoleculeDetailsDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ViewportLabelDto {
+    x: f32,
+    y: f32,
+    text: String,
+    color: String,
+    font_size: f64,
+    font_name: String,
+    font_style: String,
+    font_weight: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewportLineDto {
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    width: f32,
+    color: String,
+    stipple: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ViewportDto {
     image: Option<String>,
     width: u32,
     height: u32,
     perspective: bool,
     center_mark: String,
+    lines: Vec<ViewportLineDto>,
+    labels: Vec<ViewportLabelDto>,
     status: String,
+}
+
+fn project_viewport_point(
+    mvp: [[f32; 4]; 4],
+    point: Vector4,
+    width: u32,
+    height: u32,
+) -> Option<(f32, f32)> {
+    let value = [point.x as f32, point.y as f32, point.z as f32, 1.0];
+    let mut clip = [0.0_f32; 4];
+    for (row, component) in clip.iter_mut().enumerate() {
+        for (column, value) in value.iter().enumerate() {
+            *component += mvp[column][row] * value;
+        }
+    }
+    if clip[3] <= 0.0 {
+        return None;
+    }
+    Some((
+        (clip[0] / clip[3] + 1.0) * 0.5 * width as f32,
+        (1.0 - clip[1] / clip[3]) * 0.5 * height as f32,
+    ))
+}
+
+fn viewport_css_color(color: cuemol_gfx::Rgba8) -> String {
+    if color.a == u8::MAX {
+        format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)
+    } else {
+        format!(
+            "#{:02X}{:02X}{:02X}{:02X}",
+            color.r, color.g, color.b, color.a
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -577,6 +637,7 @@ struct AppModel {
     camera: Camera,
     renderer: Option<SceneRenderer>,
     mesh: Option<RenderMesh>,
+    screen_lines: Vec<RenderBond>,
     mesh_refit_pending: bool,
     selection: String,
     background: String,
@@ -667,6 +728,7 @@ impl AppModel {
             camera: Camera::new(),
             renderer: None,
             mesh: None,
+            screen_lines: Vec::new(),
             mesh_refit_pending: loaded > 0,
             selection: String::new(),
             background: "black".to_string(),
@@ -2144,6 +2206,91 @@ impl AppModel {
         }
         let mut specific_updates = Vec::<(String, String, bool)>::new();
         match renderer_type.as_str() {
+            "atomintr" => {
+                if let Some(raw) = properties.specific.get("mode") {
+                    let value = raw.trim();
+                    if !matches!(value, "simple" | "fancy") {
+                        return Err(format!("unsupported interaction mode: {value}"));
+                    }
+                    specific_updates.push((
+                        "mode".to_string(),
+                        value.to_string(),
+                        value == "fancy",
+                    ));
+                }
+                if let Some(raw) = properties.specific.get("showlabel") {
+                    let value = config_value_is_true(raw);
+                    specific_updates.push(("showlabel".to_string(), value.to_string(), !value));
+                }
+                if let Some(raw) = properties.specific.get("detail") {
+                    let value = raw
+                        .trim()
+                        .parse::<i32>()
+                        .map_err(|_| "interaction detail must be an integer".to_string())?;
+                    if !(0..=20).contains(&value) {
+                        return Err("interaction detail must be between 0 and 20".to_string());
+                    }
+                    specific_updates.push(("detail".to_string(), value.to_string(), value == 5));
+                }
+                if let Some(raw) = properties.specific.get("width") {
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| "interaction width must be a number".to_string())?;
+                    if !value.is_finite() || !(0.0..=10.0).contains(&value) {
+                        return Err("interaction width must be between 0 and 10".to_string());
+                    }
+                    specific_updates.push((
+                        "width".to_string(),
+                        value.to_string(),
+                        (value - 0.1).abs() < f64::EPSILON,
+                    ));
+                }
+                if let Some(value) = properties.specific.get("color") {
+                    if cuemol_gfx::parse_color(value.trim()).is_err() {
+                        return Err(format!("invalid interaction color: {value}"));
+                    }
+                    specific_updates.push((
+                        "color".to_string(),
+                        value.trim().to_string(),
+                        value.trim().eq_ignore_ascii_case("#ffff00"),
+                    ));
+                }
+                for (key, default) in [
+                    ("stipple0", 1.0),
+                    ("stipple1", 1.0),
+                    ("stipple2", -1.0),
+                    ("stipple3", -1.0),
+                    ("stipple4", -1.0),
+                    ("stipple5", -1.0),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("{key} must be a number"))?;
+                    if !value.is_finite() || !(-1.0..=100.0).contains(&value) {
+                        return Err(format!("{key} must be between -1 and 100"));
+                    }
+                    specific_updates.push((
+                        key.to_string(),
+                        value.to_string(),
+                        (value - default).abs() < f64::EPSILON,
+                    ));
+                }
+                for key in ["captype_start", "captype_end"] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw.trim();
+                    if !matches!(value, "flat" | "sphere" | "arrow") {
+                        return Err(format!("unsupported interaction cap: {value}"));
+                    }
+                    specific_updates.push((key.to_string(), value.to_string(), value == "sphere"));
+                }
+            }
             "anisou" => {
                 if let Some(raw) = properties.specific.get("drawdisc") {
                     let value = config_value_is_true(raw);
@@ -3043,6 +3190,13 @@ impl AppModel {
                 .active_scene_saved_camera()
                 .unwrap_or_else(|| frame_camera(&snapshot));
         }
+        self.screen_lines = snapshot
+            .bonds
+            .iter()
+            .filter(|bond| bond.screen_width.is_some())
+            .cloned()
+            .collect();
+        snapshot.bonds.retain(|bond| bond.screen_width.is_none());
         self.mesh = Some(tessellate_snapshot(&snapshot));
         self.mesh_refit_pending = false;
         Ok(())
@@ -3205,12 +3359,58 @@ impl AppModel {
         let height = height.clamp(64, MAX_VIEW_DIM);
         self.view_width = width;
         self.view_height = height;
+        let mvp = camera_mvp(&self.camera, f64::from(width) / f64::from(height));
+        let lines = self
+            .screen_lines
+            .iter()
+            .filter_map(|line| {
+                let (x1, y1) = project_viewport_point(mvp, line.from, width, height)?;
+                let (x2, y2) = project_viewport_point(mvp, line.to, width, height)?;
+                Some(ViewportLineDto {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width: line.screen_width.unwrap_or(1.0),
+                    color: line
+                        .color
+                        .as_ref()
+                        .and_then(cuemol_gfx::ColorSpec::rgba8)
+                        .map(viewport_css_color)
+                        .unwrap_or_else(|| "#ffff00".to_string()),
+                    stipple: line.screen_stipple,
+                })
+            })
+            .take(1_000)
+            .collect();
+        let mut labels =
+            self.desktop
+                .active_atom_intr_labels(mvp, width as f32, height as f32, 1_000);
+        let remaining = 1_000_usize.saturating_sub(labels.len());
+        labels.extend(
+            self.desktop
+                .active_name_labels(mvp, width as f32, height as f32, remaining),
+        );
         ViewportDto {
             image: None,
             width,
             height,
             perspective: self.camera.is_perspective(),
             center_mark: center_mark_name(self.camera.center_mark()).to_string(),
+            lines,
+            labels: labels
+                .into_iter()
+                .map(|label| ViewportLabelDto {
+                    x: label.x,
+                    y: label.y,
+                    text: label.text,
+                    color: label.color,
+                    font_size: label.font_size,
+                    font_name: label.font_name,
+                    font_style: label.font_style,
+                    font_weight: label.font_weight,
+                })
+                .collect(),
             status: self.status.clone(),
         }
     }
@@ -4058,6 +4258,27 @@ fn renderer_specific_attributes(
     styles: &cuemol_qsys::StyleManager,
 ) -> BTreeMap<String, String> {
     let defaults: Vec<(&str, &str)> = match renderer_type {
+        "atomintr" => vec![
+            ("mode", "fancy"),
+            ("showlabel", "false"),
+            ("detail", "5"),
+            ("stipple0", "1"),
+            ("stipple1", "1"),
+            ("stipple2", "-1"),
+            ("stipple3", "-1"),
+            ("stipple4", "-1"),
+            ("stipple5", "-1"),
+            ("width", "0.1"),
+            ("color", "#ffff00"),
+            ("captype_start", "sphere"),
+            ("captype_end", "sphere"),
+            ("arrowheight", "1"),
+            ("arrowwidth", "2"),
+            ("font_size", "12"),
+            ("font_name", "sans-serif"),
+            ("font_style", "normal"),
+            ("font_weight", "normal"),
+        ],
         "anisou" => vec![
             ("drawdisc", "true"),
             ("discscale", "1.1"),
@@ -7687,6 +7908,7 @@ mod tests {
             camera: Camera::new(),
             renderer: None,
             mesh: None,
+            screen_lines: Vec::new(),
             mesh_refit_pending: false,
             selection: String::new(),
             background: "black".to_string(),
@@ -8263,6 +8485,128 @@ mod tests {
         ] {
             assert_eq!(renderer.qsc_attr(key), None, "{key} restored");
         }
+    }
+
+    #[test]
+    fn atom_intr_properties_are_undoable_and_persisted() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let renderer_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("atomintr", "measure");
+        let specific = BTreeMap::from([
+            ("mode".to_string(), "fancy".to_string()),
+            ("showlabel".to_string(), "true".to_string()),
+            ("detail".to_string(), "8".to_string()),
+            ("stipple0".to_string(), "0.25".to_string()),
+            ("stipple1".to_string(), "0.4".to_string()),
+            ("stipple2".to_string(), "-1".to_string()),
+            ("stipple3".to_string(), "-1".to_string()),
+            ("stipple4".to_string(), "-1".to_string()),
+            ("stipple5".to_string(), "-1".to_string()),
+            ("width".to_string(), "0.25".to_string()),
+            ("color".to_string(), "#12abef".to_string()),
+            ("captype_start".to_string(), "arrow".to_string()),
+            ("captype_end".to_string(), "flat".to_string()),
+        ]);
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetRendererProperties(RendererPropertiesInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                name: "measurement".to_string(),
+                selection: "*".to_string(),
+                visible: true,
+                locked: false,
+                material: String::new(),
+                alpha: 1.0,
+                edge_type: "none".to_string(),
+                edge_width: 0.01,
+                edge_color: "#000000".to_string(),
+                line_width: 1.2,
+                detail: 3,
+                bond_width: 0.2,
+                sphere_radius: 0.3,
+                show_ring: false,
+                ring_thickness: 0.2,
+                ring_color: "#ffffbf".to_string(),
+                specific,
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let renderer = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == renderer_uid.get())
+            .unwrap();
+        for (key, expected) in [
+            ("mode", "fancy"),
+            ("showlabel", "true"),
+            ("detail", "8"),
+            ("stipple0", "0.25"),
+            ("stipple1", "0.4"),
+            ("width", "0.25"),
+            ("color", "#12abef"),
+            ("captype_start", "arrow"),
+            ("captype_end", "flat"),
+        ] {
+            assert_eq!(renderer.specific[key], expected, "{key}");
+        }
+
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        for key in [
+            "mode",
+            "showlabel",
+            "detail",
+            "stipple0",
+            "stipple1",
+            "width",
+            "color",
+            "captype_start",
+            "captype_end",
+        ] {
+            assert_eq!(renderer.qsc_attr(key), None, "{key} restored");
+        }
+    }
+
+    #[test]
+    fn simple_atom_intr_lines_are_projected_into_the_viewport() {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let fixture = root.join("tests/test_data/number_chain_atomintr1.qsc");
+        if !fixture.exists() {
+            return;
+        }
+        let mut model = model_without_gpu();
+        model.desktop.load_qsc_file(&fixture).unwrap();
+        model.rebuild_mesh(true).unwrap();
+
+        let viewport = model.viewport_metadata(800, 600);
+        assert_eq!(viewport.lines.len(), 2);
+        assert!(viewport.lines.iter().all(|line| {
+            line.width == 1.0
+                && line.stipple
+                && line.x1.is_finite()
+                && line.y1.is_finite()
+                && line.x2.is_finite()
+                && line.y2.is_finite()
+        }));
     }
 
     #[test]

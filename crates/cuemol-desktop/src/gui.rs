@@ -825,6 +825,7 @@ impl GuiApplication {
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
                 self.viewport_rect = Some(rect);
+                self.draw_atom_intr_lines(ui, camera, rect);
                 self.draw_center_mark(ui, rect);
                 self.draw_atom_labels(ui, camera, rect);
                 ui.allocate_ui(rect.size(), |ui| {
@@ -3691,6 +3692,54 @@ impl GuiApplication {
         }
     }
 
+    fn draw_atom_intr_lines(&self, ui: &egui::Ui, camera: &CameraController, rect: egui::Rect) {
+        let painter = ui.painter();
+        for bond in self
+            .snapshot
+            .bonds
+            .iter()
+            .filter(|bond| bond.screen_width.is_some())
+        {
+            let Some((from, _)) = camera.project_to_viewport(vec3_from_vector(bond.from), rect)
+            else {
+                continue;
+            };
+            let Some((to, _)) = camera.project_to_viewport(vec3_from_vector(bond.to), rect) else {
+                continue;
+            };
+            let rgba = bond
+                .color
+                .as_ref()
+                .and_then(cuemol_gfx::ColorSpec::rgba8)
+                .unwrap_or(Rgba8 {
+                    r: 255,
+                    g: 255,
+                    b: 0,
+                    a: 255,
+                });
+            let stroke = egui::Stroke::new(
+                bond.screen_width.unwrap_or(1.0).max(0.1),
+                egui::Color32::from_rgba_unmultiplied(rgba.r, rgba.g, rgba.b, rgba.a),
+            );
+            if !bond.screen_stipple {
+                painter.line_segment([from, to], stroke);
+                continue;
+            }
+            let delta = to - from;
+            let length = delta.length();
+            if length <= f32::EPSILON {
+                continue;
+            }
+            let direction = delta / length;
+            let mut start = 0.0_f32;
+            while start < length {
+                let end = (start + 8.0).min(length);
+                painter.line_segment([from + direction * start, from + direction * end], stroke);
+                start += 16.0;
+            }
+        }
+    }
+
     fn draw_center_mark(&self, ui: &egui::Ui, rect: egui::Rect) {
         if self.center_mark == CenterMark::None {
             return;
@@ -5467,6 +5516,7 @@ impl GpuState {
         let bonds = snapshot
             .bonds
             .iter()
+            .filter(|bond| bond.screen_width.is_none())
             .flat_map(bond_vertices)
             .collect::<Vec<_>>();
         self.bond_vertex_count = bonds.len() as u32;
