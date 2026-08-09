@@ -528,6 +528,7 @@ struct AnimationRenderSettings {
     height: u32,
     perspective: bool,
     fps: u32,
+    concurrency: u32,
     duplicate_last_frame: bool,
     backend: String,
     povray_executable: String,
@@ -547,6 +548,7 @@ impl Default for AnimationRenderSettings {
             height: 480,
             perspective: true,
             fps: 30,
+            concurrency: default_animation_render_concurrency(),
             duplicate_last_frame: false,
             backend: "POV-Ray".to_string(),
             povray_executable: "povray".to_string(),
@@ -579,7 +581,8 @@ struct AnimationRenderJob {
     next_frame: u32,
     completed_frames: u32,
     frame_paths: Vec<PathBuf>,
-    receiver: Option<mpsc::Receiver<std::result::Result<AnimationTaskOutput, String>>>,
+    frame_receivers: Vec<mpsc::Receiver<std::result::Result<AnimationTaskOutput, String>>>,
+    movie_receiver: Option<mpsc::Receiver<std::result::Result<AnimationTaskOutput, String>>>,
     progress: Arc<AtomicU32>,
     cancel: Arc<AtomicBool>,
     encoding_started: bool,
@@ -2529,6 +2532,7 @@ impl GuiApplication {
         settings.width = settings.width.clamp(100, 16_384);
         settings.height = settings.height.clamp(100, 16_384);
         settings.fps = settings.fps.clamp(1, 240);
+        settings.concurrency = settings.concurrency.clamp(1, 32);
         settings.base_name = sanitize_animation_base_name(&settings.base_name);
         if settings.backend == "POV-Ray" && settings.povray_executable.trim().is_empty() {
             self.set_status("POV-Ray executable is required");
@@ -2560,6 +2564,7 @@ impl GuiApplication {
             total_frames, settings.width, settings.height, settings.fps
         ));
         let restore = self.capture_animation_render_restore(camera);
+        let worker_capacity = settings.concurrency as usize;
         self.animation_elapsed = 0.0;
         self.animation_playing = false;
         self.animation_render_job = Some(AnimationRenderJob {
@@ -2569,7 +2574,8 @@ impl GuiApplication {
             next_frame: 0,
             completed_frames: 0,
             frame_paths: Vec::with_capacity(total_frames as usize),
-            receiver: None,
+            frame_receivers: Vec::with_capacity(worker_capacity),
+            movie_receiver: None,
             progress: Arc::new(AtomicU32::new(0)),
             cancel: Arc::new(AtomicBool::new(false)),
             encoding_started: false,
@@ -2611,7 +2617,9 @@ impl GuiApplication {
             return;
         };
 
-        if let Some(receiver) = job.receiver.take() {
+        let mut pending_receivers = Vec::with_capacity(job.frame_receivers.len());
+        let mut frame_failure = None;
+        for receiver in std::mem::take(&mut job.frame_receivers) {
             match receiver.try_recv() {
                 Ok(Ok(AnimationTaskOutput::Frame { index, path, log })) => {
                     job.completed_frames += 1;
@@ -2622,6 +2630,37 @@ impl GuiApplication {
                         self.animation_render_log.push(log);
                     }
                 }
+                Ok(Ok(AnimationTaskOutput::Movie { .. })) => {
+                    frame_failure.get_or_insert_with(|| {
+                        "Animation frame worker returned a movie".to_string()
+                    });
+                }
+                Ok(Err(error)) => {
+                    if !job.cancel.load(Ordering::Relaxed) {
+                        frame_failure
+                            .get_or_insert_with(|| format!("Animation rendering failed: {error}"));
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    pending_receivers.push(receiver);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    frame_failure
+                        .get_or_insert_with(|| "Animation render worker disconnected".to_string());
+                }
+            }
+        }
+        job.frame_receivers = pending_receivers;
+
+        if let Some(message) = frame_failure {
+            job.cancel.store(true, Ordering::Relaxed);
+            self.animation_render_log.push(message.clone());
+            self.finish_animation_render(job, camera, &message);
+            return;
+        }
+
+        if let Some(receiver) = job.movie_receiver.take() {
+            match receiver.try_recv() {
                 Ok(Ok(AnimationTaskOutput::Movie { path, log })) => {
                     if !log.trim().is_empty() {
                         self.animation_render_log.push(log);
@@ -2629,6 +2668,12 @@ impl GuiApplication {
                     self.animation_render_log
                         .push(format!("Movie: {}", path.to_string_lossy()));
                     self.finish_animation_render(job, camera, "Animation movie rendered");
+                    return;
+                }
+                Ok(Ok(AnimationTaskOutput::Frame { .. })) => {
+                    let message = "Animation movie worker returned a frame";
+                    self.animation_render_log.push(message.to_string());
+                    self.finish_animation_render(job, camera, message);
                     return;
                 }
                 Ok(Err(error)) => {
@@ -2642,12 +2687,10 @@ impl GuiApplication {
                     return;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
-                    job.receiver = Some(receiver);
-                    self.animation_render_job = Some(job);
-                    return;
+                    job.movie_receiver = Some(receiver);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    let message = "Animation render worker disconnected";
+                    let message = "Animation movie worker disconnected";
                     self.animation_render_log.push(message.to_string());
                     self.finish_animation_render(job, camera, message);
                     return;
@@ -2656,12 +2699,19 @@ impl GuiApplication {
         }
 
         if job.cancel.load(Ordering::Relaxed) {
-            self.finish_animation_render(job, camera, "Animation rendering cancelled");
+            if job.frame_receivers.is_empty() && job.movie_receiver.is_none() {
+                self.finish_animation_render(job, camera, "Animation rendering cancelled");
+            } else {
+                self.animation_render_job = Some(job);
+            }
             return;
         }
 
-        if job.next_frame < job.total_frames {
+        let concurrency = job.settings.concurrency as usize;
+        while job.next_frame < job.total_frames && job.frame_receivers.len() < concurrency {
             self.schedule_animation_frame(&mut job, camera);
+        }
+        if !job.frame_receivers.is_empty() {
             self.animation_render_job = Some(job);
             return;
         }
@@ -2670,7 +2720,7 @@ impl GuiApplication {
             match spawn_animation_movie_task(&job) {
                 Ok(receiver) => {
                     job.encoding_started = true;
-                    job.receiver = Some(receiver);
+                    job.movie_receiver = Some(receiver);
                     job.progress.store(990_000, Ordering::Relaxed);
                     self.animation_render_log
                         .push("Encoding movie with FFmpeg".to_string());
@@ -2721,7 +2771,7 @@ impl GuiApplication {
             denoise: self.umbreon_denoise,
         });
         job.next_frame += 1;
-        job.receiver = Some(receiver);
+        job.frame_receivers.push(receiver);
     }
 
     fn finish_animation_render(
@@ -3659,6 +3709,10 @@ impl GuiApplication {
                 &mut self.animation_render_settings.perspective,
                 false,
                 "Orthographic",
+            );
+            ui.label("NCPU");
+            ui.add(
+                egui::DragValue::new(&mut self.animation_render_settings.concurrency).range(1..=32),
             );
         });
         ui.horizontal(|ui| {
@@ -6320,6 +6374,12 @@ fn tool_status_text(_title: &str) -> &'static str {
     "No additional action is available."
 }
 
+fn default_animation_render_concurrency() -> u32 {
+    std::thread::available_parallelism()
+        .map(|count| count.get().min(8) as u32)
+        .unwrap_or(2)
+}
+
 fn animation_render_frame_count(
     objects: &[AnimObject],
     fps: u32,
@@ -6383,12 +6443,10 @@ fn update_animation_render_progress(task: &AnimationFrameTask, frame_progress: f
     let frames_weight = if task.settings.make_movie { 0.95 } else { 1.0 };
     let total = f64::from(task.total_frames.max(1));
     let completed = f64::from(task.index) + frame_progress.clamp(0.0, 1.0);
-    task.progress.store(
-        ((completed / total) * frames_weight * 1_000_000.0)
-            .round()
-            .clamp(0.0, 1_000_000.0) as u32,
-        Ordering::Relaxed,
-    );
+    let progress = ((completed / total) * frames_weight * 1_000_000.0)
+        .round()
+        .clamp(0.0, 1_000_000.0) as u32;
+    task.progress.fetch_max(progress, Ordering::Relaxed);
 }
 
 fn spawn_animation_frame_task(
@@ -7803,6 +7861,7 @@ mod tests {
 
     #[test]
     fn animation_render_helpers_define_frame_sequence_and_output_names() {
+        assert!((1..=8).contains(&default_animation_render_concurrency()));
         let objects = vec![
             AnimObject {
                 kind: AnimKind::Spin,
@@ -7857,7 +7916,8 @@ mod tests {
             next_frame: 1,
             completed_frames: 1,
             frame_paths: Vec::new(),
-            receiver: None,
+            frame_receivers: Vec::new(),
+            movie_receiver: None,
             progress: Arc::new(AtomicU32::new(0)),
             cancel: Arc::new(AtomicBool::new(false)),
             encoding_started: false,
@@ -7920,6 +7980,47 @@ mod tests {
         let png = fs::read(&path).expect("read rendered PNG");
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         fs::remove_file(path).expect("remove rendered PNG");
+    }
+
+    #[test]
+    fn animation_render_schedules_bounded_parallel_workers() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        let base_name = format!("cuemol-animation-parallel-test-{}", std::process::id());
+        app.animation_objects = vec![AnimObject {
+            kind: AnimKind::Spin,
+            duration: 1.0,
+        }];
+        app.animation_render_settings = AnimationRenderSettings {
+            output_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            base_name: base_name.clone(),
+            width: 100,
+            height: 100,
+            fps: 10,
+            concurrency: 3,
+            backend: "Umbreon".to_string(),
+            ..Default::default()
+        };
+
+        app.start_animation_render(&camera);
+        app.poll_animation_render(&mut camera);
+        let job = app.animation_render_job.as_ref().expect("render job");
+        assert_eq!(job.next_frame, 3);
+        assert_eq!(job.frame_receivers.len(), 3);
+        job.cancel.store(true, Ordering::Relaxed);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.animation_render_job.is_some() && Instant::now() < deadline {
+            app.poll_animation_render(&mut camera);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.animation_render_job.is_none(), "workers did not cancel");
+        for index in 0..10 {
+            let path = std::env::temp_dir().join(format!("{base_name}_{index:04}.png"));
+            if path.is_file() {
+                fs::remove_file(path).expect("remove rendered PNG");
+            }
+        }
     }
 
     #[test]
