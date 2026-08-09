@@ -459,6 +459,9 @@ struct GuiApplication {
     animation_render_settings: AnimationRenderSettings,
     animation_render_job: Option<AnimationRenderJob>,
     animation_render_log: Vec<String>,
+    animation_render_total_frames: u32,
+    animation_preview_frame: u32,
+    animation_preview_texture: Option<AnimationPreviewTexture>,
     superpose_reference: Option<cuemol_core::Uid>,
     superpose_moving: Option<cuemol_core::Uid>,
     superpose_algorithm: String,
@@ -612,6 +615,22 @@ struct AnimationMovieTask {
     settings: AnimationRenderSettings,
     cancel: Arc<AtomicBool>,
     progress: Arc<AtomicU32>,
+}
+
+struct AnimationPreviewTexture {
+    path: PathBuf,
+    texture: egui::TextureHandle,
+    size: egui::Vec2,
+}
+
+impl std::fmt::Debug for AnimationPreviewTexture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AnimationPreviewTexture")
+            .field("path", &self.path)
+            .field("size", &self.size)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -847,6 +866,9 @@ impl GuiApplication {
             animation_render_settings: AnimationRenderSettings::default(),
             animation_render_job: None,
             animation_render_log: Vec::new(),
+            animation_render_total_frames: 0,
+            animation_preview_frame: 0,
+            animation_preview_texture: None,
             superpose_reference: None,
             superpose_moving: None,
             superpose_algorithm: "lsq".to_string(),
@@ -2559,6 +2581,9 @@ impl GuiApplication {
 
         self.animation_render_settings = settings.clone();
         self.animation_render_log.clear();
+        self.animation_render_total_frames = total_frames;
+        self.animation_preview_frame = 0;
+        self.animation_preview_texture = None;
         self.animation_render_log.push(format!(
             "Starting {} frames at {}x{} / {} fps",
             total_frames, settings.width, settings.height, settings.fps
@@ -3623,14 +3648,24 @@ impl GuiApplication {
         ui.separator();
 
         let running = self.animation_render_job.is_some();
-        ui.add_enabled_ui(!running, |ui| match self.animation_render_settings.tab {
-            AnimationRenderTab::Main => self.animation_render_main_options_ui(ui),
-            AnimationRenderTab::Render => self.animation_render_backend_options_ui(ui),
-            AnimationRenderTab::Movie => self.animation_render_movie_options_ui(ui),
-            AnimationRenderTab::Preview => self.animation_render_progress_ui(ui),
-        });
-        if running && self.animation_render_settings.tab != AnimationRenderTab::Preview {
-            self.animation_render_progress_ui(ui);
+        match self.animation_render_settings.tab {
+            AnimationRenderTab::Main => {
+                ui.add_enabled_ui(!running, |ui| {
+                    self.animation_render_main_options_ui(ui);
+                });
+                self.animation_render_progress_ui(ui);
+            }
+            AnimationRenderTab::Render => {
+                ui.add_enabled_ui(!running, |ui| {
+                    self.animation_render_backend_options_ui(ui);
+                });
+            }
+            AnimationRenderTab::Movie => {
+                ui.add_enabled_ui(!running, |ui| {
+                    self.animation_render_movie_options_ui(ui);
+                });
+            }
+            AnimationRenderTab::Preview => self.animation_render_preview_ui(ui),
         }
 
         ui.separator();
@@ -3793,7 +3828,7 @@ impl GuiApplication {
         });
     }
 
-    fn animation_render_progress_ui(&mut self, ui: &mut egui::Ui) {
+    fn animation_render_progress_ui(&self, ui: &mut egui::Ui) {
         let (progress, text) = self.animation_render_job.as_ref().map_or_else(
             || (0.0, "Idle".to_string()),
             |job| {
@@ -3818,6 +3853,91 @@ impl GuiApplication {
                     ui.monospace(line);
                 }
             });
+    }
+
+    fn animation_render_preview_ui(&mut self, ui: &mut egui::Ui) {
+        if self.animation_render_total_frames == 0 {
+            ui.weak("No rendered frames are available.");
+            return;
+        }
+
+        let max_frame = self.animation_render_total_frames.saturating_sub(1);
+        self.animation_preview_frame = self.animation_preview_frame.min(max_frame);
+        ui.horizontal(|ui| {
+            ui.label("Frame:");
+            if ui
+                .add(
+                    egui::Slider::new(&mut self.animation_preview_frame, 0..=max_frame)
+                        .show_value(false),
+                )
+                .changed()
+            {
+                self.animation_preview_texture = None;
+            }
+            ui.monospace(format!(
+                "{} / {}",
+                self.animation_preview_frame,
+                self.animation_render_total_frames.saturating_sub(1)
+            ));
+        });
+
+        let path = animation_frame_path(
+            &self.animation_render_settings,
+            self.animation_preview_frame,
+            "png",
+        );
+        if let Err(error) = self.load_animation_preview_texture(ui.ctx(), &path) {
+            if path.is_file() {
+                ui.colored_label(egui::Color32::DARK_RED, error);
+            } else {
+                ui.weak(format!("Frame is not available yet: {}", path.display()));
+            }
+            return;
+        }
+
+        let Some(preview) = &self.animation_preview_texture else {
+            return;
+        };
+        let max_size = egui::vec2(ui.available_width(), 420.0);
+        let scale = (max_size.x / preview.size.x)
+            .min(max_size.y / preview.size.y)
+            .min(1.0);
+        let display_size = preview.size * scale.max(0.01);
+        ui.vertical_centered(|ui| {
+            ui.add(egui::Image::new((preview.texture.id(), display_size)));
+            ui.monospace(preview.path.display().to_string());
+        });
+    }
+
+    fn load_animation_preview_texture(
+        &mut self,
+        ctx: &egui::Context,
+        path: &Path,
+    ) -> std::result::Result<(), String> {
+        if self
+            .animation_preview_texture
+            .as_ref()
+            .is_some_and(|preview| preview.path == path)
+        {
+            return Ok(());
+        }
+        let bytes = fs::read(path).map_err(|error| error.to_string())?;
+        let frame = image::load_from_memory(&bytes)
+            .map_err(|error| format!("Failed to decode animation frame: {error}"))?
+            .to_rgba8();
+        let size = [frame.width() as usize, frame.height() as usize];
+        let image = egui::ColorImage::from_rgba_unmultiplied(size, frame.as_raw());
+        let texture = ctx.load_texture(
+            format!("animation-preview:{}", path.display()),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.animation_preview_texture = Some(AnimationPreviewTexture {
+            path: path.to_path_buf(),
+            texture,
+            size: egui::vec2(size[0] as f32, size[1] as f32),
+        });
+        Ok(())
     }
 
     fn render_tab(&mut self, ui: &mut egui::Ui) {
@@ -7950,7 +8070,7 @@ mod tests {
 
     #[test]
     fn animation_render_umbreon_writes_a_png_frame() {
-        let app = GuiApplication::new();
+        let mut app = GuiApplication::new();
         let base_name = format!("cuemol-animation-frame-test-{}", std::process::id());
         let settings = AnimationRenderSettings {
             output_dir: std::env::temp_dir().to_string_lossy().into_owned(),
@@ -7979,6 +8099,15 @@ mod tests {
         ));
         let png = fs::read(&path).expect("read rendered PNG");
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        let ctx = egui::Context::default();
+        app.load_animation_preview_texture(&ctx, &path)
+            .expect("load animation preview");
+        let preview = app
+            .animation_preview_texture
+            .as_ref()
+            .expect("preview texture");
+        assert_eq!(preview.path, path);
+        assert_eq!(preview.size, egui::vec2(16.0, 16.0));
         fs::remove_file(path).expect("remove rendered PNG");
     }
 
@@ -9104,6 +9233,39 @@ mod tests {
                 });
             harness.run();
             save_harness(&mut harness, &out_dir.join("sequence.png"));
+        }
+
+        // (1e) Animation-render preview dialog with a decoded PNG frame. This verifies
+        // the reference frame slider, aspect-preserving image area, and file label.
+        {
+            let preview_path = out_dir.join("animation-preview-frame_0000.png");
+            let preview_image = image::RgbaImage::from_fn(640, 360, |x, y| {
+                let red = ((x as f32 / 639.0) * 180.0 + 30.0) as u8;
+                let green = ((y as f32 / 359.0) * 140.0 + 40.0) as u8;
+                image::Rgba([red, green, 150, 255])
+            });
+            preview_image
+                .save(&preview_path)
+                .expect("write animation preview source");
+
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            app.animation_render_settings.output_dir = out_dir.to_string_lossy().into_owned();
+            app.animation_render_settings.base_name = "animation-preview-frame".to_string();
+            app.animation_render_settings.tab = AnimationRenderTab::Preview;
+            app.animation_render_total_frames = 1;
+            app.tool_dialog = Some("Animation rendering".to_string());
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1000.0, 720.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(
+                &mut harness,
+                &out_dir.join("animation_render_preview.png"),
+            );
+            fs::remove_file(preview_path).expect("remove animation preview source");
         }
 
         // (2) Every left-dock panel body expanded at once, so each panel's CONTROLS

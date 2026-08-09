@@ -28,6 +28,7 @@ egui-wgpu = { version = "0.33.3", optional = true }
 # feature into the test build; without it the two disagree on `accesskit_update`.
 egui-winit = { version = "0.33.3", default-features = false, features = ["accesskit"], optional = true }
 glam = { version = "0.30.10", optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 pollster = { version = "0.4", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 tauri = { version = "2.11.5", optional = true }
@@ -47,6 +48,7 @@ egui-gui = [
   "dep:egui-wgpu",
   "dep:egui-winit",
   "dep:glam",
+  "dep:image",
   "dep:pollster",
   "dep:wgpu",
   "dep:winit",
@@ -69,7 +71,6 @@ tauri-gui = [
 # into the tree and break `egui::Context` type identity. Only used by egui-gui tests.
 [dev-dependencies]
 egui_kittest = { version = "0.33.3", features = ["wgpu"] }
-image = "0.25"
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", optional = true }
