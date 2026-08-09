@@ -857,7 +857,8 @@ fn pixel_luma(pixel: &[u8]) -> f64 {
 fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
     let mut hits = Vec::new();
     for atom in &snapshot.atoms {
-        if let Some((distance, normal)) = ray_sphere(ray, atom.center, f64::from(atom.radius)) {
+        let main_hit = ray_sphere(ray, atom.center, f64::from(atom.radius));
+        if let Some((distance, normal)) = main_hit {
             hits.push(Hit {
                 distance,
                 position: ray.origin + ray.direction * distance,
@@ -865,15 +866,21 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
                 color: color_from_spec(atom.color.as_ref()),
                 unlit: false,
             });
+        } else if let Some(edge) = atom.edge.filter(|edge| edge.width > 0.0) {
+            if let Some((distance, normal)) =
+                ray_sphere(ray, atom.center, f64::from(atom.radius + edge.width))
+            {
+                hits.push(primitive_edge_hit(ray, distance, normal, edge));
+            }
         }
     }
     for bond in &snapshot.bonds {
-        let intersection = if bond.screen_point {
+        let main_hit = if bond.screen_point {
             ray_sphere(ray, bond.from, f64::from(bond.radius))
         } else {
             ray_cylinder(ray, bond.from, bond.to, f64::from(bond.radius))
         };
-        if let Some((distance, normal)) = intersection {
+        if let Some((distance, normal)) = main_hit {
             hits.push(Hit {
                 distance,
                 position: ray.origin + ray.direction * distance,
@@ -881,6 +888,19 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
                 color: color_from_spec(bond.color.as_ref()),
                 unlit: false,
             });
+        } else if let Some(edge) = bond
+            .edge
+            .filter(|edge| edge.width > 0.0 && bond.screen_width.is_none())
+        {
+            let radius = f64::from(bond.radius + edge.width);
+            let edge_hit = if bond.screen_point {
+                ray_sphere(ray, bond.from, radius)
+            } else {
+                ray_cylinder(ray, bond.from, bond.to, radius)
+            };
+            if let Some((distance, normal)) = edge_hit {
+                hits.push(primitive_edge_hit(ray, distance, normal, edge));
+            }
         }
     }
     for mesh in &snapshot.meshes {
@@ -922,6 +942,26 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
         }
     }
     hits
+}
+
+fn primitive_edge_hit(
+    ray: Ray,
+    distance: f64,
+    normal: Vector4,
+    edge: crate::RenderEdgeStyle,
+) -> Hit {
+    let position = ray.origin + ray.direction * distance;
+    Hit {
+        distance: if edge.mode == crate::RenderEdgeMode::Silhouette {
+            f64::MAX
+        } else {
+            distance
+        },
+        position,
+        normal,
+        color: edge.color.map(f64::from),
+        unlit: true,
+    }
 }
 
 fn ray_sphere(ray: Ray, center: Vector4, radius: f64) -> Option<(f64, Vector4)> {
@@ -1246,6 +1286,42 @@ mod tests {
                 f64::from(color[2]),
             ]
         );
+    }
+
+    #[test]
+    fn raytracer_draws_primitive_edges_only_outside_the_base_silhouette() {
+        let ray = Ray {
+            origin: Vector4::new3(1.05, 0.0, 5.0),
+            direction: Vector4::new3(0.0, 0.0, -1.0),
+        };
+        let edge = crate::RenderEdgeStyle {
+            mode: crate::RenderEdgeMode::Edges,
+            width: 0.1,
+            color: [0.1, 0.2, 0.3, 1.0],
+        };
+        let mut snapshot = RenderSceneSnapshot::empty();
+        snapshot.atoms.push(
+            crate::RenderAtom::new(Vector4::new3(0.0, 0.0, 0.0), 1.0, None).with_edge(Some(edge)),
+        );
+
+        let hits = scene_hits(&snapshot, ray);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].unlit);
+        assert_eq!(hits[0].color, edge.color.map(f64::from));
+        assert!(hits[0].distance.is_finite());
+
+        snapshot.atoms[0].edge.as_mut().unwrap().mode = crate::RenderEdgeMode::Silhouette;
+        let silhouette_hits = scene_hits(&snapshot, ray);
+        assert_eq!(silhouette_hits.len(), 1);
+        assert_eq!(silhouette_hits[0].distance, f64::MAX);
+
+        let center_ray = Ray {
+            origin: Vector4::new3(0.0, 0.0, 5.0),
+            direction: Vector4::new3(0.0, 0.0, -1.0),
+        };
+        let center_hits = scene_hits(&snapshot, center_ray);
+        assert_eq!(center_hits.len(), 1);
+        assert!(!center_hits[0].unlit);
     }
 
     #[test]

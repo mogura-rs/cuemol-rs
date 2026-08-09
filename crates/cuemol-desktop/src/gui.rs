@@ -5763,8 +5763,8 @@ struct GpuState {
     atom_quad_buffer: wgpu::Buffer,
     atom_instance_buffer: wgpu::Buffer,
     atom_instance_count: u32,
-    bond_vertex_buffer: wgpu::Buffer,
-    bond_vertex_count: u32,
+    bond_instance_buffer: wgpu::Buffer,
+    bond_instance_count: u32,
     mesh_pipeline: wgpu::RenderPipeline,
     mesh_vertex_buffer: wgpu::Buffer,
     mesh_index_buffer: wgpu::Buffer,
@@ -5859,7 +5859,7 @@ impl GpuState {
             usage: wgpu::BufferUsages::VERTEX,
         });
         let atom_instance_buffer = empty_buffer(&device, "atom-instance-buffer");
-        let bond_vertex_buffer = empty_buffer(&device, "bond-vertex-buffer");
+        let bond_instance_buffer = empty_buffer(&device, "bond-instance-buffer");
         let mesh_pipeline = create_mesh_pipeline(&device, &shader, &camera_layout, config.format);
         let mesh_vertex_buffer = empty_buffer(&device, "mesh-vertex-buffer");
         let mesh_index_buffer = empty_index_buffer(&device, "mesh-index-buffer");
@@ -5884,8 +5884,8 @@ impl GpuState {
             atom_quad_buffer,
             atom_instance_buffer,
             atom_instance_count: 0,
-            bond_vertex_buffer,
-            bond_vertex_count: 0,
+            bond_instance_buffer,
+            bond_instance_count: 0,
             mesh_pipeline,
             mesh_vertex_buffer,
             mesh_index_buffer,
@@ -5998,10 +5998,11 @@ impl GpuState {
                     .set_index_buffer(self.mesh_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 render_pass.draw_indexed(0..self.mesh_index_count, 0, 0..1);
             }
-            if self.bond_vertex_count > 0 {
+            if self.bond_instance_count > 0 {
                 render_pass.set_pipeline(&self.bond_pipeline);
-                render_pass.set_vertex_buffer(0, self.bond_vertex_buffer.slice(..));
-                render_pass.draw(0..self.bond_vertex_count, 0..1);
+                render_pass.set_vertex_buffer(0, self.atom_quad_buffer.slice(..));
+                render_pass.set_vertex_buffer(1, self.bond_instance_buffer.slice(..));
+                render_pass.draw(0..6, 0..self.bond_instance_count);
             }
             if self.atom_instance_count > 0 {
                 render_pass.set_pipeline(&self.atom_pipeline);
@@ -6059,15 +6060,15 @@ impl GpuState {
             .bonds
             .iter()
             .filter(|bond| bond.screen_width.is_none())
-            .flat_map(bond_vertices)
+            .map(bond_instance)
             .collect::<Vec<_>>();
-        self.bond_vertex_count = bonds.len() as u32;
-        self.bond_vertex_buffer = if bonds.is_empty() {
-            empty_buffer(&self.device, "bond-vertex-buffer")
+        self.bond_instance_count = bonds.len() as u32;
+        self.bond_instance_buffer = if bonds.is_empty() {
+            empty_buffer(&self.device, "bond-instance-buffer")
         } else {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("bond-vertex-buffer"),
+                    label: Some("bond-instance-buffer"),
                     contents: bytemuck::cast_slice(&bonds),
                     usage: wgpu::BufferUsages::VERTEX,
                 })
@@ -6171,7 +6172,7 @@ fn create_bond_pipeline(
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some("bond_vs"),
-            buffers: &[bond_vertex_layout()],
+            buffers: &[atom_quad_layout(), bond_instance_layout()],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -6185,14 +6186,14 @@ fn create_bond_pipeline(
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         }),
         primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::LineList,
+            topology: wgpu::PrimitiveTopology::TriangleList,
             cull_mode: None,
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: false,
-            depth_compare: wgpu::CompareFunction::LessEqual,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
             stencil: Default::default(),
             bias: Default::default(),
         }),
@@ -6266,11 +6267,11 @@ fn atom_instance_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
     }
 }
 
-fn bond_vertex_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+fn bond_instance_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
     wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<BondGpuVertex>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &BOND_VERTEX_ATTRS,
+        array_stride: std::mem::size_of::<BondInstance>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &BOND_INSTANCE_ATTRS,
     }
 }
 
@@ -6319,6 +6320,7 @@ fn empty_index_buffer(device: &wgpu::Device, label: &'static str) -> wgpu::Buffe
 
 fn atom_instance(atom: &RenderAtom) -> AtomInstance {
     let color = atom_color(atom);
+    let edge = edge_gpu_style(atom.edge);
     AtomInstance {
         center_radius: [
             atom.center.x as f32,
@@ -6328,21 +6330,49 @@ fn atom_instance(atom: &RenderAtom) -> AtomInstance {
         ],
         color,
         selected: [if atom.selected { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+        edge: [edge.0, edge.1, 0.0, 0.0],
+        edge_color: edge.2,
     }
 }
 
-fn bond_vertices(bond: &RenderBond) -> [BondGpuVertex; 2] {
+fn bond_instance(bond: &RenderBond) -> BondInstance {
     let color = bond_color(bond);
-    [
-        BondGpuVertex {
-            position: [bond.from.x as f32, bond.from.y as f32, bond.from.z as f32],
-            color,
-        },
-        BondGpuVertex {
-            position: [bond.to.x as f32, bond.to.y as f32, bond.to.z as f32],
-            color,
-        },
-    ]
+    let end_color = if bond.selected {
+        color
+    } else {
+        bond.end_color
+            .as_ref()
+            .and_then(cuemol_gfx::ColorSpec::rgba8)
+            .map_or(color, |rgba| rgba_to_float(Some(rgba)))
+    };
+    let edge = edge_gpu_style(bond.edge);
+    BondInstance {
+        from_radius: [
+            bond.from.x as f32,
+            bond.from.y as f32,
+            bond.from.z as f32,
+            bond.radius.max(0.0025),
+        ],
+        to_edge: [bond.to.x as f32, bond.to.y as f32, bond.to.z as f32, edge.0],
+        color,
+        end_color,
+        edge_color: edge.2,
+        edge_mode: [edge.1, 0.0, 0.0, 0.0],
+    }
+}
+
+fn edge_gpu_style(edge: Option<cuemol_render::RenderEdgeStyle>) -> (f32, f32, [f32; 4]) {
+    edge.filter(|edge| edge.width > 0.0)
+        .map_or((0.0, 0.0, [0.0, 0.0, 0.0, 1.0]), |edge| {
+            (
+                edge.width,
+                match edge.mode {
+                    cuemol_render::RenderEdgeMode::Edges => 1.0,
+                    cuemol_render::RenderEdgeMode::Silhouette => 2.0,
+                },
+                edge.color,
+            )
+        })
 }
 
 fn mesh_gpu_vertex(vertex: &MeshVertex) -> MeshGpuVertex {
@@ -6622,13 +6652,19 @@ struct AtomInstance {
     center_radius: [f32; 4],
     color: [f32; 4],
     selected: [f32; 4],
+    edge: [f32; 4],
+    edge_color: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct BondGpuVertex {
-    position: [f32; 3],
+struct BondInstance {
+    from_radius: [f32; 4],
+    to_edge: [f32; 4],
     color: [f32; 4],
+    end_color: [f32; 4],
+    edge_color: [f32; 4],
+    edge_mode: [f32; 4],
 }
 
 #[repr(C)]
@@ -6641,10 +6677,21 @@ struct MeshGpuVertex {
 }
 
 const ATOM_QUAD_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
-const ATOM_INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] =
-    wgpu::vertex_attr_array![1 => Float32x4, 2 => Float32x4, 3 => Float32x4];
-const BOND_VERTEX_ATTRS: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
+const ATOM_INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+    1 => Float32x4,
+    2 => Float32x4,
+    3 => Float32x4,
+    4 => Float32x4,
+    5 => Float32x4
+];
+const BOND_INSTANCE_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    1 => Float32x4,
+    2 => Float32x4,
+    3 => Float32x4,
+    4 => Float32x4,
+    5 => Float32x4,
+    6 => Float32x4
+];
 const MESH_VERTEX_ATTRS: [wgpu::VertexAttribute; 4] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32];
 
@@ -6681,6 +6728,8 @@ struct AtomVsIn {
     @location(1) center_radius: vec4<f32>,
     @location(2) color: vec4<f32>,
     @location(3) selected: vec4<f32>,
+    @location(4) edge: vec4<f32>,
+    @location(5) edge_color: vec4<f32>,
 };
 
 struct AtomVsOut {
@@ -6688,60 +6737,130 @@ struct AtomVsOut {
     @location(0) local: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) selected: f32,
+    @location(3) edge_ratio: f32,
+    @location(4) edge_mode: f32,
+    @location(5) edge_color: vec4<f32>,
 };
 
 @vertex
 fn atom_vs(input: AtomVsIn) -> AtomVsOut {
     let center = input.center_radius.xyz;
     let radius = input.center_radius.w;
+    let outer_radius = radius + input.edge.x;
     let world = center
-        + camera.right.xyz * input.corner.x * radius
-        + camera.up.xyz * input.corner.y * radius;
+        + camera.right.xyz * input.corner.x * outer_radius
+        + camera.up.xyz * input.corner.y * outer_radius;
     var output: AtomVsOut;
     output.position = camera.view_proj * vec4<f32>(world, 1.0);
-    output.local = input.corner;
+    output.local = input.corner * (outer_radius / radius);
     output.color = input.color;
     output.selected = input.selected.x;
+    output.edge_ratio = outer_radius / radius;
+    output.edge_mode = input.edge.y;
+    output.edge_color = input.edge_color;
     return output;
 }
 
+struct PrimitiveFsOut {
+    @location(0) color: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+};
+
 @fragment
-fn atom_fs(input: AtomVsOut) -> @location(0) vec4<f32> {
+fn atom_fs(input: AtomVsOut) -> PrimitiveFsOut {
     let d = dot(input.local, input.local);
-    if (d > 1.0) {
+    if (d > input.edge_ratio * input.edge_ratio) {
         discard;
     }
-    let z = sqrt(max(0.0, 1.0 - d));
-    let normal = normalize(vec3<f32>(input.local.x, input.local.y, z));
-    let shade = 0.36 + 0.64 * max(dot(normal, normalize(camera.light.xyz)), 0.0);
-    var color = vec4<f32>(input.color.rgb * shade, input.color.a);
-    if (input.selected > 0.5 && d > 0.62) {
-        color = vec4<f32>(0.0, 0.95, 1.0, 1.0);
+    var output: PrimitiveFsOut;
+    output.depth = input.position.z;
+    if (d > 1.0) {
+        output.color = input.edge_color;
+        if (input.edge_mode > 1.5) {
+            output.depth = 0.99;
+        }
+        return output;
     }
-    return color;
+    let z = sqrt(max(0.0, 1.0 - d));
+    let normal = normalize(
+        camera.right.xyz * input.local.x + camera.up.xyz * input.local.y
+            + normalize(cross(camera.right.xyz, camera.up.xyz)) * z
+    );
+    let shade = 0.36 + 0.64 * max(dot(normal, normalize(camera.light.xyz)), 0.0);
+    output.color = vec4<f32>(input.color.rgb * shade, input.color.a);
+    if (input.selected > 0.5 && d > 0.62) {
+        output.color = vec4<f32>(0.0, 0.95, 1.0, 1.0);
+    }
+    return output;
 }
 
 struct BondVsIn {
-    @location(0) position: vec3<f32>,
-    @location(1) color: vec4<f32>,
+    @location(0) corner: vec2<f32>,
+    @location(1) from_radius: vec4<f32>,
+    @location(2) to_edge: vec4<f32>,
+    @location(3) color: vec4<f32>,
+    @location(4) end_color: vec4<f32>,
+    @location(5) edge_color: vec4<f32>,
+    @location(6) edge_mode: vec4<f32>,
 };
 
 struct BondVsOut {
     @builtin(position) position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) local_x: f32,
+    @location(2) edge_ratio: f32,
+    @location(3) edge_mode: f32,
+    @location(4) edge_color: vec4<f32>,
+    @location(5) perpendicular: vec3<f32>,
 };
 
 @vertex
 fn bond_vs(input: BondVsIn) -> BondVsOut {
+    let start = input.from_radius.xyz;
+    let finish = input.to_edge.xyz;
+    let radius = input.from_radius.w;
+    let outer_radius = radius + input.to_edge.w;
+    let axis = finish - start;
+    let screen_axis = vec2<f32>(dot(axis, camera.right.xyz), dot(axis, camera.up.xyz));
+    var perpendicular = camera.right.xyz;
+    if (length(screen_axis) > 0.000001) {
+        perpendicular = normalize(
+            camera.right.xyz * (-screen_axis.y) + camera.up.xyz * screen_axis.x
+        );
+    }
+    let t = (input.corner.y + 1.0) * 0.5;
+    let world = mix(start, finish, t) + perpendicular * input.corner.x * outer_radius;
     var output: BondVsOut;
-    output.position = camera.view_proj * vec4<f32>(input.position, 1.0);
-    output.color = input.color;
+    output.position = camera.view_proj * vec4<f32>(world, 1.0);
+    output.color = mix(input.color, input.end_color, t);
+    output.local_x = input.corner.x * (outer_radius / radius);
+    output.edge_ratio = outer_radius / radius;
+    output.edge_mode = input.edge_mode.x;
+    output.edge_color = input.edge_color;
+    output.perpendicular = perpendicular;
     return output;
 }
 
 @fragment
-fn bond_fs(input: BondVsOut) -> @location(0) vec4<f32> {
-    return input.color;
+fn bond_fs(input: BondVsOut) -> PrimitiveFsOut {
+    if (abs(input.local_x) > input.edge_ratio) {
+        discard;
+    }
+    var output: PrimitiveFsOut;
+    output.depth = input.position.z;
+    if (abs(input.local_x) > 1.0) {
+        output.color = vec4<f32>(input.edge_color.rgb, input.color.a);
+        if (input.edge_mode > 1.5) {
+            output.depth = 0.99;
+        }
+        return output;
+    }
+    let z = sqrt(max(0.0, 1.0 - input.local_x * input.local_x));
+    let front = normalize(cross(camera.right.xyz, camera.up.xyz));
+    let normal = normalize(input.perpendicular * input.local_x + front * z);
+    let shade = 0.36 + 0.64 * max(dot(normal, normalize(camera.light.xyz)), 0.0);
+    output.color = vec4<f32>(input.color.rgb * shade, input.color.a);
+    return output;
 }
 
 struct MeshVsIn {
@@ -6788,6 +6907,85 @@ fn mesh_fs(input: MeshVsOut, @builtin(front_facing) front_facing: bool) -> @loca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_primitive_instances_preserve_edge_and_radius_data() {
+        let edge = cuemol_render::RenderEdgeStyle {
+            mode: cuemol_render::RenderEdgeMode::Silhouette,
+            width: 0.07,
+            color: [0.1, 0.2, 0.3, 0.4],
+        };
+        let atom = RenderAtom::new(Vector4::new3(1.0, 2.0, 3.0), 0.45, None).with_edge(Some(edge));
+        let atom_gpu = atom_instance(&atom);
+        assert_eq!(atom_gpu.center_radius, [1.0, 2.0, 3.0, 0.45]);
+        assert_eq!(atom_gpu.edge, [0.07, 2.0, 0.0, 0.0]);
+        assert_eq!(atom_gpu.edge_color, edge.color);
+
+        let bond = RenderBond::new(
+            Vector4::new3(0.0, 1.0, 2.0),
+            Vector4::new3(3.0, 4.0, 5.0),
+            0.25,
+            Some(cuemol_gfx::parse_color("#112233").unwrap()),
+        )
+        .with_end_color(Some(cuemol_gfx::parse_color("#445566").unwrap()))
+        .with_edge(Some(edge));
+        let bond_gpu = bond_instance(&bond);
+        assert_eq!(bond_gpu.from_radius, [0.0, 1.0, 2.0, 0.25]);
+        assert_eq!(bond_gpu.to_edge, [3.0, 4.0, 5.0, 0.07]);
+        assert_eq!(bond_gpu.edge_mode, [2.0, 0.0, 0.0, 0.0]);
+        assert_ne!(bond_gpu.color, bond_gpu.end_color);
+    }
+
+    #[test]
+    fn native_molecule_shader_and_primitive_pipelines_validate() {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            }))
+        else {
+            return;
+        };
+        let Ok((device, _queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("molecule-shader-test-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            }))
+        else {
+            return;
+        };
+        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("molecule-shader-test-camera-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("molecule-shader-test"),
+            source: wgpu::ShaderSource::Wgsl(MOLECULE_SHADER.into()),
+        });
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let _atom = create_atom_pipeline(&device, &shader, &camera_layout, format);
+        let _bond = create_bond_pipeline(&device, &shader, &camera_layout, format);
+        let _mesh = create_mesh_pipeline(&device, &shader, &camera_layout, format);
+        let error = pollster::block_on(device.pop_error_scope());
+        assert!(
+            error.is_none(),
+            "molecule shader validation failed: {error:?}"
+        );
+    }
 
     #[test]
     fn native_gui_tracks_legacy_menu_surfaces() {
@@ -6950,6 +7148,7 @@ mod tests {
             atom_index: Some(3),
             selected: false,
             detail: None,
+            edge: None,
         });
         assert_eq!(
             app.pick_hit(&camera, egui::pos2(400.0, 300.0)),
@@ -7105,6 +7304,7 @@ mod tests {
             atom_index: None,
             selected: true,
             detail: None,
+            edge: None,
         };
         // 3-4-5 right triangle legs → distance 5.
         app.snapshot.atoms = vec![atom(0.0, 0.0, 0.0), atom(3.0, 4.0, 0.0)];

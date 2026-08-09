@@ -2493,6 +2493,7 @@ impl DesktopAppState {
                         screen_stipple: false,
                         screen_offset: [0.0, 0.0],
                         screen_point: false,
+                        edge: None,
                     });
                 }
             }
@@ -2548,6 +2549,7 @@ impl DesktopAppState {
                     screen_stipple: false,
                     screen_offset: [0.0, 0.0],
                     screen_point: false,
+                    edge: None,
                 });
             }
         }
@@ -2653,6 +2655,7 @@ impl DesktopAppState {
                                 screen_stipple: false,
                                 screen_offset: [0.0, 0.0],
                                 screen_point: false,
+                                edge: None,
                             });
                         }
                     }
@@ -6304,6 +6307,7 @@ impl DesktopAppState {
                             screen_stipple: false,
                             screen_offset: [0.0, 0.0],
                             screen_point: false,
+                            edge: None,
                         });
                     }
                 }
@@ -38320,6 +38324,7 @@ fn append_object_renderer_snapshot(
             styles,
         ) {
             append_mesh_edge_outlines(&mut snapshot, edge_style);
+            apply_primitive_edge_style(&mut snapshot, edge_style);
         }
     }
     let alpha = renderer
@@ -38366,10 +38371,16 @@ fn apply_renderer_alpha(snapshot: &mut RenderSceneSnapshot, alpha: f64) {
     };
     for atom in &mut snapshot.atoms {
         apply_color(&mut atom.color);
+        if let Some(edge) = &mut atom.edge {
+            edge.color[3] *= alpha as f32;
+        }
     }
     for bond in &mut snapshot.bonds {
         apply_color(&mut bond.color);
         apply_color(&mut bond.end_color);
+        if let Some(edge) = &mut bond.edge {
+            edge.color[3] *= alpha as f32;
+        }
     }
     for mesh in &mut snapshot.meshes {
         for vertex in &mut mesh.vertices {
@@ -38719,6 +38730,7 @@ fn append_lw_draw_element(
                 atom_index: None,
                 selected: false,
                 detail: Some(4),
+                edge: None,
             });
             return;
         }
@@ -38760,6 +38772,7 @@ fn append_lw_arrays(
                     atom_index: None,
                     selected: false,
                     detail: Some(4),
+                    edge: None,
                 });
             }
         }
@@ -38783,6 +38796,7 @@ fn append_lw_arrays(
                     screen_stipple: false,
                     screen_offset: [0.0, 0.0],
                     screen_point: false,
+                    edge: None,
                 });
             }
         }
@@ -39280,6 +39294,30 @@ fn append_mesh_edge_outlines(snapshot: &mut RenderSceneSnapshot, edge_style: Sur
     meshes.append(&mut snapshot.meshes);
     snapshot.meshes = meshes;
     snapshot.recompute_bounds();
+}
+
+fn apply_primitive_edge_style(snapshot: &mut RenderSceneSnapshot, edge_style: SurfaceEdgeStyle) {
+    let edge = cuemol_render::RenderEdgeStyle {
+        mode: match edge_style.mode {
+            SurfaceEdgeMode::Edges => cuemol_render::RenderEdgeMode::Edges,
+            SurfaceEdgeMode::Silhouette => cuemol_render::RenderEdgeMode::Silhouette,
+        },
+        width: edge_style.width as f32,
+        color: edge_style.color,
+    };
+    for atom in &mut snapshot.atoms {
+        atom.edge = Some(edge);
+    }
+    for bond in snapshot
+        .bonds
+        .iter_mut()
+        .filter(|bond| bond.screen_width.is_none())
+    {
+        bond.edge = Some(edge);
+    }
+    if !snapshot.atoms.is_empty() || snapshot.bonds.iter().any(|bond| bond.edge.is_some()) {
+        snapshot.recompute_bounds();
+    }
 }
 
 fn surface_mesh_snapshot_for_mode(
@@ -47066,6 +47104,7 @@ end_header
             atom_index: Some(index),
             selected: false,
             detail: None,
+            edge: None,
         }
     }
 
@@ -47611,6 +47650,7 @@ end_header
             atom_index: None,
             selected: false,
             detail: None,
+            edge: None,
         });
         snapshot.meshes.push(cuemol_render::RenderMesh {
             vertices: vec![cuemol_render::MeshVertex {
@@ -48752,6 +48792,34 @@ end_header
             "styled atoms should all be the absolute sphr=0.3, first was {}",
             after.atoms[0].radius
         );
+
+        let renderer = app
+            .scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer)
+            .unwrap();
+        renderer.set_qsc_attr("egtype", "silhouette");
+        renderer.set_qsc_attr("eglinew", "0.04");
+        renderer.set_qsc_attr("egcolor", "#123456");
+        let outlined = app.active_render_snapshot("").unwrap();
+        let expected = cuemol_render::RenderEdgeStyle {
+            mode: cuemol_render::RenderEdgeMode::Silhouette,
+            width: 0.04,
+            color: [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0, 1.0],
+        };
+        assert!(outlined
+            .atoms
+            .iter()
+            .all(|atom| atom.edge == Some(expected)));
+        assert!(outlined
+            .bonds
+            .iter()
+            .all(|bond| bond.edge == Some(expected)));
+        assert!(cuemol_render::tessellate_snapshot(&outlined)
+            .vertices
+            .iter()
+            .any(cuemol_render::MeshVertex::is_silhouette_outline));
     }
 
     #[test]

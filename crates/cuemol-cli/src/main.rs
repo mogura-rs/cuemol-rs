@@ -1183,6 +1183,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         screen_stipple: false,
                         screen_offset: [0.0, 0.0],
                         screen_point: false,
+                        edge: None,
                     });
                 }
                 total_bonds += snapshot.bond_count();
@@ -1283,6 +1284,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                                 screen_stipple: false,
                                 screen_offset: [0.0, 0.0],
                                 screen_point: false,
+                                edge: None,
                             });
                         }
                         total_bonds += snapshot.bond_count();
@@ -1299,6 +1301,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                                 atom_index: None,
                                 selected: false,
                                 detail: Some(1),
+                                edge: None,
                             });
                         }
                         total_atoms += snapshot.atom_count();

@@ -10,6 +10,20 @@ pub use raytrace::{
     UmbreonRenderParams, UmbreonSceneExporter, UmbreonSmokeResult,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderEdgeMode {
+    Edges,
+    Silhouette,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderEdgeStyle {
+    pub mode: RenderEdgeMode,
+    pub width: f32,
+    /// Resolved RGBA in `[0, 1]`.
+    pub color: [f32; 4],
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderAtom {
     pub center: Vector4,
@@ -22,6 +36,8 @@ pub struct RenderAtom {
     /// `None` for the default. `tessellate_snapshot` honours it so a styled
     /// renderer's `detail` shows in the GUI without a separate detailed pass.
     pub detail: Option<u32>,
+    /// Optional C++ `egtype`/`eglinew`/`egcolor` sphere outline.
+    pub edge: Option<RenderEdgeStyle>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +59,8 @@ pub struct RenderBond {
     pub screen_offset: [f32; 2],
     /// Draw the projected `from` endpoint as a square point instead of a line.
     pub screen_point: bool,
+    /// Optional C++ `egtype`/`eglinew`/`egcolor` cylinder outline.
+    pub edge: Option<RenderEdgeStyle>,
 }
 
 /// A single triangle-mesh vertex for ribbon/cartoon geometry.
@@ -208,6 +226,20 @@ pub fn apply_icc_color_proof(snapshot: &mut RenderSceneSnapshot, transform: &Cms
 }
 
 fn apply_color_transform(snapshot: &mut RenderSceneSnapshot, transform: impl Fn(Rgba8) -> Rgba8) {
+    let proof_rgba = |color: &mut [f32; 4]| {
+        let rgba = transform(Rgba8 {
+            r: (color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+            g: (color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+            b: (color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+            a: (color[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+        });
+        *color = [
+            f32::from(rgba.r) / 255.0,
+            f32::from(rgba.g) / 255.0,
+            f32::from(rgba.b) / 255.0,
+            f32::from(rgba.a) / 255.0,
+        ];
+    };
     let proof_spec = |color: &mut Option<ColorSpec>| {
         let Some(rgba) = color.as_ref().and_then(ColorSpec::rgba8) else {
             return;
@@ -225,10 +257,16 @@ fn apply_color_transform(snapshot: &mut RenderSceneSnapshot, transform: impl Fn(
     };
     for atom in &mut snapshot.atoms {
         proof_spec(&mut atom.color);
+        if let Some(edge) = &mut atom.edge {
+            proof_rgba(&mut edge.color);
+        }
     }
     for bond in &mut snapshot.bonds {
         proof_spec(&mut bond.color);
         proof_spec(&mut bond.end_color);
+        if let Some(edge) = &mut bond.edge {
+            proof_rgba(&mut edge.color);
+        }
     }
     for mesh in &mut snapshot.meshes {
         for vertex in &mut mesh.vertices {
@@ -300,6 +338,7 @@ impl RenderAtom {
             atom_index: None,
             selected: false,
             detail: None,
+            edge: None,
         }
     }
 
@@ -320,6 +359,11 @@ impl RenderAtom {
         self.detail = detail;
         self
     }
+
+    pub fn with_edge(mut self, edge: Option<RenderEdgeStyle>) -> Self {
+        self.edge = edge;
+        self
+    }
 }
 
 impl RenderBond {
@@ -337,6 +381,7 @@ impl RenderBond {
             screen_stipple: false,
             screen_offset: [0.0, 0.0],
             screen_point: false,
+            edge: None,
         }
     }
 
@@ -370,6 +415,11 @@ impl RenderBond {
 
     pub fn with_end_color(mut self, color: Option<ColorSpec>) -> Self {
         self.end_color = color;
+        self
+    }
+
+    pub fn with_edge(mut self, edge: Option<RenderEdgeStyle>) -> Self {
+        self.edge = edge;
         self
     }
 }
@@ -460,7 +510,7 @@ impl RenderSceneSnapshot {
             }
         };
         for atom in &self.atoms {
-            let r = atom.radius as f64;
+            let r = f64::from(atom.radius + atom.edge.map_or(0.0, |edge| edge.width.max(0.0)));
             include(Vector4::new3(
                 atom.center.x - r,
                 atom.center.y - r,
@@ -473,8 +523,11 @@ impl RenderSceneSnapshot {
             ));
         }
         for bond in &self.bonds {
-            include(bond.from);
-            include(bond.to);
+            let r = f64::from(bond.radius + bond.edge.map_or(0.0, |edge| edge.width.max(0.0)));
+            for point in [bond.from, bond.to] {
+                include(Vector4::new3(point.x - r, point.y - r, point.z - r));
+                include(Vector4::new3(point.x + r, point.y + r, point.z + r));
+            }
         }
         for mesh in &self.meshes {
             for vertex in &mesh.vertices {
@@ -2544,6 +2597,60 @@ fn add_cylinder_detailed(
     }
 }
 
+fn mark_inverted_edge_geometry(
+    mesh: &mut RenderMesh,
+    vertex_start: usize,
+    index_start: usize,
+    mode: RenderEdgeMode,
+) {
+    let silhouette = mode == RenderEdgeMode::Silhouette;
+    for vertex in &mut mesh.vertices[vertex_start..] {
+        *vertex = (*vertex).with_edge_outline(silhouette);
+    }
+    for triangle in mesh.indices[index_start..].chunks_exact_mut(3) {
+        triangle.swap(1, 2);
+    }
+}
+
+fn add_sphere_edge(
+    mesh: &mut RenderMesh,
+    center: Vector4,
+    radius: f64,
+    detail: Option<u32>,
+    edge: RenderEdgeStyle,
+) {
+    let vertex_start = mesh.vertices.len();
+    let index_start = mesh.indices.len();
+    let edge_radius = radius + f64::from(edge.width.max(0.0));
+    match detail {
+        Some(detail) => {
+            let (rings, segs) = sphere_detail_to_rings_segs(detail);
+            add_sphere_detailed(mesh, center, edge_radius, edge.color, rings, segs);
+        }
+        None => add_sphere(mesh, center, edge_radius, edge.color),
+    }
+    mark_inverted_edge_geometry(mesh, vertex_start, index_start, edge.mode);
+}
+
+fn add_cylinder_edge(
+    mesh: &mut RenderMesh,
+    from: Vector4,
+    to: Vector4,
+    radius: f64,
+    edge: RenderEdgeStyle,
+) {
+    let vertex_start = mesh.vertices.len();
+    let index_start = mesh.indices.len();
+    add_cylinder(
+        mesh,
+        from,
+        to,
+        radius + f64::from(edge.width.max(0.0)),
+        edge.color,
+    );
+    mark_inverted_edge_geometry(mesh, vertex_start, index_start, edge.mode);
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomIntrRenderMode {
     Simple,
@@ -2855,6 +2962,15 @@ pub fn atom_intr_snapshot_with_options(
 pub fn tessellate_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
     let mut mesh = RenderMesh::new();
     for atom in &snapshot.atoms {
+        if let Some(edge) = atom.edge.filter(|edge| edge.width > 0.0) {
+            add_sphere_edge(
+                &mut mesh,
+                atom.center,
+                f64::from(atom.radius),
+                atom.detail,
+                edge,
+            );
+        }
         // Honour a per-atom `detail` (a styled renderer's sphere tessellation
         // level) so the GUI shows it; atoms without it use the default sphere.
         match atom.detail {
@@ -2878,6 +2994,16 @@ pub fn tessellate_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
         }
     }
     for bond in &snapshot.bonds {
+        if let Some(edge) = bond
+            .edge
+            .filter(|edge| edge.width > 0.0 && bond.screen_width.is_none())
+        {
+            if bond.screen_point {
+                add_sphere_edge(&mut mesh, bond.from, f64::from(bond.radius), None, edge);
+            } else {
+                add_cylinder_edge(&mut mesh, bond.from, bond.to, f64::from(bond.radius), edge);
+            }
+        }
         if bond.screen_point {
             add_sphere(
                 &mut mesh,
@@ -2911,6 +3037,15 @@ pub fn tessellate_snapshot_with_detail(snapshot: &RenderSceneSnapshot, detail: u
     let (rings, segs) = sphere_detail_to_rings_segs(detail);
     let mut mesh = RenderMesh::new();
     for atom in &snapshot.atoms {
+        if let Some(edge) = atom.edge.filter(|edge| edge.width > 0.0) {
+            add_sphere_edge(
+                &mut mesh,
+                atom.center,
+                f64::from(atom.radius),
+                Some(detail),
+                edge,
+            );
+        }
         add_sphere_detailed(
             &mut mesh,
             atom.center,
@@ -2921,13 +3056,40 @@ pub fn tessellate_snapshot_with_detail(snapshot: &RenderSceneSnapshot, detail: u
         );
     }
     for bond in &snapshot.bonds {
-        add_cylinder(
-            &mut mesh,
-            bond.from,
-            bond.to,
-            bond.radius as f64,
-            snapshot_color_rgba(&bond.color),
-        );
+        if let Some(edge) = bond
+            .edge
+            .filter(|edge| edge.width > 0.0 && bond.screen_width.is_none())
+        {
+            if bond.screen_point {
+                add_sphere_edge(
+                    &mut mesh,
+                    bond.from,
+                    f64::from(bond.radius),
+                    Some(detail),
+                    edge,
+                );
+            } else {
+                add_cylinder_edge(&mut mesh, bond.from, bond.to, f64::from(bond.radius), edge);
+            }
+        }
+        if bond.screen_point {
+            add_sphere_detailed(
+                &mut mesh,
+                bond.from,
+                f64::from(bond.radius),
+                snapshot_color_rgba(&bond.color),
+                rings,
+                segs,
+            );
+        } else {
+            add_cylinder(
+                &mut mesh,
+                bond.from,
+                bond.to,
+                f64::from(bond.radius),
+                snapshot_color_rgba(&bond.color),
+            );
+        }
     }
     for extra in &snapshot.meshes {
         let base = mesh.vertices.len() as u32;
@@ -2956,6 +3118,7 @@ mod tests {
                 atom_index: None,
                 selected: false,
                 detail: None,
+                edge: None,
             }],
         );
         backend.end_frame(frame);
@@ -3012,6 +3175,7 @@ mod tests {
                 atom_index: None,
                 selected: false,
                 detail: None,
+                edge: None,
             }],
             bonds: vec![RenderBond::new(
                 Vector4::new3(1.0, 0.0, 0.0),
@@ -3507,6 +3671,49 @@ mod tests {
             bounds: None,
         };
         assert_eq!(tessellate_snapshot(&degenerate).triangle_count(), 0);
+    }
+
+    #[test]
+    fn tessellate_snapshot_adds_inverted_primitive_edge_hulls() {
+        let edge = RenderEdgeStyle {
+            mode: RenderEdgeMode::Silhouette,
+            width: 0.2,
+            color: [0.1, 0.2, 0.3, 1.0],
+        };
+        let from = Vector4::new3(0.0, 0.0, 0.0);
+        let to = Vector4::new3(3.0, 0.0, 0.0);
+        let mut snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom::new(from, 1.0, None).with_edge(Some(edge))],
+            bonds: vec![RenderBond::new(from, to, 0.25, None).with_edge(Some(edge))],
+            meshes: Vec::new(),
+            bounds: None,
+        };
+        snapshot.recompute_bounds();
+
+        let mesh = tessellate_snapshot(&snapshot);
+        let sphere_vertices = (DEFAULT_SPHERE_RINGS + 1) * (DEFAULT_SPHERE_SEGS + 1);
+        let cylinder_vertices = 2 * (10 + 1);
+        assert_eq!(
+            mesh.vertices
+                .iter()
+                .filter(|vertex| vertex.is_edge_outline())
+                .count(),
+            sphere_vertices + cylinder_vertices
+        );
+        assert!(mesh.vertices[..sphere_vertices]
+            .iter()
+            .all(MeshVertex::is_silhouette_outline));
+        assert_eq!(mesh.vertices[0].color, edge.color);
+        assert!(
+            ((mesh.vertices[0].position - from).length3d() - 1.2).abs() < 1.0e-6,
+            "the edge sphere must expand by eglinew"
+        );
+        let main_sphere = &mesh.vertices[sphere_vertices..sphere_vertices * 2];
+        assert!(main_sphere.iter().all(|vertex| !vertex.is_edge_outline()));
+        assert_eq!(mesh.indices[0..3], [0, 1, (DEFAULT_SPHERE_SEGS + 1) as u32]);
+        let (min, max) = snapshot.bounds.unwrap();
+        assert!((min.y + 1.2).abs() < 1.0e-6);
+        assert!((max.x - 3.45).abs() < 1.0e-6);
     }
 
     #[test]

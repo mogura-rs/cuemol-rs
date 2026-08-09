@@ -3370,6 +3370,7 @@ pub fn simple_atom_primitives(
             atom_index: None,
             selected: false,
             detail: None,
+            edge: None,
         })
         .collect()
 }
