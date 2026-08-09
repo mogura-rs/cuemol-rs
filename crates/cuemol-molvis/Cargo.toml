@@ -10,6 +10,8 @@ cuemol-gfx.workspace = true
 cuemol-molstr.workspace = true
 cuemol-qsys.workspace = true
 cuemol-render.workspace = true
+boa_engine = "0.20"
+serde_json = "1"
 
 [lib]
 name = "cuemol_molvis"

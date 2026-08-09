@@ -3961,12 +3961,26 @@ fn coloring_node_details(
     } else {
         Some(node.type_name().to_string())
     };
-    let attrs = node
+    let mut attrs = node
         .children()
         .iter()
         .filter(|child| child.is_attr() && child.tag_name() != "type")
         .map(|child| (child.tag_name().to_string(), child.value().to_string()))
-        .collect();
+        .collect::<BTreeMap<_, _>>();
+    if coloring_type.as_deref() == Some("ScriptColoring") {
+        if let Some(script) = node
+            .children()
+            .iter()
+            .find(|child| !child.is_attr() && child.tag_name() == "script")
+        {
+            let source = if !script.value().is_empty() {
+                script.value()
+            } else {
+                script.contents()
+            };
+            attrs.insert("script".to_string(), source.to_string());
+        }
+    }
     let paint_entries = node
         .children()
         .iter()
@@ -4556,6 +4570,7 @@ fn validate_coloring_update(input: &ColoringUpdateInput) -> Result<(), String> {
         ],
         "RainbowColoring" => &["mode", "incr_mode", "start_hue", "end_hue", "sat", "bri"],
         "BfacColoring" => &["mode", "auto", "lowcol", "highcol", "lowpar", "highpar"],
+        "ScriptColoring" => &["script"],
         "ElectrostaticColoring" => &[
             "elepot",
             "lowpar",
@@ -9234,6 +9249,54 @@ mod tests {
             renderer_state.qsc_children()[0].type_name(),
             "PaintColoring"
         );
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model.snapshot().objects[0].renderers[0]
+            .coloring_type
+            .is_none());
+    }
+
+    #[test]
+    fn script_coloring_update_preserves_source_and_is_undoable() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let source = "return cuemol.makeColor(atom.element === \"C\" ? \"red\" : \"blue\");";
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetColoring {
+                input: ColoringUpdateInput {
+                    kind: "renderer".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: Some(renderer_uid.get()),
+                    coloring_type: Some("ScriptColoring".to_string()),
+                    attrs: BTreeMap::from([("script".to_string(), source.to_string())]),
+                    paint_entries: Vec::new(),
+                    gradient_entries: Vec::new(),
+                    default_color: None,
+                },
+                width: 100,
+                height: 100,
+            },
+        )
+        .unwrap();
+        let ModelResponse::MolStructUpdate(update) = response else {
+            panic!("expected a snapshot with viewport");
+        };
+        let renderer = &update.snapshot.objects[0].renderers[0];
+        assert_eq!(renderer.coloring_type.as_deref(), Some("ScriptColoring"));
+        assert_eq!(
+            renderer.coloring_attrs.get("script").map(String::as_str),
+            Some(source)
+        );
+        let renderer_state = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        let coloring = &renderer_state.qsc_children()[0];
+        assert_eq!(coloring.type_name(), "ScriptColoring");
+        assert_eq!(coloring.find_child("script").unwrap().contents(), source);
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(model.snapshot().objects[0].renderers[0]

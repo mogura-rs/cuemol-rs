@@ -3371,6 +3371,17 @@ pub fn simple_atom_primitives(
         .collect()
 }
 
+/// JavaScript source and optional renderer metadata for `ScriptColoring`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptColoringOptions {
+    pub script: String,
+    pub renderer_name: Option<String>,
+    pub renderer_type: Option<String>,
+    /// Renderer-side schemes color every atom. Object-side schemes are reached
+    /// through the CPK `$molcol` cascade and therefore color carbon atoms.
+    pub all_atoms: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MoleculeRenderOptions {
     pub object_uid: Option<u64>,
@@ -3471,6 +3482,9 @@ pub struct MoleculeRenderOptions {
     /// Renderer-level integer atom property interpreted as a packed color code.
     /// Used by `AtomPropColoring` when importing PyMOL sessions.
     pub atom_color_property: Option<String>,
+    /// JavaScript-backed atom coloring. The engine is created lazily only when a
+    /// loaded scene actually uses `ScriptColoring`.
+    pub script_coloring: Option<ScriptColoringOptions>,
     /// Multiple-bond geometry used by the source renderer. `Simple` emits two
     /// or three parallel lines; `BallStickType1` emits the original full bond
     /// plus one shortened, offset cylinder with spherical end caps.
@@ -3791,6 +3805,7 @@ impl Default for MoleculeRenderOptions {
             rainbow: None,
             bfac: None,
             atom_color_property: None,
+            script_coloring: None,
             valence_bond_mode: ValenceBondMode::Off,
             simple_bond_offsets: [0.1, 0.0],
             linear_backbone: false,
@@ -3957,6 +3972,17 @@ pub fn apply_object_coloring<'a>(
                 .map(str::to_string)
                 .unwrap_or_else(|| default_color.script_string());
             options.object_paint = vec![("*".to_string(), carbon)];
+        }
+        Some("ScriptColoring") => {
+            options.script_coloring =
+                attr("script")
+                    .filter(|script| !script.is_empty())
+                    .map(|script| ScriptColoringOptions {
+                        script: script.to_string(),
+                        renderer_name: None,
+                        renderer_type: None,
+                        all_atoms: false,
+                    });
         }
         _ if !paint_entries.is_empty() => {
             options.object_paint = paint_entries.to_vec();
@@ -4192,6 +4218,30 @@ pub fn apply_renderer_styles(
         }
         if coloring_type == "AtomPropColoring" {
             options.atom_color_property = Some("col".to_string());
+        }
+        if coloring_type == "ScriptColoring" {
+            let node = renderer
+                .qsc_children()
+                .iter()
+                .find(|node| node.tag_name() == "coloring")
+                .or_else(|| {
+                    renderer.style().and_then(|style| {
+                        styles.resolve_style_child_node(scope_id, style, "coloring")
+                    })
+                });
+            options.script_coloring = node
+                .and_then(script_source_from_coloring_node)
+                .filter(|script| !script.is_empty())
+                .map(|script| ScriptColoringOptions {
+                    script,
+                    renderer_name: Some(renderer.name().to_string()),
+                    renderer_type: Some(renderer.renderer_type().to_string()),
+                    all_atoms: true,
+                });
+            options.rainbow = None;
+            options.bfac = None;
+            options.object_paint.clear();
+            options.atom_color_property = None;
         }
     }
 
@@ -4535,6 +4585,190 @@ pub fn tessellate_styled_snapshot(
     }
 }
 
+fn script_source_from_coloring_node(node: &cuemol_core::LDom2Node) -> Option<String> {
+    let script = node
+        .children()
+        .iter()
+        .find(|child| !child.is_attr() && child.tag_name() == "script")?;
+    Some(if !script.value().is_empty() {
+        script.value().to_string()
+    } else {
+        script.contents().to_string()
+    })
+}
+
+fn evaluate_script_colors(
+    molecule: &MolCoord,
+    options: &ScriptColoringOptions,
+) -> Vec<Option<ColorSpec>> {
+    use boa_engine::{Context, Source};
+    use serde_json::json;
+
+    let residues = molecule.residue_summaries();
+    let mut residue_by_atom = vec![serde_json::Value::Null; molecule.atoms().len()];
+    for residue in residues {
+        let props = molecule
+            .residue_props()
+            .get(&residue.key)
+            .cloned()
+            .unwrap_or_default();
+        let record = json!({
+            "name": residue.res_name,
+            "type": props.get("basetype").cloned().unwrap_or_default(),
+            "sindex": residue.key.script_index(),
+            "index": residue.key.res_id,
+            "chainName": residue.key.chain_id,
+            "_atomIndices": residue.atom_indices,
+            "_props": props,
+        });
+        for atom_index in record["_atomIndices"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_u64)
+        {
+            if let Some(slot) = residue_by_atom.get_mut(atom_index as usize) {
+                *slot = record.clone();
+            }
+        }
+    }
+    let atoms = molecule
+        .atoms()
+        .iter()
+        .enumerate()
+        .map(|(index, atom)| {
+            json!({
+                "id": atom.serial,
+                "name": atom.name,
+                "element": atom.element,
+                "bfac": atom.b_factor,
+                "occ": atom.occupancy,
+                "confid": atom.alt_loc.map(|value| value.to_string()).unwrap_or_default(),
+                "pos": {
+                    "x": atom.position.x,
+                    "y": atom.position.y,
+                    "z": atom.position.z,
+                    "w": atom.position.w,
+                },
+                "chainName": atom.chain_id,
+                "residIndex": format!("{}{}", atom.res_id, atom.ins_code.unwrap_or(' ')).trim().to_string(),
+                "residName": atom.res_name,
+                "formalCharge": atom.formal_charge,
+                "_intProps": atom.int_props,
+                "_realProps": atom.real_props,
+                "_residue": residue_by_atom[index],
+            })
+        })
+        .collect::<Vec<_>>();
+    let renderer = options
+        .renderer_name
+        .as_ref()
+        .map_or(serde_json::Value::Null, |name| {
+            json!({
+                "name": name,
+                "type": options.renderer_type.as_deref().unwrap_or_default(),
+                "type_name": options.renderer_type.as_deref().unwrap_or_default(),
+            })
+        });
+    let atoms_json = match serde_json::to_string(&atoms) {
+        Ok(value) => value,
+        Err(_) => return vec![None; molecule.atoms().len()],
+    };
+    let renderer_json = renderer.to_string();
+    let script = format!(
+        r##"(function () {{
+const __rawAtoms = {atoms_json};
+function __color(spec) {{
+  return {{ __cuemolColor: String(spec), toString: function () {{ return String(spec); }} }};
+}}
+const cuemol = {{
+  makeColor: __color,
+  color: __color,
+  createObj: function (name, value) {{
+    return /color/i.test(String(name)) ? __color(value === undefined ? "#ffffff" : value) : {{ _class: String(name) }};
+  }},
+  newObj: function (name) {{ return this.createObj(name); }}
+}};
+function makeColor(spec) {{ return __color(spec); }}
+function newObj(name) {{ return cuemol.newObj(name); }}
+function __wrapAtom(atom) {{
+  atom.getPropTypeName = function (name) {{
+    return Object.prototype.hasOwnProperty.call(atom._intProps, name) ? "integer" :
+      Object.prototype.hasOwnProperty.call(atom._realProps, name) ? "real" : "";
+  }};
+  atom.getAtomPropInt = function (name) {{ return atom._intProps[name] === undefined ? 0 : atom._intProps[name]; }};
+  atom.getAtomPropReal = function (name) {{ return atom._realProps[name] === undefined ? 0 : atom._realProps[name]; }};
+  atom.toString = function () {{ return atom.chainName + "." + atom.residIndex + "." + atom.name; }};
+  atom.formatMsg = atom.toString;
+  return atom;
+}}
+const __atoms = __rawAtoms.map(__wrapAtom);
+function __wrapResidue(raw) {{
+  raw.getAtom = function (name) {{
+    const index = raw._atomIndices.find(function (value) {{ return __atoms[value].name.trim() === String(name).trim(); }});
+    return index === undefined ? null : __atoms[index];
+  }};
+  raw.getAtomAltConf = raw.getAtom;
+  raw.getAtomsJSON = function () {{ return JSON.stringify(raw._atomIndices.map(function (index) {{ return __atoms[index].name; }})); }};
+  raw.getPivotPos = function () {{ const atom = raw.getAtom("CA") || __atoms[raw._atomIndices[0]]; return atom ? atom.pos : null; }};
+  raw.getPropStr = function (name) {{ return raw._props[name] === undefined ? "" : raw._props[name]; }};
+  raw.toString = function () {{ return raw.chainName + "." + raw.sindex; }};
+  return raw;
+}}
+const __residues = Object.create(null);
+__atoms.forEach(function (atom) {{
+  const key = atom.chainName + "\u0000" + atom.residIndex;
+  if (!__residues[key]) __residues[key] = __wrapResidue(atom._residue);
+}});
+const obj = {{
+  getAtomSize: function () {{ return __atoms.length; }},
+  getAtomByID: function (id) {{ return __atoms.find(function (atom) {{ return atom.id === Number(id); }}) || null; }},
+  getAtom: function (chain, sindex, name) {{
+    return __atoms.find(function (atom) {{
+      return atom.chainName === String(chain) && atom.residIndex === String(sindex) && atom.name.trim() === String(name).trim();
+    }}) || null;
+  }},
+  getResidue: function (chain, sindex) {{ return __residues[String(chain) + "\u0000" + String(sindex)] || null; }}
+}};
+const rend = {renderer_json};
+function main(atom, resid) {{
+{user_script}
+}}
+const __results = [];
+for (let index = 0; index < __atoms.length; ++index) {{
+  const atom = __atoms[index];
+  const resid = __residues[atom.chainName + "\u0000" + atom.residIndex];
+  try {{
+    const value = main(atom, resid);
+    __results.push(value && typeof value === "object" && typeof value.__cuemolColor === "string" ? value.__cuemolColor : null);
+  }} catch (_) {{
+    break;
+  }}
+}}
+return JSON.stringify(__results);
+}})()"##,
+        user_script = options.script,
+    );
+    let mut context = Context::default();
+    let encoded = match context.eval(Source::from_bytes(&script)) {
+        Ok(value) => match value.to_string(&mut context) {
+            Ok(value) => value.to_std_string_escaped(),
+            Err(_) => return vec![None; molecule.atoms().len()],
+        },
+        Err(_) => return vec![None; molecule.atoms().len()],
+    };
+    let returned = serde_json::from_str::<Vec<Option<String>>>(&encoded).unwrap_or_default();
+    let styles = default_style_manager();
+    (0..molecule.atoms().len())
+        .map(|index| {
+            returned
+                .get(index)
+                .and_then(Option::as_deref)
+                .map(|value| solid_color_to_spec(&styles.compile_color(value, DEFAULT_STYLE_SCOPE)))
+        })
+        .collect()
+}
+
 /// Resolve the final display colour for every atom under the object's coloring
 /// cascade — Rainbow > Bfac > paint applied to carbon (the `$molcol` CPKColoring
 /// rule), every other element keeping its CPK element colour — exactly what the
@@ -4546,6 +4780,10 @@ pub fn tessellate_styled_snapshot(
 /// shows (C++ `MolSurfRenderer::getColorMol`: nearest atom → its scheme colour).
 /// Returns one `ColorSpec` per atom, indexed by atom index.
 pub fn resolve_atom_colors(molecule: &MolCoord, options: &MoleculeRenderOptions) -> Vec<ColorSpec> {
+    let script_colors = options
+        .script_coloring
+        .as_ref()
+        .map(|script| evaluate_script_colors(molecule, script));
     // Object coloring ($molcol cascade) for an atom renderer: CPKColoring carbon is
     // $molcol, so carbons defer to the object's paint/bfac scheme; other elements
     // keep their CPK colour. Built once when the object declares a scheme.
@@ -4571,6 +4809,17 @@ pub fn resolve_atom_colors(molecule: &MolCoord, options: &MoleculeRenderOptions)
         if !atom.element.eq_ignore_ascii_case("C") {
             return None;
         }
+        if let Some(colors) = &script_colors {
+            if !options
+                .script_coloring
+                .as_ref()
+                .is_some_and(|script| script.all_atoms)
+            {
+                if let Some(color) = colors.get(index).cloned().flatten() {
+                    return Some(color);
+                }
+            }
+        }
         // Object colour scheme precedence (same as the ribbon): Rainbow > Bfac > paint.
         if let Some((rainbow, ordinal, total)) = &rainbow_atoms {
             let ord = ordinal.get(&index).copied().unwrap_or(0);
@@ -4590,6 +4839,20 @@ pub fn resolve_atom_colors(molecule: &MolCoord, options: &MoleculeRenderOptions)
         .iter()
         .enumerate()
         .map(|(index, atom)| {
+            if options
+                .script_coloring
+                .as_ref()
+                .is_some_and(|script| script.all_atoms)
+            {
+                if let Some(color) = script_colors
+                    .as_ref()
+                    .and_then(|colors| colors.get(index))
+                    .cloned()
+                    .flatten()
+                {
+                    return color;
+                }
+            }
             if let Some(property) = options.atom_color_property.as_deref() {
                 let color = atom
                     .int_prop(property)
@@ -5624,8 +5887,7 @@ pub fn ribbon_mesh_snapshot(
         bfac.start_molecule(molecule);
         bfac
     });
-    let backbone_atom_colors = options
-        .backbone_atom_colors
+    let backbone_atom_colors = (options.backbone_atom_colors || options.script_coloring.is_some())
         .then(|| resolve_atom_colors(molecule, options));
     let cartoon_anchor_atoms = options
         .cartoon_anchor_selection
@@ -7673,6 +7935,111 @@ mod tests {
             int_props: Default::default(),
             real_props: Default::default(),
         }
+    }
+
+    #[test]
+    fn script_coloring_evaluates_atom_and_residue_objects_in_one_batch() {
+        let carbon = sample_atom("CA", "C", 0.0, 0.0, 0.0);
+        let mut oxygen = sample_atom("O", "O", 1.0, 0.0, 0.0);
+        oxygen.serial = 2;
+        oxygen.res_name = "GLY".to_string();
+        oxygen.res_id = 2;
+        let molecule = MolCoord::with_atoms(vec![carbon, oxygen]);
+        let options = MoleculeRenderOptions {
+            script_coloring: Some(ScriptColoringOptions {
+                script: r##"
+if (atom.element === "C" && resid.name === "ALA") return cuemol.makeColor("#ff0000");
+if (atom.id === 2 && resid.sindex === "2") return makeColor("#0000ff");
+return null;
+"##
+                .to_string(),
+                renderer_name: Some("main".to_string()),
+                renderer_type: Some("simple".to_string()),
+                all_atoms: true,
+            }),
+            ..MoleculeRenderOptions::default()
+        };
+
+        let colors = resolve_atom_colors(&molecule, &options);
+        assert_eq!(
+            colors[0].rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }
+        );
+        assert_eq!(
+            colors[1].rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255,
+            }
+        );
+    }
+
+    #[test]
+    fn renderer_script_coloring_node_populates_render_options() {
+        let carbon = sample_atom("CA", "C", 0.0, 0.0, 0.0);
+        let mut oxygen = sample_atom("O", "O", 1.0, 0.0, 0.0);
+        oxygen.serial = 2;
+        let molecule = MolCoord::with_atoms(vec![carbon, oxygen]);
+        let mut manager = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = manager.new_scene("script");
+        let scene = manager.scene_mut(scene_uid).unwrap();
+        let object_uid = scene.add_molecule("molecule", molecule.clone());
+        let object = scene.object_mut(object_uid).unwrap();
+        let renderer_uid = object.add_renderer("simple", "main");
+        let renderer = object.renderer_mut(renderer_uid).unwrap();
+        let mut coloring = cuemol_core::LDom2Node::new();
+        coloring.set_tag_name("coloring");
+        coloring.set_type_name("ScriptColoring");
+        coloring
+            .append_child("script")
+            .set_contents("return cuemol.makeColor(atom.element === \"C\" ? \"red\" : \"blue\");");
+        renderer.set_qsc_children(vec![coloring]);
+
+        let mut options = MoleculeRenderOptions::default();
+        apply_renderer_styles(&mut options, renderer, &default_style_manager(), 0);
+        let script = options.script_coloring.as_ref().unwrap();
+        assert!(script.all_atoms);
+        assert_eq!(script.renderer_name.as_deref(), Some("main"));
+        assert_eq!(script.renderer_type.as_deref(), Some("simple"));
+        let colors = resolve_atom_colors(&molecule, &options);
+        assert_eq!(colors[0].rgba8().unwrap().r, 255);
+        assert_eq!(colors[1].rgba8().unwrap().b, 255);
+    }
+
+    #[test]
+    fn script_coloring_rejects_non_color_values_and_stops_after_an_error() {
+        let nitrogen = sample_atom("N", "N", 0.0, 0.0, 0.0);
+        let mut oxygen = sample_atom("O", "O", 1.0, 0.0, 0.0);
+        oxygen.serial = 2;
+        let mut sulfur = sample_atom("S", "S", 2.0, 0.0, 0.0);
+        sulfur.serial = 3;
+        let molecule = MolCoord::with_atoms(vec![nitrogen, oxygen, sulfur]);
+        let options = MoleculeRenderOptions {
+            script_coloring: Some(ScriptColoringOptions {
+                script: r##"
+if (atom.id === 1) return "#00ff00";
+if (atom.id === 2) throw new Error("stop");
+return cuemol.makeColor("#0000ff");
+"##
+                .to_string(),
+                renderer_name: None,
+                renderer_type: None,
+                all_atoms: true,
+            }),
+            ..MoleculeRenderOptions::default()
+        };
+
+        let colors = resolve_atom_colors(&molecule, &options);
+        assert_eq!(colors[0], atom_color("N", MoleculeColorMode::Element));
+        assert_eq!(colors[1], atom_color("O", MoleculeColorMode::Element));
+        assert_eq!(colors[2], atom_color("S", MoleculeColorMode::Element));
     }
 
     #[test]

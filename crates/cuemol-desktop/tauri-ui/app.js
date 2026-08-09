@@ -5000,6 +5000,9 @@ function coloringTypeOptions(target) {
   if (target?.state.supportsMultiGradient) {
     options.push(["MultiGradientColoring", "Multi-gradient"]);
   }
+  if (target?.state.coloringType === "ScriptColoring") {
+    options.push(["ScriptColoring", "Script coloring"]);
+  }
   return options;
 }
 
@@ -5081,6 +5084,8 @@ function defaultColoringState(type, target) {
         paintEntries: [],
         defaultColor: null,
       };
+    case "ScriptColoring":
+      return { attrs: { script: "" }, paintEntries: [], defaultColor: null };
     case "ElectrostaticColoring":
       return {
         attrs: {
@@ -5517,6 +5522,25 @@ function renderColoringDeck(target) {
         coloringControlRow(label, coloringInput(`coloring-bfac-${name}`, state.attrs[name] || fallback, type, (value) => updateAttr(name, value)));
       }
       break;
+    case "ScriptColoring": {
+      const editor = document.createElement("textarea");
+      editor.id = "coloring-script-text";
+      editor.className = "coloring-script-text";
+      editor.rows = 10;
+      editor.value = state.attrs.script || "";
+      const update = button("Update", "", () => {
+        state.attrs.script = editor.value;
+        commitColoring(target, state.type, state);
+      });
+      update.id = "coloring-script-update";
+      update.disabled = true;
+      editor.addEventListener("input", () => {
+        update.disabled = false;
+      });
+      coloringControlRow("Script coloring", editor);
+      coloringDeck.append(update);
+      break;
+    }
     case "PaintColoring":
       renderPaintColoring(target, state);
       break;

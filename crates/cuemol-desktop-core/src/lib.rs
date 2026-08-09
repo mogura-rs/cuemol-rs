@@ -3605,9 +3605,17 @@ impl DesktopAppState {
         if let Some(coloring_type) = coloring_type {
             let mut node = LDom2Node::new();
             node.set_tag_name("coloring");
-            node.set_type_name(coloring_type);
-            for (name, value) in attrs {
-                node.set_str_attr(name, value);
+            node.set_type_name(coloring_type.clone());
+            for (name, value) in attrs
+                .iter()
+                .filter(|(name, _)| coloring_type != "ScriptColoring" || name.as_str() != "script")
+            {
+                node.set_str_attr(name.as_str(), value.as_str());
+            }
+            if coloring_type == "ScriptColoring" {
+                if let Some(script) = attrs.get("script") {
+                    node.append_child("script").set_contents(script.as_str());
+                }
             }
             for (selection, color) in paint_entries {
                 let paint = node.append_child("paint");

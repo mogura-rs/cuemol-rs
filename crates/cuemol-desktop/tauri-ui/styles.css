@@ -1010,9 +1010,15 @@ summary:focus-visible {
 }
 
 .coloring-control-row input,
-.coloring-control-row select {
+.coloring-control-row select,
+.coloring-control-row textarea {
   width: 100%;
   min-width: 0;
+}
+
+.coloring-script-text {
+  resize: vertical;
+  font: 11px/1.35 var(--font-mono);
 }
 
 .coloring-note {

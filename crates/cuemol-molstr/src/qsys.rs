@@ -761,9 +761,19 @@ impl MolObject {
     }
 
     pub fn set_coloring(&mut self, coloring_type: Option<String>, attrs: BTreeMap<String, String>) {
+        self.qsc_coloring_node = if coloring_type.as_deref() == Some("ScriptColoring") {
+            attrs.get("script").map(|script| {
+                let mut node = LDom2Node::new();
+                node.set_tag_name("coloring");
+                node.set_type_name("ScriptColoring");
+                node.append_child("script").set_contents(script.as_str());
+                node
+            })
+        } else {
+            None
+        };
         self.coloring_type = coloring_type;
         self.coloring_attrs = attrs;
-        self.qsc_coloring_node = None;
     }
 
     pub fn qsc_coloring_node(&self) -> Option<&LDom2Node> {
@@ -791,6 +801,21 @@ impl MolObject {
             .filter(|child| child.is_attr() && child.tag_name() != "type")
             .map(|child| (child.tag_name().to_string(), child.value().to_string()))
             .collect();
+        if coloring_type.as_deref() == Some("ScriptColoring") {
+            if let Some(script) = node
+                .children()
+                .iter()
+                .find(|child| !child.is_attr() && child.tag_name() == "script")
+            {
+                let source = if !script.value().is_empty() {
+                    script.value()
+                } else {
+                    script.contents()
+                };
+                self.coloring_attrs
+                    .insert("script".to_string(), source.to_string());
+            }
+        }
         self.paint_coloring = node
             .children()
             .iter()
@@ -2348,12 +2373,26 @@ impl MolScene {
             } else {
                 Some(coloring.type_name().to_string())
             };
-            let coloring_attrs = coloring
+            let mut coloring_attrs = coloring
                 .children()
                 .iter()
                 .filter(|node| node.is_attr() && node.tag_name() != "type")
                 .map(|node| (node.tag_name().to_string(), node.value().to_string()))
                 .collect::<BTreeMap<_, _>>();
+            if coloring_type.as_deref() == Some("ScriptColoring") {
+                if let Some(script) = coloring
+                    .children()
+                    .iter()
+                    .find(|node| !node.is_attr() && node.tag_name() == "script")
+                {
+                    let source = if !script.value().is_empty() {
+                        script.value()
+                    } else {
+                        script.contents()
+                    };
+                    coloring_attrs.insert("script".to_string(), source.to_string());
+                }
+            }
             let paint_entries = coloring
                 .children()
                 .iter()
@@ -4703,6 +4742,65 @@ ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00
                 .qsc_children()
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn script_coloring_source_round_trips_as_child_contents() {
+        let qsc = r##"<scene>
+          <object type="MolCoord" name="mol" src="datachunk:00000" srctype="qdfpdb">
+            <coloring type="ScriptColoring"><script><![CDATA[return cuemol.makeColor("#112233");]]></script></coloring>
+            <renderer type="simple" name="main">
+              <coloring type="ScriptColoring"><script><![CDATA[return cuemol.makeColor(atom.element === "C" ? "red" : "blue");]]></script></coloring>
+            </renderer>
+          </object>
+        </scene>
+========== End of XML ==========
+==========START datachunk:00000==========
+ATOM      1  CA  ALA A   1       1.000   2.000   3.000  1.00 10.00
+==========END datachunk:00000==========
+"##;
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("script-coloring");
+        manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .load_qsc_str(qsc)
+            .unwrap();
+        let object = manager
+            .scene(scene_uid)
+            .unwrap()
+            .object_by_name("mol")
+            .unwrap();
+        assert_eq!(object.coloring_type(), Some("ScriptColoring"));
+        assert_eq!(
+            object.coloring_attr("script"),
+            Some("return cuemol.makeColor(\"#112233\");")
+        );
+        let renderer_script = object.renderer_by_name("main").unwrap().qsc_children()[0]
+            .find_child("script")
+            .unwrap()
+            .contents();
+        assert!(renderer_script.contains("atom.element"));
+
+        let rewritten = manager.scene(scene_uid).unwrap().write_qsc_string();
+        assert!(rewritten.contains("<script><![CDATA[return cuemol.makeColor"));
+        assert!(!rewritten.contains("script=\""));
+        let mut reloaded = MolSceneManager::new();
+        let reloaded_uid = reloaded.new_scene("script-coloring-reloaded");
+        reloaded
+            .scene_mut(reloaded_uid)
+            .unwrap()
+            .load_qsc_str(&rewritten)
+            .unwrap();
+        assert_eq!(
+            reloaded
+                .scene(reloaded_uid)
+                .unwrap()
+                .object_by_name("mol")
+                .unwrap()
+                .coloring_attr("script"),
+            Some("return cuemol.makeColor(\"#112233\");")
         );
     }
 
