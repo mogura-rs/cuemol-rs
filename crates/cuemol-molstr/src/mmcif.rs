@@ -99,33 +99,31 @@ pub fn read_mmcif_str(input: &str) -> Result<MolCoord> {
 
 pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Result<MolCoord> {
     let document = parse_cif(input)?;
-    let loops = document.loops().cloned().collect::<Vec<_>>();
     let mut mol = MolCoord::new();
     let mut atom_keys = HashMap::new();
     let mut struct_conn_rows = Vec::new();
     let mut anisou_rows = Vec::new();
     // Secondary-structure ranges: (loop, value). _struct_conf -> "helix"
     // (HELX_P rows only), _struct_sheet_range -> "sheet".
-    let mut secstr_loops: Vec<(CifLoop, &'static str)> = Vec::new();
+    let mut secstr_loops: Vec<(&CifLoop, &'static str)> = Vec::new();
     let mut default_model: Option<String> = None;
 
-    for cif_loop in loops {
+    for cif_loop in document.loops() {
         if cif_loop.category_is("_atom_site") {
+            let columns = AtomSiteColumns::new(cif_loop);
             for row in &cif_loop.rows {
-                let model = value_for(&cif_loop.columns, row, "pdbx_PDB_model_num")
-                    .unwrap_or("1")
-                    .to_string();
+                let model = columns.value(row, columns.model).unwrap_or("1");
                 if default_model.is_none() {
-                    default_model = Some(model.clone());
+                    default_model = Some(model.to_string());
                 }
-                if !options.load_model && default_model.as_deref() != Some(model.as_str()) {
+                if !options.load_model && default_model.as_deref() != Some(model) {
                     continue;
                 }
                 let Some(atom) = atom_from_row_with_options(
-                    &cif_loop.columns,
+                    &columns,
                     row,
                     options,
-                    &model,
+                    model,
                     default_model.as_deref(),
                 )?
                 else {
@@ -168,10 +166,10 @@ pub fn read_mmcif_str_with_options(input: &str, options: MmcifReadOptions) -> Re
     mol.apply_topology_with_autogen(options.auto_topo_gen);
     mol.calc_base_pair(3.7, 30.0);
     for cif_loop in anisou_rows {
-        apply_anisou(&cif_loop, &mut mol);
+        apply_anisou(cif_loop, &mut mol);
     }
     for cif_loop in struct_conn_rows {
-        apply_struct_conn(&cif_loop, &atom_keys, &mut mol);
+        apply_struct_conn(cif_loop, &atom_keys, &mut mol);
     }
     if options.load_secstr {
         for (cif_loop, value) in &secstr_loops {
@@ -286,64 +284,67 @@ fn apply_secstr_range(cif_loop: &CifLoop, mol: &mut MolCoord, value: &str) {
 }
 
 fn atom_from_row_with_options(
-    columns: &[String],
+    columns: &AtomSiteColumns,
     row: &[String],
     options: MmcifReadOptions,
     model: &str,
     default_model: Option<&str>,
 ) -> Result<Option<Atom>> {
-    let get = |name: &str| -> Option<&str> {
-        columns
-            .iter()
-            .position(|column| {
-                column
-                    .rsplit_once('.')
-                    .is_some_and(|(_, field)| field.eq_ignore_ascii_case(name))
-            })
-            .and_then(|index| row.get(index).map(String::as_str))
-            .filter(|value| !matches!(*value, "." | "?"))
-    };
-    let Some(serial) = get("id").and_then(|v| v.parse().ok()) else {
+    let Some(serial) = columns
+        .value(row, columns.id)
+        .and_then(|value| value.parse().ok())
+    else {
         return Ok(None);
     };
-    let name = get("auth_atom_id")
-        .or_else(|| get("label_atom_id"))
+    let name = columns
+        .preferred(row, columns.auth_atom_id, columns.label_atom_id)
         .unwrap_or("")
         .to_string();
     if name.is_empty() {
         return Ok(None);
     }
-    let res_name = get("auth_comp_id")
-        .or_else(|| get("label_comp_id"))
+    let res_name = columns
+        .preferred(row, columns.auth_comp_id, columns.label_comp_id)
         .unwrap_or("")
         .to_string();
     if res_name.is_empty() {
         return Ok(None);
     }
-    let mut chain_id = get("auth_asym_id")
-        .or_else(|| get("label_asym_id"))
+    let mut chain_id = columns
+        .preferred(row, columns.auth_asym_id, columns.label_asym_id)
         .unwrap_or("")
         .to_string();
     if chain_id.is_empty() {
         return Ok(None);
     }
-    let res_id = get("auth_seq_id")
-        .or_else(|| get("label_seq_id"))
+    let res_id = columns
+        .preferred(row, columns.auth_seq_id, columns.label_seq_id)
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let ins_code = get("pdbx_PDB_ins_code").and_then(|value| value.chars().next());
-    let mut alt_loc = get("label_alt_id").and_then(|value| value.chars().next());
-    let x = parse_f64(get("Cartn_x"), "Cartn_x")?;
-    let y = parse_f64(get("Cartn_y"), "Cartn_y")?;
-    let z = parse_f64(get("Cartn_z"), "Cartn_z")?;
-    let occupancy = get("occupancy").and_then(|v| v.parse().ok()).unwrap_or(1.0);
-    let b_factor = get("B_iso_or_equiv")
+    let ins_code = columns
+        .value(row, columns.ins_code)
+        .and_then(|value| value.chars().next());
+    let mut alt_loc = columns
+        .value(row, columns.alt_id)
+        .and_then(|value| value.chars().next());
+    let x = parse_f64(columns.value(row, columns.x), "Cartn_x")?;
+    let y = parse_f64(columns.value(row, columns.y), "Cartn_y")?;
+    let z = parse_f64(columns.value(row, columns.z), "Cartn_z")?;
+    let occupancy = columns
+        .value(row, columns.occupancy)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1.0);
+    let b_factor = columns
+        .value(row, columns.b_factor)
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.0);
-    let element = get("type_symbol")
+    let element = columns
+        .value(row, columns.element)
         .map(str::to_string)
         .unwrap_or_else(|| infer_element(&name));
-    let formal_charge = get("pdbx_formal_charge").and_then(|v| v.parse().ok());
+    let formal_charge = columns
+        .value(row, columns.formal_charge)
+        .and_then(|v| v.parse().ok());
 
     if !options.load_alt_conf {
         match alt_loc {
@@ -374,6 +375,72 @@ fn atom_from_row_with_options(
         int_props: Default::default(),
         real_props: Default::default(),
     }))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AtomSiteColumns {
+    id: Option<usize>,
+    auth_atom_id: Option<usize>,
+    label_atom_id: Option<usize>,
+    auth_comp_id: Option<usize>,
+    label_comp_id: Option<usize>,
+    auth_asym_id: Option<usize>,
+    label_asym_id: Option<usize>,
+    auth_seq_id: Option<usize>,
+    label_seq_id: Option<usize>,
+    ins_code: Option<usize>,
+    alt_id: Option<usize>,
+    x: Option<usize>,
+    y: Option<usize>,
+    z: Option<usize>,
+    occupancy: Option<usize>,
+    b_factor: Option<usize>,
+    element: Option<usize>,
+    formal_charge: Option<usize>,
+    model: Option<usize>,
+}
+
+impl AtomSiteColumns {
+    fn new(cif_loop: &CifLoop) -> Self {
+        Self {
+            id: cif_loop.column_index("id"),
+            auth_atom_id: cif_loop.column_index("auth_atom_id"),
+            label_atom_id: cif_loop.column_index("label_atom_id"),
+            auth_comp_id: cif_loop.column_index("auth_comp_id"),
+            label_comp_id: cif_loop.column_index("label_comp_id"),
+            auth_asym_id: cif_loop.column_index("auth_asym_id"),
+            label_asym_id: cif_loop.column_index("label_asym_id"),
+            auth_seq_id: cif_loop.column_index("auth_seq_id"),
+            label_seq_id: cif_loop.column_index("label_seq_id"),
+            ins_code: cif_loop.column_index("pdbx_PDB_ins_code"),
+            alt_id: cif_loop.column_index("label_alt_id"),
+            x: cif_loop.column_index("Cartn_x"),
+            y: cif_loop.column_index("Cartn_y"),
+            z: cif_loop.column_index("Cartn_z"),
+            occupancy: cif_loop.column_index("occupancy"),
+            b_factor: cif_loop.column_index("B_iso_or_equiv"),
+            element: cif_loop.column_index("type_symbol"),
+            formal_charge: cif_loop.column_index("pdbx_formal_charge"),
+            model: cif_loop.column_index("pdbx_PDB_model_num"),
+        }
+    }
+
+    fn value<'a>(&self, row: &'a [String], index: Option<usize>) -> Option<&'a str> {
+        index
+            .and_then(|index| row.get(index))
+            .map(String::as_str)
+            .filter(|value| !matches!(*value, "." | "?"))
+    }
+
+    fn preferred<'a>(
+        &self,
+        row: &'a [String],
+        primary: Option<usize>,
+        fallback: Option<usize>,
+    ) -> Option<&'a str> {
+        self.value(row, primary)
+            .or_else(|| self.value(row, fallback))
+    }
 }
 
 fn value_for<'a>(columns: &[String], row: &'a [String], name: &str) -> Option<&'a str> {
@@ -430,18 +497,21 @@ fn apply_anisou(cif_loop: &CifLoop, mol: &mut MolCoord) {
     if field_indices.is_empty() {
         return;
     }
+    let atom_indices = mol
+        .atoms()
+        .iter()
+        .enumerate()
+        .map(|(index, atom)| (atom.serial, index))
+        .collect::<HashMap<_, _>>();
     for row in &cif_loop.rows {
         let serial = row
             .get(id_index)
             .and_then(|value| value.parse::<i32>().ok())
             .unwrap_or(0);
-        let Some(atom) = mol
-            .atoms_mut()
-            .iter_mut()
-            .find(|atom| atom.serial == serial)
-        else {
+        let Some(index) = atom_indices.get(&serial).copied() else {
             continue;
         };
+        let atom = &mut mol.atoms_mut()[index];
         for (prop, index) in &field_indices {
             if let Some(value) = row.get(*index).and_then(|value| value.parse::<f64>().ok()) {
                 atom.set_int_prop(*prop, (value * 10000.0).round() as i32);
@@ -828,6 +898,44 @@ ATOM 2 CB GLY A 2 1.5 0.0 0.0
         assert_eq!(mol.atoms()[0].b_factor, 0.0);
         assert_eq!(mol.atoms()[0].element, "N");
         assert_eq!(mol.atoms()[1].element, "C");
+    }
+
+    #[test]
+    fn large_atom_site_with_shuffled_columns_keeps_every_row() {
+        const ATOM_COUNT: usize = 2_048;
+        let mut cif = String::from(
+            "data_large\n\
+             loop_\n\
+             _atom_site.Cartn_z\n\
+             _atom_site.label_seq_id\n\
+             _atom_site.label_comp_id\n\
+             _atom_site.id\n\
+             _atom_site.Cartn_x\n\
+             _atom_site.label_atom_id\n\
+             _atom_site.label_asym_id\n\
+             _atom_site.Cartn_y\n",
+        );
+        for index in 0..ATOM_COUNT {
+            let serial = index + 1;
+            cif.push_str(&format!("0.0 {serial} ALA {serial} {index}.0 CA A 1.0\n"));
+        }
+        cif.push_str("#\n");
+
+        let molecule = read_mmcif_str_with_options(
+            &cif,
+            MmcifReadOptions {
+                auto_topo_gen: false,
+                ..MmcifReadOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(molecule.atom_count(), ATOM_COUNT);
+        assert_eq!(molecule.atoms()[0].serial, 1);
+        assert_eq!(molecule.atoms()[ATOM_COUNT - 1].serial, ATOM_COUNT as i32);
+        assert_eq!(
+            molecule.atoms()[ATOM_COUNT - 1].position,
+            Vector4::new3((ATOM_COUNT - 1) as f64, 1.0, 0.0)
+        );
     }
 
     #[test]

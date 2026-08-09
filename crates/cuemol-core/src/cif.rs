@@ -157,7 +157,7 @@ impl Token {
 
 /// Parse a complete CIF/mmCIF document.
 pub fn parse_cif(input: &str) -> Result<CifDocument> {
-    let tokens = tokenize(input)?;
+    let mut tokens = tokenize(input)?;
     let mut document = CifDocument::default();
     let mut current_block: Option<usize> = None;
     let mut index = 0;
@@ -165,7 +165,8 @@ pub fn parse_cif(input: &str) -> Result<CifDocument> {
     while index < tokens.len() {
         let token = &tokens[index];
         if token.is_data() {
-            let name = token.value[5..].to_string();
+            let value = std::mem::take(&mut tokens[index].value);
+            let name = value[5..].to_string();
             document.blocks.push(CifBlock {
                 name,
                 ..CifBlock::default()
@@ -181,7 +182,7 @@ pub fn parse_cif(input: &str) -> Result<CifDocument> {
             index += 1;
             let mut columns = Vec::new();
             while index < tokens.len() && tokens[index].is_name() {
-                columns.push(tokens[index].value.clone());
+                columns.push(std::mem::take(&mut tokens[index].value));
                 index += 1;
             }
             if columns.is_empty() {
@@ -191,7 +192,7 @@ pub fn parse_cif(input: &str) -> Result<CifDocument> {
 
             let mut values = Vec::new();
             while index < tokens.len() && !tokens[index].is_control() {
-                values.push(tokens[index].value.clone());
+                values.push(std::mem::take(&mut tokens[index].value));
                 index += 1;
             }
             if index < tokens.len() && tokens[index].is_word("stop_") {
@@ -222,7 +223,7 @@ pub fn parse_cif(input: &str) -> Result<CifDocument> {
         if token.is_name() {
             let block_index = ensure_block(&mut document, &mut current_block);
             let item_line = token.line;
-            let name = token.value.clone();
+            let name = std::mem::take(&mut tokens[index].value);
             index += 1;
             let Some(value) = tokens.get(index) else {
                 return Err(parse_error(
@@ -238,7 +239,7 @@ pub fn parse_cif(input: &str) -> Result<CifDocument> {
             }
             document.blocks[block_index].items.push(CifItem {
                 name,
-                value: value.value.clone(),
+                value: std::mem::take(&mut tokens[index].value),
                 line: item_line,
             });
             index += 1;

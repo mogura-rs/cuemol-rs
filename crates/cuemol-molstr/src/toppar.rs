@@ -2314,11 +2314,44 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
         }
     }
 
-    // Phase 3 — explicit non-polymer links over matching residue pairs. The
-    // distance/specificity selector prevents a residue pair from receiving more
-    // than one competing link definition.
-    for i in 0..contexts.len() {
-        for j in 0..contexts.len() {
+    // Phase 3 — explicit non-polymer links over matching residue pairs. Restrict
+    // each side to residues accepted by at least one target before forming the
+    // Cartesian product. Typical proteins therefore test only CYS/MPR residues
+    // for disulfides instead of every residue against every other residue.
+    let side_candidates = |first: bool| {
+        contexts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, context)| {
+                db.links()
+                    .iter()
+                    .filter(|link| !link.poly)
+                    .flat_map(|link| &link.targets)
+                    .any(|target| {
+                        if first {
+                            side_matches(
+                                target.group1.as_ref(),
+                                target.resid1.as_ref(),
+                                &context.res_name,
+                                &context.group,
+                            )
+                        } else {
+                            side_matches(
+                                target.group2.as_ref(),
+                                target.resid2.as_ref(),
+                                &context.res_name,
+                                &context.group,
+                            )
+                        }
+                    })
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>()
+    };
+    let first_candidates = side_candidates(true);
+    let second_candidates = side_candidates(false);
+    for &i in &first_candidates {
+        for &j in &second_candidates {
             if i == j {
                 continue;
             }
