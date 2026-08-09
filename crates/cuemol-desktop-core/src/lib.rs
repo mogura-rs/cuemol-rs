@@ -1283,7 +1283,7 @@ impl DesktopAppState {
                 let edge_type = attr("egtype");
                 let edge_width = attr("eglinew");
                 let edge_color = attr("egcolor");
-                let edge_style = surface_edge_style(
+                let edge_style = renderer_edge_style(
                     edge_type.as_deref(),
                     edge_width.as_deref(),
                     edge_color.as_deref(),
@@ -2728,7 +2728,7 @@ impl DesktopAppState {
                         let edge_type = config_attr("egtype");
                         let edge_width = config_attr("eglinew");
                         let edge_color = config_attr("egcolor");
-                        let edge_style = surface_edge_style(
+                        let edge_style = renderer_edge_style(
                             edge_type.as_deref(),
                             edge_width.as_deref(),
                             edge_color.as_deref(),
@@ -38309,6 +38309,19 @@ fn append_object_renderer_snapshot(
         merge_bounds(&mut snapshot.bounds, rings.bounds);
         snapshot.meshes.extend(rings.meshes);
     }
+    if let Some(renderer) = renderer {
+        let edge_type = renderer.resolved_attr("egtype", styles, style_scope_id);
+        let edge_width = renderer.resolved_attr("eglinew", styles, style_scope_id);
+        let edge_color = renderer.resolved_attr("egcolor", styles, style_scope_id);
+        if let Some(edge_style) = renderer_edge_style(
+            edge_type.as_deref(),
+            edge_width.as_deref(),
+            edge_color.as_deref(),
+            styles,
+        ) {
+            append_mesh_edge_outlines(&mut snapshot, edge_style);
+        }
+    }
     let alpha = renderer
         .and_then(|renderer| renderer.resolved_attr("alpha", styles, style_scope_id))
         .and_then(|value| value.trim().parse::<f64>().ok())
@@ -38588,20 +38601,21 @@ fn direct_surface_snapshot(
     let edge_type = resolved("egtype");
     let edge_width = resolved("eglinew");
     let edge_color = resolved("egcolor");
-    let edge_style = surface_edge_style(
+    let edge_style = renderer_edge_style(
         edge_type.as_deref(),
         edge_width.as_deref(),
         edge_color.as_deref(),
         styles,
     );
-    let cull_back_faces = resolved("cullface").is_some_and(|value| qsc_bool(&value));
+    let cull_back_faces =
+        resolved("cullface").is_some_and(|value| qsc_bool(&value)) || edge_style.is_some();
     surface_mesh_snapshot_for_mode(
         render_mesh,
         draw_mode,
         width,
         Some(object.uid().get()),
         cull_back_faces,
-        edge_style,
+        None,
     )
 }
 
@@ -39197,7 +39211,7 @@ struct SurfaceEdgeStyle {
     color: [f32; 4],
 }
 
-fn surface_edge_style(
+fn renderer_edge_style(
     edge_type: Option<&str>,
     edge_width: Option<&str>,
     edge_color: Option<&str>,
@@ -39220,7 +39234,7 @@ fn surface_edge_style(
     Some(SurfaceEdgeStyle { mode, width, color })
 }
 
-fn surface_edge_outline_mesh(
+fn edge_outline_mesh(
     mesh: &cuemol_render::RenderMesh,
     style: SurfaceEdgeStyle,
 ) -> cuemol_render::RenderMesh {
@@ -39232,7 +39246,8 @@ fn surface_edge_outline_mesh(
         .map(|mut vertex| {
             let length = vertex.normal.length3d();
             if length > 1.0e-12 {
-                vertex.position = vertex.position + vertex.normal.scale(style.width / length);
+                let normal = Vector4::new3(vertex.normal.x, vertex.normal.y, vertex.normal.z);
+                vertex.position = vertex.position + normal.scale(style.width / length);
             }
             vertex.color = style.color;
             vertex.with_edge_outline(silhouette)
@@ -39244,6 +39259,27 @@ fn surface_edge_outline_mesh(
         .flat_map(|triangle| [triangle[0], triangle[2], triangle[1]])
         .collect();
     cuemol_render::RenderMesh { vertices, indices }
+}
+
+fn append_mesh_edge_outlines(snapshot: &mut RenderSceneSnapshot, edge_style: SurfaceEdgeStyle) {
+    let outlines = snapshot
+        .meshes
+        .iter()
+        .filter(|mesh| {
+            mesh.vertices
+                .first()
+                .is_none_or(|vertex| !vertex.is_edge_outline())
+        })
+        .map(|mesh| edge_outline_mesh(mesh, edge_style))
+        .collect::<Vec<_>>();
+    if outlines.is_empty() {
+        return;
+    }
+    let mut meshes = Vec::with_capacity(outlines.len() + snapshot.meshes.len());
+    meshes.extend(outlines);
+    meshes.append(&mut snapshot.meshes);
+    snapshot.meshes = meshes;
+    snapshot.recompute_bounds();
 }
 
 fn surface_mesh_snapshot_for_mode(
@@ -39260,9 +39296,7 @@ fn surface_mesh_snapshot_for_mode(
     match draw_mode {
         MapSurfaceDrawMode::Fill => {
             if let Some(edge_style) = edge_style {
-                snapshot
-                    .meshes
-                    .push(surface_edge_outline_mesh(&mesh, edge_style));
+                snapshot.meshes.push(edge_outline_mesh(&mesh, edge_style));
             }
             for vertex in &mut mesh.vertices {
                 *vertex = (*vertex).with_back_face_culling(cull_back_faces || edge_style.is_some());
@@ -49395,6 +49429,35 @@ end_header
             .map(|vertex| (vertex.position - Vector4::new3(0.0, 0.0, 0.0)).length3d())
             .fold(0.0_f64, f64::max);
         assert!((changed_extent - default_extent * 2.0).abs() < 1.0e-6);
+
+        let renderer = app
+            .scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer)
+            .unwrap();
+        renderer.set_qsc_attr("style", "EgLineThin");
+        renderer.set_qsc_attr("egcolor", "#123456");
+        let outlined = app.active_render_snapshot("").unwrap();
+        assert_eq!(outlined.mesh_count(), 4);
+        assert!(outlined.meshes[..2].iter().all(|mesh| mesh
+            .vertices
+            .iter()
+            .all(cuemol_render::MeshVertex::is_edge_outline)));
+        assert!(outlined.meshes[2..]
+            .iter()
+            .all(|mesh| mesh.vertices.iter().all(|vertex| !vertex.is_edge_outline())));
+        assert_eq!(
+            outlined.meshes[0].vertices[0].color,
+            [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0, 1.0]
+        );
+        assert!(
+            ((outlined.meshes[0].vertices[0].position - outlined.meshes[2].vertices[0].position)
+                .length3d()
+                - 0.03)
+                .abs()
+                < 1.0e-8
+        );
         let _ = std::fs::remove_file(&path);
     }
 
