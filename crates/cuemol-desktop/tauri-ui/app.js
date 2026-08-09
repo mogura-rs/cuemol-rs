@@ -1427,6 +1427,7 @@ function rendererPropertiesEditor(object, renderer) {
   const densityMap = Array.isArray(object.counts);
   const surfaceObject = object.className === "MolSurfObj";
   const simpleLike = ["simple", "trace"].includes(renderer.rendererType);
+  const anisouLike = renderer.rendererType === "anisou";
   const ballStickLike = ["ballstick", "anisou"].includes(renderer.rendererType);
   const cpkLike = renderer.rendererType === "cpk";
   const disorderLike = renderer.rendererType === "disorder";
@@ -1441,6 +1442,8 @@ function rendererPropertiesEditor(object, renderer) {
     dialogTitle.textContent = "Simple Rend Properties";
   } else if (renderer.rendererType === "trace") {
     dialogTitle.textContent = "Trace renderer properties";
+  } else if (anisouLike) {
+    dialogTitle.textContent = "Anisotropic U renderer properties";
   } else if (ballStickLike) {
     dialogTitle.textContent = "Ballstick renderer properties";
   } else if (cpkLike) {
@@ -1466,7 +1469,9 @@ function rendererPropertiesEditor(object, renderer) {
   }
   const tabNames = simpleLike
     ? [renderer.rendererType === "trace" ? "Trace" : "Simple"]
-    : ballStickLike
+    : anisouLike
+      ? ["Common", "Ball & Stick", "Anisotropic U"]
+      : ballStickLike
       ? ["Common", "Ball & Stick"]
       : cpkLike
         ? ["Common", "Atom radii"]
@@ -1744,6 +1749,42 @@ function rendererPropertiesEditor(object, renderer) {
   }
 
   let disorderColorPicker = null;
+  let syncAnisouState = () => {};
+  if (anisouLike) {
+    const anisouPage = panes[2];
+    const display = document.createElement("fieldset");
+    display.className = "property-common-group renderer-specific-group";
+    const legend = document.createElement("legend");
+    legend.textContent = "Thermal ellipsoid";
+    display.append(legend);
+    const drawDiscs = addSpecificCheckbox(display, "drawdisc", "Show principal discs", true);
+    const discScale = addSpecificNumber(display, "discscale", "Disc scale:", 0, 10, 0.05, "1.1");
+    const discThickness = addSpecificNumber(
+      display,
+      "discthick",
+      "Disc thickness:",
+      0,
+      10,
+      0.01,
+      "0.1",
+    );
+    addSpecificNumber(
+      display,
+      "maxverts",
+      "Maximum vertices:",
+      1,
+      100000000,
+      1000,
+      "1000000",
+    );
+    syncAnisouState = () => {
+      discScale.disabled = !drawDiscs.checked;
+      discThickness.disabled = !drawDiscs.checked;
+    };
+    drawDiscs.addEventListener("change", syncAnisouState);
+    syncAnisouState();
+    anisouPage.append(display);
+  }
   if (cpkLike) {
     const radiiPage = panes[1];
     const radii = document.createElement("fieldset");
@@ -2681,6 +2722,7 @@ function rendererPropertiesEditor(object, renderer) {
     if (showRing) showRing.dispatchEvent(new Event("change"));
     syncDensityMapState();
     syncSurfaceState();
+    syncAnisouState();
     syncRibbonState();
     syncTubeState();
     syncNuclState();

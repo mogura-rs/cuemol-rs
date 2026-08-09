@@ -2144,6 +2144,46 @@ impl AppModel {
         }
         let mut specific_updates = Vec::<(String, String, bool)>::new();
         match renderer_type.as_str() {
+            "anisou" => {
+                if let Some(raw) = properties.specific.get("drawdisc") {
+                    let value = config_value_is_true(raw);
+                    specific_updates.push(("drawdisc".to_string(), value.to_string(), value));
+                }
+                for (key, label, minimum, default) in [
+                    ("discscale", "disc scale", 0.0, 1.1),
+                    ("discthick", "disc thickness", 0.0, 0.1),
+                ] {
+                    let Some(raw) = properties.specific.get(key) else {
+                        continue;
+                    };
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("{label} must be a number"))?;
+                    if !value.is_finite() || !(minimum..=10.0).contains(&value) {
+                        return Err(format!("{label} must be between {minimum} and 10"));
+                    }
+                    specific_updates.push((
+                        key.to_string(),
+                        value.to_string(),
+                        (value - default).abs() < f64::EPSILON,
+                    ));
+                }
+                if let Some(raw) = properties.specific.get("maxverts") {
+                    let value = raw
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| "maximum vertices must be an integer".to_string())?;
+                    if !(1..=100_000_000).contains(&value) {
+                        return Err("maximum vertices must be between 1 and 100000000".to_string());
+                    }
+                    specific_updates.push((
+                        "maxverts".to_string(),
+                        value.to_string(),
+                        value == 1_000_000,
+                    ));
+                }
+            }
             "cpk" => {
                 for (key, label, default) in [
                     ("vdwr_H", "hydrogen radius", 1.2),
@@ -4018,6 +4058,12 @@ fn renderer_specific_attributes(
     styles: &cuemol_qsys::StyleManager,
 ) -> BTreeMap<String, String> {
     let defaults: Vec<(&str, &str)> = match renderer_type {
+        "anisou" => vec![
+            ("drawdisc", "true"),
+            ("discscale", "1.1"),
+            ("discthick", "0.1"),
+            ("maxverts", "1000000"),
+        ],
         "cpk" => vec![
             ("vdwr_H", "1.2"),
             ("vdwr_C", "1.7"),
@@ -8136,6 +8182,85 @@ mod tests {
             .renderer(renderer_uid)
             .unwrap();
         for key in ["detail", "bondw", "sphr", "ring", "thickness", "ringcolor"] {
+            assert_eq!(renderer.qsc_attr(key), None, "{key} restored");
+        }
+    }
+
+    #[test]
+    fn anisou_properties_are_undoable_and_persisted() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let renderer_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("anisou", "anisou 1");
+        let specific = BTreeMap::from([
+            ("drawdisc".to_string(), "false".to_string()),
+            ("discscale".to_string(), "1.4".to_string()),
+            ("discthick".to_string(), "0.2".to_string()),
+            ("maxverts".to_string(), "250000".to_string()),
+        ]);
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetRendererProperties(RendererPropertiesInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                name: "thermal ellipsoids".to_string(),
+                selection: "*".to_string(),
+                visible: true,
+                locked: false,
+                material: String::new(),
+                alpha: 1.0,
+                edge_type: "none".to_string(),
+                edge_width: 0.01,
+                edge_color: "#000000".to_string(),
+                line_width: 1.2,
+                detail: 6,
+                bond_width: 0.15,
+                sphere_radius: 0.45,
+                show_ring: false,
+                ring_thickness: 0.2,
+                ring_color: "#ffffbf".to_string(),
+                specific,
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let renderer = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == renderer_uid.get())
+            .unwrap();
+        assert_eq!(renderer.detail, 6);
+        assert_eq!(renderer.sphere_radius, 0.45);
+        assert_eq!(renderer.specific["drawdisc"], "false");
+        assert_eq!(renderer.specific["discscale"], "1.4");
+        assert_eq!(renderer.specific["discthick"], "0.2");
+        assert_eq!(renderer.specific["maxverts"], "250000");
+
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        for key in [
+            "detail",
+            "bondw",
+            "sphr",
+            "drawdisc",
+            "discscale",
+            "discthick",
+            "maxverts",
+        ] {
             assert_eq!(renderer.qsc_attr(key), None, "{key} restored");
         }
     }

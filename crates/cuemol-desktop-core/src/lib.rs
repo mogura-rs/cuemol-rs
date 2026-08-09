@@ -21,11 +21,11 @@ use cuemol_molstr::{
 #[cfg(feature = "scripting")]
 use cuemol_molstr::{write_pdb_string_with_selection, AtomIntrLine};
 use cuemol_molvis::{
-    anisou_mesh_snapshot, apply_object_coloring, apply_renderer_styles, apply_tube_renderer_styles,
-    disorder_lines_snapshot_with_style, molecule_render_snapshot, na_renderer_snapshot,
-    ribbon_mesh_snapshot, ring_meshes_snapshot_with, scene_style_manager, DisorderRenderOptions,
-    MoleculeRenderOptions, NARenderOptions, NARenderer, ValenceBondMode, VdwRadii,
-    DEFAULT_STYLE_SCOPE,
+    anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
+    apply_tube_renderer_styles, disorder_lines_snapshot_with_style, molecule_render_snapshot,
+    na_renderer_snapshot, ribbon_mesh_snapshot, ring_meshes_snapshot_with, scene_style_manager,
+    AnIsoURenderOptions, DisorderRenderOptions, MoleculeRenderOptions, NARenderOptions, NARenderer,
+    ValenceBondMode, VdwRadii, DEFAULT_STYLE_SCOPE,
 };
 #[cfg(test)]
 use cuemol_molvis::{default_style_manager, disorder_lines_snapshot};
@@ -37633,8 +37633,31 @@ fn append_object_renderer_snapshot(
             &object.atom_intr_segments(renderer),
             Some(object.uid().get()),
         ),
-        // Anisotropic thermal ellipsoids (ANISOU atoms), not generic spheres.
-        ("anisou", _) => anisou_mesh_snapshot(object.mol(), &options),
+        // Anisotropic thermal ellipsoids with the C++ ORTEP disc controls.
+        ("anisou", renderer) => {
+            let resolved = |name: &str| {
+                renderer.and_then(|renderer| renderer.resolved_attr(name, styles, style_scope_id))
+            };
+            anisou_mesh_snapshot_with_options(
+                object.mol(),
+                &options,
+                &AnIsoURenderOptions {
+                    draw_discs: resolved("drawdisc")
+                        .as_deref()
+                        .map(qsc_bool)
+                        .unwrap_or(true),
+                    disc_scale: resolved("discscale")
+                        .and_then(|value| value.trim().parse().ok())
+                        .unwrap_or(1.1),
+                    disc_thickness: resolved("discthick")
+                        .and_then(|value| value.trim().parse().ok())
+                        .unwrap_or(0.1),
+                    max_vertices: resolved("maxverts")
+                        .and_then(|value| value.trim().parse().ok())
+                        .unwrap_or(1_000_000),
+                },
+            )
+        }
         // Disorder = dotted Bézier lines bridging unbonded chain gaps, drawn only
         // where the backbone breaks — NOT a sphere per atom. Params are the C++
         // DisoRenderer defaults (dotsep 1.0 / loopsize 2.0 / loopsize2 -1.0; a thin
@@ -48271,8 +48294,10 @@ end_header
                 .is_some(),
             "ANISOU U values must have parsed (else the test verifies nothing)"
         );
-        app.new_renderer_in_active_scene(object, "anisou", "adp")
-            .unwrap();
+        let renderer = app
+            .new_renderer_in_active_scene(object, "anisou", "adp")
+            .unwrap()
+            .result_renderer;
 
         let snapshot = app.active_render_snapshot("").unwrap();
         assert_eq!(
@@ -48285,6 +48310,25 @@ end_header
             0,
             "ANISOU atoms render as ellipsoid meshes, not sphere primitives"
         );
+        let default_triangles = snapshot.meshes[0].triangle_count();
+        app.set_renderer_property(object, renderer, "drawdisc", "false")
+            .unwrap();
+        let without_discs = app.active_render_snapshot("").unwrap();
+        assert!(without_discs.meshes[0].triangle_count() < default_triangles);
+        let default_extent = without_discs.meshes[0]
+            .vertices
+            .iter()
+            .map(|vertex| (vertex.position - Vector4::new3(0.0, 0.0, 0.0)).length3d())
+            .fold(0.0_f64, f64::max);
+        app.set_renderer_property(object, renderer, "sphr", "0.6")
+            .unwrap();
+        let changed = app.active_render_snapshot("").unwrap();
+        let changed_extent = changed.meshes[0]
+            .vertices
+            .iter()
+            .map(|vertex| (vertex.position - Vector4::new3(0.0, 0.0, 0.0)).length3d())
+            .fold(0.0_f64, f64::max);
+        assert!((changed_extent - default_extent * 2.0).abs() < 1.0e-6);
         let _ = std::fs::remove_file(&path);
     }
 

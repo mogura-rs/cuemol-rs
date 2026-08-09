@@ -7294,35 +7294,79 @@ fn atom_anisou(atom: &Atom) -> Option<[f64; 6]> {
     ])
 }
 
-/// Cholesky factor `M` (lower-triangular, `M·Mᵀ = U`) of the symmetric 3×3 tensor
-/// `U = [u11,u22,u33,u12,u13,u23]`. `None` when `U` is not positive-definite.
-fn cholesky3(u: [f64; 6]) -> Option<[[f64; 3]; 3]> {
-    let (a, b, c, d, e, f) = (u[0], u[1], u[2], u[3], u[4], u[5]);
-    if a <= 0.0 {
-        return None;
+/// Jacobi diagonalization of the symmetric anisotropic displacement tensor.
+/// Columns of the returned matrix are normalized eigenvectors.
+fn symmetric_eigen3(u: [f64; 6]) -> ([f64; 3], [[f64; 3]; 3]) {
+    let mut matrix = [[u[0], u[3], u[4]], [u[3], u[1], u[5]], [u[4], u[5], u[2]]];
+    let mut vectors = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    for _ in 0..32 {
+        let mut p = 0;
+        let mut q = 1;
+        for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+            if matrix[i][j].abs() > matrix[p][q].abs() {
+                p = i;
+                q = j;
+            }
+        }
+        if matrix[p][q].abs() < 1.0e-14 {
+            break;
+        }
+        let angle = 0.5 * (2.0 * matrix[p][q]).atan2(matrix[q][q] - matrix[p][p]);
+        let (sin, cos) = angle.sin_cos();
+        let app = matrix[p][p];
+        let aqq = matrix[q][q];
+        let apq = matrix[p][q];
+        let mut k = 0;
+        while k < 3 {
+            if k == p || k == q {
+                k += 1;
+                continue;
+            }
+            let akp = matrix[k][p];
+            let akq = matrix[k][q];
+            matrix[k][p] = cos * akp - sin * akq;
+            matrix[p][k] = matrix[k][p];
+            matrix[k][q] = sin * akp + cos * akq;
+            matrix[q][k] = matrix[k][q];
+            k += 1;
+        }
+        matrix[p][p] = cos * cos * app - 2.0 * sin * cos * apq + sin * sin * aqq;
+        matrix[q][q] = sin * sin * app + 2.0 * sin * cos * apq + cos * cos * aqq;
+        matrix[p][q] = 0.0;
+        matrix[q][p] = 0.0;
+        for row in &mut vectors {
+            let vip = row[p];
+            let viq = row[q];
+            row[p] = cos * vip - sin * viq;
+            row[q] = sin * vip + cos * viq;
+        }
     }
-    let l00 = a.sqrt();
-    let l10 = d / l00;
-    let l20 = e / l00;
-    let t11 = b - l10 * l10;
-    if t11 <= 0.0 {
-        return None;
-    }
-    let l11 = t11.sqrt();
-    let l21 = (f - l20 * l10) / l11;
-    let t22 = c - l20 * l20 - l21 * l21;
-    if t22 <= 0.0 {
-        return None;
-    }
-    let l22 = t22.sqrt();
-    Some([[l00, 0.0, 0.0], [l10, l11, 0.0], [l20, l21, l22]])
+    ([matrix[0][0], matrix[1][1], matrix[2][2]], vectors)
 }
 
-/// Thermal-ellipsoid mesh for one atom: a unit sphere transformed by `scale·M`,
-/// where `M` is the Cholesky factor of the ADP tensor `U` (so the surface is the
-/// probability contour `(x-c)ᵀU⁻¹(x-c) = scale²`). Port of C++ `AnIsoURenderer`'s
-/// sphere-through-the-U-transform. Vertex normals are `M⁻ᵀ·u` (the true ellipsoid
-/// normal). Falls back to an isotropic sphere when `U` is not positive-definite.
+#[derive(Clone, Copy)]
+struct AnisouTransform {
+    axes: [[f64; 3]; 3],
+    vectors: [[f64; 3]; 3],
+}
+
+fn anisou_axes(u: [f64; 6], scale: f64) -> AnisouTransform {
+    let (values, vectors) = symmetric_eigen3(u);
+    let mut axes = [[0.0; 3]; 3];
+    for axis in 0..3 {
+        let length = values[axis].abs().sqrt() * scale;
+        axes[axis] = [
+            vectors[0][axis] * length,
+            vectors[1][axis] * length,
+            vectors[2][axis] * length,
+        ];
+    }
+    AnisouTransform { axes, vectors }
+}
+
+/// Thermal-ellipsoid mesh for one atom. The symmetric displacement tensor is
+/// diagonalized exactly as the C++ renderer does; negative eigenvalues are
+/// mirrored to keep malformed records finite.
 pub fn anisou_ellipsoid_mesh(
     center: Vector4,
     u: [f64; 6],
@@ -7331,10 +7375,9 @@ pub fn anisou_ellipsoid_mesh(
     stacks: usize,
     slices: usize,
 ) -> RenderMesh {
-    let m = cholesky3(u).unwrap_or_else(|| {
-        let r = (((u[0] + u[1] + u[2]) / 3.0).max(1.0e-6)).sqrt();
-        [[r, 0.0, 0.0], [0.0, r, 0.0], [0.0, 0.0, r]]
-    });
+    let transform = anisou_axes(u, scale);
+    let axes = transform.axes;
+    let vectors = transform.vectors;
     let mut mesh = RenderMesh::new();
     let stacks = stacks.max(2);
     let slices = slices.max(3);
@@ -7344,23 +7387,39 @@ pub fn anisou_ellipsoid_mesh(
         for j in 0..=slices {
             let phi = std::f64::consts::TAU * j as f64 / slices as f64;
             let (sp, cp) = (phi.sin(), phi.cos());
-            let uu = [st * cp, st * sp, ct]; // unit-sphere point (= unit normal)
-                                             // position = center + scale · M · uu
-            let mu = [
-                m[0][0] * uu[0],
-                m[1][0] * uu[0] + m[1][1] * uu[1],
-                m[2][0] * uu[0] + m[2][1] * uu[1] + m[2][2] * uu[2],
-            ];
+            let unit = [st * cp, st * sp, ct];
             let position = Vector4::new3(
-                center.x + scale * mu[0],
-                center.y + scale * mu[1],
-                center.z + scale * mu[2],
+                center.x + axes[0][0] * unit[0] + axes[1][0] * unit[1] + axes[2][0] * unit[2],
+                center.y + axes[0][1] * unit[0] + axes[1][1] * unit[1] + axes[2][1] * unit[2],
+                center.z + axes[0][2] * unit[0] + axes[1][2] * unit[1] + axes[2][2] * unit[2],
             );
-            // normal = normalize(M⁻ᵀ · uu): solve Mᵀ n = uu (upper-tri back-subst).
-            let n2 = uu[2] / m[2][2];
-            let n1 = (uu[1] - m[2][1] * n2) / m[1][1];
-            let n0 = (uu[0] - m[1][0] * n1 - m[2][0] * n2) / m[0][0];
-            let normal = normalize_or(Vector4::new3(n0, n1, n2), Vector4::new3(0.0, 0.0, 1.0));
+            let normal_component = |axis: usize| {
+                let length = (axes[axis][0] * axes[axis][0]
+                    + axes[axis][1] * axes[axis][1]
+                    + axes[axis][2] * axes[axis][2])
+                    .sqrt()
+                    .max(1.0e-12);
+                unit[axis] / length
+            };
+            let components = [
+                normal_component(0),
+                normal_component(1),
+                normal_component(2),
+            ];
+            let normal = normalize_or(
+                Vector4::new3(
+                    vectors[0][0] * components[0]
+                        + vectors[0][1] * components[1]
+                        + vectors[0][2] * components[2],
+                    vectors[1][0] * components[0]
+                        + vectors[1][1] * components[1]
+                        + vectors[1][2] * components[2],
+                    vectors[2][0] * components[0]
+                        + vectors[2][1] * components[1]
+                        + vectors[2][2] * components[2],
+                ),
+                Vector4::new3(0.0, 0.0, 1.0),
+            );
             mesh.vertices.push(MeshVertex {
                 position,
                 normal,
@@ -7381,6 +7440,136 @@ pub fn anisou_ellipsoid_mesh(
     mesh
 }
 
+#[derive(Clone, Copy)]
+struct AnisouDiscGeometry {
+    radius: f64,
+    thickness: f64,
+    color: [f32; 4],
+    slices: usize,
+}
+
+fn append_anisou_disc(
+    mesh: &mut RenderMesh,
+    center: Vector4,
+    transform: AnisouTransform,
+    normal_axis: usize,
+    geometry: AnisouDiscGeometry,
+) {
+    let axes = transform.axes;
+    let vectors = transform.vectors;
+    let tangent_axes = match normal_axis {
+        0 => [1, 2],
+        1 => [2, 0],
+        _ => [0, 1],
+    };
+    let transform = |local: [f64; 3]| {
+        Vector4::new3(
+            center.x + axes[0][0] * local[0] + axes[1][0] * local[1] + axes[2][0] * local[2],
+            center.y + axes[0][1] * local[0] + axes[1][1] * local[1] + axes[2][1] * local[2],
+            center.z + axes[0][2] * local[0] + axes[1][2] * local[1] + axes[2][2] * local[2],
+        )
+    };
+    let transform_normal = |local: [f64; 3]| {
+        let mut world = [0.0; 3];
+        for axis in 0..3 {
+            let length = (axes[axis][0] * axes[axis][0]
+                + axes[axis][1] * axes[axis][1]
+                + axes[axis][2] * axes[axis][2])
+                .sqrt()
+                .max(1.0e-12);
+            let component = local[axis] / length;
+            for row in 0..3 {
+                world[row] += vectors[row][axis] * component;
+            }
+        }
+        normalize_or(
+            Vector4::new3(world[0], world[1], world[2]),
+            Vector4::new3(0.0, 0.0, 1.0),
+        )
+    };
+    let slices = geometry.slices.max(4);
+    let half = geometry.thickness / 2.0;
+
+    let side_start = mesh.vertices.len() as u32;
+    for side in [-half, half] {
+        for index in 0..=slices {
+            let angle = std::f64::consts::TAU * index as f64 / slices as f64;
+            let mut local = [0.0; 3];
+            local[normal_axis] = side;
+            local[tangent_axes[0]] = geometry.radius * angle.cos();
+            local[tangent_axes[1]] = geometry.radius * angle.sin();
+            let mut local_normal = [0.0; 3];
+            local_normal[tangent_axes[0]] = angle.cos();
+            local_normal[tangent_axes[1]] = angle.sin();
+            mesh.vertices.push(MeshVertex {
+                position: transform(local),
+                normal: transform_normal(local_normal),
+                color: geometry.color,
+            });
+        }
+    }
+    let row = (slices + 1) as u32;
+    for index in 0..slices as u32 {
+        let a = side_start + index;
+        let b = a + 1;
+        let c = a + row;
+        let d = c + 1;
+        mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
+    }
+
+    for (side, sign) in [(-half, -1.0), (half, 1.0)] {
+        let center_index = mesh.vertices.len() as u32;
+        let mut local = [0.0; 3];
+        local[normal_axis] = side;
+        let mut local_normal = [0.0; 3];
+        local_normal[normal_axis] = sign;
+        let normal = transform_normal(local_normal);
+        mesh.vertices.push(MeshVertex {
+            position: transform(local),
+            normal,
+            color: geometry.color,
+        });
+        for index in 0..=slices {
+            let angle = std::f64::consts::TAU * index as f64 / slices as f64;
+            local[tangent_axes[0]] = geometry.radius * angle.cos();
+            local[tangent_axes[1]] = geometry.radius * angle.sin();
+            mesh.vertices.push(MeshVertex {
+                position: transform(local),
+                normal,
+                color: geometry.color,
+            });
+        }
+        for index in 0..slices as u32 {
+            let a = center_index + 1 + index;
+            let b = a + 1;
+            if sign < 0.0 {
+                mesh.indices.extend_from_slice(&[center_index, b, a]);
+            } else {
+                mesh.indices.extend_from_slice(&[center_index, a, b]);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnIsoURenderOptions {
+    pub draw_discs: bool,
+    pub disc_scale: f64,
+    pub disc_thickness: f64,
+    pub max_vertices: usize,
+}
+
+impl Default for AnIsoURenderOptions {
+    fn default() -> Self {
+        Self {
+            draw_discs: true,
+            disc_scale: 1.1,
+            disc_thickness: 0.1,
+            max_vertices: 1_000_000,
+        }
+    }
+}
+
 /// Snapshot rendering atoms as anisotropic thermal ellipsoids (the geometry the
 /// `AnIsoURenderer` draws). Atoms with an ANISOU record become ellipsoid meshes;
 /// atoms without are drawn as sphere primitives so the structure still renders.
@@ -7388,11 +7577,56 @@ pub fn anisou_mesh_snapshot(
     molecule: &MolCoord,
     options: &MoleculeRenderOptions,
 ) -> RenderSceneSnapshot {
-    const PROB_SCALE: f64 = 1.5382; // 50%-probability ellipsoid (ORTEP convention)
+    anisou_mesh_snapshot_with_options(molecule, options, &AnIsoURenderOptions::default())
+}
+
+pub fn anisou_mesh_snapshot_with_options(
+    molecule: &MolCoord,
+    options: &MoleculeRenderOptions,
+    anisou: &AnIsoURenderOptions,
+) -> RenderSceneSnapshot {
+    let draw = options.draw_indices.as_ref().map(|indices| {
+        indices
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+    });
+    let drawn = |index: usize| draw.as_ref().is_none_or(|set| set.contains(&index));
+    let selected = options
+        .selected_indices
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let colors = resolve_atom_colors(molecule, options);
+    let scale = f64::from(options.atom_radius_abs.unwrap_or(0.3));
+    let mut detail = options.sphere_detail.unwrap_or(3).max(2) as usize;
+    let estimated_vertices = |value: usize| {
+        let sphere = (2 * value + 1) * (4 * value + 1);
+        let discs = if anisou.draw_discs {
+            3 * (4 * (4 * value + 1) + 2)
+        } else {
+            0
+        };
+        sphere + discs
+    };
+    while detail > 2 && estimated_vertices(detail) > anisou.max_vertices {
+        detail -= 1;
+    }
+    let stacks = 2 * detail;
+    let slices = 4 * detail;
+    let mut bond_options = options.clone();
+    bond_options.draw_atoms = false;
+    let mut snapshot = molecule_render_snapshot(molecule, &bond_options);
+    if options.bond_radius <= 0.0 {
+        snapshot.bonds.clear();
+    }
     let mut meshes = Vec::new();
     let mut atoms = Vec::new();
-    for atom in molecule.atoms() {
-        let spec = atom_color(&atom.element, options.color_mode);
+    for (index, atom) in molecule.atoms().iter().enumerate() {
+        if !drawn(index) {
+            continue;
+        }
+        let spec = colors[index].clone();
         let col = spec
             .rgba8()
             .map(|c| {
@@ -7406,30 +7640,43 @@ pub fn anisou_mesh_snapshot(
             .unwrap_or([0.8, 0.8, 0.8, 1.0]);
         match atom_anisou(atom) {
             Some(u) => {
-                meshes.push(anisou_ellipsoid_mesh(
-                    atom.position,
-                    u,
-                    PROB_SCALE,
-                    col,
-                    12,
-                    16,
-                ));
+                let mut mesh = anisou_ellipsoid_mesh(atom.position, u, scale, col, stacks, slices);
+                if anisou.draw_discs {
+                    let transform = anisou_axes(u, scale);
+                    let geometry = AnisouDiscGeometry {
+                        radius: anisou.disc_scale,
+                        thickness: anisou.disc_thickness,
+                        color: col,
+                        slices,
+                    };
+                    for normal_axis in 0..3 {
+                        append_anisou_disc(
+                            &mut mesh,
+                            atom.position,
+                            transform,
+                            normal_axis,
+                            geometry,
+                        );
+                    }
+                }
+                meshes.push(mesh);
             }
             None => {
-                atoms.push(RenderAtom::new(
-                    atom.position,
-                    options.bond_radius.max(0.2),
-                    Some(spec),
-                ));
+                let radius = (f64::from(atom.b_factor).max(0.0)
+                    / (8.0 * std::f64::consts::PI * std::f64::consts::PI))
+                    .sqrt()
+                    * scale;
+                atoms.push(
+                    RenderAtom::new(atom.position, radius as f32, Some(spec))
+                        .with_picking(options.object_uid, Some(index), selected.contains(&index))
+                        .with_detail(options.sphere_detail),
+                );
             }
         }
     }
-    RenderSceneSnapshot {
-        atoms,
-        bonds: Vec::new(),
-        meshes,
-        bounds: molecule.bounding_box_for(None),
-    }
+    snapshot.atoms.extend(atoms);
+    snapshot.meshes.extend(meshes);
+    snapshot
 }
 
 /// A unit vector perpendicular to `tangent`, chosen for numerical stability by
@@ -8569,7 +8816,7 @@ return cuemol.makeColor("#0000ff");
         let max_y = ext(&|v| (v.position.y - center.y).abs());
         assert!(max_x > max_y, "elongated along the dominant axis");
 
-        // A non-positive-definite tensor falls back to an isotropic sphere (no NaNs).
+        // The C++ renderer mirrors negative eigenvalues and never emits NaNs.
         let bad = anisou_ellipsoid_mesh(
             center,
             [-1.0, 0.01, 0.01, 0.0, 0.0, 0.0],
@@ -9062,6 +9309,50 @@ return cuemol.makeColor("#0000ff");
         assert_eq!(snap.meshes.len(), 1);
         assert_eq!(snap.atoms.len(), 1);
         assert!(snap.meshes[0].triangle_count() > 0);
+    }
+
+    #[test]
+    fn anisou_snapshot_honors_renderer_options_and_b_factor_radius() {
+        let mut ellipsoid = sample_atom("N", "N", 0.0, 0.0, 0.0);
+        for (name, value) in [
+            ("anisou_u11", 100),
+            ("anisou_u22", 100),
+            ("anisou_u33", 100),
+            ("anisou_u12", 0),
+            ("anisou_u13", 0),
+            ("anisou_u23", 0),
+        ] {
+            ellipsoid.set_int_prop(name, value);
+        }
+        let mut isotropic = sample_atom("CA", "C", 2.0, 0.0, 0.0);
+        isotropic.b_factor = 8.0 * std::f32::consts::PI * std::f32::consts::PI;
+        let molecule = MolCoord::with_atoms(vec![ellipsoid, isotropic]);
+        let options = MoleculeRenderOptions {
+            atom_radius_abs: Some(0.5),
+            sphere_detail: Some(2),
+            ..MoleculeRenderOptions::default()
+        };
+        let without_discs = anisou_mesh_snapshot_with_options(
+            &molecule,
+            &options,
+            &AnIsoURenderOptions {
+                draw_discs: false,
+                ..AnIsoURenderOptions::default()
+            },
+        );
+        let with_discs =
+            anisou_mesh_snapshot_with_options(&molecule, &options, &AnIsoURenderOptions::default());
+
+        assert_eq!(without_discs.meshes.len(), 1);
+        assert_eq!(without_discs.atoms.len(), 1);
+        assert!((without_discs.atoms[0].radius - 0.5).abs() < 1.0e-6);
+        let radius = without_discs.meshes[0]
+            .vertices
+            .iter()
+            .map(|vertex| vertex.position.length3d())
+            .fold(0.0_f64, f64::max);
+        assert!((radius - 0.05).abs() < 1.0e-6);
+        assert!(with_discs.meshes[0].triangle_count() > without_discs.meshes[0].triangle_count());
     }
 
     #[test]

@@ -13,9 +13,10 @@ use cuemol_molstr::{
     HandlerCategory, LoadedDensityMap, MolCoord, MolSceneManager, QscLoadStatus, StreamManager,
 };
 use cuemol_molvis::{
-    anisou_mesh_snapshot, apply_object_coloring, apply_renderer_styles, apply_tube_renderer_styles,
-    disorder_lines_snapshot, molecule_render_snapshot, na_renderer_snapshot, ribbon_mesh_snapshot,
-    scene_style_manager, MoleculeRenderOptions, NARenderOptions, NARenderer, DEFAULT_STYLE_SCOPE,
+    anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
+    apply_tube_renderer_styles, disorder_lines_snapshot, molecule_render_snapshot,
+    na_renderer_snapshot, ribbon_mesh_snapshot, scene_style_manager, AnIsoURenderOptions,
+    MoleculeRenderOptions, NARenderOptions, NARenderer, DEFAULT_STYLE_SCOPE,
 };
 use cuemol_qsys::{Camera, MultiGradient, ScalarObject};
 use cuemol_render::{
@@ -945,7 +946,27 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 // whole molecule (the single source of truth shared with the GUI).
                 cuemol_render::atom_intr_snapshot(&object.atom_intr_segments(renderer), None)
             } else if rtype == "anisou" {
-                anisou_mesh_snapshot(object.mol(), &options)
+                let resolved =
+                    |name: &str| renderer.resolved_attr(name, &styles, DEFAULT_STYLE_SCOPE);
+                anisou_mesh_snapshot_with_options(
+                    object.mol(),
+                    &options,
+                    &AnIsoURenderOptions {
+                        draw_discs: resolved("drawdisc")
+                            .as_deref()
+                            .map(qsc_bool)
+                            .unwrap_or(true),
+                        disc_scale: resolved("discscale")
+                            .and_then(|value| value.trim().parse().ok())
+                            .unwrap_or(1.1),
+                        disc_thickness: resolved("discthick")
+                            .and_then(|value| value.trim().parse().ok())
+                            .unwrap_or(0.1),
+                        max_vertices: resolved("maxverts")
+                            .and_then(|value| value.trim().parse().ok())
+                            .unwrap_or(1_000_000),
+                    },
+                )
             } else if rtype == "disorder" {
                 disorder_lines_snapshot(object.mol(), 1.0, 0.15, 2.0, -1.0)
             } else if rtype == "nucl" {
