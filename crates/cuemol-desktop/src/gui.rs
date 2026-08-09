@@ -6358,7 +6358,7 @@ fn mesh_gpu_vertex(vertex: &MeshVertex) -> MeshGpuVertex {
             vertex.normal.z as f32,
         ],
         color: vertex.color,
-        cull_back_faces: f32::from(vertex.culls_back_faces()),
+        cull_back_faces: vertex.normal.w as f32,
     }
 }
 
@@ -6772,6 +6772,9 @@ fn mesh_vs(input: MeshVsIn) -> MeshVsOut {
 fn mesh_fs(input: MeshVsOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
     if (input.cull_back_faces > 0.5 && !front_facing) {
         discard;
+    }
+    if (input.cull_back_faces > 1.5) {
+        return input.color;
     }
     let n = normalize(input.normal);
     let l = normalize(camera.light.xyz);

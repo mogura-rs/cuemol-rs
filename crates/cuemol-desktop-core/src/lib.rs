@@ -1239,6 +1239,7 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return;
         };
+        let styles = scene_style_manager(scene);
         for surface in scene.loaded_surfaces() {
             let meshes = self.loaded_surface_meshes(scene, std::slice::from_ref(surface), false);
             let renderer_nodes = surface
@@ -1259,10 +1260,16 @@ impl DesktopAppState {
                 renderer_nodes
             };
             for (mesh, renderer_node) in meshes.into_iter().zip(renderer_nodes) {
+                let style_list = renderer_node
+                    .map(|node| node.str_attr("style").to_string())
+                    .unwrap_or_default();
                 let attr = |name: &str| {
                     renderer_node
                         .map(|node| node.str_attr(name).to_string())
                         .filter(|value| !value.is_empty())
+                        .or_else(|| {
+                            styles.resolve_style_attr(DEFAULT_STYLE_SCOPE, &style_list, name)
+                        })
                 };
                 let width = attr("width")
                     .and_then(|value| value.parse::<f64>().ok())
@@ -1273,14 +1280,23 @@ impl DesktopAppState {
                     "point" | "2" => MapSurfaceDrawMode::Point,
                     _ => MapSurfaceDrawMode::Fill,
                 };
-                let cull_back_faces = attr("cullface").is_some_and(|value| qsc_bool(&value))
-                    || attr("egtype").is_some_and(|value| value != "none");
+                let edge_type = attr("egtype");
+                let edge_width = attr("eglinew");
+                let edge_color = attr("egcolor");
+                let edge_style = surface_edge_style(
+                    edge_type.as_deref(),
+                    edge_width.as_deref(),
+                    edge_color.as_deref(),
+                    &styles,
+                );
+                let cull_back_faces = attr("cullface").is_some_and(|value| qsc_bool(&value));
                 let mut rendered = surface_mesh_snapshot_for_mode(
                     mesh,
                     draw_mode,
                     width,
                     Some(surface.uid.get()),
                     cull_back_faces,
+                    edge_style,
                 );
                 let alpha = attr("alpha")
                     .and_then(|value| value.parse::<f64>().ok())
@@ -1653,14 +1669,25 @@ impl DesktopAppState {
     }
 
     pub fn density_map_summary(&self, map_uid: Uid) -> Option<GuiDensityMapSummary> {
-        self.density_maps.get(&map_uid).map(density_map_summary)
+        let object = self.density_maps.get(&map_uid)?;
+        let styles = self
+            .scene_manager()
+            .scene(object.scene_uid)
+            .map(scene_style_manager)
+            .unwrap_or_else(cuemol_molvis::default_style_manager);
+        Some(density_map_summary(object, &styles))
     }
 
     pub fn density_map_summaries(&self, scene_uid: Uid) -> Vec<GuiDensityMapSummary> {
+        let styles = self
+            .scene_manager()
+            .scene(scene_uid)
+            .map(scene_style_manager)
+            .unwrap_or_else(cuemol_molvis::default_style_manager);
         self.density_maps
             .values()
             .filter(|map| map.scene_uid == scene_uid)
-            .map(density_map_summary)
+            .map(|map| density_map_summary(map, &styles))
             .collect()
     }
 
@@ -1738,19 +1765,21 @@ impl DesktopAppState {
     pub fn surface_summary(&self, surface_uid: Uid) -> Option<GuiLoadedSurfaceSummary> {
         let scene_uid = self.scene_manager().scene_uid_for_surface(surface_uid)?;
         let scene = self.scene_manager().scene(scene_uid)?;
+        let styles = scene_style_manager(scene);
         scene
             .loaded_surface(surface_uid)
-            .map(|surface| surface_summary(scene_uid, surface))
+            .map(|surface| surface_summary(scene_uid, surface, &styles))
     }
 
     pub fn surface_summaries(&self, scene_uid: Uid) -> Vec<GuiLoadedSurfaceSummary> {
         self.scene_manager()
             .scene(scene_uid)
             .map(|scene| {
+                let styles = scene_style_manager(scene);
                 scene
                     .loaded_surfaces()
                     .iter()
-                    .map(|surface| surface_summary(scene_uid, surface))
+                    .map(|surface| surface_summary(scene_uid, surface, &styles))
                     .collect()
             })
             .unwrap_or_default()
@@ -2199,28 +2228,28 @@ impl DesktopAppState {
                 "invalid {color_mode} density coloring property: {name}"
             )));
         }
-        let (style_scope_id, summary) = self
+        let style_scope_id = self
+            .density_maps
+            .get(&map_uid)
+            .map(|map| map.scene_uid.get())
+            .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+        let styles = self
+            .scene_manager()
+            .scene(Uid::new(style_scope_id))
+            .map(scene_style_manager)
+            .unwrap_or_else(cuemol_molvis::default_style_manager);
+        let summary = self
             .density_maps
             .get(&map_uid)
             .and_then(|map| {
                 map.renderers
                     .iter()
                     .find(|renderer| renderer.uid == renderer_uid)
-                    .map(|renderer| {
-                        (
-                            map.scene_uid.get(),
-                            density_renderer_summary(map_uid, renderer),
-                        )
-                    })
             })
+            .map(|renderer| density_renderer_summary(map_uid, renderer, &styles))
             .ok_or_else(|| {
                 CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
             })?;
-        let styles = self
-            .scene_manager()
-            .scene(Uid::new(style_scope_id))
-            .map(scene_style_manager)
-            .unwrap_or_else(cuemol_molvis::default_style_manager);
         let gradient = parse_multi_gradient_entries(gradient_entries, &styles)?;
         let mut specific = summary.specific;
         specific.insert("colormode".to_string(), color_mode.to_string());
@@ -2536,6 +2565,11 @@ impl DesktopAppState {
         renderer_uid: Option<Uid>,
         include_hidden: bool,
     ) {
+        let styles = self
+            .scene_manager()
+            .scene(scene_uid)
+            .map(scene_style_manager)
+            .unwrap_or_else(cuemol_molvis::default_style_manager);
         for map_object in self.density_maps.values().filter(|object| {
             object.scene_uid == scene_uid
                 && map_uid.is_none_or(|uid| object.uid == uid)
@@ -2546,6 +2580,17 @@ impl DesktopAppState {
                     && (include_hidden || config.visible)
             }) {
                 let mut rendered = RenderSceneSnapshot::empty();
+                let config_attr = |name: &str| {
+                    config
+                        .attributes
+                        .get(name)
+                        .cloned()
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| {
+                            let style_list = config.attributes.get("style")?;
+                            styles.resolve_style_attr(DEFAULT_STYLE_SCOPE, style_list, name)
+                        })
+                };
                 let boundary_points = if config.bndry_molname.is_empty() {
                     None
                 } else {
@@ -2680,36 +2725,36 @@ impl DesktopAppState {
                             .iter()
                             .flat_map(|triangle| triangle.iter().copied())
                             .collect::<Vec<_>>();
-                        let cull_back_faces = config
-                            .attributes
-                            .get("cullface")
-                            .is_some_and(|value| qsc_bool(value))
-                            || config
-                                .attributes
-                                .get("egtype")
-                                .is_some_and(|value| value != "none");
+                        let edge_type = config_attr("egtype");
+                        let edge_width = config_attr("eglinew");
+                        let edge_color = config_attr("egcolor");
+                        let edge_style = surface_edge_style(
+                            edge_type.as_deref(),
+                            edge_width.as_deref(),
+                            edge_color.as_deref(),
+                            &styles,
+                        );
+                        let cull_back_faces =
+                            config_attr("cullface").as_deref().is_some_and(qsc_bool);
                         rendered = surface_mesh_snapshot_for_mode(
                             cuemol_render::RenderMesh { vertices, indices },
                             config.drawmode,
                             config.width,
                             None,
                             cull_back_faces,
+                            edge_style,
                         );
                     }
                 }
-                let alpha = config
-                    .attributes
-                    .get("alpha")
+                let alpha = config_attr("alpha")
                     .and_then(|value| value.trim().parse::<f64>().ok())
                     .unwrap_or(1.0)
                     .clamp(0.0, 1.0);
                 if alpha < 1.0 {
                     apply_renderer_alpha(&mut rendered, alpha);
                 }
-                let renderer_xform = config
-                    .attributes
-                    .get("xformMat")
-                    .and_then(|value| Matrix4::from_script_string(value).ok())
+                let renderer_xform = config_attr("xformMat")
+                    .and_then(|value| Matrix4::from_script_string(&value).ok())
                     .unwrap_or(Matrix4::IDENTITY);
                 let xform = renderer_xform.mul_mat(map_object.xform);
                 if xform != Matrix4::IDENTITY {
@@ -38540,14 +38585,23 @@ fn direct_surface_snapshot(
     let width = resolved("width")
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(1.2);
-    let cull_back_faces = resolved("cullface").is_some_and(|value| qsc_bool(&value))
-        || resolved("egtype").is_some_and(|value| value != "none");
+    let edge_type = resolved("egtype");
+    let edge_width = resolved("eglinew");
+    let edge_color = resolved("egcolor");
+    let edge_style = surface_edge_style(
+        edge_type.as_deref(),
+        edge_width.as_deref(),
+        edge_color.as_deref(),
+        styles,
+    );
+    let cull_back_faces = resolved("cullface").is_some_and(|value| qsc_bool(&value));
     surface_mesh_snapshot_for_mode(
         render_mesh,
         draw_mode,
         width,
         Some(object.uid().get()),
         cull_back_faces,
+        edge_style,
     )
 }
 
@@ -39130,20 +39184,88 @@ fn render_color_spec(color: [f32; 4]) -> cuemol_gfx::ColorSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceEdgeMode {
+    Edges,
+    Silhouette,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SurfaceEdgeStyle {
+    mode: SurfaceEdgeMode,
+    width: f64,
+    color: [f32; 4],
+}
+
+fn surface_edge_style(
+    edge_type: Option<&str>,
+    edge_width: Option<&str>,
+    edge_color: Option<&str>,
+    styles: &StyleManager,
+) -> Option<SurfaceEdgeStyle> {
+    let mode = match edge_type?.trim() {
+        "edges" | "1" => SurfaceEdgeMode::Edges,
+        "silhouette" | "2" => SurfaceEdgeMode::Silhouette,
+        _ => return None,
+    };
+    let width = edge_width
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.01)
+        .max(0.0);
+    let color = edge_color
+        .and_then(|value| resolve_qsc_color(value, styles))
+        .map(rgba8_render_color)
+        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+    Some(SurfaceEdgeStyle { mode, width, color })
+}
+
+fn surface_edge_outline_mesh(
+    mesh: &cuemol_render::RenderMesh,
+    style: SurfaceEdgeStyle,
+) -> cuemol_render::RenderMesh {
+    let silhouette = style.mode == SurfaceEdgeMode::Silhouette;
+    let vertices = mesh
+        .vertices
+        .iter()
+        .copied()
+        .map(|mut vertex| {
+            let length = vertex.normal.length3d();
+            if length > 1.0e-12 {
+                vertex.position = vertex.position + vertex.normal.scale(style.width / length);
+            }
+            vertex.color = style.color;
+            vertex.with_edge_outline(silhouette)
+        })
+        .collect();
+    let indices = mesh
+        .indices
+        .chunks_exact(3)
+        .flat_map(|triangle| [triangle[0], triangle[2], triangle[1]])
+        .collect();
+    cuemol_render::RenderMesh { vertices, indices }
+}
+
 fn surface_mesh_snapshot_for_mode(
     mut mesh: cuemol_render::RenderMesh,
     draw_mode: MapSurfaceDrawMode,
     width: f64,
     object_uid: Option<u64>,
     cull_back_faces: bool,
+    edge_style: Option<SurfaceEdgeStyle>,
 ) -> RenderSceneSnapshot {
     let width = width.clamp(0.1, 10.0) as f32;
     let fallback_radius = (0.02 * width).max(0.002);
     let mut snapshot = RenderSceneSnapshot::empty();
     match draw_mode {
         MapSurfaceDrawMode::Fill => {
+            if let Some(edge_style) = edge_style {
+                snapshot
+                    .meshes
+                    .push(surface_edge_outline_mesh(&mesh, edge_style));
+            }
             for vertex in &mut mesh.vertices {
-                *vertex = (*vertex).with_back_face_culling(cull_back_faces);
+                *vertex = (*vertex).with_back_face_culling(cull_back_faces || edge_style.is_some());
             }
             if !mesh.indices.is_empty() {
                 snapshot.meshes.push(mesh);
@@ -39610,7 +39732,10 @@ fn selection_center_and_length(
     Some((center, span + 20.0))
 }
 
-fn density_map_summary(object: &GuiDensityMapObject) -> GuiDensityMapSummary {
+fn density_map_summary(
+    object: &GuiDensityMapObject,
+    styles: &StyleManager,
+) -> GuiDensityMapSummary {
     let (center, radius) = object.map.fit_view_center_and_radius();
     GuiDensityMapSummary {
         uid: object.uid,
@@ -39636,7 +39761,7 @@ fn density_map_summary(object: &GuiDensityMapObject) -> GuiDensityMapSummary {
         renderers: object
             .renderers
             .iter()
-            .map(|renderer| density_renderer_summary(object.uid, renderer))
+            .map(|renderer| density_renderer_summary(object.uid, renderer, styles))
             .collect(),
     }
 }
@@ -39656,12 +39781,18 @@ fn parse_density_i32(name: &str, value: &str) -> Result<i32> {
 fn density_renderer_summary(
     map_uid: Uid,
     renderer: &GuiDensityRenderer,
+    styles: &StyleManager,
 ) -> GuiDensityRendererSummary {
     let attribute = |name: &str, fallback: &str| {
         renderer
             .attributes
             .get(name)
             .cloned()
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                let style_list = renderer.attributes.get("style")?;
+                styles.resolve_style_attr(DEFAULT_STYLE_SCOPE, style_list, name)
+            })
             .unwrap_or_else(|| fallback.to_string())
     };
     let mut specific = renderer.attributes.clone();
@@ -39818,7 +39949,11 @@ fn set_qsc_bool_attr(node: &mut LDom2Node, name: &str, value: bool, default: boo
     }
 }
 
-fn surface_summary(scene_uid: Uid, surface: &LoadedSurface) -> GuiLoadedSurfaceSummary {
+fn surface_summary(
+    scene_uid: Uid,
+    surface: &LoadedSurface,
+    styles: &StyleManager,
+) -> GuiLoadedSurfaceSummary {
     let node = surface.qsc_node.as_ref();
     let attr = |name: &str| {
         node.map(|node| node.str_attr(name).to_string())
@@ -39830,11 +39965,17 @@ fn surface_summary(scene_uid: Uid, surface: &LoadedSurface) -> GuiLoadedSurfaceS
         .flatten()
         .enumerate()
         .map(|(index, renderer)| {
-            surface_renderer_summary(scene_uid, surface.uid, index, Some(renderer))
+            surface_renderer_summary(scene_uid, surface.uid, index, Some(renderer), styles)
         })
         .collect::<Vec<_>>();
     let renderers = if renderers.is_empty() && node.is_none() {
-        vec![surface_renderer_summary(scene_uid, surface.uid, 0, None)]
+        vec![surface_renderer_summary(
+            scene_uid,
+            surface.uid,
+            0,
+            None,
+            styles,
+        )]
     } else {
         renderers
     };
@@ -39864,10 +40005,15 @@ fn surface_renderer_summary(
     surface_uid: Uid,
     renderer_index: usize,
     node: Option<&LDom2Node>,
+    styles: &StyleManager,
 ) -> GuiLoadedSurfaceRendererSummary {
+    let style_list = node
+        .map(|node| node.str_attr("style").to_string())
+        .unwrap_or_default();
     let attr = |name: &str, fallback: &str| {
         node.map(|node| node.str_attr(name).to_string())
             .filter(|value| !value.is_empty())
+            .or_else(|| styles.resolve_style_attr(DEFAULT_STYLE_SCOPE, &style_list, name))
             .unwrap_or_else(|| fallback.to_string())
     };
     let mut specific = node
@@ -47690,6 +47836,7 @@ end_header
         let qsc = format!(
             "<scene>\n\
              <object type=\"MolSurf\" name=\"native-surface\" src=\"datachunk:00000\" srctype=\"qdfsurf\">\n\
+             <renderer type=\"molsurf\" name=\"outlined\" style=\"EgLineThin\" egcolor=\"#abcdef\"/>\n\
              </object>\n\
              </scene>\n\
              ========== End of XML ==========\n\
@@ -47706,7 +47853,29 @@ end_header
         assert_eq!(meshes.len(), 1);
         assert_eq!(meshes[0].vertices.len(), 3);
         assert_eq!(meshes[0].indices, vec![0, 1, 2]);
-        assert_eq!(app.active_render_snapshot("").unwrap().mesh_count(), 1);
+        let summary = app.surface_summaries(app.active_scene().unwrap());
+        assert_eq!(summary[0].renderers[0].edge_type, "edges");
+        assert_eq!(summary[0].renderers[0].edge_width, 0.03);
+        let snapshot = app.active_render_snapshot("").unwrap();
+        assert_eq!(snapshot.mesh_count(), 2);
+        assert!(snapshot.meshes[0]
+            .vertices
+            .iter()
+            .all(cuemol_render::MeshVertex::is_edge_outline));
+        assert!(snapshot.meshes[0]
+            .vertices
+            .iter()
+            .all(|vertex| !vertex.is_silhouette_outline()));
+        assert_eq!(snapshot.meshes[0].indices, vec![0, 2, 1]);
+        assert!(snapshot.meshes[1]
+            .vertices
+            .iter()
+            .all(cuemol_render::MeshVertex::culls_back_faces));
+        assert!((snapshot.meshes[0].vertices[0].position.z - 0.03).abs() < 1.0e-12);
+        assert_eq!(
+            snapshot.meshes[0].vertices[0].color,
+            [171.0 / 255.0, 205.0 / 255.0, 239.0 / 255.0, 1.0]
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -48038,7 +48207,7 @@ end_header
              <object type=\"MolCoord\" name=\"clip-mol\" src=\"datachunk:00001\" srctype=\"qdfmol\"/>\n\
              <object type=\"DensityMap\" name=\"native-map\" src=\"datachunk:00000\" srctype=\"qdfmap\">\n\
              <renderer type=\"contour\" name=\"wire\" siglevel=\"0\" color=\"Red\" width=\"2\" bndry_molname=\"clip-mol\" bndry_sel=\"name CA\" bndry_rng=\"100\"/>\n\
-             <renderer type=\"isosurf\" name=\"solid\" siglevel=\"0\" color=\"#0000ff\" binning=\"2\" max_grids=\"77\" use_pbc=\"false\" bndry_molname=\"clip-mol\" bndry_sel=\"name CA\" bndry_rng=\"100\" colormode=\"multigrad\" color_mapname=\"native-map\" cullface=\"true\">\n\
+             <renderer type=\"isosurf\" name=\"solid\" siglevel=\"0\" color=\"#0000ff\" binning=\"2\" max_grids=\"77\" use_pbc=\"false\" bndry_molname=\"clip-mol\" bndry_sel=\"name CA\" bndry_rng=\"100\" colormode=\"multigrad\" color_mapname=\"native-map\" cullface=\"true\" style=\"EgLineThin\" egcolor=\"#123456\">\n\
              <multi_grad><gradnode par=\"-1\"><col value=\"#ff0000\"/></gradnode><gradnode par=\"1\"><col value=\"#00ff00\"/></gradnode></multi_grad>\n\
              </renderer>\n\
              <renderer type=\"isosurf\" name=\"lines\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"line\"/>\n\
@@ -48064,6 +48233,8 @@ end_header
         assert_eq!(maps[0].format, "qdfmap");
         assert_eq!(maps[0].counts, [2, 2, 2]);
         assert_eq!(maps[0].value_count, 8);
+        assert_eq!(maps[0].renderers[1].edge_type, "edges");
+        assert_eq!(maps[0].renderers[1].edge_width, 0.03);
         assert!(app.active_scene_skipped_objects().is_empty());
         let map_object = app.density_maps.values().next().unwrap();
         assert_eq!(map_object.renderers[1].binning, 2);
@@ -48088,11 +48259,24 @@ end_header
             snapshot.mesh_triangle_count() > 0,
             "saved isosurface renderer must draw"
         );
+        assert_eq!(snapshot.mesh_count(), 2);
         assert!(snapshot.meshes[0]
             .vertices
             .iter()
-            .all(|vertex| vertex.color[2] == 0.0));
+            .all(cuemol_render::MeshVertex::is_edge_outline));
         assert!(snapshot.meshes[0]
+            .vertices
+            .iter()
+            .all(|vertex| !vertex.is_silhouette_outline()));
+        assert_eq!(
+            snapshot.meshes[0].vertices[0].color,
+            [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0, 1.0]
+        );
+        assert!(snapshot.meshes[1]
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color[2] == 0.0));
+        assert!(snapshot.meshes[1]
             .vertices
             .iter()
             .all(cuemol_render::MeshVertex::culls_back_faces));
@@ -48810,6 +48994,49 @@ end_header
             .vertices
             .iter()
             .all(cuemol_render::MeshVertex::culls_back_faces));
+
+        app.set_renderer_property(object, renderer_uid, "egtype", "edges")
+            .unwrap();
+        app.set_renderer_property(object, renderer_uid, "eglinew", "0.05")
+            .unwrap();
+        app.set_renderer_property(object, renderer_uid, "egcolor", "#123456")
+            .unwrap();
+        let outlined = app.active_render_snapshot("").unwrap();
+        assert_eq!(outlined.mesh_count(), 2);
+        let outline = &outlined.meshes[0];
+        let surface = &outlined.meshes[1];
+        assert!(outline
+            .vertices
+            .iter()
+            .all(cuemol_render::MeshVertex::is_edge_outline));
+        assert!(outline
+            .vertices
+            .iter()
+            .all(|vertex| !vertex.is_silhouette_outline()));
+        assert!(surface
+            .vertices
+            .iter()
+            .all(cuemol_render::MeshVertex::culls_back_faces));
+        assert_eq!(
+            outline.indices[0..3],
+            [surface.indices[0], surface.indices[2], surface.indices[1]]
+        );
+        assert_eq!(
+            outline.vertices[0].color,
+            [18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0, 1.0]
+        );
+        assert!(
+            ((outline.vertices[0].position - surface.vertices[0].position).length3d() - 0.05).abs()
+                < 1.0e-8
+        );
+        app.set_renderer_property(object, renderer_uid, "egtype", "silhouette")
+            .unwrap();
+        assert!(app.active_render_snapshot("").unwrap().meshes[0]
+            .vertices
+            .iter()
+            .all(cuemol_render::MeshVertex::is_silhouette_outline));
+        app.set_renderer_property(object, renderer_uid, "egtype", "none")
+            .unwrap();
 
         let size = 80usize;
         app.set_surface_potential_map(DensityMap::from_grid_map(GridMap {

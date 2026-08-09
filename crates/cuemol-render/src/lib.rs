@@ -55,16 +55,38 @@ pub struct MeshVertex {
 }
 
 impl MeshVertex {
+    const CULL_BACK_FACES: f64 = 1.0;
+    const EDGE_OUTLINE: f64 = 2.0;
+    const SILHOUETTE_OUTLINE: f64 = 3.0;
+
     /// Mark this vertex as belonging to a mesh that discards back-facing
     /// fragments. The marker is stored in the otherwise-unused normal `w`
     /// component so existing mesh interchange remains unchanged.
     pub fn with_back_face_culling(mut self, enabled: bool) -> Self {
-        self.normal.w = f64::from(enabled);
+        self.normal.w = if enabled { Self::CULL_BACK_FACES } else { 0.0 };
         self
     }
 
     pub fn culls_back_faces(&self) -> bool {
         self.normal.w > 0.5
+    }
+
+    /// Mark a reversed, expanded mesh as an unlit edge-line outline.
+    pub fn with_edge_outline(mut self, silhouette: bool) -> Self {
+        self.normal.w = if silhouette {
+            Self::SILHOUETTE_OUTLINE
+        } else {
+            Self::EDGE_OUTLINE
+        };
+        self
+    }
+
+    pub fn is_edge_outline(&self) -> bool {
+        self.normal.w > 1.5
+    }
+
+    pub fn is_silhouette_outline(&self) -> bool {
+        self.normal.w > 2.5
     }
 }
 
@@ -398,7 +420,7 @@ impl RenderSceneSnapshot {
         for mesh in &mut self.meshes {
             for vertex in &mut mesh.vertices {
                 m.xform3d(&mut vertex.position);
-                let cull_back_faces = vertex.culls_back_faces();
+                let render_marker = vertex.normal.w;
                 // Rotation-only (w=0 drops the translation column).
                 let rotated = m.transform_point(Vector4::new4(
                     vertex.normal.x,
@@ -411,7 +433,7 @@ impl RenderSceneSnapshot {
                 if len > 1.0e-12 {
                     vertex.normal =
                         Vector4::new3(rotated.x / len, rotated.y / len, rotated.z / len);
-                    vertex.normal.w = f64::from(cull_back_faces);
+                    vertex.normal.w = render_marker;
                 }
             }
         }
@@ -2973,11 +2995,14 @@ mod tests {
             m.set_ai(i + 1, *value).unwrap();
         }
         let mut mesh = RenderMesh::new();
-        mesh.vertices.push(MeshVertex {
-            position: Vector4::new3(1.0, 0.0, 0.0),
-            normal: Vector4::new3(1.0, 0.0, 0.0),
-            color: [1.0, 1.0, 1.0, 1.0],
-        });
+        mesh.vertices.push(
+            MeshVertex {
+                position: Vector4::new3(1.0, 0.0, 0.0),
+                normal: Vector4::new3(1.0, 0.0, 0.0),
+                color: [1.0, 1.0, 1.0, 1.0],
+            }
+            .with_edge_outline(true),
+        );
         let mut snapshot = RenderSceneSnapshot {
             atoms: vec![RenderAtom {
                 center: Vector4::new3(1.0, 0.0, 0.0),
@@ -3023,6 +3048,7 @@ mod tests {
             n.y,
             n.z
         );
+        assert!(snapshot.meshes[0].vertices[0].is_silhouette_outline());
         // bounds were recomputed around the transformed geometry.
         let (lo, hi) = snapshot.bounds.expect("bounds recomputed");
         assert!(

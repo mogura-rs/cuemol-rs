@@ -643,6 +643,7 @@ struct Hit {
     position: Vector4,
     normal: Vector4,
     color: [f64; 4],
+    unlit: bool,
 }
 
 fn trace_sample(
@@ -690,6 +691,9 @@ fn shade_hit(
     camera: &Camera,
     params: &UmbreonRenderParams,
 ) -> [f64; 3] {
+    if hit.unlit {
+        return [hit.color[0], hit.color[1], hit.color[2]];
+    }
     let camera_position = camera.center()
         + transform_direction(
             camera
@@ -859,6 +863,7 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
                 position: ray.origin + ray.direction * distance,
                 normal,
                 color: color_from_spec(atom.color.as_ref()),
+                unlit: false,
             });
         }
     }
@@ -874,6 +879,7 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
                 position: ray.origin + ray.direction * distance,
                 normal,
                 color: color_from_spec(bond.color.as_ref()),
+                unlit: false,
             });
         }
     }
@@ -910,6 +916,7 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
                         normal
                     },
                     color,
+                    unlit: v0.is_edge_outline(),
                 });
             }
         }
@@ -1197,6 +1204,48 @@ mod tests {
         assert!(ray_triangle(ray, front, true).is_some());
         assert!(ray_triangle(ray, back, true).is_none());
         assert!(ray_triangle(ray, back, false).is_some());
+    }
+
+    #[test]
+    fn raytracer_treats_edge_outline_mesh_as_unlit() {
+        let color = [0.75, 0.25, 0.1, 1.0];
+        let mut snapshot = RenderSceneSnapshot::empty();
+        snapshot.meshes.push(RenderMesh {
+            vertices: [(-1.0, -1.0), (1.0, -1.0), (0.0, 1.0)]
+                .into_iter()
+                .map(|(x, y)| {
+                    MeshVertex {
+                        position: Vector4::new3(x, y, 0.0),
+                        normal: Vector4::new3(1.0, 0.0, 0.0),
+                        color,
+                    }
+                    .with_edge_outline(false)
+                })
+                .collect(),
+            indices: vec![0, 1, 2],
+        });
+        let ray = Ray {
+            origin: Vector4::new3(0.0, 0.0, 1.0),
+            direction: Vector4::new3(0.0, 0.0, -1.0),
+        };
+        let hits = scene_hits(&snapshot, ray);
+
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].unlit);
+        assert_eq!(
+            shade_hit(
+                &snapshot,
+                hits[0],
+                ray,
+                &test_camera(),
+                &UmbreonRenderParams::default(),
+            ),
+            [
+                f64::from(color[0]),
+                f64::from(color[1]),
+                f64::from(color[2]),
+            ]
+        );
     }
 
     #[test]

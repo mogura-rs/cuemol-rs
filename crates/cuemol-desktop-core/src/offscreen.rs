@@ -9,7 +9,7 @@ use wgpu::util::DeviceExt;
 use cuemol_core::{CueMolError, Matrix4, Result, Uid};
 use cuemol_gfx::{jitter_offset, jitter_sample_count};
 use cuemol_qsys::{Camera, View, ViewCap};
-use cuemol_render::{tessellate_snapshot, RenderMesh, RenderSceneSnapshot};
+use cuemol_render::{tessellate_snapshot, MeshVertex, RenderMesh, RenderSceneSnapshot};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -17,6 +17,24 @@ struct GpuVertex {
     position: [f32; 4],
     normal: [f32; 4],
     color: [f32; 4],
+}
+
+fn gpu_vertex(vertex: &MeshVertex) -> GpuVertex {
+    GpuVertex {
+        position: [
+            vertex.position.x as f32,
+            vertex.position.y as f32,
+            vertex.position.z as f32,
+            1.0,
+        ],
+        normal: [
+            vertex.normal.x as f32,
+            vertex.normal.y as f32,
+            vertex.normal.z as f32,
+            vertex.normal.w as f32,
+        ],
+        color: vertex.color,
+    }
 }
 
 #[repr(C)]
@@ -60,6 +78,9 @@ fn vs(@location(0) position: vec4<f32>, @location(1) normal: vec4<f32>, @locatio
 fn fs(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
     if (in.cull_back_faces > 0.5 && !front_facing) {
         discard;
+    }
+    if (in.cull_back_faces > 1.5) {
+        return in.color;
     }
     let light = normalize(vec3<f32>(0.0, 0.0, 1.0));
     let n = normalize(in.normal);
@@ -700,21 +721,7 @@ fn draw_meshes(
     for mesh in meshes {
         let base = vertices.len() as u32;
         for v in &mesh.vertices {
-            vertices.push(GpuVertex {
-                position: [
-                    v.position.x as f32,
-                    v.position.y as f32,
-                    v.position.z as f32,
-                    1.0,
-                ],
-                normal: [
-                    v.normal.x as f32,
-                    v.normal.y as f32,
-                    v.normal.z as f32,
-                    f32::from(v.culls_back_faces()),
-                ],
-                color: v.color,
-            });
+            vertices.push(gpu_vertex(v));
         }
         indices.extend(mesh.indices.iter().map(|i| i + base));
     }
@@ -1249,6 +1256,14 @@ mod tests {
             render_meshes_offscreen(&[culled], IDENTITY, 64, 64, [0.0, 0.0, 0.0, 1.0]).unwrap();
         let centre = pixel(&image, 64, 32, 32);
         assert!(centre[0] < 30 && centre[1] < 30 && centre[2] < 30);
+    }
+
+    #[test]
+    fn offscreen_gpu_vertex_preserves_edge_outline_marker() {
+        let edge = vert(0.0, 0.0, [1.0, 0.0, 0.0, 1.0]).with_edge_outline(false);
+        let silhouette = vert(0.0, 0.0, [1.0, 0.0, 0.0, 1.0]).with_edge_outline(true);
+        assert_eq!(gpu_vertex(&edge).normal[3], 2.0);
+        assert_eq!(gpu_vertex(&silhouette).normal[3], 3.0);
     }
 
     #[test]
