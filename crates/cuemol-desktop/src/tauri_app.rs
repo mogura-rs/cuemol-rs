@@ -360,6 +360,7 @@ struct ViewportLineDto {
     y2: f32,
     width: f32,
     color: String,
+    end_color: Option<String>,
     stipple: bool,
 }
 
@@ -900,7 +901,11 @@ impl AppModel {
                                 .unwrap_or(0.01),
                             edge_color: state.qsc_attr("egcolor").unwrap_or("#000000").to_string(),
                             line_width: state
-                                .qsc_attr("width")
+                                .qsc_attr(if state.renderer_type() == "spline" {
+                                    "line_width"
+                                } else {
+                                    "width"
+                                })
                                 .and_then(|value| value.parse().ok())
                                 .unwrap_or(1.2),
                             detail: state
@@ -2180,7 +2185,7 @@ impl AppModel {
         if cuemol_gfx::parse_color(properties.edge_color.trim()).is_err() {
             return Err(format!("invalid edge color: {}", properties.edge_color));
         }
-        if matches!(renderer_type.as_str(), "simple" | "trace")
+        if matches!(renderer_type.as_str(), "simple" | "trace" | "spline")
             && (!properties.line_width.is_finite()
                 || properties.line_width <= 0.0
                 || properties.line_width > 10.0)
@@ -2206,6 +2211,55 @@ impl AppModel {
         }
         let mut specific_updates = Vec::<(String, String, bool)>::new();
         match renderer_type.as_str() {
+            "spline" => {
+                if let Some(raw) = properties.specific.get("axialdetail") {
+                    let value = raw
+                        .trim()
+                        .parse::<i32>()
+                        .map_err(|_| "spline axial detail must be an integer".to_string())?;
+                    if !(1..=100).contains(&value) {
+                        return Err("spline axial detail must be between 1 and 100".to_string());
+                    }
+                    specific_updates.push((
+                        "axialdetail".to_string(),
+                        value.to_string(),
+                        value == 6,
+                    ));
+                }
+                if let Some(raw) = properties.specific.get("smooth") {
+                    let value = raw
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| "spline smoothing must be a number".to_string())?;
+                    if !value.is_finite() {
+                        return Err("spline smoothing must be finite".to_string());
+                    }
+                    specific_updates.push((
+                        "smooth".to_string(),
+                        value.to_string(),
+                        value.abs() < f64::EPSILON,
+                    ));
+                }
+                if let Some(raw) = properties.specific.get("smoothcolor") {
+                    let value = match raw.trim() {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err("spline smooth color must be true or false".to_string()),
+                    };
+                    specific_updates.push(("smoothcolor".to_string(), value.to_string(), value));
+                }
+                if let Some(raw) = properties.specific.get("pivotatom") {
+                    let value = raw.trim();
+                    if value.len() > 16 {
+                        return Err("spline pivot atom must be at most 16 characters".to_string());
+                    }
+                    specific_updates.push((
+                        "pivotatom".to_string(),
+                        value.to_string(),
+                        value.is_empty(),
+                    ));
+                }
+            }
             "atomintr" => {
                 if let Some(raw) = properties.specific.get("mode") {
                     let value = raw.trim();
@@ -2876,6 +2930,11 @@ impl AppModel {
                 properties.line_width.to_string(),
                 (properties.line_width - 1.2).abs() < f64::EPSILON,
             )?,
+            "spline" => set_property(
+                "line_width",
+                properties.line_width.to_string(),
+                (properties.line_width - 1.2).abs() < f64::EPSILON,
+            )?,
             "ballstick" | "anisou" => {
                 set_property(
                     "detail",
@@ -3378,10 +3437,15 @@ impl AppModel {
                         .and_then(cuemol_gfx::ColorSpec::rgba8)
                         .map(viewport_css_color)
                         .unwrap_or_else(|| "#ffff00".to_string()),
+                    end_color: line
+                        .end_color
+                        .as_ref()
+                        .and_then(cuemol_gfx::ColorSpec::rgba8)
+                        .map(viewport_css_color),
                     stipple: line.screen_stipple,
                 })
             })
-            .take(1_000)
+            .take(200_000)
             .collect();
         let mut labels =
             self.desktop
@@ -3572,16 +3636,16 @@ impl AppModel {
     }
 
     fn pick_atom(&mut self, x: f64, y: f64, width: u32, height: u32) -> Result<(), String> {
-        let snapshot = self
+        let atoms = self
             .desktop
-            .active_render_snapshot(&self.selection)
+            .active_pick_atoms(&self.selection)
             .map_err(|error| error.to_string())?;
         let mvp = camera_mvp(
             &self.camera,
             f64::from(width.max(1)) / f64::from(height.max(1)),
         );
         let Some((object_uid, atom_index)) = pick_atom_screen(
-            &snapshot.atoms,
+            &atoms,
             mvp,
             (x, y),
             (f64::from(width), f64::from(height)),
@@ -3611,16 +3675,16 @@ impl AppModel {
         width: u32,
         height: u32,
     ) -> Result<(), String> {
-        let snapshot = self
+        let atoms = self
             .desktop
-            .active_render_snapshot(&self.selection)
+            .active_pick_atoms(&self.selection)
             .map_err(|error| error.to_string())?;
         let mvp = camera_mvp(
             &self.camera,
             f64::from(width.max(1)) / f64::from(height.max(1)),
         );
         let hits = atoms_in_screen_rect(
-            &snapshot.atoms,
+            &atoms,
             mvp,
             (x1, y1),
             (x2, y2),
@@ -8411,6 +8475,93 @@ mod tests {
     }
 
     #[test]
+    fn spline_properties_are_undoable_and_persisted() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let renderer_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("spline", "spline 1");
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetRendererProperties(RendererPropertiesInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                name: "smooth backbone".to_string(),
+                selection: "*".to_string(),
+                visible: true,
+                locked: false,
+                material: String::new(),
+                alpha: 1.0,
+                edge_type: "none".to_string(),
+                edge_width: 0.01,
+                edge_color: "#000000".to_string(),
+                line_width: 2.6,
+                detail: 3,
+                bond_width: 0.2,
+                sphere_radius: 0.3,
+                show_ring: false,
+                ring_thickness: 0.2,
+                ring_color: "#ffffbf".to_string(),
+                specific: BTreeMap::from([
+                    ("axialdetail".to_string(), "12".to_string()),
+                    ("smooth".to_string(), "0.25".to_string()),
+                    ("smoothcolor".to_string(), "false".to_string()),
+                    ("pivotatom".to_string(), "CA".to_string()),
+                ]),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let dto = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == renderer_uid.get())
+            .unwrap();
+        assert_eq!(dto.line_width, 2.6);
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        for (key, value) in [
+            ("line_width", "2.6"),
+            ("axialdetail", "12"),
+            ("smooth", "0.25"),
+            ("smoothcolor", "false"),
+            ("pivotatom", "CA"),
+        ] {
+            assert_eq!(renderer.qsc_attr(key), Some(value));
+        }
+
+        model.undo(0).unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        for key in [
+            "line_width",
+            "axialdetail",
+            "smooth",
+            "smoothcolor",
+            "pivotatom",
+        ] {
+            assert_eq!(renderer.qsc_attr(key), None, "{key} restored");
+        }
+    }
+
+    #[test]
     fn ballstick_properties_are_undoable_and_persisted() {
         let (mut model, object_uid, _) = model_with_renderer();
         let scene_uid = model.desktop.active_scene().unwrap();
@@ -8665,14 +8816,14 @@ mod tests {
         model.rebuild_mesh(true).unwrap();
 
         let viewport = model.viewport_metadata(800, 600);
-        assert_eq!(viewport.lines.len(), 2);
-        assert!(viewport.lines.iter().all(|line| {
-            line.width == 1.0
-                && line.stipple
-                && line.x1.is_finite()
-                && line.y1.is_finite()
-                && line.x2.is_finite()
-                && line.y2.is_finite()
+        let interaction_lines = viewport
+            .lines
+            .iter()
+            .filter(|line| line.width == 1.0 && line.stipple)
+            .collect::<Vec<_>>();
+        assert_eq!(interaction_lines.len(), 2);
+        assert!(interaction_lines.iter().all(|line| {
+            line.x1.is_finite() && line.y1.is_finite() && line.x2.is_finite() && line.y2.is_finite()
         }));
     }
 

@@ -4996,6 +4996,337 @@ pub fn molecule_render_snapshot(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ScreenLineMeta {
+    width: f32,
+    object_uid: Option<u64>,
+    atom_indices: Option<(usize, usize)>,
+    selected: bool,
+}
+
+fn append_screen_line(
+    bonds: &mut Vec<RenderBond>,
+    from: Vector4,
+    to: Vector4,
+    start_color: ColorSpec,
+    end_color: ColorSpec,
+    meta: ScreenLineMeta,
+) {
+    bonds.push(
+        RenderBond::new(from, to, (meta.width * 0.01).max(0.0025), Some(start_color))
+            .with_end_color(Some(end_color))
+            .with_picking(meta.object_uid, meta.atom_indices, meta.selected)
+            .with_screen_style(meta.width, false),
+    );
+}
+
+fn same_resolved_color(lhs: &ColorSpec, rhs: &ColorSpec) -> bool {
+    lhs.rgba8() == rhs.rgba8()
+}
+
+/// Build the unlit pixel-width geometry of C++ `SimpleRenderer`.
+///
+/// Bonded atoms are represented only by lines; an unbonded atom gets the
+/// reference three-axis 0.25-A aster. Different atom colors meet sharply at the
+/// midpoint. GUI picking uses the molecule-coordinate path, not render geometry.
+pub fn simple_line_snapshot(
+    molecule: &MolCoord,
+    options: &MoleculeRenderOptions,
+    width: f32,
+) -> RenderSceneSnapshot {
+    let selected = options
+        .selected_indices
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let draw = options.draw_indices.as_ref().map(|indices| {
+        indices
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+    });
+    let drawn = |index: usize| draw.as_ref().is_none_or(|set| set.contains(&index));
+    let colors = resolve_atom_colors(molecule, options);
+    let mut bonds = Vec::new();
+    let mut bonded = std::collections::BTreeSet::new();
+    let width = width.max(0.0);
+
+    if options.draw_bonds && width > 0.0 {
+        for bond in molecule
+            .bonds()
+            .iter()
+            .filter(|bond| drawn(bond.atom1) && drawn(bond.atom2))
+        {
+            let (Some(atom1), Some(atom2)) = (
+                molecule.atoms().get(bond.atom1),
+                molecule.atoms().get(bond.atom2),
+            ) else {
+                continue;
+            };
+            bonded.insert(bond.atom1);
+            bonded.insert(bond.atom2);
+            let pos1 = atom1.position;
+            let pos2 = atom2.position;
+            let color1 = colors[bond.atom1].clone();
+            let color2 = colors[bond.atom2].clone();
+            let selected_bond = selected.contains(&bond.atom1) || selected.contains(&bond.atom2);
+            let mut offsets = vec![0.0];
+            if options.valence_bond_mode == ValenceBondMode::Simple {
+                offsets = match bond.order {
+                    BondOrder::Double => options.simple_bond_offsets.to_vec(),
+                    BondOrder::Triple => vec![
+                        0.0,
+                        options.simple_bond_offsets[0],
+                        -options.simple_bond_offsets[0],
+                    ],
+                    _ => offsets,
+                };
+            }
+            let direction = double_bond_direction(molecule, bond);
+            for offset in offsets {
+                let delta = direction.scale(offset);
+                let from = pos1 + delta;
+                let to = pos2 + delta;
+                if same_resolved_color(&color1, &color2) {
+                    append_screen_line(
+                        &mut bonds,
+                        from,
+                        to,
+                        color1.clone(),
+                        color1.clone(),
+                        ScreenLineMeta {
+                            width,
+                            object_uid: options.object_uid,
+                            atom_indices: Some((bond.atom1, bond.atom2)),
+                            selected: selected_bond,
+                        },
+                    );
+                } else {
+                    let midpoint = (from + to).scale(0.5);
+                    append_screen_line(
+                        &mut bonds,
+                        from,
+                        midpoint,
+                        color1.clone(),
+                        color1.clone(),
+                        ScreenLineMeta {
+                            width,
+                            object_uid: options.object_uid,
+                            atom_indices: Some((bond.atom1, bond.atom2)),
+                            selected: selected_bond,
+                        },
+                    );
+                    append_screen_line(
+                        &mut bonds,
+                        to,
+                        midpoint,
+                        color2.clone(),
+                        color2.clone(),
+                        ScreenLineMeta {
+                            width,
+                            object_uid: options.object_uid,
+                            atom_indices: Some((bond.atom1, bond.atom2)),
+                            selected: selected_bond,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    if options.draw_atoms && width > 0.0 {
+        const ASTER_RADIUS: f64 = 0.25;
+        for (index, atom) in molecule.atoms().iter().enumerate() {
+            if !drawn(index) || bonded.contains(&index) {
+                continue;
+            }
+            let center = atom.position;
+            let color = colors[index].clone();
+            for axis in [
+                Vector4::new3(ASTER_RADIUS, 0.0, 0.0),
+                Vector4::new3(0.0, ASTER_RADIUS, 0.0),
+                Vector4::new3(0.0, 0.0, ASTER_RADIUS),
+            ] {
+                append_screen_line(
+                    &mut bonds,
+                    center - axis,
+                    center + axis,
+                    color.clone(),
+                    color.clone(),
+                    ScreenLineMeta {
+                        width,
+                        object_uid: options.object_uid,
+                        atom_indices: Some((index, index)),
+                        selected: selected.contains(&index),
+                    },
+                );
+            }
+        }
+    }
+
+    let bounds = match &draw {
+        None => molecule.bounding_box_for(None),
+        Some(set) => bounds_of_atoms(molecule, set),
+    };
+    RenderSceneSnapshot {
+        atoms: Vec::new(),
+        bonds,
+        meshes: Vec::new(),
+        bounds,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainchainLineMode {
+    Trace,
+    Spline,
+}
+
+fn interpolate_color(lhs: &ColorSpec, rhs: &ColorSpec, t: f64) -> ColorSpec {
+    let lhs = lhs.rgba8().unwrap_or(cuemol_gfx::Rgba8 {
+        r: 255,
+        g: 255,
+        b: 255,
+        a: 255,
+    });
+    let rhs = rhs.rgba8().unwrap_or(lhs);
+    let lerp = |a: u8, b: u8| {
+        (f64::from(a) + (f64::from(b) - f64::from(a)) * t.clamp(0.0, 1.0)).round() as u8
+    };
+    rgba_to_spec([
+        f32::from(lerp(lhs.r, rhs.r)) / 255.0,
+        f32::from(lerp(lhs.g, rhs.g)) / 255.0,
+        f32::from(lerp(lhs.b, rhs.b)) / 255.0,
+        f32::from(lerp(lhs.a, rhs.a)) / 255.0,
+    ])
+}
+
+/// Build the unlit pixel-width C++ `TraceRenderer` or `SplineRenderer` line path.
+pub fn mainchain_line_snapshot(
+    molecule: &MolCoord,
+    options: &MoleculeRenderOptions,
+    mode: MainchainLineMode,
+    width: f32,
+    axial_detail: u32,
+    smoothing: f64,
+    smooth_color: bool,
+) -> RenderSceneSnapshot {
+    let selected = options
+        .selected_indices
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let draw = options.draw_indices.as_ref().map(|indices| {
+        indices
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+    });
+    let chains = collect_mainchain_pivots(molecule, draw.as_ref(), options.pivot_atom.as_deref());
+    let colors = resolve_atom_colors(molecule, options);
+    let mut bonds = Vec::new();
+    let width = width.max(0.0);
+
+    for pivots in &chains {
+        if pivots.len() == 1 {
+            if mode == MainchainLineMode::Trace && width > 0.0 {
+                let point = &pivots[0];
+                let color = colors[point.atom_index].clone();
+                for axis in [
+                    Vector4::new3(0.25, 0.0, 0.0),
+                    Vector4::new3(0.0, 0.25, 0.0),
+                    Vector4::new3(0.0, 0.0, 0.25),
+                ] {
+                    append_screen_line(
+                        &mut bonds,
+                        point.pos - axis,
+                        point.pos + axis,
+                        color.clone(),
+                        color.clone(),
+                        ScreenLineMeta {
+                            width,
+                            object_uid: options.object_uid,
+                            atom_indices: Some((point.atom_index, point.atom_index)),
+                            selected: selected.contains(&point.atom_index),
+                        },
+                    );
+                }
+            }
+            continue;
+        }
+        if mode == MainchainLineMode::Spline && pivots.len() == 2 {
+            continue;
+        }
+        if width <= 0.0 {
+            continue;
+        }
+
+        let subdiv = if mode == MainchainLineMode::Trace {
+            1
+        } else {
+            axial_detail.max(1) as usize
+        };
+        let mut positions = pivots.iter().map(|point| point.pos).collect::<Vec<_>>();
+        if mode == MainchainLineMode::Spline && positions.len() >= 3 && smoothing > 0.0 {
+            let original = positions.clone();
+            let weight = smoothing.clamp(0.0, 1.0);
+            for index in 1..original.len() - 1 {
+                let midpoint = (original[index - 1] + original[index + 1]).scale(0.5);
+                positions[index] = original[index].scale(1.0 - weight) + midpoint.scale(weight);
+            }
+        }
+        let samples = if mode == MainchainLineMode::Trace {
+            linear_samples(&positions, subdiv)
+        } else {
+            cubic_spline_samples(&positions, subdiv)
+        };
+        let mut sample_colors = Vec::with_capacity(samples.len());
+        for segment in 0..pivots.len() - 1 {
+            let lhs = &colors[pivots[segment].atom_index];
+            let rhs = &colors[pivots[segment + 1].atom_index];
+            for step in 0..subdiv {
+                sample_colors.push(interpolate_color(lhs, rhs, step as f64 / subdiv as f64));
+            }
+        }
+        sample_colors.push(colors[pivots.last().expect("non-empty pivots").atom_index].clone());
+        for index in 0..samples.len().saturating_sub(1) {
+            let pivot_segment = (index / subdiv).min(pivots.len() - 2);
+            let start_index = pivots[pivot_segment].atom_index;
+            let end_index = pivots[pivot_segment + 1].atom_index;
+            let start_color = sample_colors[index].clone();
+            let end_color = if smooth_color {
+                sample_colors[index + 1].clone()
+            } else {
+                start_color.clone()
+            };
+            append_screen_line(
+                &mut bonds,
+                samples[index],
+                samples[index + 1],
+                start_color,
+                end_color,
+                ScreenLineMeta {
+                    width,
+                    object_uid: options.object_uid,
+                    atom_indices: Some((start_index, end_index)),
+                    selected: selected.contains(&start_index) || selected.contains(&end_index),
+                },
+            );
+        }
+    }
+
+    let bounds = match &draw {
+        None => molecule.bounding_box_for(None),
+        Some(set) => bounds_of_atoms(molecule, set),
+    };
+    RenderSceneSnapshot {
+        atoms: Vec::new(),
+        bonds,
+        meshes: Vec::new(),
+        bounds,
+    }
+}
+
 fn append_valence_bond_geometry(
     molecule: &MolCoord,
     bond: &Bond,
@@ -9541,6 +9872,123 @@ return cuemol.makeColor("#0000ff");
         let mut atom = sample_atom("CA", "C", x, y, z);
         atom.res_id = res_id;
         atom
+    }
+
+    #[test]
+    fn simple_line_snapshot_matches_valence_midpoint_and_aster_geometry() {
+        let mut molecule = MolCoord::with_atoms(vec![
+            sample_atom("C1", "C", 0.0, 0.0, 0.0),
+            sample_atom("N1", "N", 1.0, 0.0, 0.0),
+            sample_atom("O1", "O", 3.0, 0.0, 0.0),
+        ]);
+        molecule.add_bond(0, 1, BondOrder::Double);
+        let snapshot = simple_line_snapshot(
+            &molecule,
+            &MoleculeRenderOptions {
+                object_uid: Some(9),
+                valence_bond_mode: ValenceBondMode::Simple,
+                ..MoleculeRenderOptions::default()
+            },
+            2.4,
+        );
+
+        assert_eq!(snapshot.atom_count(), 0);
+        assert_eq!(snapshot.mesh_count(), 0);
+        assert_eq!(snapshot.bond_count(), 7);
+        assert!(snapshot
+            .bonds
+            .iter()
+            .all(|bond| bond.screen_width == Some(2.4)));
+        assert_eq!(
+            snapshot
+                .bonds
+                .iter()
+                .filter(|bond| bond.atom_indices == Some((2, 2)))
+                .count(),
+            3,
+            "the unbonded atom must be a three-axis aster"
+        );
+        for bond in snapshot
+            .bonds
+            .iter()
+            .filter(|bond| bond.atom_indices == Some((0, 1)))
+        {
+            assert_eq!(bond.color, bond.end_color);
+            assert!(
+                ((bond.to - bond.from).length3d() - 0.5).abs() < 1.0e-9,
+                "different atom colors must split each line into equal halves"
+            );
+        }
+    }
+
+    #[test]
+    fn mainchain_line_snapshot_distinguishes_trace_spline_and_isolated_residue() {
+        let molecule = MolCoord::with_atoms(vec![
+            ca_atom(1, 0.0, 0.0, 0.0),
+            ca_atom(2, 3.0, 2.0, 0.0),
+            ca_atom(3, 6.0, 0.0, 0.0),
+        ]);
+        let options = MoleculeRenderOptions::default();
+        let trace = mainchain_line_snapshot(
+            &molecule,
+            &options,
+            MainchainLineMode::Trace,
+            1.2,
+            1,
+            0.0,
+            true,
+        );
+        assert_eq!(trace.bond_count(), 2);
+        assert_eq!(trace.mesh_count(), 0);
+        assert!(trace
+            .bonds
+            .iter()
+            .all(|bond| bond.screen_width == Some(1.2)));
+
+        let spline = mainchain_line_snapshot(
+            &molecule,
+            &options,
+            MainchainLineMode::Spline,
+            1.8,
+            4,
+            0.0,
+            false,
+        );
+        assert_eq!(spline.bond_count(), 8);
+        assert_eq!(spline.mesh_count(), 0);
+        assert!(spline.bonds.iter().all(|bond| bond.color == bond.end_color));
+
+        let isolated = MolCoord::with_atoms(vec![ca_atom(1, 0.0, 0.0, 0.0)]);
+        let isolated_trace = mainchain_line_snapshot(
+            &isolated,
+            &options,
+            MainchainLineMode::Trace,
+            1.2,
+            1,
+            0.0,
+            true,
+        );
+        assert_eq!(isolated_trace.bond_count(), 3);
+        let isolated_spline = mainchain_line_snapshot(
+            &isolated,
+            &options,
+            MainchainLineMode::Spline,
+            1.2,
+            6,
+            0.0,
+            true,
+        );
+        assert_eq!(isolated_spline.bond_count(), 0);
+        let two_residue_spline = mainchain_line_snapshot(
+            &MolCoord::with_atoms(vec![ca_atom(1, 0.0, 0.0, 0.0), ca_atom(2, 3.0, 0.0, 0.0)]),
+            &options,
+            MainchainLineMode::Spline,
+            1.2,
+            6,
+            0.0,
+            true,
+        );
+        assert_eq!(two_residue_spline.bond_count(), 0);
     }
 
     #[test]

@@ -23,10 +23,10 @@ use cuemol_molstr::{write_pdb_string_with_selection, AtomIntrLine};
 use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
     apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot_with_style,
-    molecule_render_snapshot, na_renderer_snapshot, ribbon_mesh_snapshot,
-    ring_meshes_snapshot_with, scene_style_manager, AnIsoURenderOptions, DisorderRenderOptions,
-    MoleculeRenderOptions, NARenderOptions, NARenderer, ValenceBondMode, VdwRadii,
-    DEFAULT_STYLE_SCOPE,
+    mainchain_line_snapshot, molecule_render_snapshot, na_renderer_snapshot, ribbon_mesh_snapshot,
+    ring_meshes_snapshot_with, scene_style_manager, simple_line_snapshot, AnIsoURenderOptions,
+    DisorderRenderOptions, MainchainLineMode, MoleculeRenderOptions, NARenderOptions, NARenderer,
+    ValenceBondMode, VdwRadii, DEFAULT_STYLE_SCOPE,
 };
 #[cfg(test)]
 use cuemol_molvis::{default_style_manager, disorder_lines_snapshot};
@@ -1253,6 +1253,7 @@ impl DesktopAppState {
                                 to: rhs.position,
                                 radius: (0.04 * width) as f32,
                                 color: Some(render_color_spec(lhs.color)),
+                                end_color: None,
                                 object_uid: Some(surface.uid.get()),
                                 atom_indices: None,
                                 selected: false,
@@ -2442,6 +2443,7 @@ impl DesktopAppState {
                         to,
                         radius: 0.12,
                         color: Some(cell_color.clone()),
+                        end_color: None,
                         object_uid: None,
                         atom_indices: None,
                         selected: false,
@@ -2494,6 +2496,7 @@ impl DesktopAppState {
                     to: segment[1],
                     radius: 0.04,
                     color: Some(contour_color.clone()),
+                    end_color: None,
                     object_uid: None,
                     atom_indices: None,
                     selected: false,
@@ -2580,6 +2583,7 @@ impl DesktopAppState {
                                 to: segment[1],
                                 radius: (0.04 * config.width.max(0.1)) as f32,
                                 color: Some(config.color.clone()),
+                                end_color: None,
                                 object_uid: None,
                                 atom_indices: None,
                                 selected: false,
@@ -2695,6 +2699,7 @@ impl DesktopAppState {
                                         to: rhs.position,
                                         radius: (0.04 * config.width.max(0.1)) as f32,
                                         color: color_spec(lhs.color),
+                                        end_color: None,
                                         object_uid: None,
                                         atom_indices: None,
                                         selected: false,
@@ -4931,11 +4936,11 @@ impl DesktopAppState {
         height: f32,
         max: usize,
     ) -> Vec<GuiAtomLabel> {
-        let Ok(snapshot) = self.active_render_snapshot(selection_text) else {
+        let Ok(atoms) = self.active_pick_atoms(selection_text) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for atom in snapshot.atoms.iter().filter(|atom| atom.selected) {
+        for atom in atoms.iter().filter(|atom| atom.selected) {
             if out.len() >= max {
                 break;
             }
@@ -5184,6 +5189,61 @@ impl DesktopAppState {
             .active_scene
             .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
         self.render_snapshot(scene_uid, selection_text)
+    }
+
+    /// Atom centers used by GUI picking and selection overlays.
+    ///
+    /// Line renderers intentionally emit no sphere primitives, so interaction
+    /// must read molecule coordinates independently of the visible geometry.
+    pub fn active_pick_atoms(
+        &self,
+        selection_text: &str,
+    ) -> Result<Vec<cuemol_render::RenderAtom>> {
+        let scene_uid = self
+            .active_scene
+            .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let selector = parse_gui_selector(selection_text)?;
+        let mut atoms = Vec::new();
+        for object in scene.objects().iter().filter(|object| {
+            object.is_visible()
+                && (object.renderers().is_empty()
+                    || object
+                        .renderers()
+                        .iter()
+                        .any(|renderer| renderer.is_visible()))
+        }) {
+            let selected = selector
+                .as_ref()
+                .map(|selector| {
+                    object
+                        .mol()
+                        .select_indices(selector)
+                        .into_iter()
+                        .collect::<BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            atoms.extend(
+                object
+                    .mol()
+                    .atoms()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, atom)| {
+                        let mut position = atom.position;
+                        object.xform_matrix().xform3d(&mut position);
+                        cuemol_render::RenderAtom::new(position, 0.0, None).with_picking(
+                            Some(object.uid().get()),
+                            Some(index),
+                            selected.contains(&index),
+                        )
+                    }),
+            );
+        }
+        Ok(atoms)
     }
 
     /// The active scene's saved view camera — the `__current` camera restored from
@@ -6146,6 +6206,7 @@ impl DesktopAppState {
                             to,
                             radius: 0.05,
                             color: Some(color.clone()),
+                            end_color: None,
                             object_uid: None,
                             atom_indices: None,
                             selected: false,
@@ -37817,6 +37878,55 @@ fn append_object_renderer_snapshot(
         );
     }
     let mut snapshot = match (renderer_type, renderer) {
+        ("simple", renderer) => {
+            let width = renderer
+                .and_then(|renderer| renderer.resolved_attr("width", styles, style_scope_id))
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .unwrap_or(1.2);
+            simple_line_snapshot(object.mol(), &options, width)
+        }
+        ("trace", renderer) => {
+            let width = renderer
+                .and_then(|renderer| renderer.resolved_attr("width", styles, style_scope_id))
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .unwrap_or(1.2);
+            mainchain_line_snapshot(
+                object.mol(),
+                &options,
+                MainchainLineMode::Trace,
+                width,
+                1,
+                0.0,
+                true,
+            )
+        }
+        ("spline", renderer) => {
+            let resolved = |name: &str| {
+                renderer.and_then(|renderer| renderer.resolved_attr(name, styles, style_scope_id))
+            };
+            let width = resolved("line_width")
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .unwrap_or(1.2);
+            let axial_detail = resolved("axialdetail")
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .unwrap_or(6);
+            let smoothing = resolved("smooth")
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let smooth_color = resolved("smoothcolor")
+                .as_deref()
+                .map(qsc_bool)
+                .unwrap_or(true);
+            mainchain_line_snapshot(
+                object.mol(),
+                &options,
+                MainchainLineMode::Spline,
+                width,
+                axial_detail,
+                smoothing,
+                smooth_color,
+            )
+        }
         // An atom-interaction renderer draws measurement lines between its atom
         // pairs, NOT the whole molecule — route it to the measurement geometry so
         // it stops dumping every atom (the gap this closes).
@@ -38062,6 +38172,7 @@ fn apply_renderer_alpha(snapshot: &mut RenderSceneSnapshot, alpha: f64) {
     }
     for bond in &mut snapshot.bonds {
         apply_color(&mut bond.color);
+        apply_color(&mut bond.end_color);
     }
     for mesh in &mut snapshot.meshes {
         for vertex in &mut mesh.vertices {
@@ -38446,6 +38557,7 @@ fn append_lw_arrays(
                     to: f32_position(*to),
                     radius: (line_width * 0.02).max(0.01),
                     color: Some(lw_color_spec(*color)),
+                    end_color: None,
                     object_uid: None,
                     atom_indices: None,
                     selected: false,
@@ -38966,14 +39078,11 @@ fn qsc_bool(value: &str) -> bool {
     )
 }
 
-/// Renderer types drawn as a smoothed main-chain trace instead of all-atom geometry.
+/// Renderer types drawn as a swept main-chain mesh instead of all-atom geometry.
 ///
 /// Kept in sync with the matching arm in [`renderer_render_options`].
 fn is_mainchain_trace_renderer(renderer_type: &str) -> bool {
-    matches!(
-        renderer_type,
-        "trace" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl"
-    )
+    matches!(renderer_type, "ribbon" | "cartoon" | "tube" | "nucl")
 }
 
 fn renderer_render_options(
@@ -39027,19 +39136,6 @@ fn renderer_render_options(
         apply_renderer_styles(&mut options, renderer, styles, style_scope_id);
         if matches!(renderer_type, "tube" | "nucl") {
             apply_tube_renderer_styles(&mut options, renderer, styles, style_scope_id);
-        }
-        if matches!(renderer_type, "simple" | "trace") {
-            if let Some(width) = renderer
-                .resolved_attr("width", styles, style_scope_id)
-                .and_then(|value| value.trim().parse::<f32>().ok())
-            {
-                let default_radius = if renderer_type == "simple" {
-                    0.08
-                } else {
-                    0.12
-                };
-                options.bond_radius = default_radius * width.max(f32::EPSILON) / 1.2;
-            }
         }
         if renderer_type == "simple" {
             if renderer
@@ -47191,7 +47287,13 @@ end_header
             .unwrap()
             .renderer(renderer)
             .is_some());
-        assert_eq!(app.active_render_snapshot("").unwrap().atom_count(), 327);
+        let rendered = app.active_render_snapshot("").unwrap();
+        assert_eq!(rendered.atom_count(), 0);
+        assert!(rendered
+            .bonds
+            .iter()
+            .all(|bond| bond.screen_width == Some(1.2)));
+        assert_eq!(app.active_pick_atoms("").unwrap().len(), 327);
         assert!(
             app.renderer_summaries(object)
                 .iter()
@@ -47200,11 +47302,13 @@ end_header
                 .visible
         );
         app.set_renderer_visible(object, renderer, false).unwrap();
-        assert_eq!(app.active_render_snapshot("").unwrap().atom_count(), 0);
+        assert_eq!(app.active_render_snapshot("").unwrap().bond_count(), 0);
+        assert!(app.active_pick_atoms("").unwrap().is_empty());
         app.set_renderer_visible(object, renderer, true).unwrap();
-        assert_eq!(app.active_render_snapshot("").unwrap().atom_count(), 327);
+        assert!(app.active_render_snapshot("").unwrap().bond_count() > 0);
+        assert_eq!(app.active_pick_atoms("").unwrap().len(), 327);
         assert!(app.destroy_renderer_in_object(object, renderer).unwrap());
-        assert_eq!(app.active_render_snapshot("").unwrap().atom_count(), 327);
+        assert!(app.active_render_snapshot("").unwrap().bond_count() > 0);
 
         let atom = app.atom_summary(object, 0).unwrap();
         assert_eq!(atom.object_uid, object);
@@ -47760,8 +47864,13 @@ end_header
             .all(|vertex| vertex.color[2] == 0.0));
         assert!(snapshot.atom_count() > 0, "point-mode isosurface must draw");
         assert!(snapshot.bond_count() > 1, "line-mode isosurface must draw");
+        let contour = snapshot
+            .bonds
+            .iter()
+            .find(|bond| bond.screen_width.is_none())
+            .expect("saved contour bond");
         assert_eq!(
-            snapshot.bonds[0].color.as_ref().unwrap().rgba8().unwrap(),
+            contour.color.as_ref().unwrap().rgba8().unwrap(),
             cuemol_gfx::Rgba8 {
                 r: 255,
                 g: 0,
@@ -47771,7 +47880,7 @@ end_header
         );
         #[cfg(feature = "scripting")]
         {
-            let baseline = snapshot.bonds[0].from;
+            let baseline = contour.from;
             app.run_script_js(
                 "var map = cuemol.getObject('native-map'); \
              var generated = map.getRendererByName('solid').generateSurfObj(); \
@@ -47804,12 +47913,24 @@ end_header
             let moved = app.active_render_snapshot("").unwrap();
             assert_eq!(moved.mesh_triangle_count(), 0);
             assert!(moved.bond_count() > 0);
-            assert!((moved.bonds[0].from.x - baseline.x - 100.0).abs() < 1.0e-8);
-            assert!((moved.bonds[0].from.y - baseline.y - 50.0).abs() < 1.0e-8);
+            let moved_contour = moved
+                .bonds
+                .iter()
+                .find(|bond| bond.screen_width.is_none())
+                .expect("moved contour bond");
+            assert!((moved_contour.from.x - baseline.x - 100.0).abs() < 1.0e-8);
+            assert!((moved_contour.from.y - baseline.y - 50.0).abs() < 1.0e-8);
             app.run_script_js("cuemol.getObject('native-map').visible = false;")
                 .unwrap();
             let hidden = app.active_render_snapshot("").unwrap();
-            assert_eq!(hidden.bond_count(), 0);
+            assert_eq!(
+                hidden
+                    .bonds
+                    .iter()
+                    .filter(|bond| bond.screen_width.is_none())
+                    .count(),
+                0
+            );
             assert_eq!(hidden.mesh_triangle_count(), 0);
         }
         let _ = std::fs::remove_file(&path);
@@ -48192,23 +48313,27 @@ end_header
         };
 
         let snapshot = app.render_snapshot(scene_uid, "").unwrap();
-        // Scene = a trace ribbon (mesh) + `*selection` (skipped) + two atomintr
-        // renderers (one <line> each). After the fix: zero atom spheres, exactly
-        // two measurement-line bonds, plus the trace ribbon mesh.
+        // Scene = a trace line + `*selection` (skipped) + two atomintr renderers
+        // (one <line> each). There are no atom spheres or tube meshes.
         assert_eq!(
             snapshot.atom_count(),
             0,
             "atomintr/`*selection` must not dump atom spheres"
         );
         assert_eq!(
-            snapshot.bond_count(),
+            snapshot
+                .bonds
+                .iter()
+                .filter(|bond| bond.atom_indices.is_none())
+                .count(),
             2,
-            "one measurement line per atomintr renderer"
+            "one unidentified measurement line per atomintr renderer"
         );
-        assert!(
-            snapshot.mesh_count() >= 1,
-            "the trace renderer still contributes a ribbon mesh"
-        );
+        assert!(snapshot
+            .bonds
+            .iter()
+            .any(|bond| bond.atom_indices.is_some()));
+        assert_eq!(snapshot.mesh_count(), 0);
 
         // Endpoint oracle: `measure2` is <line aid1="43" aid2="88"/>, so one
         // measurement bond must connect the resolved positions of atoms 43 and 88.
@@ -48307,7 +48432,11 @@ end_header
         }
         let styled = app.render_snapshot(scene_uid, "").unwrap();
         assert_eq!(
-            styled.bond_count(),
+            styled
+                .bonds
+                .iter()
+                .filter(|bond| bond.atom_indices.is_none())
+                .count(),
             1,
             "the other interaction remains simple"
         );
@@ -48689,8 +48818,8 @@ end_header
 
     #[test]
     fn renderer_sel_restricts_the_ribbon_trace_to_its_residues() {
-        // The mainchain/ribbon path also honours a renderer's `sel`: a sel'd trace
-        // splines only its residues' backbone, not the whole chain.
+        // The mainchain path also honours a renderer's `sel`: a sel'd trace draws
+        // only its residues' backbone, not the whole chain.
         let Some(root) = reference_test_data_root() else {
             return;
         };
@@ -48705,17 +48834,8 @@ end_header
             .unwrap()
             .result_renderer;
 
-        let full: usize = app
-            .active_render_snapshot("")
-            .unwrap()
-            .meshes
-            .iter()
-            .map(|mesh| mesh.vertices.len())
-            .sum();
-        assert!(
-            full > 0,
-            "the full backbone trace should produce a ribbon mesh"
-        );
+        let full = app.active_render_snapshot("").unwrap().bond_count();
+        assert!(full > 0, "the full backbone trace should produce lines");
 
         app.scene_manager_mut()
             .object_mut(object)
@@ -48723,13 +48843,7 @@ end_header
             .renderer_mut(renderer)
             .unwrap()
             .set_qsc_attr("sel", "resid 1:10");
-        let restricted: usize = app
-            .active_render_snapshot("")
-            .unwrap()
-            .meshes
-            .iter()
-            .map(|mesh| mesh.vertices.len())
-            .sum();
+        let restricted = app.active_render_snapshot("").unwrap().bond_count();
         assert!(
             restricted > 0 && restricted < full,
             "a sel'd trace should cover fewer residues: full={full} restricted={restricted}"
@@ -48738,7 +48852,7 @@ end_header
 
     #[test]
     fn putty_modulates_ribbon_width_by_bfactor() {
-        // A trace renderer with putty_mode="scale1" modulates the backbone tube
+        // A tube renderer with putty_mode="scale1" modulates the backbone tube
         // width per residue by the B-factor (TubeRenderer putty). 1CRN has varying
         // B-factors, so the puttied ribbon mesh differs from the unmodulated one
         // (same topology, moved cross-section vertices).
@@ -48752,7 +48866,7 @@ end_header
             .unwrap()
             .result_object;
         let renderer = app
-            .new_renderer_in_active_scene(object, "trace", "tr")
+            .new_renderer_in_active_scene(object, "tube", "tube")
             .unwrap()
             .result_renderer;
 
@@ -48765,7 +48879,7 @@ end_header
                 .collect()
         };
         let base = vertices(&app);
-        assert!(!base.is_empty(), "the trace should produce a ribbon mesh");
+        assert!(!base.is_empty(), "the tube should produce a ribbon mesh");
 
         app.scene_manager_mut()
             .object_mut(object)
@@ -48904,11 +49018,12 @@ end_header
             "the C1' atoms must have parsed (else the test verifies nothing)"
         );
 
-        // A plain trace draws the ribbon backbone only (no base-stick bonds).
+        // A plain trace draws one pixel-width backbone line and no base sticks.
         app.new_renderer_in_active_scene(object, "trace", "tr")
             .unwrap();
         let trace = app.active_render_snapshot("").unwrap();
-        assert_eq!(trace.bond_count(), 0, "a plain trace has no base sticks");
+        assert_eq!(trace.bond_count(), 1);
+        assert!(trace.bonds.iter().all(|bond| bond.screen_width.is_some()));
 
         // Replace it with a nucl renderer: ribbon mesh + base-stick bonds.
         app.new_scene("work2", false);
@@ -48994,15 +49109,17 @@ end_header
         );
 
         let has_floral = |snapshot: &RenderSceneSnapshot| {
-            snapshot
-                .meshes
-                .iter()
-                .flat_map(|mesh| mesh.vertices.iter())
-                .any(|vertex| {
-                    (vertex.color[0] - 1.0).abs() < 0.005
-                        && (vertex.color[1] - 250.0 / 255.0).abs() < 0.005
-                        && (vertex.color[2] - 240.0 / 255.0).abs() < 0.005
+            snapshot.bonds.iter().any(|bond| {
+                [&bond.color, &bond.end_color].into_iter().any(|color| {
+                    color.as_ref().and_then(cuemol_gfx::ColorSpec::rgba8)
+                        == Some(cuemol_gfx::Rgba8 {
+                            r: 255,
+                            g: 250,
+                            b: 240,
+                            a: 255,
+                        })
                 })
+            })
         };
         assert!(
             has_floral(&app.render_snapshot(scene_uid, "").unwrap()),
@@ -49209,16 +49326,17 @@ end_header
         );
 
         let snapshot = app.render_snapshot(scene_uid, "").unwrap();
-        let colors: Vec<[f32; 4]> = snapshot
-            .meshes
+        let colors = snapshot
+            .bonds
             .iter()
-            .flat_map(|mesh| mesh.vertices.iter().map(|vertex| vertex.color))
-            .collect();
-        assert!(!colors.is_empty(), "the trace ribbon should produce mesh");
+            .flat_map(|bond| [&bond.color, &bond.end_color])
+            .filter_map(|color| color.as_ref().and_then(cuemol_gfx::ColorSpec::rgba8))
+            .collect::<Vec<_>>();
+        assert!(!colors.is_empty(), "the trace should produce colored lines");
         // The gradient spans start_hue=240 (blue: B high, R low) to end_hue=0 (red:
         // R high, B low) — neither is producible by the default section colouring.
-        let has_blue = colors.iter().any(|c| c[2] > 0.8 && c[0] < 0.2);
-        let has_red = colors.iter().any(|c| c[0] > 0.8 && c[2] < 0.2);
+        let has_blue = colors.iter().any(|color| color.b > 204 && color.r < 51);
+        let has_red = colors.iter().any(|color| color.r > 204 && color.b < 51);
         assert!(
             has_blue && has_red,
             "rainbow ribbon must span blue->red (has_blue={has_blue} has_red={has_red})"
@@ -49275,6 +49393,11 @@ end_header
                 snapshot.atoms.len(),
                 1,
                 "cpk lone atom -> exactly one sphere"
+            );
+            assert_eq!(
+                app.active_pick_atoms("").unwrap()[0].center,
+                snapshot.atoms[0].center,
+                "picking must follow the object transform"
             );
             snapshot.atoms[0].center
         };
@@ -49362,18 +49485,18 @@ end_header
             "the object BfacColoring must have parsed"
         );
 
-        let colors: Vec<[f32; 4]> = app
-            .render_snapshot(scene_uid, "")
-            .unwrap()
-            .meshes
+        let snapshot = app.render_snapshot(scene_uid, "").unwrap();
+        let colors = snapshot
+            .bonds
             .iter()
-            .flat_map(|mesh| mesh.vertices.iter().map(|vertex| vertex.color))
-            .collect();
-        assert!(!colors.is_empty(), "the trace ribbon should produce mesh");
+            .flat_map(|bond| [&bond.color, &bond.end_color])
+            .filter_map(|color| color.as_ref().and_then(cuemol_gfx::ColorSpec::rgba8))
+            .collect::<Vec<_>>();
+        assert!(!colors.is_empty(), "the trace should produce colored lines");
         // Low-B end -> blue (B>0.8,R<0.2), high-B end -> red (R>0.8,B<0.2); the
         // default element/section colouring produces neither.
-        let has_blue = colors.iter().any(|c| c[2] > 0.8 && c[0] < 0.2);
-        let has_red = colors.iter().any(|c| c[0] > 0.8 && c[2] < 0.2);
+        let has_blue = colors.iter().any(|color| color.b > 204 && color.r < 51);
+        let has_red = colors.iter().any(|color| color.r > 204 && color.b < 51);
         assert!(
             has_blue && has_red,
             "B-factor ramp must span blue->red (has_blue={has_blue} has_red={has_red})"
@@ -49544,10 +49667,14 @@ end_header
         assert_eq!(app.active_object_summaries()[0].uid, object_uid);
 
         let snapshot = app.active_render_snapshot("name CA").unwrap();
-        assert_eq!(snapshot.atom_count(), 327);
+        assert_eq!(snapshot.atom_count(), 0);
         assert!(snapshot.bond_count() > 0);
         assert_eq!(
-            snapshot.atoms.iter().filter(|atom| atom.selected).count(),
+            app.active_pick_atoms("name CA")
+                .unwrap()
+                .iter()
+                .filter(|atom| atom.selected)
+                .count(),
             46
         );
         assert!(snapshot.bounds.is_some());
@@ -50273,7 +50400,7 @@ attribute \"dep\" string \"positions\"
         assert!(std::fs::read_to_string(&pdb_path).unwrap().contains("ATOM"));
 
         let exported_atoms = app.export_active_scene_pov(&pov_path, "name CA").unwrap();
-        assert_eq!(exported_atoms, 327);
+        assert_eq!(exported_atoms, 0);
         let pov = std::fs::read_to_string(&pov_path).unwrap();
         assert!(pov.contains("camera {"));
         assert!(pov.contains("mesh2 {"));
@@ -50323,8 +50450,7 @@ attribute \"dep\" string \"positions\"
         let deleted = app.delete_atoms_in_object(object_uid, "chain Z").unwrap();
         assert_eq!(deleted, 46);
 
-        let snapshot = app.active_render_snapshot("").unwrap();
-        assert_eq!(snapshot.atom_count(), 281);
+        assert_eq!(app.active_pick_atoms("").unwrap().len(), 281);
     }
 
     #[test]

@@ -1429,6 +1429,7 @@ function rendererPropertiesEditor(object, renderer) {
   const densityMap = Array.isArray(object.counts);
   const surfaceObject = object.className === "MolSurfObj";
   const simpleLike = ["simple", "trace"].includes(renderer.rendererType);
+  const splineLike = renderer.rendererType === "spline";
   const atomIntrLike = renderer.rendererType === "atomintr";
   const anisouLike = renderer.rendererType === "anisou";
   const ballStickLike = ["ballstick", "anisou"].includes(renderer.rendererType);
@@ -1445,6 +1446,8 @@ function rendererPropertiesEditor(object, renderer) {
     dialogTitle.textContent = "Simple Rend Properties";
   } else if (renderer.rendererType === "trace") {
     dialogTitle.textContent = "Trace renderer properties";
+  } else if (splineLike) {
+    dialogTitle.textContent = "Spline renderer properties";
   } else if (atomIntrLike) {
     dialogTitle.textContent = "Interaction renderer properties";
   } else if (anisouLike) {
@@ -1474,6 +1477,8 @@ function rendererPropertiesEditor(object, renderer) {
   }
   const tabNames = simpleLike
     ? [renderer.rendererType === "trace" ? "Trace" : "Simple"]
+    : splineLike
+      ? ["Common", "Spline"]
     : atomIntrLike
       ? ["Common", "Interaction"]
       : anisouLike
@@ -1539,6 +1544,16 @@ function rendererPropertiesEditor(object, renderer) {
     specificControls.push(input);
     return input;
   };
+  const addSpecificText = (host, key, label, fallback) => {
+    const input = document.createElement("input");
+    input.value = renderer.specific?.[key] ?? fallback;
+    input.spellcheck = false;
+    propertyField(host, label, input);
+    specificInputs.set(key, input);
+    specificDefaults.set(key, fallback);
+    specificControls.push(input);
+    return input;
+  };
   const addSpecificColor = (host, key, label, fallback) => {
     const row = document.createElement("div");
     row.className = "edge-color-editor";
@@ -1562,11 +1577,15 @@ function rendererPropertiesEditor(object, renderer) {
     return { input, picker };
   };
   let lineWidth = null;
-  if (simpleLike) {
+  if (simpleLike || splineLike) {
     const line = document.createElement("fieldset");
     line.className = "property-common-group renderer-specific-group";
     const legend = document.createElement("legend");
-    legend.textContent = renderer.rendererType === "trace" ? "Trace" : "Simple";
+    legend.textContent = splineLike
+      ? "Spline"
+      : renderer.rendererType === "trace"
+        ? "Trace"
+        : "Simple";
     line.append(legend);
     lineWidth = document.createElement("input");
     lineWidth.type = "number";
@@ -1575,8 +1594,14 @@ function rendererPropertiesEditor(object, renderer) {
     lineWidth.step = "0.2";
     lineWidth.value = renderer.lineWidth;
     propertyField(line, "Line width:", lineWidth);
-    page.append(line);
+    (splineLike ? panes[1] : page).append(line);
     specificControls.push(lineWidth);
+    if (splineLike) {
+      addSpecificNumber(line, "axialdetail", "Axial detail:", 1, 100, 1, "6");
+      addSpecificNumber(line, "smooth", "Smoothing:", -1000, 1000, 0.05, "0");
+      addSpecificCheckbox(line, "smoothcolor", "Smooth colors", true);
+      addSpecificText(line, "pivotatom", "Pivot atom:", "");
+    }
   }
   const basic = document.createElement("fieldset");
   basic.className = "property-common-group";
@@ -6205,22 +6230,79 @@ function viewportDimensions() {
 function applyViewport(result, sequence) {
   if (sequence !== requestSequence) return;
   renderedViewportSize = `${result.width}x${result.height}`;
-  viewport.classList.toggle("has-image", Boolean(result.image));
+  viewport.classList.toggle(
+    "has-image",
+    Boolean(result.image || result.lines?.length || result.labels?.length),
+  );
+  viewportImage.hidden = !result.image;
   if (result.image) viewportImage.src = result.image;
   viewportLines.replaceChildren();
   viewportLines.setAttribute("viewBox", `0 0 ${result.width} ${result.height}`);
-  for (const line of result.lines || []) {
+  const lineDefs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+  viewportLines.append(lineDefs);
+  const solidLineGroups = new Map();
+  for (const [index, line] of (result.lines || []).entries()) {
+    const x1 = Number(line.x1) || 0;
+    const y1 = Number(line.y1) || 0;
+    const x2 = Number(line.x2) || 0;
+    const y2 = Number(line.y2) || 0;
+    const startColor = line.color || "#ffff00";
+    const width = Math.max(0.1, Number(line.width) || 1);
+    if (!line.endColor || line.endColor === startColor) {
+      const key = `${startColor}|${width}|${Boolean(line.stipple)}`;
+      const group = solidLineGroups.get(key) || {
+        color: startColor,
+        width,
+        stipple: Boolean(line.stipple),
+        commands: [],
+      };
+      group.commands.push(`M ${x1} ${y1} L ${x2} ${y2}`);
+      solidLineGroups.set(key, group);
+      continue;
+    }
+
     const element = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    element.setAttribute("x1", String(Number(line.x1) || 0));
-    element.setAttribute("y1", String(Number(line.y1) || 0));
-    element.setAttribute("x2", String(Number(line.x2) || 0));
-    element.setAttribute("y2", String(Number(line.y2) || 0));
-    element.setAttribute("stroke", line.color || "#ffff00");
-    element.setAttribute("stroke-width", String(Math.max(0.1, Number(line.width) || 1)));
+    element.setAttribute("x1", String(x1));
+    element.setAttribute("y1", String(y1));
+    element.setAttribute("x2", String(x2));
+    element.setAttribute("y2", String(y2));
+    if (line.endColor && line.endColor !== startColor) {
+      const gradientId = `viewport-line-gradient-${index}`;
+      const gradient = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "linearGradient",
+      );
+      gradient.id = gradientId;
+      gradient.setAttribute("gradientUnits", "userSpaceOnUse");
+      gradient.setAttribute("x1", String(x1));
+      gradient.setAttribute("y1", String(y1));
+      gradient.setAttribute("x2", String(x2));
+      gradient.setAttribute("y2", String(y2));
+      for (const [offset, color] of [["0", startColor], ["1", line.endColor]]) {
+        const stop = document.createElementNS("http://www.w3.org/2000/svg", "stop");
+        stop.setAttribute("offset", offset);
+        stop.setAttribute("stop-color", color);
+        gradient.append(stop);
+      }
+      lineDefs.append(gradient);
+      element.setAttribute("stroke", `url(#${gradientId})`);
+    }
+    element.setAttribute("stroke-width", String(width));
     element.setAttribute("stroke-linecap", "butt");
     element.setAttribute("vector-effect", "non-scaling-stroke");
     if (line.stipple) element.setAttribute("stroke-dasharray", "8 8");
     viewportLines.append(element);
+  }
+  for (const group of solidLineGroups.values()) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", group.commands.join(" "));
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", group.color);
+    path.setAttribute("stroke-width", String(group.width));
+    path.setAttribute("stroke-linecap", "butt");
+    path.setAttribute("vector-effect", "non-scaling-stroke");
+    if (group.stipple) path.setAttribute("stroke-dasharray", "8 8");
+    viewportLines.append(path);
   }
   viewportLabels.replaceChildren();
   for (const label of result.labels || []) {

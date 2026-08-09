@@ -831,7 +831,7 @@ impl GuiApplication {
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
                 self.viewport_rect = Some(rect);
-                self.draw_atom_intr_lines(ui, camera, rect);
+                self.draw_screen_lines(ui, camera, rect);
                 self.draw_center_mark(ui, rect);
                 self.draw_atom_labels(ui, camera, rect);
                 ui.allocate_ui(rect.size(), |ui| {
@@ -1875,7 +1875,13 @@ impl GuiApplication {
     fn selection_centroid(&self) -> Option<Vec3> {
         let mut sum = Vec3::ZERO;
         let mut count = 0u32;
-        for atom in self.snapshot.atoms.iter().filter(|atom| atom.selected) {
+        for atom in self
+            .state
+            .active_pick_atoms(&self.selection_text)
+            .unwrap_or_default()
+            .iter()
+            .filter(|atom| atom.selected)
+        {
             sum += vec3_from_vector(atom.center);
             count += 1;
         }
@@ -3692,13 +3698,15 @@ impl GuiApplication {
             return;
         }
         const MAX_LABELS: usize = 80;
-        let selected: Vec<&RenderAtom> = self
-            .snapshot
-            .atoms
+        let pick_atoms = self
+            .state
+            .active_pick_atoms(&self.selection_text)
+            .unwrap_or_default();
+        let selected = pick_atoms
             .iter()
             .filter(|atom| atom.selected)
             .take(MAX_LABELS)
-            .collect();
+            .collect::<Vec<_>>();
         if selected.is_empty() {
             return;
         }
@@ -3738,7 +3746,7 @@ impl GuiApplication {
         }
     }
 
-    fn draw_atom_intr_lines(&self, ui: &egui::Ui, camera: &CameraController, rect: egui::Rect) {
+    fn draw_screen_lines(&self, ui: &egui::Ui, camera: &CameraController, rect: egui::Rect) {
         let painter = ui.painter();
         for bond in self
             .snapshot
@@ -3763,24 +3771,52 @@ impl GuiApplication {
                     b: 0,
                     a: 255,
                 });
-            let stroke = egui::Stroke::new(
-                bond.screen_width.unwrap_or(1.0).max(0.1),
-                egui::Color32::from_rgba_unmultiplied(rgba.r, rgba.g, rgba.b, rgba.a),
-            );
-            if !bond.screen_stipple {
-                painter.line_segment([from, to], stroke);
-                continue;
-            }
+            let end_rgba = bond
+                .end_color
+                .as_ref()
+                .and_then(cuemol_gfx::ColorSpec::rgba8)
+                .unwrap_or(rgba);
             let delta = to - from;
             let length = delta.length();
             if length <= f32::EPSILON {
                 continue;
             }
             let direction = delta / length;
+            let width = bond.screen_width.unwrap_or(1.0).max(0.1);
+            let gradient = rgba != end_rgba;
+            let paint_span = |start: f32, end: f32| {
+                let steps = if gradient {
+                    ((end - start) / 4.0).ceil().max(1.0) as usize
+                } else {
+                    1
+                };
+                for step in 0..steps {
+                    let span_start = start + (end - start) * step as f32 / steps as f32;
+                    let span_end = start + (end - start) * (step + 1) as f32 / steps as f32;
+                    let t = ((span_start + span_end) * 0.5 / length).clamp(0.0, 1.0);
+                    let lerp = |start: u8, end: u8| {
+                        (f32::from(start) + (f32::from(end) - f32::from(start)) * t).round() as u8
+                    };
+                    let color = egui::Color32::from_rgba_unmultiplied(
+                        lerp(rgba.r, end_rgba.r),
+                        lerp(rgba.g, end_rgba.g),
+                        lerp(rgba.b, end_rgba.b),
+                        lerp(rgba.a, end_rgba.a),
+                    );
+                    painter.line_segment(
+                        [from + direction * span_start, from + direction * span_end],
+                        egui::Stroke::new(width, color),
+                    );
+                }
+            };
+            if !bond.screen_stipple {
+                paint_span(0.0, length);
+                continue;
+            }
             let mut start = 0.0_f32;
             while start < length {
                 let end = (start + 8.0).min(length);
-                painter.line_segment([from + direction * start, from + direction * end], stroke);
+                paint_span(start, end);
                 start += 16.0;
             }
         }
@@ -4879,7 +4915,13 @@ impl GuiApplication {
     fn pick_hit(&self, camera: &CameraController, position: egui::Pos2) -> Option<PickHit> {
         let viewport = self.viewport_rect?;
         let mut best: Option<(f32, PickHit)> = None;
-        for atom in &self.snapshot.atoms {
+        let atoms = self
+            .state
+            .active_pick_atoms(&self.selection_text)
+            .ok()
+            .filter(|atoms| !atoms.is_empty())
+            .unwrap_or_else(|| self.snapshot.atoms.clone());
+        for atom in &atoms {
             let object_uid = atom.object_uid?;
             let atom_index = atom.atom_index?;
             let center = vec3_from_vector(atom.center);
@@ -6503,7 +6545,7 @@ mod tests {
         if let Some(pdb) = reference_pdb_path() {
             app.open_path = pdb.to_string_lossy().to_string();
             app.open_current_path(&mut camera);
-            assert!(app.snapshot.atom_count() > 0);
+            assert!(app.snapshot.bond_count() > 0);
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     app.workspace_section(ui, &mut camera);
@@ -6526,8 +6568,9 @@ mod tests {
                 egui::vec2(800.0, 600.0),
             ));
             let first = app
-                .snapshot
-                .atoms
+                .state
+                .active_pick_atoms(&app.selection_text)
+                .expect("loaded molecule pick atoms")
                 .iter()
                 .find_map(|atom| Some((atom.object_uid?, atom.atom_index?)))
                 .expect("loaded molecule has a pickable atom");
@@ -6567,9 +6610,10 @@ mod tests {
 
         let distinct_colors = |app: &GuiApplication| -> usize {
             app.snapshot
-                .atoms
+                .bonds
                 .iter()
-                .filter_map(|atom| atom.color.as_ref().and_then(|color| color.rgba8()))
+                .flat_map(|bond| [&bond.color, &bond.end_color])
+                .filter_map(|color| color.as_ref().and_then(|color| color.rgba8()))
                 .map(|color| format!("{color:?}"))
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
@@ -6653,18 +6697,16 @@ mod tests {
             .first()
             .map(|object| object.uid)
             .expect("1CRN loads as one object");
-        // Ensure a renderer exists to target (a plain PDB may render implicitly).
+        for renderer in app.state.renderer_summaries(object_uid) {
+            app.state
+                .set_renderer_visible(object_uid, renderer.uid, false)
+                .expect("hide existing renderer");
+        }
         let renderer_uid = app
             .state
-            .renderer_summaries(object_uid)
-            .first()
-            .map(|renderer| renderer.uid)
-            .unwrap_or_else(|| {
-                app.state
-                    .new_renderer_in_active_scene(object_uid, "ballstick", "test")
-                    .expect("create renderer")
-                    .result_renderer
-            });
+            .new_renderer_in_active_scene(object_uid, "ballstick", "test")
+            .expect("create renderer")
+            .result_renderer;
 
         app.state
             .set_renderer_property(object_uid, renderer_uid, "bondw", "0.5")

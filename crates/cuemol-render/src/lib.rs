@@ -30,6 +30,8 @@ pub struct RenderBond {
     pub to: Vector4,
     pub radius: f32,
     pub color: Option<ColorSpec>,
+    /// Optional color at `to`; screen-space lines interpolate from `color`.
+    pub end_color: Option<ColorSpec>,
     pub object_uid: Option<u64>,
     pub atom_indices: Option<(usize, usize)>,
     pub selected: bool,
@@ -186,6 +188,7 @@ fn apply_color_transform(snapshot: &mut RenderSceneSnapshot, transform: impl Fn(
     }
     for bond in &mut snapshot.bonds {
         proof_spec(&mut bond.color);
+        proof_spec(&mut bond.end_color);
     }
     for mesh in &mut snapshot.meshes {
         for vertex in &mut mesh.vertices {
@@ -286,6 +289,7 @@ impl RenderBond {
             to,
             radius,
             color,
+            end_color: None,
             object_uid: None,
             atom_indices: None,
             selected: false,
@@ -309,6 +313,11 @@ impl RenderBond {
     pub fn with_screen_style(mut self, width: f32, stipple: bool) -> Self {
         self.screen_width = Some(width.max(0.0));
         self.screen_stipple = stipple;
+        self
+    }
+
+    pub fn with_end_color(mut self, color: Option<ColorSpec>) -> Self {
+        self.end_color = color;
         self
     }
 }
