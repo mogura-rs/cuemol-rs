@@ -143,6 +143,7 @@ const workspaceRendererStyleCache = new Map();
 let workspaceCameraClipboardAvailable = false;
 let workspaceObjectClipboardAvailable = false;
 let workspaceRendererClipboardAvailable = false;
+let workspaceStyleClipboardName = null;
 let selectedDensityMapUid = null;
 let selectedDensityRendererUid = null;
 let selectedSurfaceUid = null;
@@ -4720,6 +4721,70 @@ function workspaceCameraContextItems(scene, camera = null) {
   return items;
 }
 
+async function copyWorkspaceStyle(sceneUid, style) {
+  if (!invoke || style.localIndex === null) return false;
+  setBusy(true);
+  try {
+    const status = await invoke("copy_workspace_style", {
+      input: { sceneUid, localIndex: style.localIndex },
+    });
+    workspaceStyleClipboardName = style.name;
+    snapshot.status = status;
+    renderStatusAndLog();
+    return true;
+  } catch (error) {
+    showError(error);
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function pasteWorkspaceStyle(scene) {
+  if (!workspaceStyleClipboardName) return;
+  const replace = (snapshot.styles || []).some(
+    (style) =>
+      style.ownerSceneUid === scene.uid &&
+      style.localIndex !== null &&
+      style.name === workspaceStyleClipboardName,
+  );
+  if (
+    replace &&
+    !globalThis.confirm?.(`Style "${workspaceStyleClipboardName}" already exists. Replace?`)
+  ) {
+    return;
+  }
+  const changed = await mutate(
+    "paste_workspace_style",
+    { input: { sceneUid: scene.uid, replace } },
+    () => {},
+    Boolean(scene.active),
+  );
+  if (!changed) return;
+  if (scene.active) {
+    selectedStyleIndex = activeStyles().findIndex(
+      (style) => style.localIndex !== null && style.name === workspaceStyleClipboardName,
+    );
+    workspaceSelectionKind = "style";
+  }
+  renderShell();
+}
+
+function workspaceStyleContextItems(scene, style = null) {
+  return [
+    {
+      label: "Copy",
+      disabled: !style || style.localIndex === null,
+      action: () => copyWorkspaceStyle(scene.uid, style),
+    },
+    {
+      label: "Paste",
+      disabled: !workspaceStyleClipboardName,
+      action: () => pasteWorkspaceStyle(scene),
+    },
+  ];
+}
+
 function workspaceObjectContextItems(scene, object) {
   const select = (selection) => () =>
     runMoleculeSelectionAction(object.uid, selection, "select");
@@ -5743,6 +5808,11 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     const styleCount = document.createElement("small");
     styleCount.textContent = `${sceneStyles.length} STYLE`;
     styleRoot.append(styleCount);
+    styleRoot.addEventListener("contextmenu", (event) => {
+      workspaceSelectionKind = "styleRoot";
+      selectedStyleIndex = null;
+      showWorkspaceContextMenu(event, workspaceStyleContextItems(scene));
+    });
     sceneTree.append(styleRoot);
     sceneStyles.forEach((style, styleIndex) => {
       const markers = `${style.readOnly || style.sceneUid === 0 ? " 🔒" : ""}${
@@ -5768,6 +5838,11 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       if (style.localIndex !== null) {
         styleRow.addEventListener("dblclick", () => showStyleProperties(style));
       }
+      styleRow.addEventListener("contextmenu", (event) => {
+        workspaceSelectionKind = "style";
+        selectedStyleIndex = styleIndex;
+        showWorkspaceContextMenu(event, workspaceStyleContextItems(scene, style));
+      });
       sceneTree.append(styleRow);
     });
   }
@@ -7975,6 +8050,7 @@ async function mutate(command, args = {}, render = renderShell, refreshViewport 
         "create_renderer_style",
         "set_style_properties",
         "destroy_style",
+        "paste_workspace_style",
         "undo",
         "redo",
       ].includes(command)

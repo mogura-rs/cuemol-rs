@@ -577,6 +577,17 @@ impl WorkspaceCameraClipboard {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceStyleClipboard {
+    style: LoadedStyle,
+}
+
+impl WorkspaceStyleClipboard {
+    pub fn name(&self) -> String {
+        self.style.node.str_attr("id").to_string()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiAtomSummary {
     pub object_uid: Uid,
@@ -2140,6 +2151,64 @@ impl DesktopAppState {
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
         Ok(scene.remove_loaded_style(local_index).is_some())
+    }
+
+    pub fn copy_workspace_style(
+        &self,
+        scene_uid: Uid,
+        local_index: usize,
+    ) -> Result<WorkspaceStyleClipboard> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let style = scene
+            .loaded_styles()
+            .get(local_index)
+            .cloned()
+            .ok_or_else(|| CueMolError::NotFound(format!("style {local_index}")))?;
+        Ok(WorkspaceStyleClipboard { style })
+    }
+
+    pub fn workspace_style_exists(&self, scene_uid: Uid, name: &str) -> bool {
+        self.scene_manager().scene(scene_uid).is_some_and(|scene| {
+            scene
+                .loaded_styles()
+                .iter()
+                .any(|style| style.node.str_attr("id").as_str() == name)
+        })
+    }
+
+    pub fn paste_workspace_style(
+        &mut self,
+        scene_uid: Uid,
+        clipboard: &WorkspaceStyleClipboard,
+        replace: bool,
+    ) -> Result<usize> {
+        let name = clipboard.name();
+        if name.trim().is_empty() {
+            return Err(CueMolError::invalid_argument("copied style name is empty"));
+        }
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let existing = scene
+            .loaded_styles()
+            .iter()
+            .position(|style| style.node.str_attr("id").as_str() == name);
+        if existing.is_some() && !replace {
+            return Err(CueMolError::invalid_argument(format!(
+                "style already exists: {name}"
+            )));
+        }
+        let style = clipboard.style.clone();
+        if let Some(index) = existing {
+            scene.loaded_styles_mut()[index] = style;
+            Ok(index)
+        } else {
+            Ok(scene.add_loaded_style(style))
+        }
     }
 
     pub fn object_summaries(&self, scene_uid: Uid) -> Vec<GuiObjectSummary> {
@@ -53616,6 +53685,33 @@ attribute \"dep\" string \"positions\"
             .unwrap();
         assert_eq!(local.name, "custom");
         assert!(local.read_only);
+
+        let clipboard = app.copy_workspace_style(scene_uid, local_index).unwrap();
+        assert_eq!(clipboard.name(), "custom");
+        assert!(app.workspace_style_exists(scene_uid, "custom"));
+        assert!(app
+            .paste_workspace_style(scene_uid, &clipboard, false)
+            .is_err());
+        app.update_scene_style(
+            scene_uid,
+            local_index,
+            "custom",
+            false,
+            "<styles><style id=\"Narrow\" type=\"renderer\" width=\"1\"/></styles>",
+        )
+        .unwrap();
+        assert_eq!(
+            app.paste_workspace_style(scene_uid, &clipboard, true)
+                .unwrap(),
+            local_index
+        );
+        assert!(
+            app.style_summaries(scene_uid)
+                .into_iter()
+                .find(|style| style.local_index == Some(local_index))
+                .unwrap()
+                .read_only
+        );
 
         let path = std::env::temp_dir().join(format!(
             "cuemol-desktop-style-workspace-{}.qsc",

@@ -15,7 +15,7 @@ use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRen
 use crate::{
     anim_step, atoms_in_screen_rect, pick_atom_screen, AnimKind, AnimObject, DesktopAppState,
     WorkspaceCameraClipboard, WorkspaceObjectClipboard, WorkspaceRendererClipboard,
-    MOLECULE_RENDERER_TYPES,
+    WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
@@ -759,6 +759,20 @@ struct WorkspaceCameraPasteInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceStyleCopyInput {
+    scene_uid: u64,
+    local_index: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceStylePasteInput {
+    scene_uid: u64,
+    replace: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceRendererGroupInput {
     object_uid: u64,
     #[serde(default)]
@@ -860,6 +874,7 @@ struct AppModel {
     workspace_camera_clipboard: Option<WorkspaceCameraClipboard>,
     workspace_object_clipboard: Option<WorkspaceObjectClipboard>,
     workspace_renderer_clipboard: Option<WorkspaceRendererClipboard>,
+    workspace_style_clipboard: Option<WorkspaceStyleClipboard>,
     undo_stack: Vec<AppModelUndoEntry>,
     redo_stack: Vec<AppModelUndoEntry>,
     log_lines: Vec<String>,
@@ -956,6 +971,7 @@ impl AppModel {
             workspace_camera_clipboard: None,
             workspace_object_clipboard: None,
             workspace_renderer_clipboard: None,
+            workspace_style_clipboard: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             log_lines: Vec::new(),
@@ -2530,6 +2546,32 @@ impl AppModel {
             .map_err(|error| error.to_string())?;
         self.modified_scenes.insert(scene_uid);
         self.status = format!("Pasted camera {name}");
+        Ok(())
+    }
+
+    fn copy_workspace_style(&mut self, input: WorkspaceStyleCopyInput) -> Result<String, String> {
+        let clipboard = self
+            .desktop
+            .copy_workspace_style(Uid::new(input.scene_uid), input.local_index)
+            .map_err(|error| error.to_string())?;
+        let name = clipboard.name();
+        self.workspace_style_clipboard = Some(clipboard);
+        self.status = format!("Copied style {name}");
+        Ok(self.status.clone())
+    }
+
+    fn paste_workspace_style(&mut self, input: WorkspaceStylePasteInput) -> Result<(), String> {
+        let clipboard = self
+            .workspace_style_clipboard
+            .clone()
+            .ok_or_else(|| "No copied style".to_string())?;
+        let scene_uid = Uid::new(input.scene_uid);
+        self.desktop
+            .paste_workspace_style(scene_uid, &clipboard, input.replace)
+            .map_err(|error| error.to_string())?;
+        self.modified_scenes.insert(scene_uid);
+        self.status = format!("Pasted style {}", clipboard.name());
+        self.invalidate_mesh(false);
         Ok(())
     }
 
@@ -5069,6 +5111,8 @@ enum ModelRequest {
     PasteWorkspaceObject(WorkspaceObjectPasteInput),
     CopyWorkspaceCamera(WorkspaceCameraCopyInput),
     PasteWorkspaceCamera(WorkspaceCameraPasteInput),
+    CopyWorkspaceStyle(WorkspaceStyleCopyInput),
+    PasteWorkspaceStyle(WorkspaceStylePasteInput),
     CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     FitWorkspaceItem {
@@ -6515,6 +6559,15 @@ fn handle_model_request(
         ModelRequest::PasteWorkspaceCamera(input) => {
             let undo = model.capture_undo();
             model.paste_workspace_camera(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::CopyWorkspaceStyle(input) => {
+            Ok(ModelResponse::Message(model.copy_workspace_style(input)?))
+        }
+        ModelRequest::PasteWorkspaceStyle(input) => {
+            let undo = model.capture_undo();
+            model.paste_workspace_style(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -8525,6 +8578,28 @@ fn paste_workspace_camera(
 }
 
 #[tauri::command]
+fn copy_workspace_style(
+    input: WorkspaceStyleCopyInput,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::CopyWorkspaceStyle(input),
+    )?)
+}
+
+#[tauri::command]
+fn paste_workspace_style(
+    input: WorkspaceStylePasteInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::PasteWorkspaceStyle(input),
+    )?)
+}
+
+#[tauri::command]
 fn create_workspace_renderer_group(
     input: WorkspaceRendererGroupInput,
     state: State<'_, ManagedState>,
@@ -9666,6 +9741,8 @@ pub fn run() -> Result<(), tauri::Error> {
             paste_workspace_object,
             copy_workspace_camera,
             paste_workspace_camera,
+            copy_workspace_style,
+            paste_workspace_style,
             create_workspace_renderer_group,
             rename_workspace_renderer_group,
             fit_workspace_item,
@@ -9775,6 +9852,7 @@ mod tests {
             workspace_camera_clipboard: None,
             workspace_object_clipboard: None,
             workspace_renderer_clipboard: None,
+            workspace_style_clipboard: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             log_lines: Vec::new(),
@@ -12384,6 +12462,69 @@ mod tests {
             .unwrap();
         assert_eq!(local.name, "custom");
         assert!(local.read_only);
+
+        let undo_count = model.undo_stack.len();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CopyWorkspaceStyle(WorkspaceStyleCopyInput {
+                scene_uid: scene_uid.get(),
+                local_index,
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Message(message) = response else {
+            panic!("expected copy status message");
+        };
+        assert_eq!(message, "Copied style custom");
+        assert_eq!(model.undo_stack.len(), undo_count);
+        model
+            .desktop
+            .update_scene_style(
+                scene_uid,
+                local_index,
+                "custom",
+                false,
+                "<styles><style id=\"Narrow\" width=\"1\"/></styles>",
+            )
+            .unwrap();
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::PasteWorkspaceStyle(WorkspaceStylePasteInput {
+                scene_uid: scene_uid.get(),
+                replace: false,
+            }),
+        )
+        .is_err());
+        handle_model_request(
+            &mut model,
+            ModelRequest::PasteWorkspaceStyle(WorkspaceStylePasteInput {
+                scene_uid: scene_uid.get(),
+                replace: true,
+            }),
+        )
+        .unwrap();
+        assert!(model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("Wide"));
+        assert_eq!(
+            model.undo_stack.last().unwrap().description,
+            "Pasted style custom"
+        );
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("Narrow"));
+        assert!(model.workspace_style_clipboard.is_some());
 
         handle_model_request(
             &mut model,

@@ -3,7 +3,7 @@
 use crate::{
     anim_step, AnimKind, AnimObject, DesktopAppState, GuiAtomLabel, GuiLoadedPath,
     GuiSequenceSummary, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
-    WorkspaceRendererClipboard,
+    WorkspaceRendererClipboard, WorkspaceStyleClipboard,
 };
 use ab_glyph::{point, Font, FontRef, ScaleFont};
 use cuemol_core::{CueMolError, Result, Vector4};
@@ -473,6 +473,8 @@ struct GuiApplication {
     workspace_camera_clipboard: Option<WorkspaceCameraClipboard>,
     workspace_object_clipboard: Option<WorkspaceObjectClipboard>,
     workspace_renderer_clipboard: Option<WorkspaceRendererClipboard>,
+    workspace_style_clipboard: Option<WorkspaceStyleClipboard>,
+    pending_style_paste_scene: Option<cuemol_core::Uid>,
     /// Molecule chosen in the MolStruct panel's molecule selector (CueMol2
     /// `molstruct-panel.xul`); independent of the Workspace tree selection.
     molstruct_object: Option<cuemol_core::Uid>,
@@ -2205,6 +2207,8 @@ impl GuiApplication {
             workspace_camera_clipboard: None,
             workspace_object_clipboard: None,
             workspace_renderer_clipboard: None,
+            workspace_style_clipboard: None,
+            pending_style_paste_scene: None,
             molstruct_object: None,
             molstruct_expand_all: false,
             selection_tab: SelectionTab::Command,
@@ -3652,12 +3656,25 @@ impl GuiApplication {
                 };
                 let root_selected = self.selected_object.is_none()
                     && self.workspace_aux_selection == Some(root_selection);
-                if ui.selectable_label(root_selected, "Styles").clicked() {
+                let root_response = ui.selectable_label(root_selected, "Styles");
+                if root_response.clicked() {
                     self.activate_workspace_scene(scene.uid, camera);
                     self.selected_object = None;
                     self.selected_renderer = None;
                     self.workspace_aux_selection = Some(root_selection);
                 }
+                root_response.context_menu(|ui| {
+                    if ui
+                        .add_enabled(
+                            self.workspace_style_clipboard.is_some(),
+                            egui::Button::new("Paste"),
+                        )
+                        .clicked()
+                    {
+                        self.request_paste_workspace_style(scene.uid);
+                        ui.close();
+                    }
+                });
                 ui.indent(format!("style-root-{}", scene.uid.get()), |ui| {
                     for (style_index, summary) in styles.iter().enumerate() {
                         let selection = WorkspaceAuxSelection::Style {
@@ -3683,6 +3700,31 @@ impl GuiApplication {
                         if response.double_clicked() && summary.local_index.is_some() {
                             self.open_style_properties(selection);
                         }
+                        response.context_menu(|ui| {
+                            if ui
+                                .add_enabled(
+                                    summary.local_index.is_some(),
+                                    egui::Button::new("Copy"),
+                                )
+                                .clicked()
+                            {
+                                self.copy_workspace_style_to_clipboard(
+                                    scene.uid,
+                                    summary.local_index.expect("local style was enabled"),
+                                );
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.workspace_style_clipboard.is_some(),
+                                    egui::Button::new("Paste"),
+                                )
+                                .clicked()
+                            {
+                                self.request_paste_workspace_style(scene.uid);
+                                ui.close();
+                            }
+                        });
                     }
                 });
             });
@@ -8434,12 +8476,48 @@ impl GuiApplication {
         self.view_props_dialog(ctx, camera);
         self.style_props_dialog(ctx);
         self.renderer_style_create_dialog(ctx);
+        self.style_paste_confirmation_dialog(ctx);
         self.chain_dialog(ctx);
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx);
         self.get_pdb_dialog(ctx);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
+    }
+
+    fn style_paste_confirmation_dialog(&mut self, ctx: &egui::Context) {
+        let Some(scene_uid) = self.pending_style_paste_scene else {
+            return;
+        };
+        let name = self
+            .workspace_style_clipboard
+            .as_ref()
+            .map(WorkspaceStyleClipboard::name)
+            .unwrap_or_default();
+        let mut open = true;
+        let mut replace = false;
+        let mut cancel = false;
+        egui::Window::new("Replace Style?")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!("Style \"{name}\" already exists. Replace?"));
+                ui.horizontal(|ui| {
+                    if ui.button("Replace").clicked() {
+                        replace = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if replace {
+            self.pending_style_paste_scene = None;
+            self.paste_workspace_style_clipboard(scene_uid, true);
+        } else if cancel || !open {
+            self.pending_style_paste_scene = None;
+        }
     }
 
     fn about_dialog(&mut self, ctx: &egui::Context) {
@@ -11353,6 +11431,68 @@ impl GuiApplication {
             .style_summaries(scene_uid)
             .into_iter()
             .nth(style_index)
+    }
+
+    fn copy_workspace_style_to_clipboard(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        local_index: usize,
+    ) {
+        match self.state.copy_workspace_style(scene_uid, local_index) {
+            Ok(clipboard) => {
+                let name = clipboard.name();
+                self.workspace_style_clipboard = Some(clipboard);
+                self.set_status(format!("Copied style {name}"));
+            }
+            Err(error) => self.set_status(format!("Copy style error: {error}")),
+        }
+    }
+
+    fn request_paste_workspace_style(&mut self, scene_uid: cuemol_core::Uid) {
+        let Some(clipboard) = self.workspace_style_clipboard.as_ref() else {
+            self.set_status("No copied style");
+            return;
+        };
+        if self
+            .state
+            .workspace_style_exists(scene_uid, &clipboard.name())
+        {
+            self.pending_style_paste_scene = Some(scene_uid);
+        } else {
+            self.paste_workspace_style_clipboard(scene_uid, false);
+        }
+    }
+
+    fn paste_workspace_style_clipboard(&mut self, scene_uid: cuemol_core::Uid, replace: bool) {
+        let Some(clipboard) = self.workspace_style_clipboard.clone() else {
+            self.set_status("No copied style");
+            return;
+        };
+        let undo = self.capture_undo();
+        match self
+            .state
+            .paste_workspace_style(scene_uid, &clipboard, replace)
+        {
+            Ok(local_index) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                let style_index = self
+                    .state
+                    .style_summaries(scene_uid)
+                    .iter()
+                    .position(|style| style.local_index == Some(local_index))
+                    .expect("the pasted style was just inserted");
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Style {
+                    scene_uid,
+                    style_index,
+                });
+                self.rebuild_snapshot();
+                self.set_status(format!("Pasted style {}", clipboard.name()));
+            }
+            Err(error) => self.set_status(format!("Paste style error: {error}")),
+        }
     }
 
     fn open_new_style_properties(&mut self, scene_uid: cuemol_core::Uid) {
@@ -18449,13 +18589,48 @@ mod tests {
         };
         app.open_style_properties(selection);
         assert_eq!(app.style_properties_draft.as_ref().unwrap().name, "style_0");
+
+        app.copy_workspace_style_to_clipboard(scene_uid, local_index);
+        assert!(app.workspace_style_clipboard.is_some());
+        assert!(app.undo_stack.is_empty());
+        app.state
+            .update_scene_style(
+                scene_uid,
+                local_index,
+                "style_0",
+                false,
+                "<styles><style id=\"Narrow\" type=\"renderer\" width=\"1\"/></styles>",
+            )
+            .unwrap();
+        app.request_paste_workspace_style(scene_uid);
+        assert_eq!(app.pending_style_paste_scene, Some(scene_uid));
+        app.pending_style_paste_scene = None;
+        app.paste_workspace_style_clipboard(scene_uid, true);
+        assert!(!app
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("Narrow"));
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert!(app
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("Narrow"));
+
         app.delete_aux_selection(selection);
         assert!(app
             .state
             .style_summaries(scene_uid)
             .iter()
             .all(|style| style.local_index.is_none()));
-        let mut camera = CameraController::default();
         app.undo(&mut camera);
         assert!(app
             .state

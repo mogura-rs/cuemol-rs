@@ -351,8 +351,11 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("paste_workspace_object"));
     assert!(JS.contains("copy_workspace_camera"));
     assert!(JS.contains("paste_workspace_camera"));
+    assert!(JS.contains("copy_workspace_style"));
+    assert!(JS.contains("paste_workspace_style"));
     assert!(JS.contains("workspaceSceneContextItems"));
     assert!(JS.contains("workspaceCameraContextItems"));
+    assert!(JS.contains("workspaceStyleContextItems"));
     assert!(JS.contains("workspaceRendererClipboardAvailable"));
     assert!(JS.contains("Paste Renderer"));
     assert!(JS.contains("Paste Object"));
@@ -493,6 +496,8 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "paste_workspace_object",
         "copy_workspace_camera",
         "paste_workspace_camera",
+        "copy_workspace_style",
+        "paste_workspace_style",
         "create_workspace_renderer_group",
         "rename_workspace_renderer_group",
         "delete_workspace_item",
