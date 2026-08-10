@@ -605,6 +605,64 @@ impl Default for NativeMdTrajectoryDraft {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativePngUnit {
+    Pixel,
+    Millimeter,
+    Centimeter,
+    Inch,
+}
+
+impl NativePngUnit {
+    const ALL: [Self; 4] = [Self::Pixel, Self::Millimeter, Self::Centimeter, Self::Inch];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pixel => "pixel",
+            Self::Millimeter => "mm",
+            Self::Centimeter => "cm",
+            Self::Inch => "inch",
+        }
+    }
+}
+
+fn png_pixels_to_unit(pixels: u32, unit: NativePngUnit, dpi: u32) -> f64 {
+    let pixels = f64::from(pixels);
+    let dpi = f64::from(dpi.max(1));
+    match unit {
+        NativePngUnit::Pixel => pixels,
+        NativePngUnit::Millimeter => pixels / dpi * 25.4,
+        NativePngUnit::Centimeter => pixels / dpi * 2.54,
+        NativePngUnit::Inch => pixels / dpi,
+    }
+}
+
+fn png_unit_to_pixels(value: f64, unit: NativePngUnit, dpi: u32) -> u32 {
+    let dpi = f64::from(dpi.max(1));
+    let pixels = match unit {
+        NativePngUnit::Pixel => value,
+        NativePngUnit::Millimeter => value / 25.4 * dpi,
+        NativePngUnit::Centimeter => value / 2.54 * dpi,
+        NativePngUnit::Inch => value * dpi,
+    };
+    if !pixels.is_finite() || pixels <= 0.0 {
+        return 1;
+    }
+    pixels.round().clamp(1.0, f64::from(u32::MAX)) as u32
+}
+
+#[derive(Debug, Clone)]
+struct NativePngExportDraft {
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    aspect: f64,
+    resolution_dpi: u32,
+    unit: NativePngUnit,
+    retain_aspect: bool,
+    transparent: bool,
+}
+
 #[derive(Debug)]
 enum NativeTrajectoryPanelAction {
     SetFrame {
@@ -682,6 +740,7 @@ struct GuiApplication {
     pdb_probe_receiver: Option<mpsc::Receiver<PdbProbeMessage>>,
     pdb_probe_result: Option<std::result::Result<Vec<crate::GuiPdbFileKind>, String>>,
     md_trajectory_draft: Option<NativeMdTrajectoryDraft>,
+    png_export_draft: Option<NativePngExportDraft>,
     renderer_setup_draft: Option<NativeRendererSetupDraft>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
@@ -2477,6 +2536,7 @@ impl GuiApplication {
             pdb_probe_receiver: None,
             pdb_probe_result: None,
             md_trajectory_draft: None,
+            png_export_draft: None,
             renderer_setup_draft: None,
             pdb_download_receiver: None,
             url_download_receiver: None,
@@ -8545,8 +8605,34 @@ impl GuiApplication {
     fn choose_export_scene(&mut self) {
         if let Some(path) = native_file_dialog(NativeFileDialog::ExportScene, &self.export_path) {
             self.export_path = path.to_string_lossy().into_owned();
-            self.export_current_scene();
+            if crate::DesktopAppState::path_has_extension(&self.export_path, "png") {
+                self.open_png_export_dialog(path);
+            } else {
+                self.export_current_scene();
+            }
         }
+    }
+
+    fn open_png_export_dialog(&mut self, path: PathBuf) {
+        let (width, height) = self
+            .viewport_rect
+            .map(|rect| {
+                (
+                    (rect.width().round() as u32).max(1),
+                    (rect.height().round() as u32).max(1),
+                )
+            })
+            .unwrap_or((1280, 960));
+        self.png_export_draft = Some(NativePngExportDraft {
+            path,
+            width,
+            height,
+            aspect: f64::from(width) / f64::from(height),
+            resolution_dpi: 150,
+            unit: NativePngUnit::Pixel,
+            retain_aspect: true,
+            transparent: false,
+        });
     }
 
     fn choose_merge_molecule(&mut self, camera: &mut CameraController) {
@@ -10197,6 +10283,7 @@ impl GuiApplication {
         self.renderer_dialog(ctx);
         self.get_pdb_dialog(ctx);
         self.md_trajectory_dialog(ctx);
+        self.png_export_dialog(ctx);
         self.renderer_setup_dialog(ctx, camera);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
@@ -15285,6 +15372,148 @@ impl GuiApplication {
             );
         } else if open && !cancel {
             self.md_trajectory_draft = Some(draft);
+        }
+    }
+
+    fn png_export_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.png_export_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("PNG options")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                ui.strong("Image size");
+                egui::Grid::new("png_export_size")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Resolution (DPI):");
+                        egui::ComboBox::from_id_salt("png_export_dpi")
+                            .selected_text(draft.resolution_dpi.to_string())
+                            .show_ui(ui, |ui| {
+                                for dpi in [72, 150, 300, 600] {
+                                    ui.selectable_value(
+                                        &mut draft.resolution_dpi,
+                                        dpi,
+                                        dpi.to_string(),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Unit:");
+                        egui::ComboBox::from_id_salt("png_export_unit")
+                            .selected_text(draft.unit.label())
+                            .show_ui(ui, |ui| {
+                                for unit in NativePngUnit::ALL {
+                                    ui.selectable_value(&mut draft.unit, unit, unit.label());
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Width:");
+                        let mut width =
+                            png_pixels_to_unit(draft.width, draft.unit, draft.resolution_dpi);
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut width)
+                                    .range(0.01..=100_000.0)
+                                    .speed(if draft.unit == NativePngUnit::Pixel {
+                                        1.0
+                                    } else {
+                                        0.1
+                                    }),
+                            )
+                            .changed()
+                        {
+                            draft.width =
+                                png_unit_to_pixels(width, draft.unit, draft.resolution_dpi).max(1);
+                            if draft.retain_aspect {
+                                draft.height =
+                                    (f64::from(draft.width) / draft.aspect).round().max(1.0) as u32;
+                            }
+                        }
+                        ui.end_row();
+
+                        ui.label("Height:");
+                        let mut height =
+                            png_pixels_to_unit(draft.height, draft.unit, draft.resolution_dpi);
+                        if ui
+                            .add_enabled(
+                                !draft.retain_aspect,
+                                egui::DragValue::new(&mut height)
+                                    .range(0.01..=100_000.0)
+                                    .speed(if draft.unit == NativePngUnit::Pixel {
+                                        1.0
+                                    } else {
+                                        0.1
+                                    }),
+                            )
+                            .changed()
+                        {
+                            draft.height =
+                                png_unit_to_pixels(height, draft.unit, draft.resolution_dpi).max(1);
+                        }
+                        ui.end_row();
+
+                        ui.label("Retain aspect ratio:");
+                        if ui.checkbox(&mut draft.retain_aspect, "").changed()
+                            && draft.retain_aspect
+                        {
+                            draft.height =
+                                (f64::from(draft.width) / draft.aspect).round().max(1.0) as u32;
+                        }
+                        ui.end_row();
+                    });
+                ui.separator();
+                ui.strong("Output");
+                ui.label(format!("Pixel size: {} x {}", draft.width, draft.height));
+                ui.checkbox(&mut draft.transparent, "Transparent PNG");
+                ui.weak(draft.path.to_string_lossy());
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let valid = draft.width > 0
+                        && draft.height > 0
+                        && draft.resolution_dpi > 0
+                        && draft.path.file_name().is_some();
+                    if ui.add_enabled(valid, egui::Button::new("OK")).clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if accept {
+            let options = crate::GuiPngExportOptions {
+                width: draft.width,
+                height: draft.height,
+                resolution_dpi: f64::from(draft.resolution_dpi),
+                transparent: draft.transparent,
+            };
+            match self.state.export_active_scene_png_with_options(
+                &draft.path,
+                options,
+                &self.selection_text,
+            ) {
+                Ok(()) => self.set_status(format!(
+                    "Exported {}x{} PNG at {} DPI to {}",
+                    draft.width,
+                    draft.height,
+                    draft.resolution_dpi,
+                    draft.path.display()
+                )),
+                Err(error) => self.set_error(error),
+            }
+        } else if open && !cancel {
+            self.png_export_draft = Some(draft);
         }
     }
 
@@ -20625,6 +20854,39 @@ fn default_config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn png_export_units_round_trip_at_selected_dpi() {
+        assert_eq!(png_pixels_to_unit(150, NativePngUnit::Pixel, 150), 150.0);
+        assert!((png_pixels_to_unit(150, NativePngUnit::Inch, 150) - 1.0).abs() < 1.0e-9);
+        assert!((png_pixels_to_unit(150, NativePngUnit::Centimeter, 150) - 2.54).abs() < 1.0e-9);
+        assert!((png_pixels_to_unit(150, NativePngUnit::Millimeter, 150) - 25.4).abs() < 1.0e-9);
+        for unit in NativePngUnit::ALL {
+            let value = png_pixels_to_unit(900, unit, 300);
+            assert_eq!(png_unit_to_pixels(value, unit, 300), 900);
+        }
+        assert_eq!(png_unit_to_pixels(f64::NAN, NativePngUnit::Pixel, 150), 1);
+    }
+
+    #[test]
+    fn png_export_options_start_from_the_live_viewport() {
+        let mut app = GuiApplication::new();
+        app.viewport_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(10.0, 20.0),
+            egui::vec2(900.0, 600.0),
+        ));
+        let path = PathBuf::from("viewport.png");
+        app.open_png_export_dialog(path.clone());
+
+        let draft = app.png_export_draft.expect("PNG export draft");
+        assert_eq!(draft.path, path);
+        assert_eq!((draft.width, draft.height), (900, 600));
+        assert_eq!(draft.resolution_dpi, 150);
+        assert_eq!(draft.unit, NativePngUnit::Pixel);
+        assert!(draft.retain_aspect);
+        assert!(!draft.transparent);
+        assert!((draft.aspect - 1.5).abs() < 1.0e-9);
+    }
 
     #[test]
     fn animation_render_helpers_define_frame_sequence_and_output_names() {

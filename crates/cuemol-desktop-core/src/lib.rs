@@ -1092,6 +1092,14 @@ pub struct GuiTrajectorySummary {
     pub blocks: Vec<GuiTrajectoryBlockSummary>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GuiPngExportOptions {
+    pub width: u32,
+    pub height: u32,
+    pub resolution_dpi: f64,
+    pub transparent: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuiDensityMapSummary {
     pub uid: Uid,
@@ -9150,6 +9158,35 @@ impl DesktopAppState {
         height: u32,
         selection_text: &str,
     ) -> Result<()> {
+        self.export_active_scene_png_with_options(
+            path,
+            GuiPngExportOptions {
+                width,
+                height,
+                resolution_dpi: 72.0,
+                transparent: false,
+            },
+            selection_text,
+        )
+    }
+
+    #[cfg(feature = "offscreen")]
+    pub fn export_active_scene_png_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: GuiPngExportOptions,
+        selection_text: &str,
+    ) -> Result<()> {
+        if options.width == 0 || options.height == 0 {
+            return Err(CueMolError::invalid_argument(
+                "PNG dimensions must be positive",
+            ));
+        }
+        if !options.resolution_dpi.is_finite() || options.resolution_dpi <= 0.0 {
+            return Err(CueMolError::invalid_argument(
+                "PNG resolution must be positive",
+            ));
+        }
         let scene_uid = self
             .active_scene
             .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
@@ -9158,8 +9195,10 @@ impl DesktopAppState {
         exporter
             .handler_mut()
             .set_path(path.as_ref().to_string_lossy());
-        exporter.set_width(width.min(i32::MAX as u32) as i32);
-        exporter.set_height(height.min(i32::MAX as u32) as i32);
+        exporter.set_width(options.width.min(i32::MAX as u32) as i32);
+        exporter.set_height(options.height.min(i32::MAX as u32) as i32);
+        exporter.set_resolution_dpi(options.resolution_dpi);
+        exporter.set_use_alpha(options.transparent);
         self.write_png_exporter(&mut exporter, selection_text)
     }
 
@@ -51850,10 +51889,53 @@ end_header
         app.ensure_active_scene();
         let path =
             std::env::temp_dir().join(format!("cuemol2-rs-export-{}.png", std::process::id()));
-        match app.export_active_scene_png(&path, 32, 32, "") {
+        assert!(app
+            .export_active_scene_png_with_options(
+                &path,
+                GuiPngExportOptions {
+                    width: 0,
+                    height: 32,
+                    resolution_dpi: 150.0,
+                    transparent: true,
+                },
+                "",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("dimensions must be positive"));
+        assert!(app
+            .export_active_scene_png_with_options(
+                &path,
+                GuiPngExportOptions {
+                    width: 32,
+                    height: 32,
+                    resolution_dpi: f64::NAN,
+                    transparent: false,
+                },
+                "",
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("resolution must be positive"));
+        match app.export_active_scene_png_with_options(
+            &path,
+            GuiPngExportOptions {
+                width: 32,
+                height: 32,
+                resolution_dpi: 150.0,
+                transparent: true,
+            },
+            "",
+        ) {
             Ok(()) => {
                 let bytes = std::fs::read(&path).expect("read exported png");
                 assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG");
+                let decoder = png::Decoder::new(&bytes[..]);
+                let reader = decoder.read_info().expect("read PNG metadata");
+                assert_eq!(reader.info().color_type, png::ColorType::Rgba);
+                let dimensions = reader.info().pixel_dims.expect("PNG resolution");
+                assert_eq!(dimensions.unit, png::Unit::Meter);
+                assert!((i64::from(dimensions.xppu) - 5906).abs() <= 1);
                 let _ = std::fs::remove_file(&path);
             }
             Err(_) => { /* no GPU adapter in this environment; skip */ }

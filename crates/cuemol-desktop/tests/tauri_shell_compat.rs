@@ -463,6 +463,27 @@ fn desktop_startup_and_fetch_overlap_independent_initialization() {
 }
 
 #[test]
+fn png_export_matches_the_reference_options_dialog() {
+    for label in [
+        "PNG options",
+        "Resolution (DPI)",
+        "Retain aspect ratio",
+        "Transparent PNG",
+        "Pixel size:",
+    ] {
+        assert!(JS.contains(label), "missing PNG option {label}");
+    }
+    for value in ["[72, 150, 300, 600]", "resolutionDpi", "transparent"] {
+        assert!(JS.contains(value), "missing PNG option binding {value}");
+    }
+    assert_eq!(JS.matches("await showPngExportOptions(").count(), 2);
+    assert!(CSS.contains(".reference-dialog.png-options-dialog"));
+    assert!(CSS.contains("width: min(360px, calc(100vw - 48px))"));
+    assert!(TAURI_APP_RS.contains("export_active_scene_png_with_options"));
+    assert!(TAURI_APP_RS.contains("GuiPngExportOptions"));
+}
+
+#[test]
 fn tauri_viewport_render_requests_are_coalesced() {
     assert!(JS.contains("if (viewportRenderRequest)"));
     assert!(JS.contains("viewportRenderQueued = true"));

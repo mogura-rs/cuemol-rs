@@ -5794,6 +5794,8 @@ enum ModelRequest {
         path: String,
         width: u32,
         height: u32,
+        resolution_dpi: f64,
+        transparent: bool,
     },
 }
 
@@ -8777,14 +8779,20 @@ fn handle_model_request(
             path,
             width,
             height,
+            resolution_dpi,
+            transparent,
         } => {
             model.persist_camera()?;
             model
                 .desktop
-                .export_active_scene_png(
+                .export_active_scene_png_with_options(
                     &path,
-                    width.clamp(64, MAX_VIEW_DIM),
-                    height.clamp(64, MAX_VIEW_DIM),
+                    crate::GuiPngExportOptions {
+                        width: width.max(1),
+                        height: height.max(1),
+                        resolution_dpi,
+                        transparent,
+                    },
                     &model.selection,
                 )
                 .map_err(|error| error.to_string())?;
@@ -10956,6 +10964,8 @@ fn export_png(
     path: String,
     width: u32,
     height: u32,
+    resolution_dpi: f64,
+    transparent: bool,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
@@ -10964,6 +10974,8 @@ fn export_png(
             path,
             width,
             height,
+            resolution_dpi,
+            transparent,
         },
     )?)
 }

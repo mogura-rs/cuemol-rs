@@ -3929,6 +3929,143 @@ function showRendererSetup(setup) {
   });
 }
 
+function showPngExportOptions(initialWidth, initialHeight) {
+  if (referenceDialog.open) referenceDialog.close();
+  dialogTitle.textContent = "PNG options";
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog png-options-dialog";
+
+  const seededWidth = Math.max(1, Math.round(initialWidth) || 1);
+  const seededHeight = Math.max(1, Math.round(initialHeight) || 1);
+  const aspect = seededWidth / seededHeight;
+  let pixelWidth = seededWidth;
+  let pixelHeight = seededHeight;
+  const dpi = dialogSelect(
+    "Resolution (DPI)",
+    [72, 150, 300, 600].map((value) => [value, String(value)]),
+    150,
+  );
+  const unit = dialogSelect(
+    "Unit",
+    [
+      ["px", "pixel"],
+      ["mm", "mm"],
+      ["cm", "cm"],
+      ["in", "inch"],
+    ],
+    "px",
+  );
+  const width = dialogField("Width", String(pixelWidth), "number");
+  const height = dialogField("Height", String(pixelHeight), "number");
+  width.min = "0.01";
+  height.min = "0.01";
+  width.max = "100000";
+  height.max = "100000";
+  const retainAspect = dialogCheckbox("Retain aspect ratio", true);
+  const pixelSize = dialogParagraph("");
+  pixelSize.className = "dialog-readout";
+  dialogContent.append(pixelSize);
+  const transparent = dialogCheckbox("Transparent PNG", false);
+
+  const fromPixels = (pixels) => {
+    const resolution = Number(dpi.value);
+    if (unit.value === "in") return pixels / resolution;
+    if (unit.value === "cm") return (pixels / resolution) * 2.54;
+    if (unit.value === "mm") return (pixels / resolution) * 25.4;
+    return pixels;
+  };
+  const toPixels = (value) => {
+    const resolution = Number(dpi.value);
+    if (unit.value === "in") return Math.round(value * resolution);
+    if (unit.value === "cm") return Math.round((value / 2.54) * resolution);
+    if (unit.value === "mm") return Math.round((value / 25.4) * resolution);
+    return Math.round(value);
+  };
+  const displayValue = (pixels) => {
+    const value = fromPixels(pixels);
+    return unit.value === "px" ? String(Math.round(value)) : String(Number(value.toFixed(3)));
+  };
+  const updateDisplays = () => {
+    width.value = displayValue(pixelWidth);
+    height.value = displayValue(pixelHeight);
+    height.disabled = retainAspect.checked;
+    pixelSize.textContent = `Pixel size: ${pixelWidth} x ${pixelHeight}`;
+  };
+  const updateWidth = () => {
+    const value = Number(width.value);
+    const pixels = toPixels(value);
+    if (!Number.isFinite(value) || pixels <= 0) return;
+    pixelWidth = pixels;
+    if (retainAspect.checked) {
+      pixelHeight = Math.max(1, Math.round(pixelWidth / aspect));
+    }
+    updateDisplays();
+  };
+  const updateHeight = () => {
+    if (retainAspect.checked) return;
+    const value = Number(height.value);
+    const pixels = toPixels(value);
+    if (!Number.isFinite(value) || pixels <= 0) return;
+    pixelHeight = pixels;
+    updateDisplays();
+  };
+  width.addEventListener("change", updateWidth);
+  height.addEventListener("change", updateHeight);
+  dpi.addEventListener("change", updateDisplays);
+  unit.addEventListener("change", updateDisplays);
+  retainAspect.addEventListener("change", () => {
+    if (retainAspect.checked) {
+      pixelHeight = Math.max(1, Math.round(pixelWidth / aspect));
+    }
+    updateDisplays();
+  });
+  updateDisplays();
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      referenceDialog.removeEventListener("close", onClose);
+      resolve(value);
+    };
+    const onClose = () => {
+      if (!referenceDialog.open) finish(null);
+    };
+    referenceDialog.addEventListener("close", onClose);
+    const cancel = button("Cancel", "", () => {
+      finish(null);
+      referenceDialog.close();
+    });
+    const ok = button("OK", "dialog-primary", () => {
+      const requestedWidth = toPixels(Number(width.value));
+      const requestedHeight = toPixels(Number(height.value));
+      if (
+        !Number.isFinite(requestedWidth) ||
+        requestedWidth <= 0 ||
+        (!retainAspect.checked &&
+          (!Number.isFinite(requestedHeight) || requestedHeight <= 0))
+      ) return;
+      pixelWidth = requestedWidth;
+      pixelHeight = retainAspect.checked
+        ? Math.max(1, Math.round(pixelWidth / aspect))
+        : requestedHeight;
+      finish({
+        width: pixelWidth,
+        height: pixelHeight,
+        resolutionDpi: Number(dpi.value),
+        transparent: transparent.checked,
+      });
+      referenceDialog.close();
+    });
+    dialogActions(cancel, ok);
+    if (!referenceDialog.open && referenceDialog.showModal) {
+      referenceDialog.showModal();
+    }
+  });
+}
+
 async function showReferenceDialog(title) {
   if (referenceDialog.open) referenceDialog.close();
   atomPickerTarget = null;
@@ -4752,14 +4889,18 @@ async function showReferenceDialog(title) {
       referenceDialog.close();
     });
     const saveImage = button("Save image…", "dialog-primary", async () => {
+      const options = await showPngExportOptions(
+        Number(width.value),
+        Number(height.value),
+      );
+      if (!options) return;
       const path = await chooseOutputPath("cuemol.png", "PNG image", ["png"]);
       if (!path) return;
       await mutateWithoutViewport(
         "export_png",
         {
           path,
-          width: Number(width.value),
-          height: Number(height.value),
+          ...options,
         },
         renderStatusAndLog,
       );
@@ -10034,6 +10175,11 @@ async function saveScene(saveAs = false) {
 }
 
 async function exportPng() {
+  const options = await showPngExportOptions(
+    viewportDimensions().width,
+    viewportDimensions().height,
+  );
+  if (!options) return;
   const path = await dialog?.save?.({
     defaultPath: "cuemol.png",
     filters: [{ name: "PNG image", extensions: ["png"] }],
@@ -10041,7 +10187,7 @@ async function exportPng() {
   if (!path) return;
   await mutateWithoutViewport(
     "export_png",
-    { path, ...viewportDimensions() },
+    { path, ...options },
     renderStatusAndLog,
   );
 }

@@ -2038,6 +2038,10 @@ summary:focus-visible {
   margin: 0;
 }
 
+.reference-dialog.png-options-dialog {
+  width: min(360px, calc(100vw - 48px));
+}
+
 .reference-dialog form {
   display: grid;
   grid-template-rows: 30px minmax(110px, auto) 36px;
