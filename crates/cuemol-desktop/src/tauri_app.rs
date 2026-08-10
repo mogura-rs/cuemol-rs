@@ -9382,6 +9382,37 @@ fn get_pdb_history() -> Vec<String> {
 }
 
 #[tauri::command]
+async fn check_pdb_availability(
+    pdb_id: String,
+    fetch_coordinates: bool,
+    coordinate_source: String,
+    fetch_two_fofc: bool,
+    fetch_fofc: bool,
+    map_source: String,
+) -> Result<Vec<String>, String> {
+    let options = crate::PdbFetchOptions {
+        pdb_id,
+        fetch_coordinates,
+        coordinate_source,
+        fetch_two_fofc,
+        fetch_fofc,
+        map_source,
+    };
+    let unavailable = tauri::async_runtime::spawn_blocking(move || crate::probe_pdb_files(options))
+        .await
+        .map_err(|error| format!("PDB availability task failed: {error}"))??;
+    Ok(unavailable
+        .into_iter()
+        .map(|kind| match kind {
+            crate::GuiPdbFileKind::Coordinates => "coordinates",
+            crate::GuiPdbFileKind::TwoFoFc => "2fofc",
+            crate::GuiPdbFileKind::FoFc => "fofc",
+        })
+        .map(str::to_string)
+        .collect())
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn open_pdb(
     pdb_id: String,
@@ -10507,6 +10538,7 @@ pub fn run() -> Result<(), tauri::Error> {
             open_initial_paths,
             reload_scene,
             get_pdb_history,
+            check_pdb_availability,
             open_pdb,
             load_trajectory,
             set_trajectory_frame,

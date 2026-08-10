@@ -552,6 +552,10 @@ fn restrict_crystal_draft(draft: &mut NativeCrystalDraft, space_group_name: &str
 }
 
 type PdbDownloadMessage = std::result::Result<(String, Vec<crate::PdbDownloadedFile>), String>;
+type PdbProbeMessage = (
+    crate::PdbFetchOptions,
+    std::result::Result<Vec<crate::GuiPdbFileKind>, String>,
+);
 
 #[derive(Debug)]
 struct GuiApplication {
@@ -572,6 +576,10 @@ struct GuiApplication {
     pdb_fetch_two_fofc: bool,
     pdb_fetch_fofc: bool,
     pdb_map_source: String,
+    pdb_probe_options: Option<crate::PdbFetchOptions>,
+    pdb_probe_deadline: Option<Instant>,
+    pdb_probe_receiver: Option<mpsc::Receiver<PdbProbeMessage>>,
+    pdb_probe_result: Option<std::result::Result<Vec<crate::GuiPdbFileKind>, String>>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
@@ -2349,6 +2357,10 @@ impl GuiApplication {
             pdb_fetch_two_fofc: false,
             pdb_fetch_fofc: false,
             pdb_map_source: "RCSB_CIF".to_string(),
+            pdb_probe_options: None,
+            pdb_probe_deadline: None,
+            pdb_probe_receiver: None,
+            pdb_probe_result: None,
             pdb_download_receiver: None,
             url_download_receiver: None,
             script_path: "script.js".to_string(),
@@ -8385,6 +8397,85 @@ impl GuiApplication {
         }
     }
 
+    fn pdb_fetch_options(&self) -> crate::PdbFetchOptions {
+        crate::PdbFetchOptions {
+            pdb_id: self.pdb_id.clone(),
+            fetch_coordinates: self.pdb_fetch_coordinates,
+            coordinate_source: self.pdb_coordinate_source.clone(),
+            fetch_two_fofc: self.pdb_fetch_two_fofc,
+            fetch_fofc: self.pdb_fetch_fofc,
+            map_source: self.pdb_map_source.clone(),
+        }
+    }
+
+    fn update_pdb_probe(&mut self, ctx: &egui::Context) {
+        let options = self.pdb_fetch_options();
+        let valid = crate::normalize_pdb_id(&options.pdb_id).is_ok();
+        let any_selected =
+            options.fetch_coordinates || options.fetch_two_fofc || options.fetch_fofc;
+        if !valid || !any_selected {
+            self.pdb_probe_options = None;
+            self.pdb_probe_deadline = None;
+            self.pdb_probe_receiver = None;
+            self.pdb_probe_result = None;
+            return;
+        }
+        if self.pdb_probe_options.as_ref() != Some(&options) {
+            self.pdb_probe_options = Some(options.clone());
+            self.pdb_probe_deadline = Some(Instant::now() + Duration::from_millis(180));
+            self.pdb_probe_receiver = None;
+            self.pdb_probe_result = None;
+            ctx.request_repaint_after(Duration::from_millis(180));
+        }
+
+        if self
+            .pdb_probe_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.pdb_probe_deadline = None;
+            let (sender, receiver) = mpsc::channel();
+            let probe_options = options.clone();
+            let result_options = options.clone();
+            let repaint = ctx.clone();
+            match std::thread::Builder::new()
+                .name("cuemol-pdb-probe".to_string())
+                .spawn(move || {
+                    let result = crate::probe_pdb_files(probe_options);
+                    let _ = sender.send((result_options, result));
+                    repaint.request_repaint();
+                }) {
+                Ok(_) => self.pdb_probe_receiver = Some(receiver),
+                Err(error) => {
+                    self.pdb_probe_result = Some(Err(format!(
+                        "failed to start PDB availability check: {error}"
+                    )));
+                }
+            }
+        } else if let Some(deadline) = self.pdb_probe_deadline {
+            ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
+        }
+
+        let result = self
+            .pdb_probe_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match result {
+            Some(Ok((result_options, result))) => {
+                self.pdb_probe_receiver = None;
+                if self.pdb_probe_options.as_ref() == Some(&result_options) {
+                    self.pdb_probe_result = Some(result);
+                }
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.pdb_probe_receiver = None;
+                self.pdb_probe_result = Some(Err(
+                    "PDB availability check stopped unexpectedly".to_string()
+                ));
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
+    }
+
     fn start_pdb_download(&mut self, ctx: &egui::Context) {
         if self.pdb_download_receiver.is_some() {
             self.set_status("PDB download is already running");
@@ -14218,9 +14309,43 @@ impl GuiApplication {
                 });
                 let any_selected =
                     self.pdb_fetch_coordinates || self.pdb_fetch_two_fofc || self.pdb_fetch_fofc;
+                self.update_pdb_probe(ctx);
+                let availability_ok = self
+                    .pdb_probe_result
+                    .as_ref()
+                    .is_some_and(|result| result.as_ref().is_ok_and(Vec::is_empty));
+                let availability_message = if valid_pdb_id && !any_selected {
+                    "Neither pdb nor map selected".to_string()
+                } else if valid_pdb_id && any_selected {
+                    match self.pdb_probe_result.as_ref() {
+                        Some(Ok(unavailable)) if !unavailable.is_empty() => {
+                            let entry_type =
+                                if unavailable.contains(&crate::GuiPdbFileKind::Coordinates) {
+                                    "PDB"
+                                } else {
+                                    "Map"
+                                };
+                            format!(
+                                "{entry_type} Entry {}: not found.",
+                                self.pdb_id.trim().to_ascii_lowercase()
+                            )
+                        }
+                        Some(Err(error)) => format!("Availability check failed: {error}"),
+                        Some(Ok(_)) => String::new(),
+                        None => "Checking availability…".to_string(),
+                    }
+                } else {
+                    String::new()
+                };
+                if !availability_message.is_empty() {
+                    ui.label(availability_message);
+                }
                 if ui
                     .add_enabled(
-                        valid_pdb_id && any_selected && self.pdb_download_receiver.is_none(),
+                        valid_pdb_id
+                            && any_selected
+                            && availability_ok
+                            && self.pdb_download_receiver.is_none(),
                         egui::Button::new("Download and Open"),
                     )
                     .clicked()

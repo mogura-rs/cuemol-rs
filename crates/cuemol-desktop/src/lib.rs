@@ -54,6 +54,14 @@ struct PdbDownloadSpec {
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PdbProbeSpec {
+    kinds: Vec<GuiPdbFileKind>,
+    url: String,
+    path: PathBuf,
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 struct DownloadGate {
     result: Mutex<Option<DownloadResult>>,
     ready: Condvar,
@@ -64,6 +72,9 @@ type DownloadGates = Mutex<HashMap<PathBuf, Arc<DownloadGate>>>;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 static DOWNLOAD_GATES: OnceLock<DownloadGates> = OnceLock::new();
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+static PDB_AVAILABILITY_CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 pub(crate) fn download_cache_path(filename: &str) -> std::path::PathBuf {
@@ -298,6 +309,93 @@ fn pdb_cached_path(primary_filename: &str, legacy_filename: Option<&str>) -> Pat
     } else {
         std::env::temp_dir().join(primary_filename)
     }
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn pdb_probe_specs(options: &PdbFetchOptions) -> std::result::Result<Vec<PdbProbeSpec>, String> {
+    let mut probes: Vec<PdbProbeSpec> = Vec::new();
+    for spec in pdb_download_specs(options)? {
+        if let Some(probe) = probes.iter_mut().find(|probe| probe.url == spec.url) {
+            probe.kinds.push(spec.kind);
+        } else {
+            probes.push(PdbProbeSpec {
+                kinds: vec![spec.kind],
+                url: spec.url,
+                path: spec.path,
+            });
+        }
+    }
+    Ok(probes)
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+pub(crate) fn probe_pdb_files(
+    options: PdbFetchOptions,
+) -> std::result::Result<Vec<GuiPdbFileKind>, String> {
+    let handles = pdb_probe_specs(&options)?
+        .into_iter()
+        .map(|probe| {
+            std::thread::Builder::new()
+                .name("cuemol-pdb-probe".to_string())
+                .spawn(
+                    move || -> std::result::Result<Vec<GuiPdbFileKind>, String> {
+                        if nonempty_file(&probe.path) || probe_url_available(&probe.url)? {
+                            Ok(Vec::new())
+                        } else {
+                            Ok(probe.kinds)
+                        }
+                    },
+                )
+                .map_err(|error| format!("failed to start PDB availability check: {error}"))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut unavailable = Vec::new();
+    for handle in handles {
+        unavailable.extend(
+            handle
+                .join()
+                .map_err(|_| "PDB availability check panicked".to_string())??,
+        );
+    }
+    Ok(unavailable)
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn probe_url_available(url: &str) -> std::result::Result<bool, String> {
+    let cache = PDB_AVAILABILITY_CACHE.get_or_init(Default::default);
+    if let Some(available) = cache
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(url)
+        .copied()
+    {
+        return Ok(available);
+    }
+    let status = std::process::Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--head",
+            "--connect-timeout",
+            "3",
+            "--max-time",
+            "8",
+        ])
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|error| format!("failed to start PDB availability check: {error}"))?;
+    let available = status.success();
+    if available {
+        cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(url.to_string(), true);
+    }
+    Ok(available)
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -555,6 +653,26 @@ mod download_tests {
         options.fetch_two_fofc = true;
         options.map_source = "unknown".to_string();
         assert!(pdb_download_specs(&options).is_err());
+    }
+
+    #[test]
+    fn pdb_probe_specs_coalesce_the_shared_ebi_map() {
+        let options = PdbFetchOptions {
+            pdb_id: "1CRN".to_string(),
+            fetch_coordinates: true,
+            coordinate_source: "RCSB_CIF".to_string(),
+            fetch_two_fofc: true,
+            fetch_fofc: true,
+            map_source: "EBI_MTZ".to_string(),
+        };
+        let probes = pdb_probe_specs(&options).unwrap();
+        assert_eq!(probes.len(), 2);
+        assert_eq!(probes[0].kinds, [GuiPdbFileKind::Coordinates]);
+        assert_eq!(
+            probes[1].kinds,
+            [GuiPdbFileKind::TwoFoFc, GuiPdbFileKind::FoFc]
+        );
+        assert!(probes[1].url.ends_with("/1crn_map.mtz"));
     }
 
     #[test]

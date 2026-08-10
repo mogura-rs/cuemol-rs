@@ -4585,32 +4585,89 @@ async function showReferenceDialog(title) {
       "RCSB_CIF",
       mapsGroup,
     );
+    const resultText = dialogParagraph("");
+    resultText.className = "dialog-note";
+    dialogContent.append(resultText);
+    let availabilityState = "idle";
+    let availabilityTimer = null;
+    let availabilitySequence = 0;
+    const availabilityArgs = () => ({
+      pdbId: pdbId.value.trim().toUpperCase(),
+      fetchCoordinates: fetchCoordinates.checked,
+      coordinateSource: coordinateSource.value,
+      fetchTwoFofc: fetchTwoFofc.checked,
+      fetchFofc: fetchFofc.checked,
+      mapSource: mapSource.value,
+    });
     const open = button("Download and Open", "dialog-primary", async () => {
-      const id = pdbId.value.trim().toUpperCase();
+      const args = availabilityArgs();
+      const id = args.pdbId;
       if (!/^[0-9][0-9A-Z]{3}$/.test(id)) return;
-      const changed = await mutateWithViewport("open_pdb", {
-        pdbId: id,
-        fetchCoordinates: fetchCoordinates.checked,
-        coordinateSource: coordinateSource.value,
-        fetchTwoFofc: fetchTwoFofc.checked,
-        fetchFofc: fetchFofc.checked,
-        mapSource: mapSource.value,
-      });
+      const changed = await mutateWithViewport("open_pdb", args);
       if (changed) referenceDialog.close();
     });
     const updateOpenState = () => {
+      const validId = /^[0-9][0-9A-Z]{3}$/.test(pdbId.value.trim().toUpperCase());
       const mapsSelected = fetchTwoFofc.checked || fetchFofc.checked;
       coordinateSource.disabled = !fetchCoordinates.checked;
       mapSource.disabled = !mapsSelected;
       open.disabled =
-        !/^[0-9][0-9A-Z]{3}$/.test(pdbId.value.trim().toUpperCase()) ||
-        (!fetchCoordinates.checked && !mapsSelected);
+        !validId ||
+        (!fetchCoordinates.checked && !mapsSelected) ||
+        availabilityState !== "available";
     };
-    pdbId.addEventListener("input", updateOpenState);
-    fetchCoordinates.addEventListener("change", updateOpenState);
-    fetchTwoFofc.addEventListener("change", updateOpenState);
-    fetchFofc.addEventListener("change", updateOpenState);
-    updateOpenState();
+    const scheduleAvailabilityCheck = () => {
+      clearTimeout(availabilityTimer);
+      const sequence = ++availabilitySequence;
+      const args = availabilityArgs();
+      const validId = /^[0-9][0-9A-Z]{3}$/.test(args.pdbId);
+      const anySelected =
+        args.fetchCoordinates || args.fetchTwoFofc || args.fetchFofc;
+      if (!validId) {
+        availabilityState = "idle";
+        resultText.textContent = "";
+        updateOpenState();
+        return;
+      }
+      if (!anySelected) {
+        availabilityState = "idle";
+        resultText.textContent = "Neither pdb nor map selected";
+        updateOpenState();
+        return;
+      }
+      availabilityState = "checking";
+      resultText.textContent = "Checking availability…";
+      updateOpenState();
+      availabilityTimer = setTimeout(async () => {
+        if (!referenceDialog.open || !pdbId.isConnected) return;
+        try {
+          const unavailable = await invoke("check_pdb_availability", args);
+          if (sequence !== availabilitySequence || !referenceDialog.open || !pdbId.isConnected) {
+            return;
+          }
+          if (unavailable.length) {
+            const entryType = unavailable.includes("coordinates") ? "PDB" : "Map";
+            resultText.textContent = `${entryType} Entry ${args.pdbId.toLowerCase()}: not found.`;
+            availabilityState = "unavailable";
+          } else {
+            resultText.textContent = "";
+            availabilityState = "available";
+          }
+        } catch (error) {
+          if (sequence !== availabilitySequence) return;
+          resultText.textContent = `Availability check failed: ${error}`;
+          availabilityState = "unavailable";
+        }
+        updateOpenState();
+      }, 180);
+    };
+    pdbId.addEventListener("input", scheduleAvailabilityCheck);
+    fetchCoordinates.addEventListener("change", scheduleAvailabilityCheck);
+    coordinateSource.addEventListener("change", scheduleAvailabilityCheck);
+    fetchTwoFofc.addEventListener("change", scheduleAvailabilityCheck);
+    fetchFofc.addEventListener("change", scheduleAvailabilityCheck);
+    mapSource.addEventListener("change", scheduleAvailabilityCheck);
+    scheduleAvailabilityCheck();
     dialogActions(open);
   } else {
     dialogContent.append(dialogParagraph(`${title} dialog`));

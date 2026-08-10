@@ -411,6 +411,7 @@ fn tauri_open_pdb_matches_reference_coordinate_and_map_options() {
     }
     for binding in [
         "await invoke(\"get_pdb_history\")",
+        "await invoke(\"check_pdb_availability\", args)",
         "pdbHistoryList.id = \"open-pdb-history\"",
         "pdbId.setAttribute(\"list\", pdbHistoryList.id)",
         "fetchCoordinates: fetchCoordinates.checked",
@@ -423,6 +424,9 @@ fn tauri_open_pdb_matches_reference_coordinate_and_map_options() {
     }
     assert!(JS.contains("coordinateSource.disabled = !fetchCoordinates.checked"));
     assert!(JS.contains("mapSource.disabled = !mapsSelected"));
+    assert!(JS.contains("Checking availability…"));
+    assert!(JS.contains("Neither pdb nor map selected"));
+    assert!(JS.contains("setTimeout(async () =>"));
 }
 
 #[test]
