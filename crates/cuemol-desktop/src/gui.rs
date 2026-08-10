@@ -452,6 +452,7 @@ struct GuiApplication {
     workspace_aux_selection: Option<WorkspaceAuxSelection>,
     editing_saved_camera: Option<(cuemol_core::Uid, String)>,
     style_properties_draft: Option<NativeStyleProperties>,
+    renderer_style_create_draft: Option<NativeRendererStyleCreate>,
     /// Molecule chosen in the MolStruct panel's molecule selector (CueMol2
     /// `molstruct-panel.xul`); independent of the Workspace tree selection.
     molstruct_object: Option<cuemol_core::Uid>,
@@ -1047,6 +1048,18 @@ struct NativeStyleProperties {
     name: String,
     read_only: bool,
     xml: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeRendererStyleCreate {
+    scene_uid: cuemol_core::Uid,
+    object_uid: cuemol_core::Uid,
+    renderer_uid: cuemol_core::Uid,
+    renderer_name: String,
+    renderer_type: String,
+    style_set_index: Option<usize>,
+    name_prefix: String,
+    overwrite: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2099,6 +2112,7 @@ impl GuiApplication {
             workspace_aux_selection: None,
             editing_saved_camera: None,
             style_properties_draft: None,
+            renderer_style_create_draft: None,
             molstruct_object: None,
             molstruct_expand_all: false,
             selection_tab: SelectionTab::Command,
@@ -3624,11 +3638,20 @@ impl GuiApplication {
             } else {
                 format!("{} ({})", renderer.name, renderer.renderer_type)
             };
-            if ui.selectable_label(selected, label).clicked() {
+            let response = ui.selectable_label(selected, label);
+            if response.clicked() {
                 self.activate_workspace_scene(scene_uid, camera);
                 self.selected_object = Some(object_uid);
                 self.selected_renderer = Some(renderer.uid);
                 self.workspace_aux_selection = None;
+            }
+            if !is_group {
+                response.context_menu(|ui| {
+                    if ui.button("Create style...").clicked() {
+                        self.open_renderer_style_create(scene_uid, object_uid, renderer.uid);
+                        ui.close();
+                    }
+                });
             }
         });
     }
@@ -7380,6 +7403,7 @@ impl GuiApplication {
         self.scene_props_dialog(ctx);
         self.view_props_dialog(ctx, camera);
         self.style_props_dialog(ctx);
+        self.renderer_style_create_dialog(ctx);
         self.chain_dialog(ctx);
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx);
@@ -10272,6 +10296,196 @@ impl GuiApplication {
             name,
             read_only: false,
         });
+    }
+
+    fn open_renderer_style_create(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+    ) {
+        let Some(renderer) = self
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .and_then(|scene| scene.object(object_uid))
+            .and_then(|object| object.renderer(renderer_uid))
+        else {
+            self.set_status("Renderer not found");
+            return;
+        };
+        if renderer.renderer_type() == "*group" {
+            self.set_status("Renderer groups cannot be saved as styles");
+            return;
+        }
+        let style_set_index = self
+            .state
+            .style_summaries(scene_uid)
+            .into_iter()
+            .filter(|style| !style.read_only)
+            .filter_map(|style| style.local_index)
+            .next_back();
+        self.renderer_style_create_draft = Some(NativeRendererStyleCreate {
+            scene_uid,
+            object_uid,
+            renderer_uid,
+            renderer_name: renderer.name().to_string(),
+            renderer_type: renderer.renderer_type().to_string(),
+            style_set_index,
+            name_prefix: String::new(),
+            overwrite: false,
+        });
+    }
+
+    fn apply_renderer_style_create(
+        &mut self,
+        draft: &NativeRendererStyleCreate,
+    ) -> std::result::Result<String, String> {
+        let local_index = draft
+            .style_set_index
+            .ok_or_else(|| "no writable style set is available".to_string())?;
+        let undo = self.capture_undo();
+        let style_name = self
+            .state
+            .create_scene_renderer_style(
+                draft.scene_uid,
+                local_index,
+                draft.object_uid,
+                draft.renderer_uid,
+                &draft.name_prefix,
+                draft.overwrite,
+            )
+            .map_err(|error| error.to_string())?;
+        self.push_undo_snapshot(undo);
+        self.modified_scenes.insert(draft.scene_uid);
+        self.rebuild_snapshot();
+        Ok(style_name)
+    }
+
+    fn renderer_style_create_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.renderer_style_create_draft.take() else {
+            return;
+        };
+        let style_sets = self
+            .state
+            .style_summaries(draft.scene_uid)
+            .into_iter()
+            .filter(|style| !style.read_only)
+            .filter_map(|style| style.local_index.map(|index| (index, style.name)))
+            .collect::<Vec<_>>();
+        if draft
+            .style_set_index
+            .is_some_and(|index| !style_sets.iter().any(|(candidate, _)| *candidate == index))
+        {
+            draft.style_set_index = style_sets.last().map(|(index, _)| *index);
+            draft.overwrite = false;
+        }
+        let style_name = format!("{}{}", draft.name_prefix.trim(), draft.renderer_type);
+        let style_exists = draft.style_set_index.is_some_and(|local_index| {
+            self.state
+                .scene_manager()
+                .scene(draft.scene_uid)
+                .and_then(|scene| scene.loaded_styles().get(local_index))
+                .is_some_and(|style| {
+                    style.node.children().iter().any(|child| {
+                        child.tag_name() == "style"
+                            && child
+                                .str_attr("id")
+                                .as_str()
+                                .eq_ignore_ascii_case(&style_name)
+                    })
+                })
+        });
+        let mut open = true;
+        let mut create = false;
+        let mut cancel = false;
+        egui::Window::new("Create Renderer Style")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .default_height(190.0)
+            .show(ctx, |ui| {
+                egui::Grid::new("renderer_style_create_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Original rend:");
+                        ui.label(format!("{} ({})", draft.renderer_name, draft.renderer_type));
+                        ui.end_row();
+
+                        ui.label("Target Style set:");
+                        let selected_name = draft
+                            .style_set_index
+                            .and_then(|index| {
+                                style_sets.iter().find(|(candidate, _)| *candidate == index)
+                            })
+                            .map(|(_, name)| name.as_str())
+                            .unwrap_or("(none)");
+                        let before = draft.style_set_index;
+                        egui::ComboBox::from_id_salt("renderer_style_target_set")
+                            .selected_text(selected_name)
+                            .show_ui(ui, |ui| {
+                                for (index, name) in &style_sets {
+                                    ui.selectable_value(
+                                        &mut draft.style_set_index,
+                                        Some(*index),
+                                        name,
+                                    );
+                                }
+                            });
+                        if draft.style_set_index != before {
+                            draft.overwrite = false;
+                        }
+                        ui.end_row();
+
+                        ui.label("Style name:");
+                        ui.horizontal(|ui| {
+                            if ui.text_edit_singleline(&mut draft.name_prefix).changed() {
+                                draft.overwrite = false;
+                            }
+                            ui.label(&draft.renderer_type);
+                        });
+                        ui.end_row();
+                    });
+                if style_sets.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(180, 70, 50),
+                        "Create a writable scene Style set first.",
+                    );
+                } else if style_exists {
+                    ui.checkbox(
+                        &mut draft.overwrite,
+                        format!("Overwrite existing style {style_name}"),
+                    );
+                }
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let create_enabled = draft.style_set_index.is_some()
+                        && !draft.name_prefix.trim().is_empty()
+                        && (!style_exists || draft.overwrite);
+                    if ui
+                        .add_enabled(create_enabled, egui::Button::new("Create"))
+                        .clicked()
+                    {
+                        create = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if create {
+            match self.apply_renderer_style_create(&draft) {
+                Ok(style_name) => self.set_status(format!("Created style {style_name}")),
+                Err(error) => {
+                    self.set_status(format!("Style error: {error}"));
+                    self.renderer_style_create_draft = Some(draft);
+                }
+            }
+        } else if !cancel && open {
+            self.renderer_style_create_draft = Some(draft);
+        }
     }
 
     fn open_style_properties(&mut self, selection: WorkspaceAuxSelection) {
@@ -17141,6 +17355,55 @@ mod tests {
     }
 
     #[test]
+    fn native_renderer_context_style_creation_is_undoable() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let local_index = app.state.create_scene_style(scene_uid, "user").unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let renderer_uid = app
+            .state
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "lines");
+        app.state
+            .set_renderer_property(object_uid, renderer_uid, "width", "3.5")
+            .unwrap();
+
+        app.open_renderer_style_create(scene_uid, object_uid, renderer_uid);
+        let mut draft = app.renderer_style_create_draft.take().unwrap();
+        assert_eq!(draft.style_set_index, Some(local_index));
+        draft.name_prefix = "Wide".to_string();
+        assert_eq!(
+            app.apply_renderer_style_create(&draft).unwrap(),
+            "Widesimple"
+        );
+        let style = &app
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index];
+        assert!(style.data.contains("id=\"Widesimple\""));
+        assert!(style.data.contains("width=\"3.5\""));
+        assert!(style.node.str_attr("modified").equals_ignore_case("true"));
+
+        app.undo(&mut CameraController::default());
+        let style = &app
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index];
+        assert!(!style.data.contains("id=\"Widesimple\""));
+    }
+
+    #[test]
     fn native_workspace_density_map_properties_apply_delete_undo_and_save() {
         let mut app = GuiApplication::new();
         let scene_uid = app.state.active_scene().unwrap();
@@ -18722,6 +18985,41 @@ mod tests {
                 });
             harness.run();
             save_harness(&mut harness, &out_dir.join("renderer_properties.png"));
+        }
+
+        // (1b5b) Renderer style creation dialog.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            let scene_uid = app.state.active_scene().unwrap();
+            app.state.create_scene_style(scene_uid, "user").unwrap();
+            if let Some(object_uid) = app
+                .state
+                .active_object_summaries()
+                .first()
+                .map(|object| object.uid)
+            {
+                if let Some(renderer_uid) = app
+                    .state
+                    .renderer_summaries(object_uid)
+                    .first()
+                    .map(|renderer| renderer.uid)
+                {
+                    app.open_renderer_style_create(scene_uid, object_uid, renderer_uid);
+                    app.renderer_style_create_draft
+                        .as_mut()
+                        .unwrap()
+                        .name_prefix = "Presentation".to_string();
+                }
+            }
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1000.0, 760.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("renderer_style_create.png"));
         }
 
         // (1b6) Ribbon renderer child-property page.

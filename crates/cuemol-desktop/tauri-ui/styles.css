@@ -2544,6 +2544,18 @@ summary:focus-visible {
   gap: 4px;
 }
 
+.renderer-style-name {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.renderer-style-name > span {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
 .reference-dialog.workspace-property-dialog .dialog-reset {
   margin-right: auto;
 }

@@ -107,6 +107,17 @@ struct StylePropertiesInput {
     xml: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RendererStyleCreateInput {
+    scene_uid: u64,
+    local_index: usize,
+    object_uid: u64,
+    renderer_uid: u64,
+    name_prefix: String,
+    overwrite: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RendererDto {
@@ -4254,6 +4265,22 @@ impl AppModel {
         Ok(())
     }
 
+    fn create_renderer_style(&mut self, input: RendererStyleCreateInput) -> Result<(), String> {
+        let style_name = self
+            .desktop
+            .create_scene_renderer_style(
+                Uid::new(input.scene_uid),
+                input.local_index,
+                Uid::new(input.object_uid),
+                Uid::new(input.renderer_uid),
+                &input.name_prefix,
+                input.overwrite,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = format!("Created style {style_name}");
+        Ok(())
+    }
+
     fn style_properties(
         &self,
         scene_uid: u64,
@@ -4635,6 +4662,7 @@ enum ModelRequest {
     LoadCamera(String),
     DestroyCamera(String),
     CreateStyle(String),
+    CreateRendererStyle(RendererStyleCreateInput),
     GetStyleProperties {
         scene_uid: u64,
         local_index: usize,
@@ -5969,6 +5997,12 @@ fn handle_model_request(
         ModelRequest::CreateStyle(name) => {
             let undo = model.capture_undo();
             model.create_named_style(&name)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::CreateRendererStyle(input) => {
+            let undo = model.capture_undo();
+            model.create_renderer_style(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -7776,6 +7810,17 @@ fn create_style(name: String, state: State<'_, ManagedState>) -> Result<AppSnaps
 }
 
 #[tauri::command]
+fn create_renderer_style(
+    input: RendererStyleCreateInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::CreateRendererStyle(input),
+    )?)
+}
+
+#[tauri::command]
 fn get_style_properties(
     scene_uid: u64,
     local_index: usize,
@@ -8965,6 +9010,7 @@ pub fn run() -> Result<(), tauri::Error> {
             load_camera,
             destroy_camera,
             create_style,
+            create_renderer_style,
             get_style_properties,
             get_renderer_style_options,
             set_style_properties,
@@ -11304,6 +11350,58 @@ mod tests {
             .styles
             .iter()
             .any(|style| style.name == "custom"));
+    }
+
+    #[test]
+    fn renderer_context_style_creation_is_undoable_without_rebuilding_the_mesh() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let local_index = model.desktop.create_scene_style(scene_uid, "user").unwrap();
+        model
+            .desktop
+            .set_renderer_property(object_uid, renderer_uid, "width", "3.5")
+            .unwrap();
+        model.prepare_mesh_if_needed().unwrap();
+        assert!(model.mesh.is_some());
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CreateRendererStyle(RendererStyleCreateInput {
+                scene_uid: scene_uid.get(),
+                local_index,
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                name_prefix: "Wide".to_string(),
+                overwrite: false,
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(snapshot.status, "Created style Widesimple");
+        assert!(snapshot
+            .styles
+            .iter()
+            .any(|style| style.local_index == Some(local_index) && style.modified));
+        assert!(model.mesh.is_some());
+        let style = &model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index];
+        assert!(style.data.contains("id=\"Widesimple\""));
+        assert!(style.data.contains("width=\"3.5\""));
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let style = &model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index];
+        assert!(!style.data.contains("id=\"Widesimple\""));
     }
 
     #[test]

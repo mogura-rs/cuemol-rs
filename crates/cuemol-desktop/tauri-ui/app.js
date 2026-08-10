@@ -3155,6 +3155,118 @@ async function chooseOutputPath(defaultPath, name, extensions) {
   });
 }
 
+async function rendererStyleCreateEditor(object, renderer) {
+  const styleSets = (snapshot?.styles || []).filter(
+    (style) =>
+      style.ownerSceneUid === object.sceneUid &&
+      style.localIndex !== null &&
+      !style.readOnly,
+  );
+  dialogTitle.textContent = "Create Renderer Style";
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog has-actions";
+  dialogContent.append(dialogParagraph(`Original rend: ${renderer.name} (${renderer.rendererType})`));
+  const styleSet = dialogSelect(
+    "Target Style set:",
+    styleSets.map((style) => [style.localIndex, style.name]),
+    styleSets.at(-1)?.localIndex ?? "",
+  );
+  const nameRow = document.createElement("label");
+  nameRow.className = "dialog-field";
+  const nameLabel = document.createElement("span");
+  nameLabel.textContent = "Style name:";
+  const nameEditor = document.createElement("span");
+  nameEditor.className = "renderer-style-name";
+  const namePrefix = document.createElement("input");
+  const suffix = document.createElement("span");
+  suffix.textContent = renderer.rendererType;
+  nameEditor.append(namePrefix, suffix);
+  nameRow.append(nameLabel, nameEditor);
+  dialogContent.append(nameRow);
+  const overwriteLabel = document.createElement("label");
+  overwriteLabel.className = "dialog-checkbox";
+  const overwrite = document.createElement("input");
+  overwrite.type = "checkbox";
+  const overwriteText = document.createElement("span");
+  overwriteLabel.append(overwrite, overwriteText);
+  overwriteLabel.hidden = true;
+  dialogContent.append(overwriteLabel);
+  const note = dialogParagraph("");
+  note.className = "dialog-note";
+  if (!styleSets.length) note.textContent = "Create a writable scene Style set first.";
+  dialogContent.append(note);
+
+  let existingNames = new Set();
+  let requestSequence = 0;
+  let create;
+  const updateState = () => {
+    const styleName = `${namePrefix.value.trim()}${renderer.rendererType}`;
+    const exists = existingNames.has(styleName.toLowerCase());
+    overwriteLabel.hidden = !exists;
+    overwriteText.textContent = `Overwrite existing style ${styleName}`;
+    if (!exists) overwrite.checked = false;
+    create.disabled =
+      !styleSets.length || !namePrefix.value.trim() || (exists && !overwrite.checked);
+  };
+  const loadStyleNames = async () => {
+    const sequence = ++requestSequence;
+    existingNames = new Set();
+    if (!styleSets.length || styleSet.value === "") {
+      updateState();
+      return;
+    }
+    const localIndex = Number(styleSet.value);
+    if (!Number.isInteger(localIndex)) {
+      updateState();
+      return;
+    }
+    try {
+      const properties = await invoke("get_style_properties", {
+        sceneUid: object.sceneUid,
+        localIndex,
+      });
+      if (sequence !== requestSequence) return;
+      const documentNode = new DOMParser().parseFromString(properties.xml, "application/xml");
+      existingNames = new Set(
+        [...documentNode.documentElement.children]
+          .filter((node) => node.tagName === "style")
+          .map((node) => (node.getAttribute("id") || "").toLowerCase()),
+      );
+    } catch (error) {
+      if (sequence === requestSequence) showError(error);
+    }
+    updateState();
+  };
+  namePrefix.addEventListener("input", updateState);
+  overwrite.addEventListener("change", updateState);
+  styleSet.addEventListener("change", () => {
+    overwrite.checked = false;
+    loadStyleNames();
+  });
+  const cancel = button("Cancel", "", () => referenceDialog.close());
+  create = button("Create", "dialog-primary", async () => {
+    const localIndex = Number(styleSet.value);
+    if (!Number.isInteger(localIndex)) return;
+    const changed = await mutateWithoutViewport("create_renderer_style", {
+      input: {
+        sceneUid: object.sceneUid,
+        localIndex,
+        objectUid: object.uid,
+        rendererUid: renderer.uid,
+        namePrefix: namePrefix.value,
+        overwrite: overwrite.checked,
+      },
+    });
+    if (changed) referenceDialog.close();
+  });
+  create.disabled = true;
+  dialogActions(cancel, create);
+  await loadStyleNames();
+  if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
+  namePrefix.focus();
+}
+
 async function showStyleProperties(style) {
   if (!style || style.localIndex === null) {
     showError("Global styles are read-only.");
@@ -4665,6 +4777,16 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         rendererRow.addEventListener("dblclick", () =>
           showReferenceDialog("Renderer Properties"),
         );
+        if (!isGroup) {
+          rendererRow.addEventListener("contextmenu", async (event) => {
+            event.preventDefault();
+            selectedObjectUid = object.uid;
+            selectedRendererUid = renderer.uid;
+            workspaceSelectionKind = "renderer";
+            if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
+            await rendererStyleCreateEditor(object, renderer);
+          });
+        }
         rendererRow.prepend(
           workspaceStateControls(
             {

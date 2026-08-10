@@ -1907,6 +1907,87 @@ impl DesktopAppState {
         Ok(scene.add_loaded_style(LoadedStyle { node, data }))
     }
 
+    pub fn create_scene_renderer_style(
+        &mut self,
+        scene_uid: Uid,
+        local_index: usize,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        name_prefix: &str,
+        overwrite: bool,
+    ) -> Result<String> {
+        let name_prefix = name_prefix.trim();
+        if name_prefix.is_empty() {
+            return Err(CueMolError::invalid_argument("style name is required"));
+        }
+        let renderer = self
+            .scene_manager()
+            .scene(scene_uid)
+            .and_then(|scene| scene.object(object_uid))
+            .and_then(|object| object.renderer(renderer_uid))
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?
+            .clone();
+        if renderer.renderer_type() == "*group" {
+            return Err(CueMolError::invalid_argument(
+                "renderer groups cannot be saved as styles",
+            ));
+        }
+        let style_name = format!("{name_prefix}{}", renderer.renderer_type());
+        let mut style_node = LDom2Node::new();
+        style_node.set_tag_name("style");
+        style_node.set_type_name("renderer");
+        style_node.set_str_attr("id", &style_name);
+        style_node.set_str_attr("desc", name_prefix);
+        for (name, value) in renderer.qsc_attrs() {
+            if !matches!(
+                name.as_str(),
+                "name" | "type" | "ui_order" | "group" | "style"
+            ) {
+                style_node.set_str_attr(name, value);
+            }
+        }
+        for child in renderer.qsc_children() {
+            style_node.append_child_node(child.clone());
+        }
+
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let style = scene
+            .loaded_styles_mut()
+            .get_mut(local_index)
+            .ok_or_else(|| CueMolError::NotFound(format!("style {local_index}")))?;
+        if style.node.str_attr("readonly").equals_ignore_case("true") {
+            return Err(CueMolError::invalid_argument("style set is read-only"));
+        }
+        let style_exists = style.node.children().iter().any(|child| {
+            !child.is_attr()
+                && child.tag_name() == "style"
+                && child
+                    .str_attr("id")
+                    .as_str()
+                    .eq_ignore_ascii_case(&style_name)
+        });
+        if style_exists && !overwrite {
+            return Err(CueMolError::invalid_argument(format!(
+                "style already exists: {style_name}"
+            )));
+        }
+        style.node.retain_children(|child| {
+            child.is_attr()
+                || child.tag_name() != "style"
+                || !child
+                    .str_attr("id")
+                    .as_str()
+                    .eq_ignore_ascii_case(&style_name)
+        });
+        style.node.append_child_node(style_node);
+        style.node.set_str_attr("modified", "true");
+        style.data = write_ldom2_xml(&LDom2Tree::from(style.node.clone()));
+        Ok(style_name)
+    }
+
     pub fn update_scene_style(
         &mut self,
         scene_uid: Uid,
@@ -52242,6 +52323,84 @@ attribute \"dep\" string \"positions\"
             .style_summaries(scene_uid)
             .iter()
             .all(|style| style.local_index.is_none()));
+    }
+
+    #[test]
+    fn desktop_renderer_style_creation_captures_overwrites_and_persists_properties() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("styles", true).result_scene;
+        let local_index = app.create_scene_style(scene_uid, "user").unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let renderer_uid = app
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "lines");
+        app.set_renderer_property(object_uid, renderer_uid, "width", "2.5")
+            .unwrap();
+
+        assert_eq!(
+            app.create_scene_renderer_style(
+                scene_uid,
+                local_index,
+                object_uid,
+                renderer_uid,
+                "Wide",
+                false,
+            )
+            .unwrap(),
+            "Widesimple"
+        );
+        let xml = &app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data;
+        assert!(xml.contains("id=\"Widesimple\""));
+        assert!(xml.contains("desc=\"Wide\""));
+        assert!(xml.contains("width=\"2.5\""));
+        assert!(app
+            .renderer_style_options(scene_uid, "simple")
+            .iter()
+            .any(|style| style.name == "Widesimple"));
+
+        app.set_renderer_property(object_uid, renderer_uid, "width", "4")
+            .unwrap();
+        assert_eq!(
+            app.create_scene_renderer_style(
+                scene_uid,
+                local_index,
+                object_uid,
+                renderer_uid,
+                "Wide",
+                false,
+            )
+            .unwrap_err()
+            .to_string(),
+            "invalid argument: style already exists: Widesimple"
+        );
+        app.create_scene_renderer_style(
+            scene_uid,
+            local_index,
+            object_uid,
+            renderer_uid,
+            "Wide",
+            true,
+        )
+        .unwrap();
+        let xml = &app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data;
+        assert_eq!(xml.matches("id=\"Widesimple\"").count(), 1);
+        assert!(xml.contains("width=\"4\""));
     }
 
     #[test]

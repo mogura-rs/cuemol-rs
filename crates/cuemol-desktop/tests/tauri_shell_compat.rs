@@ -336,6 +336,12 @@ fn tauri_workspace_exposes_reference_style_nodes_and_actions() {
     assert!(JS.contains("mutate(\"destroy_style\""));
     assert!(JS.contains("invoke(\"get_style_properties\""));
     assert!(JS.contains("invoke(\"set_style_properties\""));
+    assert!(JS.contains("async function rendererStyleCreateEditor(object, renderer)"));
+    assert!(JS.contains("mutateWithoutViewport(\"create_renderer_style\""));
+    assert!(JS.contains("Create Renderer Style"));
+    assert!(JS.contains("Target Style set:"));
+    assert!(JS.contains("Overwrite existing style"));
+    assert!(CSS.contains(".renderer-style-name"));
 }
 
 #[test]
@@ -419,6 +425,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "set_workspace_visible",
         "set_workspace_locked",
         "get_renderer_style_options",
+        "create_renderer_style",
         "delete_workspace_item",
         "fit_workspace_item",
     ] {
