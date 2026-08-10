@@ -601,6 +601,8 @@ struct GuiApplication {
     superpose_moving_selection: String,
     superpose_auto_recenter: bool,
     superpose_use_property: bool,
+    bond_object: Option<cuemol_core::Uid>,
+    selected_nonstandard_bonds: std::collections::BTreeSet<(i32, i32)>,
     bond_aid1: String,
     bond_aid2: String,
     contact_r_min: f64,
@@ -2327,6 +2329,8 @@ impl GuiApplication {
             superpose_moving_selection: "name CA".to_string(),
             superpose_auto_recenter: true,
             superpose_use_property: false,
+            bond_object: None,
+            selected_nonstandard_bonds: std::collections::BTreeSet::new(),
             bond_aid1: String::new(),
             bond_aid2: String::new(),
             contact_r_min: 1.5,
@@ -8250,8 +8254,14 @@ impl GuiApplication {
         }
     }
 
+    fn bond_target_object_uid(&self) -> Option<cuemol_core::Uid> {
+        self.bond_object
+            .filter(|uid| self.state.scene_manager().object(*uid).is_some())
+            .or_else(|| self.target_object_uid())
+    }
+
     fn edit_bond(&mut self, make: bool) {
-        let Some(object_uid) = self.target_object_uid() else {
+        let Some(object_uid) = self.bond_target_object_uid() else {
             self.set_status("No object selected");
             return;
         };
@@ -8280,6 +8290,8 @@ impl GuiApplication {
                 self.push_undo_snapshot(undo);
                 self.rebuild_snapshot();
                 if make {
+                    self.bond_aid1.clear();
+                    self.bond_aid2.clear();
                     self.set_status("Bond created");
                 } else {
                     self.set_status("Bond removed");
@@ -8288,6 +8300,40 @@ impl GuiApplication {
             Ok(false) => self.set_status("Bond was unchanged"),
             Err(error) => self.set_error(error),
         }
+    }
+
+    fn remove_selected_nonstandard_bonds(&mut self) {
+        let Some(object_uid) = self.bond_target_object_uid() else {
+            self.set_status("No object selected");
+            return;
+        };
+        if self.selected_nonstandard_bonds.is_empty() {
+            self.set_status("Select at least one non-standard bond");
+            return;
+        }
+        let undo = self.capture_undo();
+        let pairs = self
+            .selected_nonstandard_bonds
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut removed = 0;
+        for (aid1, aid2) in pairs {
+            match self.state.remove_bond_in_object(object_uid, aid1, aid2) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    self.set_error(error);
+                    return;
+                }
+            }
+        }
+        self.selected_nonstandard_bonds.clear();
+        if removed > 0 {
+            self.push_undo_snapshot(undo);
+            self.rebuild_snapshot();
+        }
+        self.set_status(format!("Removed {removed} non-standard bond(s)"));
     }
 
     fn calculate_contacts(&mut self) {
@@ -13254,6 +13300,78 @@ impl GuiApplication {
     }
 
     fn bond_editor_tool_ui(&mut self, ui: &mut egui::Ui) {
+        let objects = self.state.active_object_summaries();
+        if !objects
+            .iter()
+            .any(|object| Some(object.uid) == self.bond_object)
+        {
+            self.bond_object = self
+                .target_object_uid()
+                .filter(|uid| objects.iter().any(|object| object.uid == *uid))
+                .or_else(|| objects.first().map(|object| object.uid));
+            self.selected_nonstandard_bonds.clear();
+        }
+        let before = self.bond_object;
+        egui::ComboBox::from_label("Mol name")
+            .selected_text(object_combo_label(&objects, self.bond_object))
+            .show_ui(ui, |ui| {
+                for object in &objects {
+                    ui.selectable_value(
+                        &mut self.bond_object,
+                        Some(object.uid),
+                        object.name.as_str(),
+                    );
+                }
+            });
+        if self.bond_object != before {
+            self.selected_nonstandard_bonds.clear();
+        }
+
+        let bonds = self
+            .bond_object
+            .and_then(|uid| self.state.nonstandard_bond_summaries(uid).ok())
+            .unwrap_or_default();
+        egui::Frame::new()
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .min_scrolled_height(96.0)
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        if bonds.is_empty() {
+                            ui.weak("No non-standard bonds.");
+                        }
+                        for bond in &bonds {
+                            let pair = (
+                                bond.atom1.serial.min(bond.atom2.serial),
+                                bond.atom1.serial.max(bond.atom2.serial),
+                            );
+                            let mut selected = self.selected_nonstandard_bonds.contains(&pair);
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut selected, "").changed() {
+                                    if selected {
+                                        self.selected_nonstandard_bonds.insert(pair);
+                                    } else {
+                                        self.selected_nonstandard_bonds.remove(&pair);
+                                    }
+                                }
+                                ui.monospace(format_nonstandard_bond_atom(&bond.atom1));
+                                ui.label("—");
+                                ui.monospace(format_nonstandard_bond_atom(&bond.atom2));
+                            });
+                        }
+                    });
+            });
+        if ui
+            .add_enabled(
+                !self.selected_nonstandard_bonds.is_empty(),
+                egui::Button::new("Delete selected"),
+            )
+            .clicked()
+        {
+            self.remove_selected_nonstandard_bonds();
+        }
+        ui.separator();
         ui.horizontal(|ui| {
             ui.label("Atom serials");
             ui.add_sized(
@@ -13266,11 +13384,8 @@ impl GuiApplication {
             );
         });
         ui.horizontal(|ui| {
-            if ui.button("Make Bond").clicked() {
+            if ui.button("Add").clicked() {
                 self.edit_bond(true);
-            }
-            if ui.button("Remove Bond").clicked() {
-                self.edit_bond(false);
             }
         });
     }
@@ -17728,6 +17843,22 @@ fn object_combo_label(
         .unwrap_or_else(|| "Select object".to_string())
 }
 
+fn format_nonstandard_bond_atom(atom: &crate::GuiBondAtomSummary) -> String {
+    let chain = if atom.chain_id.is_empty() {
+        "_"
+    } else {
+        &atom.chain_id
+    };
+    let residue_id = atom.insertion_code.map_or_else(
+        || atom.residue_id.to_string(),
+        |code| format!("{}{code}", atom.residue_id),
+    );
+    format!(
+        "{chain} {} {residue_id} {} (#{})",
+        atom.residue_name, atom.atom_name, atom.serial
+    )
+}
+
 fn gui_error(error: impl std::fmt::Display) -> CueMolError {
     CueMolError::invalid_argument(error.to_string())
 }
@@ -20678,6 +20809,48 @@ mod tests {
             &app.cached_active_structure_tree()
         ));
         assert_eq!(app.cached_active_structure_tree().len(), 2);
+    }
+
+    #[test]
+    fn native_bond_editor_lists_and_removes_selected_nonstandard_bonds() {
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().into_owned();
+        app.open_current_path(&mut camera);
+        let object_uid = app.state.active_object_summaries()[0].uid;
+        app.bond_object = Some(object_uid);
+        let before = app.state.nonstandard_bond_summaries(object_uid).unwrap();
+
+        app.bond_aid1 = "1".to_string();
+        app.bond_aid2 = "327".to_string();
+        app.edit_bond(true);
+        assert_eq!(app.status, "Bond created");
+        assert!(app.bond_aid1.is_empty());
+        let added = app
+            .state
+            .nonstandard_bond_summaries(object_uid)
+            .unwrap()
+            .into_iter()
+            .find(|bond| {
+                [bond.atom1.serial, bond.atom2.serial]
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == std::collections::BTreeSet::from([1, 327])
+            })
+            .expect("created bond is listed");
+        app.selected_nonstandard_bonds.insert((
+            added.atom1.serial.min(added.atom2.serial),
+            added.atom1.serial.max(added.atom2.serial),
+        ));
+        app.remove_selected_nonstandard_bonds();
+        assert_eq!(app.status, "Removed 1 non-standard bond(s)");
+        assert_eq!(
+            app.state.nonstandard_bond_summaries(object_uid).unwrap(),
+            before
+        );
     }
 
     /// Exercise the whole shell + every left-panel section headlessly so a runtime

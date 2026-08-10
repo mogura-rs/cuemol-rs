@@ -2191,6 +2191,38 @@ summary:focus-visible {
   margin: -2px 0 10px;
 }
 
+.bond-list {
+  min-height: 96px;
+  max-height: 240px;
+  margin: 8px 0 12px;
+  overflow: auto;
+  border: 1px solid #999;
+  background: #fff;
+}
+
+.bond-list > p {
+  margin: 10px;
+  color: #666;
+}
+
+.bond-list-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  min-height: 28px;
+  border-bottom: 1px solid #ddd;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.bond-list-row > * {
+  min-width: 0;
+  margin: 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .morph-frame-list {
   min-height: 72px;
   max-height: 150px;

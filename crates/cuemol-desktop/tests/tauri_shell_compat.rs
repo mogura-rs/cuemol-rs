@@ -146,6 +146,8 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "tick_animation_frame",
         "superpose_objects",
         "edit_bond",
+        "get_nonstandard_bonds",
+        "remove_nonstandard_bonds",
         "calculate_contacts",
         "assign_secondary_structure",
         "write_surface",
@@ -174,6 +176,10 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     }
     assert!(HTML.contains("data-interaction=\"rotate\""));
     assert!(HTML.contains("data-interaction=\"rect-select\""));
+    assert!(JS.contains("bondList.className = \"bond-list\""));
+    assert!(JS.contains("button(\"Delete selected\""));
+    assert!(JS.contains("JSON.parse(json)"));
+    assert!(CSS.contains(".bond-list-row"));
 }
 
 #[test]

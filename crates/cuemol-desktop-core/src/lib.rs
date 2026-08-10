@@ -611,6 +611,22 @@ pub struct GuiAtomSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiBondAtomSummary {
+    pub serial: i32,
+    pub chain_id: String,
+    pub residue_name: String,
+    pub residue_id: i32,
+    pub insertion_code: Option<char>,
+    pub atom_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiNonstandardBondSummary {
+    pub atom1: GuiBondAtomSummary,
+    pub atom2: GuiBondAtomSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiSequenceSummary {
     pub object_uid: Uid,
     pub object_name: String,
@@ -8484,6 +8500,47 @@ impl DesktopAppState {
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         Ok(MolAnlManager::new().make_bond(object.mol_mut(), aid1, aid2))
+    }
+
+    pub fn nonstandard_bond_summaries(
+        &self,
+        object_uid: Uid,
+    ) -> Result<Vec<GuiNonstandardBondSummary>> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let molecule = object.mol();
+        let atom_summary = |index: usize| {
+            let atom = molecule.atoms().get(index)?;
+            Some(GuiBondAtomSummary {
+                serial: atom.serial,
+                chain_id: atom.chain_id.clone(),
+                residue_name: atom.res_name.clone(),
+                residue_id: atom.res_id,
+                insertion_code: atom.ins_code,
+                atom_name: atom.name.trim().to_string(),
+            })
+        };
+        Ok(molecule
+            .bonds()
+            .iter()
+            .filter(|bond| bond.persist)
+            .filter_map(|bond| {
+                Some(GuiNonstandardBondSummary {
+                    atom1: atom_summary(bond.atom1)?,
+                    atom2: atom_summary(bond.atom2)?,
+                })
+            })
+            .collect())
+    }
+
+    pub fn nonstandard_bonds_json(&self, object_uid: Uid) -> Result<String> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        Ok(MolAnlManager::new().get_nostd_bonds_json(object.mol()))
     }
 
     pub fn remove_bond_in_object(&mut self, object_uid: Uid, aid1: i32, aid2: i32) -> Result<bool> {
@@ -55310,8 +55367,22 @@ attribute \"dep\" string \"positions\"
             Matrix4::IDENTITY
         );
 
+        let bonds_before = app.nonstandard_bond_summaries(first).unwrap();
         assert!(app.make_bond_in_object(first, 1, 327).unwrap());
+        let bonds = app.nonstandard_bond_summaries(first).unwrap();
+        let added = bonds
+            .iter()
+            .find(|bond| {
+                [bond.atom1.serial, bond.atom2.serial]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+                    == BTreeSet::from([1, 327])
+            })
+            .expect("created non-standard bond summary");
+        assert_eq!(added.atom1.chain_id, "A");
+        assert!(!added.atom1.atom_name.is_empty());
         assert!(app.remove_bond_in_object(first, 1, 327).unwrap());
+        assert_eq!(app.nonstandard_bond_summaries(first).unwrap(), bonds_before);
         let contacts = app
             .calc_atom_contacts_in_object(first, "name CA", 1.0, 8.0, false, 4)
             .unwrap();

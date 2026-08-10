@@ -3619,25 +3619,81 @@ async function showReferenceDialog(title) {
         objectOptions,
         selectedObjectUid ?? objects[0].uid,
       );
+      const selectedBonds = new Set();
+      let bonds = [];
+      const bondList = document.createElement("div");
+      bondList.className = "bond-list";
+      const remove = button("Delete selected", "", async () => {
+        const pairs = bonds
+          .filter((bond) => selectedBonds.has(`${bond[0].aid}:${bond[1].aid}`))
+          .map((bond) => [bond[0].aid, bond[1].aid]);
+        if (pairs.length === 0) return;
+        const changed = await mutate("remove_nonstandard_bonds", {
+          objectUid: Number(object.value),
+          pairs,
+        });
+        if (changed) await refreshBonds();
+      });
+      remove.disabled = true;
+      const formatAtom = (atom) =>
+        `${atom.chain || "_"} ${atom.resn} ${atom.resid} ${atom.aname} (#${atom.aid})`;
+      const renderBonds = () => {
+        bondList.replaceChildren();
+        if (bonds.length === 0) {
+          bondList.append(dialogParagraph("No non-standard bonds."));
+        }
+        for (const bond of bonds) {
+          const key = `${bond[0].aid}:${bond[1].aid}`;
+          const row = document.createElement("label");
+          row.className = "bond-list-row";
+          const selected = document.createElement("input");
+          selected.type = "checkbox";
+          selected.checked = selectedBonds.has(key);
+          selected.addEventListener("change", () => {
+            if (selected.checked) selectedBonds.add(key);
+            else selectedBonds.delete(key);
+            remove.disabled = selectedBonds.size === 0;
+          });
+          const atom1 = document.createElement("span");
+          atom1.textContent = formatAtom(bond[0]);
+          const atom2 = document.createElement("span");
+          atom2.textContent = formatAtom(bond[1]);
+          row.append(selected, atom1, atom2);
+          bondList.append(row);
+        }
+      };
+      const refreshBonds = async () => {
+        try {
+          const json = await invoke("get_nonstandard_bonds", {
+            objectUid: Number(object.value),
+          });
+          bonds = JSON.parse(json);
+          selectedBonds.clear();
+          remove.disabled = true;
+          renderBonds();
+        } catch (error) {
+          showError(error);
+        }
+      };
+      object.addEventListener("change", refreshBonds);
+      dialogContent.append(bondList);
       const aid1 = dialogField("Atom1", "", "number");
       const aid2 = dialogField("Atom2", "", "number");
       const make = button("Add", "dialog-primary", async () => {
-        await mutate("edit_bond", {
+        const changed = await mutate("edit_bond", {
           objectUid: Number(object.value),
           aid1: Number(aid1.value),
           aid2: Number(aid2.value),
           make: true,
         });
-      });
-      const remove = button("Delete", "", async () => {
-        await mutate("edit_bond", {
-          objectUid: Number(object.value),
-          aid1: Number(aid1.value),
-          aid2: Number(aid2.value),
-          make: false,
-        });
+        if (changed) {
+          aid1.value = "";
+          aid2.value = "";
+          await refreshBonds();
+        }
       });
       dialogActions(remove, make);
+      void refreshBonds();
     }
   } else if (title === "Interaction") {
     dialogTitle.textContent = "Interaction analysis";

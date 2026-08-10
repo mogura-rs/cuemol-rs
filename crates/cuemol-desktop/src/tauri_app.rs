@@ -5325,6 +5325,13 @@ enum ModelRequest {
         aid2: i32,
         make: bool,
     },
+    GetNonstandardBonds {
+        object_uid: u64,
+    },
+    RemoveNonstandardBonds {
+        object_uid: u64,
+        pairs: Vec<[i32; 2]>,
+    },
     CalculateContacts {
         object_uid: u64,
         selection: String,
@@ -7492,6 +7499,40 @@ fn handle_model_request(
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::GetNonstandardBonds { object_uid } => {
+            let json = model
+                .desktop
+                .nonstandard_bonds_json(Uid::new(object_uid))
+                .map_err(|error| error.to_string())?;
+            Ok(ModelResponse::Message(json))
+        }
+        ModelRequest::RemoveNonstandardBonds { object_uid, pairs } => {
+            let pairs = pairs
+                .into_iter()
+                .filter(|[aid1, aid2]| aid1 != aid2)
+                .map(|[aid1, aid2]| (aid1.min(aid2), aid1.max(aid2)))
+                .collect::<BTreeSet<_>>();
+            if pairs.is_empty() {
+                return Err("select at least one non-standard bond".to_string());
+            }
+            let undo = model.capture_undo();
+            let mut removed = 0;
+            for (aid1, aid2) in pairs {
+                if model
+                    .desktop
+                    .remove_bond_in_object(Uid::new(object_uid), aid1, aid2)
+                    .map_err(|error| error.to_string())?
+                {
+                    removed += 1;
+                }
+            }
+            model.status = format!("Removed {removed} non-standard bond(s)");
+            if removed > 0 {
+                model.invalidate_mesh(false);
+                model.push_undo(undo);
+            }
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::CalculateContacts {
             object_uid,
             selection,
@@ -9491,6 +9532,29 @@ fn edit_bond(
 }
 
 #[tauri::command]
+fn get_nonstandard_bonds(
+    object_uid: u64,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::GetNonstandardBonds { object_uid },
+    )?)
+}
+
+#[tauri::command]
+fn remove_nonstandard_bonds(
+    object_uid: u64,
+    pairs: Vec<[i32; 2]>,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::RemoveNonstandardBonds { object_uid, pairs },
+    )?)
+}
+
+#[tauri::command]
 fn calculate_contacts(
     object_uid: u64,
     selection: String,
@@ -10210,6 +10274,8 @@ pub fn run() -> Result<(), tauri::Error> {
             merge_molecules,
             superpose_objects,
             edit_bond,
+            get_nonstandard_bonds,
+            remove_nonstandard_bonds,
             calculate_contacts,
             assign_secondary_structure,
             write_surface,
@@ -14013,6 +14079,11 @@ mod tests {
         let objects = model.desktop.active_object_summaries();
         let first = objects[0].uid.get();
         let second = objects[1].uid.get();
+        let bond_count = model
+            .desktop
+            .nonstandard_bond_summaries(Uid::new(first))
+            .unwrap()
+            .len();
 
         handle_model_request(
             &mut model,
@@ -14037,6 +14108,44 @@ mod tests {
             },
         )
         .unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::GetNonstandardBonds { object_uid: first },
+        )
+        .unwrap();
+        let ModelResponse::Message(bonds) = response else {
+            panic!("expected non-standard bond JSON");
+        };
+        assert!(bonds.contains("\"aid\":1"));
+        assert!(bonds.contains("\"aid\":327"));
+        assert_eq!(
+            model
+                .desktop
+                .nonstandard_bond_summaries(Uid::new(first))
+                .unwrap()
+                .len(),
+            bond_count + 1
+        );
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::RemoveNonstandardBonds {
+                object_uid: first,
+                pairs: vec![[1, 327]],
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected snapshot after bond removal");
+        };
+        assert_eq!(snapshot.status, "Removed 1 non-standard bond(s)");
+        assert_eq!(
+            model
+                .desktop
+                .nonstandard_bond_summaries(Uid::new(first))
+                .unwrap()
+                .len(),
+            bond_count
+        );
         let response = handle_model_request(
             &mut model,
             ModelRequest::CalculateContacts {
