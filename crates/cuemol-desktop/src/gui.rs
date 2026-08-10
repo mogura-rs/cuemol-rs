@@ -6,7 +6,7 @@ use crate::{
     WorkspaceRendererClipboard, WorkspaceStyleClipboard,
 };
 use ab_glyph::{point, Font, FontRef, ScaleFont};
-use cuemol_core::{CueMolError, Result, Vector4};
+use cuemol_core::{parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Node, Result, Vector4};
 use cuemol_gfx::Rgba8;
 use cuemol_qsys::{StereoMode, View};
 use cuemol_render::{
@@ -1472,6 +1472,164 @@ struct NativeStyleProperties {
     name: String,
     read_only: bool,
     xml: String,
+    tab: NativeStyleEditorTab,
+    new_color_name: String,
+    new_selection_name: String,
+    color_edits: std::collections::BTreeMap<String, String>,
+    selection_edits: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeStyleEditorTab {
+    Color,
+    Selection,
+    Styles,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeStyleValueEntry {
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeStyleEntry {
+    name: String,
+    style_type: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NativeStyleSetContents {
+    colors: Vec<NativeStyleValueEntry>,
+    selections: Vec<NativeStyleValueEntry>,
+    styles: Vec<NativeStyleEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NativeStyleMutation {
+    SetColor { name: String, value: String },
+    RemoveColor { name: String },
+    SetSelection { name: String, value: String },
+    RemoveSelection { name: String },
+    RemoveStyle { name: String },
+}
+
+fn native_style_set_contents(xml: &str) -> Result<NativeStyleSetContents> {
+    let tree = parse_ldom2_xml(xml)?;
+    if tree.top().tag_name() != "styles" {
+        return Err(CueMolError::invalid_argument(
+            "style XML root must be <styles>",
+        ));
+    }
+    let mut contents = NativeStyleSetContents::default();
+    for child in tree
+        .top()
+        .children()
+        .iter()
+        .filter(|child| !child.is_attr())
+    {
+        let name = child.str_attr("id").to_string();
+        if name.is_empty() {
+            continue;
+        }
+        match child.tag_name() {
+            "color" => contents.colors.push(NativeStyleValueEntry {
+                name,
+                value: child.value().to_string(),
+            }),
+            "sel" => contents.selections.push(NativeStyleValueEntry {
+                name,
+                value: child.value().to_string(),
+            }),
+            "style" => contents.styles.push(NativeStyleEntry {
+                name,
+                style_type: child.type_name().to_string(),
+            }),
+            _ => {}
+        }
+    }
+    Ok(contents)
+}
+
+fn mutate_native_style_xml(xml: &str, mutation: &NativeStyleMutation) -> Result<String> {
+    let mut tree = parse_ldom2_xml(xml)?;
+    if tree.top().tag_name() != "styles" {
+        return Err(CueMolError::invalid_argument(
+            "style XML root must be <styles>",
+        ));
+    }
+    let (tag_name, name) = match mutation {
+        NativeStyleMutation::SetColor { name, .. } | NativeStyleMutation::RemoveColor { name } => {
+            ("color", name.trim())
+        }
+        NativeStyleMutation::SetSelection { name, .. }
+        | NativeStyleMutation::RemoveSelection { name } => ("sel", name.trim()),
+        NativeStyleMutation::RemoveStyle { name } => ("style", name.trim()),
+    };
+    if name.is_empty() {
+        return Err(CueMolError::invalid_argument(
+            "style entry name is required",
+        ));
+    }
+    match mutation {
+        NativeStyleMutation::SetColor { value, .. }
+        | NativeStyleMutation::SetSelection { value, .. } => {
+            if let Some(child) = tree.top_mut().children_mut().iter_mut().find(|child| {
+                !child.is_attr()
+                    && child.tag_name() == tag_name
+                    && child.str_attr("id").as_str() == name
+            }) {
+                child.set_value(value);
+            } else {
+                let mut child = LDom2Node::new();
+                child.set_tag_name(tag_name);
+                child.set_str_attr("id", name);
+                child.set_value(value);
+                tree.top_mut().append_child_node(child);
+            }
+        }
+        NativeStyleMutation::RemoveColor { .. }
+        | NativeStyleMutation::RemoveSelection { .. }
+        | NativeStyleMutation::RemoveStyle { .. } => {
+            tree.top_mut().retain_children(|child| {
+                child.is_attr()
+                    || child.tag_name() != tag_name
+                    || child.str_attr("id").as_str() != name
+            });
+        }
+    }
+    Ok(write_ldom2_xml(&tree))
+}
+
+fn native_style_color(value: &str) -> Option<egui::Color32> {
+    let hex = value.trim().strip_prefix('#')?;
+    let (red, green, blue, alpha) = match hex.len() {
+        6 => (
+            u8::from_str_radix(&hex[0..2], 16).ok()?,
+            u8::from_str_radix(&hex[2..4], 16).ok()?,
+            u8::from_str_radix(&hex[4..6], 16).ok()?,
+            255,
+        ),
+        8 => (
+            u8::from_str_radix(&hex[0..2], 16).ok()?,
+            u8::from_str_radix(&hex[2..4], 16).ok()?,
+            u8::from_str_radix(&hex[4..6], 16).ok()?,
+            u8::from_str_radix(&hex[6..8], 16).ok()?,
+        ),
+        _ => return None,
+    };
+    Some(egui::Color32::from_rgba_unmultiplied(
+        red, green, blue, alpha,
+    ))
+}
+
+fn native_style_color_string(color: egui::Color32) -> String {
+    let [red, green, blue, alpha] = color.to_array();
+    if alpha == 255 {
+        format!("#{red:02x}{green:02x}{blue:02x}")
+    } else {
+        format!("#{red:02x}{green:02x}{blue:02x}{alpha:02x}")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14027,6 +14185,11 @@ impl GuiApplication {
             xml: format!("<styles id=\"{name}\">\n</styles>\n"),
             name,
             read_only: false,
+            tab: NativeStyleEditorTab::Color,
+            new_color_name: String::new(),
+            new_selection_name: String::new(),
+            color_edits: std::collections::BTreeMap::new(),
+            selection_edits: std::collections::BTreeMap::new(),
         });
     }
 
@@ -14499,12 +14662,32 @@ impl GuiApplication {
             self.set_status("Style not found");
             return;
         };
+        let contents = match native_style_set_contents(&style.data) {
+            Ok(contents) => contents,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
         self.style_properties_draft = Some(NativeStyleProperties {
             scene_uid: summary.scene_uid,
             local_index: Some(local_index),
             name: summary.name,
             read_only: summary.read_only,
             xml: style.data.clone(),
+            tab: NativeStyleEditorTab::Color,
+            new_color_name: String::new(),
+            new_selection_name: String::new(),
+            color_edits: contents
+                .colors
+                .into_iter()
+                .map(|entry| (entry.name, entry.value))
+                .collect(),
+            selection_edits: contents
+                .selections
+                .into_iter()
+                .map(|entry| (entry.name, entry.value))
+                .collect(),
         });
     }
 
@@ -14549,93 +14732,372 @@ impl GuiApplication {
         }
     }
 
+    fn apply_native_style_mutation(
+        &mut self,
+        draft: &mut NativeStyleProperties,
+        mutation: NativeStyleMutation,
+    ) {
+        if draft.read_only {
+            self.set_status("Style set is read-only");
+            return;
+        }
+        let Some(local_index) = draft.local_index else {
+            self.set_status("Create the style set before editing it");
+            return;
+        };
+        let xml = match mutate_native_style_xml(&draft.xml, &mutation) {
+            Ok(xml) => xml,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let undo = self.capture_undo();
+        match self
+            .state
+            .update_scene_style(draft.scene_uid, local_index, &draft.name, false, &xml)
+        {
+            Ok(()) => {
+                draft.xml = self
+                    .state
+                    .scene_manager()
+                    .scene(draft.scene_uid)
+                    .and_then(|scene| scene.loaded_styles().get(local_index))
+                    .map(|style| style.data.clone())
+                    .unwrap_or(xml);
+                let status = match &mutation {
+                    NativeStyleMutation::SetColor { name, value } => {
+                        draft.color_edits.insert(name.clone(), value.clone());
+                        format!("Updated color {name}")
+                    }
+                    NativeStyleMutation::RemoveColor { name } => {
+                        draft.color_edits.remove(name);
+                        format!("Removed color {name}")
+                    }
+                    NativeStyleMutation::SetSelection { name, value } => {
+                        draft.selection_edits.insert(name.clone(), value.clone());
+                        format!("Updated selection {name}")
+                    }
+                    NativeStyleMutation::RemoveSelection { name } => {
+                        draft.selection_edits.remove(name);
+                        format!("Removed selection {name}")
+                    }
+                    NativeStyleMutation::RemoveStyle { name } => {
+                        format!("Removed style {name}")
+                    }
+                };
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(draft.scene_uid);
+                self.rebuild_snapshot();
+                self.set_status(status);
+            }
+            Err(error) => {
+                self.state = undo.state;
+                self.set_error(error);
+            }
+        }
+    }
+
     fn style_props_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut draft) = self.style_properties_draft.take() else {
             return;
         };
-        let mut open = true;
-        let mut apply = false;
-        let mut accept = false;
-        let mut cancel = false;
-        egui::Window::new("Style editor")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(640.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.text_edit_singleline(&mut draft.name);
-                    ui.checkbox(&mut draft.read_only, "Read only");
-                });
-                ui.label("Style XML");
-                ui.add_sized(
-                    [ui.available_width(), 320.0],
-                    egui::TextEdit::multiline(&mut draft.xml)
-                        .font(egui::TextStyle::Monospace)
-                        .code_editor(),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("OK").clicked() {
-                        accept = true;
+        if draft.local_index.is_none() {
+            let mut create = false;
+            let mut cancel = false;
+            egui::Window::new("New Style")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(420.0)
+                .show(ctx, |ui| {
+                    ui.label("Name for new style:");
+                    let response = ui.text_edit_singleline(&mut draft.name);
+                    if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        create = true;
                     }
-                    if ui.button("Apply").clicked() {
-                        apply = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
-            });
-        if accept || apply {
-            let undo = self.capture_undo();
-            let result = (|| {
-                let local_index = match draft.local_index {
-                    Some(index) => index,
-                    None => self
-                        .state
-                        .create_scene_style(draft.scene_uid, &draft.name)
-                        .map_err(|error| error.to_string())?,
-                };
-                self.state
-                    .update_scene_style(
-                        draft.scene_uid,
-                        local_index,
-                        &draft.name,
-                        draft.read_only,
-                        &draft.xml,
-                    )
-                    .map_err(|error| error.to_string())?;
-                Ok::<usize, String>(local_index)
-            })();
-            match result {
-                Ok(local_index) => {
-                    draft.local_index = Some(local_index);
-                    self.push_undo_snapshot(undo);
-                    self.modified_scenes.insert(draft.scene_uid);
-                    let style_index = self
-                        .state
-                        .style_summaries(draft.scene_uid)
-                        .iter()
-                        .position(|style| style.local_index == Some(local_index))
-                        .unwrap_or(0);
-                    self.workspace_aux_selection = Some(WorkspaceAuxSelection::Style {
-                        scene_uid: draft.scene_uid,
-                        style_index,
+                    ui.separator();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(!draft.name.trim().is_empty(), egui::Button::new("Create"))
+                            .clicked()
+                        {
+                            create = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
                     });
-                    self.rebuild_snapshot();
-                    self.set_status(format!("Saved style {}", draft.name.trim()));
-                    if !accept {
+                });
+            if create {
+                let undo = self.capture_undo();
+                match self.state.create_scene_style(draft.scene_uid, &draft.name) {
+                    Ok(local_index) => {
+                        self.push_undo_snapshot(undo);
+                        self.modified_scenes.insert(draft.scene_uid);
+                        let style_index = self
+                            .state
+                            .style_summaries(draft.scene_uid)
+                            .iter()
+                            .position(|style| style.local_index == Some(local_index))
+                            .unwrap_or(0);
+                        self.workspace_aux_selection = Some(WorkspaceAuxSelection::Style {
+                            scene_uid: draft.scene_uid,
+                            style_index,
+                        });
+                        self.rebuild_snapshot();
+                        self.set_status(format!("Created style {}", draft.name.trim()));
+                    }
+                    Err(error) => {
+                        self.state = undo.state;
+                        self.set_error(error);
                         self.style_properties_draft = Some(draft);
                     }
                 }
-                Err(error) => {
-                    self.state = undo.state;
-                    self.set_status(format!("Style error: {error}"));
-                    self.style_properties_draft = Some(draft);
-                }
+            } else if !cancel {
+                self.style_properties_draft = Some(draft);
             }
-        } else if !cancel && open {
+            return;
+        }
+
+        let contents = match native_style_set_contents(&draft.xml) {
+            Ok(contents) => contents,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let mut close = false;
+        let mut mutation = None;
+        egui::Window::new(format!("Style editor: {}", draft.name))
+            .collapsible(false)
+            .resizable(true)
+            .default_width(500.0)
+            .min_width(460.0)
+            .show(ctx, |ui| {
+                if draft.read_only {
+                    ui.label(egui::RichText::new("(read-only style set)").weak());
+                }
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut draft.tab, NativeStyleEditorTab::Color, "Color");
+                    ui.selectable_value(
+                        &mut draft.tab,
+                        NativeStyleEditorTab::Selection,
+                        "Selection",
+                    );
+                    ui.selectable_value(&mut draft.tab, NativeStyleEditorTab::Styles, "Styles");
+                });
+                ui.separator();
+
+                match draft.tab {
+                    NativeStyleEditorTab::Color => {
+                        ui.label("Named colors");
+                        egui::ScrollArea::vertical()
+                            .max_height(260.0)
+                            .show(ui, |ui| {
+                                if contents.colors.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("(no named colors)").italics().weak(),
+                                    );
+                                }
+                                for entry in &contents.colors {
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized([120.0, 20.0], egui::Label::new(&entry.name));
+                                        let mut value = draft
+                                            .color_edits
+                                            .get(&entry.name)
+                                            .cloned()
+                                            .unwrap_or_else(|| entry.value.clone());
+                                        let response = ui.add_enabled(
+                                            !draft.read_only,
+                                            egui::TextEdit::singleline(&mut value)
+                                                .desired_width(150.0),
+                                        );
+                                        let commit_text = response.lost_focus()
+                                            || (response.has_focus()
+                                                && ui.input(|input| {
+                                                    input.key_pressed(egui::Key::Enter)
+                                                }));
+                                        if commit_text && value != entry.value && mutation.is_none()
+                                        {
+                                            mutation = Some(NativeStyleMutation::SetColor {
+                                                name: entry.name.clone(),
+                                                value: value.clone(),
+                                            });
+                                        }
+                                        if let Some(mut color) = native_style_color(&value) {
+                                            let changed = ui
+                                                .add_enabled_ui(!draft.read_only, |ui| {
+                                                    ui.color_edit_button_srgba(&mut color)
+                                                })
+                                                .inner
+                                                .changed();
+                                            if changed && mutation.is_none() {
+                                                value = native_style_color_string(color);
+                                                mutation = Some(NativeStyleMutation::SetColor {
+                                                    name: entry.name.clone(),
+                                                    value: value.clone(),
+                                                });
+                                            }
+                                        }
+                                        draft.color_edits.insert(entry.name.clone(), value);
+                                        if ui
+                                            .add_enabled(
+                                                !draft.read_only,
+                                                egui::Button::new("Delete"),
+                                            )
+                                            .clicked()
+                                        {
+                                            mutation = Some(NativeStyleMutation::RemoveColor {
+                                                name: entry.name.clone(),
+                                            });
+                                        }
+                                    });
+                                }
+                            });
+                        ui.horizontal(|ui| {
+                            ui.add_enabled(
+                                !draft.read_only,
+                                egui::TextEdit::singleline(&mut draft.new_color_name)
+                                    .hint_text("New color name"),
+                            );
+                            if ui
+                                .add_enabled(
+                                    !draft.read_only && !draft.new_color_name.trim().is_empty(),
+                                    egui::Button::new("Add"),
+                                )
+                                .clicked()
+                            {
+                                mutation = Some(NativeStyleMutation::SetColor {
+                                    name: draft.new_color_name.trim().to_string(),
+                                    value: "#ffffff".to_string(),
+                                });
+                                draft.new_color_name.clear();
+                            }
+                        });
+                    }
+                    NativeStyleEditorTab::Selection => {
+                        ui.label("Named selections");
+                        egui::ScrollArea::vertical()
+                            .max_height(260.0)
+                            .show(ui, |ui| {
+                                if contents.selections.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("(no named selections)")
+                                            .italics()
+                                            .weak(),
+                                    );
+                                }
+                                for entry in &contents.selections {
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized([120.0, 20.0], egui::Label::new(&entry.name));
+                                        let mut value = draft
+                                            .selection_edits
+                                            .get(&entry.name)
+                                            .cloned()
+                                            .unwrap_or_else(|| entry.value.clone());
+                                        let response = ui.add_enabled(
+                                            !draft.read_only,
+                                            egui::TextEdit::singleline(&mut value)
+                                                .desired_width(220.0),
+                                        );
+                                        let commit = response.lost_focus()
+                                            || (response.has_focus()
+                                                && ui.input(|input| {
+                                                    input.key_pressed(egui::Key::Enter)
+                                                }));
+                                        if commit && value != entry.value && mutation.is_none() {
+                                            mutation = Some(NativeStyleMutation::SetSelection {
+                                                name: entry.name.clone(),
+                                                value: value.clone(),
+                                            });
+                                        }
+                                        draft.selection_edits.insert(entry.name.clone(), value);
+                                        if ui
+                                            .add_enabled(
+                                                !draft.read_only,
+                                                egui::Button::new("Delete"),
+                                            )
+                                            .clicked()
+                                        {
+                                            mutation = Some(NativeStyleMutation::RemoveSelection {
+                                                name: entry.name.clone(),
+                                            });
+                                        }
+                                    });
+                                }
+                            });
+                        ui.horizontal(|ui| {
+                            ui.add_enabled(
+                                !draft.read_only,
+                                egui::TextEdit::singleline(&mut draft.new_selection_name)
+                                    .hint_text("New selection name"),
+                            );
+                            if ui
+                                .add_enabled(
+                                    !draft.read_only && !draft.new_selection_name.trim().is_empty(),
+                                    egui::Button::new("Add"),
+                                )
+                                .clicked()
+                            {
+                                mutation = Some(NativeStyleMutation::SetSelection {
+                                    name: draft.new_selection_name.trim().to_string(),
+                                    value: "*".to_string(),
+                                });
+                                draft.new_selection_name.clear();
+                            }
+                        });
+                    }
+                    NativeStyleEditorTab::Styles => {
+                        ui.label("Style entries");
+                        egui::ScrollArea::vertical()
+                            .max_height(260.0)
+                            .show(ui, |ui| {
+                                if contents.styles.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("(no style entries)").italics().weak(),
+                                    );
+                                }
+                                for entry in &contents.styles {
+                                    ui.horizontal(|ui| {
+                                        ui.label(&entry.name);
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui
+                                                    .add_enabled(
+                                                        !draft.read_only,
+                                                        egui::Button::new("Delete"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    mutation =
+                                                        Some(NativeStyleMutation::RemoveStyle {
+                                                            name: entry.name.clone(),
+                                                        });
+                                                }
+                                                ui.label(
+                                                    egui::RichText::new(&entry.style_type).weak(),
+                                                );
+                                            },
+                                        );
+                                    });
+                                }
+                            });
+                    }
+                }
+
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if let Some(mutation) = mutation {
+            self.apply_native_style_mutation(&mut draft, mutation);
+        }
+        if !close {
             self.style_properties_draft = Some(draft);
         }
     }
@@ -23467,6 +23929,123 @@ mod tests {
         app.undo(&mut camera);
         assert_eq!(app.state.camera_summaries(scene_uid)[0].visibility_count, 1);
         assert!(app.modified_scenes.contains(&scene_uid));
+    }
+
+    #[test]
+    fn native_style_set_xml_mutations_preserve_structured_entries() {
+        let xml = concat!(
+            "<styles id=\"user\">",
+            "<color id=\"accent\" value=\"#112233\"/>",
+            "<sel id=\"active\" value=\"chain A\"/>",
+            "<style id=\"Ribbon\" type=\"renderer\" width=\"1\"/>",
+            "</styles>"
+        );
+        let contents = native_style_set_contents(xml).unwrap();
+        assert_eq!(
+            contents.colors,
+            vec![NativeStyleValueEntry {
+                name: "accent".to_string(),
+                value: "#112233".to_string(),
+            }]
+        );
+        assert_eq!(contents.selections[0].value, "chain A");
+        assert_eq!(contents.styles[0].style_type, "renderer");
+
+        let xml = mutate_native_style_xml(
+            xml,
+            &NativeStyleMutation::SetColor {
+                name: "accent".to_string(),
+                value: "#abcdef".to_string(),
+            },
+        )
+        .unwrap();
+        let xml = mutate_native_style_xml(
+            &xml,
+            &NativeStyleMutation::SetSelection {
+                name: "all".to_string(),
+                value: "*".to_string(),
+            },
+        )
+        .unwrap();
+        let xml = mutate_native_style_xml(
+            &xml,
+            &NativeStyleMutation::RemoveStyle {
+                name: "Ribbon".to_string(),
+            },
+        )
+        .unwrap();
+        let contents = native_style_set_contents(&xml).unwrap();
+        assert_eq!(contents.colors[0].value, "#abcdef");
+        assert!(contents
+            .selections
+            .iter()
+            .any(|entry| entry.name == "all" && entry.value == "*"));
+        assert!(contents.styles.is_empty());
+    }
+
+    #[test]
+    fn native_style_set_live_edits_are_undoable_and_respect_read_only() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let local_index = app.state.create_scene_style(scene_uid, "style_0").unwrap();
+        app.state
+            .update_scene_style(
+                scene_uid,
+                local_index,
+                "style_0",
+                false,
+                "<styles><color id=\"accent\" value=\"#112233\"/></styles>",
+            )
+            .unwrap();
+        let style_index = app
+            .state
+            .style_summaries(scene_uid)
+            .iter()
+            .position(|style| style.local_index == Some(local_index))
+            .unwrap();
+        app.open_style_properties(WorkspaceAuxSelection::Style {
+            scene_uid,
+            style_index,
+        });
+        let mut draft = app.style_properties_draft.take().unwrap();
+
+        app.apply_native_style_mutation(
+            &mut draft,
+            NativeStyleMutation::SetColor {
+                name: "accent".to_string(),
+                value: "#abcdef".to_string(),
+            },
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        assert_eq!(
+            native_style_set_contents(&draft.xml).unwrap().colors[0].value,
+            "#abcdef"
+        );
+
+        let before_read_only_attempt = draft.xml.clone();
+        draft.read_only = true;
+        app.apply_native_style_mutation(
+            &mut draft,
+            NativeStyleMutation::RemoveColor {
+                name: "accent".to_string(),
+            },
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        assert_eq!(draft.xml, before_read_only_attempt);
+
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        let restored = &app
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data;
+        assert_eq!(
+            native_style_set_contents(restored).unwrap().colors[0].value,
+            "#112233"
+        );
     }
 
     #[test]

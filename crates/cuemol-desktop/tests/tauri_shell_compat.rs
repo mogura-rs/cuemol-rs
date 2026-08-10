@@ -625,12 +625,19 @@ fn style_set_editor_uses_live_structured_tabs() {
         "New color name",
         "New selection name",
     ] {
-        assert!(JS.contains(label), "missing structured style editor behavior {label}");
+        assert!(
+            JS.contains(label),
+            "missing structured style editor behavior {label}"
+        );
     }
     assert!(JS.contains("new XMLSerializer().serializeToString(documentNode)"));
     assert!(JS.contains("snapshot = await invoke(\"set_style_properties\""));
     assert!(CSS.contains(".reference-dialog.style-set-editor-dialog"));
     assert!(!JS.contains("xmlTitle.textContent = \"Style XML\""));
+    assert!(NATIVE_GUI_RS.contains("enum NativeStyleEditorTab"));
+    assert!(NATIVE_GUI_RS.contains("fn native_style_set_contents"));
+    assert!(NATIVE_GUI_RS.contains("fn apply_native_style_mutation"));
+    assert!(NATIVE_GUI_RS.contains("(read-only style set)"));
 }
 
 #[test]
