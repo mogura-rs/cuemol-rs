@@ -4201,6 +4201,18 @@ impl GuiApplication {
             self.open_aux_renderer_dialog(selection);
             ui.close();
         }
+        let can_regenerate = match selection {
+            WorkspaceAuxSelection::Surface { surface_uid, .. } => self
+                .state
+                .surface_summary(surface_uid)
+                .is_some_and(|surface| !surface.original_molecule.is_empty()),
+            _ => false,
+        };
+        if can_regenerate && ui.button("Regenerate surface...").clicked() {
+            self.activate_workspace_scene(scene_uid, camera);
+            self.regenerate_workspace_surface(selection);
+            ui.close();
+        }
         if ui.button("Delete Object").clicked() {
             self.delete_workspace_object(owner);
             ui.close();
@@ -4217,6 +4229,25 @@ impl GuiApplication {
         ui: &mut egui::Ui,
         selection: WorkspaceAuxSelection,
     ) {
+        let can_generate_surface = match selection {
+            WorkspaceAuxSelection::DensityMap {
+                map_uid,
+                renderer_uid: Some(renderer_uid),
+                ..
+            } => self.state.density_map_summary(map_uid).is_some_and(|map| {
+                map.renderers.into_iter().any(|renderer| {
+                    renderer.uid == renderer_uid && renderer.renderer_type == "isosurf"
+                })
+            }),
+            _ => false,
+        };
+        if can_generate_surface && ui.button("Generate surface obj").clicked() {
+            self.generate_workspace_surface(selection);
+            ui.close();
+        }
+        if can_generate_surface {
+            ui.separator();
+        }
         if ui.button("Delete").clicked() {
             self.delete_aux_selection(selection);
             ui.close();
@@ -13691,6 +13722,65 @@ impl GuiApplication {
                     Err(error) => self.set_error(error),
                 }
             }
+        }
+    }
+
+    fn generate_workspace_surface(&mut self, selection: WorkspaceAuxSelection) {
+        let WorkspaceAuxSelection::DensityMap {
+            scene_uid,
+            map_uid,
+            renderer_uid: Some(renderer_uid),
+        } = selection
+        else {
+            self.set_status("Select an isosurface renderer");
+            return;
+        };
+        let undo = self.capture_undo();
+        match self
+            .state
+            .generate_density_surface_object(map_uid, renderer_uid)
+        {
+            Ok(surface_uid) => {
+                let name = self
+                    .state
+                    .surface_summary(surface_uid)
+                    .map(|surface| surface.name)
+                    .unwrap_or_else(|| surface_uid.get().to_string());
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
+                    scene_uid,
+                    surface_uid,
+                    renderer_uid: None,
+                });
+                self.rebuild_snapshot();
+                self.set_status(format!("Generated surface object {name}"));
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn regenerate_workspace_surface(&mut self, selection: WorkspaceAuxSelection) {
+        let WorkspaceAuxSelection::Surface {
+            scene_uid,
+            surface_uid,
+            ..
+        } = selection
+        else {
+            self.set_status("Select a molecular surface");
+            return;
+        };
+        let undo = self.capture_undo();
+        match self.state.regenerate_surface_object(surface_uid) {
+            Ok(triangle_count) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.rebuild_snapshot();
+                self.set_status(format!("Regenerated surface: {triangle_count} triangle(s)"));
+            }
+            Err(error) => self.set_error(error),
         }
     }
 

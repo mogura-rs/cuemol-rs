@@ -375,6 +375,10 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("Paste Object"));
     assert!(JS.contains("label: \"Save As ...\""));
     assert!(JS.contains("label: \"Delete Object\""));
+    assert!(JS.contains("label: \"Generate surface obj\""));
+    assert!(JS.contains("generate_density_surface"));
+    assert!(JS.contains("label: \"Regenerate surface...\""));
+    assert!(JS.contains("regenerate_surface"));
     assert!(JS.contains("WORKSPACE_PAINT_MONOCHROME"));
     assert!(JS.contains("Paint · ${group} · ${label}"));
     assert!(JS.contains("[\"B-factor\", \"bfactor\"]"));

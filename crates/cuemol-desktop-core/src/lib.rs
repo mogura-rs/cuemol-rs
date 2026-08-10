@@ -3065,6 +3065,234 @@ impl DesktopAppState {
         Ok(uid)
     }
 
+    pub fn generate_density_surface_object(
+        &mut self,
+        map_uid: Uid,
+        renderer_uid: Uid,
+    ) -> Result<Uid> {
+        let (scene_uid, map_name, map_xform, map, config) = {
+            let object = self
+                .density_maps
+                .get(&map_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+            let config = object
+                .renderers
+                .iter()
+                .find(|renderer| renderer.uid == renderer_uid)
+                .filter(|renderer| renderer.kind == GuiDensityRendererKind::IsoSurface)
+                .ok_or_else(|| {
+                    CueMolError::invalid_argument(
+                        "only an isosurface renderer can generate a surface object",
+                    )
+                })?;
+            (
+                object.scene_uid,
+                object.name.clone(),
+                object.xform,
+                object.map.clone(),
+                config.clone(),
+            )
+        };
+        let boundary_points = if config.bndry_molname.is_empty() {
+            None
+        } else {
+            self.scene_manager()
+                .scene(scene_uid)
+                .and_then(|scene| scene.object_by_name(&config.bndry_molname))
+                .map(|object| {
+                    object
+                        .mol()
+                        .select_indices(&config.bndry_sel)
+                        .into_iter()
+                        .map(|index| object.mol().atoms()[index].position)
+                        .collect::<Vec<_>>()
+                })
+        };
+        let mut generator = MapSurfRenderer::new();
+        generator.map_mut().set_siglevel(config.siglevel);
+        generator.map_mut().set_extent(config.extent);
+        generator.map_mut().set_center(config.center);
+        generator.map_mut().set_use_pbc(config.use_pbc);
+        generator.map_mut().set_bndry_rng(config.bndry_rng);
+        generator
+            .map_mut()
+            .set_bndry_molname(config.bndry_molname.clone());
+        generator
+            .map_mut()
+            .set_bndry_sel(Some(config.bndry_sel.clone()));
+        generator.set_width(config.width);
+        generator.set_binning(config.binning);
+        generator.set_max_grids(config.max_grids);
+        generator.set_drawmode(config.drawmode);
+        let surface = generator.generate_surf_obj_with_boundary(&map, boundary_points.as_deref());
+        let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
+
+        let object_names = self
+            .object_summaries(scene_uid)
+            .into_iter()
+            .map(|object| object.name)
+            .chain(
+                self.density_map_summaries(scene_uid)
+                    .into_iter()
+                    .map(|object| object.name),
+            )
+            .chain(
+                self.surface_summaries(scene_uid)
+                    .into_iter()
+                    .map(|object| object.name),
+            )
+            .collect::<BTreeSet<_>>();
+        let object_name = (1_u64..)
+            .map(|index| format!("{map_name}_sf{index}"))
+            .find(|name| !object_names.contains(name))
+            .expect("the surface object name space cannot be exhausted");
+        let renderer_names = self
+            .scene_manager()
+            .scene(scene_uid)
+            .into_iter()
+            .flat_map(|scene| scene.objects())
+            .flat_map(|object| object.renderers())
+            .map(|renderer| renderer.name().to_string())
+            .chain(
+                self.density_map_summaries(scene_uid)
+                    .into_iter()
+                    .flat_map(|object| object.renderers.into_iter().map(|renderer| renderer.name)),
+            )
+            .chain(
+                self.surface_summaries(scene_uid)
+                    .into_iter()
+                    .flat_map(|object| object.renderers.into_iter().map(|renderer| renderer.name)),
+            )
+            .collect::<BTreeSet<_>>();
+        let renderer_name = (1_u64..)
+            .map(|index| format!("molsurf{index}"))
+            .find(|name| !renderer_names.contains(name))
+            .expect("the surface renderer name space cannot be exhausted");
+        let ui_order = self
+            .object_summaries(scene_uid)
+            .into_iter()
+            .map(|object| object.ui_order)
+            .chain(
+                self.density_map_summaries(scene_uid)
+                    .into_iter()
+                    .map(|object| object.ui_order),
+            )
+            .chain(
+                self.surface_summaries(scene_uid)
+                    .into_iter()
+                    .map(|object| object.ui_order),
+            )
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+
+        let mut object_node = LDom2Node::new();
+        object_node.set_tag_name("object");
+        object_node.set_type_name("MolSurfObj");
+        object_node.set_str_attr("name", &object_name);
+        object_node.set_str_attr("src", "datachunk:00000");
+        object_node.set_str_attr("srctype", "qdfsurf");
+        object_node.set_str_attr("ui_order", ui_order.to_string());
+        if map_xform != Matrix4::IDENTITY {
+            object_node.set_str_attr("xformMat", map_xform.to_script_string());
+        }
+        let mut renderer_node = LDom2Node::new();
+        renderer_node.set_tag_name("renderer");
+        renderer_node.set_type_name("molsurf");
+        renderer_node.set_str_attr("name", renderer_name);
+        if config.color_mode == MapColorMode::MultiGradient {
+            renderer_node.set_str_attr("colormode", "multigrad");
+            renderer_node.set_str_attr("color_mapname", config.color_mapname);
+            sync_qsc_multi_gradient_node(&mut renderer_node, &config.multi_grad);
+        } else if let Some(color) = config.color.rgba8() {
+            renderer_node.set_str_attr("defaultcolor", qsc_rgba8_string(color));
+        }
+        object_node.append_child_node(renderer_node);
+
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        Ok(scene.add_loaded_surface(LoadedSurface {
+            uid: Uid::new(0),
+            name: object_name,
+            object_type: "MolSurfObj".to_string(),
+            srctype: "qdfsurf".to_string(),
+            data: String::from_utf8_lossy(&raw_data).into_owned(),
+            raw_data,
+            qsc_node: Some(object_node),
+        }))
+    }
+
+    pub fn regenerate_surface_object(&mut self, surface_uid: Uid) -> Result<usize> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_surface(surface_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?;
+        let summary = self
+            .surface_summary(surface_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?;
+        if summary.original_molecule.is_empty() {
+            return Err(CueMolError::undefined_reference(
+                "surface has no original molecule",
+            ));
+        }
+        let (molecule, raw_data) = {
+            let scene = self
+                .scene_manager()
+                .scene(scene_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+            let molecule = scene
+                .object_by_name(&summary.original_molecule)
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!(
+                        "original molecule {}",
+                        summary.original_molecule
+                    ))
+                })?
+                .mol()
+                .clone();
+            let raw_data = scene
+                .loaded_surface(surface_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?
+                .raw_data
+                .clone();
+            (molecule, raw_data)
+        };
+        let mut surface = cuemol_surface::qdf::read_qdf_surface_bytes(&raw_data)?;
+        let selection = (!summary.original_selection.trim().is_empty())
+            .then(|| parse_selector(&summary.original_selection))
+            .transpose()?;
+        let density = if summary.original_density > 0.0 {
+            summary.original_density
+        } else {
+            -1.0
+        };
+        let probe_radius = if summary.original_probe_radius >= 0.0 {
+            summary.original_probe_radius
+        } else {
+            -1.0
+        };
+        surface.regenerate_ses_from_mol(&molecule, selection.as_ref(), density, probe_radius)?;
+        let triangle_count = surface.mesh().triangle_count();
+        let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
+        let target = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_surface_mut(surface_uid))
+            .expect("surface was checked above");
+        target.srctype = "qdfsurf".to_string();
+        target.data = String::from_utf8_lossy(&raw_data).into_owned();
+        target.raw_data = raw_data;
+        let node = ensure_surface_qsc_node(target);
+        node.set_str_attr("srctype", "qdfsurf");
+        node.set_str_attr("orig_mol", surface.orig_mol());
+        node.set_str_attr("orig_sel", surface.orig_sel());
+        node.set_str_attr("orig_den", surface.orig_den().to_string());
+        node.set_str_attr("orig_prad", surface.orig_prad().to_string());
+        Ok(triangle_count)
+    }
+
     pub fn active_object_summaries(&self) -> Vec<GuiObjectSummary> {
         self.active_scene
             .map(|scene_uid| self.object_summaries(scene_uid))
@@ -53321,6 +53549,28 @@ attribute \"dep\" string \"positions\"
         let colored = app.density_map_summary(map_uid).unwrap();
         assert_eq!(colored.renderers[1].specific["colormode"], "multigrad");
         assert_eq!(colored.renderers[1].multi_gradient.len(), 2);
+        let generated_uid = app
+            .generate_density_surface_object(map_uid, isosurf_uid)
+            .unwrap();
+        let generated = app.surface_summary(generated_uid).unwrap();
+        assert_eq!(generated.name, "renamed map_sf1");
+        assert_eq!(generated.format, "qdfsurf");
+        assert_eq!(generated.renderers[0].name, "molsurf1");
+        assert_eq!(generated.renderers[0].specific["colormode"], "multigrad");
+        assert_eq!(generated.renderers[0].multi_gradient.len(), 2);
+        let generated_surface = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_surface(generated_uid)
+            .unwrap();
+        assert!(
+            cuemol_surface::qdf::read_qdf_surface_bytes(&generated_surface.raw_data)
+                .unwrap()
+                .mesh()
+                .triangle_count()
+                > 0
+        );
         app.save_active_scene_qsc(&qsc_path).unwrap();
 
         let mut reloaded = DesktopAppState::new();
@@ -53345,6 +53595,81 @@ attribute \"dep\" string \"positions\"
         );
 
         let _ = std::fs::remove_file(qsc_path);
+    }
+
+    #[test]
+    fn molecular_surface_regeneration_uses_the_current_source_molecule() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let molecule = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("source", molecule);
+        let molecule = app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .mol()
+            .clone();
+        let mut surface = MolSurfObj::new();
+        surface.create_ses_from_mol(&molecule, Selector::All, 1.0, 1.4);
+        surface.set_orig_mol("source");
+        let before_min_x = surface
+            .mesh()
+            .vertices()
+            .iter()
+            .map(|vertex| vertex.position.x)
+            .fold(f64::INFINITY, f64::min);
+        let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
+        let mut node = LDom2Node::new();
+        node.set_tag_name("object");
+        node.set_type_name("MolSurfObj");
+        node.set_str_attr("name", "surface");
+        node.set_str_attr("orig_mol", "source");
+        node.set_str_attr("orig_sel", "*");
+        node.set_str_attr("orig_den", "1");
+        node.set_str_attr("orig_prad", "1.4");
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "qdfsurf".to_string(),
+                data: String::from_utf8_lossy(&raw_data).into_owned(),
+                raw_data,
+                qsc_node: Some(node),
+            });
+        app.scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .mol_mut()
+            .atoms_mut()[0]
+            .position = Vector4::new3(10.0, 0.0, 0.0);
+
+        assert!(app.regenerate_surface_object(surface_uid).unwrap() > 0);
+        let regenerated = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_surface(surface_uid)
+            .unwrap();
+        let regenerated =
+            cuemol_surface::qdf::read_qdf_surface_bytes(&regenerated.raw_data).unwrap();
+        let after_min_x = regenerated
+            .mesh()
+            .vertices()
+            .iter()
+            .map(|vertex| vertex.position.x)
+            .fold(f64::INFINITY, f64::min);
+        assert!(after_min_x - before_min_x > 9.0);
     }
 
     #[test]

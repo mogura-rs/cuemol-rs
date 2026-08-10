@@ -5072,11 +5072,15 @@ function selectWorkspaceAuxItem(kind, objectUid, rendererUid = null) {
 
 function workspaceAuxObjectContextItems(scene, kind, object) {
   const isDensityMap = kind === "densityMap";
-  return [
+  const activate = async () => {
+    if (snapshot.activeSceneUid === scene.uid) return true;
+    return mutate("activate_scene", { sceneUid: scene.uid });
+  };
+  const items = [
     {
       label: "New Renderer...",
       action: async () => {
-        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        if (!(await activate())) return;
         if (isDensityMap) {
           await mutate("add_density_renderer", {
             mapUid: object.uid,
@@ -5098,16 +5102,30 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
     {
       label: "Properties...",
       action: async () => {
-        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        if (!(await activate())) return;
         selectWorkspaceAuxItem(kind, object.uid);
         showReferenceDialog("Object Properties");
       },
     },
   ];
+  if (!isDensityMap && object.originalMolecule) {
+    items.splice(1, 0, {
+      label: "Regenerate surface...",
+      action: async () => {
+        if (!(await activate())) return;
+        await mutate("regenerate_surface", { surfaceUid: object.uid });
+      },
+    });
+  }
+  return items;
 }
 
 function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
-  return [
+  const activate = async () => {
+    if (snapshot.activeSceneUid === scene.uid) return true;
+    return mutate("activate_scene", { sceneUid: scene.uid });
+  };
+  const items = [
     {
       label: "Delete",
       action: () =>
@@ -5119,12 +5137,28 @@ function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
     {
       label: "Properties...",
       action: async () => {
-        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        if (!(await activate())) return;
         selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
         showReferenceDialog("Renderer Properties");
       },
     },
   ];
+  if (kind === "densityRenderer" && renderer.rendererType === "isosurf") {
+    items.unshift(
+      {
+        label: "Generate surface obj",
+        action: async () => {
+          if (!(await activate())) return;
+          await mutate("generate_density_surface", {
+            mapUid: object.uid,
+            rendererUid: renderer.uid,
+          });
+        },
+      },
+      null,
+    );
+  }
+  return items;
 }
 
 function workspaceStyleSignature(sceneUid) {

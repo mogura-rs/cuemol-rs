@@ -5064,6 +5064,10 @@ enum ModelRequest {
         map_uid: u64,
         renderer_type: String,
     },
+    GenerateDensitySurface {
+        map_uid: u64,
+        renderer_uid: u64,
+    },
     SetSurfaceProperties(ObjectPropertiesInput),
     SetSurfaceRendererProperties(RendererPropertiesInput),
     SetSurfaceRendererVisible {
@@ -5072,6 +5076,9 @@ enum ModelRequest {
         visible: bool,
     },
     AddSurfaceRenderer {
+        surface_uid: u64,
+    },
+    RegenerateSurface {
         surface_uid: u64,
     },
     SaveCamera(String),
@@ -6370,6 +6377,20 @@ fn handle_model_request(
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::GenerateDensitySurface {
+            map_uid,
+            renderer_uid,
+        } => {
+            let undo = model.capture_undo();
+            let surface_uid = model
+                .desktop
+                .generate_density_surface_object(Uid::new(map_uid), Uid::new(renderer_uid))
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Generated surface object {}", surface_uid.get());
+            model.invalidate_mesh(false);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::SetSurfaceProperties(properties) => {
             let undo = model.capture_undo();
             model.set_surface_properties(properties)?;
@@ -6395,6 +6416,17 @@ fn handle_model_request(
         ModelRequest::AddSurfaceRenderer { surface_uid } => {
             let undo = model.capture_undo();
             model.add_surface_renderer(surface_uid)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::RegenerateSurface { surface_uid } => {
+            let undo = model.capture_undo();
+            let triangle_count = model
+                .desktop
+                .regenerate_surface_object(Uid::new(surface_uid))
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Regenerated surface: {triangle_count} triangle(s)");
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -8262,6 +8294,21 @@ fn add_density_renderer(
 }
 
 #[tauri::command]
+fn generate_density_surface(
+    map_uid: u64,
+    renderer_uid: u64,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::GenerateDensitySurface {
+            map_uid,
+            renderer_uid,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn set_surface_properties(
     properties: ObjectPropertiesInput,
     state: State<'_, ManagedState>,
@@ -8308,6 +8355,17 @@ fn add_surface_renderer(
     snapshot_response(request_model(
         &state,
         ModelRequest::AddSurfaceRenderer { surface_uid },
+    )?)
+}
+
+#[tauri::command]
+fn regenerate_surface(
+    surface_uid: u64,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::RegenerateSurface { surface_uid },
     )?)
 }
 
@@ -9711,10 +9769,12 @@ pub fn run() -> Result<(), tauri::Error> {
             set_density_renderer_properties,
             set_density_renderer_visible,
             add_density_renderer,
+            generate_density_surface,
             set_surface_properties,
             set_surface_renderer_properties,
             set_surface_renderer_visible,
             add_surface_renderer,
+            regenerate_surface,
             save_camera,
             load_camera,
             destroy_camera,
@@ -12174,6 +12234,37 @@ mod tests {
         assert_eq!(snapshot.density_maps[0].name, "renamed density");
         assert!(!snapshot.density_maps[0].visible);
         assert!(snapshot.density_maps[0].locked);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddDensityRenderer {
+                map_uid: map_uid.get(),
+                renderer_type: "isosurf".to_string(),
+            },
+        )
+        .unwrap();
+        let isosurface_uid = model.snapshot().density_maps[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.renderer_type == "isosurf")
+            .unwrap()
+            .uid;
+        handle_model_request(
+            &mut model,
+            ModelRequest::GenerateDensitySurface {
+                map_uid: map_uid.get(),
+                renderer_uid: isosurface_uid,
+            },
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.surfaces.len(), 1);
+        assert_eq!(snapshot.surfaces[0].name, "renamed density_sf1");
+        assert_eq!(snapshot.surfaces[0].format, "qdfsurf");
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model.snapshot().surfaces.is_empty());
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert_eq!(model.snapshot().surfaces.len(), 1);
     }
 
     #[test]
