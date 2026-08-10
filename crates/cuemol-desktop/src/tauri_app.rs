@@ -14,7 +14,8 @@ use tauri::State;
 use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
     anim_step, atoms_in_screen_rect, pick_atom_screen, AnimKind, AnimObject, DesktopAppState,
-    WorkspaceObjectClipboard, WorkspaceRendererClipboard, MOLECULE_RENDERER_TYPES,
+    WorkspaceCameraClipboard, WorkspaceObjectClipboard, WorkspaceRendererClipboard,
+    MOLECULE_RENDERER_TYPES,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
@@ -745,6 +746,19 @@ struct WorkspaceObjectPasteInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceCameraCopyInput {
+    scene_uid: u64,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceCameraPasteInput {
+    scene_uid: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceRendererGroupInput {
     object_uid: u64,
     #[serde(default)]
@@ -843,6 +857,7 @@ struct AppModel {
     opened_paths: Vec<String>,
     structure_revision: u64,
     modified_scenes: BTreeSet<Uid>,
+    workspace_camera_clipboard: Option<WorkspaceCameraClipboard>,
     workspace_object_clipboard: Option<WorkspaceObjectClipboard>,
     workspace_renderer_clipboard: Option<WorkspaceRendererClipboard>,
     undo_stack: Vec<AppModelUndoEntry>,
@@ -938,6 +953,7 @@ impl AppModel {
             opened_paths: Vec::new(),
             structure_revision: 1,
             modified_scenes: BTreeSet::new(),
+            workspace_camera_clipboard: None,
             workspace_object_clipboard: None,
             workspace_renderer_clipboard: None,
             undo_stack: Vec::new(),
@@ -2488,6 +2504,32 @@ impl AppModel {
         self.status = "Paste object".to_string();
         self.touch_structure_details();
         self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn copy_workspace_camera(&mut self, input: WorkspaceCameraCopyInput) -> Result<String, String> {
+        let clipboard = self
+            .desktop
+            .copy_workspace_camera(Uid::new(input.scene_uid), &input.name)
+            .map_err(|error| error.to_string())?;
+        let name = clipboard.name().to_string();
+        self.workspace_camera_clipboard = Some(clipboard);
+        self.status = format!("Copied camera {name}");
+        Ok(self.status.clone())
+    }
+
+    fn paste_workspace_camera(&mut self, input: WorkspaceCameraPasteInput) -> Result<(), String> {
+        let clipboard = self
+            .workspace_camera_clipboard
+            .clone()
+            .ok_or_else(|| "No copied camera".to_string())?;
+        let scene_uid = Uid::new(input.scene_uid);
+        let name = self
+            .desktop
+            .paste_workspace_camera(scene_uid, &clipboard)
+            .map_err(|error| error.to_string())?;
+        self.modified_scenes.insert(scene_uid);
+        self.status = format!("Pasted camera {name}");
         Ok(())
     }
 
@@ -5025,6 +5067,8 @@ enum ModelRequest {
     PasteWorkspaceRenderers(WorkspaceRendererPasteInput),
     CopyWorkspaceObject(WorkspaceObjectCopyInput),
     PasteWorkspaceObject(WorkspaceObjectPasteInput),
+    CopyWorkspaceCamera(WorkspaceCameraCopyInput),
+    PasteWorkspaceCamera(WorkspaceCameraPasteInput),
     CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     FitWorkspaceItem {
@@ -6462,6 +6506,15 @@ fn handle_model_request(
         ModelRequest::PasteWorkspaceObject(input) => {
             let undo = model.capture_undo();
             model.paste_workspace_object(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::CopyWorkspaceCamera(input) => {
+            Ok(ModelResponse::Message(model.copy_workspace_camera(input)?))
+        }
+        ModelRequest::PasteWorkspaceCamera(input) => {
+            let undo = model.capture_undo();
+            model.paste_workspace_camera(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -8450,6 +8503,28 @@ fn paste_workspace_object(
 }
 
 #[tauri::command]
+fn copy_workspace_camera(
+    input: WorkspaceCameraCopyInput,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::CopyWorkspaceCamera(input),
+    )?)
+}
+
+#[tauri::command]
+fn paste_workspace_camera(
+    input: WorkspaceCameraPasteInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::PasteWorkspaceCamera(input),
+    )?)
+}
+
+#[tauri::command]
 fn create_workspace_renderer_group(
     input: WorkspaceRendererGroupInput,
     state: State<'_, ManagedState>,
@@ -9589,6 +9664,8 @@ pub fn run() -> Result<(), tauri::Error> {
             paste_workspace_renderers,
             copy_workspace_object,
             paste_workspace_object,
+            copy_workspace_camera,
+            paste_workspace_camera,
             create_workspace_renderer_group,
             rename_workspace_renderer_group,
             fit_workspace_item,
@@ -9695,6 +9772,7 @@ mod tests {
             opened_paths: Vec::new(),
             structure_revision: 1,
             modified_scenes: BTreeSet::new(),
+            workspace_camera_clipboard: None,
             workspace_object_clipboard: None,
             workspace_renderer_clipboard: None,
             undo_stack: Vec::new(),
@@ -12214,6 +12292,41 @@ mod tests {
                 .zoom,
             91.0
         );
+
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let undo_count = model.undo_stack.len();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CopyWorkspaceCamera(WorkspaceCameraCopyInput {
+                scene_uid: scene_uid.get(),
+                name: "camera_renamed".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Message(message) = response else {
+            panic!("expected copy status message");
+        };
+        assert_eq!(message, "Copied camera camera_renamed");
+        assert_eq!(model.undo_stack.len(), undo_count);
+        handle_model_request(
+            &mut model,
+            ModelRequest::PasteWorkspaceCamera(WorkspaceCameraPasteInput {
+                scene_uid: scene_uid.get(),
+            }),
+        )
+        .unwrap();
+        assert!(model
+            .snapshot()
+            .cameras
+            .iter()
+            .any(|camera| camera.name == "copy1_camera_renamed"));
+        assert_eq!(
+            model.undo_stack.last().unwrap().description,
+            "Pasted camera copy1_camera_renamed"
+        );
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().cameras.len(), 1);
+        assert!(model.workspace_camera_clipboard.is_some());
 
         handle_model_request(
             &mut model,

@@ -2,7 +2,8 @@
 // so both desktop front ends drive the animation timeline identically.
 use crate::{
     anim_step, AnimKind, AnimObject, DesktopAppState, GuiAtomLabel, GuiLoadedPath,
-    GuiSequenceSummary, WorkspaceObjectClipboard, WorkspaceRendererClipboard,
+    GuiSequenceSummary, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
+    WorkspaceRendererClipboard,
 };
 use ab_glyph::{point, Font, FontRef, ScaleFont};
 use cuemol_core::{CueMolError, Result, Vector4};
@@ -469,6 +470,7 @@ struct GuiApplication {
     editing_saved_camera: Option<(cuemol_core::Uid, String)>,
     style_properties_draft: Option<NativeStyleProperties>,
     renderer_style_create_draft: Option<NativeRendererStyleCreate>,
+    workspace_camera_clipboard: Option<WorkspaceCameraClipboard>,
     workspace_object_clipboard: Option<WorkspaceObjectClipboard>,
     workspace_renderer_clipboard: Option<WorkspaceRendererClipboard>,
     /// Molecule chosen in the MolStruct panel's molecule selector (CueMol2
@@ -2200,6 +2202,7 @@ impl GuiApplication {
             editing_saved_camera: None,
             style_properties_draft: None,
             renderer_style_create_draft: None,
+            workspace_camera_clipboard: None,
             workspace_object_clipboard: None,
             workspace_renderer_clipboard: None,
             molstruct_object: None,
@@ -3582,12 +3585,25 @@ impl GuiApplication {
                 };
                 let root_selected = self.selected_object.is_none()
                     && self.workspace_aux_selection == Some(root_selection);
-                if ui.selectable_label(root_selected, "Camera").clicked() {
+                let root_response = ui.selectable_label(root_selected, "Camera");
+                if root_response.clicked() {
                     self.activate_workspace_scene(scene.uid, camera);
                     self.selected_object = None;
                     self.selected_renderer = None;
                     self.workspace_aux_selection = Some(root_selection);
                 }
+                root_response.context_menu(|ui| {
+                    if ui
+                        .add_enabled(
+                            self.workspace_camera_clipboard.is_some(),
+                            egui::Button::new("Paste"),
+                        )
+                        .clicked()
+                    {
+                        self.paste_workspace_camera_clipboard(scene.uid);
+                        ui.close();
+                    }
+                });
                 ui.indent(format!("camera-root-{}", scene.uid.get()), |ui| {
                     for (camera_index, summary) in cameras.iter().enumerate() {
                         let selection = WorkspaceAuxSelection::Camera {
@@ -3613,6 +3629,22 @@ impl GuiApplication {
                         if response.double_clicked() {
                             self.load_workspace_camera(selection, camera);
                         }
+                        response.context_menu(|ui| {
+                            if ui.button("Copy").clicked() {
+                                self.copy_workspace_camera_to_clipboard(scene.uid, &summary.name);
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.workspace_camera_clipboard.is_some(),
+                                    egui::Button::new("Paste"),
+                                )
+                                .clicked()
+                            {
+                                self.paste_workspace_camera_clipboard(scene.uid);
+                                ui.close();
+                            }
+                        });
                     }
                 });
                 let root_selection = WorkspaceAuxSelection::StyleRoot {
@@ -11265,6 +11297,47 @@ impl GuiApplication {
         }
     }
 
+    fn copy_workspace_camera_to_clipboard(&mut self, scene_uid: cuemol_core::Uid, name: &str) {
+        match self.state.copy_workspace_camera(scene_uid, name) {
+            Ok(clipboard) => {
+                let name = clipboard.name().to_string();
+                self.workspace_camera_clipboard = Some(clipboard);
+                self.set_status(format!("Copied camera {name}"));
+            }
+            Err(error) => self.set_status(format!("Copy camera error: {error}")),
+        }
+    }
+
+    fn paste_workspace_camera_clipboard(&mut self, scene_uid: cuemol_core::Uid) {
+        let Some(clipboard) = self.workspace_camera_clipboard.clone() else {
+            self.set_status("No copied camera");
+            return;
+        };
+        let undo = self.capture_undo();
+        match self.state.paste_workspace_camera(scene_uid, &clipboard) {
+            Ok(name) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                if self.state.active_scene() == Some(scene_uid) {
+                    let camera_index = self
+                        .state
+                        .camera_summaries(scene_uid)
+                        .iter()
+                        .position(|camera| camera.name == name)
+                        .expect("the pasted camera was just inserted");
+                    self.selected_object = None;
+                    self.selected_renderer = None;
+                    self.workspace_aux_selection = Some(WorkspaceAuxSelection::Camera {
+                        scene_uid,
+                        camera_index,
+                    });
+                }
+                self.set_status(format!("Pasted camera {name}"));
+            }
+            Err(error) => self.set_status(format!("Paste camera error: {error}")),
+        }
+    }
+
     fn style_summary_for_selection(
         &self,
         selection: WorkspaceAuxSelection,
@@ -18304,6 +18377,18 @@ mod tests {
         let mut camera = CameraController::default();
         app.load_workspace_camera(selection, &mut camera);
         assert!((camera.to_qsys_camera("loaded").zoom() - 80.0).abs() < 1.0e-5);
+
+        app.copy_workspace_camera_to_clipboard(scene_uid, "camera_0");
+        assert!(app.workspace_camera_clipboard.is_some());
+        app.paste_workspace_camera_clipboard(scene_uid);
+        assert_eq!(app.state.camera_summaries(scene_uid).len(), 2);
+        assert_eq!(
+            app.state.camera_summaries(scene_uid)[1].name,
+            "copy1_camera_0"
+        );
+        app.undo(&mut camera);
+        assert_eq!(app.state.camera_summaries(scene_uid).len(), 1);
+        assert!(app.workspace_camera_clipboard.is_some());
 
         app.delete_aux_selection(selection);
         assert!(app.state.camera_summaries(scene_uid).is_empty());

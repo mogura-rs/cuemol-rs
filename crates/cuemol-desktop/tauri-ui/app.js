@@ -140,6 +140,7 @@ let snapshot = null;
 let selectedObjectUid = null;
 let selectedRendererUid = null;
 const workspaceRendererStyleCache = new Map();
+let workspaceCameraClipboardAvailable = false;
 let workspaceObjectClipboardAvailable = false;
 let workspaceRendererClipboardAvailable = false;
 let selectedDensityMapUid = null;
@@ -4662,6 +4663,63 @@ function workspaceSceneContextItems(scene) {
   ];
 }
 
+async function copyWorkspaceCamera(sceneUid, name) {
+  if (!invoke) return false;
+  setBusy(true);
+  try {
+    const status = await invoke("copy_workspace_camera", {
+      input: { sceneUid, name },
+    });
+    workspaceCameraClipboardAvailable = true;
+    snapshot.status = status;
+    renderStatusAndLog();
+    return true;
+  } catch (error) {
+    showError(error);
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function pasteWorkspaceCamera(scene) {
+  const previous = new Set(
+    (snapshot.cameras || [])
+      .filter((camera) => camera.sceneUid === scene.uid)
+      .map((camera) => camera.name),
+  );
+  const changed = await mutateWithoutViewport(
+    "paste_workspace_camera",
+    { input: { sceneUid: scene.uid } },
+    () => {},
+  );
+  if (!changed) return;
+  const pasted = (snapshot.cameras || []).find(
+    (camera) => camera.sceneUid === scene.uid && !previous.has(camera.name),
+  );
+  if (scene.active && pasted) {
+    selectedCameraName = pasted.name;
+    workspaceSelectionKind = "camera";
+  }
+  renderShell();
+}
+
+function workspaceCameraContextItems(scene, camera = null) {
+  const items = [];
+  if (camera) {
+    items.push({
+      label: "Copy",
+      action: () => copyWorkspaceCamera(scene.uid, camera.name),
+    });
+  }
+  items.push({
+    label: "Paste",
+    disabled: !workspaceCameraClipboardAvailable,
+    action: () => pasteWorkspaceCamera(scene),
+  });
+  return items;
+}
+
 function workspaceObjectContextItems(scene, object) {
   const select = (selection) => () =>
     runMoleculeSelectionAction(object.uid, selection, "select");
@@ -5626,6 +5684,11 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     const count = document.createElement("small");
     count.textContent = `${sceneCameras.length} CAM`;
     cameraRoot.append(count);
+    cameraRoot.addEventListener("contextmenu", (event) => {
+      workspaceSelectionKind = "cameraRoot";
+      selectedCameraName = null;
+      showWorkspaceContextMenu(event, workspaceCameraContextItems(scene));
+    });
     sceneTree.append(cameraRoot);
     for (const camera of sceneCameras) {
       const markers = `${camera.source ? " ↗" : ""}${camera.visibilityCount > 0 ? " ◉" : ""}`;
@@ -5651,6 +5714,11 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         selectedCameraName = camera.name;
         if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
         await mutate("load_camera", { name: camera.name });
+      });
+      cameraRow.addEventListener("contextmenu", (event) => {
+        workspaceSelectionKind = "camera";
+        selectedCameraName = camera.name;
+        showWorkspaceContextMenu(event, workspaceCameraContextItems(scene, camera));
       });
       sceneTree.append(cameraRow);
     }

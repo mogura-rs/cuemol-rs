@@ -566,6 +566,17 @@ impl WorkspaceObjectClipboard {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceCameraClipboard {
+    camera: cuemol_qsys::Camera,
+}
+
+impl WorkspaceCameraClipboard {
+    pub fn name(&self) -> &str {
+        self.camera.name()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiAtomSummary {
     pub object_uid: Uid,
@@ -1831,6 +1842,46 @@ impl DesktopAppState {
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
         let destroyed = scene.destroy_camera(name);
         Ok(destroyed)
+    }
+
+    pub fn copy_workspace_camera(
+        &self,
+        scene_uid: Uid,
+        name: &str,
+    ) -> Result<WorkspaceCameraClipboard> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let camera = scene
+            .camera_by_name(name)
+            .cloned()
+            .ok_or_else(|| CueMolError::NotFound(format!("camera {name}")))?;
+        Ok(WorkspaceCameraClipboard { camera })
+    }
+
+    pub fn paste_workspace_camera(
+        &mut self,
+        scene_uid: Uid,
+        clipboard: &WorkspaceCameraClipboard,
+    ) -> Result<String> {
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let source_name = clipboard.name();
+        let name = if scene.camera_by_name(source_name).is_none() {
+            source_name.to_string()
+        } else {
+            (1_u64..)
+                .map(|index| format!("copy{index}_{source_name}"))
+                .find(|candidate| scene.camera_by_name(candidate).is_none())
+                .expect("the camera name suffix space is inexhaustible")
+        };
+        let mut camera = clipboard.camera.clone();
+        camera.set_name(&name);
+        scene.set_camera(camera);
+        Ok(name)
     }
 
     pub fn style_summaries(&self, scene_uid: Uid) -> Vec<GuiStyleSummary> {
@@ -53459,6 +53510,18 @@ attribute \"dep\" string \"positions\"
         assert!(!object.is_visible());
         assert!(!object.renderer(renderer_uid).unwrap().is_visible());
 
+        let clipboard = app.copy_workspace_camera(scene_uid, "camera_0").unwrap();
+        let pasted_name = app.paste_workspace_camera(scene_uid, &clipboard).unwrap();
+        assert_eq!(pasted_name, "copy1_camera_0");
+        let pasted = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .camera_by_name(&pasted_name)
+            .unwrap();
+        assert_eq!(pasted.zoom(), 75.0);
+        assert_eq!(pasted.visibility_size(), 2);
+
         let path = std::env::temp_dir().join(format!(
             "cuemol-desktop-camera-workspace-{}.qsc",
             std::process::id()
@@ -53470,7 +53533,11 @@ attribute \"dep\" string \"positions\"
         let _ = std::fs::remove_file(path);
 
         assert!(app.destroy_scene_camera(scene_uid, "camera_0").unwrap());
-        assert!(app.camera_summaries(scene_uid).is_empty());
+        assert_eq!(app.camera_summaries(scene_uid).len(), 1);
+        assert_eq!(
+            app.paste_workspace_camera(scene_uid, &clipboard).unwrap(),
+            "camera_0"
+        );
     }
 
     #[test]
