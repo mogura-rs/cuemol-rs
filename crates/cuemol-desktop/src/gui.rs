@@ -520,6 +520,8 @@ struct GuiApplication {
     options_pane: OptionsPane,
     options_draft: Option<NativePreferences>,
     show_scene_props: bool,
+    scene_properties_draft: Option<NativeSceneProperties>,
+    scene_property_selected: usize,
     show_view_props: bool,
     view_properties_draft: Option<NativeViewProperties>,
     view_property_selected: usize,
@@ -592,6 +594,7 @@ struct GuiApplication {
     recent_paths: Vec<PathBuf>,
     undo_stack: Vec<GuiUndoSnapshot>,
     redo_stack: Vec<GuiUndoSnapshot>,
+    modified_scenes: std::collections::BTreeSet<cuemol_core::Uid>,
     status: String,
     log_lines: Vec<String>,
     selection_history: Vec<String>,
@@ -604,6 +607,7 @@ struct GuiUndoSnapshot {
     selected_renderer: Option<cuemol_core::Uid>,
     selection_text: String,
     last_loaded_path: Option<PathBuf>,
+    modified_scenes: std::collections::BTreeSet<cuemol_core::Uid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -744,23 +748,42 @@ impl std::fmt::Debug for AnimationPreviewTexture {
 enum SceneBackground {
     White,
     Black,
+    Custom(Rgba8),
 }
 
 impl SceneBackground {
+    fn parse(value: &str) -> std::result::Result<Self, String> {
+        let rgb = |r, g, b| Self::Custom(Rgba8 { r, g, b, a: 255 });
+        let named = match value.trim().to_ascii_lowercase().as_str() {
+            "white" => Ok(Self::White),
+            "black" => Ok(Self::Black),
+            "red" => Ok(rgb(255, 0, 0)),
+            "green" => Ok(rgb(0, 128, 0)),
+            "lime" => Ok(rgb(0, 255, 0)),
+            "blue" => Ok(rgb(0, 0, 255)),
+            "yellow" => Ok(rgb(255, 255, 0)),
+            "cyan" | "aqua" => Ok(rgb(0, 255, 255)),
+            "magenta" | "fuchsia" => Ok(rgb(255, 0, 255)),
+            "gray" | "grey" => Ok(rgb(128, 128, 128)),
+            "orange" => Ok(rgb(255, 165, 0)),
+            _ => {
+                return cuemol_gfx::parse_color(value.trim())
+                    .map_err(|error| error.to_string())?
+                    .rgba8()
+                    .map(Self::Custom)
+                    .ok_or_else(|| format!("unresolved background color: {value}"))
+            }
+        };
+        named
+    }
+
     fn clear_color(self) -> wgpu::Color {
-        match self {
-            Self::White => wgpu::Color {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 1.0,
-            },
-            Self::Black => wgpu::Color {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 1.0,
-            },
+        let rgba = self.rgba_f32();
+        wgpu::Color {
+            r: f64::from(rgba[0]),
+            g: f64::from(rgba[1]),
+            b: f64::from(rgba[2]),
+            a: f64::from(rgba[3]),
         }
     }
 
@@ -768,6 +791,22 @@ impl SceneBackground {
         match self {
             Self::White => [1.0, 1.0, 1.0, 1.0],
             Self::Black => [0.0, 0.0, 0.0, 1.0],
+            Self::Custom(rgba) => [
+                f32::from(rgba.r) / 255.0,
+                f32::from(rgba.g) / 255.0,
+                f32::from(rgba.b) / 255.0,
+                f32::from(rgba.a) / 255.0,
+            ],
+        }
+    }
+
+    fn foreground(self, dark: egui::Color32, light: egui::Color32) -> egui::Color32 {
+        let [red, green, blue, _] = self.rgba_f32();
+        let luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+        if luminance >= 0.5 {
+            dark
+        } else {
+            light
         }
     }
 }
@@ -955,6 +994,275 @@ struct NativePreferences {
     multitouch_pad: bool,
     emulate_right_button: bool,
     shortcuts: Vec<NativeShortcut>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct NativeSceneProperties {
+    uid: u64,
+    modified: bool,
+    name: String,
+    source: String,
+    source_type: String,
+    base_path: String,
+    background: String,
+    ao_enabled: bool,
+    ao_radius: f64,
+    ao_intensity: f64,
+    ao_slices: i32,
+    ao_steps: i32,
+    ao_half_res: bool,
+    aa_method: String,
+    aa_jitter_level: i32,
+    onload: String,
+    object_uids: String,
+    active_object_id: u64,
+    active_renderer_id: u64,
+    view_uids: String,
+    active_view_id: u64,
+    use_color_proof: bool,
+    icc_filename: String,
+    icc_intent: String,
+}
+
+impl NativeSceneProperties {
+    fn from_state(state: &DesktopAppState) -> Option<Self> {
+        let uid = state.active_scene()?;
+        let scene = state.scene_manager().scene(uid)?;
+        let object_uids = scene
+            .objects()
+            .iter()
+            .map(|object| object.uid().get().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let view_uids = state
+            .command_manager()
+            .views()
+            .iter()
+            .filter(|view| view.scene_uid() == uid)
+            .map(|view| view.uid().get().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        Some(Self {
+            uid: uid.get(),
+            modified: false,
+            name: scene.name().to_string(),
+            source: scene.source().to_string(),
+            source_type: scene.source_type().to_string(),
+            base_path: scene.base_path().to_string(),
+            background: scene
+                .scene_attribute("bgcolor")
+                .unwrap_or("black")
+                .to_string(),
+            ao_enabled: scene_attr_bool(scene.scene_attribute("aoEnabled"), false),
+            ao_radius: scene_attr_f64(scene.scene_attribute("aoRadius"), 4.0),
+            ao_intensity: scene_attr_f64(scene.scene_attribute("aoIntensity"), 2.2),
+            ao_slices: scene_attr_i32(scene.scene_attribute("aoSlices"), 9),
+            ao_steps: scene_attr_i32(scene.scene_attribute("aoSteps"), 3),
+            ao_half_res: scene_attr_bool(scene.scene_attribute("aoHalfRes"), false),
+            aa_method: scene
+                .scene_attribute("aa_method")
+                .unwrap_or("fxaa")
+                .to_string(),
+            aa_jitter_level: scene_attr_i32(scene.scene_attribute("aaJitterLevel"), 0),
+            onload: scene.scene_attribute("onload").unwrap_or("").to_string(),
+            object_uids,
+            active_object_id: scene.active_object_uid().map_or(0, cuemol_core::Uid::get),
+            active_renderer_id: scene.active_renderer_uid().map_or(0, cuemol_core::Uid::get),
+            view_uids,
+            active_view_id: scene.active_view_uid().map_or(0, cuemol_core::Uid::get),
+            use_color_proof: scene_attr_bool(scene.scene_attribute("use_colproof"), false),
+            icc_filename: scene
+                .scene_attribute("icc_filename")
+                .unwrap_or("")
+                .to_string(),
+            icc_intent: scene
+                .scene_attribute("icc_intent")
+                .unwrap_or("perceptual")
+                .to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScenePropertyKey {
+    Uid,
+    Modified,
+    Name,
+    Source,
+    SourceType,
+    BasePath,
+    Background,
+    AoEnabled,
+    AoRadius,
+    AoIntensity,
+    AoSlices,
+    AoSteps,
+    AoHalfRes,
+    AaMethod,
+    AaJitterLevel,
+    Onload,
+    ObjectUids,
+    ActiveObjectId,
+    ActiveRendererId,
+    ViewUids,
+    ActiveViewId,
+    UseColorProof,
+    IccFilename,
+    IccIntent,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScenePropertyDefinition {
+    key: ScenePropertyKey,
+    name: &'static str,
+    type_name: &'static str,
+    readonly: bool,
+    has_default: bool,
+}
+
+const SCENE_PROPERTY_DEFINITIONS: &[ScenePropertyDefinition] = &[
+    scene_property(ScenePropertyKey::Uid, "uid", "integer", true, false),
+    scene_property(
+        ScenePropertyKey::Modified,
+        "modified",
+        "boolean",
+        true,
+        false,
+    ),
+    scene_property(ScenePropertyKey::Name, "name", "string", true, false),
+    scene_property(ScenePropertyKey::Source, "src", "string", true, false),
+    scene_property(
+        ScenePropertyKey::SourceType,
+        "srctype",
+        "string",
+        true,
+        false,
+    ),
+    scene_property(
+        ScenePropertyKey::BasePath,
+        "basePath",
+        "string",
+        true,
+        false,
+    ),
+    scene_property(
+        ScenePropertyKey::Background,
+        "bgcolor",
+        "color",
+        false,
+        true,
+    ),
+    scene_property(
+        ScenePropertyKey::AoEnabled,
+        "aoEnabled",
+        "boolean",
+        false,
+        true,
+    ),
+    scene_property(ScenePropertyKey::AoRadius, "aoRadius", "real", false, true),
+    scene_property(
+        ScenePropertyKey::AoIntensity,
+        "aoIntensity",
+        "real",
+        false,
+        true,
+    ),
+    scene_property(
+        ScenePropertyKey::AoSlices,
+        "aoSlices",
+        "integer",
+        false,
+        true,
+    ),
+    scene_property(ScenePropertyKey::AoSteps, "aoSteps", "integer", false, true),
+    scene_property(
+        ScenePropertyKey::AoHalfRes,
+        "aoHalfRes",
+        "boolean",
+        false,
+        true,
+    ),
+    scene_property(ScenePropertyKey::AaMethod, "aa_method", "enum", false, true),
+    scene_property(
+        ScenePropertyKey::AaJitterLevel,
+        "aaJitterLevel",
+        "integer",
+        false,
+        true,
+    ),
+    scene_property(ScenePropertyKey::Onload, "onload", "string", false, true),
+    scene_property(
+        ScenePropertyKey::ObjectUids,
+        "obj_uids",
+        "string",
+        true,
+        false,
+    ),
+    scene_property(
+        ScenePropertyKey::ActiveObjectId,
+        "activeObjID",
+        "integer",
+        true,
+        false,
+    ),
+    scene_property(
+        ScenePropertyKey::ActiveRendererId,
+        "activeRendID",
+        "integer",
+        true,
+        false,
+    ),
+    scene_property(
+        ScenePropertyKey::ViewUids,
+        "view_uids",
+        "string",
+        true,
+        false,
+    ),
+    scene_property(
+        ScenePropertyKey::ActiveViewId,
+        "activeViewID",
+        "integer",
+        true,
+        false,
+    ),
+    scene_property(
+        ScenePropertyKey::UseColorProof,
+        "use_colproof",
+        "boolean",
+        false,
+        true,
+    ),
+    scene_property(
+        ScenePropertyKey::IccFilename,
+        "icc_filename",
+        "string",
+        false,
+        true,
+    ),
+    scene_property(
+        ScenePropertyKey::IccIntent,
+        "icc_intent",
+        "enum",
+        false,
+        true,
+    ),
+];
+
+const fn scene_property(
+    key: ScenePropertyKey,
+    name: &'static str,
+    type_name: &'static str,
+    readonly: bool,
+    has_default: bool,
+) -> ScenePropertyDefinition {
+    ScenePropertyDefinition {
+        key,
+        name,
+        type_name,
+        readonly,
+        has_default,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1375,6 +1683,8 @@ impl GuiApplication {
             options_pane: OptionsPane::Misc,
             options_draft: None,
             show_scene_props: false,
+            scene_properties_draft: None,
+            scene_property_selected: 0,
             show_view_props: false,
             view_properties_draft: None,
             view_property_selected: 0,
@@ -1445,6 +1755,7 @@ impl GuiApplication {
             recent_paths: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            modified_scenes: std::collections::BTreeSet::new(),
             status: "Ready".to_string(),
             log_lines: Vec::new(),
             selection_history: Vec::new(),
@@ -1845,6 +2156,7 @@ impl GuiApplication {
                         self.state.set_active_scene(Some(scene.uid));
                         self.selected_object = None;
                         self.selected_renderer = None;
+                        self.sync_active_scene_properties();
                         self.rebuild_snapshot();
                         camera.fit_snapshot(&self.snapshot);
                     }
@@ -2001,14 +2313,14 @@ impl GuiApplication {
                             .radio_value(&mut self.background, SceneBackground::White, "White")
                             .clicked()
                         {
-                            self.set_status("Background set to white");
+                            self.persist_scene_background("white");
                             ui.close();
                         }
                         if ui
                             .radio_value(&mut self.background, SceneBackground::Black, "Black")
                             .clicked()
                         {
-                            self.set_status("Background set to black");
+                            self.persist_scene_background("black");
                             ui.close();
                         }
                     });
@@ -2017,11 +2329,10 @@ impl GuiApplication {
                         .checkbox(&mut self.color_proofing, "Use color proofing")
                         .clicked()
                     {
-                        self.rebuild_snapshot();
-                        self.set_status(format!("Color proofing: {}", self.color_proofing));
+                        self.persist_scene_color_proofing();
                     }
                     if ui.button("Properties...").clicked() {
-                        self.show_scene_props = true;
+                        self.open_scene_properties();
                         ui.close();
                     }
                 });
@@ -2380,6 +2691,7 @@ impl GuiApplication {
                 self.state.set_active_scene(Some(scene.uid));
                 self.selected_object = None;
                 self.selected_renderer = None;
+                self.sync_active_scene_properties();
                 self.rebuild_snapshot();
                 camera.fit_snapshot(&self.snapshot);
             }
@@ -4944,6 +5256,7 @@ impl GuiApplication {
         match self.state.open_path(&path) {
             Ok(GuiLoadedPath::Scene { scene_uid }) => {
                 self.push_undo_snapshot(undo);
+                self.modified_scenes.remove(&scene_uid);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.last_loaded_path = Some(path);
@@ -4967,6 +5280,7 @@ impl GuiApplication {
                 }
                 self.surface_mesh = None;
                 self.show_surface = false;
+                self.sync_active_scene_properties();
                 self.rebuild_snapshot();
                 // Restore the scene's saved view (a `.qsc` `<camera>`); only a
                 // camera-less scene falls back to auto-framing the bounding box.
@@ -4980,6 +5294,7 @@ impl GuiApplication {
                 object_uid,
             }) => {
                 self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
                 self.selected_object = Some(object_uid);
                 self.selected_renderer = None;
                 self.last_loaded_path = Some(path);
@@ -4989,11 +5304,13 @@ impl GuiApplication {
                     object_uid.get(),
                     scene_uid.get()
                 ));
+                self.sync_active_scene_properties();
                 self.rebuild_snapshot();
                 camera.fit_snapshot(&self.snapshot);
             }
             Ok(GuiLoadedPath::Map { scene_uid, map_uid }) => {
                 self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.last_loaded_path = Some(path);
@@ -5003,6 +5320,7 @@ impl GuiApplication {
                     map_uid.get(),
                     scene_uid.get()
                 ));
+                self.sync_active_scene_properties();
                 self.rebuild_snapshot();
                 camera.fit_snapshot(&self.snapshot);
             }
@@ -5023,6 +5341,7 @@ impl GuiApplication {
         match self.state.reload_active_scene_qsc() {
             Ok(scene_uid) => {
                 self.push_undo_snapshot(undo);
+                self.modified_scenes.remove(&scene_uid);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.selection_text.clear();
@@ -5030,6 +5349,7 @@ impl GuiApplication {
                 self.open_path = path.to_string_lossy().into_owned();
                 self.surface_mesh = None;
                 self.show_surface = false;
+                self.sync_active_scene_properties();
                 self.rebuild_snapshot();
                 match self.state.active_scene_saved_camera() {
                     Some(saved) => *camera = CameraController::from_qsys_camera(&saved),
@@ -5052,6 +5372,7 @@ impl GuiApplication {
         self.selected_object = None;
         self.selected_renderer = None;
         self.last_loaded_path = None;
+        self.sync_active_scene_properties();
         self.set_status("New scene created");
         self.rebuild_snapshot();
         camera.fit_snapshot(&self.snapshot);
@@ -5063,23 +5384,28 @@ impl GuiApplication {
     }
 
     fn close_current_scene(&mut self, camera: &mut CameraController) {
+        let modified_scenes = self.modified_scenes.clone();
         let undo = self.capture_undo();
         match self.state.close_active_scene() {
             Ok(Some(_)) => {
                 self.push_undo_snapshot(undo);
+                self.modified_scenes = modified_scenes;
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.last_loaded_path = None;
+                self.sync_active_scene_properties();
                 self.set_status("Current tab closed");
                 self.rebuild_snapshot();
                 camera.fit_snapshot(&self.snapshot);
             }
             Ok(None) => {
                 self.push_undo_snapshot(undo);
+                self.modified_scenes = modified_scenes;
                 self.state.new_scene("Untitled", true);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.last_loaded_path = None;
+                self.sync_active_scene_properties();
                 self.set_status("Last tab closed; new scene created");
                 self.rebuild_snapshot();
                 camera.fit_snapshot(&self.snapshot);
@@ -5115,6 +5441,11 @@ impl GuiApplication {
                 self.save_path = path.to_string_lossy().into_owned();
                 self.last_loaded_path = Some(path.to_path_buf());
                 self.add_recent_path(path.to_path_buf());
+                self.undo_stack.clear();
+                self.redo_stack.clear();
+                if let Some(scene_uid) = self.state.active_scene() {
+                    self.modified_scenes.remove(&scene_uid);
+                }
                 self.set_status(format!("Saved {}", path.display()));
             }
             Err(error) => self.set_error(error),
@@ -5850,10 +6181,10 @@ impl GuiApplication {
             return;
         }
         let painter = ui.painter();
-        let color = match self.background {
-            SceneBackground::White => egui::Color32::from_rgb(20, 24, 30),
-            SceneBackground::Black => egui::Color32::from_rgb(235, 240, 248),
-        };
+        let color = self.background.foreground(
+            egui::Color32::from_rgb(20, 24, 30),
+            egui::Color32::from_rgb(235, 240, 248),
+        );
         for atom in selected {
             let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) else {
                 continue;
@@ -6017,10 +6348,10 @@ impl GuiApplication {
         let center = rect.center();
         let stroke = egui::Stroke::new(
             1.0,
-            match self.background {
-                SceneBackground::White => egui::Color32::from_rgb(25, 30, 36),
-                SceneBackground::Black => egui::Color32::from_rgb(220, 226, 235),
-            },
+            self.background.foreground(
+                egui::Color32::from_rgb(25, 30, 36),
+                egui::Color32::from_rgb(220, 226, 235),
+            ),
         );
         let painter = ui.painter();
         match camera.center_mark {
@@ -6458,26 +6789,381 @@ impl GuiApplication {
         input.set_hitprec(hitprec);
     }
 
+    fn open_scene_properties(&mut self) {
+        let Some(mut properties) = NativeSceneProperties::from_state(&self.state) else {
+            self.set_status("No active scene");
+            return;
+        };
+        properties.modified = self
+            .state
+            .active_scene()
+            .is_some_and(|uid| self.modified_scenes.contains(&uid));
+        self.scene_properties_draft = Some(properties);
+        self.scene_property_selected = 0;
+        self.show_scene_props = true;
+    }
+
     fn scene_props_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_scene_props {
             return;
         }
+        let Some(mut draft) = self
+            .scene_properties_draft
+            .take()
+            .or_else(|| NativeSceneProperties::from_state(&self.state))
+        else {
+            self.show_scene_props = false;
+            return;
+        };
+        let mut selected = self
+            .scene_property_selected
+            .min(SCENE_PROPERTY_DEFINITIONS.len().saturating_sub(1));
         let mut open = self.show_scene_props;
-        egui::Window::new("Scene Properties")
+        let mut apply = false;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Object properties")
             .open(&mut open)
             .collapsible(false)
+            .resizable(true)
+            .default_width(640.0)
+            .min_width(560.0)
             .show(ctx, |ui| {
-                if let Some(scene) = self.state.active_scene_summary() {
-                    ui.label(format!("name: {}", scene.name));
-                    ui.monospace(format!("uid: {}", scene.uid.get()));
-                    ui.label(format!("objects: {}", scene.object_count));
-                    ui.label(format!("cameras: {}", scene.camera_count));
-                }
+                let _ = ui.selectable_label(true, "Generic");
                 ui.separator();
-                ui.radio_value(&mut self.background, SceneBackground::White, "White");
-                ui.radio_value(&mut self.background, SceneBackground::Black, "Black");
+                Self::scene_property_editor_ui(ui, &mut draft, &mut selected);
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
             });
-        self.show_scene_props = open;
+        self.scene_property_selected = selected;
+        if accept || apply {
+            match self.apply_scene_properties(&draft) {
+                Ok(()) => {
+                    self.set_status("Scene properties updated");
+                    if accept {
+                        self.show_scene_props = false;
+                        self.scene_properties_draft = None;
+                    } else {
+                        let mut refreshed =
+                            NativeSceneProperties::from_state(&self.state).unwrap_or(draft);
+                        refreshed.modified = true;
+                        self.show_scene_props = true;
+                        self.scene_properties_draft = Some(refreshed);
+                    }
+                }
+                Err(error) => {
+                    self.set_status(format!("Scene properties error: {error}"));
+                    self.show_scene_props = true;
+                    self.scene_properties_draft = Some(draft);
+                }
+            }
+        } else if cancel || !open {
+            self.show_scene_props = false;
+            self.scene_properties_draft = None;
+        } else {
+            self.show_scene_props = true;
+            self.scene_properties_draft = Some(draft);
+        }
+    }
+
+    fn scene_property_editor_ui(
+        ui: &mut egui::Ui,
+        draft: &mut NativeSceneProperties,
+        selected: &mut usize,
+    ) {
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(
+                1.0,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            ))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("native_scene_property_table")
+                            .striped(true)
+                            .num_columns(4)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                for heading in ["Name", "R", "Type", "Value"] {
+                                    ui.strong(heading);
+                                }
+                                ui.end_row();
+                                for (index, definition) in
+                                    SCENE_PROPERTY_DEFINITIONS.iter().enumerate()
+                                {
+                                    if ui
+                                        .selectable_label(*selected == index, definition.name)
+                                        .clicked()
+                                    {
+                                        *selected = index;
+                                    }
+                                    ui.label(if definition.readonly { "R" } else { "" });
+                                    ui.label(definition.type_name);
+                                    ui.monospace(scene_property_value(draft, definition.key));
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+        ui.add_space(8.0);
+        let definition = SCENE_PROPERTY_DEFINITIONS[*selected];
+        egui::Grid::new("native_scene_property_detail")
+            .num_columns(2)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Name:");
+                ui.monospace(definition.name);
+                ui.end_row();
+                ui.label("Type:");
+                ui.monospace(definition.type_name);
+                ui.end_row();
+                ui.label("Value:");
+                ui.horizontal(|ui| {
+                    let mut is_default = scene_property_is_default(draft, definition.key);
+                    if ui
+                        .add_enabled(
+                            definition.has_default && !definition.readonly,
+                            egui::Checkbox::new(&mut is_default, "default"),
+                        )
+                        .changed()
+                        && is_default
+                    {
+                        reset_scene_property(draft, definition.key);
+                    }
+                    Self::scene_property_control_ui(ui, draft, definition);
+                });
+                ui.end_row();
+            });
+    }
+
+    fn scene_property_control_ui(
+        ui: &mut egui::Ui,
+        draft: &mut NativeSceneProperties,
+        definition: ScenePropertyDefinition,
+    ) {
+        use ScenePropertyKey as Key;
+        match definition.key {
+            Key::Background => {
+                ui.text_edit_singleline(&mut draft.background);
+                let background = SceneBackground::parse(&draft.background)
+                    .unwrap_or(SceneBackground::Black)
+                    .rgba_f32();
+                let mut color = egui::Color32::from_rgba_unmultiplied(
+                    (background[0] * 255.0).round() as u8,
+                    (background[1] * 255.0).round() as u8,
+                    (background[2] * 255.0).round() as u8,
+                    (background[3] * 255.0).round() as u8,
+                );
+                if ui.color_edit_button_srgba(&mut color).changed() {
+                    let [red, green, blue, _] = color.to_array();
+                    draft.background = format!("#{red:02x}{green:02x}{blue:02x}");
+                }
+            }
+            Key::AoEnabled => {
+                ui.checkbox(&mut draft.ao_enabled, "");
+            }
+            Key::AoRadius => {
+                ui.add(egui::DragValue::new(&mut draft.ao_radius).speed(0.1));
+            }
+            Key::AoIntensity => {
+                ui.add(egui::DragValue::new(&mut draft.ao_intensity).speed(0.1));
+            }
+            Key::AoSlices => {
+                ui.add(egui::DragValue::new(&mut draft.ao_slices).range(1..=64));
+            }
+            Key::AoSteps => {
+                ui.add(egui::DragValue::new(&mut draft.ao_steps).range(1..=32));
+            }
+            Key::AoHalfRes => {
+                ui.checkbox(&mut draft.ao_half_res, "");
+            }
+            Key::AaMethod => {
+                egui::ComboBox::from_id_salt("native_scene_aa_method")
+                    .selected_text(&draft.aa_method)
+                    .show_ui(ui, |ui| {
+                        for method in ["none", "fxaa", "smaa"] {
+                            ui.selectable_value(&mut draft.aa_method, method.to_string(), method);
+                        }
+                    });
+            }
+            Key::AaJitterLevel => {
+                ui.add(egui::DragValue::new(&mut draft.aa_jitter_level).range(0..=5));
+            }
+            Key::Onload => {
+                ui.text_edit_singleline(&mut draft.onload);
+            }
+            Key::UseColorProof => {
+                ui.checkbox(&mut draft.use_color_proof, "");
+            }
+            Key::IccFilename => {
+                ui.text_edit_singleline(&mut draft.icc_filename);
+            }
+            Key::IccIntent => {
+                egui::ComboBox::from_id_salt("native_scene_icc_intent")
+                    .selected_text(icc_intent_label(&draft.icc_intent))
+                    .show_ui(ui, |ui| {
+                        for (value, label) in [
+                            ("perceptual", "perceptual"),
+                            ("relative_colorimetric", "relative colorimetric"),
+                            ("saturation", "saturation"),
+                            ("absolute_colorimetric", "absolute colorimetric"),
+                        ] {
+                            ui.selectable_value(&mut draft.icc_intent, value.to_string(), label);
+                        }
+                    });
+            }
+            _ => {
+                ui.monospace(scene_property_value(draft, definition.key));
+            }
+        }
+    }
+
+    fn apply_scene_properties(
+        &mut self,
+        draft: &NativeSceneProperties,
+    ) -> std::result::Result<(), String> {
+        let scene_uid = cuemol_core::Uid::new(draft.uid);
+        if self.state.scene_manager().scene(scene_uid).is_none() {
+            return Err(format!("scene {} was not found", draft.uid));
+        }
+        let background = draft.background.trim();
+        if background.is_empty() {
+            return Err("scene background color is required".to_string());
+        }
+        let runtime_background = SceneBackground::parse(background)?;
+        if !draft.ao_radius.is_finite() || draft.ao_radius <= 0.0 {
+            return Err("AO radius must be a positive finite number".to_string());
+        }
+        if !draft.ao_intensity.is_finite() || draft.ao_intensity <= 0.0 {
+            return Err("AO intensity must be a positive finite number".to_string());
+        }
+        if !(1..=64).contains(&draft.ao_slices) {
+            return Err("AO slices must be between 1 and 64".to_string());
+        }
+        if !(1..=32).contains(&draft.ao_steps) {
+            return Err("AO steps must be between 1 and 32".to_string());
+        }
+        if !matches!(draft.aa_method.as_str(), "none" | "fxaa" | "smaa") {
+            return Err(format!("unsupported AA method: {}", draft.aa_method));
+        }
+        if !(0..=5).contains(&draft.aa_jitter_level) {
+            return Err("AA jitter level must be between 0 and 5".to_string());
+        }
+        if !matches!(
+            draft.icc_intent.as_str(),
+            "perceptual" | "relative_colorimetric" | "saturation" | "absolute_colorimetric"
+        ) {
+            return Err(format!("unsupported ICC intent: {}", draft.icc_intent));
+        }
+
+        let undo = self.capture_undo();
+        let scene = self
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .expect("validated scene must remain live");
+        set_native_scene_attr_default(scene, "bgcolor", background, "black");
+        set_native_scene_attr_default(scene, "aoEnabled", &draft.ao_enabled.to_string(), "false");
+        set_native_scene_attr_default(scene, "aoRadius", &draft.ao_radius.to_string(), "4");
+        set_native_scene_attr_default(scene, "aoIntensity", &draft.ao_intensity.to_string(), "2.2");
+        set_native_scene_attr_default(scene, "aoSlices", &draft.ao_slices.to_string(), "9");
+        set_native_scene_attr_default(scene, "aoSteps", &draft.ao_steps.to_string(), "3");
+        set_native_scene_attr_default(scene, "aoHalfRes", &draft.ao_half_res.to_string(), "false");
+        set_native_scene_attr_default(scene, "aa_method", &draft.aa_method, "fxaa");
+        set_native_scene_attr_default(
+            scene,
+            "aaJitterLevel",
+            &draft.aa_jitter_level.to_string(),
+            "0",
+        );
+        set_native_scene_attr_default(scene, "onload", &draft.onload, "");
+        set_native_scene_attr_default(
+            scene,
+            "use_colproof",
+            &draft.use_color_proof.to_string(),
+            "false",
+        );
+        set_native_scene_attr_default(scene, "icc_filename", &draft.icc_filename, "");
+        set_native_scene_attr_default(scene, "icc_intent", &draft.icc_intent, "perceptual");
+        self.push_undo_snapshot(undo);
+        self.modified_scenes.insert(scene_uid);
+        if self.state.active_scene() == Some(scene_uid) {
+            self.background = runtime_background;
+            self.color_proofing = draft.use_color_proof;
+            self.rebuild_snapshot();
+        }
+        Ok(())
+    }
+
+    fn sync_active_scene_properties(&mut self) {
+        let Some(scene) = self
+            .state
+            .active_scene()
+            .and_then(|uid| self.state.scene_manager().scene(uid))
+        else {
+            self.background = SceneBackground::Black;
+            self.color_proofing = false;
+            return;
+        };
+        self.background = scene
+            .scene_attribute("bgcolor")
+            .and_then(|value| SceneBackground::parse(value).ok())
+            .unwrap_or(SceneBackground::Black);
+        self.color_proofing = scene_attr_bool(scene.scene_attribute("use_colproof"), false);
+    }
+
+    fn persist_scene_background(&mut self, value: &str) {
+        let Some(scene_uid) = self.state.active_scene() else {
+            self.set_status("No active scene");
+            return;
+        };
+        let Ok(background) = SceneBackground::parse(value) else {
+            self.set_status(format!("Invalid background color: {value}"));
+            return;
+        };
+        let undo = self.capture_undo();
+        let Some(scene) = self.state.scene_manager_mut().scene_mut(scene_uid) else {
+            self.set_status("No active scene");
+            return;
+        };
+        set_native_scene_attr_default(scene, "bgcolor", value, "black");
+        self.push_undo_snapshot(undo);
+        self.modified_scenes.insert(scene_uid);
+        self.background = background;
+        self.set_status(format!("Background set to {value}"));
+    }
+
+    fn persist_scene_color_proofing(&mut self) {
+        let Some(scene_uid) = self.state.active_scene() else {
+            self.set_status("No active scene");
+            return;
+        };
+        let undo = self.capture_undo();
+        let Some(scene) = self.state.scene_manager_mut().scene_mut(scene_uid) else {
+            self.set_status("No active scene");
+            return;
+        };
+        set_native_scene_attr_default(
+            scene,
+            "use_colproof",
+            &self.color_proofing.to_string(),
+            "false",
+        );
+        self.push_undo_snapshot(undo);
+        self.modified_scenes.insert(scene_uid);
+        self.rebuild_snapshot();
+        self.set_status(format!("Color proofing: {}", self.color_proofing));
     }
 
     fn open_view_properties(&mut self, camera: &CameraController) {
@@ -7299,10 +7985,18 @@ impl GuiApplication {
             selected_renderer: self.selected_renderer,
             selection_text: self.selection_text.clone(),
             last_loaded_path: self.last_loaded_path.clone(),
+            modified_scenes: self.modified_scenes.clone(),
         }
     }
 
     fn push_undo_snapshot(&mut self, snapshot: GuiUndoSnapshot) {
+        if let Some(scene_uid) = self
+            .state
+            .active_scene()
+            .filter(|scene_uid| snapshot.state.scene_manager().scene(*scene_uid).is_some())
+        {
+            self.modified_scenes.insert(scene_uid);
+        }
         self.undo_stack.push(snapshot);
         if self.undo_stack.len() > 50 {
             self.undo_stack.remove(0);
@@ -7316,6 +8010,8 @@ impl GuiApplication {
         self.selected_renderer = snapshot.selected_renderer;
         self.selection_text = snapshot.selection_text;
         self.last_loaded_path = snapshot.last_loaded_path;
+        self.modified_scenes = snapshot.modified_scenes;
+        self.sync_active_scene_properties();
         self.rebuild_snapshot();
         camera.fit_snapshot(&self.snapshot);
     }
@@ -8264,6 +8960,113 @@ center_mark\t{}\n",
             camera.orientation = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch);
         }
         Ok(camera)
+    }
+}
+
+fn scene_attr_bool(value: Option<&str>, fallback: bool) -> bool {
+    value.map_or(fallback, |value| matches!(value, "true" | "1"))
+}
+
+fn scene_attr_f64(value: Option<&str>, fallback: f64) -> f64 {
+    value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(fallback)
+}
+
+fn scene_attr_i32(value: Option<&str>, fallback: i32) -> i32 {
+    value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(fallback)
+}
+
+fn set_native_scene_attr_default(
+    scene: &mut cuemol_molstr::MolScene,
+    name: &str,
+    value: &str,
+    default_value: &str,
+) {
+    if value == default_value {
+        scene.remove_scene_attribute(name);
+    } else {
+        scene.set_scene_attribute(name, value);
+    }
+}
+
+fn icc_intent_label(value: &str) -> &str {
+    match value {
+        "relative_colorimetric" => "relative colorimetric",
+        "absolute_colorimetric" => "absolute colorimetric",
+        _ => value,
+    }
+}
+
+fn scene_property_value(properties: &NativeSceneProperties, key: ScenePropertyKey) -> String {
+    use ScenePropertyKey as Key;
+    match key {
+        Key::Uid => properties.uid.to_string(),
+        Key::Modified => properties.modified.to_string(),
+        Key::Name => properties.name.clone(),
+        Key::Source => properties.source.clone(),
+        Key::SourceType => properties.source_type.clone(),
+        Key::BasePath => properties.base_path.clone(),
+        Key::Background => properties.background.clone(),
+        Key::AoEnabled => properties.ao_enabled.to_string(),
+        Key::AoRadius => format!("{:.6}", properties.ao_radius),
+        Key::AoIntensity => format!("{:.6}", properties.ao_intensity),
+        Key::AoSlices => properties.ao_slices.to_string(),
+        Key::AoSteps => properties.ao_steps.to_string(),
+        Key::AoHalfRes => properties.ao_half_res.to_string(),
+        Key::AaMethod => properties.aa_method.clone(),
+        Key::AaJitterLevel => properties.aa_jitter_level.to_string(),
+        Key::Onload => properties.onload.clone(),
+        Key::ObjectUids => properties.object_uids.clone(),
+        Key::ActiveObjectId => properties.active_object_id.to_string(),
+        Key::ActiveRendererId => properties.active_renderer_id.to_string(),
+        Key::ViewUids => properties.view_uids.clone(),
+        Key::ActiveViewId => properties.active_view_id.to_string(),
+        Key::UseColorProof => properties.use_color_proof.to_string(),
+        Key::IccFilename => properties.icc_filename.clone(),
+        Key::IccIntent => properties.icc_intent.clone(),
+    }
+}
+
+fn scene_property_is_default(properties: &NativeSceneProperties, key: ScenePropertyKey) -> bool {
+    use ScenePropertyKey as Key;
+    match key {
+        Key::Background => properties.background == "black",
+        Key::AoEnabled => !properties.ao_enabled,
+        Key::AoRadius => approx_property(properties.ao_radius, 4.0),
+        Key::AoIntensity => approx_property(properties.ao_intensity, 2.2),
+        Key::AoSlices => properties.ao_slices == 9,
+        Key::AoSteps => properties.ao_steps == 3,
+        Key::AoHalfRes => !properties.ao_half_res,
+        Key::AaMethod => properties.aa_method == "fxaa",
+        Key::AaJitterLevel => properties.aa_jitter_level == 0,
+        Key::Onload => properties.onload.is_empty(),
+        Key::UseColorProof => !properties.use_color_proof,
+        Key::IccFilename => properties.icc_filename.is_empty(),
+        Key::IccIntent => properties.icc_intent == "perceptual",
+        _ => false,
+    }
+}
+
+fn reset_scene_property(properties: &mut NativeSceneProperties, key: ScenePropertyKey) {
+    use ScenePropertyKey as Key;
+    match key {
+        Key::Background => properties.background = "black".to_string(),
+        Key::AoEnabled => properties.ao_enabled = false,
+        Key::AoRadius => properties.ao_radius = 4.0,
+        Key::AoIntensity => properties.ao_intensity = 2.2,
+        Key::AoSlices => properties.ao_slices = 9,
+        Key::AoSteps => properties.ao_steps = 3,
+        Key::AoHalfRes => properties.ao_half_res = false,
+        Key::AaMethod => properties.aa_method = "fxaa".to_string(),
+        Key::AaJitterLevel => properties.aa_jitter_level = 0,
+        Key::Onload => properties.onload.clear(),
+        Key::UseColorProof => properties.use_color_proof = false,
+        Key::IccFilename => properties.icc_filename.clear(),
+        Key::IccIntent => properties.icc_intent = "perceptual".to_string(),
+        _ => {}
     }
 }
 
@@ -11155,6 +11958,144 @@ mod tests {
     }
 
     #[test]
+    fn native_scene_property_editor_matches_reference_contract_and_persists_values() {
+        let names = SCENE_PROPERTY_DEFINITIONS
+            .iter()
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "uid",
+                "modified",
+                "name",
+                "src",
+                "srctype",
+                "basePath",
+                "bgcolor",
+                "aoEnabled",
+                "aoRadius",
+                "aoIntensity",
+                "aoSlices",
+                "aoSteps",
+                "aoHalfRes",
+                "aa_method",
+                "aaJitterLevel",
+                "onload",
+                "obj_uids",
+                "activeObjID",
+                "activeRendID",
+                "view_uids",
+                "activeViewID",
+                "use_colproof",
+                "icc_filename",
+                "icc_intent",
+            ]
+        );
+
+        let mut app = GuiApplication::new();
+        let mut properties = NativeSceneProperties::from_state(&app.state).unwrap();
+        properties.background = "#123456".to_string();
+        properties.ao_enabled = true;
+        properties.ao_radius = 7.5;
+        properties.ao_intensity = 3.25;
+        properties.ao_slices = 16;
+        properties.ao_steps = 6;
+        properties.ao_half_res = true;
+        properties.aa_method = "smaa".to_string();
+        properties.aa_jitter_level = 4;
+        properties.onload = "sceneReady();".to_string();
+        properties.use_color_proof = true;
+        properties.icc_filename = "proof.icc".to_string();
+        properties.icc_intent = "relative_colorimetric".to_string();
+
+        app.apply_scene_properties(&properties).unwrap();
+        assert_eq!(
+            app.background,
+            SceneBackground::Custom(Rgba8 {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+                a: 0xff,
+            })
+        );
+        assert!(app.color_proofing);
+        assert_eq!(app.undo_stack.len(), 1);
+        let scene = app
+            .state
+            .scene_manager()
+            .scene(cuemol_core::Uid::new(properties.uid))
+            .unwrap();
+        for (name, expected) in [
+            ("bgcolor", "#123456"),
+            ("aoEnabled", "true"),
+            ("aoRadius", "7.5"),
+            ("aoIntensity", "3.25"),
+            ("aoSlices", "16"),
+            ("aoSteps", "6"),
+            ("aoHalfRes", "true"),
+            ("aa_method", "smaa"),
+            ("aaJitterLevel", "4"),
+            ("onload", "sceneReady();"),
+            ("use_colproof", "true"),
+            ("icc_filename", "proof.icc"),
+            ("icc_intent", "relative_colorimetric"),
+        ] {
+            assert_eq!(scene.scene_attribute(name), Some(expected), "{name}");
+        }
+
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert_eq!(app.background, SceneBackground::Black);
+        assert!(!app.color_proofing);
+        assert!(app.modified_scenes.is_empty());
+        app.redo(&mut camera);
+        assert_eq!(
+            app.background,
+            SceneBackground::Custom(Rgba8 {
+                r: 0x12,
+                g: 0x34,
+                b: 0x56,
+                a: 0xff,
+            })
+        );
+        assert!(app.color_proofing);
+        assert!(app
+            .modified_scenes
+            .contains(&cuemol_core::Uid::new(properties.uid)));
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-native-scene-properties-{}.qsc",
+            std::process::id()
+        ));
+        app.save_current_scene_to_path(&camera, &path);
+        let qsc = fs::read_to_string(&path).unwrap();
+        assert!(qsc.contains("bgcolor=\"#123456\""));
+        assert!(qsc.contains("aoEnabled=\"true\""));
+        assert!(qsc.contains("icc_intent=\"relative_colorimetric\""));
+        assert!(app.undo_stack.is_empty());
+        assert!(app.modified_scenes.is_empty());
+        fs::remove_file(path).unwrap();
+
+        properties.ao_radius = 0.0;
+        assert_eq!(
+            app.apply_scene_properties(&properties),
+            Err("AO radius must be a positive finite number".to_string())
+        );
+    }
+
+    #[test]
+    fn native_scene_property_dialog_keeps_an_isolated_draft() {
+        let ctx = egui::Context::default();
+        let mut app = GuiApplication::new();
+        app.open_scene_properties();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.scene_props_dialog(ctx));
+        assert!(app.show_scene_props);
+        assert!(app.scene_properties_draft.is_some());
+        assert_eq!(app.background, SceneBackground::Black);
+    }
+
+    #[test]
     fn native_view_property_dialog_keeps_an_isolated_draft() {
         let ctx = egui::Context::default();
         let mut app = GuiApplication::new();
@@ -12143,7 +13084,21 @@ mod tests {
             save_harness(&mut harness, &out_dir.join("options.png"));
         }
 
-        // (1b4) Generic View property editor with the full reference property table.
+        // (1b4) Generic Scene property editor with the full Scene.qif table.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            app.open_scene_properties();
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1100.0, 820.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("scene_properties.png"));
+        }
+
+        // (1b5) Generic View property editor with the full reference property table.
         {
             let mut app = GuiApplication::new();
             let mut camera = CameraController::default();
