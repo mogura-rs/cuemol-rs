@@ -22,7 +22,7 @@ use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
@@ -118,7 +118,7 @@ pub fn run() -> Result<()> {
     spawn_process_exit_timer_from_env();
     let event_loop = EventLoop::new().map_err(gui_error)?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut runner = NativeRunner::new();
+    let mut runner = NativeRunner::new(event_loop.create_proxy());
     let run_result = event_loop.run_app(&mut runner).map_err(gui_error);
     let init_error = runner.init_error.take();
     std::mem::forget(runner);
@@ -131,6 +131,8 @@ struct NativeRunner {
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     gpu: Option<GpuState>,
+    gpu_init_receiver: Option<mpsc::Receiver<Result<GpuState>>>,
+    event_proxy: EventLoopProxy<()>,
     app: GuiApplication,
     init_error: Option<CueMolError>,
     started_at: Instant,
@@ -138,12 +140,14 @@ struct NativeRunner {
 }
 
 impl NativeRunner {
-    fn new() -> Self {
+    fn new(event_proxy: EventLoopProxy<()>) -> Self {
         Self {
             window: None,
             egui_ctx: egui::Context::default(),
             egui_state: None,
             gpu: None,
+            gpu_init_receiver: None,
+            event_proxy,
             app: GuiApplication::new(),
             init_error: None,
             started_at: Instant::now(),
@@ -176,6 +180,12 @@ impl ApplicationHandler for NativeRunner {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let _ = self.guard_gui_callback(event_loop, "about_to_wait", |this, event_loop| {
             this.about_to_wait_impl(event_loop);
+        });
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
+        let _ = self.guard_gui_callback(event_loop, "user_event", |this, event_loop| {
+            this.poll_gpu_init(event_loop);
         });
     }
 }
@@ -224,18 +234,64 @@ impl NativeRunner {
             None,
             None,
         );
-        let gpu = match pollster::block_on(GpuState::new(window.clone())) {
-            Ok(gpu) => gpu,
+        self.egui_state = Some(egui_state);
+        self.window = Some(window.clone());
+
+        let gpu_bootstrap = match GpuBootstrap::new(window.clone()) {
+            Ok(bootstrap) => bootstrap,
             Err(error) => {
                 self.init_error = Some(error);
                 event_loop.exit();
                 return;
             }
         };
-        self.egui_state = Some(egui_state);
-        self.gpu = Some(gpu);
-        window.request_redraw();
-        self.window = Some(window);
+        let (sender, receiver) = mpsc::channel();
+        let proxy = self.event_proxy.clone();
+        match std::thread::Builder::new()
+            .name("cuemol-gpu-init".to_string())
+            .spawn(move || {
+                let result = pollster::block_on(GpuState::new(gpu_bootstrap));
+                let _ = sender.send(result);
+                let _ = proxy.send_event(());
+            }) {
+            Ok(_) => self.gpu_init_receiver = Some(receiver),
+            Err(error) => {
+                self.init_error = Some(CueMolError::Io(format!(
+                    "failed to start GPU initialization: {error}"
+                )));
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn poll_gpu_init(&mut self, event_loop: &ActiveEventLoop) {
+        let result = self
+            .gpu_init_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match result {
+            Some(Ok(Ok(mut gpu))) => {
+                self.gpu_init_receiver = None;
+                if let Some(window) = &self.window {
+                    gpu.resize(window.inner_size());
+                    window.request_redraw();
+                }
+                self.gpu = Some(gpu);
+            }
+            Some(Ok(Err(error))) => {
+                self.gpu_init_receiver = None;
+                self.init_error = Some(error);
+                event_loop.exit();
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.gpu_init_receiver = None;
+                self.init_error = Some(CueMolError::Io(
+                    "GPU initialization thread stopped".to_string(),
+                ));
+                event_loop.exit();
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
     }
 
     fn window_event_impl(
@@ -250,6 +306,9 @@ impl NativeRunner {
         if window_id != window.id() {
             return;
         }
+        if matches!(event, WindowEvent::CloseRequested) {
+            std::process::exit(0);
+        }
         if matches!(event, WindowEvent::RedrawRequested) && self.should_exit_now() {
             event_loop.exit();
             return;
@@ -257,16 +316,15 @@ impl NativeRunner {
         let Some(egui_state) = self.egui_state.as_mut() else {
             return;
         };
+        let response = egui_state.on_window_event(window.as_ref(), &event);
+        let mut needs_redraw = response.repaint;
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
-        let response = egui_state.on_window_event(window.as_ref(), &event);
-        let mut needs_redraw = response.repaint;
         if self.app.handle_window_event(&event, &mut gpu.camera) {
             needs_redraw = true;
         }
         match event {
-            WindowEvent::CloseRequested => std::process::exit(0),
             WindowEvent::Resized(size) => {
                 gpu.resize(size);
                 needs_redraw = true;
@@ -311,6 +369,7 @@ impl NativeRunner {
     }
 
     fn about_to_wait_impl(&mut self, event_loop: &ActiveEventLoop) {
+        self.poll_gpu_init(event_loop);
         if self.should_exit_now() {
             event_loop.exit();
         }
@@ -6935,6 +6994,25 @@ impl ReusableGpuBuffer {
     }
 }
 
+struct GpuBootstrap {
+    instance: wgpu::Instance,
+    surface: wgpu::Surface<'static>,
+    size: PhysicalSize<u32>,
+}
+
+impl GpuBootstrap {
+    fn new(window: Arc<Window>) -> Result<Self> {
+        let size = window.inner_size();
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let surface = instance.create_surface(window).map_err(gui_error)?;
+        Ok(Self {
+            instance,
+            surface,
+            size,
+        })
+    }
+}
+
 struct GpuState {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -6961,10 +7039,12 @@ struct GpuState {
 }
 
 impl GpuState {
-    async fn new(window: Arc<Window>) -> Result<Self> {
-        let size = window.inner_size();
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let surface = instance.create_surface(window).map_err(gui_error)?;
+    async fn new(bootstrap: GpuBootstrap) -> Result<Self> {
+        let GpuBootstrap {
+            instance,
+            surface,
+            size,
+        } = bootstrap;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
