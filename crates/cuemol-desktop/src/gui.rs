@@ -1059,6 +1059,33 @@ impl NativeRendererProperties {
         } else {
             renderer.qsc_attr("sel").unwrap_or("*").to_string()
         };
+        let styles = state
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .and_then(|scene_uid| state.scene_manager().scene(scene_uid))
+            .map(cuemol_molvis::scene_style_manager)
+            .unwrap_or_else(cuemol_molvis::default_style_manager);
+        let mut specific = renderer.qsc_attrs().clone();
+        for (key, fallback) in native_renderer_specific_defaults(&renderer_type) {
+            let resolved = if let Some((child, attribute)) = key.split_once('.') {
+                if attribute == "type" {
+                    renderer.resolved_child_type(child, &styles, cuemol_molvis::DEFAULT_STYLE_SCOPE)
+                } else {
+                    renderer.resolved_child_attr(
+                        child,
+                        attribute,
+                        &styles,
+                        cuemol_molvis::DEFAULT_STYLE_SCOPE,
+                    )
+                }
+            } else {
+                renderer.resolved_attr(key, &styles, cuemol_molvis::DEFAULT_STYLE_SCOPE)
+            };
+            specific.insert(
+                (*key).to_string(),
+                resolved.unwrap_or_else(|| (*fallback).to_string()),
+            );
+        }
         Some(Self {
             object_uid,
             renderer_uid,
@@ -1093,7 +1120,7 @@ impl NativeRendererProperties {
                 .qsc_attr("ringcolor")
                 .unwrap_or("#ffffbf")
                 .to_string(),
-            specific: renderer.qsc_attrs().clone(),
+            specific,
         })
     }
 
@@ -7137,6 +7164,7 @@ impl GuiApplication {
             .default_width(520.0)
             .min_width(440.0)
             .default_height(500.0)
+            .max_height(600.0)
             .show(ctx, |ui| {
                 let tabs = draft.tabs();
                 draft.selected_tab = draft.selected_tab.min(tabs.len().saturating_sub(1));
@@ -7152,8 +7180,9 @@ impl GuiApplication {
                     .show(ui, |ui| {
                         let one_page = tabs.len() == 1;
                         if draft.selected_tab == 0 {
-                            if one_page {
+                            if one_page || draft.renderer_type == "ribbon" {
                                 Self::renderer_specific_properties_ui(ui, &mut draft);
+                                ui.add_space(8.0);
                             }
                             Self::renderer_common_properties_ui(ui, &mut draft, &material_names);
                         } else {
@@ -7666,10 +7695,702 @@ impl GuiApplication {
                     Self::renderer_specific_text(ui, draft, "defaultcolor", "Color:", "#ffffff");
                 });
             }
+            ("tube" | "nucl", "Tube") => {
+                Self::renderer_tube_properties_ui(ui, draft);
+            }
+            ("nucl", "Nucleic acid") => {
+                Self::renderer_nucl_properties_ui(ui, draft);
+            }
+            ("ribbon", "Common") => {
+                Self::renderer_backbone_properties_ui(ui, draft, 6, true, "sphere");
+            }
+            ("ribbon", "Helix") => {
+                Self::renderer_section_properties_ui(ui, draft, "helix", "Helix section");
+                ui.add_space(8.0);
+                Self::renderer_specific_group(ui, "Helix spline", |ui| {
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "helix_smooth",
+                        "Smoothing:",
+                        0.0,
+                        0.0,
+                        5.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_bool(
+                        ui,
+                        draft,
+                        "helix_usebackcol",
+                        "Use back-face color",
+                        false,
+                    );
+                    Self::renderer_specific_text(
+                        ui,
+                        draft,
+                        "helix_backcol",
+                        "Back-face color:",
+                        "#ffffff",
+                    );
+                });
+                ui.add_space(8.0);
+                Self::renderer_junction_properties_ui(ui, draft, "helixhead", "Helix head");
+                ui.add_space(8.0);
+                Self::renderer_junction_properties_ui(ui, draft, "helixtail", "Helix tail");
+            }
+            ("ribbon", "Sheet") => {
+                Self::renderer_section_properties_ui(ui, draft, "sheet", "Sheet section");
+                ui.add_space(8.0);
+                Self::renderer_specific_group(ui, "Sheet spline", |ui| {
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "sheet_smooth",
+                        "Smoothing:",
+                        0.5,
+                        0.0,
+                        5.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_bool(
+                        ui,
+                        draft,
+                        "sheet_usesidecol",
+                        "Use side-face color",
+                        false,
+                    );
+                    Self::renderer_specific_text(
+                        ui,
+                        draft,
+                        "sheet_sidecol",
+                        "Side-face color:",
+                        "#ffffff",
+                    );
+                });
+                ui.add_space(8.0);
+                Self::renderer_junction_properties_ui(ui, draft, "sheethead", "Sheet head");
+                ui.add_space(8.0);
+                Self::renderer_junction_properties_ui(ui, draft, "sheettail", "Sheet tail");
+            }
+            ("ribbon", "Coil") => {
+                Self::renderer_section_properties_ui(ui, draft, "coil", "Coil section");
+                ui.add_space(8.0);
+                Self::renderer_specific_group(ui, "Coil spline", |ui| {
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "coil_smooth",
+                        "Smoothing:",
+                        0.0,
+                        0.0,
+                        5.0,
+                        0.1,
+                    );
+                });
+            }
+            ("cartoon", "Cartoon") => {
+                Self::renderer_backbone_properties_ui(ui, draft, 8, false, "flat");
+                ui.add_space(8.0);
+                Self::renderer_specific_group(ui, "Anchor selection", |ui| {
+                    Self::renderer_specific_text(ui, draft, "anchor_sel", "Selection:", "");
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "anchor_weight",
+                        "Weight:",
+                        10.0,
+                        0.0,
+                        20.0,
+                        0.5,
+                    );
+                });
+            }
+            ("cartoon", "Helix") => {
+                Self::renderer_specific_group(ui, "Helix", |ui| {
+                    Self::renderer_specific_bool(
+                        ui,
+                        draft,
+                        "helix_ribbon",
+                        "Draw helix as ribbon",
+                        false,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "helix_smooth",
+                        "Smoothing:",
+                        3.0,
+                        -5.0,
+                        5.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_choice(
+                        ui,
+                        draft,
+                        "helix_width_mode",
+                        "Width mode:",
+                        "average",
+                        &[
+                            ("const", "Constant"),
+                            ("average", "Average"),
+                            ("wavy", "Wavy"),
+                        ],
+                    );
+                    for (key, label, fallback, minimum, maximum) in [
+                        ("helix_width", "Width:", 2.3, 0.01, 10.0),
+                        ("helix_extend", "Extension:", 0.5, 0.0, 3.0),
+                        ("helix_wsmooth", "Width smoothing:", 5.0, -5.0, 5.0),
+                        ("helix_wplus", "Width adjustment:", 0.2, -2.0, 3.0),
+                    ] {
+                        Self::renderer_specific_f64(
+                            ui, draft, key, label, fallback, minimum, maximum, 0.1,
+                        );
+                    }
+                });
+                ui.add_space(8.0);
+                Self::renderer_section_properties_ui(ui, draft, "ribhelix", "Ribbon helix section");
+                ui.add_space(8.0);
+                Self::renderer_junction_properties_ui(
+                    ui,
+                    draft,
+                    "ribhelix_head",
+                    "Ribbon helix head",
+                );
+                ui.add_space(8.0);
+                Self::renderer_junction_properties_ui(
+                    ui,
+                    draft,
+                    "ribhelix_tail",
+                    "Ribbon helix tail",
+                );
+            }
+            ("cartoon", "Sheet") => {
+                Self::renderer_section_properties_ui(ui, draft, "sheet", "Sheet section");
+                ui.add_space(8.0);
+                Self::renderer_specific_group(ui, "Sheet spline", |ui| {
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "sheet_smooth",
+                        "Smoothing:",
+                        2.0,
+                        -5.0,
+                        5.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "sheet_wsmooth",
+                        "Width smoothing:",
+                        5.0,
+                        -5.0,
+                        5.0,
+                        0.1,
+                    );
+                });
+                ui.add_space(8.0);
+                Self::renderer_junction_properties_ui(ui, draft, "sheethead", "Sheet head");
+            }
+            ("cartoon", "Coil") => {
+                Self::renderer_section_properties_ui(ui, draft, "coil", "Coil section");
+                ui.add_space(8.0);
+                Self::renderer_specific_group(ui, "Coil spline", |ui| {
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "coil_smooth",
+                        "Smoothing:",
+                        -1.0,
+                        -5.0,
+                        5.0,
+                        0.1,
+                    );
+                });
+            }
+            ("contour" | "gpu_mapmesh" | "isosurf" | "gpu_mapvol", "Map") => {
+                Self::renderer_map_properties_ui(ui, draft);
+            }
+            ("surface" | "dsurface" | "directsurf" | "dsurf2", "MolSurf") => {
+                Self::renderer_surface_properties_ui(ui, draft);
+            }
             _ => {
                 ui.weak("Properties on this page are inherited from the current style.");
             }
         }
+    }
+
+    fn renderer_backbone_properties_ui(
+        ui: &mut egui::Ui,
+        draft: &mut NativeRendererProperties,
+        axial_detail: i32,
+        smooth_color: bool,
+        cap_type: &str,
+    ) {
+        Self::renderer_specific_group(ui, "Backbone spline", |ui| {
+            Self::renderer_specific_i32(
+                ui,
+                draft,
+                "axialdetail",
+                "Axial detail:",
+                axial_detail,
+                2,
+                20,
+            );
+            Self::renderer_specific_bool(ui, draft, "smoothcolor", "Smooth color", smooth_color);
+            Self::renderer_specific_bool(ui, draft, "segend_fade", "Fade at segment ends", false);
+            for (key, label) in [("start_captype", "Start cap:"), ("end_captype", "End cap:")] {
+                Self::renderer_specific_choice(
+                    ui,
+                    draft,
+                    key,
+                    label,
+                    cap_type,
+                    &[("flat", "Flat"), ("sphere", "Sphere"), ("none", "None")],
+                );
+            }
+        });
+        ui.add_space(8.0);
+        Self::renderer_specific_group(ui, "Pivot atom", |ui| {
+            Self::renderer_specific_text(ui, draft, "pivotatom", "Atom name:", "");
+        });
+    }
+
+    fn renderer_section_properties_ui(
+        ui: &mut egui::Ui,
+        draft: &mut NativeRendererProperties,
+        key: &str,
+        title: &str,
+    ) {
+        Self::renderer_specific_group(ui, title, |ui| {
+            let type_key = format!("{key}.type");
+            Self::renderer_specific_choice(
+                ui,
+                draft,
+                &type_key,
+                "Type:",
+                "elliptical",
+                &[
+                    ("elliptical", "Elliptical"),
+                    ("roundsquare", "Rounded square"),
+                    ("rectangle", "Rectangle"),
+                    ("fancy1", "Fancy"),
+                ],
+            );
+            let detail_key = format!("{key}.detail");
+            Self::renderer_specific_i32(ui, draft, &detail_key, "Detail:", 16, 2, 20);
+            let width_key = format!("{key}.width");
+            Self::renderer_specific_f64(ui, draft, &width_key, "Width 1:", 0.35, 0.01, 10.0, 0.01);
+            let width = draft
+                .specific_value(&width_key, "0.35")
+                .parse::<f64>()
+                .unwrap_or(0.35)
+                .max(f64::EPSILON);
+            let ratio_key = format!("{key}.tuber");
+            let ratio = draft
+                .specific_value(&ratio_key, "1")
+                .parse::<f64>()
+                .unwrap_or(1.0);
+            let mut width_2 = width * ratio;
+            ui.horizontal(|ui| {
+                ui.label("Width 2:");
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut width_2)
+                            .speed(0.01)
+                            .range(0.01..=10.0),
+                    )
+                    .changed()
+                {
+                    draft
+                        .specific
+                        .insert(ratio_key, (width_2 / width).to_string());
+                }
+            });
+            let sharp_key = format!("{key}.sharp");
+            Self::renderer_specific_f64(ui, draft, &sharp_key, "Sharpness:", 0.4, 0.0, 1.0, 0.05);
+        });
+    }
+
+    fn renderer_junction_properties_ui(
+        ui: &mut egui::Ui,
+        draft: &mut NativeRendererProperties,
+        key: &str,
+        title: &str,
+    ) {
+        Self::renderer_specific_group(ui, title, |ui| {
+            let type_key = format!("{key}.type");
+            Self::renderer_specific_choice(
+                ui,
+                draft,
+                &type_key,
+                "Type:",
+                "smooth",
+                &[("smooth", "Smooth"), ("flat", "Flat"), ("arrow", "Arrow")],
+            );
+            let arrow = draft.specific_value(&type_key, "smooth") == "arrow";
+            ui.add_enabled_ui(arrow, |ui| {
+                let gamma_key = format!("{key}.gamma");
+                Self::renderer_specific_f64(ui, draft, &gamma_key, "Gamma:", 2.2, 0.1, 10.0, 0.1);
+                for (suffix, label, fallback, minimum, maximum) in [
+                    ("basw", "Base width (%):", 0.0, 0.0, 1.0),
+                    ("arrow", "Arrow width (%):", 1.8, 1.0, 3.0),
+                ] {
+                    let property = format!("{key}.{suffix}");
+                    Self::renderer_specific_percentage(
+                        ui, draft, &property, label, fallback, minimum, maximum,
+                    );
+                }
+            });
+        });
+    }
+
+    fn renderer_specific_percentage(
+        ui: &mut egui::Ui,
+        draft: &mut NativeRendererProperties,
+        key: &str,
+        label: &str,
+        fallback: f64,
+        minimum: f64,
+        maximum: f64,
+    ) {
+        let mut value = draft
+            .specific_value(key, &fallback.to_string())
+            .parse::<f64>()
+            .unwrap_or(fallback)
+            * 100.0;
+        ui.horizontal(|ui| {
+            ui.label(label);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut value)
+                        .speed(5.0)
+                        .range(minimum * 100.0..=maximum * 100.0),
+                )
+                .changed()
+            {
+                draft
+                    .specific
+                    .insert(key.to_string(), (value / 100.0).to_string());
+            }
+        });
+    }
+
+    fn renderer_tube_properties_ui(ui: &mut egui::Ui, draft: &mut NativeRendererProperties) {
+        let enabled = draft.renderer_type != "nucl"
+            || draft
+                .specific
+                .get("show_tube")
+                .map(|value| value_is_true(value))
+                .unwrap_or(true);
+        ui.add_enabled_ui(enabled, |ui| {
+            Self::renderer_section_properties_ui(ui, draft, "section", "Section");
+            ui.add_space(8.0);
+            Self::renderer_specific_group(ui, "Spline", |ui| {
+                Self::renderer_specific_i32(ui, draft, "axialdetail", "Axial detail:", 6, 2, 20);
+                Self::renderer_specific_f64(ui, draft, "smooth", "Smoothing:", 0.0, 0.0, 0.5, 0.05);
+                Self::renderer_specific_bool(ui, draft, "smoothcolor", "Smooth color", true);
+                Self::renderer_specific_bool(
+                    ui,
+                    draft,
+                    "segend_fade",
+                    "Fade at segment ends",
+                    false,
+                );
+                Self::renderer_specific_choice(
+                    ui,
+                    draft,
+                    "start_captype",
+                    "Cap type:",
+                    "sphere",
+                    &[("flat", "Flat"), ("sphere", "Sphere"), ("none", "None")],
+                );
+                let cap = draft.specific_value("start_captype", "sphere");
+                draft.specific.insert("end_captype".to_string(), cap);
+            });
+            ui.add_space(8.0);
+            Self::renderer_specific_group(ui, "Pivot atom", |ui| {
+                Self::renderer_specific_text(ui, draft, "pivotatom", "Atom name:", "");
+            });
+            ui.add_space(8.0);
+            Self::renderer_specific_group(ui, "Putty", |ui| {
+                Self::renderer_specific_choice(
+                    ui,
+                    draft,
+                    "putty_mode",
+                    "Mode:",
+                    "none",
+                    &[
+                        ("none", "None"),
+                        ("linear1", "Linear"),
+                        ("scale1", "Scaled"),
+                    ],
+                );
+                let putty = draft.specific_value("putty_mode", "none") != "none";
+                ui.add_enabled_ui(putty, |ui| {
+                    Self::renderer_specific_choice(
+                        ui,
+                        draft,
+                        "putty_tgt",
+                        "Target:",
+                        "bfac",
+                        &[("bfac", "B-factor"), ("occ", "Occupancy")],
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "putty_loscl",
+                        "Low scale:",
+                        3.0,
+                        0.01,
+                        10.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "putty_hiscl",
+                        "High scale:",
+                        3.0,
+                        0.01,
+                        10.0,
+                        0.1,
+                    );
+                });
+            });
+        });
+    }
+
+    fn renderer_nucl_properties_ui(ui: &mut egui::Ui, draft: &mut NativeRendererProperties) {
+        Self::renderer_specific_group(ui, "Nucleic acid", |ui| {
+            Self::renderer_specific_bool(ui, draft, "show_tube", "Show tube", true);
+            Self::renderer_specific_bool(ui, draft, "show_basepair", "Connect base pair", true);
+        });
+        ui.add_space(8.0);
+        let show_base = draft
+            .specific
+            .get("show_basepair")
+            .map(|value| value_is_true(value))
+            .unwrap_or(true);
+        ui.add_enabled_ui(show_base, |ui| {
+            Self::renderer_specific_group(ui, "Base", |ui| {
+                Self::renderer_specific_choice(
+                    ui,
+                    draft,
+                    "base_type",
+                    "Type:",
+                    "basepair",
+                    &[
+                        ("basepair", "Base pair"),
+                        ("simple1", "Simple"),
+                        ("detail1", "Detailed 1"),
+                        ("detail2", "Detailed 2"),
+                    ],
+                );
+                Self::renderer_specific_i32(ui, draft, "base_detail", "Detail:", 3, 2, 20);
+                Self::renderer_specific_f64(ui, draft, "base_size", "Size:", 0.5, 0.0, 10.0, 0.05);
+                let base_size = draft
+                    .specific_value("base_size", "0.5")
+                    .parse::<f64>()
+                    .unwrap_or(0.5)
+                    .max(f64::EPSILON);
+                let thickness = draft
+                    .specific_value("base_thick", "0.5")
+                    .parse::<f64>()
+                    .unwrap_or(0.5);
+                let mut percentage = thickness * 100.0 / base_size;
+                ui.horizontal(|ui| {
+                    ui.label("Thickness (%):");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut percentage)
+                                .speed(5.0)
+                                .range(0.0..=100.0),
+                        )
+                        .changed()
+                    {
+                        draft.specific.insert(
+                            "base_thick".to_string(),
+                            (percentage * base_size / 100.0).to_string(),
+                        );
+                    }
+                });
+            });
+        });
+    }
+
+    fn renderer_map_properties_ui(ui: &mut egui::Ui, draft: &mut NativeRendererProperties) {
+        Self::renderer_specific_group(ui, "Map", |ui| {
+            let auto = draft
+                .specific
+                .get("autoupdate")
+                .map(|value| value_is_true(value))
+                .unwrap_or(true);
+            let drag = draft
+                .specific
+                .get("dragupdate")
+                .map(|value| value_is_true(value))
+                .unwrap_or(false);
+            let mut update_mode = if !auto {
+                "none".to_string()
+            } else if drag {
+                "drag".to_string()
+            } else {
+                "auto".to_string()
+            };
+            ui.horizontal(|ui| {
+                ui.label("Center update:");
+                egui::ComboBox::from_id_salt("native_renderer_map_update")
+                    .selected_text(&update_mode)
+                    .show_ui(ui, |ui| {
+                        for (value, label) in [
+                            ("none", "None"),
+                            ("auto", "Automatic"),
+                            ("drag", "Automatic (drag)"),
+                        ] {
+                            ui.selectable_value(&mut update_mode, value.to_string(), label);
+                        }
+                    });
+            });
+            draft.specific.insert(
+                "autoupdate".to_string(),
+                (update_mode != "none").to_string(),
+            );
+            draft.specific.insert(
+                "dragupdate".to_string(),
+                (update_mode == "drag").to_string(),
+            );
+            match draft.renderer_type.as_str() {
+                "isosurf" => {
+                    Self::renderer_specific_choice(
+                        ui,
+                        draft,
+                        "drawmode",
+                        "Drawing Mode:",
+                        "fill",
+                        &[("fill", "fill"), ("line", "line"), ("point", "point")],
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "width",
+                        "Line/Point size:",
+                        1.2,
+                        0.1,
+                        10.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_i32(
+                        ui,
+                        draft,
+                        "max_grids",
+                        "Max grid size:",
+                        100,
+                        10,
+                        2000,
+                    );
+                    Self::renderer_specific_bool(ui, draft, "cullface", "Back-face culling", false);
+                }
+                "contour" | "gpu_mapmesh" => {
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "width",
+                        "Line width:",
+                        1.0,
+                        0.1,
+                        10.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_i32(ui, draft, "bufsize", "Buffer size:", 100, 50, 200);
+                }
+                "gpu_mapvol" => Self::renderer_specific_choice(
+                    ui,
+                    draft,
+                    "xferfn_type",
+                    "Transfer function:",
+                    "rainbow1",
+                    &[
+                        ("rainbow1", "Rainbow"),
+                        ("auto2", "Automatic"),
+                        ("multigrad", "Multi-gradient"),
+                    ],
+                ),
+                _ => {}
+            }
+            Self::renderer_specific_bool(ui, draft, "use_pbc", "Use periodic boundary", true);
+        });
+        ui.add_space(8.0);
+        Self::renderer_specific_group(ui, "Display boundary", |ui| {
+            Self::renderer_specific_text(ui, draft, "bndry_molname", "Target:", "");
+            Self::renderer_specific_text(ui, draft, "bndry_sel", "Selection:", "all");
+            Self::renderer_specific_f64(ui, draft, "bndry_rng", "Distance:", 5.0, 0.1, 100.0, 0.1);
+        });
+    }
+
+    fn renderer_surface_properties_ui(ui: &mut egui::Ui, draft: &mut NativeRendererProperties) {
+        let direct = matches!(
+            draft.renderer_type.as_str(),
+            "dsurface" | "directsurf" | "dsurf2"
+        );
+        Self::renderer_specific_group(ui, "Draw", |ui| {
+            Self::renderer_specific_choice(
+                ui,
+                draft,
+                "drawmode",
+                "Drawing Mode:",
+                "fill",
+                &[("fill", "fill"), ("line", "line"), ("point", "point")],
+            );
+            Self::renderer_specific_f64(
+                ui,
+                draft,
+                "width",
+                "Line/Point size:",
+                1.2,
+                0.1,
+                10.0,
+                0.1,
+            );
+            ui.add_enabled_ui(direct, |ui| {
+                Self::renderer_specific_choice(
+                    ui,
+                    draft,
+                    "surftype",
+                    "Surface type:",
+                    "ses",
+                    &[
+                        ("vdw", "van der Waals"),
+                        ("sas", "Solvent accessible"),
+                        ("ses", "Solvent excluded"),
+                    ],
+                );
+                Self::renderer_specific_i32(ui, draft, "detail", "Detail:", 6, 1, 21);
+            });
+        });
+        ui.add_space(8.0);
+        Self::renderer_specific_group(ui, "Show selected", |ui| {
+            Self::renderer_specific_text(ui, draft, "target", "Selection mol:", "");
+            Self::renderer_specific_text(ui, draft, "showsel", "Selection:", "*");
+        });
+        ui.add_space(8.0);
+        let choices = if direct {
+            &[("molecule", "By molecule"), ("potential", "By potential")][..]
+        } else {
+            &[
+                ("solid", "Solid color"),
+                ("molecule", "By molecule"),
+                ("potential", "By potential"),
+            ][..]
+        };
+        Self::renderer_specific_choice(
+            ui,
+            draft,
+            "colormode",
+            "Coloring mode:",
+            if direct { "molecule" } else { "solid" },
+            choices,
+        );
     }
 
     fn renderer_specific_group(
@@ -10241,6 +10962,188 @@ fn native_renderer_specific_defaults(
             ("loopsize2", "-1"),
             ("defaultcolor", "#ffffff"),
         ],
+        "ribbon" => &[
+            ("helix.type", "elliptical"),
+            ("helix.width", "0.35"),
+            ("helix.tuber", "1"),
+            ("helix.sharp", "0.4"),
+            ("helix.detail", "16"),
+            ("sheet.type", "elliptical"),
+            ("sheet.width", "0.35"),
+            ("sheet.tuber", "1"),
+            ("sheet.sharp", "0.4"),
+            ("sheet.detail", "16"),
+            ("coil.type", "elliptical"),
+            ("coil.width", "0.35"),
+            ("coil.tuber", "1"),
+            ("coil.sharp", "0.4"),
+            ("coil.detail", "16"),
+            ("helixhead.type", "smooth"),
+            ("helixhead.gamma", "2.2"),
+            ("helixhead.basw", "0"),
+            ("helixhead.arrow", "1.8"),
+            ("helixtail.type", "smooth"),
+            ("helixtail.gamma", "2.2"),
+            ("helixtail.basw", "0"),
+            ("helixtail.arrow", "1.8"),
+            ("sheethead.type", "smooth"),
+            ("sheethead.gamma", "2.2"),
+            ("sheethead.basw", "0"),
+            ("sheethead.arrow", "1.8"),
+            ("sheettail.type", "smooth"),
+            ("sheettail.gamma", "2.2"),
+            ("sheettail.basw", "0"),
+            ("sheettail.arrow", "1.8"),
+            ("axialdetail", "6"),
+            ("smoothcolor", "true"),
+            ("pivotatom", ""),
+            ("start_captype", "sphere"),
+            ("end_captype", "sphere"),
+            ("segend_fade", "false"),
+            ("helix_smooth", "0"),
+            ("sheet_smooth", "0.5"),
+            ("coil_smooth", "0"),
+            ("helix_usebackcol", "false"),
+            ("helix_backcol", "#ffffff"),
+            ("sheet_usesidecol", "false"),
+            ("sheet_sidecol", "#ffffff"),
+        ],
+        "cartoon" => &[
+            ("sheet.type", "elliptical"),
+            ("sheet.width", "0.35"),
+            ("sheet.tuber", "1"),
+            ("sheet.sharp", "0.4"),
+            ("sheet.detail", "16"),
+            ("coil.type", "elliptical"),
+            ("coil.width", "0.35"),
+            ("coil.tuber", "1"),
+            ("coil.sharp", "0.4"),
+            ("coil.detail", "16"),
+            ("sheethead.type", "smooth"),
+            ("sheethead.gamma", "2.2"),
+            ("sheethead.basw", "0"),
+            ("sheethead.arrow", "1.8"),
+            ("ribhelix.type", "elliptical"),
+            ("ribhelix.width", "0.35"),
+            ("ribhelix.tuber", "1"),
+            ("ribhelix.sharp", "0.4"),
+            ("ribhelix.detail", "16"),
+            ("ribhelix_head.type", "smooth"),
+            ("ribhelix_head.gamma", "2.2"),
+            ("ribhelix_head.basw", "0"),
+            ("ribhelix_head.arrow", "1.8"),
+            ("ribhelix_tail.type", "smooth"),
+            ("ribhelix_tail.gamma", "2.2"),
+            ("ribhelix_tail.basw", "0"),
+            ("ribhelix_tail.arrow", "1.8"),
+            ("axialdetail", "8"),
+            ("smoothcolor", "false"),
+            ("pivotatom", ""),
+            ("start_captype", "flat"),
+            ("end_captype", "flat"),
+            ("segend_fade", "false"),
+            ("anchor_sel", ""),
+            ("anchor_weight", "10"),
+            ("helix_ribbon", "false"),
+            ("helix_smooth", "3"),
+            ("helix_width_mode", "average"),
+            ("helix_width", "2.3"),
+            ("helix_extend", "0.5"),
+            ("helix_wsmooth", "5"),
+            ("helix_wplus", "0.2"),
+            ("sheet_smooth", "2"),
+            ("sheet_wsmooth", "5"),
+            ("coil_smooth", "-1"),
+        ],
+        "tube" => &[
+            ("section.type", "elliptical"),
+            ("section.width", "0.35"),
+            ("section.tuber", "1"),
+            ("section.sharp", "0.4"),
+            ("section.detail", "16"),
+            ("axialdetail", "6"),
+            ("smooth", "0"),
+            ("smoothcolor", "true"),
+            ("pivotatom", ""),
+            ("start_captype", "sphere"),
+            ("end_captype", "sphere"),
+            ("segend_fade", "false"),
+            ("putty_mode", "none"),
+            ("putty_tgt", "bfac"),
+            ("putty_hiscl", "3"),
+            ("putty_loscl", "3"),
+        ],
+        "nucl" => &[
+            ("section.type", "elliptical"),
+            ("section.width", "0.35"),
+            ("section.tuber", "1"),
+            ("section.sharp", "0.4"),
+            ("section.detail", "16"),
+            ("axialdetail", "6"),
+            ("smooth", "0"),
+            ("smoothcolor", "true"),
+            ("pivotatom", ""),
+            ("start_captype", "sphere"),
+            ("end_captype", "sphere"),
+            ("segend_fade", "false"),
+            ("putty_mode", "none"),
+            ("putty_tgt", "bfac"),
+            ("putty_hiscl", "3"),
+            ("putty_loscl", "3"),
+            ("show_tube", "true"),
+            ("show_basepair", "true"),
+            ("base_size", "0.5"),
+            ("base_detail", "3"),
+            ("base_thick", "0.5"),
+            ("base_type", "basepair"),
+        ],
+        "contour" | "gpu_mapmesh" => &[
+            ("autoupdate", "true"),
+            ("dragupdate", "false"),
+            ("width", "1"),
+            ("bufsize", "100"),
+            ("use_pbc", "true"),
+            ("bndry_molname", ""),
+            ("bndry_sel", "all"),
+            ("bndry_rng", "5"),
+        ],
+        "isosurf" => &[
+            ("autoupdate", "true"),
+            ("dragupdate", "false"),
+            ("drawmode", "fill"),
+            ("width", "1.2"),
+            ("max_grids", "100"),
+            ("cullface", "false"),
+            ("use_pbc", "true"),
+            ("bndry_molname", ""),
+            ("bndry_sel", "all"),
+            ("bndry_rng", "5"),
+        ],
+        "gpu_mapvol" => &[
+            ("autoupdate", "true"),
+            ("dragupdate", "false"),
+            ("xferfn_type", "rainbow1"),
+            ("use_pbc", "true"),
+            ("bndry_molname", ""),
+            ("bndry_sel", "all"),
+            ("bndry_rng", "5"),
+        ],
+        "surface" => &[
+            ("drawmode", "fill"),
+            ("width", "1.2"),
+            ("target", ""),
+            ("showsel", "*"),
+            ("colormode", "solid"),
+        ],
+        "dsurface" | "directsurf" | "dsurf2" => &[
+            ("drawmode", "fill"),
+            ("width", "1.2"),
+            ("surftype", "ses"),
+            ("detail", "6"),
+            ("target", ""),
+            ("showsel", "*"),
+            ("colormode", "molecule"),
+        ],
         _ => &[],
     }
 }
@@ -10393,6 +11296,235 @@ fn validate_native_renderer_properties(
                 "disorder color",
             )?;
         }
+        "ribbon" | "cartoon" => {
+            let cartoon = draft.renderer_type == "cartoon";
+            let sections = if cartoon {
+                &["sheet", "coil", "ribhelix"][..]
+            } else {
+                &["helix", "sheet", "coil"][..]
+            };
+            for section in sections {
+                validate_renderer_choice(
+                    draft,
+                    &format!("{section}.type"),
+                    "elliptical",
+                    &["elliptical", "roundsquare", "rectangle", "fancy1"],
+                )?;
+                validate_renderer_integer(
+                    draft,
+                    &format!("{section}.detail"),
+                    "16",
+                    &format!("{section} detail"),
+                    2,
+                    20,
+                )?;
+                for (suffix, label, fallback, minimum, maximum) in [
+                    ("width", "width", "0.35", 0.001, 10.0),
+                    ("tuber", "width ratio", "1", 0.1, 10.0),
+                    ("sharp", "sharpness", "0.4", 0.0, 1.0),
+                ] {
+                    validate_renderer_number(
+                        draft,
+                        &format!("{section}.{suffix}"),
+                        fallback,
+                        &format!("{section} {label}"),
+                        minimum,
+                        maximum,
+                    )?;
+                }
+            }
+            let junctions = if cartoon {
+                &["sheethead", "ribhelix_head", "ribhelix_tail"][..]
+            } else {
+                &["helixhead", "helixtail", "sheethead", "sheettail"][..]
+            };
+            for junction in junctions {
+                validate_renderer_choice(
+                    draft,
+                    &format!("{junction}.type"),
+                    "smooth",
+                    &["smooth", "flat", "arrow"],
+                )?;
+                for (suffix, fallback, minimum, maximum) in [
+                    ("gamma", "2.2", 0.1, 10.0),
+                    ("basw", "0", 0.0, 1.0),
+                    ("arrow", "1.8", 1.0, 3.0),
+                ] {
+                    validate_renderer_number(
+                        draft,
+                        &format!("{junction}.{suffix}"),
+                        fallback,
+                        &format!("{junction} {suffix}"),
+                        minimum,
+                        maximum,
+                    )?;
+                }
+            }
+            validate_renderer_integer(
+                draft,
+                "axialdetail",
+                if cartoon { "8" } else { "6" },
+                "axial detail",
+                2,
+                20,
+            )?;
+            for key in ["smoothcolor", "segend_fade"] {
+                validate_renderer_bool(
+                    draft,
+                    key,
+                    if key == "smoothcolor" {
+                        !cartoon
+                    } else {
+                        false
+                    },
+                )?;
+            }
+            for key in ["start_captype", "end_captype"] {
+                validate_renderer_choice(
+                    draft,
+                    key,
+                    if cartoon { "flat" } else { "sphere" },
+                    &["flat", "sphere", "none"],
+                )?;
+            }
+            if cartoon {
+                validate_renderer_bool(draft, "helix_ribbon", false)?;
+                validate_renderer_choice(
+                    draft,
+                    "helix_width_mode",
+                    "average",
+                    &["const", "average", "wavy"],
+                )?;
+                for (key, fallback, minimum, maximum) in [
+                    ("anchor_weight", "10", 0.0, 20.0),
+                    ("helix_smooth", "3", -5.0, 5.0),
+                    ("helix_width", "2.3", 0.001, 10.0),
+                    ("helix_extend", "0.5", 0.0, 3.0),
+                    ("helix_wsmooth", "5", -5.0, 5.0),
+                    ("helix_wplus", "0.2", -2.0, 3.0),
+                    ("sheet_smooth", "2", -5.0, 5.0),
+                    ("sheet_wsmooth", "5", -5.0, 5.0),
+                    ("coil_smooth", "-1", -5.0, 5.0),
+                ] {
+                    validate_renderer_number(draft, key, fallback, key, minimum, maximum)?;
+                }
+            } else {
+                for (key, fallback) in [
+                    ("helix_smooth", "0"),
+                    ("sheet_smooth", "0.5"),
+                    ("coil_smooth", "0"),
+                ] {
+                    validate_renderer_number(draft, key, fallback, key, 0.0, 5.0)?;
+                }
+                validate_renderer_bool(draft, "helix_usebackcol", false)?;
+                validate_renderer_bool(draft, "sheet_usesidecol", false)?;
+                validate_renderer_color(
+                    &draft.specific_value("helix_backcol", "#ffffff"),
+                    "helix back-face color",
+                )?;
+                validate_renderer_color(
+                    &draft.specific_value("sheet_sidecol", "#ffffff"),
+                    "sheet side-face color",
+                )?;
+            }
+        }
+        "tube" | "nucl" => {
+            validate_renderer_choice(
+                draft,
+                "section.type",
+                "elliptical",
+                &["elliptical", "roundsquare", "rectangle", "fancy1"],
+            )?;
+            validate_renderer_integer(draft, "section.detail", "16", "section detail", 2, 20)?;
+            validate_renderer_integer(draft, "axialdetail", "6", "axial detail", 2, 20)?;
+            for (key, fallback, minimum, maximum) in [
+                ("section.width", "0.35", f64::EPSILON, 10.0),
+                ("section.tuber", "1", f64::EPSILON, 100.0),
+                ("section.sharp", "0.4", 0.0, 1.0),
+                ("smooth", "0", 0.0, 1.0),
+                ("putty_hiscl", "3", 0.01, 10.0),
+                ("putty_loscl", "3", 0.01, 10.0),
+            ] {
+                validate_renderer_number(draft, key, fallback, key, minimum, maximum)?;
+            }
+            for key in ["smoothcolor", "segend_fade"] {
+                validate_renderer_bool(draft, key, key == "smoothcolor")?;
+            }
+            for key in ["start_captype", "end_captype"] {
+                validate_renderer_choice(draft, key, "sphere", &["flat", "sphere", "none"])?;
+            }
+            validate_renderer_choice(draft, "putty_mode", "none", &["none", "linear1", "scale1"])?;
+            validate_renderer_choice(draft, "putty_tgt", "bfac", &["bfac", "occ"])?;
+            if draft.renderer_type == "nucl" {
+                validate_renderer_bool(draft, "show_tube", true)?;
+                validate_renderer_bool(draft, "show_basepair", true)?;
+                validate_renderer_number(draft, "base_size", "0.5", "base size", 0.0, 10.0)?;
+                validate_renderer_number(draft, "base_thick", "0.5", "base thickness", 0.0, 10.0)?;
+                validate_renderer_integer(draft, "base_detail", "3", "base detail", 2, 20)?;
+                validate_renderer_choice(
+                    draft,
+                    "base_type",
+                    "basepair",
+                    &["basepair", "simple1", "detail1", "detail2"],
+                )?;
+            }
+        }
+        "contour" | "gpu_mapmesh" | "isosurf" | "gpu_mapvol" => {
+            for key in ["autoupdate", "dragupdate", "use_pbc"] {
+                validate_renderer_bool(draft, key, key != "dragupdate")?;
+            }
+            validate_renderer_number(draft, "bndry_rng", "5", "boundary distance", 0.1, 100.0)?;
+            match draft.renderer_type.as_str() {
+                "contour" | "gpu_mapmesh" => {
+                    validate_renderer_number(draft, "width", "1", "line width", 0.1, 10.0)?;
+                    validate_renderer_integer(draft, "bufsize", "100", "buffer size", 50, 200)?;
+                }
+                "isosurf" => {
+                    validate_renderer_choice(
+                        draft,
+                        "drawmode",
+                        "fill",
+                        &["fill", "line", "point"],
+                    )?;
+                    validate_renderer_number(draft, "width", "1.2", "line width", 0.1, 10.0)?;
+                    validate_renderer_integer(
+                        draft,
+                        "max_grids",
+                        "100",
+                        "maximum grid size",
+                        10,
+                        2000,
+                    )?;
+                    validate_renderer_bool(draft, "cullface", false)?;
+                }
+                "gpu_mapvol" => validate_renderer_choice(
+                    draft,
+                    "xferfn_type",
+                    "rainbow1",
+                    &["rainbow1", "auto2", "multigrad"],
+                )?,
+                _ => {}
+            }
+        }
+        "surface" | "dsurface" | "directsurf" | "dsurf2" => {
+            let direct = draft.renderer_type != "surface";
+            validate_renderer_choice(draft, "drawmode", "fill", &["fill", "line", "point"])?;
+            validate_renderer_number(draft, "width", "1.2", "surface width", 0.1, 10.0)?;
+            validate_renderer_choice(
+                draft,
+                "colormode",
+                if direct { "molecule" } else { "solid" },
+                if direct {
+                    &["molecule", "potential"]
+                } else {
+                    &["solid", "molecule", "potential"]
+                },
+            )?;
+            if direct {
+                validate_renderer_choice(draft, "surftype", "ses", &["vdw", "sas", "ses"])?;
+                validate_renderer_integer(draft, "detail", "6", "surface detail", 1, 21)?;
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -10445,6 +11577,18 @@ fn validate_renderer_choice(
     let value = draft.specific_value(key, fallback);
     if !choices.contains(&value.trim()) {
         return Err(format!("unsupported {key}: {value}"));
+    }
+    Ok(())
+}
+
+fn validate_renderer_bool(
+    draft: &NativeRendererProperties,
+    key: &str,
+    fallback: bool,
+) -> std::result::Result<(), String> {
+    let value = draft.specific_value(key, if fallback { "true" } else { "false" });
+    if !matches!(value.trim(), "true" | "false") {
+        return Err(format!("{key} must be true or false"));
     }
     Ok(())
 }
@@ -13737,6 +14881,182 @@ mod tests {
     }
 
     #[test]
+    fn native_renderer_property_pages_roundtrip_child_and_nucleic_fields() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let (ribbon_uid, nucl_uid) = {
+            let object = app
+                .state
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .unwrap();
+            (
+                object.add_renderer("ribbon", "ribbon"),
+                object.add_renderer("nucl", "nucleic acid"),
+            )
+        };
+
+        let mut ribbon =
+            NativeRendererProperties::from_state(&app.state, object_uid, ribbon_uid).unwrap();
+        assert_eq!(ribbon.tabs(), &["Common", "Helix", "Sheet", "Coil"]);
+        ribbon
+            .specific
+            .insert("helix.type".to_string(), "fancy1".to_string());
+        ribbon
+            .specific
+            .insert("helix.width".to_string(), "0.72".to_string());
+        ribbon
+            .specific
+            .insert("axialdetail".to_string(), "10".to_string());
+        ribbon
+            .specific
+            .insert("helix_usebackcol".to_string(), "true".to_string());
+        ribbon
+            .specific
+            .insert("helix_backcol".to_string(), "#123456".to_string());
+        app.apply_renderer_properties(&ribbon).unwrap();
+
+        let renderer = app
+            .state
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(ribbon_uid)
+            .unwrap();
+        assert_eq!(
+            renderer.qsc_child_attr("helix", "type"),
+            Some("fancy1".to_string())
+        );
+        assert_eq!(
+            renderer.qsc_child_attr("helix", "width"),
+            Some("0.72".to_string())
+        );
+        assert_eq!(renderer.qsc_attr("axialdetail"), Some("10"));
+
+        let mut nucl =
+            NativeRendererProperties::from_state(&app.state, object_uid, nucl_uid).unwrap();
+        assert_eq!(nucl.tabs(), &["Common", "Nucleic acid", "Tube"]);
+        nucl.specific
+            .insert("show_basepair".to_string(), "false".to_string());
+        nucl.specific
+            .insert("base_type".to_string(), "detail2".to_string());
+        nucl.specific
+            .insert("base_size".to_string(), "1.2".to_string());
+        nucl.specific
+            .insert("section.width".to_string(), "0.62".to_string());
+        app.apply_renderer_properties(&nucl).unwrap();
+
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        let renderer = app
+            .state
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(nucl_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("show_basepair"), None);
+        app.redo(&mut camera);
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-native-renderer-pages-{}.qsc",
+            std::process::id()
+        ));
+        app.save_current_scene_to_path(&camera, &path);
+        let qsc = fs::read_to_string(&path).unwrap();
+        assert!(qsc.contains("axialdetail=\"10\""));
+        assert!(qsc.contains("show_basepair=\"false\""));
+        assert!(qsc.contains("base_type=\"detail2\""));
+        assert!(qsc.contains("width=\"0.72\""));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn native_renderer_map_and_surface_pages_validate_and_persist() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let (map_uid, surface_uid) = {
+            let object = app
+                .state
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .unwrap();
+            (
+                object.add_renderer("isosurf", "map surface"),
+                object.add_renderer("dsurface", "molecular surface"),
+            )
+        };
+
+        let mut map =
+            NativeRendererProperties::from_state(&app.state, object_uid, map_uid).unwrap();
+        assert_eq!(map.tabs(), &["Common", "Map"]);
+        map.specific
+            .insert("drawmode".to_string(), "line".to_string());
+        map.specific.insert("width".to_string(), "2.4".to_string());
+        map.specific
+            .insert("max_grids".to_string(), "500".to_string());
+        map.specific
+            .insert("cullface".to_string(), "true".to_string());
+        app.apply_renderer_properties(&map).unwrap();
+        let renderer = app
+            .state
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(map_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("drawmode"), Some("line"));
+        assert_eq!(renderer.qsc_attr("max_grids"), Some("500"));
+
+        let mut surface =
+            NativeRendererProperties::from_state(&app.state, object_uid, surface_uid).unwrap();
+        assert_eq!(surface.tabs(), &["Common", "MolSurf"]);
+        surface
+            .specific
+            .insert("colormode".to_string(), "potential".to_string());
+        surface
+            .specific
+            .insert("surftype".to_string(), "sas".to_string());
+        surface
+            .specific
+            .insert("detail".to_string(), "9".to_string());
+        surface
+            .specific
+            .insert("width".to_string(), "2".to_string());
+        app.apply_renderer_properties(&surface).unwrap();
+        let renderer = app
+            .state
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(surface_uid)
+            .unwrap();
+        assert_eq!(renderer.qsc_attr("colormode"), Some("potential"));
+        assert_eq!(renderer.qsc_attr("surftype"), Some("sas"));
+        assert_eq!(renderer.qsc_attr("detail"), Some("9"));
+
+        surface
+            .specific
+            .insert("width".to_string(), "0".to_string());
+        assert_eq!(
+            app.apply_renderer_properties(&surface),
+            Err("surface width must be between 0.1 and 10".to_string())
+        );
+    }
+
+    #[test]
     fn native_renderer_property_dialog_keeps_an_isolated_draft() {
         let ctx = egui::Context::default();
         let mut app = GuiApplication::new();
@@ -14827,7 +16147,38 @@ mod tests {
             save_harness(&mut harness, &out_dir.join("renderer_properties.png"));
         }
 
-        // (1b6) Generic Scene property editor with the full Scene.qif table.
+        // (1b6) Ribbon renderer child-property page.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            if let Some(object_uid) = app
+                .state
+                .active_object_summaries()
+                .first()
+                .map(|object| object.uid)
+            {
+                let renderer_uid = app
+                    .state
+                    .scene_manager_mut()
+                    .object_mut(object_uid)
+                    .unwrap()
+                    .add_renderer("ribbon", "ribbon");
+                app.selected_object = Some(object_uid);
+                app.selected_renderer = Some(renderer_uid);
+                app.open_renderer_properties(object_uid, renderer_uid);
+                app.renderer_properties_draft.as_mut().unwrap().selected_tab = 1;
+            }
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1000.0, 760.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("ribbon_properties.png"));
+        }
+
+        // (1b7) Generic Scene property editor with the full Scene.qif table.
         {
             let mut app = GuiApplication::new();
             let mut camera = CameraController::default();
@@ -14841,7 +16192,7 @@ mod tests {
             save_harness(&mut harness, &out_dir.join("scene_properties.png"));
         }
 
-        // (1b7) Generic View property editor with the full reference property table.
+        // (1b8) Generic View property editor with the full reference property table.
         {
             let mut app = GuiApplication::new();
             let mut camera = CameraController::default();
