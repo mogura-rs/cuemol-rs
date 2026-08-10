@@ -1,6 +1,10 @@
 // AnimKind/AnimObject + the `anim_spin_direction` timeline stepper are shared via core
 // so both desktop front ends drive the animation timeline identically.
-use crate::{anim_step, AnimKind, AnimObject, DesktopAppState, GuiLoadedPath, GuiSequenceSummary};
+use crate::{
+    anim_step, AnimKind, AnimObject, DesktopAppState, GuiAtomLabel, GuiLoadedPath,
+    GuiSequenceSummary,
+};
+use ab_glyph::{point, Font, FontRef, ScaleFont};
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::Rgba8;
 use cuemol_render::{
@@ -612,6 +616,7 @@ struct AnimationRenderSettings {
     pov_post_blend: bool,
     pov_shadow: bool,
     pov_edge_lines: bool,
+    pov_labels: bool,
     pov_radiosity: i32,
     make_movie: bool,
     ffmpeg_executable: String,
@@ -638,6 +643,7 @@ impl Default for AnimationRenderSettings {
             pov_post_blend: true,
             pov_shadow: false,
             pov_edge_lines: true,
+            pov_labels: false,
             pov_radiosity: -1,
             make_movie: false,
             ffmpeg_executable: "ffmpeg".to_string(),
@@ -689,6 +695,7 @@ struct AnimationFrameTask {
     total_frames: u32,
     snapshot: RenderSceneSnapshot,
     camera: cuemol_qsys::Camera,
+    labels: Vec<GuiAtomLabel>,
     background: [f32; 4],
     progress: Arc<AtomicU32>,
     cancel: Arc<AtomicBool>,
@@ -2873,6 +2880,7 @@ impl GuiApplication {
         let mut frame_camera = camera.clone();
         frame_camera.perspective = job.settings.perspective;
         let qsys_camera = frame_camera.to_qsys_camera("__animation_render");
+        let labels = animation_frame_labels(&self.state, &job.settings, &qsys_camera);
         let snapshot = self.snapshot.clone();
         let background = self.background.rgba_f32();
         let receiver = spawn_animation_frame_task(AnimationFrameTask {
@@ -2881,6 +2889,7 @@ impl GuiApplication {
             total_frames: job.total_frames,
             snapshot,
             camera: qsys_camera,
+            labels,
             background,
             progress: Arc::clone(&job.progress),
             cancel: Arc::clone(&job.cancel),
@@ -3899,9 +3908,7 @@ impl GuiApplication {
                     &mut self.animation_render_settings.pov_edge_lines,
                     "Edge lines",
                 );
-                let mut labels = false;
-                ui.add_enabled(false, egui::Checkbox::new(&mut labels, "Labels"))
-                    .on_hover_text("Pixel-label export is not available yet");
+                ui.checkbox(&mut self.animation_render_settings.pov_labels, "Labels");
             });
             let radiosity_label = POV_RADIOSITY_MODES
                 .iter()
@@ -6694,6 +6701,144 @@ fn animation_frame_path(
         .join(format!("{}_{index:04}.{extension}", settings.base_name))
 }
 
+fn animation_frame_labels(
+    state: &DesktopAppState,
+    settings: &AnimationRenderSettings,
+    camera: &cuemol_qsys::Camera,
+) -> Vec<GuiAtomLabel> {
+    if settings.backend != "POV-Ray"
+        || !settings.pov_labels
+        || settings.width == 0
+        || settings.height == 0
+    {
+        return Vec::new();
+    }
+    const MAX_LABELS: usize = 10_000;
+    let aspect = f64::from(settings.width) / f64::from(settings.height);
+    let mvp = crate::offscreen::camera_mvp(camera, aspect);
+    let mut labels = state.active_name_labels(
+        mvp,
+        settings.width as f32,
+        settings.height as f32,
+        MAX_LABELS,
+    );
+    if labels.len() < MAX_LABELS {
+        labels.extend(state.active_atom_intr_labels(
+            mvp,
+            settings.width as f32,
+            settings.height as f32,
+            MAX_LABELS - labels.len(),
+        ));
+    }
+    labels
+}
+
+fn overlay_animation_labels(
+    path: &Path,
+    labels: &[GuiAtomLabel],
+) -> std::result::Result<(), String> {
+    let mut frame = image::open(path)
+        .map_err(|error| format!("failed to read label target {}: {error}", path.display()))?
+        .to_rgba8();
+    for label in labels {
+        draw_animation_label(&mut frame, label);
+    }
+    frame
+        .save(path)
+        .map_err(|error| format!("failed to write labelled frame {}: {error}", path.display()))
+}
+
+fn draw_animation_label(frame: &mut image::RgbaImage, label: &GuiAtomLabel) {
+    let monospace = label.font_name.to_ascii_lowercase().contains("mono");
+    let font_data = if monospace {
+        epaint_default_fonts::HACK_REGULAR
+    } else {
+        epaint_default_fonts::UBUNTU_LIGHT
+    };
+    let font = FontRef::try_from_slice(font_data).expect("embedded label font is valid");
+    let scale = label.font_size.clamp(1.0, 512.0) as f32;
+    let scaled = font.as_scaled(scale);
+    let line_height = (scaled.height() + scaled.line_gap()).max(1.0);
+    let color = cuemol_gfx::parse_color(&label.color)
+        .ok()
+        .and_then(|color| color.rgba8())
+        .unwrap_or(Rgba8 {
+            r: 255,
+            g: 255,
+            b: 0,
+            a: 255,
+        });
+    let style = label.font_style.to_ascii_lowercase();
+    let italic = style.contains("italic") || style.contains("oblique");
+    let weight = label.font_weight.trim().to_ascii_lowercase();
+    let bold = weight.contains("bold")
+        || weight
+            .parse::<u16>()
+            .is_ok_and(|numeric_weight| numeric_weight >= 600);
+    let mut caret_x = label.x;
+    let mut baseline_y = label.y + scaled.descent();
+    let mut previous = None;
+    for character in label.text.chars() {
+        if character == '\n' {
+            caret_x = label.x;
+            baseline_y += line_height;
+            previous = None;
+            continue;
+        }
+        let glyph_id = font.glyph_id(character);
+        if let Some(previous) = previous {
+            caret_x += scaled.kern(previous, glyph_id);
+        }
+        let glyph = glyph_id.with_scale_and_position(scale, point(caret_x, baseline_y));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|x, y, coverage| {
+                let italic_offset = if italic {
+                    ((bounds.height() - y as f32) * 0.18).round() as i32
+                } else {
+                    0
+                };
+                let pixel_x = bounds.min.x as i32 + x as i32 + italic_offset;
+                let pixel_y = bounds.min.y as i32 + y as i32;
+                blend_animation_label_pixel(frame, pixel_x, pixel_y, color, coverage);
+                if bold {
+                    blend_animation_label_pixel(frame, pixel_x + 1, pixel_y, color, coverage);
+                }
+            });
+        }
+        caret_x += scaled.h_advance(glyph_id);
+        previous = Some(glyph_id);
+    }
+}
+
+fn blend_animation_label_pixel(
+    frame: &mut image::RgbaImage,
+    x: i32,
+    y: i32,
+    color: Rgba8,
+    coverage: f32,
+) {
+    if x < 0 || y < 0 || x >= frame.width() as i32 || y >= frame.height() as i32 {
+        return;
+    }
+    let pixel = frame.get_pixel_mut(x as u32, y as u32);
+    let source_alpha = coverage.clamp(0.0, 1.0) * f32::from(color.a) / 255.0;
+    let target_alpha = f32::from(pixel[3]) / 255.0;
+    let output_alpha = source_alpha + target_alpha * (1.0 - source_alpha);
+    if output_alpha <= f32::EPSILON {
+        return;
+    }
+    for (target, source) in pixel.0[..3].iter_mut().zip([color.r, color.g, color.b]) {
+        let target_value = f32::from(*target) / 255.0;
+        let source_value = f32::from(source) / 255.0;
+        let output = (source_value * source_alpha
+            + target_value * target_alpha * (1.0 - source_alpha))
+            / output_alpha;
+        *target = (output * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    pixel[3] = (output_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+}
+
 fn update_animation_render_progress(task: &AnimationFrameTask, frame_progress: f64) {
     let frames_weight = if task.settings.make_movie { 0.95 } else { 1.0 };
     let total = f64::from(task.total_frames.max(1));
@@ -6810,6 +6955,9 @@ fn render_pov_animation_frame(
             "POV-Ray did not create {}",
             png_path.to_string_lossy()
         ));
+    }
+    if task.settings.pov_labels && !task.labels.is_empty() {
+        overlay_animation_labels(&png_path, &task.labels)?;
     }
     update_animation_render_progress(task, 1.0);
     Ok(AnimationTaskOutput::Frame {
@@ -8219,6 +8367,7 @@ mod tests {
             total_frames: 1,
             snapshot: app.snapshot.clone(),
             camera: camera.to_qsys_camera("cancelled"),
+            labels: Vec::new(),
             background: app.background.rgba_f32(),
             progress: Arc::new(AtomicU32::new(0)),
             cancel,
@@ -8246,6 +8395,7 @@ mod tests {
             total_frames: 1,
             snapshot: app.snapshot.clone(),
             camera: CameraController::default().to_qsys_camera("test"),
+            labels: Vec::new(),
             background: SceneBackground::White.rgba_f32(),
             progress: Arc::new(AtomicU32::new(0)),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -8268,6 +8418,37 @@ mod tests {
         assert_eq!(preview.path, path);
         assert_eq!(preview.size, egui::vec2(16.0, 16.0));
         fs::remove_file(path).expect("remove rendered PNG");
+    }
+
+    #[test]
+    fn animation_render_label_overlay_rasterizes_styled_text() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-animation-label-test-{}.png",
+            std::process::id()
+        ));
+        image::RgbaImage::new(160, 80)
+            .save(&path)
+            .expect("write label target");
+        let label = GuiAtomLabel {
+            x: 10.0,
+            y: 60.0,
+            text: "CueMol".to_string(),
+            color: "#ff0000".to_string(),
+            font_size: 24.0,
+            font_name: "sans-serif".to_string(),
+            font_style: "italic".to_string(),
+            font_weight: "bold".to_string(),
+        };
+
+        overlay_animation_labels(&path, &[label]).expect("overlay label");
+
+        let rendered = image::open(&path).expect("read labelled frame").to_rgba8();
+        let red_pixels = rendered
+            .pixels()
+            .filter(|pixel| pixel[0] > 0 && pixel[1] == 0 && pixel[2] == 0 && pixel[3] > 0)
+            .count();
+        assert!(red_pixels > 30, "expected rasterized red label pixels");
+        fs::remove_file(path).expect("remove labelled frame");
     }
 
     #[test]
