@@ -692,6 +692,19 @@ summary:focus-visible {
   font-weight: 600;
 }
 
+.workspace-inline-rename {
+  min-width: 120px;
+  height: 19px;
+  flex: 1 1 auto;
+  padding: 1px 4px;
+  border: 1px solid #4679bd;
+  border-radius: 2px;
+  outline: 0;
+  background: #fff;
+  color: #111;
+  font: inherit;
+}
+
 .tree-renderer.group-child {
   padding-left: 58px;
 }

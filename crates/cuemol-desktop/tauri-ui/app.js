@@ -161,6 +161,8 @@ let selectedSurfaceRendererUid = null;
 let selectedCameraName = null;
 let selectedStyleIndex = null;
 let workspaceSelectionKind = "object";
+let workspaceInlineRename = null;
+let workspaceRenameTimer = null;
 let molstructObjectUid = null;
 const molstructSelectedKeys = new Set();
 const molstructOpenKeys = new Set();
@@ -7417,6 +7419,81 @@ function selectWorkspaceAuxItem(kind, objectUid, rendererUid = null) {
   workspaceSelectionKind = kind;
 }
 
+function clearWorkspaceRenameTimer() {
+  if (workspaceRenameTimer === null) return;
+  clearTimeout(workspaceRenameTimer);
+  workspaceRenameTimer = null;
+}
+
+function rerenderWorkspaceTree() {
+  renderedSceneTreeKey = "";
+  renderSceneTree(workspaceChromeRenderKey());
+}
+
+function beginWorkspaceRendererGroupRename(objectUid, rendererUid) {
+  clearWorkspaceRenameTimer();
+  workspaceInlineRename = { kind: "rendererGroup", objectUid, rendererUid };
+  rerenderWorkspaceTree();
+  requestAnimationFrame(() => {
+    const input = sceneTree.querySelector(".workspace-inline-rename");
+    input?.focus();
+    input?.select();
+  });
+}
+
+function scheduleWorkspaceRendererGroupRename(objectUid, rendererUid) {
+  clearWorkspaceRenameTimer();
+  workspaceRenameTimer = setTimeout(() => {
+    workspaceRenameTimer = null;
+    if (
+      workspaceSelectionKind === "rendererGroup" &&
+      selectedObjectUid === objectUid &&
+      selectedRendererUid === rendererUid
+    ) {
+      beginWorkspaceRendererGroupRename(objectUid, rendererUid);
+    }
+  }, 500);
+}
+
+function workspaceRendererGroupRenameInput(object, renderer) {
+  const input = document.createElement("input");
+  input.className = "workspace-inline-rename";
+  input.type = "text";
+  input.value = renderer.name;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  let finished = false;
+  const finish = async (commit) => {
+    if (finished) return;
+    finished = true;
+    const name = input.value.trim();
+    workspaceInlineRename = null;
+    if (!commit || name === "" || name === renderer.name) {
+      rerenderWorkspaceTree();
+      return;
+    }
+    const renamed = await mutateWithoutViewport("rename_workspace_renderer_group", {
+      input: { objectUid: object.uid, groupUid: renderer.uid, name },
+    });
+    if (!renamed) rerenderWorkspaceTree();
+  };
+  input.addEventListener("mousedown", (event) => event.stopPropagation());
+  input.addEventListener("click", (event) => event.stopPropagation());
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      void finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      void finish(false);
+    }
+  });
+  input.addEventListener("blur", () => void finish(true));
+  return input;
+}
+
 function workspaceAuxObjectContextItems(scene, kind, object) {
   const isDensityMap = kind === "densityMap";
   const activate = async () => {
@@ -7555,17 +7632,7 @@ async function workspaceRendererContextItems(scene, object, renderer) {
       },
       {
         label: "Rename…",
-        action: async () => {
-          const name = await showTextPromptDialog({
-            title: "Rename Renderer Group",
-            label: "New name:",
-            defaultValue: renderer.name,
-          });
-          if (name === null || name === renderer.name) return;
-          await mutateWithoutViewport("rename_workspace_renderer_group", {
-            input: { objectUid: object.uid, groupUid: renderer.uid, name },
-          });
-        },
+        action: () => beginWorkspaceRendererGroupRename(object.uid, renderer.uid),
       },
       {
         label: "Copy",
@@ -8149,8 +8216,17 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       const appendMoleculeRendererRow = (renderer, isChild = false) => {
         const isGroup = renderer.rendererType === "*group";
         const selectionKind = isGroup ? "rendererGroup" : "renderer";
+        const isRenaming =
+          isGroup &&
+          workspaceInlineRename?.kind === "rendererGroup" &&
+          workspaceInlineRename.objectUid === object.uid &&
+          workspaceInlineRename.rendererUid === renderer.uid;
         const rendererRow = button(
-          isGroup ? `${renderer.name} (group)` : `${renderer.rendererType} · ${renderer.name}`,
+          isRenaming
+            ? ""
+            : isGroup
+              ? `${renderer.name} (group)`
+              : `${renderer.rendererType} · ${renderer.name}`,
           `tree-renderer${
             workspaceSelectionKind === selectionKind && renderer.uid === selectedRendererUid
               ? " active"
@@ -8159,6 +8235,11 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             renderer.visible ? "" : " hidden"
           }`,
           () => {
+            const alreadySelected =
+              isGroup &&
+              workspaceSelectionKind === "rendererGroup" &&
+              selectedObjectUid === object.uid &&
+              selectedRendererUid === renderer.uid;
             selectedObjectUid = object.uid;
             selectedRendererUid = renderer.uid;
             selectedDensityMapUid = null;
@@ -8166,10 +8247,16 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             selectedSurfaceUid = null;
             selectedSurfaceRendererUid = null;
             workspaceSelectionKind = selectionKind;
+            if (alreadySelected && !isRenaming) {
+              scheduleWorkspaceRendererGroupRename(object.uid, renderer.uid);
+              return;
+            }
+            clearWorkspaceRenameTimer();
             renderShell();
           },
         );
-        rendererRow.draggable = true;
+        rendererRow.dataset.workspaceRenameTarget = `${object.uid}:${renderer.uid}`;
+        rendererRow.draggable = !isRenaming;
         rendererRow.addEventListener("dragstart", (event) => {
           draggedWorkspaceRenderer = {
             objectUid: object.uid,
@@ -8218,9 +8305,10 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           rendererRow.classList.remove("dragging");
           clearWorkspaceRendererDropMarkers();
         });
-        rendererRow.addEventListener("dblclick", () =>
-          showReferenceDialog("Renderer Properties"),
-        );
+        rendererRow.addEventListener("dblclick", () => {
+          clearWorkspaceRenameTimer();
+          showReferenceDialog("Renderer Properties");
+        });
         rendererRow.addEventListener("contextmenu", async (event) => {
           event.preventDefault();
           selectedObjectUid = object.uid;
@@ -8243,6 +8331,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             !isGroup,
           ),
         );
+        if (isRenaming) rendererRow.append(workspaceRendererGroupRenameInput(object, renderer));
         objectBlock.append(rendererRow);
       };
       for (const node of groupedMoleculeRenderers(object.renderers)) {
@@ -11953,6 +12042,22 @@ window.addEventListener("keydown", (event) => {
   } else if (!editing && event.key.toLowerCase() === "p") {
     cameraCommand("projection");
   }
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (workspaceRenameTimer === null) return;
+  const selectedTarget = `${selectedObjectUid}:${selectedRendererUid}`;
+  const row = event.target.closest("[data-workspace-rename-target]");
+  if (row?.dataset.workspaceRenameTarget !== selectedTarget) clearWorkspaceRenameTimer();
+});
+
+sceneTree.addEventListener("keydown", (event) => {
+  if (event.key !== "F2" || workspaceSelectionKind !== "rendererGroup") return;
+  const object = selectedObject();
+  const renderer = selectedRenderer();
+  if (!object || !renderer || renderer.rendererType !== "*group") return;
+  event.preventDefault();
+  beginWorkspaceRendererGroupRename(object.uid, renderer.uid);
 });
 
 window.addEventListener("dragover", (event) => event.preventDefault());

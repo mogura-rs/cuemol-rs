@@ -944,7 +944,7 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
 
 #[test]
 fn tauri_workspace_reorders_and_regroups_renderers_by_dragging() {
-    assert!(JS.contains("rendererRow.draggable = true"));
+    assert!(JS.contains("rendererRow.draggable = !isRenaming"));
     assert!(JS.contains("application/x-cuemol-renderer"));
     assert!(JS.contains("function workspaceRendererDropPosition(event, renderer)"));
     assert!(JS.contains("mutateWithoutViewport(\"move_workspace_renderer\""));
@@ -1041,8 +1041,14 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("rename_workspace_renderer_group"));
     assert!(JS.contains("label: \"Rename…\""));
     assert!(!JS.contains("globalThis.prompt"));
-    assert!(JS.contains("title: \"Rename Renderer Group\""));
-    assert!(JS.contains("label: \"New name:\""));
+    assert!(JS.contains("function beginWorkspaceRendererGroupRename(objectUid, rendererUid)"));
+    assert!(JS.contains("function scheduleWorkspaceRendererGroupRename(objectUid, rendererUid)"));
+    assert!(JS.contains("}, 500);"));
+    assert!(JS.contains("workspaceSelectionKind === \"rendererGroup\""));
+    assert!(JS.contains("input.addEventListener(\"blur\", () => void finish(true))"));
+    assert!(JS.contains("event.key === \"Enter\""));
+    assert!(JS.contains("event.key === \"Escape\""));
+    assert!(CSS.contains(".workspace-inline-rename"));
     let tauri_renderer_group_menu = JS
         .split("async function workspaceRendererContextItems(scene, object, renderer)")
         .nth(1)
