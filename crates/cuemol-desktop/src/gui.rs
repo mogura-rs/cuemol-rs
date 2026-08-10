@@ -1074,6 +1074,7 @@ struct NativeRendererProperties {
     selection: String,
     visible: bool,
     locked: bool,
+    style: String,
     material: String,
     alpha: f64,
     edge_type: String,
@@ -1152,6 +1153,7 @@ impl NativeRendererProperties {
             selection,
             visible: renderer.is_visible(),
             locked: renderer.qsc_attr("locked").is_some_and(value_is_true),
+            style: renderer.style().unwrap_or_default().to_string(),
             material: renderer.qsc_attr("material").unwrap_or("").to_string(),
             alpha: numeric("alpha", 1.0),
             edge_type: renderer.qsc_attr("egtype").unwrap_or("none").to_string(),
@@ -1191,6 +1193,7 @@ impl NativeRendererProperties {
             .renderers
             .into_iter()
             .find(|renderer| renderer.uid == renderer_uid)?;
+        let style = renderer.specific.get("style").cloned().unwrap_or_default();
         Some(Self::from_workspace_summary(
             NativePropertyObject::DensityMap(map_uid),
             renderer.uid,
@@ -1199,6 +1202,7 @@ impl NativeRendererProperties {
             String::new(),
             renderer.visible,
             renderer.locked,
+            style,
             renderer.material,
             renderer.alpha,
             renderer.edge_type,
@@ -1218,6 +1222,7 @@ impl NativeRendererProperties {
             .renderers
             .into_iter()
             .find(|renderer| renderer.uid == renderer_uid)?;
+        let style = renderer.specific.get("style").cloned().unwrap_or_default();
         Some(Self::from_workspace_summary(
             NativePropertyObject::Surface(surface_uid),
             renderer.uid,
@@ -1226,6 +1231,7 @@ impl NativeRendererProperties {
             renderer.selection,
             renderer.visible,
             renderer.locked,
+            style,
             renderer.material,
             renderer.alpha,
             renderer.edge_type,
@@ -1244,6 +1250,7 @@ impl NativeRendererProperties {
         selection: String,
         visible: bool,
         locked: bool,
+        style: String,
         material: String,
         alpha: f64,
         edge_type: String,
@@ -1266,6 +1273,7 @@ impl NativeRendererProperties {
             selection,
             visible,
             locked,
+            style,
             material,
             alpha,
             edge_type,
@@ -1413,7 +1421,8 @@ fn strip_native_renderer_common_specific(
     specific: &mut std::collections::BTreeMap<String, String>,
 ) {
     for key in [
-        "name", "sel", "visible", "locked", "material", "alpha", "egtype", "eglinew", "egcolor",
+        "name", "sel", "visible", "locked", "style", "material", "alpha", "egtype", "eglinew",
+        "egcolor",
     ] {
         specific.remove(key);
     }
@@ -8003,6 +8012,12 @@ impl GuiApplication {
         let material_names = scene_uid
             .map(|scene_uid| self.state.material_names(scene_uid.get()))
             .unwrap_or_default();
+        let style_options = scene_uid
+            .map(|scene_uid| {
+                self.state
+                    .renderer_style_options(scene_uid, &draft.renderer_type)
+            })
+            .unwrap_or_default();
         let mut open = true;
         let mut accept = false;
         let mut cancel = false;
@@ -8033,7 +8048,12 @@ impl GuiApplication {
                                 Self::renderer_specific_properties_ui(ui, &mut draft);
                                 ui.add_space(8.0);
                             }
-                            Self::renderer_common_properties_ui(ui, &mut draft, &material_names);
+                            Self::renderer_common_properties_ui(
+                                ui,
+                                &mut draft,
+                                &material_names,
+                                &style_options,
+                            );
                         } else {
                             Self::renderer_specific_properties_ui(ui, &mut draft);
                         }
@@ -8067,6 +8087,7 @@ impl GuiApplication {
         ui: &mut egui::Ui,
         draft: &mut NativeRendererProperties,
         material_names: &[String],
+        style_options: &[cuemol_qsys::StyleInfo],
     ) {
         egui::Frame::new()
             .stroke(egui::Stroke::new(
@@ -8120,6 +8141,44 @@ impl GuiApplication {
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut draft.visible, "Visible");
                             ui.checkbox(&mut draft.locked, "Locked");
+                        });
+                        ui.end_row();
+
+                        ui.label("Style:");
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                [ui.available_width().max(180.0) - 110.0, 22.0],
+                                egui::TextEdit::singleline(&mut draft.style)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                            egui::ComboBox::from_id_salt("native_renderer_style")
+                                .selected_text("Add preset")
+                                .show_ui(ui, |ui| {
+                                    for style in style_options {
+                                        let label = if style.description.is_empty() {
+                                            style.name.as_str()
+                                        } else {
+                                            style.description.as_str()
+                                        };
+                                        if ui.button(label).on_hover_text(&style.name).clicked() {
+                                            let mut names = draft
+                                                .style
+                                                .split(',')
+                                                .map(str::trim)
+                                                .filter(|name| !name.is_empty())
+                                                .map(str::to_string)
+                                                .collect::<Vec<_>>();
+                                            if !names
+                                                .iter()
+                                                .any(|name| name.eq_ignore_ascii_case(&style.name))
+                                            {
+                                                names.push(style.name.clone());
+                                                draft.style = names.join(",");
+                                            }
+                                            ui.close();
+                                        }
+                                    }
+                                });
                         });
                         ui.end_row();
 
@@ -9502,6 +9561,9 @@ impl GuiApplication {
                 )
                 .map_err(|error| error.to_string())?;
         }
+        self.state
+            .set_renderer_styles(object_uid, draft.renderer_uid, draft.style.trim())
+            .map_err(|error| error.to_string())?;
 
         match renderer_type.as_str() {
             "simple" | "trace" => self.set_renderer_draft_property(
@@ -9601,6 +9663,9 @@ impl GuiApplication {
                 &draft.specific,
             )
             .map_err(|error| error.to_string())?;
+        self.state
+            .set_density_renderer_styles(map_uid, draft.renderer_uid, draft.style.trim())
+            .map_err(|error| error.to_string())?;
         self.push_undo_snapshot(undo);
         self.modified_scenes.insert(scene_uid);
         self.selected_object = None;
@@ -9651,6 +9716,9 @@ impl GuiApplication {
                 draft.edge_color.trim(),
                 &draft.specific,
             )
+            .map_err(|error| error.to_string())?;
+        self.state
+            .set_surface_renderer_styles(surface_uid, draft.renderer_uid, draft.style.trim())
             .map_err(|error| error.to_string())?;
         self.push_undo_snapshot(undo);
         self.modified_scenes.insert(scene_uid);
@@ -16736,6 +16804,7 @@ mod tests {
         properties.selection = "name CA".to_string();
         properties.visible = false;
         properties.locked = true;
+        properties.style = "ThickSimple,DefaultCPKColoring".to_string();
         properties.material = "default".to_string();
         properties.alpha = 0.6;
         properties.edge_type = "silhouette".to_string();
@@ -16760,6 +16829,7 @@ mod tests {
         assert_eq!(renderer.qsc_attr("sel"), Some("name CA"));
         assert!(!renderer.is_visible());
         assert_eq!(renderer.qsc_attr("locked"), Some("true"));
+        assert_eq!(renderer.style(), Some("ThickSimple,DefaultCPKColoring"));
         assert_eq!(renderer.qsc_attr("alpha"), Some("0.6"));
         assert_eq!(renderer.qsc_attr("bondw"), Some("0.42"));
         assert_eq!(renderer.qsc_attr("ringcolor"), Some("#abcdef"));
@@ -16776,6 +16846,7 @@ mod tests {
             .unwrap();
         assert_eq!(renderer.name(), "sticks");
         assert!(renderer.is_visible());
+        assert_eq!(renderer.style(), None);
         assert_eq!(renderer.qsc_attr("bondw"), None);
         app.redo(&mut camera);
 
@@ -16786,6 +16857,7 @@ mod tests {
         app.save_current_scene_to_path(&camera, &path);
         let qsc = fs::read_to_string(&path).unwrap();
         assert!(qsc.contains("name=\"detailed sticks\""));
+        assert!(qsc.contains("style=\"ThickSimple,DefaultCPKColoring\""));
         assert!(qsc.contains("bondw=\"0.42\""));
         assert!(qsc.contains("egtype=\"silhouette\""));
         fs::remove_file(path).unwrap();

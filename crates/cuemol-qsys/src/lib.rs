@@ -62,7 +62,9 @@ pub use render_base::{DispCacheRenderer, DispListRenderer, DrawObj, ShaderObjMgr
 pub use renderer_factory::{RendererFactory, RendererInstance};
 pub use scalar_object::ScalarObject;
 pub use scene::{AAMethod, AnimMgrHandle, Scene, SceneManager};
-pub use style::{AutoStyleContext, AutoStyleCtxt, StyleManager, StyleNamedColorResolver, StyleSet};
+pub use style::{
+    AutoStyleContext, AutoStyleCtxt, StyleInfo, StyleManager, StyleNamedColorResolver, StyleSet,
+};
 pub use style_sheet::{reset_property_to_style, StyleEvent, StyleSheet, StyleSupports};
 pub use sys_config::{SysConfig, SysConfigSection};
 pub use text_render::{create_text_render, destroy_text_render, Canvas2DTextRender2};

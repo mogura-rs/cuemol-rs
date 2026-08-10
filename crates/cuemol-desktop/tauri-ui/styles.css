@@ -2538,6 +2538,12 @@ summary:focus-visible {
   padding: 1px;
 }
 
+.renderer-style-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 124px;
+  gap: 4px;
+}
+
 .reference-dialog.workspace-property-dialog .dialog-reset {
   margin-right: auto;
 }

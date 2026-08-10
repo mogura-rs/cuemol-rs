@@ -1482,7 +1482,7 @@ function objectPropertiesEditor(object) {
   dialogActions(cancel, ok);
 }
 
-function rendererPropertiesEditor(object, renderer) {
+function rendererPropertiesEditor(object, renderer, styleOptions = []) {
   const densityMap = Array.isArray(object.counts);
   const surfaceObject = object.className === "MolSurfObj";
   const rendererGroup = renderer.rendererType === "*group";
@@ -1756,6 +1756,39 @@ function rendererPropertiesEditor(object, renderer) {
   const visible = propertyCheckbox(checks, "Visible", renderer.visible);
   const locked = propertyCheckbox(checks, "Locked", renderer.locked);
   basic.append(checks);
+  const styleEditor = document.createElement("div");
+  styleEditor.className = "renderer-style-editor";
+  const style = document.createElement("input");
+  style.value = renderer.style || "";
+  style.spellcheck = false;
+  const stylePreset = document.createElement("select");
+  const presetPlaceholder = document.createElement("option");
+  presetPlaceholder.value = "";
+  presetPlaceholder.textContent = "Add preset";
+  stylePreset.append(presetPlaceholder);
+  for (const option of styleOptions) {
+    const element = document.createElement("option");
+    element.value = option.name;
+    element.textContent = option.description || option.name;
+    element.title = option.name;
+    stylePreset.append(element);
+  }
+  stylePreset.addEventListener("change", () => {
+    const next = stylePreset.value;
+    if (!next) return;
+    const names = style.value
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean);
+    if (!names.some((name) => name.toLowerCase() === next.toLowerCase())) {
+      names.push(next);
+      style.value = names.join(",");
+      style.dispatchEvent(new Event("input"));
+    }
+    stylePreset.value = "";
+  });
+  styleEditor.append(style, stylePreset);
+  propertyField(basic, "Style:", styleEditor);
   const material = document.createElement("select");
   const materialNames = ["", ...(snapshot.materialNames || [])];
   if (renderer.material && !materialNames.includes(renderer.material)) {
@@ -2997,6 +3030,8 @@ function rendererPropertiesEditor(object, renderer) {
     selection,
     visible,
     locked,
+    style,
+    stylePreset,
     material,
     alpha,
     edgeType,
@@ -3012,6 +3047,8 @@ function rendererPropertiesEditor(object, renderer) {
     selection.value = densityMap || rendererGroup ? "(not available)" : "*";
     visible.checked = true;
     locked.checked = false;
+    style.value = "";
+    stylePreset.value = "";
     material.value = "";
     alpha.value = "1";
     edgeType.value = "none";
@@ -3078,16 +3115,19 @@ function rendererPropertiesEditor(object, renderer) {
           showRing: showRing ? showRing.checked : renderer.showRing,
           ringThickness: ringThickness ? Number(ringThickness.value) : renderer.ringThickness,
           ringColor: ringColor ? ringColor.value : renderer.ringColor,
-          specific: Object.fromEntries(
-            [...specificInputs].map(([key, control]) => [
-              key,
-              specificReaders.has(key)
-                ? specificReaders.get(key)()
-                : control.type === "checkbox"
-                  ? String(control.checked)
-                  : control.value,
-            ]),
-          ),
+          specific: {
+            ...Object.fromEntries(
+              [...specificInputs].map(([key, control]) => [
+                key,
+                specificReaders.has(key)
+                  ? specificReaders.get(key)()
+                  : control.type === "checkbox"
+                    ? String(control.checked)
+                    : control.value,
+              ]),
+            ),
+            style: style.value,
+          },
         },
       },
     );
@@ -3353,7 +3393,16 @@ async function showReferenceDialog(title) {
         ? selectedSurfaceRenderer()
         : selectedRenderer();
     if (object && renderer) {
-      rendererPropertiesEditor(object, renderer);
+      let styleOptions = [];
+      try {
+        styleOptions = await invoke("get_renderer_style_options", {
+          sceneUid: object.sceneUid,
+          rendererType: renderer.rendererType,
+        });
+      } catch (error) {
+        showError(error);
+      }
+      rendererPropertiesEditor(object, renderer, styleOptions);
     } else {
       dialogContent.append(dialogParagraph("Select a renderer first."));
     }

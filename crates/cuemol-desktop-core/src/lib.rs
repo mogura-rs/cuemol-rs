@@ -1844,6 +1844,28 @@ impl DesktopAppState {
         summaries
     }
 
+    pub fn renderer_style_options(
+        &self,
+        scene_uid: Uid,
+        renderer_type: &str,
+    ) -> Vec<cuemol_qsys::StyleInfo> {
+        let Some(scene) = self.scene_manager().scene(scene_uid) else {
+            return Vec::new();
+        };
+        let manager = scene_style_manager(scene);
+        let mut styles = manager.style_infos(DEFAULT_STYLE_SCOPE);
+        if scene_uid.get() != DEFAULT_STYLE_SCOPE {
+            styles.extend(manager.style_infos(scene_uid.get()));
+        }
+        styles.retain(|style| {
+            (style.style_type.is_empty() || style.style_type == "renderer")
+                && renderer_style_matches(&style.name, renderer_type)
+        });
+        styles.sort_by_key(|style| style.name.to_ascii_lowercase());
+        styles.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
+        styles
+    }
+
     pub fn suggest_style_name(&self, scene_uid: Uid) -> Result<String> {
         let scene = self
             .scene_manager()
@@ -2191,6 +2213,31 @@ impl DesktopAppState {
         Ok(())
     }
 
+    pub fn set_surface_renderer_styles(
+        &mut self,
+        surface_uid: Uid,
+        renderer_uid: Uid,
+        styles: &str,
+    ) -> Result<()> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_surface(surface_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?;
+        let surface = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_surface_mut(surface_uid))
+            .expect("surface was checked above");
+        let node = ensure_surface_renderer_node(surface, scene_uid, renderer_uid)?;
+        let styles = styles.trim();
+        if styles.is_empty() {
+            node.remove_child("style");
+        } else {
+            node.set_str_attr("style", styles);
+        }
+        Ok(())
+    }
+
     pub fn add_surface_renderer(&mut self, surface_uid: Uid) -> Result<Uid> {
         let scene_uid = self
             .scene_manager()
@@ -2474,6 +2521,35 @@ impl DesktopAppState {
         renderer
             .attributes
             .insert("locked".to_string(), locked.to_string());
+        map.modified = true;
+        Ok(())
+    }
+
+    pub fn set_density_renderer_styles(
+        &mut self,
+        map_uid: Uid,
+        renderer_uid: Uid,
+        styles: &str,
+    ) -> Result<()> {
+        let map = self
+            .density_maps
+            .get_mut(&map_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+        let renderer = map
+            .renderers
+            .iter_mut()
+            .find(|renderer| renderer.uid == renderer_uid)
+            .ok_or_else(|| {
+                CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
+            })?;
+        let styles = styles.trim();
+        if styles.is_empty() {
+            renderer.attributes.remove("style");
+        } else {
+            renderer
+                .attributes
+                .insert("style".to_string(), styles.to_string());
+        }
         map.modified = true;
         Ok(())
     }
@@ -4051,6 +4127,28 @@ impl DesktopAppState {
             renderer.set_qsc_attr("locked", "true");
         } else {
             renderer.remove_qsc_attr("locked");
+        }
+        Ok(())
+    }
+
+    pub fn set_renderer_styles(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        styles: &str,
+    ) -> Result<()> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let renderer = object
+            .renderer_mut(renderer_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        let styles = styles.trim();
+        if styles.is_empty() {
+            renderer.remove_qsc_attr("style");
+        } else {
+            renderer.set_qsc_attr("style", styles);
         }
         Ok(())
     }
@@ -40077,6 +40175,34 @@ fn qsc_bool(value: &str) -> bool {
     )
 }
 
+fn renderer_style_matches(style_name: &str, renderer_type: &str) -> bool {
+    let renderer_type = renderer_type.trim_start_matches('*').to_ascii_lowercase();
+    if renderer_type == "group" {
+        return false;
+    }
+    let suffix = match renderer_type.as_str() {
+        "name_label" | "namelabel" => "label",
+        "gpu_mapmesh" => "contour",
+        other => other,
+    };
+    let name = style_name.to_ascii_lowercase();
+    if name.ends_with(suffix) {
+        return true;
+    }
+    let supports_edges = !matches!(
+        renderer_type.as_str(),
+        "simple" | "trace" | "spline" | "name_label" | "namelabel" | "selection"
+    );
+    if supports_edges && name.starts_with("egline") {
+        return true;
+    }
+    let supports_coloring = !matches!(
+        renderer_type.as_str(),
+        "selection" | "name_label" | "namelabel" | "atomintr"
+    );
+    supports_coloring && (name.ends_with("coloring") || name.ends_with("paint"))
+}
+
 /// Renderer types drawn as a swept main-chain mesh instead of all-atom geometry.
 ///
 /// Kept in sync with the matching arm in [`renderer_render_options`].
@@ -52047,6 +52173,22 @@ attribute \"dep\" string \"positions\"
         let renderer = &app.renderer_summaries(object_uid)[0];
         assert!(!renderer.visible);
         assert!(renderer.locked);
+        let style_options = app.renderer_style_options(scene_uid, "simple");
+        assert!(style_options
+            .iter()
+            .any(|style| style.name == "DefaultSimple"));
+        assert!(style_options
+            .iter()
+            .any(|style| style.name == "DefaultCPKColoring"));
+        assert!(!style_options
+            .iter()
+            .any(|style| style.name == "DefaultViewInConf"));
+        app.set_renderer_styles(object_uid, renderer_uid, "ThickSimple,DefaultCPKColoring")
+            .unwrap();
+        assert_eq!(
+            app.renderer_summaries(object_uid)[0].style.as_deref(),
+            Some("ThickSimple,DefaultCPKColoring")
+        );
 
         let path = std::env::temp_dir().join(format!(
             "cuemol-desktop-workspace-state-{}.qsc",
@@ -52056,6 +52198,7 @@ attribute \"dep\" string \"positions\"
         let qsc = std::fs::read_to_string(&path).unwrap();
         assert!(qsc.contains("visible=\"false\""));
         assert!(qsc.contains("locked=\"true\""));
+        assert!(qsc.contains("style=\"ThickSimple,DefaultCPKColoring\""));
         let _ = std::fs::remove_file(path);
     }
 

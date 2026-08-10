@@ -418,6 +418,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "add_surface_renderer",
         "set_workspace_visible",
         "set_workspace_locked",
+        "get_renderer_style_options",
         "delete_workspace_item",
         "fit_workspace_item",
     ] {
@@ -493,7 +494,10 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
     );
     assert!(JS.contains("showReferenceDialog(\"Object Properties\")"));
     assert!(JS.contains("showReferenceDialog(\"Renderer Properties\")"));
+    assert!(JS.contains("rendererPropertiesEditor(object, renderer, styleOptions)"));
+    assert!(JS.contains("style: style.value"));
     assert!(CSS.contains(".workspace-property-editor"));
+    assert!(CSS.contains(".renderer-style-editor"));
     assert!(CSS.contains(".property-common-group"));
     assert!(CSS.contains(".renderer-row.selected"));
     assert!(CSS.contains(".tree-object.density-map"));

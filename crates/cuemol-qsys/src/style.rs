@@ -89,6 +89,13 @@ pub struct StyleSet {
     materials: BTreeMap<String, StyleMaterial>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyleInfo {
+    pub name: String,
+    pub description: String,
+    pub style_type: String,
+}
+
 impl StyleSet {
     pub fn new(uid: u64, name: impl Into<String>) -> Self {
         Self {
@@ -336,6 +343,25 @@ impl StyleSet {
 
     pub fn get_style_names_json(&self) -> String {
         self.style_names_json()
+    }
+
+    pub fn style_infos(&self) -> Vec<StyleInfo> {
+        self.styles
+            .iter()
+            .filter_map(|(key, node)| {
+                let name = key.strip_suffix("\tstyle")?;
+                let style_type = if node.type_name().is_empty() {
+                    node.str_attr("type").to_string()
+                } else {
+                    node.type_name().to_string()
+                };
+                Some(StyleInfo {
+                    name: name.to_string(),
+                    description: node.str_attr("desc").to_string(),
+                    style_type,
+                })
+            })
+            .collect()
     }
 
     pub fn put_material_string(
@@ -734,6 +760,15 @@ impl StyleManager {
 
     pub fn get_style_names_json(&self, scope_id: u64) -> String {
         self.style_names_json(scope_id)
+    }
+
+    pub fn style_infos(&self, scope_id: u64) -> Vec<StyleInfo> {
+        self.scopes
+            .get(&scope_id)
+            .into_iter()
+            .flatten()
+            .flat_map(StyleSet::style_infos)
+            .collect()
     }
 
     pub fn style_node(&self, scope_id: u64, style_id: &str) -> Option<&LDom2Node> {
@@ -1718,6 +1753,14 @@ mod tests {
         assert_eq!(
             set.style_names_json(),
             r#"[{"name":"Ribbon","desc":"","type":""}]"#
+        );
+        assert_eq!(
+            set.style_infos(),
+            [StyleInfo {
+                name: "Ribbon".to_string(),
+                description: String::new(),
+                style_type: String::new(),
+            }]
         );
         assert!(set.remove_style("Ribbon"));
         assert!(!set.has_style("Ribbon"));

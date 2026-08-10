@@ -90,6 +90,13 @@ struct StylePropertiesDto {
     xml: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RendererStyleOptionDto {
+    name: String,
+    description: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StylePropertiesInput {
@@ -110,6 +117,7 @@ struct RendererDto {
     selection: String,
     visible: bool,
     locked: bool,
+    style: String,
     material: String,
     alpha: f64,
     edge_type: String,
@@ -1001,6 +1009,7 @@ impl AppModel {
                             },
                             visible: renderer.visible,
                             locked: state.qsc_attr("locked").is_some_and(config_value_is_true),
+                            style: state.style().unwrap_or_default().to_string(),
                             material: state.qsc_attr("material").unwrap_or("").to_string(),
                             alpha: state
                                 .qsc_attr("alpha")
@@ -1118,6 +1127,7 @@ impl AppModel {
                             selection: String::new(),
                             visible: renderer.visible,
                             locked: renderer.locked,
+                            style: renderer.specific.get("style").cloned().unwrap_or_default(),
                             material: renderer.material,
                             alpha: renderer.alpha,
                             edge_type: renderer.edge_type,
@@ -1200,6 +1210,7 @@ impl AppModel {
                             selection: renderer.selection,
                             visible: renderer.visible,
                             locked: renderer.locked,
+                            style: renderer.specific.get("style").cloned().unwrap_or_default(),
                             material: renderer.material,
                             alpha: renderer.alpha,
                             edge_type: renderer.edge_type,
@@ -1897,6 +1908,15 @@ impl AppModel {
                 &properties.specific,
             )
             .map_err(|error| error.to_string())?;
+        if let Some(styles) = properties.specific.get("style") {
+            self.desktop
+                .set_density_renderer_styles(
+                    Uid::new(properties.object_uid),
+                    Uid::new(properties.renderer_uid),
+                    styles,
+                )
+                .map_err(|error| error.to_string())?;
+        }
         self.status = "Density renderer properties updated".to_string();
         self.invalidate_mesh(false);
         Ok(())
@@ -2365,6 +2385,15 @@ impl AppModel {
                 &properties.specific,
             )
             .map_err(|error| error.to_string())?;
+        if let Some(styles) = properties.specific.get("style") {
+            self.desktop
+                .set_surface_renderer_styles(
+                    Uid::new(properties.object_uid),
+                    Uid::new(properties.renderer_uid),
+                    styles,
+                )
+                .map_err(|error| error.to_string())?;
+        }
         self.status = "Surface renderer properties updated".to_string();
         self.invalidate_mesh(false);
         Ok(())
@@ -3393,6 +3422,11 @@ impl AppModel {
         }
         for (key, value, is_default) in specific_updates {
             set_property(&key, value, is_default)?;
+        }
+        if let Some(styles) = properties.specific.get("style") {
+            self.desktop
+                .set_renderer_styles(object_uid, renderer_uid, styles)
+                .map_err(|error| error.to_string())?;
         }
         self.status = "Renderer properties updated".to_string();
         self.invalidate_mesh(false);
@@ -4605,6 +4639,10 @@ enum ModelRequest {
         scene_uid: u64,
         local_index: usize,
     },
+    GetRendererStyleOptions {
+        scene_uid: u64,
+        renderer_type: String,
+    },
     SetStyleProperties(StylePropertiesInput),
     DestroyStyle {
         scene_uid: u64,
@@ -4877,6 +4915,7 @@ enum ModelResponse {
     ViewProperties(ViewPropertiesDto),
     ViewPropertiesUpdate(Box<ViewPropertiesUpdateDto>),
     StyleProperties(StylePropertiesDto),
+    RendererStyleOptions(Vec<RendererStyleOptionDto>),
 }
 
 struct ModelEnvelope {
@@ -5938,6 +5977,20 @@ fn handle_model_request(
             local_index,
         } => Ok(ModelResponse::StyleProperties(
             model.style_properties(scene_uid, local_index)?,
+        )),
+        ModelRequest::GetRendererStyleOptions {
+            scene_uid,
+            renderer_type,
+        } => Ok(ModelResponse::RendererStyleOptions(
+            model
+                .desktop
+                .renderer_style_options(Uid::new(scene_uid), &renderer_type)
+                .into_iter()
+                .map(|style| RendererStyleOptionDto {
+                    name: style.name,
+                    description: style.description,
+                })
+                .collect(),
         )),
         ModelRequest::SetStyleProperties(properties) => {
             let undo = model.capture_undo();
@@ -7211,7 +7264,10 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
-        | ModelResponse::StyleProperties(_) => Err("unexpected non-snapshot response".to_string()),
+        | ModelResponse::StyleProperties(_)
+        | ModelResponse::RendererStyleOptions(_) => {
+            Err("unexpected non-snapshot response".to_string())
+        }
     }
 }
 
@@ -7229,7 +7285,8 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
-        | ModelResponse::StyleProperties(_) => {
+        | ModelResponse::StyleProperties(_)
+        | ModelResponse::RendererStyleOptions(_) => {
             Err("unexpected non-molecule-details response".to_string())
         }
     }
@@ -7249,7 +7306,10 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
-        | ModelResponse::StyleProperties(_) => Err("unexpected non-viewport response".to_string()),
+        | ModelResponse::StyleProperties(_)
+        | ModelResponse::RendererStyleOptions(_) => {
+            Err("unexpected non-viewport response".to_string())
+        }
     }
 }
 
@@ -7267,7 +7327,8 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
-        | ModelResponse::StyleProperties(_) => {
+        | ModelResponse::StyleProperties(_)
+        | ModelResponse::RendererStyleOptions(_) => {
             Err("unexpected animation frame response".to_string())
         }
     }
@@ -7287,7 +7348,8 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
-        | ModelResponse::StyleProperties(_) => {
+        | ModelResponse::StyleProperties(_)
+        | ModelResponse::RendererStyleOptions(_) => {
             Err("unexpected trajectory frame response".to_string())
         }
     }
@@ -7307,7 +7369,8 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
-        | ModelResponse::StyleProperties(_) => {
+        | ModelResponse::StyleProperties(_)
+        | ModelResponse::RendererStyleOptions(_) => {
             Err("unexpected application info response".to_string())
         }
     }
@@ -7327,7 +7390,8 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
-        | ModelResponse::StyleProperties(_) => {
+        | ModelResponse::StyleProperties(_)
+        | ModelResponse::RendererStyleOptions(_) => {
             Err("unexpected non-preferences response".to_string())
         }
     }
@@ -7347,7 +7411,8 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::Preferences(_)
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
-        | ModelResponse::StyleProperties(_) => {
+        | ModelResponse::StyleProperties(_)
+        | ModelResponse::RendererStyleOptions(_) => {
             Err("unexpected non-preferences-update response".to_string())
         }
     }
@@ -7367,7 +7432,8 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
-        | ModelResponse::StyleProperties(_) => {
+        | ModelResponse::StyleProperties(_)
+        | ModelResponse::RendererStyleOptions(_) => {
             Err("unexpected non-initial-state response".to_string())
         }
     }
@@ -7396,7 +7462,8 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::Preferences(_)
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewPropertiesUpdate(_)
-        | ModelResponse::StyleProperties(_) => {
+        | ModelResponse::StyleProperties(_)
+        | ModelResponse::RendererStyleOptions(_) => {
             Err("unexpected non-view-properties response".to_string())
         }
     }
@@ -7406,6 +7473,15 @@ fn style_properties_response(response: ModelResponse) -> Result<StylePropertiesD
     match response {
         ModelResponse::StyleProperties(properties) => Ok(properties),
         _ => Err("unexpected non-style-properties response".to_string()),
+    }
+}
+
+fn renderer_style_options_response(
+    response: ModelResponse,
+) -> Result<Vec<RendererStyleOptionDto>, String> {
+    match response {
+        ModelResponse::RendererStyleOptions(options) => Ok(options),
+        _ => Err("unexpected non-renderer-style-options response".to_string()),
     }
 }
 
@@ -7425,7 +7501,8 @@ fn view_properties_update_response(
         | ModelResponse::Preferences(_)
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
-        | ModelResponse::StyleProperties(_) => {
+        | ModelResponse::StyleProperties(_)
+        | ModelResponse::RendererStyleOptions(_) => {
             Err("unexpected non-view-properties-update response".to_string())
         }
     }
@@ -7709,6 +7786,21 @@ fn get_style_properties(
         ModelRequest::GetStyleProperties {
             scene_uid,
             local_index,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn get_renderer_style_options(
+    scene_uid: u64,
+    renderer_type: String,
+    state: State<'_, ManagedState>,
+) -> Result<Vec<RendererStyleOptionDto>, String> {
+    renderer_style_options_response(request_model(
+        &state,
+        ModelRequest::GetRendererStyleOptions {
+            scene_uid,
+            renderer_type,
         },
     )?)
 }
@@ -8874,6 +8966,7 @@ pub fn run() -> Result<(), tauri::Error> {
             destroy_camera,
             create_style,
             get_style_properties,
+            get_renderer_style_options,
             set_style_properties,
             destroy_style,
             set_workspace_visible,
@@ -9392,6 +9485,22 @@ mod tests {
     #[test]
     fn workspace_object_and_renderer_properties_are_undoable_and_persisted() {
         let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::GetRendererStyleOptions {
+                scene_uid: scene_uid.get(),
+                renderer_type: "simple".to_string(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::RendererStyleOptions(style_options) = response else {
+            panic!("expected renderer style options");
+        };
+        assert!(style_options
+            .iter()
+            .any(|style| style.name == "DefaultSimple"));
+
         model.prepare_mesh_if_needed().unwrap();
         assert!(model.mesh.is_some());
         handle_model_request(
@@ -9432,7 +9541,10 @@ mod tests {
                 show_ring: false,
                 ring_thickness: 0.2,
                 ring_color: "#ffffbf".to_string(),
-                specific: BTreeMap::new(),
+                specific: BTreeMap::from([(
+                    "style".to_string(),
+                    "ThickSimple,DefaultCPKColoring".to_string(),
+                )]),
             }),
         )
         .unwrap();
@@ -9449,6 +9561,7 @@ mod tests {
         assert_eq!(renderer.edge_width, 0.2);
         assert_eq!(renderer.edge_color, "#123456");
         assert_eq!(renderer.line_width, 2.4);
+        assert_eq!(renderer.style, "ThickSimple,DefaultCPKColoring");
         assert_eq!(snapshot.undo_descriptions.len(), 2);
         assert!(model.mesh.is_none());
 
@@ -9461,6 +9574,7 @@ mod tests {
             .renderer(renderer_uid)
             .unwrap();
         assert_eq!(renderer.name(), "simple 1");
+        assert_eq!(renderer.style(), None);
         assert_eq!(renderer.qsc_attr("alpha"), None);
         assert_eq!(renderer.qsc_attr("width"), None);
     }
