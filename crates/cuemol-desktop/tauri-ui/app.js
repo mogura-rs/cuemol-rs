@@ -4704,6 +4704,22 @@ function workspaceRendererContextItems(scene, object, renderer) {
     }
     items.push(null);
   }
+  const typeChangeAllowed =
+    renderer.rendererType === "*selection" ||
+    (!renderer.rendererType.startsWith("*") &&
+      !["atomintr", "disorder"].includes(renderer.rendererType));
+  if (typeChangeAllowed) {
+    for (const targetType of MOLECULE_RENDERER_TYPES) {
+      if (targetType === renderer.rendererType || ["atomintr", "disorder"].includes(targetType)) {
+        continue;
+      }
+      items.push({
+        label: `Change type · ${targetType}`,
+        action: () => changeWorkspaceRendererType(object, renderer, targetType),
+      });
+    }
+    items.push(null);
+  }
   items.push(
     {
       label: "Create style...",
@@ -7630,6 +7646,33 @@ async function mutate(command, args = {}, render = renderShell, refreshViewport 
 
 function mutateWithoutViewport(command, args = {}, render = renderShell) {
   return mutate(command, args, render, false);
+}
+
+async function changeWorkspaceRendererType(object, renderer, targetType) {
+  const changed = await mutate(
+    "change_workspace_renderer_type",
+    {
+      input: {
+        objectUid: object.uid,
+        rendererUid: renderer.uid,
+        rendererType: targetType,
+      },
+    },
+    () => {},
+  );
+  if (!changed) return;
+  const target = snapshot.objects
+    .find((candidate) => candidate.uid === object.uid)
+    ?.renderers.filter(
+      (candidate) =>
+        candidate.rendererType === targetType &&
+        (renderer.rendererType === "*selection" || candidate.name === renderer.name),
+    )
+    .sort((left, right) => right.uid - left.uid)[0];
+  selectedObjectUid = object.uid;
+  selectedRendererUid = target?.uid ?? null;
+  workspaceSelectionKind = target ? "renderer" : "object";
+  renderShell();
 }
 
 async function mutateWithViewport(command, args = {}, render = renderShell) {

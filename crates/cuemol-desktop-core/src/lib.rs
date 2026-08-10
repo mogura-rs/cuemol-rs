@@ -4194,6 +4194,75 @@ impl DesktopAppState {
         self.new_renderer(scene_uid, target_object, renderer_type, renderer_name)
     }
 
+    /// Change a Workspace molecular renderer to another compatible type.
+    /// Normal renderers are replaced with a new UID, while `*selection` is kept
+    /// and converted into an additional renderer, matching CueMol2's workflow.
+    pub fn change_renderer_type_in_object(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        renderer_type: &str,
+    ) -> Result<Uid> {
+        let renderer_type = renderer_type.trim();
+        if !MOLECULE_RENDERER_TYPES.contains(&renderer_type)
+            || matches!(renderer_type, "atomintr" | "disorder")
+        {
+            return Err(CueMolError::invalid_argument(format!(
+                "unsupported renderer type change target: {renderer_type}"
+            )));
+        }
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let (source_type, selection) = {
+            let object = self
+                .scene_manager()
+                .object(object_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+            let renderer = object
+                .renderer(renderer_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+            (
+                renderer.renderer_type().to_string(),
+                object.mol().selection_text().to_string(),
+            )
+        };
+        if source_type == renderer_type {
+            return Ok(renderer_uid);
+        }
+        if (source_type.starts_with('*') && source_type != "*selection")
+            || matches!(source_type.as_str(), "atomintr" | "disorder")
+        {
+            return Err(CueMolError::invalid_argument(format!(
+                "renderer type {source_type} cannot be changed"
+            )));
+        }
+        if source_type == "*selection" {
+            let name = self.suggest_renderer_name(scene_uid, renderer_type)?;
+            let new_uid = self
+                .new_renderer(scene_uid, object_uid, renderer_type, name)?
+                .result_renderer;
+            self.set_renderer_selection_text(object_uid, new_uid, &selection)?;
+            return Ok(new_uid);
+        }
+
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .expect("object was checked above");
+        let new_uid = object
+            .change_renderer_type(renderer_uid, renderer_type)
+            .expect("renderer was checked above");
+        if let Some(style) = default_molecule_renderer_style(renderer_type) {
+            object
+                .renderer_mut(new_uid)
+                .expect("replacement renderer exists")
+                .set_qsc_attr("style", style);
+        }
+        Ok(new_uid)
+    }
+
     pub fn set_renderer_visible(
         &mut self,
         object_uid: Uid,
@@ -50985,6 +51054,75 @@ end_header
         assert!(app
             .set_renderer_selection_text(object_uid, group_uid, "*")
             .is_err());
+    }
+
+    #[test]
+    fn workspace_renderer_type_change_matches_replace_and_selection_conversion() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("renderer type", false).result_scene;
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let (renderer_uid, group_uid) = {
+            let object = app.scene_manager_mut().object_mut(object_uid).unwrap();
+            let group_uid = object.add_renderer("*group", "representations");
+            let renderer_uid = object.add_renderer("simple", "lines");
+            let renderer = object.renderer_mut(renderer_uid).unwrap();
+            renderer.set_qsc_attr("group", "representations");
+            renderer.set_qsc_attr("bondw", "0.4");
+            renderer.set_qsc_attr("style", "OldStyle");
+            renderer.set_visible(false);
+            (renderer_uid, group_uid)
+        };
+
+        let replacement_uid = app
+            .change_renderer_type_in_object(object_uid, renderer_uid, "cartoon")
+            .unwrap();
+        assert_ne!(replacement_uid, renderer_uid);
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert!(object.renderer(renderer_uid).is_none());
+        let replacement = object.renderer(replacement_uid).unwrap();
+        assert_eq!(replacement.renderer_type(), "cartoon");
+        assert_eq!(replacement.name(), "lines");
+        assert_eq!(replacement.group(), Some("representations"));
+        assert_eq!(replacement.qsc_attr("bondw"), Some("0.4"));
+        assert_eq!(
+            replacement.qsc_attr("style"),
+            Some("DefaultCartoon,DefaultHSCPaint")
+        );
+        assert!(!replacement.is_visible());
+        assert!(app
+            .change_renderer_type_in_object(object_uid, group_uid, "cpk")
+            .is_err());
+        assert!(app
+            .change_renderer_type_in_object(object_uid, replacement_uid, "atomintr")
+            .is_err());
+
+        app.set_molecule_selection_text(object_uid, "protein")
+            .unwrap();
+        let selection_uid = app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderers()
+            .iter()
+            .find(|renderer| renderer.renderer_type() == "*selection")
+            .unwrap()
+            .uid();
+        let converted_uid = app
+            .change_renderer_type_in_object(object_uid, selection_uid, "cpk")
+            .unwrap();
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert!(object.renderer(selection_uid).is_some());
+        let converted = object.renderer(converted_uid).unwrap();
+        assert_eq!(converted.renderer_type(), "cpk");
+        assert_eq!(converted.qsc_attr("sel"), Some("protein"));
+        assert_eq!(
+            converted.qsc_attr("style"),
+            Some("DefaultCPK,DefaultCPKColoring")
+        );
     }
 
     #[test]

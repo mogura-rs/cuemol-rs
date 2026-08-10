@@ -962,6 +962,32 @@ impl MolObject {
         changed
     }
 
+    /// Replace a renderer with the same serialized state and a new runtime UID.
+    /// CueMol2 implements renderer type changes by serializing the old renderer
+    /// with a type override, deleting it, and attaching the deserialized result.
+    pub fn change_renderer_type(
+        &mut self,
+        uid: Uid,
+        renderer_type: impl Into<String>,
+    ) -> Option<Uid> {
+        let index = self
+            .renderers
+            .iter()
+            .position(|renderer| renderer.uid == uid)?;
+        let renderer_type = renderer_type.into();
+        if self.renderers[index].renderer_type == renderer_type {
+            return Some(uid);
+        }
+        let mut renderer = self.renderers.remove(index);
+        let new_uid = Uid::new(self.next_renderer_uid);
+        self.next_renderer_uid += 1;
+        renderer.uid = new_uid;
+        renderer.renderer_type = renderer_type;
+        self.renderers.insert(index, renderer);
+        self.modified = true;
+        Some(new_uid)
+    }
+
     pub fn add_renderer(
         &mut self,
         renderer_type: impl Into<String>,
@@ -4036,6 +4062,41 @@ mod tests {
         assert_eq!(object.alt_source(), "fallback.pdb");
         assert_eq!(object.source(), "datachunk:00000");
         assert!(!object.modified());
+    }
+
+    #[test]
+    fn renderer_type_change_replaces_uid_and_preserves_serialized_state() {
+        let mut manager = MolSceneManager::new();
+        let scene_uid = manager.new_scene("renderer type");
+        let object_uid = manager
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", MolCoord::new());
+        let object = manager.object_mut(object_uid).unwrap();
+        let renderer_uid = object.add_renderer("simple", "lines");
+        let renderer = object.renderer_mut(renderer_uid).unwrap();
+        renderer.set_qsc_attr("group", "representations");
+        renderer.set_qsc_attr("sel", "protein");
+        renderer.set_qsc_attr("ui_order", "7");
+        renderer.set_qsc_child_attr("section", "width", "0.45");
+        renderer.set_visible(false);
+
+        let replacement_uid = object
+            .change_renderer_type(renderer_uid, "cartoon")
+            .unwrap();
+        assert_ne!(replacement_uid, renderer_uid);
+        assert!(object.renderer(renderer_uid).is_none());
+        let replacement = object.renderer(replacement_uid).unwrap();
+        assert_eq!(replacement.renderer_type(), "cartoon");
+        assert_eq!(replacement.name(), "lines");
+        assert_eq!(replacement.group(), Some("representations"));
+        assert_eq!(replacement.qsc_attr("sel"), Some("protein"));
+        assert_eq!(replacement.qsc_attr("ui_order"), Some("7"));
+        assert_eq!(
+            replacement.qsc_child_attr("section", "width").as_deref(),
+            Some("0.45")
+        );
+        assert!(!replacement.is_visible());
     }
 
     #[test]

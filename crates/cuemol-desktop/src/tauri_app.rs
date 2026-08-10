@@ -685,6 +685,14 @@ struct WorkspaceRendererSelectionInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceRendererTypeInput {
+    object_uid: u64,
+    renderer_uid: u64,
+    renderer_type: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceRendererGroupInput {
     object_uid: u64,
     #[serde(default)]
@@ -2313,6 +2321,22 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Change renderer selection".to_string();
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn change_workspace_renderer_type(
+        &mut self,
+        input: WorkspaceRendererTypeInput,
+    ) -> Result<(), String> {
+        self.desktop
+            .change_renderer_type_in_object(
+                Uid::new(input.object_uid),
+                Uid::new(input.renderer_uid),
+                &input.renderer_type,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = format!("Change renderer type to {}", input.renderer_type);
         self.invalidate_mesh(false);
         Ok(())
     }
@@ -4822,6 +4846,7 @@ enum ModelRequest {
     MoveWorkspaceObject(WorkspaceMoveObjectInput),
     MoveWorkspaceRenderer(WorkspaceMoveRendererInput),
     SetWorkspaceRendererSelection(WorkspaceRendererSelectionInput),
+    ChangeWorkspaceRendererType(WorkspaceRendererTypeInput),
     CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     FitWorkspaceItem {
@@ -6216,6 +6241,12 @@ fn handle_model_request(
         ModelRequest::SetWorkspaceRendererSelection(input) => {
             let undo = model.capture_undo();
             model.set_workspace_renderer_selection(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ChangeWorkspaceRendererType(input) => {
+            let undo = model.capture_undo();
+            model.change_workspace_renderer_type(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -8116,6 +8147,17 @@ fn set_workspace_renderer_selection(
 }
 
 #[tauri::command]
+fn change_workspace_renderer_type(
+    input: WorkspaceRendererTypeInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ChangeWorkspaceRendererType(input),
+    )?)
+}
+
+#[tauri::command]
 fn create_workspace_renderer_group(
     input: WorkspaceRendererGroupInput,
     state: State<'_, ManagedState>,
@@ -9247,6 +9289,7 @@ pub fn run() -> Result<(), tauri::Error> {
             move_workspace_object,
             move_workspace_renderer,
             set_workspace_renderer_selection,
+            change_workspace_renderer_type,
             create_workspace_renderer_group,
             rename_workspace_renderer_group,
             fit_workspace_item,
@@ -10635,6 +10678,46 @@ mod tests {
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().objects[0].renderers[0].selection, "*");
+    }
+
+    #[test]
+    fn workspace_renderer_type_change_is_undoable_and_invalidates_mesh() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        model.prepare_mesh_if_needed().unwrap();
+        assert!(model.mesh.is_some());
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::ChangeWorkspaceRendererType(WorkspaceRendererTypeInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                renderer_type: "cartoon".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let replacement = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.renderer_type == "cartoon")
+            .unwrap();
+        assert_ne!(replacement.uid, renderer_uid.get());
+        assert_eq!(replacement.name, "simple 1");
+        assert_eq!(
+            snapshot.undo_descriptions[0],
+            "Change renderer type to cartoon"
+        );
+        assert!(model.mesh.is_none());
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .is_some());
     }
 
     #[test]

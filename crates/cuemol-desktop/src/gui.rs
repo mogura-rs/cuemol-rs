@@ -3989,6 +3989,36 @@ impl GuiApplication {
                                 );
                                 ui.separator();
                             }
+                            if renderer.renderer_type == "*selection"
+                                || (!renderer.renderer_type.starts_with('*')
+                                    && !matches!(
+                                        renderer.renderer_type.as_str(),
+                                        "atomintr" | "disorder"
+                                    ))
+                            {
+                                ui.menu_button("Change type", |ui| {
+                                    for renderer_type in
+                                        RENDERER_TYPES.iter().copied().filter(|renderer_type| {
+                                            *renderer_type != renderer.renderer_type
+                                                && !matches!(
+                                                    *renderer_type,
+                                                    "atomintr" | "disorder"
+                                                )
+                                        })
+                                    {
+                                        if ui.button(renderer_type).clicked() {
+                                            self.change_workspace_renderer_type(
+                                                scene_uid,
+                                                object_uid,
+                                                renderer.uid,
+                                                renderer_type,
+                                            );
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                                ui.separator();
+                            }
                             if ui.button("Create style...").clicked() {
                                 self.open_renderer_style_create(
                                     scene_uid,
@@ -4065,6 +4095,31 @@ impl GuiApplication {
             renderer.uid,
             position,
         );
+    }
+
+    fn change_workspace_renderer_type(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        renderer_type: &str,
+    ) {
+        let undo = self.capture_undo();
+        match self
+            .state
+            .change_renderer_type_in_object(object_uid, renderer_uid, renderer_type)
+        {
+            Ok(new_uid) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.selected_object = Some(object_uid);
+                self.selected_renderer = Some(new_uid);
+                self.workspace_aux_selection = None;
+                self.rebuild_snapshot();
+                self.set_status(format!("Change renderer type to {renderer_type}"));
+            }
+            Err(error) => self.set_status(format!("Renderer type error: {error}")),
+        }
     }
 
     fn workspace_renderer_selection_menu(
@@ -18421,6 +18476,44 @@ mod tests {
                 .qsc_attr("sel"),
             None
         );
+    }
+
+    #[test]
+    fn native_workspace_renderer_type_change_selects_replacement_and_is_undoable() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let renderer_uid = app
+            .state
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "lines");
+
+        app.change_workspace_renderer_type(scene_uid, object_uid, renderer_uid, "cartoon");
+        let replacement_uid = app.selected_renderer.unwrap();
+        assert_ne!(replacement_uid, renderer_uid);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(replacement_uid)
+                .unwrap()
+                .renderer_type(),
+            "cartoon"
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+
+        app.undo(&mut CameraController::default());
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert!(object.renderer(renderer_uid).is_some());
+        assert!(object.renderer(replacement_uid).is_none());
     }
 
     #[test]
