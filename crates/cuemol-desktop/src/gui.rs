@@ -157,12 +157,39 @@ pub fn run() -> Result<()> {
     init_error.map_or(Ok(()), Err)
 }
 
+#[derive(Debug)]
+struct NativeConfigSource {
+    path: Option<PathBuf>,
+    input: std::result::Result<Option<String>, String>,
+}
+
+fn load_native_config_source() -> NativeConfigSource {
+    let Some(path) = default_config_path() else {
+        return NativeConfigSource {
+            path: None,
+            input: Ok(None),
+        };
+    };
+    let input = if path.is_file() {
+        fs::read_to_string(&path)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    } else {
+        Ok(None)
+    };
+    NativeConfigSource {
+        path: Some(path),
+        input,
+    }
+}
+
 struct NativeRunner {
     window: Option<Arc<Window>>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
     gpu: Option<GpuState>,
     gpu_init_receiver: Option<mpsc::Receiver<Result<GpuState>>>,
+    config_init_receiver: Option<mpsc::Receiver<NativeConfigSource>>,
     event_proxy: EventLoopProxy<()>,
     app: Option<GuiApplication>,
     init_error: Option<CueMolError>,
@@ -178,6 +205,7 @@ impl NativeRunner {
             egui_state: None,
             gpu: None,
             gpu_init_receiver: None,
+            config_init_receiver: None,
             event_proxy,
             app: None,
             init_error: None,
@@ -217,6 +245,7 @@ impl ApplicationHandler for NativeRunner {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, (): ()) {
         let _ = self.guard_gui_callback(event_loop, "user_event", |this, event_loop| {
             this.poll_gpu_init(event_loop);
+            this.poll_config_init(event_loop);
         });
     }
 }
@@ -287,9 +316,23 @@ impl NativeRunner {
             }) {
             Ok(_) => {
                 self.gpu_init_receiver = Some(receiver);
-                // Load configuration and construct the desktop state only after the
-                // window exists and GPU initialization is already running off-thread.
-                self.app = Some(GuiApplication::new_persistent());
+                let (config_sender, config_receiver) = mpsc::channel();
+                let config_proxy = self.event_proxy.clone();
+                match std::thread::Builder::new()
+                    .name("cuemol-config-init".to_string())
+                    .spawn(move || {
+                        let config = load_native_config_source();
+                        let _ = config_sender.send(config);
+                        let _ = config_proxy.send_event(());
+                    }) {
+                    Ok(_) => self.config_init_receiver = Some(config_receiver),
+                    Err(error) => {
+                        self.init_error = Some(CueMolError::Io(format!(
+                            "failed to start configuration loading: {error}"
+                        )));
+                        event_loop.exit();
+                    }
+                }
             }
             Err(error) => {
                 self.init_error = Some(CueMolError::Io(format!(
@@ -323,6 +366,30 @@ impl NativeRunner {
                 self.gpu_init_receiver = None;
                 self.init_error = Some(CueMolError::Io(
                     "GPU initialization thread stopped".to_string(),
+                ));
+                event_loop.exit();
+            }
+            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+        }
+    }
+
+    fn poll_config_init(&mut self, event_loop: &ActiveEventLoop) {
+        let result = self
+            .config_init_receiver
+            .as_ref()
+            .map(mpsc::Receiver::try_recv);
+        match result {
+            Some(Ok(config)) => {
+                self.config_init_receiver = None;
+                self.app = Some(GuiApplication::new_with_config_source(config));
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                self.config_init_receiver = None;
+                self.init_error = Some(CueMolError::Io(
+                    "configuration loading thread stopped".to_string(),
                 ));
                 event_loop.exit();
             }
@@ -409,6 +476,7 @@ impl NativeRunner {
 
     fn about_to_wait_impl(&mut self, event_loop: &ActiveEventLoop) {
         self.poll_gpu_init(event_loop);
+        self.poll_config_init(event_loop);
         if self.should_exit_now() {
             event_loop.exit();
         }
@@ -2971,20 +3039,22 @@ impl GuiApplication {
         }
     }
 
-    fn new_persistent() -> Self {
+    fn new_with_config_source(config: NativeConfigSource) -> Self {
         let mut app = Self::new();
-        let Some(path) = default_config_path() else {
+        let Some(path) = config.path else {
             return app;
         };
         app.config_path = path.to_string_lossy().into_owned();
-        if path.is_file() {
-            match app.state.load_config_file(&path) {
+        match config.input {
+            Ok(Some(input)) => match app.state.load_config_text(&input) {
                 Ok(_) => {
                     app.apply_stored_preferences();
                     app.status = format!("Loaded config {}", path.display());
                 }
                 Err(error) => app.status = format!("Config load failed: {error}"),
-            }
+            },
+            Ok(None) => {}
+            Err(error) => app.status = format!("Config load failed: {error}"),
         }
         app
     }
@@ -22958,6 +23028,17 @@ mod tests {
         assert!(app.snapshot.atoms.is_empty());
         assert!(app.snapshot.bonds.is_empty());
         assert!(app.snapshot.meshes.is_empty());
+    }
+
+    #[test]
+    fn native_startup_applies_preloaded_config_without_file_io() {
+        let app = GuiApplication::new_with_config_source(NativeConfigSource {
+            path: Some(PathBuf::from("preloaded.conf")),
+            input: Ok(Some("view_input:tbrad\t1.25\n".to_string())),
+        });
+        assert_eq!(app.state.config_value("view_input:tbrad"), "1.25");
+        assert_eq!(app.state.view_input_config().tbrad(), 1.25);
+        assert_eq!(app.status, "Loaded config preloaded.conf");
     }
 
     #[test]

@@ -476,10 +476,14 @@ fn desktop_startup_and_fetch_overlap_independent_initialization() {
     let gpu_start = NATIVE_GUI_RS
         .find("self.gpu_init_receiver = Some(receiver)")
         .unwrap();
+    let config_start = NATIVE_GUI_RS.find("cuemol-config-init").unwrap();
     let app_start = NATIVE_GUI_RS
-        .find("self.app = Some(GuiApplication::new_persistent())")
+        .find("self.app = Some(GuiApplication::new_with_config_source(config))")
         .unwrap();
-    assert!(gpu_start < app_start);
+    assert!(gpu_start < config_start);
+    assert!(config_start < app_start);
+    assert!(NATIVE_GUI_RS.contains("fs::read_to_string(&path)"));
+    assert!(NATIVE_GUI_RS.contains("poll_config_init(event_loop)"));
 
     assert!(TAURI_APP_RS.contains("ModelRequest::StartRendererWarmup"));
     assert!(TAURI_APP_RS.contains("request_model(&state, ModelRequest::StartRendererWarmup)"));

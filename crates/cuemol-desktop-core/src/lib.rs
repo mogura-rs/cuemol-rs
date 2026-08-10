@@ -1531,6 +1531,10 @@ impl DesktopAppState {
 
     pub fn load_config_file(&mut self, path: impl AsRef<Path>) -> Result<usize> {
         let input = fs::read_to_string(path)?;
+        self.load_config_text(&input)
+    }
+
+    pub fn load_config_text(&mut self, input: &str) -> Result<usize> {
         let mut count = 0;
         for line in input.lines() {
             let trimmed = line.trim();
@@ -52681,6 +52685,15 @@ end_header
         let mut loaded = DesktopAppState::new();
         assert_eq!(loaded.load_config_file(&path).unwrap(), expected_entries);
         assert_eq!(loaded.config_value("gui:test"), "line1\nline2");
+
+        let mut loaded_from_text = DesktopAppState::new();
+        assert_eq!(
+            loaded_from_text
+                .load_config_text("gui:text\tline1\\nline2\n")
+                .unwrap(),
+            1
+        );
+        assert_eq!(loaded_from_text.config_value("gui:text"), "line1\nline2");
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(dir);
     }
