@@ -274,6 +274,25 @@ fn tauri_viewport_render_requests_are_coalesced() {
 }
 
 #[test]
+fn tauri_workspace_chrome_reuses_unchanged_dom() {
+    assert!(JS.contains("function workspaceChromeRenderKey()"));
+    let workspace_key = JS
+        .split("function workspaceChromeRenderKey()")
+        .nth(1)
+        .and_then(|source| source.split("function renderSceneTabs").next())
+        .expect("Workspace render-key function");
+    assert!(JS.contains("const workspaceRenderKey = workspaceChromeRenderKey();"));
+    assert!(JS.contains("if (renderedSceneTabsKey === renderKey) return;"));
+    assert!(JS.contains("if (renderedSceneTreeKey === renderKey) return;"));
+    assert!(JS.contains("if (renderedInspectorKey === renderKey) return;"));
+    assert!(JS.contains("renderSceneTabs(workspaceRenderKey)"));
+    assert!(JS.contains("renderSceneTree(workspaceRenderKey)"));
+    assert!(JS.contains("renderInspector(workspaceRenderKey)"));
+    assert!(!workspace_key.contains("snapshot.camera"));
+    assert!(!workspace_key.contains("snapshot.densityLevel"));
+}
+
+#[test]
 fn tauri_projection_toggle_uses_the_compact_viewport_response() {
     assert!(JS.contains("snapshot.perspective = result.perspective"));
     assert!(JS.contains("renderProjectionControls()"));

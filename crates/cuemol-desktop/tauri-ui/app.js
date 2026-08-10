@@ -173,6 +173,9 @@ let moleculeDetailsTimer = null;
 let moleculeDetailsRequest = null;
 let renderedMolstructKey = "";
 let renderedSequenceKey = "";
+let renderedSceneTabsKey = "";
+let renderedSceneTreeKey = "";
+let renderedInspectorKey = "";
 let selectionCandidateCache = { key: "", values: null };
 
 function loadRecentFiles() {
@@ -4219,7 +4222,64 @@ function normalizeSelection() {
   }
 }
 
-function renderSceneTabs() {
+function workspaceChromeRenderKey() {
+  const rendererKey = (renderer) => [
+    renderer.uid,
+    renderer.name,
+    renderer.rendererType,
+    renderer.visible,
+    renderer.locked,
+  ];
+  return JSON.stringify({
+    selection: [
+      workspaceSelectionKind,
+      selectedObjectUid,
+      selectedRendererUid,
+      selectedDensityMapUid,
+      selectedDensityRendererUid,
+      selectedSurfaceUid,
+      selectedSurfaceRendererUid,
+    ],
+    scenes: snapshot.scenes.map((scene) => [
+      scene.uid,
+      scene.name,
+      scene.active,
+      scene.objectCount,
+      scene.mapCount,
+    ]),
+    objects: snapshot.objects.map((object) => [
+      object.sceneUid,
+      object.uid,
+      object.name,
+      object.visible,
+      object.atomCount,
+      object.residueCount,
+      object.bondCount,
+      object.renderers.map(rendererKey),
+    ]),
+    maps: snapshot.densityMaps.map((map) => [
+      map.sceneUid,
+      map.uid,
+      map.name,
+      map.visible,
+      map.counts,
+      map.renderers.map(rendererKey),
+    ]),
+    surfaces: (snapshot.surfaces || []).map((surface) => [
+      surface.sceneUid,
+      surface.uid,
+      surface.name,
+      surface.visible,
+      surface.className,
+      surface.format,
+      surface.renderers.map(rendererKey),
+    ]),
+  });
+}
+
+function renderSceneTabs(renderKey = workspaceChromeRenderKey()) {
+  if (renderedSceneTabsKey === renderKey) return;
+  renderedSceneTabsKey = renderKey;
   sceneTabs.replaceChildren();
   for (const scene of snapshot.scenes) {
     const tab = button(scene.name || `Scene ${scene.uid}`, `scene-tab${scene.active ? " active" : ""}`, () => {
@@ -4230,7 +4290,9 @@ function renderSceneTabs() {
   }
 }
 
-function renderSceneTree() {
+function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
+  if (renderedSceneTreeKey === renderKey) return;
+  renderedSceneTreeKey = renderKey;
   sceneTree.replaceChildren();
   if (snapshot.scenes.length === 0) {
     workspaceProperties.disabled = true;
@@ -4443,7 +4505,9 @@ function renderSceneTree() {
   workspaceZoom.disabled = workspaceDelete.disabled;
 }
 
-function renderInspector() {
+function renderInspector(renderKey = workspaceChromeRenderKey()) {
+  if (renderedInspectorKey === renderKey) return;
+  renderedInspectorKey = renderKey;
   const map = ["densityMap", "densityRenderer"].includes(workspaceSelectionKind)
     ? selectedDensityMap()
     : null;
@@ -4559,8 +4623,9 @@ function renderInspector() {
         selectedRendererUid = renderer.uid;
         workspaceSelectionKind = "renderer";
       }
-      renderSceneTree();
-      renderInspector();
+      const renderKey = workspaceChromeRenderKey();
+      renderSceneTree(renderKey);
+      renderInspector(renderKey);
     };
     row.addEventListener("click", selectRow);
     row.addEventListener("keydown", (event) => {
@@ -6321,6 +6386,7 @@ function renderProjectionControls() {
 function renderShell() {
   if (!snapshot) return;
   normalizeSelection();
+  const workspaceRenderKey = workspaceChromeRenderKey();
   renderProjectionControls();
   document.querySelectorAll("input[name='background']").forEach((input) => {
     input.checked = input.value === snapshot.background;
@@ -6335,9 +6401,9 @@ function renderShell() {
   measureReadout.textContent = snapshot.measureResult || "Select 2 / 3 / 4 atoms";
   renderStatusAndLog();
   metrics.textContent = `${snapshot.scenes.length} scenes / ${snapshot.objects.length} objects`;
-  renderSceneTabs();
-  renderSceneTree();
-  renderInspector();
+  renderSceneTabs(workspaceRenderKey);
+  renderSceneTree(workspaceRenderKey);
+  renderInspector(workspaceRenderKey);
   renderMolStruct();
   renderSelectionPanel();
   renderColoring();
