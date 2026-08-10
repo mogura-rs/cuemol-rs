@@ -3510,6 +3510,7 @@ function showRendererSetup(setup) {
   referenceDialog.className = "reference-dialog";
   const readerDefaults = setup.readerOptions || null;
   const namdDefaults = setup.namdCoorOptions || null;
+  const msmsDefaults = setup.msmsOptions || null;
   const ccp4Defaults = setup.ccp4MapOptions || null;
   const mtzDefaults = setup.mtzMapOptions || null;
   const readerTab = readerDefaults
@@ -3518,6 +3519,8 @@ function showRendererSetup(setup) {
       : "PDB options"
     : namdDefaults
       ? "NAMD Coor file options"
+    : msmsDefaults
+      ? "MSMS surface file options"
     : ccp4Defaults
       ? "CCP4Map options"
       : mtzDefaults
@@ -3548,7 +3551,9 @@ function showRendererSetup(setup) {
   const rendererName = dialogField("Renderer name:", setup.rendererName, "text", rendererPage);
   const selection = dialogOptionalField("Selection:", "", selectionHistoryEntries, rendererPage);
   const densityMapTarget = setup.targetKind === "densityMap";
-  if (densityMapTarget) {
+  const surfaceTarget = setup.targetKind === "surface";
+  const selectionAllowed = !densityMapTarget && !surfaceTarget;
+  if (!selectionAllowed) {
     selection.enabled.disabled = true;
     selection.input.disabled = true;
   }
@@ -3679,6 +3684,35 @@ function showRendererSetup(setup) {
     topologyPath.closest("label").append(changeTopology);
     namdControls = { topologyPath };
   }
+  let msmsControls = null;
+  if (msmsDefaults) {
+    const readerPage = pages.panes[1];
+    const vertexPath = dialogField(
+      "Vertex file:",
+      msmsDefaults.vertexPath || "",
+      "text",
+      readerPage,
+    );
+    const changeVertex = button("Change ...", "", async () => {
+      if (!dialog?.open) {
+        showError("The Tauri dialog plugin is unavailable.");
+        return;
+      }
+      const path = await dialog.open({
+        title: "Select MSMS vertex file",
+        multiple: false,
+        directory: false,
+        defaultPath: vertexPath.value || undefined,
+        filters: [{ name: "MSMS vertex file", extensions: ["vert"] }],
+      });
+      if (path) {
+        vertexPath.value = path;
+        vertexPath.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
+    vertexPath.closest("label").append(changeVertex);
+    msmsControls = { vertexPath };
+  }
   let mtzControls = null;
   if (mtzDefaults) {
     const readerPage = pages.panes[1];
@@ -3769,8 +3803,9 @@ function showRendererSetup(setup) {
         !objectName.value.trim() ||
         !rendererType.value ||
         !rendererName.value.trim() ||
-        (!densityMapTarget && selection.enabled.checked && !selection.input.value.trim()) ||
+        (selectionAllowed && selection.enabled.checked && !selection.input.value.trim()) ||
         (namdControls && !namdControls.topologyPath.value.trim()) ||
+        (msmsControls && !msmsControls.vertexPath.value.trim()) ||
         (ccp4Controls?.truncateMin.enabled.checked &&
           (!ccp4Controls.truncateMin.input.value.trim() ||
             !Number.isFinite(Number(ccp4Controls.truncateMin.input.value)))) ||
@@ -3795,7 +3830,7 @@ function showRendererSetup(setup) {
       updateState();
       if (ok.disabled) return;
       ok.disabled = true;
-      if (!densityMapTarget && selection.enabled.checked) {
+      if (selectionAllowed && selection.enabled.checked) {
         rememberSelection(selection.input.value);
       }
       finish({
@@ -3805,7 +3840,7 @@ function showRendererSetup(setup) {
           rendererType: rendererType.value,
           rendererName: rendererName.value.trim(),
           selection:
-            !densityMapTarget && selection.enabled.checked
+            selectionAllowed && selection.enabled.checked
               ? selection.input.value.trim()
               : null,
           recenter: densityMapTarget ? moveViewCenter.checked : recenter.checked,
@@ -3824,6 +3859,9 @@ function showRendererSetup(setup) {
           : null,
         namdCoorOptions: namdControls
           ? { topologyPath: namdControls.topologyPath.value.trim() }
+          : null,
+        msmsOptions: msmsControls
+          ? { vertexPath: msmsControls.vertexPath.value.trim() }
           : null,
         ccp4MapOptions: ccp4Controls
           ? {
@@ -3858,6 +3896,7 @@ function showRendererSetup(setup) {
       selection.enabled,
       selection.input,
       ...(namdControls ? [namdControls.topologyPath] : []),
+      ...(msmsControls ? [msmsControls.vertexPath] : []),
       ...(ccp4Controls
         ? [
             ccp4Controls.normalize,
@@ -9953,6 +9992,7 @@ async function openSelectedPaths(paths) {
           rendererSetup: setup.rendererSetup,
           readerOptions: setup.readerOptions,
           namdCoorOptions: setup.namdCoorOptions,
+          msmsOptions: setup.msmsOptions,
           ccp4MapOptions: setup.ccp4MapOptions,
           mtzMapOptions: setup.mtzMapOptions,
         },

@@ -145,6 +145,7 @@ struct RendererSetupDto {
     options: Vec<RendererSetupOptionDto>,
     reader_options: Option<MoleculeReaderOptionsDto>,
     namd_coor_options: Option<NamdCoorReaderOptionsDto>,
+    msms_options: Option<MsmsReaderOptionsDto>,
     ccp4_map_options: Option<Ccp4MapReaderOptionsDto>,
     mtz_map_options: Option<MtzMapReaderOptionsDto>,
 }
@@ -218,6 +219,28 @@ impl From<NamdCoorReaderOptionsDto> for crate::GuiNamdCoorReaderOptions {
     fn from(value: NamdCoorReaderOptionsDto) -> Self {
         Self {
             topology_path: value.topology_path,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct MsmsReaderOptionsDto {
+    vertex_path: String,
+}
+
+impl From<crate::GuiMsmsReaderOptions> for MsmsReaderOptionsDto {
+    fn from(value: crate::GuiMsmsReaderOptions) -> Self {
+        Self {
+            vertex_path: value.vertex_path,
+        }
+    }
+}
+
+impl From<MsmsReaderOptionsDto> for crate::GuiMsmsReaderOptions {
+    fn from(value: MsmsReaderOptionsDto) -> Self {
+        Self {
+            vertex_path: value.vertex_path,
         }
     }
 }
@@ -342,6 +365,7 @@ struct FileRendererSetupInput {
     target_kind: String,
     reader_options: Option<MoleculeReaderOptionsDto>,
     namd_coor_options: Option<NamdCoorReaderOptionsDto>,
+    msms_options: Option<MsmsReaderOptionsDto>,
     ccp4_map_options: Option<Ccp4MapReaderOptionsDto>,
     mtz_map_options: Option<MtzMapReaderOptionsDto>,
     renderer_setup: RendererSetupInput,
@@ -5503,6 +5527,7 @@ enum ModelRequest {
         reader_options: Option<crate::GuiMoleculeReaderOptions>,
         namd_coor_options: Option<crate::GuiNamdCoorReaderOptions>,
         density_map_options: Option<crate::GuiDensityMapReaderOptions>,
+        msms_options: Option<crate::GuiMsmsReaderOptions>,
         renderer_setup: crate::GuiRendererSetup,
         width: u32,
         height: u32,
@@ -6698,6 +6723,7 @@ fn renderer_setup_defaults(
         recenter: preferences.recenter,
         reader_options: reader_options.map(MoleculeReaderOptionsDto::from),
         namd_coor_options: namd_coor_options.map(NamdCoorReaderOptionsDto::from),
+        msms_options: None,
         ccp4_map_options: None,
         mtz_map_options: None,
         options: options
@@ -6749,8 +6775,51 @@ fn density_map_renderer_setup_defaults(
         recenter: false,
         reader_options: None,
         namd_coor_options: None,
+        msms_options: None,
         ccp4_map_options,
         mtz_map_options,
+        options: options
+            .into_iter()
+            .map(|option| RendererSetupOptionDto {
+                name: option.name,
+                description: option.description,
+                preset: option.preset,
+            })
+            .collect(),
+    })
+}
+
+fn surface_renderer_setup_defaults(
+    model: &mut AppModel,
+    base_object_name: &str,
+    reader_options: Option<crate::GuiMsmsReaderOptions>,
+) -> Result<RendererSetupDto, String> {
+    let scene_uid = model.desktop.ensure_active_scene();
+    let options = model.desktop.surface_renderer_setup_options();
+    let preferences = crate::load_renderer_setup_preferences();
+    let renderer_type = options
+        .first()
+        .map(|option| option.name.clone())
+        .ok_or_else(|| "no compatible surface renderers are available".to_string())?;
+    let object_name = model
+        .desktop
+        .suggest_object_name(scene_uid, base_object_name)
+        .map_err(|error| error.to_string())?;
+    let renderer_name = model
+        .desktop
+        .suggest_renderer_name(scene_uid, &renderer_type)
+        .map_err(|error| error.to_string())?;
+    Ok(RendererSetupDto {
+        target_kind: "surface".to_string(),
+        object_name,
+        renderer_type,
+        renderer_name,
+        recenter: preferences.recenter,
+        reader_options: None,
+        namd_coor_options: None,
+        msms_options: reader_options.map(MsmsReaderOptionsDto::from),
+        ccp4_map_options: None,
+        mtz_map_options: None,
         options: options
             .into_iter()
             .map(|option| RendererSetupOptionDto {
@@ -7333,6 +7402,11 @@ fn handle_model_request(
                     object_name,
                     file_setup.density_map_reader_options,
                 )?,
+                crate::GuiFileRendererTarget::Surface => surface_renderer_setup_defaults(
+                    model,
+                    object_name,
+                    file_setup.msms_reader_options,
+                )?,
             };
             Ok(ModelResponse::FileRendererSetup(Some(setup)))
         }
@@ -7342,6 +7416,7 @@ fn handle_model_request(
             reader_options,
             namd_coor_options,
             density_map_options,
+            msms_options,
             renderer_setup,
             width,
             height,
@@ -7351,9 +7426,11 @@ fn handle_model_request(
             let recenter = renderer_setup.recenter;
             let map_renderer_center = (!recenter).then(|| model.camera.center());
             let result = match target {
-                crate::GuiFileRendererTarget::Molecule if density_map_options.is_some() => {
+                crate::GuiFileRendererTarget::Molecule
+                    if density_map_options.is_some() || msms_options.is_some() =>
+                {
                     Err(cuemol_core::CueMolError::invalid_argument(
-                        "density-map reader options require a density-map target",
+                        "non-molecule reader options require their matching target",
                     ))
                 }
                 crate::GuiFileRendererTarget::Molecule => {
@@ -7365,10 +7442,12 @@ fn handle_model_request(
                     )
                 }
                 crate::GuiFileRendererTarget::DensityMap
-                    if reader_options.is_some() || namd_coor_options.is_some() =>
+                    if reader_options.is_some()
+                        || namd_coor_options.is_some()
+                        || msms_options.is_some() =>
                 {
                     Err(cuemol_core::CueMolError::invalid_argument(
-                        "molecule reader options require a molecule target",
+                        "non-density-map reader options require their matching target",
                     ))
                 }
                 crate::GuiFileRendererTarget::DensityMap => {
@@ -7376,6 +7455,22 @@ fn handle_model_request(
                         &path,
                         density_map_options.as_ref(),
                         map_renderer_center,
+                        &renderer_setup,
+                    )
+                }
+                crate::GuiFileRendererTarget::Surface
+                    if reader_options.is_some()
+                        || namd_coor_options.is_some()
+                        || density_map_options.is_some() =>
+                {
+                    Err(cuemol_core::CueMolError::invalid_argument(
+                        "non-surface reader options require their matching target",
+                    ))
+                }
+                crate::GuiFileRendererTarget::Surface => {
+                    model.desktop.open_surface_path_with_renderer_setup(
+                        &path,
+                        msms_options.as_ref(),
                         &renderer_setup,
                     )
                 }
@@ -9878,6 +9973,7 @@ fn open_path_with_renderer_setup(
     let target = match file_setup.target_kind.as_str() {
         "molecule" => crate::GuiFileRendererTarget::Molecule,
         "densityMap" => crate::GuiFileRendererTarget::DensityMap,
+        "surface" => crate::GuiFileRendererTarget::Surface,
         target => return Err(format!("unsupported renderer setup target: {target}")),
     };
     let reader_options = file_setup
@@ -9887,6 +9983,9 @@ fn open_path_with_renderer_setup(
     let namd_coor_options = file_setup
         .namd_coor_options
         .map(crate::GuiNamdCoorReaderOptions::from);
+    let msms_options = file_setup
+        .msms_options
+        .map(crate::GuiMsmsReaderOptions::from);
     let density_map_options = match (file_setup.ccp4_map_options, file_setup.mtz_map_options) {
         (Some(_), Some(_)) => {
             return Err("only one density-map reader option set is allowed".to_string())
@@ -9912,6 +10011,7 @@ fn open_path_with_renderer_setup(
             reader_options,
             namd_coor_options,
             density_map_options,
+            msms_options,
             renderer_setup,
             width,
             height,
@@ -11536,6 +11636,7 @@ mod tests {
                     .unwrap(),
                 namd_coor_options: None,
                 density_map_options: None,
+                msms_options: None,
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "opened.pdb".to_string(),
                     renderer_type: "invalid".to_string(),
@@ -11566,6 +11667,7 @@ mod tests {
                     .unwrap(),
                 namd_coor_options: None,
                 density_map_options: None,
+                msms_options: None,
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "opened.pdb".to_string(),
                     renderer_type: "ballstick".to_string(),
@@ -11630,6 +11732,7 @@ mod tests {
                 reader_options: None,
                 namd_coor_options: None,
                 density_map_options: None,
+                msms_options: None,
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "density".to_string(),
                     renderer_type: "contour".to_string(),
@@ -11660,6 +11763,76 @@ mod tests {
         );
         assert!(!model.mesh_refit_pending);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn file_open_renderer_setup_loads_msms_surface_with_vertex_options() {
+        let dir =
+            std::env::temp_dir().join(format!("cuemol-renderer-setup-msms-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let face_path = dir.join("surface.face");
+        let vert_path = dir.join("surface.vert");
+        fs::write(&face_path, "# MSMS\n# faces\n1\n1 2 3\n").unwrap();
+        fs::write(
+            &vert_path,
+            "# MSMS\n# vertices\n3\n0 0 0 0 0 1\n1 0 0 0 0 1\n0 1 0 0 0 1\n",
+        )
+        .unwrap();
+        let path_text = face_path.to_string_lossy().into_owned();
+        let mut model = model_without_gpu();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::GetFileRendererSetup {
+                path: path_text.clone(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::FileRendererSetup(Some(defaults)) = response else {
+            panic!("expected MSMS renderer setup");
+        };
+        assert_eq!(defaults.target_kind, "surface");
+        assert_eq!(defaults.renderer_type, "molsurf");
+        assert_eq!(
+            defaults
+                .msms_options
+                .as_ref()
+                .map(|options| options.vertex_path.as_str()),
+            vert_path.to_str()
+        );
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::OpenPathWithRendererSetup {
+                path: path_text,
+                target: crate::GuiFileRendererTarget::Surface,
+                reader_options: None,
+                namd_coor_options: None,
+                density_map_options: None,
+                msms_options: defaults.msms_options.map(crate::GuiMsmsReaderOptions::from),
+                renderer_setup: crate::GuiRendererSetup {
+                    object_name: "surface.face".to_string(),
+                    renderer_type: "molsurf".to_string(),
+                    renderer_name: "surface1".to_string(),
+                    selection: None,
+                    recenter: true,
+                },
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        let ModelResponse::MolStructUpdate(update) = response else {
+            panic!("expected surface update");
+        };
+        assert_eq!(update.snapshot.surfaces.len(), 1);
+        assert_eq!(update.snapshot.surfaces[0].name, "surface.face");
+        assert_eq!(update.snapshot.surfaces[0].renderers[0].name, "surface1");
+        assert!(model.mesh_refit_pending);
+
+        for path in [face_path, vert_path] {
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir(dir).unwrap();
     }
 
     #[test]

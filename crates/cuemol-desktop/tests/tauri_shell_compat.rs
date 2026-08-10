@@ -273,6 +273,20 @@ fn tauri_file_open_matches_reference_namd_coor_options() {
 }
 
 #[test]
+fn tauri_file_open_matches_reference_msms_surface_options() {
+    for binding in [
+        "const msmsDefaults = setup.msmsOptions || null",
+        "MSMS surface file options",
+        "Vertex file:",
+        "msmsOptions: setup.msmsOptions",
+        "vertexPath: msmsControls.vertexPath.value.trim()",
+        "extensions: [\"vert\"]",
+    ] {
+        assert!(JS.contains(binding), "missing MSMS binding: {binding}");
+    }
+}
+
+#[test]
 fn tauri_file_open_matches_reference_ccp4_map_options() {
     for label in [
         "CCP4Map options",

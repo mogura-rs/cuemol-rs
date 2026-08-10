@@ -1022,10 +1022,16 @@ pub enum GuiDensityMapReaderOptions {
     Mtz(GuiMtzMapReaderOptions),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiMsmsReaderOptions {
+    pub vertex_path: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuiFileRendererTarget {
     Molecule,
     DensityMap,
+    Surface,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1034,6 +1040,7 @@ pub struct GuiFileRendererSetup {
     pub molecule_reader_options: Option<GuiMoleculeReaderOptions>,
     pub namd_coor_reader_options: Option<GuiNamdCoorReaderOptions>,
     pub density_map_reader_options: Option<GuiDensityMapReaderOptions>,
+    pub msms_reader_options: Option<GuiMsmsReaderOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7329,7 +7336,7 @@ impl DesktopAppState {
             return Ok(GuiLoadedPath::Map { scene_uid, map_uid });
         }
         if is_surface_format(format) {
-            self.load_surface_object(scene_uid, path, object_name, format)?;
+            self.load_surface_object(scene_uid, path, object_name, format, None)?;
             return Ok(GuiLoadedPath::Scene { scene_uid });
         }
         if format == "qdflwobj" {
@@ -7393,6 +7400,7 @@ impl DesktopAppState {
                 molecule_reader_options: molecule_reader_options_for_format(format),
                 namd_coor_reader_options,
                 density_map_reader_options: None,
+                msms_reader_options: None,
             }));
         }
         if is_density_map_format(format) {
@@ -7414,6 +7422,25 @@ impl DesktopAppState {
                 molecule_reader_options: None,
                 namd_coor_reader_options: None,
                 density_map_reader_options,
+                msms_reader_options: None,
+            }));
+        }
+        if is_surface_format(format) {
+            let msms_reader_options = (format == "msms").then(|| GuiMsmsReaderOptions {
+                vertex_path: if effective_extension(path.as_ref()) == "vert" {
+                    path.as_ref().to_string_lossy().into_owned()
+                } else {
+                    related_path_with_extension(path.as_ref(), "vert")
+                        .to_string_lossy()
+                        .into_owned()
+                },
+            });
+            return Ok(Some(GuiFileRendererSetup {
+                target: GuiFileRendererTarget::Surface,
+                molecule_reader_options: None,
+                namd_coor_reader_options: None,
+                density_map_reader_options: None,
+                msms_reader_options,
             }));
         }
         Ok(None)
@@ -7647,6 +7674,66 @@ impl DesktopAppState {
                 preset: false,
             })
             .collect()
+    }
+
+    pub fn surface_renderer_setup_options(&self) -> Vec<GuiRendererSetupOption> {
+        vec![GuiRendererSetupOption {
+            name: "molsurf".to_string(),
+            description: "molsurf".to_string(),
+            preset: false,
+        }]
+    }
+
+    pub fn open_surface_path_with_renderer_setup(
+        &mut self,
+        path: impl AsRef<Path>,
+        reader_options: Option<&GuiMsmsReaderOptions>,
+        setup: &GuiRendererSetup,
+    ) -> Result<GuiLoadedPath> {
+        let path = path.as_ref();
+        let format = guess_path_format(path, &self.stream_manager)?;
+        if !is_surface_format(format) {
+            return Err(CueMolError::invalid_argument(
+                "the file does not support surface renderer setup",
+            ));
+        }
+        if reader_options.is_some() && format != "msms" {
+            return Err(CueMolError::invalid_argument(
+                "MSMS reader options do not match the surface file format",
+            ));
+        }
+        if reader_options.is_some_and(|options| options.vertex_path.trim().is_empty()) {
+            return Err(CueMolError::invalid_argument(
+                "MSMS reader options require a vertex file",
+            ));
+        }
+        if setup.object_name.trim().is_empty()
+            || setup.renderer_type.trim() != "molsurf"
+            || setup.renderer_name.trim().is_empty()
+        {
+            return Err(CueMolError::invalid_argument(
+                "object name and a molsurf renderer name are required",
+            ));
+        }
+
+        let scene_uid = self.ensure_active_scene();
+        let surface_uid = self.load_surface_object(
+            scene_uid,
+            path,
+            setup.object_name.trim().to_string(),
+            format,
+            reader_options.map(|options| options.vertex_path.trim()),
+        )?;
+        let surface = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_surface_mut(surface_uid))
+            .expect("surface was just inserted");
+        let object_node = ensure_surface_qsc_node(surface);
+        let mut renderer_node = default_surface_renderer_node(1);
+        renderer_node.set_str_attr("name", setup.renderer_name.trim());
+        object_node.append_child_node(renderer_node);
+        Ok(GuiLoadedPath::Scene { scene_uid })
     }
 
     pub fn open_density_map_path_with_renderer_setup(
@@ -7947,7 +8034,8 @@ impl DesktopAppState {
         path: &Path,
         object_name: String,
         format: &str,
-    ) -> Result<()> {
+        msms_vertex_path: Option<&str>,
+    ) -> Result<Uid> {
         let (srctype, raw_data) = match format {
             "obj" => {
                 let data = fs::read(path)?;
@@ -7966,11 +8054,21 @@ impl DesktopAppState {
             }
             "msms" => {
                 let ext = effective_extension(path);
-                let (face_path, vertex_path) = if ext == "face" {
-                    (path.to_path_buf(), path.with_extension("vert"))
+                let face_path = if ext == "vert" {
+                    related_path_with_extension(path, "face")
                 } else {
-                    (path.with_extension("face"), path.to_path_buf())
+                    path.to_path_buf()
                 };
+                let vertex_path = msms_vertex_path.map_or_else(
+                    || {
+                        if ext == "vert" {
+                            path.to_path_buf()
+                        } else {
+                            related_path_with_extension(path, "vert")
+                        }
+                    },
+                    PathBuf::from,
+                );
                 let mesh = cuemol_surface::read_msms_surface_files(face_path, vertex_path)?;
                 ("obj", mesh.to_obj_string(&object_name).into_bytes())
             }
@@ -7984,7 +8082,7 @@ impl DesktopAppState {
             .scene_manager_mut()
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        scene.add_loaded_surface(LoadedSurface {
+        Ok(scene.add_loaded_surface(LoadedSurface {
             uid: Uid::new(0),
             name: object_name,
             object_type: "MolSurfObj".to_string(),
@@ -7992,8 +8090,7 @@ impl DesktopAppState {
             data: String::from_utf8_lossy(&raw_data).into_owned(),
             raw_data,
             qsc_node: None,
-        });
-        Ok(())
+        }))
     }
 
     fn load_lw_object(&mut self, scene_uid: Uid, path: &Path, object_name: String) -> Result<()> {
@@ -39315,7 +39412,8 @@ impl DesktopAppState {
                         self.load_density_map(scene_uid, path, name, &format)
                             .map(|_| ())
                     } else if is_surface_format(&format) {
-                        self.load_surface_object(scene_uid, path, name, &format)
+                        self.load_surface_object(scene_uid, path, name, &format, None)
+                            .map(|_| ())
                     } else if format == "qdflwobj" {
                         self.load_lw_object(scene_uid, path, name)
                     } else if is_desktop_extension_format(&format) {
@@ -56570,6 +56668,71 @@ attribute \"dep\" string \"positions\"
             qdf_surface_path,
             qdf_lw_path,
         ] {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn msms_renderer_setup_uses_selected_vertex_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-desktop-msms-options-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let face_path = dir.join("surface.face");
+        let default_vert_path = dir.join("surface.vert");
+        let selected_vert_path = dir.join("selected.vert");
+        std::fs::write(&face_path, "# MSMS\n# faces\n1\n1 2 3\n").unwrap();
+        std::fs::write(
+            &selected_vert_path,
+            "# MSMS\n# vertices\n3\n0 0 0 0 0 1\n2 0 0 0 0 1\n0 2 0 0 0 1\n",
+        )
+        .unwrap();
+
+        let mut app = DesktopAppState::new();
+        let defaults = app
+            .file_renderer_setup_for_path(&face_path)
+            .unwrap()
+            .expect("MSMS renderer setup");
+        assert_eq!(defaults.target, GuiFileRendererTarget::Surface);
+        assert_eq!(
+            defaults
+                .msms_reader_options
+                .as_ref()
+                .map(|options| options.vertex_path.as_str()),
+            default_vert_path.to_str()
+        );
+        let options = GuiMsmsReaderOptions {
+            vertex_path: selected_vert_path.to_string_lossy().into_owned(),
+        };
+        let setup = GuiRendererSetup {
+            object_name: "surface.face".to_string(),
+            renderer_type: "molsurf".to_string(),
+            renderer_name: "surface1".to_string(),
+            selection: None,
+            recenter: true,
+        };
+        let GuiLoadedPath::Scene { scene_uid } = app
+            .open_surface_path_with_renderer_setup(&face_path, Some(&options), &setup)
+            .unwrap()
+        else {
+            panic!("expected surface load");
+        };
+        let summary = app.surface_summaries(scene_uid).pop().unwrap();
+        assert_eq!(summary.name, "surface.face");
+        assert_eq!(summary.renderers.len(), 1);
+        assert_eq!(summary.renderers[0].name, "surface1");
+        let surface = app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_surface(summary.uid)
+            .unwrap();
+        let mesh = cuemol_surface::read_obj_str(&surface.data).unwrap();
+        assert_eq!(mesh.vertices()[1].position.x, 2.0);
+
+        for path in [face_path, selected_vert_path] {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(dir);

@@ -577,6 +577,7 @@ struct NativeRendererSetupDraft {
     reader_options: Option<crate::GuiMoleculeReaderOptions>,
     namd_coor_options: Option<crate::GuiNamdCoorReaderOptions>,
     density_map_options: Option<crate::GuiDensityMapReaderOptions>,
+    msms_options: Option<crate::GuiMsmsReaderOptions>,
     object_name: String,
     renderer_type: String,
     renderer_name: String,
@@ -587,11 +588,20 @@ struct NativeRendererSetupDraft {
     options: Vec<crate::GuiRendererSetupOption>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct NativeRendererReaderOptions {
+    molecule: Option<crate::GuiMoleculeReaderOptions>,
+    namd_coor: Option<crate::GuiNamdCoorReaderOptions>,
+    density_map: Option<crate::GuiDensityMapReaderOptions>,
+    msms: Option<crate::GuiMsmsReaderOptions>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct NativeFileReaderOptions<'a> {
     molecule: Option<&'a crate::GuiMoleculeReaderOptions>,
     namd_coor: Option<&'a crate::GuiNamdCoorReaderOptions>,
     density_map: Option<&'a crate::GuiDensityMapReaderOptions>,
+    msms: Option<&'a crate::GuiMsmsReaderOptions>,
 }
 
 #[derive(Debug)]
@@ -1077,6 +1087,7 @@ enum InteractionMode {
 enum NativeFileDialog {
     OpenObject,
     OpenPsf,
+    OpenMsmsVertex,
     OpenScene,
     OpenCamera,
     OpenStyle,
@@ -8108,9 +8119,12 @@ impl GuiApplication {
                     &object_name,
                     NativeRendererSetupAction::OpenPath(path),
                     file_setup.target,
-                    file_setup.molecule_reader_options,
-                    file_setup.namd_coor_reader_options,
-                    file_setup.density_map_reader_options,
+                    NativeRendererReaderOptions {
+                        molecule: file_setup.molecule_reader_options,
+                        namd_coor: file_setup.namd_coor_reader_options,
+                        density_map: file_setup.density_map_reader_options,
+                        msms: file_setup.msms_reader_options,
+                    },
                 );
             }
             Ok(None) => self.open_current_path(camera),
@@ -8254,6 +8268,9 @@ impl GuiApplication {
                     &setup,
                 )
             }
+            crate::GuiFileRendererTarget::Surface => self
+                .state
+                .open_surface_path_with_renderer_setup(&path, reader_options.msms, &setup),
         };
         match result {
             Ok(GuiLoadedPath::Object {
@@ -8284,6 +8301,31 @@ impl GuiApplication {
                     map_uid,
                     renderer_uid: None,
                 });
+                self.last_loaded_path = Some(path.clone());
+                self.add_recent_path(path.clone());
+                self.sync_active_scene_properties();
+                self.rebuild_snapshot();
+                if recenter {
+                    camera.fit_snapshot(&self.snapshot);
+                }
+                self.set_status(format!("File: [{}] is loaded.", path.display()));
+            }
+            Ok(GuiLoadedPath::Scene { scene_uid })
+                if target == crate::GuiFileRendererTarget::Surface =>
+            {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.workspace_aux_selection =
+                    self.state
+                        .surface_summaries(scene_uid)
+                        .last()
+                        .map(|surface| WorkspaceAuxSelection::Surface {
+                            scene_uid,
+                            surface_uid: surface.uid,
+                            renderer_uid: None,
+                        });
                 self.last_loaded_path = Some(path.clone());
                 self.add_recent_path(path.clone());
                 self.sync_active_scene_properties();
@@ -14549,9 +14591,7 @@ impl GuiApplication {
             &object_name,
             NativeRendererSetupAction::PdbDownload,
             crate::GuiFileRendererTarget::Molecule,
-            None,
-            None,
-            None,
+            NativeRendererReaderOptions::default(),
         );
     }
 
@@ -14560,9 +14600,7 @@ impl GuiApplication {
         base_object_name: &str,
         action: NativeRendererSetupAction,
         target: crate::GuiFileRendererTarget,
-        reader_options: Option<crate::GuiMoleculeReaderOptions>,
-        namd_coor_options: Option<crate::GuiNamdCoorReaderOptions>,
-        density_map_options: Option<crate::GuiDensityMapReaderOptions>,
+        reader_options: NativeRendererReaderOptions,
     ) {
         let scene_uid = self.state.ensure_active_scene();
         let available_options = match target {
@@ -14571,6 +14609,9 @@ impl GuiApplication {
             }
             crate::GuiFileRendererTarget::DensityMap => {
                 Ok(self.state.density_map_renderer_setup_options())
+            }
+            crate::GuiFileRendererTarget::Surface => {
+                Ok(self.state.surface_renderer_setup_options())
             }
         };
         let options = match available_options {
@@ -14600,16 +14641,17 @@ impl GuiApplication {
         self.renderer_setup_draft = Some(NativeRendererSetupDraft {
             action,
             target,
-            reader_options,
-            namd_coor_options,
-            density_map_options,
+            reader_options: reader_options.molecule,
+            namd_coor_options: reader_options.namd_coor,
+            density_map_options: reader_options.density_map,
+            msms_options: reader_options.msms,
             object_name,
             renderer_type,
             renderer_name,
             renderer_name_default: true,
             selection_enabled: false,
             selection: String::new(),
-            recenter: target == crate::GuiFileRendererTarget::Molecule && preferences.recenter,
+            recenter: target != crate::GuiFileRendererTarget::DensityMap && preferences.recenter,
             options,
         });
     }
@@ -14721,6 +14763,9 @@ impl GuiApplication {
                         ui.radio_value(&mut draft.recenter, false, "Set map center");
                         ui.radio_value(&mut draft.recenter, true, "Move view center");
                     }
+                    crate::GuiFileRendererTarget::Surface => {
+                        ui.checkbox(&mut draft.recenter, "Recenter view");
+                    }
                 }
                 if let Some(options) = draft.reader_options.as_mut() {
                     ui.separator();
@@ -14764,6 +14809,25 @@ impl GuiApplication {
                                 &options.topology_path,
                             ) {
                                 options.topology_path = path.to_string_lossy().into_owned();
+                            }
+                        }
+                    });
+                }
+                if let Some(options) = draft.msms_options.as_mut() {
+                    ui.separator();
+                    ui.strong("MSMS surface file options");
+                    ui.horizontal(|ui| {
+                        ui.label("Vertex file:");
+                        ui.add_sized(
+                            [240.0, 22.0],
+                            egui::TextEdit::singleline(&mut options.vertex_path),
+                        );
+                        if ui.button("Change ...").clicked() {
+                            if let Some(path) = native_file_dialog(
+                                NativeFileDialog::OpenMsmsVertex,
+                                &options.vertex_path,
+                            ) {
+                                options.vertex_path = path.to_string_lossy().into_owned();
                             }
                         }
                     });
@@ -14906,6 +14970,10 @@ impl GuiApplication {
                             .as_ref()
                             .is_none_or(|options| !options.topology_path.trim().is_empty())
                         && draft
+                            .msms_options
+                            .as_ref()
+                            .is_none_or(|options| !options.vertex_path.trim().is_empty())
+                        && draft
                             .density_map_options
                             .as_ref()
                             .is_none_or(|options| match options {
@@ -14962,6 +15030,7 @@ impl GuiApplication {
                             molecule: draft.reader_options.as_ref(),
                             namd_coor: draft.namd_coor_options.as_ref(),
                             density_map: draft.density_map_options.as_ref(),
+                            msms: draft.msms_options.as_ref(),
                         },
                         setup,
                         camera,
@@ -17742,6 +17811,10 @@ const PSF_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "PSF file",
     extensions: &["psf"],
 }];
+const MSMS_VERTEX_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "MSMS vertex file",
+    extensions: &["vert"],
+}];
 const OBJECT_SAVE_FILTERS: &[NativeFileFilter] = &[
     NativeFileFilter {
         label: "Protein Data Bank",
@@ -17798,6 +17871,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
         NativeFileDialog::OpenPsf => NativeFileDialogSpec {
             title: "Select PSF file",
             filters: PSF_OPEN_FILTERS,
+            default_extension: None,
+            save: false,
+        },
+        NativeFileDialog::OpenMsmsVertex => NativeFileDialogSpec {
+            title: "Select MSMS vertex file",
+            filters: MSMS_VERTEX_OPEN_FILTERS,
             default_extension: None,
             save: false,
         },
@@ -20122,6 +20201,9 @@ mod tests {
             .iter()
             .flat_map(|filter| filter.extensions)
             .any(|extension| *extension == "mmcif"));
+        let open_msms_vertex = native_file_dialog_spec(NativeFileDialog::OpenMsmsVertex);
+        assert_eq!(open_msms_vertex.title, "Select MSMS vertex file");
+        assert_eq!(open_msms_vertex.filters[0].extensions, &["vert"]);
 
         let save_scene = native_file_dialog_spec(NativeFileDialog::SaveScene);
         assert!(save_scene.save);
@@ -22067,17 +22149,18 @@ mod tests {
             "sample.pdb",
             NativeRendererSetupAction::OpenPath(path.clone()),
             crate::GuiFileRendererTarget::Molecule,
-            Some(crate::GuiMoleculeReaderOptions {
-                kind: crate::GuiMoleculeReaderKind::Pdb,
-                ignore_multiple_models: true,
-                ignore_anisou: false,
-                ignore_alt_conf: false,
-                load_segid_as_chain: false,
-                calculate_secondary_structure: true,
-                auto_generate_topology: true,
-            }),
-            None,
-            None,
+            NativeRendererReaderOptions {
+                molecule: Some(crate::GuiMoleculeReaderOptions {
+                    kind: crate::GuiMoleculeReaderKind::Pdb,
+                    ignore_multiple_models: true,
+                    ignore_anisou: false,
+                    ignore_alt_conf: false,
+                    load_segid_as_chain: false,
+                    calculate_secondary_structure: true,
+                    auto_generate_topology: true,
+                }),
+                ..NativeRendererReaderOptions::default()
+            },
         );
         let setup = app.renderer_setup_draft.as_ref().unwrap();
         assert_eq!(setup.object_name, "sample.pdb");
