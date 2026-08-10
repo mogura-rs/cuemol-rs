@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{mpsc, Mutex};
 
 use cuemol_core::{LDom2Node, Quat, Uid, Vector4};
@@ -19,7 +18,6 @@ use crate::{
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
-static NEXT_DOWNLOAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -7969,51 +7967,8 @@ fn download_pdb_to_cache(pdb_id: &str) -> Result<PathBuf, String> {
     } else {
         temporary_path
     };
-    let download_id = NEXT_DOWNLOAD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let partial_path = path.with_file_name(format!(
-        "{filename}.{}.{download_id}.partial",
-        std::process::id(),
-    ));
     let url = format!("https://files.rcsb.org/download/{pdb_id}.cif.gz");
-    let output = Command::new("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--compressed",
-        ])
-        .arg("--connect-timeout")
-        .arg("5")
-        .arg("--max-time")
-        .arg("30")
-        .arg("--output")
-        .arg(&partial_path)
-        .arg(&url)
-        .output()
-        .map_err(|error| format!("failed to start curl: {error}"))?;
-    if !output.status.success() {
-        let _ = fs::remove_file(&partial_path);
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if detail.is_empty() {
-            format!("RCSB download failed with {}", output.status)
-        } else {
-            format!("RCSB download failed: {detail}")
-        });
-    }
-    if !fs::metadata(&partial_path).is_ok_and(|metadata| metadata.len() > 0) {
-        let _ = fs::remove_file(&partial_path);
-        return Err("RCSB download returned an empty file".to_string());
-    }
-    if let Err(error) = fs::rename(&partial_path, &path) {
-        if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 0) {
-            let _ = fs::remove_file(&partial_path);
-        } else {
-            let _ = fs::remove_file(&partial_path);
-            return Err(format!("failed to cache RCSB download: {error}"));
-        }
-    }
-    Ok(path)
+    crate::download_to_shared_cache(&url, &path)
 }
 
 fn backup_scene_file(path: &Path) -> Result<(), String> {

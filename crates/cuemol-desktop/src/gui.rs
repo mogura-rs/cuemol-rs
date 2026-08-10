@@ -26,7 +26,6 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::window::{Window, WindowId};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
-static NEXT_DOWNLOAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("HD 720", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -7760,61 +7759,7 @@ fn pdb_download_target(pdb_id: &str) -> Result<(String, String, PathBuf)> {
 }
 
 fn download_to_cache(url: &str, path: &Path) -> Result<PathBuf> {
-    if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
-        return Ok(path.to_path_buf());
-    }
-    let filename = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("download");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let download_id = NEXT_DOWNLOAD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let partial_path = path.with_file_name(format!(
-        "{filename}.{}.{download_id}.partial",
-        std::process::id(),
-    ));
-    let output = Command::new("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--compressed",
-            "--connect-timeout",
-            "5",
-            "--max-time",
-            "30",
-        ])
-        .arg("--output")
-        .arg(&partial_path)
-        .arg(url)
-        .output()?;
-    if !output.status.success() {
-        let _ = fs::remove_file(&partial_path);
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(CueMolError::invalid_argument(if detail.is_empty() {
-            format!("curl failed with status {}", output.status)
-        } else {
-            format!("curl failed: {detail}")
-        }));
-    }
-    if !fs::metadata(&partial_path).is_ok_and(|metadata| metadata.len() > 0) {
-        let _ = fs::remove_file(&partial_path);
-        return Err(CueMolError::invalid_argument(
-            "download returned an empty file",
-        ));
-    }
-    if let Err(error) = fs::rename(&partial_path, path) {
-        if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
-            let _ = fs::remove_file(&partial_path);
-        } else {
-            let _ = fs::remove_file(&partial_path);
-            return Err(error.into());
-        }
-    }
-    Ok(path.to_path_buf())
+    crate::download_to_shared_cache(url, path).map_err(CueMolError::invalid_argument)
 }
 
 fn url_cache_path(url: &str) -> PathBuf {
