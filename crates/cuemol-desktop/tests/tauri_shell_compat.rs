@@ -1038,13 +1038,17 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("Edit interaction list..."));
     assert!(JS.contains("kind: \"renderer\""));
     assert!(JS.contains("create_workspace_renderer_group"));
-    assert!(JS.contains("rename_workspace_renderer_group"));
+    assert!(JS.contains("rename_workspace_node"));
     assert!(JS.contains("label: \"Rename…\""));
     assert!(!JS.contains("globalThis.prompt"));
-    assert!(JS.contains("function beginWorkspaceRendererGroupRename(objectUid, rendererUid)"));
-    assert!(JS.contains("function scheduleWorkspaceRendererGroupRename(objectUid, rendererUid)"));
+    assert!(JS.contains("function beginWorkspaceInlineRename(kind, objectUid, rendererUid = null)"));
+    assert!(
+        JS.contains("function scheduleWorkspaceInlineRename(kind, objectUid, rendererUid = null)")
+    );
     assert!(JS.contains("}, 500);"));
-    assert!(JS.contains("workspaceSelectionKind === \"rendererGroup\""));
+    assert!(JS.contains("workspaceSelectionKind === kind"));
+    assert!(JS.contains("beginWorkspaceInlineRename(\"object\", object.uid)"));
+    assert!(JS.contains("beginWorkspaceInlineRename(\"renderer\", object.uid, renderer.uid)"));
     assert!(JS.contains("input.addEventListener(\"blur\", () => void finish(true))"));
     assert!(JS.contains("event.key === \"Enter\""));
     assert!(JS.contains("event.key === \"Escape\""));
@@ -1323,7 +1327,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "copy_workspace_style",
         "paste_workspace_style",
         "create_workspace_renderer_group",
-        "rename_workspace_renderer_group",
+        "rename_workspace_node",
         "delete_workspace_item",
         "fit_workspace_item",
     ] {

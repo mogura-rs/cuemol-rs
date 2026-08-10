@@ -1182,6 +1182,16 @@ struct WorkspaceRendererGroupInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceRenameInput {
+    kind: String,
+    object_uid: u64,
+    #[serde(default)]
+    renderer_uid: Option<u64>,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RendererPropertiesInput {
     object_uid: u64,
     renderer_uid: u64,
@@ -3069,6 +3079,55 @@ impl AppModel {
             .rename_renderer_group(Uid::new(input.object_uid), Uid::new(group_uid), input.name)
             .map_err(|error| error.to_string())?;
         self.status = "Rename renderer group".to_string();
+        Ok(())
+    }
+
+    fn rename_workspace_node(&mut self, input: WorkspaceRenameInput) -> Result<(), String> {
+        let name = input.name.trim();
+        if name.is_empty() || name.contains(':') {
+            return Err("Workspace item name must be non-empty and cannot contain ':'".to_string());
+        }
+        let object_uid = Uid::new(input.object_uid);
+        match input.kind.as_str() {
+            "object" => {
+                let object = self
+                    .desktop
+                    .scene_manager_mut()
+                    .object_mut(object_uid)
+                    .ok_or_else(|| format!("object {} not found", input.object_uid))?;
+                object.set_name(name);
+                self.touch_structure_details();
+                self.status = format!("Rename to {name}");
+            }
+            "renderer" => {
+                let renderer_uid = Uid::new(
+                    input
+                        .renderer_uid
+                        .ok_or_else(|| "renderer UID is required".to_string())?,
+                );
+                let renderer = self
+                    .desktop
+                    .scene_manager_mut()
+                    .object_mut(object_uid)
+                    .and_then(|object| object.renderer_mut(renderer_uid))
+                    .ok_or_else(|| format!("renderer {} not found", renderer_uid.get()))?;
+                if renderer.renderer_type() == "*group" {
+                    return Err("renderer groups require the group rename operation".to_string());
+                }
+                renderer.set_name(name);
+                self.status = format!("Rename to {name}");
+            }
+            "rendererGroup" => {
+                let group_uid = input
+                    .renderer_uid
+                    .ok_or_else(|| "renderer group UID is required".to_string())?;
+                self.desktop
+                    .rename_renderer_group(object_uid, Uid::new(group_uid), name)
+                    .map_err(|error| error.to_string())?;
+                self.status = format!("Rename to {name}");
+            }
+            kind => return Err(format!("unsupported Workspace item type: {kind}")),
+        }
         Ok(())
     }
 
@@ -5655,6 +5714,7 @@ enum ModelRequest {
     PasteWorkspaceStyle(WorkspaceStylePasteInput),
     CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput),
+    RenameWorkspaceNode(WorkspaceRenameInput),
     FitWorkspaceItem {
         target: WorkspaceFitInput,
         width: u32,
@@ -7567,6 +7627,12 @@ fn handle_model_request(
         ModelRequest::RenameWorkspaceRendererGroup(input) => {
             let undo = model.capture_undo();
             model.rename_workspace_renderer_group(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::RenameWorkspaceNode(input) => {
+            let undo = model.capture_undo();
+            model.rename_workspace_node(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10222,6 +10288,17 @@ fn rename_workspace_renderer_group(
 }
 
 #[tauri::command]
+fn rename_workspace_node(
+    input: WorkspaceRenameInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::RenameWorkspaceNode(input),
+    )?)
+}
+
+#[tauri::command]
 fn fit_workspace_item(
     target: WorkspaceFitInput,
     width: u32,
@@ -11694,6 +11771,7 @@ pub fn run() -> Result<(), tauri::Error> {
             paste_workspace_style,
             create_workspace_renderer_group,
             rename_workspace_renderer_group,
+            rename_workspace_node,
             fit_workspace_item,
             set_config_value,
             undo,
@@ -13985,6 +14063,47 @@ mod tests {
             .renderers
             .iter()
             .any(|renderer| renderer.uid == group_uid && renderer.name == "group1"));
+    }
+
+    #[test]
+    fn workspace_object_and_renderer_inline_renames_are_undoable() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::RenameWorkspaceNode(WorkspaceRenameInput {
+                kind: "object".to_string(),
+                object_uid: object_uid.get(),
+                renderer_uid: None,
+                name: "renamed molecule".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(snapshot.objects[0].name, "renamed molecule");
+        assert_eq!(snapshot.undo_descriptions[0], "Rename to renamed molecule");
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::RenameWorkspaceNode(WorkspaceRenameInput {
+                kind: "renderer".to_string(),
+                object_uid: object_uid.get(),
+                renderer_uid: Some(renderer_uid.get()),
+                name: "renamed renderer".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(snapshot.objects[0].renderers[0].name, "renamed renderer");
+        assert_eq!(snapshot.undo_descriptions[0], "Rename to renamed renderer");
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().objects[0].renderers[0].name, "simple 1");
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().objects[0].name, "molecule");
     }
 
     #[test]
