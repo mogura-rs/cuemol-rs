@@ -3638,6 +3638,10 @@ impl GuiApplication {
                     self.workspace_aux_selection = Some(root_selection);
                 }
                 root_response.context_menu(|ui| {
+                    if ui.button("New Camera...").clicked() {
+                        self.open_new_camera_properties(scene.uid, camera);
+                        ui.close();
+                    }
                     if ui
                         .add_enabled(
                             self.workspace_camera_clipboard.is_some(),
@@ -3675,6 +3679,14 @@ impl GuiApplication {
                             self.load_workspace_camera(selection, camera);
                         }
                         response.context_menu(|ui| {
+                            if ui.button("New Camera...").clicked() {
+                                self.open_new_camera_properties(scene.uid, camera);
+                                ui.close();
+                            }
+                            if ui.button("Delete").clicked() {
+                                self.delete_aux_selection(selection);
+                                ui.close();
+                            }
                             if ui.button("Copy").clicked() {
                                 self.copy_workspace_camera_to_clipboard(scene.uid, &summary.name);
                                 ui.close();
@@ -3687,6 +3699,24 @@ impl GuiApplication {
                                 .clicked()
                             {
                                 self.paste_workspace_camera_clipboard(scene.uid);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Save from scene (with vis flags)").clicked() {
+                                self.save_workspace_camera_from_scene(selection, camera);
+                                ui.close();
+                            }
+                            if ui.button("Apply to scene (with vis flags)").clicked() {
+                                self.load_workspace_camera(selection, camera);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Rename...").clicked() {
+                                self.open_camera_properties(selection);
+                                ui.close();
+                            }
+                            if ui.button("Properties...").clicked() {
+                                self.open_camera_properties(selection);
                                 ui.close();
                             }
                         });
@@ -3705,6 +3735,10 @@ impl GuiApplication {
                     self.workspace_aux_selection = Some(root_selection);
                 }
                 root_response.context_menu(|ui| {
+                    if ui.button("New Style...").clicked() {
+                        self.open_new_style_properties(scene.uid);
+                        ui.close();
+                    }
                     if ui
                         .add_enabled(
                             self.workspace_style_clipboard.is_some(),
@@ -3742,6 +3776,10 @@ impl GuiApplication {
                             self.open_style_properties(selection);
                         }
                         response.context_menu(|ui| {
+                            if ui.button("New Style...").clicked() {
+                                self.open_new_style_properties(scene.uid);
+                                ui.close();
+                            }
                             if ui
                                 .add_enabled(
                                     summary.local_index.is_some(),
@@ -3763,6 +3801,49 @@ impl GuiApplication {
                                 .clicked()
                             {
                                 self.request_paste_workspace_style(scene.uid);
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    summary.local_index.is_some(),
+                                    egui::Button::new("Delete"),
+                                )
+                                .clicked()
+                            {
+                                self.delete_aux_selection(selection);
+                                ui.close();
+                            }
+                            ui.separator();
+                            let mut read_only = summary.read_only;
+                            if ui
+                                .add_enabled(
+                                    summary.local_index.is_some()
+                                        && (summary.read_only || !summary.modified),
+                                    egui::Checkbox::new(&mut read_only, "Read-only"),
+                                )
+                                .changed()
+                            {
+                                self.set_workspace_style_read_only(selection, read_only);
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    summary.local_index.is_some(),
+                                    egui::Button::new("Rename..."),
+                                )
+                                .clicked()
+                            {
+                                self.open_style_properties(selection);
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    summary.local_index.is_some(),
+                                    egui::Button::new("Edit..."),
+                                )
+                                .clicked()
+                            {
+                                self.open_style_properties(selection);
                                 ui.close();
                             }
                         });
@@ -11429,6 +11510,30 @@ impl GuiApplication {
         }
     }
 
+    fn save_workspace_camera_from_scene(
+        &mut self,
+        selection: WorkspaceAuxSelection,
+        camera: &CameraController,
+    ) {
+        let Some(summary) = self.camera_summary_for_selection(selection) else {
+            self.set_status("Camera not found");
+            return;
+        };
+        let undo = self.capture_undo();
+        match self.state.save_scene_camera(
+            summary.scene_uid,
+            camera.to_qsys_camera(&summary.name),
+            true,
+        ) {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(summary.scene_uid);
+                self.set_status(format!("Saved camera {}", summary.name));
+            }
+            Err(error) => self.set_status(format!("Camera save error: {error}")),
+        }
+    }
+
     fn copy_workspace_camera_to_clipboard(&mut self, scene_uid: cuemol_core::Uid, name: &str) {
         match self.state.copy_workspace_camera(scene_uid, name) {
             Ok(clipboard) => {
@@ -11778,6 +11883,47 @@ impl GuiApplication {
             read_only: summary.read_only,
             xml: style.data.clone(),
         });
+    }
+
+    fn set_workspace_style_read_only(&mut self, selection: WorkspaceAuxSelection, read_only: bool) {
+        let Some(summary) = self.style_summary_for_selection(selection) else {
+            self.set_status("Style not found");
+            return;
+        };
+        let Some(local_index) = summary.local_index else {
+            self.set_status("Global styles are read-only");
+            return;
+        };
+        if read_only && summary.modified {
+            self.set_status("Modified styles cannot be made read-only");
+            return;
+        }
+        let Some(xml) = self
+            .state
+            .scene_manager()
+            .scene(summary.scene_uid)
+            .and_then(|scene| scene.loaded_styles().get(local_index))
+            .map(|style| style.data.clone())
+        else {
+            self.set_status("Style not found");
+            return;
+        };
+        let undo = self.capture_undo();
+        match self.state.update_scene_style(
+            summary.scene_uid,
+            local_index,
+            &summary.name,
+            read_only,
+            &xml,
+        ) {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(summary.scene_uid);
+                self.rebuild_snapshot();
+                self.set_status(format!("Style read-only: {read_only}"));
+            }
+            Err(error) => self.set_error(error),
+        }
     }
 
     fn style_props_dialog(&mut self, ctx: &egui::Context) {
@@ -18568,7 +18714,23 @@ mod tests {
             camera_index: 0,
         };
         app.workspace_aux_selection = Some(selection);
-        let mut camera = CameraController::default();
+        let mut current = CameraController::default().to_qsys_camera("current");
+        current.set_zoom(95.0);
+        let mut camera = CameraController::from_qsys_camera(&current);
+        app.save_workspace_camera_from_scene(selection, &camera);
+        assert!(
+            (app.state
+                .scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .camera_by_name("camera_0")
+                .unwrap()
+                .zoom()
+                - 95.0)
+                .abs()
+                < 1.0e-5
+        );
+        app.undo(&mut camera);
         app.load_workspace_camera(selection, &mut camera);
         assert!((camera.to_qsys_camera("loaded").zoom() - 80.0).abs() < 1.0e-5);
 
@@ -18644,6 +18806,20 @@ mod tests {
         app.open_style_properties(selection);
         assert_eq!(app.style_properties_draft.as_ref().unwrap().name, "style_0");
 
+        app.set_workspace_style_read_only(selection, true);
+        assert!(app
+            .state
+            .style_summaries(scene_uid)
+            .iter()
+            .any(|style| style.name == "style_0" && style.read_only));
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert!(app
+            .state
+            .style_summaries(scene_uid)
+            .iter()
+            .any(|style| style.name == "style_0" && !style.read_only));
+
         app.copy_workspace_style_to_clipboard(scene_uid, local_index);
         assert!(app.workspace_style_clipboard.is_some());
         assert!(app.undo_stack.is_empty());
@@ -18668,7 +18844,6 @@ mod tests {
             .loaded_styles()[local_index]
             .data
             .contains("Narrow"));
-        let mut camera = CameraController::default();
         app.undo(&mut camera);
         assert!(app
             .state

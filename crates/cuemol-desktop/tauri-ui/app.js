@@ -4747,7 +4747,31 @@ async function pasteWorkspaceCamera(scene) {
 }
 
 function workspaceCameraContextItems(scene, camera = null) {
-  const items = [];
+  const activate = async () => {
+    if (snapshot.activeSceneUid === scene.uid) return true;
+    return mutate("activate_scene", { sceneUid: scene.uid });
+  };
+  const items = [
+    {
+      label: "New Camera...",
+      action: async () => {
+        if (!(await activate())) return;
+        const used = new Set(activeCameras().map((candidate) => candidate.name));
+        let index = 0;
+        while (used.has(`camera_${index}`)) index += 1;
+        const name = globalThis.prompt?.("Camera name", `camera_${index}`)?.trim();
+        if (name) await mutate("save_camera", { name });
+      },
+    },
+    {
+      label: "Delete",
+      disabled: !camera,
+      action: async () => {
+        if (!(await activate())) return;
+        await mutate("destroy_camera", { name: camera.name });
+      },
+    },
+  ];
   if (camera) {
     items.push({
       label: "Copy",
@@ -4759,6 +4783,44 @@ function workspaceCameraContextItems(scene, camera = null) {
     disabled: !workspaceCameraClipboardAvailable,
     action: () => pasteWorkspaceCamera(scene),
   });
+  items.push(
+    null,
+    {
+      label: "Save from scene (with vis flags)",
+      disabled: !camera,
+      action: async () => {
+        if (!(await activate())) return;
+        await mutate("save_camera", { name: camera.name });
+      },
+    },
+    {
+      label: "Apply to scene (with vis flags)",
+      disabled: !camera,
+      action: async () => {
+        if (!(await activate())) return;
+        await mutate("load_camera", { name: camera.name });
+      },
+    },
+    null,
+    {
+      label: "Rename...",
+      disabled: !camera,
+      action: async () => {
+        if (!(await activate())) return;
+        selectedCameraName = camera.name;
+        await showReferenceDialog("Camera Properties");
+      },
+    },
+    {
+      label: "Properties...",
+      disabled: !camera,
+      action: async () => {
+        if (!(await activate())) return;
+        selectedCameraName = camera.name;
+        await showReferenceDialog("Camera Properties");
+      },
+    },
+  );
   return items;
 }
 
@@ -4811,8 +4873,46 @@ async function pasteWorkspaceStyle(scene) {
   renderShell();
 }
 
+async function updateWorkspaceStyle(style, update) {
+  if (!invoke || !style || style.localIndex === null) return false;
+  let properties;
+  try {
+    properties = await invoke("get_style_properties", {
+      sceneUid: style.sceneUid,
+      localIndex: style.localIndex,
+    });
+  } catch (error) {
+    showError(error);
+    return false;
+  }
+  return mutateWithoutViewport("set_style_properties", {
+    properties: {
+      sceneUid: properties.sceneUid,
+      localIndex: properties.localIndex,
+      name: update.name ?? properties.name,
+      readOnly: update.readOnly ?? properties.readOnly,
+      xml: properties.xml,
+    },
+  });
+}
+
 function workspaceStyleContextItems(scene, style = null) {
   return [
+    {
+      label: "New Style...",
+      action: async () => {
+        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        const used = new Set(
+          activeStyles()
+            .filter((candidate) => candidate.localIndex !== null)
+            .map((candidate) => candidate.name),
+        );
+        let index = 0;
+        while (used.has(`style_${index}`)) index += 1;
+        const name = globalThis.prompt?.("Style name", `style_${index}`)?.trim();
+        if (name) await mutateWithoutViewport("create_style", { name });
+      },
+    },
     {
       label: "Copy",
       disabled: !style || style.localIndex === null,
@@ -4822,6 +4922,39 @@ function workspaceStyleContextItems(scene, style = null) {
       label: "Paste",
       disabled: !workspaceStyleClipboardName,
       action: () => pasteWorkspaceStyle(scene),
+    },
+    {
+      label: "Delete",
+      disabled: !style || style.localIndex === null,
+      action: () =>
+        mutateWithoutViewport("destroy_style", {
+          sceneUid: style.sceneUid,
+          localIndex: style.localIndex,
+        }),
+    },
+    null,
+    {
+      label: "Read-only",
+      checked: Boolean(style?.readOnly),
+      disabled:
+        !style || style.localIndex === null || (!style.readOnly && Boolean(style.modified)),
+      action: () => updateWorkspaceStyle(style, { readOnly: !style.readOnly }),
+    },
+    {
+      label: "Rename...",
+      disabled: !style || style.localIndex === null,
+      action: async () => {
+        const name = globalThis.prompt?.("Style name", style.name)?.trim();
+        if (name && name !== style.name) await updateWorkspaceStyle(style, { name });
+      },
+    },
+    {
+      label: "Edit...",
+      disabled: !style || style.localIndex === null,
+      action: async () => {
+        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        await showStyleProperties(style);
+      },
     },
   ];
 }

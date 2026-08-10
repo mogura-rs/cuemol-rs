@@ -355,7 +355,14 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("paste_workspace_style"));
     assert!(JS.contains("workspaceSceneContextItems"));
     assert!(JS.contains("workspaceCameraContextItems"));
+    assert!(JS.contains("label: \"New Camera...\""));
+    assert!(JS.contains("Save from scene (with vis flags)"));
+    assert!(JS.contains("Apply to scene (with vis flags)"));
     assert!(JS.contains("workspaceStyleContextItems"));
+    assert!(JS.contains("function updateWorkspaceStyle(style, update)"));
+    assert!(JS.contains("label: \"New Style...\""));
+    assert!(JS.contains("label: \"Read-only\""));
+    assert!(JS.contains("label: \"Rename...\""));
     assert!(JS.contains("Background color · White"));
     assert!(JS.contains("Background color · Black"));
     assert!(JS.contains("option: \"color-proof\", value"));
