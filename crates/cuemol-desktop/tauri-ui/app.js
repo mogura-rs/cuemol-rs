@@ -4522,12 +4522,19 @@ async function showReferenceDialog(title) {
     dialogActions(open);
   } else if (title === "Open PDB") {
     const pdbId = dialogField("PDB ID", "1CRN");
+    pdbId.maxLength = 4;
+    pdbId.pattern = "[0-9][0-9A-Za-z]{3}";
     const open = button("Download and Open", "dialog-primary", async () => {
       const id = pdbId.value.trim().toUpperCase();
-      if (!id) return;
+      if (!/^[0-9][0-9A-Z]{3}$/.test(id)) return;
       await mutateWithViewport("open_pdb", { pdbId: id });
       referenceDialog.close();
     });
+    const updateOpenState = () => {
+      open.disabled = !/^[0-9][0-9A-Z]{3}$/.test(pdbId.value.trim().toUpperCase());
+    };
+    pdbId.addEventListener("input", updateOpenState);
+    updateOpenState();
     dialogActions(open);
   } else {
     dialogContent.append(dialogParagraph(`${title} dialog`));

@@ -9375,6 +9375,7 @@ async fn open_pdb(
     height: u32,
     state: State<'_, ManagedState>,
 ) -> Result<MolStructUpdateDto, String> {
+    let pdb_id = crate::normalize_pdb_id(&pdb_id)?;
     let _renderer_warmup = tauri::async_runtime::spawn_blocking(shared_scene_renderer);
     let download_id = pdb_id.clone();
     let path = tauri::async_runtime::spawn_blocking(move || download_pdb_to_cache(&download_id))
@@ -10237,14 +10238,7 @@ fn export_png(
 }
 
 fn download_pdb_to_cache(pdb_id: &str) -> Result<PathBuf, String> {
-    let pdb_id = pdb_id.trim().to_ascii_uppercase();
-    if !(4..=16).contains(&pdb_id.len())
-        || !pdb_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_')
-    {
-        return Err("PDB ID must contain 4-16 letters, digits, or underscores".to_string());
-    }
+    let pdb_id = crate::normalize_pdb_id(pdb_id)?;
     let filename = format!("cuemol-pdb-{pdb_id}.cif.gz");
     let persistent_path = crate::download_cache_path(&filename);
     let persistent_legacy_path = crate::download_cache_path(&format!("cuemol-pdb-{pdb_id}.cif"));
@@ -12655,7 +12649,7 @@ mod tests {
 
     #[test]
     fn pdb_download_reuses_a_nonempty_cached_file() {
-        let pdb_id = format!("T{:X}", std::process::id());
+        let pdb_id = format!("8{:03}", std::process::id() % 1_000);
         let path = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif"));
         fs::write(&path, b"cached mmCIF").unwrap();
         assert_eq!(download_pdb_to_cache(&pdb_id).unwrap(), path);
@@ -12664,7 +12658,7 @@ mod tests {
 
     #[test]
     fn pdb_download_prefers_the_compressed_cache() {
-        let pdb_id = format!("G{:X}", std::process::id());
+        let pdb_id = format!("9{:03}", std::process::id() % 1_000);
         let compressed = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif.gz"));
         let legacy = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif"));
         fs::write(&compressed, b"cached gzip mmCIF").unwrap();

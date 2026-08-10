@@ -284,6 +284,8 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(JS.contains("void mutateWithViewport(\"open_initial_paths\")"));
     assert!(JS.contains("mutateWithViewport(\"open_paths\""));
     assert!(JS.contains("mutateWithViewport(\"open_pdb\""));
+    assert!(JS.contains("pdbId.maxLength = 4"));
+    assert!(JS.contains("/^[0-9][0-9A-Z]{3}$/"));
     assert!(JS.contains("applyViewport(update.viewport, sequence)"));
     assert!(JS.contains("if (!update.viewport.image && snapshotHasRenderableContent())"));
     assert!(JS.contains(

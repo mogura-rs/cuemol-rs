@@ -65,6 +65,23 @@ pub(crate) fn download_cache_path(filename: &str) -> std::path::PathBuf {
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+pub(crate) fn normalize_pdb_id(value: &str) -> std::result::Result<String, String> {
+    let pdb_id = value.trim().to_ascii_uppercase();
+    let mut characters = pdb_id.chars();
+    if pdb_id.len() != 4
+        || !characters
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+        || !characters.all(|character| character.is_ascii_alphanumeric())
+    {
+        return Err(
+            "PDB ID must start with a digit and contain four alphanumeric characters".to_string(),
+        );
+    }
+    Ok(pdb_id)
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 pub(crate) fn download_to_shared_cache(url: &str, path: &Path) -> DownloadResult {
     if nonempty_file(path) {
         return Ok(path.to_path_buf());
@@ -202,6 +219,14 @@ pub mod tauri_app;
 mod download_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn pdb_id_validation_matches_the_reference_dialog() {
+        assert_eq!(normalize_pdb_id(" 1crn ").unwrap(), "1CRN");
+        for invalid in ["", "1ABC2", "ABCD", "1AB_", "1AB-"] {
+            assert!(normalize_pdb_id(invalid).is_err(), "accepted {invalid}");
+        }
+    }
 
     #[test]
     fn concurrent_cache_requests_share_one_operation() {

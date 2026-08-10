@@ -14072,11 +14072,15 @@ impl GuiApplication {
                     [ui.available_width(), 22.0],
                     egui::TextEdit::singleline(&mut self.pdb_id),
                 );
+                let valid_pdb_id = crate::normalize_pdb_id(&self.pdb_id).is_ok();
                 ui.label(format!(
                     "https://files.rcsb.org/download/{}.cif.gz",
                     self.pdb_id.trim().to_ascii_uppercase()
                 ));
-                if ui.button("Use as Open Path").clicked() {
+                if ui
+                    .add_enabled(valid_pdb_id, egui::Button::new("Use as Open Path"))
+                    .clicked()
+                {
                     self.open_path = format!(
                         "https://files.rcsb.org/download/{}.cif.gz",
                         self.pdb_id.trim().to_ascii_uppercase()
@@ -14085,7 +14089,7 @@ impl GuiApplication {
                 }
                 if ui
                     .add_enabled(
-                        self.pdb_download_receiver.is_none(),
+                        valid_pdb_id && self.pdb_download_receiver.is_none(),
                         egui::Button::new("Download and Open"),
                     )
                     .clicked()
@@ -18381,12 +18385,7 @@ fn download_url_to_cache(url: &str) -> Result<PathBuf> {
 }
 
 fn pdb_download_target(pdb_id: &str) -> Result<(String, String, PathBuf)> {
-    let pdb_id = pdb_id.trim().to_ascii_uppercase();
-    if pdb_id.len() != 4 || !pdb_id.chars().all(|ch| ch.is_ascii_alphanumeric()) {
-        return Err(CueMolError::invalid_argument(
-            "PDB ID must be four alphanumeric characters",
-        ));
-    }
+    let pdb_id = crate::normalize_pdb_id(pdb_id).map_err(CueMolError::invalid_argument)?;
     let url = format!("https://files.rcsb.org/download/{pdb_id}.cif.gz");
     let filename = format!("cuemol-pdb-{pdb_id}.cif.gz");
     let path = cached_download_path(&filename);
@@ -21184,6 +21183,7 @@ mod tests {
         assert_eq!(url, "https://files.rcsb.org/download/1CRN.cif.gz");
         assert!(path.ends_with("cuemol-pdb-1CRN.cif.gz"));
         assert!(pdb_download_target("bad").is_err());
+        assert!(pdb_download_target("ACRN").is_err());
     }
 
     #[test]
