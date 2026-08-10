@@ -2110,6 +2110,65 @@ summary:focus-visible {
   margin-top: 12px;
 }
 
+.reference-dialog.visibility-flag-dialog .dialog-content {
+  min-height: 280px;
+}
+
+.visibility-flag-editor {
+  max-height: min(52vh, 460px);
+  overflow: auto;
+  border: 1px solid #8f8f8f;
+  background: #fff;
+  font-size: 12px;
+}
+
+.visibility-flag-row {
+  display: grid;
+  grid-template-columns: 46px minmax(220px, 1fr) 46px;
+  min-height: 25px;
+  align-items: center;
+  border-bottom: 1px solid #ddd;
+}
+
+.visibility-flag-row > * {
+  min-width: 0;
+  margin: 0 auto;
+}
+
+.visibility-flag-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom-color: #888;
+  background: #e7e7e7;
+  font-weight: 600;
+}
+
+.visibility-flag-target {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  gap: 7px;
+  padding: 3px 7px;
+  overflow: hidden;
+}
+
+.visibility-flag-row.renderer .visibility-flag-target {
+  padding-left: 24px;
+}
+
+.visibility-flag-target > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visibility-flag-target small {
+  color: #666;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
 .trajectory-file-list {
   display: block;
   width: 100%;

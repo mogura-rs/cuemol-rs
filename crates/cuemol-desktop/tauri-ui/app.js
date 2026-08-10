@@ -4754,6 +4754,105 @@ async function pasteWorkspaceCamera(scene) {
   renderShell();
 }
 
+async function showCameraVisibilityEditor(scene, camera) {
+  if (!invoke || !scene || !camera) return;
+  let entries;
+  setBusy(true);
+  try {
+    entries = await invoke("get_camera_visibility", {
+      sceneUid: scene.uid,
+      name: camera.name,
+    });
+  } catch (error) {
+    showError(error);
+    return;
+  } finally {
+    setBusy(false);
+  }
+
+  const draft = entries.map((entry) => ({ ...entry }));
+  dialogTitle.textContent = "Edit visibility flags";
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog wide has-actions visibility-flag-dialog";
+  const editor = document.createElement("div");
+  editor.className = "visibility-flag-editor";
+  const header = document.createElement("div");
+  header.className = "visibility-flag-row visibility-flag-header";
+  for (const label of ["Inc", "Obj/Rend", "Vis"]) {
+    const cell = document.createElement("span");
+    cell.textContent = label;
+    header.append(cell);
+  }
+  editor.append(header);
+  for (const entry of draft) {
+    const row = document.createElement("div");
+    row.className = "visibility-flag-row";
+    row.classList.toggle("renderer", !entry.isObject);
+    const included = document.createElement("input");
+    included.type = "checkbox";
+    included.checked = entry.included;
+    included.setAttribute("aria-label", `Include ${entry.name}`);
+    const target = document.createElement("span");
+    target.className = "visibility-flag-target";
+    const name = document.createElement("span");
+    name.textContent = entry.name || entry.typeName;
+    const type = document.createElement("small");
+    type.textContent = entry.typeName;
+    target.append(name, type);
+    const visible = document.createElement("input");
+    visible.type = "checkbox";
+    visible.checked = entry.included && entry.visible;
+    visible.disabled = !entry.included;
+    visible.setAttribute("aria-label", `Visible ${entry.name}`);
+    included.addEventListener("change", () => {
+      entry.included = included.checked;
+      if (!entry.included) {
+        entry.visible = false;
+        visible.checked = false;
+      }
+      visible.disabled = !entry.included;
+    });
+    visible.addEventListener("change", () => {
+      entry.visible = visible.checked;
+    });
+    row.append(included, target, visible);
+    editor.append(row);
+  }
+  if (draft.length === 0) editor.append(dialogParagraph("No objects or renderers."));
+  dialogContent.append(editor);
+
+  const submit = async (closeAfter) => {
+    const changed = await mutateWithoutViewport(
+      "set_camera_visibility",
+      {
+        input: {
+          sceneUid: scene.uid,
+          name: camera.name,
+          entries: draft
+            .filter((entry) => entry.included)
+            .map((entry) => ({
+              targetUid: entry.targetUid,
+              isObject: entry.isObject,
+              visible: entry.visible,
+            })),
+        },
+      },
+      () => {},
+    );
+    if (!changed) return;
+    selectedCameraName = camera.name;
+    workspaceSelectionKind = "camera";
+    renderShell();
+    if (closeAfter) referenceDialog.close();
+  };
+  const cancel = button("Cancel", "", () => referenceDialog.close());
+  const apply = button("Apply", "", () => submit(false));
+  const ok = button("OK", "dialog-primary", () => submit(true));
+  dialogActions(cancel, apply, ok);
+  if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
+}
+
 function workspaceCameraContextItems(scene, camera = null) {
   const activate = async () => {
     if (snapshot.activeSceneUid === scene.uid) return true;
@@ -4807,6 +4906,26 @@ function workspaceCameraContextItems(scene, camera = null) {
       action: async () => {
         if (!(await activate())) return;
         await mutate("load_camera", { name: camera.name });
+      },
+    },
+    {
+      label: "Edit vis flags...",
+      disabled: !camera,
+      action: async () => {
+        if (!(await activate())) return;
+        await showCameraVisibilityEditor(scene, camera);
+      },
+    },
+    {
+      label: "Clear vis flags",
+      disabled: !camera || camera.visibilityCount === 0,
+      action: async () => {
+        if (!(await activate())) return;
+        if (!globalThis.confirm?.(`Clear visibility flags in ${camera.name}?`)) return;
+        await mutateWithoutViewport("clear_camera_visibility", {
+          sceneUid: scene.uid,
+          name: camera.name,
+        });
       },
     },
     null,

@@ -500,6 +500,17 @@ pub struct GuiCameraSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiCameraVisibilityEntry {
+    pub target_uid: Uid,
+    pub parent_uid: Option<Uid>,
+    pub name: String,
+    pub type_name: String,
+    pub is_object: bool,
+    pub included: bool,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiStyleSummary {
     pub scene_uid: Uid,
     pub local_index: Option<usize>,
@@ -1782,6 +1793,9 @@ impl DesktopAppState {
         if name.is_empty() {
             return Err(CueMolError::invalid_argument("camera name is required"));
         }
+        let visibility_settings = save_visibility
+            .then(|| self.scene_visibility_settings(scene_uid))
+            .transpose()?;
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
@@ -1791,13 +1805,10 @@ impl DesktopAppState {
             camera.set_alt_source(existing.alt_source());
         }
         camera.set_name(name);
-        if save_visibility {
+        if let Some(visibility_settings) = visibility_settings {
             camera.clear_visibility_settings();
-            for object in scene.objects() {
-                camera.vis_append(object.uid().get(), object.is_visible(), true);
-                for renderer in object.renderers() {
-                    camera.vis_append(renderer.uid().get(), renderer.is_visible(), false);
-                }
+            for (target_uid, visible, is_object) in visibility_settings {
+                camera.vis_append(target_uid.get(), visible, is_object);
             }
         }
         scene.set_camera(camera);
@@ -1810,40 +1821,337 @@ impl DesktopAppState {
         name: &str,
         load_visibility: bool,
     ) -> Result<cuemol_qsys::Camera> {
-        let scene = self
-            .scene_manager_mut()
-            .scene_mut(scene_uid)
+        let camera = self
+            .scene_manager()
+            .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        let camera = scene
+        let camera = camera
             .camera_by_name(name)
             .cloned()
             .ok_or_else(|| CueMolError::NotFound(format!("camera {name}")))?;
         if load_visibility {
+            self.apply_scene_visibility_settings(scene_uid, camera.visibility_settings())?;
+        }
+        Ok(camera)
+    }
+
+    pub fn camera_visibility_entries(
+        &self,
+        scene_uid: Uid,
+        name: &str,
+    ) -> Result<Vec<GuiCameraVisibilityEntry>> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let camera = scene
+            .camera_by_name(name)
+            .ok_or_else(|| CueMolError::NotFound(format!("camera {name}")))?;
+        let settings = camera
+            .visibility_settings()
+            .map(|(uid, visible, is_object)| ((Uid::new(uid), is_object), visible))
+            .collect::<BTreeMap<_, _>>();
+        let entry = |target_uid, parent_uid, name, type_name, is_object| {
+            let visible = settings
+                .get(&(target_uid, is_object))
+                .copied()
+                .unwrap_or(false);
+            GuiCameraVisibilityEntry {
+                target_uid,
+                parent_uid,
+                name,
+                type_name,
+                is_object,
+                included: settings.contains_key(&(target_uid, is_object)),
+                visible,
+            }
+        };
+
+        let mut groups = scene
+            .objects()
+            .iter()
+            .map(|object| {
+                let object_uid = object.uid();
+                let mut entries = vec![entry(
+                    object_uid,
+                    None,
+                    object.name().to_string(),
+                    "MolCoord".to_string(),
+                    true,
+                )];
+                entries.extend(object.renderers().iter().map(|renderer| {
+                    entry(
+                        renderer.uid(),
+                        Some(object_uid),
+                        renderer.name().to_string(),
+                        renderer.renderer_type().to_string(),
+                        false,
+                    )
+                }));
+                (
+                    effective_workspace_order(object.ui_order(), object_uid),
+                    GuiWorkspaceObjectKind::Molecule,
+                    object_uid,
+                    entries,
+                )
+            })
+            .collect::<Vec<_>>();
+        groups.extend(
+            self.density_map_summaries(scene_uid)
+                .into_iter()
+                .map(|map| {
+                    let mut entries = vec![entry(map.uid, None, map.name, map.class_name, true)];
+                    entries.extend(map.renderers.into_iter().map(|renderer| {
+                        entry(
+                            renderer.uid,
+                            Some(map.uid),
+                            renderer.name,
+                            renderer.renderer_type,
+                            false,
+                        )
+                    }));
+                    (
+                        map.ui_order,
+                        GuiWorkspaceObjectKind::DensityMap,
+                        map.uid,
+                        entries,
+                    )
+                }),
+        );
+        groups.extend(
+            self.surface_summaries(scene_uid)
+                .into_iter()
+                .map(|surface| {
+                    let mut entries = vec![entry(
+                        surface.uid,
+                        None,
+                        surface.name,
+                        surface.class_name,
+                        true,
+                    )];
+                    entries.extend(surface.renderers.into_iter().map(|renderer| {
+                        entry(
+                            renderer.uid,
+                            Some(surface.uid),
+                            renderer.name,
+                            renderer.renderer_type,
+                            false,
+                        )
+                    }));
+                    (
+                        surface.ui_order,
+                        GuiWorkspaceObjectKind::Surface,
+                        surface.uid,
+                        entries,
+                    )
+                }),
+        );
+        groups.sort_by_key(|(order, kind, uid, _)| (*order, *kind, *uid));
+        Ok(groups
+            .into_iter()
+            .flat_map(|(_, _, _, entries)| entries)
+            .collect())
+    }
+
+    pub fn set_scene_camera_visibility_settings(
+        &mut self,
+        scene_uid: Uid,
+        name: &str,
+        settings: &[(Uid, bool, bool)],
+    ) -> Result<usize> {
+        let valid_targets = self
+            .camera_visibility_entries(scene_uid, name)?
+            .into_iter()
+            .map(|entry| (entry.target_uid, entry.is_object))
+            .collect::<BTreeSet<_>>();
+        if let Some((uid, _, is_object)) = settings
+            .iter()
+            .find(|(uid, _, is_object)| !valid_targets.contains(&(*uid, *is_object)))
+        {
+            return Err(CueMolError::invalid_argument(format!(
+                "visibility target {} is not in scene {} ({})",
+                uid.get(),
+                scene_uid.get(),
+                if *is_object { "object" } else { "renderer" }
+            )));
+        }
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let mut camera = scene
+            .camera_by_name(name)
+            .cloned()
+            .ok_or_else(|| CueMolError::NotFound(format!("camera {name}")))?;
+        camera.clear_visibility_settings();
+        for (target_uid, visible, is_object) in settings {
+            camera.vis_append(target_uid.get(), *visible, *is_object);
+        }
+        let size = camera.visibility_size();
+        scene.set_camera(camera);
+        Ok(size)
+    }
+
+    pub fn clear_scene_camera_visibility_settings(
+        &mut self,
+        scene_uid: Uid,
+        name: &str,
+    ) -> Result<usize> {
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let mut camera = scene
+            .camera_by_name(name)
+            .cloned()
+            .ok_or_else(|| CueMolError::NotFound(format!("camera {name}")))?;
+        let cleared = camera.visibility_size();
+        camera.clear_visibility_settings();
+        scene.set_camera(camera);
+        Ok(cleared)
+    }
+
+    fn scene_visibility_settings(&self, scene_uid: Uid) -> Result<Vec<(Uid, bool, bool)>> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let mut settings = scene
+            .objects()
+            .iter()
+            .flat_map(|object| {
+                std::iter::once((object.uid(), object.is_visible(), true)).chain(
+                    object
+                        .renderers()
+                        .iter()
+                        .map(|renderer| (renderer.uid(), renderer.is_visible(), false)),
+                )
+            })
+            .collect::<Vec<_>>();
+        settings.extend(
+            self.density_map_summaries(scene_uid)
+                .into_iter()
+                .flat_map(|map| {
+                    std::iter::once((map.uid, map.visible, true)).chain(
+                        map.renderers
+                            .into_iter()
+                            .map(|renderer| (renderer.uid, renderer.visible, false)),
+                    )
+                }),
+        );
+        settings.extend(
+            self.surface_summaries(scene_uid)
+                .into_iter()
+                .flat_map(|surface| {
+                    std::iter::once((surface.uid, surface.visible, true)).chain(
+                        surface
+                            .renderers
+                            .into_iter()
+                            .map(|renderer| (renderer.uid, renderer.visible, false)),
+                    )
+                }),
+        );
+        Ok(settings)
+    }
+
+    fn apply_scene_visibility_settings(
+        &mut self,
+        scene_uid: Uid,
+        settings: impl Iterator<Item = (u64, bool, bool)>,
+    ) -> Result<()> {
+        enum Target {
+            DensityObject(Uid),
+            DensityRenderer(Uid, Uid),
+            SurfaceObject(Uid),
+            SurfaceRenderer(Uid, Uid),
+        }
+
+        let density_renderers = self
+            .density_map_summaries(scene_uid)
+            .into_iter()
+            .flat_map(|map| {
+                map.renderers
+                    .into_iter()
+                    .map(move |renderer| (renderer.uid, map.uid))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let density_objects = self
+            .density_maps
+            .values()
+            .filter(|map| map.scene_uid == scene_uid)
+            .map(|map| map.uid)
+            .collect::<BTreeSet<_>>();
+        let surface_summaries = self.surface_summaries(scene_uid);
+        let surface_objects = surface_summaries
+            .iter()
+            .map(|surface| surface.uid)
+            .collect::<BTreeSet<_>>();
+        let surface_renderers = surface_summaries
+            .into_iter()
+            .flat_map(|surface| {
+                surface
+                    .renderers
+                    .into_iter()
+                    .map(move |renderer| (renderer.uid, surface.uid))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut remaining = Vec::new();
+        {
+            let scene = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
             let object_uids = scene
                 .objects()
                 .iter()
                 .map(|object| object.uid())
                 .collect::<Vec<_>>();
-            for (target, visible, is_object) in camera.visibility_settings() {
+            for (target, visible, is_object) in settings {
                 let target = Uid::new(target);
                 if is_object {
                     if let Some(object) = scene.object_mut(target) {
                         object.set_visible(visible);
+                    } else if density_objects.contains(&target) {
+                        remaining.push((Target::DensityObject(target), visible));
+                    } else if surface_objects.contains(&target) {
+                        remaining.push((Target::SurfaceObject(target), visible));
                     }
                     continue;
                 }
+                let mut applied = false;
                 for object_uid in &object_uids {
                     if let Some(renderer) = scene
                         .object_mut(*object_uid)
                         .and_then(|object| object.renderer_mut(target))
                     {
                         renderer.set_visible(visible);
+                        applied = true;
                         break;
                     }
                 }
+                if applied {
+                    continue;
+                }
+                if let Some(map_uid) = density_renderers.get(&target) {
+                    remaining.push((Target::DensityRenderer(*map_uid, target), visible));
+                } else if let Some(surface_uid) = surface_renderers.get(&target) {
+                    remaining.push((Target::SurfaceRenderer(*surface_uid, target), visible));
+                }
             }
         }
-        Ok(camera)
+        for (target, visible) in remaining {
+            match target {
+                Target::DensityObject(uid) => self.set_density_map_visible(uid, visible)?,
+                Target::DensityRenderer(parent_uid, uid) => {
+                    self.set_density_renderer_visible(parent_uid, uid, visible)?
+                }
+                Target::SurfaceObject(uid) => self.set_surface_visible(uid, visible)?,
+                Target::SurfaceRenderer(parent_uid, uid) => {
+                    self.set_surface_renderer_visible(parent_uid, uid, visible)?
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn destroy_scene_camera(&mut self, scene_uid: Uid, name: &str) -> Result<bool> {
@@ -53923,13 +54231,35 @@ attribute \"dep\" string \"positions\"
             .renderer_mut(renderer_uid)
             .unwrap()
             .set_visible(false);
+        let map_uid = app.add_density_map(scene_uid, "map", DensityMap::new());
+        let map_renderer_uid = app.add_density_renderer(map_uid, "contour").unwrap();
+        app.set_density_map_visible(map_uid, false).unwrap();
+        app.set_density_renderer_visible(map_uid, map_renderer_uid, false)
+            .unwrap();
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: String::new(),
+                raw_data: Vec::new(),
+                qsc_node: None,
+            });
+        let surface_renderer_uid = app.surface_summary(surface_uid).unwrap().renderers[0].uid;
+        app.set_surface_visible(surface_uid, false).unwrap();
+        app.set_surface_renderer_visible(surface_uid, surface_renderer_uid, false)
+            .unwrap();
 
         let mut camera = cuemol_qsys::Camera::new();
         camera.set_name("camera_0");
         camera.set_zoom(75.0);
         app.save_scene_camera(scene_uid, camera, true).unwrap();
         assert_eq!(app.suggest_camera_name(scene_uid).unwrap(), "camera_1");
-        assert_eq!(app.camera_summaries(scene_uid)[0].visibility_count, 2);
+        assert_eq!(app.camera_summaries(scene_uid)[0].visibility_count, 6);
 
         let object = app
             .scene_manager_mut()
@@ -53939,11 +54269,23 @@ attribute \"dep\" string \"positions\"
             .unwrap();
         object.set_visible(true);
         object.renderer_mut(renderer_uid).unwrap().set_visible(true);
+        app.set_density_map_visible(map_uid, true).unwrap();
+        app.set_density_renderer_visible(map_uid, map_renderer_uid, true)
+            .unwrap();
+        app.set_surface_visible(surface_uid, true).unwrap();
+        app.set_surface_renderer_visible(surface_uid, surface_renderer_uid, true)
+            .unwrap();
         let loaded = app.load_scene_camera(scene_uid, "camera_0", true).unwrap();
         assert_eq!(loaded.zoom(), 75.0);
         let object = app.scene_manager().object(object_uid).unwrap();
         assert!(!object.is_visible());
         assert!(!object.renderer(renderer_uid).unwrap().is_visible());
+        let map = app.density_map_summary(map_uid).unwrap();
+        assert!(!map.visible);
+        assert!(!map.renderers[0].visible);
+        let surface = app.surface_summary(surface_uid).unwrap();
+        assert!(!surface.visible);
+        assert!(!surface.renderers[0].visible);
 
         let clipboard = app.copy_workspace_camera(scene_uid, "camera_0").unwrap();
         let pasted_name = app.paste_workspace_camera(scene_uid, &clipboard).unwrap();
@@ -53955,7 +54297,7 @@ attribute \"dep\" string \"positions\"
             .camera_by_name(&pasted_name)
             .unwrap();
         assert_eq!(pasted.zoom(), 75.0);
-        assert_eq!(pasted.visibility_size(), 2);
+        assert_eq!(pasted.visibility_size(), 6);
 
         let path = std::env::temp_dir().join(format!(
             "cuemol-desktop-camera-workspace-{}.qsc",
@@ -53966,6 +54308,37 @@ attribute \"dep\" string \"positions\"
         assert!(qsc.contains("name=\"camera_0\""));
         assert!(qsc.contains("<visibilities>"));
         let _ = std::fs::remove_file(path);
+
+        let entries = app
+            .camera_visibility_entries(scene_uid, "camera_0")
+            .unwrap();
+        assert_eq!(entries.len(), 6);
+        assert!(entries.iter().all(|entry| entry.included && !entry.visible));
+        assert_eq!(
+            app.set_scene_camera_visibility_settings(
+                scene_uid,
+                "camera_0",
+                &[(map_renderer_uid, true, false)],
+            )
+            .unwrap(),
+            1
+        );
+        let entries = app
+            .camera_visibility_entries(scene_uid, "camera_0")
+            .unwrap();
+        assert!(entries.iter().any(|entry| {
+            entry.target_uid == map_renderer_uid && entry.included && entry.visible
+        }));
+        assert_eq!(
+            app.clear_scene_camera_visibility_settings(scene_uid, "camera_0")
+                .unwrap(),
+            1
+        );
+        assert!(app
+            .camera_visibility_entries(scene_uid, "camera_0")
+            .unwrap()
+            .iter()
+            .all(|entry| !entry.included && !entry.visible));
 
         assert!(app.destroy_scene_camera(scene_uid, "camera_0").unwrap());
         assert_eq!(app.camera_summaries(scene_uid).len(), 1);

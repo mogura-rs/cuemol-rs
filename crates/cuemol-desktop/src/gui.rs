@@ -468,6 +468,8 @@ struct GuiApplication {
     selected_renderer: Option<cuemol_core::Uid>,
     workspace_aux_selection: Option<WorkspaceAuxSelection>,
     editing_saved_camera: Option<(cuemol_core::Uid, String)>,
+    camera_visibility_draft: Option<NativeCameraVisibilityDraft>,
+    pending_camera_visibility_clear: Option<(cuemol_core::Uid, String)>,
     style_properties_draft: Option<NativeStyleProperties>,
     renderer_style_create_draft: Option<NativeRendererStyleCreate>,
     workspace_camera_clipboard: Option<WorkspaceCameraClipboard>,
@@ -1086,6 +1088,13 @@ struct NativeStyleProperties {
     name: String,
     read_only: bool,
     xml: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeCameraVisibilityDraft {
+    scene_uid: cuemol_core::Uid,
+    camera_name: String,
+    entries: Vec<crate::GuiCameraVisibilityEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2202,6 +2211,8 @@ impl GuiApplication {
             selected_object: None,
             workspace_aux_selection: None,
             editing_saved_camera: None,
+            camera_visibility_draft: None,
+            pending_camera_visibility_clear: None,
             style_properties_draft: None,
             renderer_style_create_draft: None,
             workspace_camera_clipboard: None,
@@ -3736,6 +3747,21 @@ impl GuiApplication {
                             }
                             if ui.button("Apply to scene (with vis flags)").clicked() {
                                 self.load_workspace_camera(selection, camera);
+                                ui.close();
+                            }
+                            if ui.button("Edit vis flags...").clicked() {
+                                self.open_camera_visibility_editor(selection);
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    summary.visibility_count > 0,
+                                    egui::Button::new("Clear vis flags"),
+                                )
+                                .clicked()
+                            {
+                                self.pending_camera_visibility_clear =
+                                    Some((summary.scene_uid, summary.name.clone()));
                                 ui.close();
                             }
                             ui.separator();
@@ -8708,6 +8734,8 @@ impl GuiApplication {
         self.renderer_props_dialog(ctx);
         self.scene_props_dialog(ctx);
         self.view_props_dialog(ctx, camera);
+        self.camera_visibility_dialog(ctx);
+        self.camera_visibility_clear_dialog(ctx);
         self.style_props_dialog(ctx);
         self.renderer_style_create_dialog(ctx);
         self.style_paste_confirmation_dialog(ctx);
@@ -8717,6 +8745,130 @@ impl GuiApplication {
         self.get_pdb_dialog(ctx);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
+    }
+
+    fn camera_visibility_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.camera_visibility_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut apply = false;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Edit visibility flags")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .default_height(360.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("camera_visibility_grid")
+                            .num_columns(3)
+                            .striped(true)
+                            .spacing([12.0, 5.0])
+                            .show(ui, |ui| {
+                                ui.strong("Inc");
+                                ui.strong("Obj/Rend");
+                                ui.strong("Vis");
+                                ui.end_row();
+                                for entry in &mut draft.entries {
+                                    let was_included = entry.included;
+                                    ui.checkbox(&mut entry.included, "");
+                                    if was_included && !entry.included {
+                                        entry.visible = false;
+                                    }
+                                    ui.horizontal(|ui| {
+                                        if !entry.is_object {
+                                            ui.add_space(18.0);
+                                        }
+                                        ui.label(&entry.name);
+                                        ui.weak(format!("({})", entry.type_name));
+                                    });
+                                    ui.add_enabled_ui(entry.included, |ui| {
+                                        ui.checkbox(&mut entry.visible, "");
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if accept || apply {
+            let undo = self.capture_undo();
+            let settings = draft
+                .entries
+                .iter()
+                .filter(|entry| entry.included)
+                .map(|entry| (entry.target_uid, entry.visible, entry.is_object))
+                .collect::<Vec<_>>();
+            match self.state.set_scene_camera_visibility_settings(
+                draft.scene_uid,
+                &draft.camera_name,
+                &settings,
+            ) {
+                Ok(count) => {
+                    self.push_undo_snapshot(undo);
+                    self.modified_scenes.insert(draft.scene_uid);
+                    self.set_status(format!(
+                        "Change visflags of {}: {count} item(s)",
+                        draft.camera_name
+                    ));
+                    if !accept {
+                        self.camera_visibility_draft = Some(draft);
+                    }
+                }
+                Err(error) => {
+                    self.set_status(format!("Camera visibility error: {error}"));
+                    self.camera_visibility_draft = Some(draft);
+                }
+            }
+        } else if !cancel && open {
+            self.camera_visibility_draft = Some(draft);
+        }
+    }
+
+    fn camera_visibility_clear_dialog(&mut self, ctx: &egui::Context) {
+        let Some((scene_uid, name)) = self.pending_camera_visibility_clear.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut clear = false;
+        let mut cancel = false;
+        egui::Window::new("Clear visibility flags?")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!("Clear visibility flags in {name}?"));
+                ui.horizontal(|ui| {
+                    if ui.button("Clear").clicked() {
+                        clear = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if clear {
+            self.pending_camera_visibility_clear = None;
+            self.clear_camera_visibility(scene_uid, &name);
+        } else if cancel || !open {
+            self.pending_camera_visibility_clear = None;
+        }
     }
 
     fn style_paste_confirmation_dialog(&mut self, ctx: &egui::Context) {
@@ -11580,6 +11732,41 @@ impl GuiApplication {
         ));
         self.view_property_selected = 0;
         self.show_view_props = true;
+    }
+
+    fn open_camera_visibility_editor(&mut self, selection: WorkspaceAuxSelection) {
+        let Some(summary) = self.camera_summary_for_selection(selection) else {
+            self.set_status("Camera not found");
+            return;
+        };
+        match self
+            .state
+            .camera_visibility_entries(summary.scene_uid, &summary.name)
+        {
+            Ok(entries) => {
+                self.camera_visibility_draft = Some(NativeCameraVisibilityDraft {
+                    scene_uid: summary.scene_uid,
+                    camera_name: summary.name,
+                    entries,
+                });
+            }
+            Err(error) => self.set_status(format!("Camera visibility error: {error}")),
+        }
+    }
+
+    fn clear_camera_visibility(&mut self, scene_uid: cuemol_core::Uid, name: &str) {
+        let undo = self.capture_undo();
+        match self
+            .state
+            .clear_scene_camera_visibility_settings(scene_uid, name)
+        {
+            Ok(count) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.set_status(format!("Clear visibility flags in {name}: {count} item(s)"));
+            }
+            Err(error) => self.set_status(format!("Camera visibility error: {error}")),
+        }
     }
 
     fn load_workspace_camera(
@@ -18912,6 +19099,52 @@ mod tests {
         );
         app.undo(&mut camera);
         assert_eq!(app.state.camera_summaries(scene_uid)[0].name, "camera_0");
+    }
+
+    #[test]
+    fn native_camera_visibility_editor_and_clear_are_undoable() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let scene = app.state.scene_manager_mut().scene_mut(scene_uid).unwrap();
+        let object_uid = scene.add_molecule("mol", cuemol_molstr::MolCoord::new());
+        let renderer_uid = scene
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "simple");
+        let mut saved = cuemol_qsys::Camera::new();
+        saved.set_name("camera_0");
+        app.state.save_scene_camera(scene_uid, saved, true).unwrap();
+        let selection = WorkspaceAuxSelection::Camera {
+            scene_uid,
+            camera_index: 0,
+        };
+
+        app.open_camera_visibility_editor(selection);
+        let draft = app.camera_visibility_draft.as_mut().unwrap();
+        assert_eq!(draft.entries.len(), 2);
+        for entry in &mut draft.entries {
+            entry.included = entry.target_uid == renderer_uid;
+            entry.visible = false;
+        }
+        let settings = draft
+            .entries
+            .iter()
+            .filter(|entry| entry.included)
+            .map(|entry| (entry.target_uid, entry.visible, entry.is_object))
+            .collect::<Vec<_>>();
+        let undo = app.capture_undo();
+        app.state
+            .set_scene_camera_visibility_settings(scene_uid, "camera_0", &settings)
+            .unwrap();
+        app.push_undo_snapshot(undo);
+        assert_eq!(app.state.camera_summaries(scene_uid)[0].visibility_count, 1);
+
+        app.clear_camera_visibility(scene_uid, "camera_0");
+        assert_eq!(app.state.camera_summaries(scene_uid)[0].visibility_count, 0);
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert_eq!(app.state.camera_summaries(scene_uid)[0].visibility_count, 1);
+        assert!(app.modified_scenes.contains(&scene_uid));
     }
 
     #[test]

@@ -71,6 +71,34 @@ struct CameraDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CameraVisibilityEntryDto {
+    target_uid: u64,
+    parent_uid: Option<u64>,
+    name: String,
+    type_name: String,
+    is_object: bool,
+    included: bool,
+    visible: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CameraVisibilitySettingInput {
+    target_uid: u64,
+    is_object: bool,
+    visible: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CameraVisibilityUpdateInput {
+    scene_uid: u64,
+    name: String,
+    entries: Vec<CameraVisibilitySettingInput>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StyleDto {
     owner_scene_uid: u64,
     scene_uid: u64,
@@ -5104,6 +5132,15 @@ enum ModelRequest {
     SaveCamera(String),
     LoadCamera(String),
     DestroyCamera(String),
+    GetCameraVisibility {
+        scene_uid: u64,
+        name: String,
+    },
+    SetCameraVisibility(CameraVisibilityUpdateInput),
+    ClearCameraVisibility {
+        scene_uid: u64,
+        name: String,
+    },
     CreateStyle(String),
     CreateRendererStyle(RendererStyleCreateInput),
     GetStyleProperties {
@@ -5404,6 +5441,7 @@ enum ModelResponse {
     ViewPropertiesUpdate(Box<ViewPropertiesUpdateDto>),
     StyleProperties(StylePropertiesDto),
     RendererStyleOptions(Vec<RendererStyleOptionDto>),
+    CameraVisibility(Vec<CameraVisibilityEntryDto>),
     Message(String),
 }
 
@@ -6484,6 +6522,53 @@ fn handle_model_request(
         ModelRequest::DestroyCamera(name) => {
             let undo = model.capture_undo();
             model.destroy_named_camera(&name)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::GetCameraVisibility { scene_uid, name } => {
+            let entries = model
+                .desktop
+                .camera_visibility_entries(Uid::new(scene_uid), &name)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|entry| CameraVisibilityEntryDto {
+                    target_uid: entry.target_uid.get(),
+                    parent_uid: entry.parent_uid.map(Uid::get),
+                    name: entry.name,
+                    type_name: entry.type_name,
+                    is_object: entry.is_object,
+                    included: entry.included,
+                    visible: entry.visible,
+                })
+                .collect();
+            Ok(ModelResponse::CameraVisibility(entries))
+        }
+        ModelRequest::SetCameraVisibility(input) => {
+            let undo = model.capture_undo();
+            let scene_uid = Uid::new(input.scene_uid);
+            let settings = input
+                .entries
+                .into_iter()
+                .map(|entry| (Uid::new(entry.target_uid), entry.visible, entry.is_object))
+                .collect::<Vec<_>>();
+            let count = model
+                .desktop
+                .set_scene_camera_visibility_settings(scene_uid, &input.name, &settings)
+                .map_err(|error| error.to_string())?;
+            model.modified_scenes.insert(scene_uid);
+            model.status = format!("Change visflags of {}: {count} item(s)", input.name);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ClearCameraVisibility { scene_uid, name } => {
+            let undo = model.capture_undo();
+            let scene_uid = Uid::new(scene_uid);
+            let count = model
+                .desktop
+                .clear_scene_camera_visibility_settings(scene_uid, &name)
+                .map_err(|error| error.to_string())?;
+            model.modified_scenes.insert(scene_uid);
+            model.status = format!("Clear visibility flags in {name}: {count} item(s)");
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -7882,6 +7967,7 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::CameraVisibility(_)
         | ModelResponse::Message(_) => Err("unexpected non-snapshot response".to_string()),
     }
 }
@@ -7902,6 +7988,7 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::CameraVisibility(_)
         | ModelResponse::Message(_) => Err("unexpected non-molecule-details response".to_string()),
     }
 }
@@ -7922,6 +8009,7 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::CameraVisibility(_)
         | ModelResponse::Message(_) => Err("unexpected non-viewport response".to_string()),
     }
 }
@@ -7942,6 +8030,7 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::CameraVisibility(_)
         | ModelResponse::Message(_) => Err("unexpected animation frame response".to_string()),
     }
 }
@@ -7962,6 +8051,7 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::CameraVisibility(_)
         | ModelResponse::Message(_) => Err("unexpected trajectory frame response".to_string()),
     }
 }
@@ -7982,6 +8072,7 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::CameraVisibility(_)
         | ModelResponse::Message(_) => Err("unexpected application info response".to_string()),
     }
 }
@@ -8002,6 +8093,7 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::CameraVisibility(_)
         | ModelResponse::Message(_) => Err("unexpected non-preferences response".to_string()),
     }
 }
@@ -8022,6 +8114,7 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::CameraVisibility(_)
         | ModelResponse::Message(_) => {
             Err("unexpected non-preferences-update response".to_string())
         }
@@ -8044,6 +8137,7 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::CameraVisibility(_)
         | ModelResponse::Message(_) => Err("unexpected non-initial-state response".to_string()),
     }
 }
@@ -8073,6 +8167,7 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::CameraVisibility(_)
         | ModelResponse::Message(_) => Err("unexpected non-view-properties response".to_string()),
     }
 }
@@ -8090,6 +8185,15 @@ fn renderer_style_options_response(
     match response {
         ModelResponse::RendererStyleOptions(options) => Ok(options),
         _ => Err("unexpected non-renderer-style-options response".to_string()),
+    }
+}
+
+fn camera_visibility_response(
+    response: ModelResponse,
+) -> Result<Vec<CameraVisibilityEntryDto>, String> {
+    match response {
+        ModelResponse::CameraVisibility(entries) => Ok(entries),
+        _ => Err("unexpected non-camera-visibility response".to_string()),
     }
 }
 
@@ -8111,6 +8215,7 @@ fn view_properties_update_response(
         | ModelResponse::ViewProperties(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::CameraVisibility(_)
         | ModelResponse::Message(_) => {
             Err("unexpected non-view-properties-update response".to_string())
         }
@@ -8414,6 +8519,41 @@ fn load_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapsh
 #[tauri::command]
 fn destroy_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::DestroyCamera(name))?)
+}
+
+#[tauri::command]
+fn get_camera_visibility(
+    scene_uid: u64,
+    name: String,
+    state: State<'_, ManagedState>,
+) -> Result<Vec<CameraVisibilityEntryDto>, String> {
+    camera_visibility_response(request_model(
+        &state,
+        ModelRequest::GetCameraVisibility { scene_uid, name },
+    )?)
+}
+
+#[tauri::command]
+fn set_camera_visibility(
+    input: CameraVisibilityUpdateInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetCameraVisibility(input),
+    )?)
+}
+
+#[tauri::command]
+fn clear_camera_visibility(
+    scene_uid: u64,
+    name: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ClearCameraVisibility { scene_uid, name },
+    )?)
 }
 
 #[tauri::command]
@@ -9810,6 +9950,9 @@ pub fn run() -> Result<(), tauri::Error> {
             save_camera,
             load_camera,
             destroy_camera,
+            get_camera_visibility,
+            set_camera_visibility,
+            clear_camera_visibility,
             create_style,
             create_renderer_style,
             get_style_properties,
@@ -12664,6 +12807,57 @@ mod tests {
         assert!(model.snapshot().cameras.is_empty());
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().cameras[0].name, "camera_renamed");
+    }
+
+    #[test]
+    fn camera_visibility_commands_edit_clear_and_undo_flags() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        handle_model_request(&mut model, ModelRequest::SaveCamera("camera_0".to_string())).unwrap();
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::GetCameraVisibility {
+                scene_uid: scene_uid.get(),
+                name: "camera_0".to_string(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::CameraVisibility(entries) = response else {
+            panic!("expected camera visibility entries");
+        };
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| {
+            entry.target_uid == object_uid.get() && entry.is_object && entry.included
+        }));
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetCameraVisibility(CameraVisibilityUpdateInput {
+                scene_uid: scene_uid.get(),
+                name: "camera_0".to_string(),
+                entries: vec![CameraVisibilitySettingInput {
+                    target_uid: renderer_uid.get(),
+                    is_object: false,
+                    visible: false,
+                }],
+            }),
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().cameras[0].visibility_count, 1);
+        assert!(model.modified_scenes.contains(&scene_uid));
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::ClearCameraVisibility {
+                scene_uid: scene_uid.get(),
+                name: "camera_0".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().cameras[0].visibility_count, 0);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().cameras[0].visibility_count, 1);
     }
 
     #[test]
