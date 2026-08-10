@@ -533,6 +533,28 @@ pub struct GuiRendererSummary {
     pub style: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceRendererClipboard {
+    group_name: Option<String>,
+    renderers: Vec<MolRenderer>,
+}
+
+impl WorkspaceRendererClipboard {
+    pub fn renderer_count(&self) -> usize {
+        self.renderers.len()
+    }
+
+    pub fn is_group(&self) -> bool {
+        self.group_name.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRendererPasteResult {
+    pub group_uid: Option<Uid>,
+    pub renderer_uids: Vec<Uid>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiAtomSummary {
     pub object_uid: Uid,
@@ -4786,6 +4808,94 @@ impl DesktopAppState {
             )));
         }
         Ok(object.add_renderer("*group", name))
+    }
+
+    pub fn copy_workspace_renderer(
+        &self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+    ) -> Result<WorkspaceRendererClipboard> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let renderer = object
+            .renderer(renderer_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        if renderer.renderer_type() == "*group" {
+            let group_name = renderer.name().to_string();
+            let renderers = object
+                .renderers()
+                .iter()
+                .filter(|renderer| renderer.group().is_some_and(|group| group == group_name))
+                .cloned()
+                .collect();
+            return Ok(WorkspaceRendererClipboard {
+                group_name: Some(group_name),
+                renderers,
+            });
+        }
+        Ok(WorkspaceRendererClipboard {
+            group_name: None,
+            renderers: vec![renderer.clone()],
+        })
+    }
+
+    pub fn paste_workspace_renderers(
+        &mut self,
+        object_uid: Uid,
+        destination_group_uid: Option<Uid>,
+        clipboard: &WorkspaceRendererClipboard,
+    ) -> Result<WorkspaceRendererPasteResult> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let destination_group = if let Some(group_uid) = destination_group_uid {
+            Some(
+                object
+                    .renderer(group_uid)
+                    .filter(|renderer| renderer.renderer_type() == "*group")
+                    .map(|renderer| renderer.name().to_string())
+                    .ok_or_else(|| {
+                        CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+                    })?,
+            )
+        } else {
+            None
+        };
+        let mut group_uid = destination_group_uid;
+        let destination_group = match (destination_group, clipboard.group_name.as_deref()) {
+            (Some(group), _) => Some(group),
+            (None, Some(source_group)) => {
+                let mut group = source_group.to_string();
+                if object.renderers().iter().any(|renderer| {
+                    renderer.renderer_type() == "*group" && renderer.name() == group
+                }) {
+                    for index in 1_u64.. {
+                        let candidate = format!("{source_group}({index})");
+                        if object.renderers().iter().all(|renderer| {
+                            renderer.renderer_type() != "*group" || renderer.name() != candidate
+                        }) {
+                            group = candidate;
+                            break;
+                        }
+                    }
+                }
+                group_uid = Some(object.add_renderer("*group", &group));
+                Some(group)
+            }
+            (None, None) => None,
+        };
+        let renderer_uids = clipboard
+            .renderers
+            .iter()
+            .map(|renderer| object.attach_renderer_copy(renderer, destination_group.as_deref()))
+            .collect();
+        Ok(WorkspaceRendererPasteResult {
+            group_uid,
+            renderer_uids,
+        })
     }
 
     pub fn rename_renderer_group(
@@ -49265,6 +49375,96 @@ end_header
         assert!(app
             .rename_renderer_group(object_uid, group_uid, "")
             .is_err());
+    }
+
+    #[test]
+    fn workspace_renderer_clipboard_copies_single_renderers_and_groups() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("clipboard", false).result_scene;
+        let (source_uid, target_uid) = {
+            let scene = app.scene_manager_mut().scene_mut(scene_uid).unwrap();
+            (
+                scene.add_molecule("source", cuemol_molstr::MolCoord::new()),
+                scene.add_molecule("target", cuemol_molstr::MolCoord::new()),
+            )
+        };
+        let (group_uid, first_uid, second_uid) = {
+            let source = app.scene_manager_mut().object_mut(source_uid).unwrap();
+            let group_uid = source.add_renderer("*group", "representations");
+            let first_uid = source.add_renderer("simple", "main");
+            source
+                .renderer_mut(first_uid)
+                .unwrap()
+                .set_qsc_attr("group", "representations");
+            let second_uid = source.add_renderer("cpk", "atoms");
+            source
+                .renderer_mut(second_uid)
+                .unwrap()
+                .set_qsc_attr("group", "representations");
+            source
+                .renderer_mut(first_uid)
+                .unwrap()
+                .set_qsc_attr("style", "DefaultSimple");
+            (group_uid, first_uid, second_uid)
+        };
+
+        let renderer_clipboard = app.copy_workspace_renderer(source_uid, first_uid).unwrap();
+        assert_eq!(renderer_clipboard.renderer_count(), 1);
+        assert!(!renderer_clipboard.is_group());
+        app.destroy_renderer_in_object(source_uid, first_uid)
+            .unwrap();
+        let first_paste = app
+            .paste_workspace_renderers(target_uid, None, &renderer_clipboard)
+            .unwrap();
+        let target = app.scene_manager().object(target_uid).unwrap();
+        let pasted = target.renderer(first_paste.renderer_uids[0]).unwrap();
+        assert_eq!(pasted.name(), "main");
+        assert_eq!(pasted.group(), None);
+        assert_eq!(pasted.qsc_attr("style"), Some("DefaultSimple"));
+
+        let group_clipboard = app.copy_workspace_renderer(source_uid, group_uid).unwrap();
+        assert_eq!(group_clipboard.renderer_count(), 1);
+        assert!(group_clipboard.is_group());
+        let group_paste = app
+            .paste_workspace_renderers(target_uid, None, &group_clipboard)
+            .unwrap();
+        let target = app.scene_manager().object(target_uid).unwrap();
+        let pasted_group_uid = group_paste.group_uid.unwrap();
+        assert_eq!(
+            target.renderer(pasted_group_uid).unwrap().name(),
+            "representations"
+        );
+        assert_eq!(group_paste.renderer_uids.len(), 1);
+        assert_eq!(
+            target
+                .renderer(group_paste.renderer_uids[0])
+                .unwrap()
+                .group(),
+            Some("representations")
+        );
+
+        let destination_group_uid = app
+            .create_renderer_group(target_uid, "destination")
+            .unwrap();
+        let second_paste = app
+            .paste_workspace_renderers(target_uid, Some(destination_group_uid), &renderer_clipboard)
+            .unwrap();
+        let target = app.scene_manager().object(target_uid).unwrap();
+        assert_eq!(
+            target
+                .renderer(second_paste.renderer_uids[0])
+                .unwrap()
+                .name(),
+            "main(1)"
+        );
+        assert_eq!(
+            target
+                .renderer(second_paste.renderer_uids[0])
+                .unwrap()
+                .group(),
+            Some("destination")
+        );
+        assert!(target.renderer(second_uid).is_none());
     }
 
     #[test]

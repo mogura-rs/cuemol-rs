@@ -1139,6 +1139,46 @@ impl MolObject {
         true
     }
 
+    /// Attach a detached renderer copy with a fresh runtime UID and a unique name.
+    /// The destination group replaces the source renderer's original group.
+    pub fn attach_renderer_copy(
+        &mut self,
+        renderer: &MolRenderer,
+        destination_group: Option<&str>,
+    ) -> Uid {
+        let mut renderer = renderer.clone();
+        let uid = Uid::new(self.next_renderer_uid);
+        self.next_renderer_uid += 1;
+        renderer.uid = uid;
+        let base_name = renderer.name.clone();
+        if self
+            .renderers
+            .iter()
+            .any(|existing| existing.name == base_name)
+        {
+            for index in 1_u64.. {
+                let candidate = format!("{base_name}({index})");
+                if self
+                    .renderers
+                    .iter()
+                    .all(|existing| existing.name != candidate)
+                {
+                    renderer.name = candidate;
+                    break;
+                }
+            }
+        }
+        if let Some(group) = destination_group.filter(|group| !group.is_empty()) {
+            renderer.set_qsc_attr("group", group);
+        } else {
+            renderer.remove_qsc_attr("group");
+        }
+        renderer.set_qsc_attr("ui_order", uid.get().to_string());
+        self.renderers.push(renderer);
+        self.modified = true;
+        uid
+    }
+
     pub fn add_atom_intr_renderer(
         &mut self,
         name: impl Into<String>,

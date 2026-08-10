@@ -14,7 +14,7 @@ use tauri::State;
 use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
     anim_step, atoms_in_screen_rect, pick_atom_screen, AnimKind, AnimObject, DesktopAppState,
-    MOLECULE_RENDERER_TYPES,
+    WorkspaceRendererClipboard, MOLECULE_RENDERER_TYPES,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
@@ -718,6 +718,21 @@ struct WorkspaceRendererPaintInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceRendererCopyInput {
+    object_uid: u64,
+    renderer_uid: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceRendererPasteInput {
+    object_uid: u64,
+    #[serde(default)]
+    destination_group_uid: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceRendererGroupInput {
     object_uid: u64,
     #[serde(default)]
@@ -816,6 +831,7 @@ struct AppModel {
     opened_paths: Vec<String>,
     structure_revision: u64,
     modified_scenes: BTreeSet<Uid>,
+    workspace_renderer_clipboard: Option<WorkspaceRendererClipboard>,
     undo_stack: Vec<AppModelUndoEntry>,
     redo_stack: Vec<AppModelUndoEntry>,
     log_lines: Vec<String>,
@@ -909,6 +925,7 @@ impl AppModel {
             opened_paths: Vec::new(),
             structure_revision: 1,
             modified_scenes: BTreeSet::new(),
+            workspace_renderer_clipboard: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             log_lines: Vec::new(),
@@ -2415,6 +2432,41 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Insert paint entry".to_string();
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn copy_workspace_renderer(
+        &mut self,
+        input: WorkspaceRendererCopyInput,
+    ) -> Result<String, String> {
+        let clipboard = self
+            .desktop
+            .copy_workspace_renderer(Uid::new(input.object_uid), Uid::new(input.renderer_uid))
+            .map_err(|error| error.to_string())?;
+        let count = clipboard.renderer_count();
+        self.workspace_renderer_clipboard = Some(clipboard);
+        self.status = format!("Copied {count} renderer(s)");
+        Ok(self.status.clone())
+    }
+
+    fn paste_workspace_renderers(
+        &mut self,
+        input: WorkspaceRendererPasteInput,
+    ) -> Result<(), String> {
+        let clipboard = self
+            .workspace_renderer_clipboard
+            .clone()
+            .ok_or_else(|| "No copied renderer".to_string())?;
+        let result = self
+            .desktop
+            .paste_workspace_renderers(
+                Uid::new(input.object_uid),
+                input.destination_group_uid.map(Uid::new),
+                &clipboard,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = format!("Pasted {} renderer(s)", result.renderer_uids.len());
         self.invalidate_mesh(false);
         Ok(())
     }
@@ -4928,6 +4980,8 @@ enum ModelRequest {
     ApplyWorkspaceRendererStyle(WorkspaceRendererStyleInput),
     SetWorkspaceRendererColoring(WorkspaceRendererColoringInput),
     InsertWorkspaceRendererPaint(WorkspaceRendererPaintInput),
+    CopyWorkspaceRenderer(WorkspaceRendererCopyInput),
+    PasteWorkspaceRenderers(WorkspaceRendererPasteInput),
     CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     FitWorkspaceItem {
@@ -5189,6 +5243,7 @@ enum ModelResponse {
     ViewPropertiesUpdate(Box<ViewPropertiesUpdateDto>),
     StyleProperties(StylePropertiesDto),
     RendererStyleOptions(Vec<RendererStyleOptionDto>),
+    Message(String),
 }
 
 struct ModelEnvelope {
@@ -6346,6 +6401,15 @@ fn handle_model_request(
         ModelRequest::InsertWorkspaceRendererPaint(input) => {
             let undo = model.capture_undo();
             model.insert_workspace_renderer_paint(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::CopyWorkspaceRenderer(input) => Ok(ModelResponse::Message(
+            model.copy_workspace_renderer(input)?,
+        )),
+        ModelRequest::PasteWorkspaceRenderers(input) => {
+            let undo = model.capture_undo();
+            model.paste_workspace_renderers(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -7600,9 +7664,8 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
-        | ModelResponse::RendererStyleOptions(_) => {
-            Err("unexpected non-snapshot response".to_string())
-        }
+        | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::Message(_) => Err("unexpected non-snapshot response".to_string()),
     }
 }
 
@@ -7621,9 +7684,8 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
-        | ModelResponse::RendererStyleOptions(_) => {
-            Err("unexpected non-molecule-details response".to_string())
-        }
+        | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::Message(_) => Err("unexpected non-molecule-details response".to_string()),
     }
 }
 
@@ -7642,9 +7704,8 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
-        | ModelResponse::RendererStyleOptions(_) => {
-            Err("unexpected non-viewport response".to_string())
-        }
+        | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::Message(_) => Err("unexpected non-viewport response".to_string()),
     }
 }
 
@@ -7663,9 +7724,8 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
-        | ModelResponse::RendererStyleOptions(_) => {
-            Err("unexpected animation frame response".to_string())
-        }
+        | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::Message(_) => Err("unexpected animation frame response".to_string()),
     }
 }
 
@@ -7684,9 +7744,8 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
-        | ModelResponse::RendererStyleOptions(_) => {
-            Err("unexpected trajectory frame response".to_string())
-        }
+        | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::Message(_) => Err("unexpected trajectory frame response".to_string()),
     }
 }
 
@@ -7705,9 +7764,8 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
-        | ModelResponse::RendererStyleOptions(_) => {
-            Err("unexpected application info response".to_string())
-        }
+        | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::Message(_) => Err("unexpected application info response".to_string()),
     }
 }
 
@@ -7726,9 +7784,8 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
-        | ModelResponse::RendererStyleOptions(_) => {
-            Err("unexpected non-preferences response".to_string())
-        }
+        | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::Message(_) => Err("unexpected non-preferences response".to_string()),
     }
 }
 
@@ -7747,7 +7804,8 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
-        | ModelResponse::RendererStyleOptions(_) => {
+        | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::Message(_) => {
             Err("unexpected non-preferences-update response".to_string())
         }
     }
@@ -7768,9 +7826,8 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::ViewProperties(_)
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
-        | ModelResponse::RendererStyleOptions(_) => {
-            Err("unexpected non-initial-state response".to_string())
-        }
+        | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::Message(_) => Err("unexpected non-initial-state response".to_string()),
     }
 }
 
@@ -7798,9 +7855,8 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
-        | ModelResponse::RendererStyleOptions(_) => {
-            Err("unexpected non-view-properties response".to_string())
-        }
+        | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::Message(_) => Err("unexpected non-view-properties response".to_string()),
     }
 }
 
@@ -7837,9 +7893,17 @@ fn view_properties_update_response(
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
         | ModelResponse::StyleProperties(_)
-        | ModelResponse::RendererStyleOptions(_) => {
+        | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::Message(_) => {
             Err("unexpected non-view-properties-update response".to_string())
         }
+    }
+}
+
+fn message_response(response: ModelResponse) -> Result<String, String> {
+    match response {
+        ModelResponse::Message(message) => Ok(message),
+        _ => Err("unexpected non-message response".to_string()),
     }
 }
 
@@ -8286,6 +8350,28 @@ fn insert_workspace_renderer_paint(
     snapshot_response(request_model(
         &state,
         ModelRequest::InsertWorkspaceRendererPaint(input),
+    )?)
+}
+
+#[tauri::command]
+fn copy_workspace_renderer(
+    input: WorkspaceRendererCopyInput,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::CopyWorkspaceRenderer(input),
+    )?)
+}
+
+#[tauri::command]
+fn paste_workspace_renderers(
+    input: WorkspaceRendererPasteInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::PasteWorkspaceRenderers(input),
     )?)
 }
 
@@ -9425,6 +9511,8 @@ pub fn run() -> Result<(), tauri::Error> {
             apply_workspace_renderer_style,
             set_workspace_renderer_coloring,
             insert_workspace_renderer_paint,
+            copy_workspace_renderer,
+            paste_workspace_renderers,
             create_workspace_renderer_group,
             rename_workspace_renderer_group,
             fit_workspace_item,
@@ -9531,6 +9619,7 @@ mod tests {
             opened_paths: Vec::new(),
             structure_revision: 1,
             modified_scenes: BTreeSet::new(),
+            workspace_renderer_clipboard: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             log_lines: Vec::new(),
@@ -10947,6 +11036,48 @@ mod tests {
             snapshot.objects[0].renderers[0].paint_entries[0].color,
             "hsb(120, 1.0, 1.0)"
         );
+    }
+
+    #[test]
+    fn workspace_renderer_copy_uses_small_response_and_paste_is_undoable() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CopyWorkspaceRenderer(WorkspaceRendererCopyInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Message(message) = response else {
+            panic!("expected copy status message");
+        };
+        assert_eq!(message, "Copied 1 renderer(s)");
+        assert!(model.undo_stack.is_empty());
+
+        model
+            .desktop
+            .destroy_renderer_in_object(object_uid, renderer_uid)
+            .unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::PasteWorkspaceRenderers(WorkspaceRendererPasteInput {
+                object_uid: object_uid.get(),
+                destination_group_uid: None,
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected paste snapshot");
+        };
+        assert_eq!(snapshot.objects[0].renderers.len(), 1);
+        assert_eq!(snapshot.objects[0].renderers[0].renderer_type, "simple");
+        assert_eq!(snapshot.undo_descriptions[0], "Pasted 1 renderer(s)");
+        assert!(model.mesh.is_none());
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model.snapshot().objects[0].renderers.is_empty());
+        assert!(model.workspace_renderer_clipboard.is_some());
     }
 
     #[test]

@@ -140,6 +140,7 @@ let snapshot = null;
 let selectedObjectUid = null;
 let selectedRendererUid = null;
 const workspaceRendererStyleCache = new Map();
+let workspaceRendererClipboardAvailable = false;
 let selectedDensityMapUid = null;
 let selectedDensityRendererUid = null;
 let selectedSurfaceUid = null;
@@ -4597,6 +4598,31 @@ function aroundWorkspaceSelection(selection, radius, byResidue) {
   return byResidue ? `byres ${expression}` : expression;
 }
 
+async function copyWorkspaceRenderer(objectUid, rendererUid) {
+  if (!invoke) return false;
+  setBusy(true);
+  try {
+    const status = await invoke("copy_workspace_renderer", {
+      input: { objectUid, rendererUid },
+    });
+    workspaceRendererClipboardAvailable = true;
+    snapshot.status = status;
+    renderStatusAndLog();
+    return true;
+  } catch (error) {
+    showError(error);
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+function pasteWorkspaceRenderers(objectUid, destinationGroupUid = null) {
+  return mutate("paste_workspace_renderers", {
+    input: { objectUid, destinationGroupUid },
+  });
+}
+
 function workspaceObjectContextItems(scene, object) {
   const select = (selection) => () =>
     runMoleculeSelectionAction(object.uid, selection, "select");
@@ -4631,6 +4657,12 @@ function workspaceObjectContextItems(scene, object) {
     }
   }
   items.push(
+    null,
+    {
+      label: "Paste Renderer",
+      disabled: !workspaceRendererClipboardAvailable,
+      action: () => pasteWorkspaceRenderers(object.uid),
+    },
     null,
     {
       label: "New Group...",
@@ -4701,6 +4733,16 @@ async function workspaceRendererContextItems(scene, object, renderer) {
           });
         },
       },
+      {
+        label: "Copy",
+        action: () => copyWorkspaceRenderer(object.uid, renderer.uid),
+      },
+      {
+        label: "Paste Renderer",
+        disabled: !workspaceRendererClipboardAvailable,
+        action: () => pasteWorkspaceRenderers(object.uid, renderer.uid),
+      },
+      null,
       {
         label: "New Renderer...",
         action: () =>
@@ -4873,6 +4915,11 @@ async function workspaceRendererContextItems(scene, object, renderer) {
     });
   }
   items.push(
+    null,
+    {
+      label: "Copy",
+      action: () => copyWorkspaceRenderer(object.uid, renderer.uid),
+    },
     null,
     {
       label: "New Renderer...",
