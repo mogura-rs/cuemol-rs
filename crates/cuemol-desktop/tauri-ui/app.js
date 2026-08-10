@@ -6833,53 +6833,63 @@ function workspaceCameraContextItems(scene, camera = null) {
     if (snapshot.activeSceneUid === scene.uid) return true;
     return mutate("activate_scene", { sceneUid: scene.uid });
   };
-  const items = [
-    {
-      label: "New Camera...",
-      action: async () => {
-        if (!(await activate())) return;
-        const used = new Set(activeCameras().map((candidate) => candidate.name));
-        let index = 0;
-        while (used.has(`camera_${index}`)) index += 1;
-        const name = globalThis.prompt?.("Camera name", `camera_${index}`)?.trim();
-        if (name) await mutate("save_camera_view", { name });
-      },
+  const newCamera = {
+    label: "New Camera…",
+    action: async () => {
+      if (!(await activate())) return;
+      const used = new Set(activeCameras().map((candidate) => candidate.name));
+      let index = 0;
+      while (used.has(`camera_${index}`)) index += 1;
+      const name = globalThis.prompt?.("Camera name", `camera_${index}`)?.trim();
+      if (name) await mutate("save_camera_view", { name });
     },
+  };
+  const loadCamera = {
+    label: "Load…",
+    action: async () => {
+      if (!(await activate())) return;
+      await loadWorkspaceCameraFile(scene);
+    },
+  };
+  const items = [
+    { label: camera?.name || "Cameras", disabled: true },
+    null,
+    newCamera,
+  ];
+  if (!camera) {
+    if (workspaceCameraClipboardAvailable) {
+      items.push({ label: "Paste Camera", action: () => pasteWorkspaceCamera(scene) });
+    }
+    items.push(null, { label: "Camera file", children: [loadCamera] });
+    return items;
+  }
+
+  items.push(
+    null,
+    {
+      label: "Copy",
+      action: () => copyWorkspaceCamera(scene.uid, camera.name),
+    },
+  );
+  if (workspaceCameraClipboardAvailable) {
+    items.push({ label: "Paste Camera", action: () => pasteWorkspaceCamera(scene) });
+  }
+  items.push(
     {
       label: "Delete",
-      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         await mutate("destroy_camera", { name: camera.name });
       },
     },
-  ];
-  if (camera) {
-    items.push({
-      label: "Copy",
-      action: () => copyWorkspaceCamera(scene.uid, camera.name),
-    });
-  }
-  items.push({
-    label: "Paste",
-    disabled: !workspaceCameraClipboardAvailable,
-    action: () => pasteWorkspaceCamera(scene),
-  });
-  items.push(
     null,
     {
       label: "Camera file",
       children: [
-        {
-          label: "Load ...",
-          action: async () => {
-            if (!(await activate())) return;
-            await loadWorkspaceCameraFile(scene);
-          },
-        },
+        loadCamera,
         {
           label: "Reload",
-          disabled: !camera?.source,
+          disabled: !camera.source,
           action: async () => {
             if (!(await activate())) return;
             await mutateWithoutViewport("reload_camera_file", {
@@ -6890,15 +6900,13 @@ function workspaceCameraContextItems(scene, camera = null) {
         },
         {
           label: "Save",
-          disabled: !camera,
           action: async () => {
             if (!(await activate())) return;
             await saveWorkspaceCameraFile(scene, camera, false);
           },
         },
         {
-          label: "Save as...",
-          disabled: !camera,
+          label: "Save As…",
           action: async () => {
             if (!(await activate())) return;
             await saveWorkspaceCameraFile(scene, camera, true);
@@ -6909,7 +6917,6 @@ function workspaceCameraContextItems(scene, camera = null) {
     null,
     {
       label: "Save from view",
-      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         await mutateWithoutViewport("save_camera_view", { name: camera.name });
@@ -6917,7 +6924,6 @@ function workspaceCameraContextItems(scene, camera = null) {
     },
     {
       label: "Apply to view",
-      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         await mutate("load_camera_view", { name: camera.name });
@@ -6926,7 +6932,6 @@ function workspaceCameraContextItems(scene, camera = null) {
     null,
     {
       label: "Save from scene (with vis flags)",
-      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         await mutate("save_camera", { name: camera.name });
@@ -6934,15 +6939,13 @@ function workspaceCameraContextItems(scene, camera = null) {
     },
     {
       label: "Apply to scene (with vis flags)",
-      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         await mutate("load_camera", { name: camera.name });
       },
     },
     {
-      label: "Edit vis flags...",
-      disabled: !camera,
+      label: "Edit vis flags…",
       action: async () => {
         if (!(await activate())) return;
         await showCameraVisibilityEditor(scene, camera);
@@ -6950,10 +6953,9 @@ function workspaceCameraContextItems(scene, camera = null) {
     },
     {
       label: "Clear vis flags",
-      disabled: !camera || camera.visibilityCount === 0,
+      disabled: camera.visibilityCount === 0,
       action: async () => {
         if (!(await activate())) return;
-        if (!globalThis.confirm?.(`Clear visibility flags in ${camera.name}?`)) return;
         await mutateWithoutViewport("clear_camera_visibility", {
           sceneUid: scene.uid,
           name: camera.name,
@@ -6962,17 +6964,16 @@ function workspaceCameraContextItems(scene, camera = null) {
     },
     null,
     {
-      label: "Rename...",
-      disabled: !camera,
+      label: "Rename…",
       action: async () => {
         if (!(await activate())) return;
         selectedCameraName = camera.name;
         await showReferenceDialog("Camera Properties");
       },
     },
+    null,
     {
-      label: "Properties...",
-      disabled: !camera,
+      label: "Properties…",
       action: async () => {
         if (!(await activate())) return;
         selectedCameraName = camera.name;

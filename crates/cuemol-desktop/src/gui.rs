@@ -895,7 +895,6 @@ struct GuiApplication {
     workspace_aux_selection: Option<WorkspaceAuxSelection>,
     editing_saved_camera: Option<(cuemol_core::Uid, String)>,
     camera_visibility_draft: Option<NativeCameraVisibilityDraft>,
-    pending_camera_visibility_clear: Option<(cuemol_core::Uid, String)>,
     style_properties_draft: Option<NativeStyleProperties>,
     renderer_style_create_draft: Option<NativeRendererStyleCreate>,
     renderer_style_edit_draft: Option<NativeRendererStyleEdit>,
@@ -2881,7 +2880,6 @@ impl GuiApplication {
             workspace_aux_selection: None,
             editing_saved_camera: None,
             camera_visibility_draft: None,
-            pending_camera_visibility_clear: None,
             style_properties_draft: None,
             renderer_style_create_draft: None,
             renderer_style_edit_draft: None,
@@ -4388,29 +4386,24 @@ impl GuiApplication {
                     self.workspace_aux_selection = Some(root_selection);
                 }
                 root_response.context_menu(|ui| {
-                    if ui.button("New Camera...").clicked() {
+                    ui.weak("Cameras");
+                    ui.separator();
+                    if ui.button("New Camera…").clicked() {
                         self.open_new_camera_properties(scene.uid, camera);
                         ui.close();
                     }
-                    if ui
-                        .add_enabled(
-                            self.workspace_camera_clipboard.is_some(),
-                            egui::Button::new("Paste"),
-                        )
-                        .clicked()
+                    if self.workspace_camera_clipboard.is_some()
+                        && ui.button("Paste Camera").clicked()
                     {
                         self.paste_workspace_camera_clipboard(scene.uid);
                         ui.close();
                     }
                     ui.separator();
                     ui.menu_button("Camera file", |ui| {
-                        if ui.button("Load ...").clicked() {
+                        if ui.button("Load…").clicked() {
                             self.choose_load_workspace_camera_file(scene.uid, camera);
                             ui.close();
                         }
-                        ui.add_enabled(false, egui::Button::new("Reload"));
-                        ui.add_enabled(false, egui::Button::new("Save"));
-                        ui.add_enabled(false, egui::Button::new("Save as..."));
                     });
                 });
                 ui.indent(format!("camera-root-{}", scene.uid.get()), |ui| {
@@ -4439,31 +4432,30 @@ impl GuiApplication {
                             self.load_workspace_camera(selection, camera);
                         }
                         response.context_menu(|ui| {
-                            if ui.button("New Camera...").clicked() {
+                            ui.weak(&summary.name);
+                            ui.separator();
+                            if ui.button("New Camera…").clicked() {
                                 self.open_new_camera_properties(scene.uid, camera);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Copy").clicked() {
+                                self.copy_workspace_camera_to_clipboard(scene.uid, &summary.name);
+                                ui.close();
+                            }
+                            if self.workspace_camera_clipboard.is_some()
+                                && ui.button("Paste Camera").clicked()
+                            {
+                                self.paste_workspace_camera_clipboard(scene.uid);
                                 ui.close();
                             }
                             if ui.button("Delete").clicked() {
                                 self.delete_aux_selection(selection);
                                 ui.close();
                             }
-                            if ui.button("Copy").clicked() {
-                                self.copy_workspace_camera_to_clipboard(scene.uid, &summary.name);
-                                ui.close();
-                            }
-                            if ui
-                                .add_enabled(
-                                    self.workspace_camera_clipboard.is_some(),
-                                    egui::Button::new("Paste"),
-                                )
-                                .clicked()
-                            {
-                                self.paste_workspace_camera_clipboard(scene.uid);
-                                ui.close();
-                            }
                             ui.separator();
                             ui.menu_button("Camera file", |ui| {
-                                if ui.button("Load ...").clicked() {
+                                if ui.button("Load…").clicked() {
                                     self.choose_load_workspace_camera_file(scene.uid, camera);
                                     ui.close();
                                 }
@@ -4481,7 +4473,7 @@ impl GuiApplication {
                                     self.choose_save_workspace_camera_file(selection, false);
                                     ui.close();
                                 }
-                                if ui.button("Save as...").clicked() {
+                                if ui.button("Save As…").clicked() {
                                     self.choose_save_workspace_camera_file(selection, true);
                                     ui.close();
                                 }
@@ -4504,7 +4496,7 @@ impl GuiApplication {
                                 self.load_workspace_camera(selection, camera);
                                 ui.close();
                             }
-                            if ui.button("Edit vis flags...").clicked() {
+                            if ui.button("Edit vis flags…").clicked() {
                                 self.open_camera_visibility_editor(selection);
                                 ui.close();
                             }
@@ -4515,16 +4507,16 @@ impl GuiApplication {
                                 )
                                 .clicked()
                             {
-                                self.pending_camera_visibility_clear =
-                                    Some((summary.scene_uid, summary.name.clone()));
+                                self.clear_camera_visibility(summary.scene_uid, &summary.name);
                                 ui.close();
                             }
                             ui.separator();
-                            if ui.button("Rename...").clicked() {
+                            if ui.button("Rename…").clicked() {
                                 self.open_camera_properties(selection);
                                 ui.close();
                             }
-                            if ui.button("Properties...").clicked() {
+                            ui.separator();
+                            if ui.button("Properties…").clicked() {
                                 self.open_camera_properties(selection);
                                 ui.close();
                             }
@@ -10828,7 +10820,6 @@ impl GuiApplication {
         self.scene_props_dialog(ctx);
         self.view_props_dialog(ctx, camera);
         self.camera_visibility_dialog(ctx);
-        self.camera_visibility_clear_dialog(ctx);
         self.style_props_dialog(ctx);
         self.renderer_style_create_dialog(ctx);
         self.renderer_style_edit_dialog(ctx);
@@ -10960,36 +10951,6 @@ impl GuiApplication {
             }
         } else if !cancel && open {
             self.camera_visibility_draft = Some(draft);
-        }
-    }
-
-    fn camera_visibility_clear_dialog(&mut self, ctx: &egui::Context) {
-        let Some((scene_uid, name)) = self.pending_camera_visibility_clear.clone() else {
-            return;
-        };
-        let mut open = true;
-        let mut clear = false;
-        let mut cancel = false;
-        egui::Window::new("Clear visibility flags?")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label(format!("Clear visibility flags in {name}?"));
-                ui.horizontal(|ui| {
-                    if ui.button("Clear").clicked() {
-                        clear = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
-            });
-        if clear {
-            self.pending_camera_visibility_clear = None;
-            self.clear_camera_visibility(scene_uid, &name);
-        } else if cancel || !open {
-            self.pending_camera_visibility_clear = None;
         }
     }
 

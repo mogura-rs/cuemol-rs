@@ -973,7 +973,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("paste_workspace_style"));
     assert!(JS.contains("workspaceSceneContextItems"));
     assert!(JS.contains("workspaceCameraContextItems"));
-    assert!(JS.contains("label: \"New Camera...\""));
+    assert!(JS.contains("label: \"New Camera…\""));
     assert!(JS.contains("label: \"Camera file\""));
     assert!(JS.contains("function loadWorkspaceCameraFile(scene)"));
     assert!(JS.contains("function saveWorkspaceCameraFile(scene, camera, saveAs)"));
@@ -1037,7 +1037,7 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("\"set_camera_visibility\""));
     assert!(JS.contains("\"clear_camera_visibility\""));
     assert!(JS.contains("Edit visibility flags"));
-    assert!(JS.contains("label: \"Edit vis flags...\""));
+    assert!(JS.contains("label: \"Edit vis flags…\""));
     assert!(JS.contains("label: \"Clear vis flags\""));
     assert!(JS.contains("label: \"Save from view\""));
     assert!(JS.contains("label: \"Apply to view\""));
@@ -1060,7 +1060,7 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     let native_editor = NATIVE_GUI_RS
         .split("fn camera_visibility_dialog(&mut self, ctx: &egui::Context)")
         .nth(1)
-        .and_then(|source| source.split("fn camera_visibility_clear_dialog").next())
+        .and_then(|source| source.split("fn style_paste_confirmation_dialog").next())
         .expect("native camera visibility editor");
     assert!(native_editor.contains("Edit visibility flags: {}"));
     assert!(native_editor.contains("Object / Renderer"));
@@ -1068,6 +1068,42 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(native_editor.contains("ui.weak(\"(no scene elements)\")"));
     assert!(!native_editor.contains("ui.button(\"Apply\")"));
     assert!(!native_editor.contains("entry.visible = false"));
+
+    let tauri_camera_menu = JS
+        .split("function workspaceCameraContextItems(scene, camera = null)")
+        .nth(1)
+        .and_then(|source| source.split("function workspaceStyleContextItems").next())
+        .expect("Tauri camera context menu");
+    assert!(tauri_camera_menu.contains("camera?.name || \"Cameras\""));
+    assert!(tauri_camera_menu.contains("label: \"Paste Camera\""));
+    assert!(tauri_camera_menu.contains("label: \"Load…\""));
+    assert!(tauri_camera_menu.contains("label: \"Save As…\""));
+    let tauri_camera_root = tauri_camera_menu
+        .split("if (!camera) {")
+        .nth(1)
+        .and_then(|source| source.split("return items;").next())
+        .expect("Tauri camera-root context menu");
+    assert!(tauri_camera_root.contains("children: [loadCamera]"));
+    assert!(!tauri_camera_root.contains("label: \"Reload\""));
+    let clear_action = tauri_camera_menu
+        .split("label: \"Clear vis flags\"")
+        .nth(1)
+        .and_then(|source| source.split("label: \"Rename…\"").next())
+        .expect("Tauri clear camera visibility action");
+    assert!(clear_action.contains("mutateWithoutViewport(\"clear_camera_visibility\""));
+    assert!(!clear_action.contains("globalThis.confirm"));
+    assert!(!NATIVE_GUI_RS.contains("pending_camera_visibility_clear"));
+    assert!(!NATIVE_GUI_RS.contains("fn camera_visibility_clear_dialog"));
+
+    let native_camera_root = NATIVE_GUI_RS
+        .split("let root_selection = WorkspaceAuxSelection::CameraRoot")
+        .nth(1)
+        .and_then(|source| source.split("ui.indent(format!(\"camera-root-").next())
+        .expect("native camera-root context menu");
+    assert!(native_camera_root.contains("ui.weak(\"Cameras\")"));
+    assert!(native_camera_root.contains("ui.button(\"Paste Camera\")"));
+    assert!(native_camera_root.contains("ui.button(\"Load…\")"));
+    assert!(!native_camera_root.contains("Button::new(\"Reload\")"));
 }
 
 #[test]
