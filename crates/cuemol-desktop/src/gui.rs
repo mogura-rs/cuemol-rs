@@ -7,7 +7,7 @@ use crate::{
 use ab_glyph::{point, Font, FontRef, ScaleFont};
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::Rgba8;
-use cuemol_qsys::StereoMode;
+use cuemol_qsys::{StereoMode, View};
 use cuemol_render::{
     tessellate_snapshot, MeshVertex, PovSceneExporter, RenderAtom, RenderBond, RenderSceneSnapshot,
     UmbreonDenoiseMode, UmbreonSceneExporter,
@@ -68,6 +68,8 @@ const MOUSE_PRESETS: &[(&str, &str)] = &[
     ("TrackpadViewInConf", "Trackpad"),
 ];
 const RENDERER_TYPES: &[&str] = crate::MOLECULE_RENDERER_TYPES;
+const DENSITY_RENDERER_TYPES: &[&str] = &["contour", "isosurf", "gpu_mapvol"];
+const SURFACE_RENDERER_TYPES: &[&str] = &["molsurf"];
 const LEGACY_MENU_SURFACES: &[&str] = &[
     "About CueMol2",
     "Preferences...",
@@ -531,7 +533,7 @@ struct GuiApplication {
     show_chain_dialog: bool,
     show_residue_dialog: bool,
     show_renderer_dialog: bool,
-    new_renderer_target: Option<cuemol_core::Uid>,
+    new_renderer_owner: Option<NativePropertyObject>,
     new_renderer_type: String,
     new_renderer_name: String,
     chain_edit_value: String,
@@ -1217,6 +1219,7 @@ impl NativeRendererProperties {
         edge_color: String,
         mut specific: std::collections::BTreeMap<String, String>,
     ) -> Self {
+        strip_native_renderer_common_specific(&mut specific);
         for (key, fallback) in native_renderer_specific_defaults(&renderer_type) {
             specific
                 .entry((*key).to_string())
@@ -1357,6 +1360,16 @@ fn workspace_linked_text(source: &str, source_type: &str) -> String {
         source.to_string()
     } else {
         format!("{source}  ({source_type})")
+    }
+}
+
+fn strip_native_renderer_common_specific(
+    specific: &mut std::collections::BTreeMap<String, String>,
+) {
+    for key in [
+        "name", "sel", "visible", "locked", "material", "alpha", "egtype", "eglinew", "egcolor",
+    ] {
+        specific.remove(key);
     }
 }
 
@@ -2058,7 +2071,7 @@ impl GuiApplication {
             show_chain_dialog: false,
             show_residue_dialog: false,
             show_renderer_dialog: false,
-            new_renderer_target: None,
+            new_renderer_owner: None,
             new_renderer_type: "simple".to_string(),
             new_renderer_name: "simple".to_string(),
             chain_edit_value: "A".to_string(),
@@ -3228,14 +3241,23 @@ impl GuiApplication {
         }
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button("Zoom").on_hover_text("Zoom at scene").clicked() {
-                camera.fit_snapshot(&self.snapshot);
+            let zoom_enabled = self.selected_object.is_some()
+                || matches!(
+                    self.workspace_aux_selection,
+                    Some(WorkspaceAuxSelection::DensityMap { .. })
+                );
+            if ui
+                .add_enabled(zoom_enabled, egui::Button::new("Zoom"))
+                .on_hover_text("Zoom at selected item")
+                .clicked()
+            {
+                self.zoom_workspace_selection(camera);
             }
             if ui.button("Add").on_hover_text("Add renderer").clicked() {
                 if let Some(object_uid) = self.selected_object {
                     self.open_renderer_dialog(object_uid);
                 } else if let Some(selection) = self.workspace_aux_selection {
-                    self.add_aux_renderer(selection);
+                    self.open_aux_renderer_dialog(selection);
                 } else if let Some(object_uid) = self
                     .state
                     .active_object_summaries()
@@ -3284,6 +3306,53 @@ impl GuiApplication {
         self.sync_active_scene_properties();
         self.rebuild_snapshot();
         camera.fit_snapshot(&self.snapshot);
+    }
+
+    fn zoom_workspace_selection(&mut self, camera: &mut CameraController) {
+        match self.fit_workspace_selection(camera) {
+            Ok(true) => self.set_status("View fitted"),
+            Ok(false) => self.set_status("Selected item cannot be fitted"),
+            Err(error) => self.set_status(format!("Zoom error: {error}")),
+        }
+    }
+
+    fn fit_workspace_selection(
+        &self,
+        camera: &mut CameraController,
+    ) -> std::result::Result<bool, String> {
+        let scene_uid = self
+            .state
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        let mut view = View::new(cuemol_core::Uid::new(1), scene_uid);
+        view.set_camera(&camera.to_qsys_camera("Workspace fit"));
+        let viewport = self
+            .viewport_rect
+            .map(|rect| rect.size())
+            .unwrap_or_else(|| egui::vec2(800.0, 600.0));
+        view.set_view_size(
+            viewport.x.max(1.0).round() as u32,
+            viewport.y.max(1.0).round() as u32,
+        );
+        let fitted = if let Some(object_uid) = self.selected_object {
+            self.state
+                .fit_molecule_view(object_uid, self.selected_renderer, &mut view)
+                .map_err(|error| error.to_string())?
+        } else {
+            match self.workspace_aux_selection {
+                Some(WorkspaceAuxSelection::DensityMap { map_uid, .. }) => {
+                    self.state
+                        .fit_density_map_view(map_uid, &mut view)
+                        .map_err(|error| error.to_string())?;
+                    true
+                }
+                Some(WorkspaceAuxSelection::Surface { .. }) | None => false,
+            }
+        };
+        if fitted {
+            *camera = CameraController::from_qsys_camera(&view.camera());
+        }
+        Ok(fitted)
     }
 
     /// MolStruct section — the molecule's chain → residue → atom hierarchy
@@ -9976,13 +10045,23 @@ impl GuiApplication {
             .open(&mut open)
             .collapsible(false)
             .show(ctx, |ui| {
-                if let Some(uid) = self.new_renderer_target {
-                    ui.monospace(format!("object uid: {}", uid.get()));
+                if let Some(owner) = self.new_renderer_owner {
+                    let (kind, uid) = match owner {
+                        NativePropertyObject::Molecule(uid) => ("molecule", uid),
+                        NativePropertyObject::DensityMap(uid) => ("density map", uid),
+                        NativePropertyObject::Surface(uid) => ("surface", uid),
+                    };
+                    ui.monospace(format!("{kind} uid: {}", uid.get()));
                 }
+                let renderer_types = match self.new_renderer_owner {
+                    Some(NativePropertyObject::DensityMap(_)) => DENSITY_RENDERER_TYPES,
+                    Some(NativePropertyObject::Surface(_)) => SURFACE_RENDERER_TYPES,
+                    Some(NativePropertyObject::Molecule(_)) | None => RENDERER_TYPES,
+                };
                 egui::ComboBox::from_label("Type")
                     .selected_text(renderer_type_label(&self.new_renderer_type))
                     .show_ui(ui, |ui| {
-                        for renderer_type in RENDERER_TYPES {
+                        for renderer_type in renderer_types {
                             ui.selectable_value(
                                 &mut self.new_renderer_type,
                                 (*renderer_type).to_string(),
@@ -10531,8 +10610,8 @@ impl GuiApplication {
     }
 
     fn open_renderer_dialog(&mut self, object_uid: cuemol_core::Uid) {
-        self.new_renderer_target = Some(object_uid);
-        if self.new_renderer_type.trim().is_empty() {
+        self.new_renderer_owner = Some(NativePropertyObject::Molecule(object_uid));
+        if !RENDERER_TYPES.contains(&self.new_renderer_type.as_str()) {
             self.new_renderer_type = "simple".to_string();
         }
         self.new_renderer_name = self
@@ -10542,32 +10621,176 @@ impl GuiApplication {
         self.show_renderer_dialog = true;
     }
 
+    fn open_aux_renderer_dialog(&mut self, selection: WorkspaceAuxSelection) {
+        match selection {
+            WorkspaceAuxSelection::DensityMap { map_uid, .. } => {
+                self.new_renderer_owner = Some(NativePropertyObject::DensityMap(map_uid));
+                if !DENSITY_RENDERER_TYPES.contains(&self.new_renderer_type.as_str()) {
+                    self.new_renderer_type = "contour".to_string();
+                }
+                let serial = self
+                    .state
+                    .density_map_summary(map_uid)
+                    .map(|map| {
+                        map.renderers
+                            .iter()
+                            .filter(|renderer| renderer.renderer_type == self.new_renderer_type)
+                            .count()
+                            + 1
+                    })
+                    .unwrap_or(1);
+                self.new_renderer_name = format!("{} {serial}", self.new_renderer_type);
+            }
+            WorkspaceAuxSelection::Surface { surface_uid, .. } => {
+                self.new_renderer_owner = Some(NativePropertyObject::Surface(surface_uid));
+                self.new_renderer_type = "molsurf".to_string();
+                let serial = self
+                    .state
+                    .surface_summary(surface_uid)
+                    .map(|surface| surface.renderers.len() + 1)
+                    .unwrap_or(1);
+                self.new_renderer_name = format!("molsurf {serial}");
+            }
+        }
+        self.show_renderer_dialog = true;
+    }
+
     fn create_renderer_from_dialog(&mut self) {
-        let Some(object_uid) = self.new_renderer_target else {
+        let Some(owner) = self.new_renderer_owner else {
             self.set_status("No target object selected");
             return;
         };
         let renderer_type = self.new_renderer_type.trim().to_string();
         let renderer_name = self.new_renderer_name.trim().to_string();
-        if renderer_type.is_empty() || renderer_name.is_empty() {
+        if renderer_type.is_empty() || renderer_name.is_empty() || renderer_name.contains(':') {
             self.set_status("Renderer type and name are required");
             return;
         }
         let undo = self.capture_undo();
-        match self
-            .state
-            .new_renderer_in_active_scene(object_uid, renderer_type, renderer_name)
-        {
-            Ok(result) => {
+        let created = match owner {
+            NativePropertyObject::Molecule(object_uid) => self
+                .state
+                .new_renderer_in_active_scene(object_uid, renderer_type, renderer_name)
+                .map(|result| result.result_renderer),
+            NativePropertyObject::DensityMap(map_uid) => (|| {
+                if !DENSITY_RENDERER_TYPES.contains(&renderer_type.as_str()) {
+                    return Err(CueMolError::invalid_argument(format!(
+                        "unsupported density renderer: {renderer_type}"
+                    )));
+                }
+                let renderer_uid = self.state.add_density_renderer(map_uid, &renderer_type)?;
+                let renderer = self
+                    .state
+                    .density_map_summary(map_uid)
+                    .and_then(|map| {
+                        map.renderers
+                            .into_iter()
+                            .find(|renderer| renderer.uid == renderer_uid)
+                    })
+                    .ok_or_else(|| {
+                        CueMolError::NotFound(format!("renderer {}", renderer_uid.get()))
+                    })?;
+                let mut specific = renderer.specific;
+                strip_native_renderer_common_specific(&mut specific);
+                self.state.set_density_renderer_properties(
+                    map_uid,
+                    renderer_uid,
+                    renderer_name,
+                    renderer.visible,
+                    renderer.locked,
+                    renderer.material,
+                    renderer.alpha,
+                    renderer.edge_type,
+                    renderer.edge_width,
+                    renderer.edge_color,
+                    &specific,
+                )?;
+                Ok(renderer_uid)
+            })(),
+            NativePropertyObject::Surface(surface_uid) => (|| {
+                if renderer_type != "molsurf" {
+                    return Err(CueMolError::invalid_argument(format!(
+                        "unsupported surface renderer: {renderer_type}"
+                    )));
+                }
+                let renderer_uid = self.state.add_surface_renderer(surface_uid)?;
+                let renderer = self
+                    .state
+                    .surface_summary(surface_uid)
+                    .and_then(|surface| {
+                        surface
+                            .renderers
+                            .into_iter()
+                            .find(|renderer| renderer.uid == renderer_uid)
+                    })
+                    .ok_or_else(|| {
+                        CueMolError::NotFound(format!("renderer {}", renderer_uid.get()))
+                    })?;
+                let mut specific = renderer.specific;
+                strip_native_renderer_common_specific(&mut specific);
+                self.state.set_surface_renderer_properties(
+                    surface_uid,
+                    renderer_uid,
+                    renderer_name,
+                    &renderer.selection,
+                    renderer.visible,
+                    renderer.locked,
+                    renderer.material,
+                    renderer.alpha,
+                    renderer.edge_type,
+                    renderer.edge_width,
+                    renderer.edge_color,
+                    &specific,
+                )?;
+                Ok(renderer_uid)
+            })(),
+        };
+        match created {
+            Ok(renderer_uid) => {
                 self.push_undo_snapshot(undo);
-                self.selected_object = Some(object_uid);
-                self.selected_renderer = Some(result.result_renderer);
-                self.workspace_aux_selection = None;
+                match owner {
+                    NativePropertyObject::Molecule(object_uid) => {
+                        self.selected_object = Some(object_uid);
+                        self.selected_renderer = Some(renderer_uid);
+                        self.workspace_aux_selection = None;
+                    }
+                    NativePropertyObject::DensityMap(map_uid) => {
+                        let scene_uid = self
+                            .state
+                            .density_map_summary(map_uid)
+                            .map(|map| map.scene_uid)
+                            .expect("created density renderer must retain its map");
+                        self.selected_object = None;
+                        self.selected_renderer = None;
+                        self.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
+                            scene_uid,
+                            map_uid,
+                            renderer_uid: Some(renderer_uid),
+                        });
+                    }
+                    NativePropertyObject::Surface(surface_uid) => {
+                        let scene_uid = self
+                            .state
+                            .surface_summary(surface_uid)
+                            .map(|surface| surface.scene_uid)
+                            .expect("created surface renderer must retain its surface");
+                        self.selected_object = None;
+                        self.selected_renderer = None;
+                        self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
+                            scene_uid,
+                            surface_uid,
+                            renderer_uid: Some(renderer_uid),
+                        });
+                    }
+                }
                 self.show_renderer_dialog = false;
                 self.rebuild_snapshot();
                 self.set_status("Renderer added");
             }
-            Err(error) => self.set_error(error),
+            Err(error) => {
+                self.state = undo.state;
+                self.set_error(error);
+            }
         }
     }
 
@@ -10682,43 +10905,6 @@ impl GuiApplication {
                 }
                 self.rebuild_snapshot();
                 self.set_status(format!("Surface renderer visibility: {visible}"));
-            }
-            Err(error) => self.set_error(error),
-        }
-    }
-
-    fn add_aux_renderer(&mut self, selection: WorkspaceAuxSelection) {
-        let undo = self.capture_undo();
-        let result = match selection {
-            WorkspaceAuxSelection::DensityMap {
-                scene_uid, map_uid, ..
-            } => self
-                .state
-                .add_density_renderer(map_uid, "contour")
-                .map(|renderer_uid| WorkspaceAuxSelection::DensityMap {
-                    scene_uid,
-                    map_uid,
-                    renderer_uid: Some(renderer_uid),
-                }),
-            WorkspaceAuxSelection::Surface {
-                scene_uid,
-                surface_uid,
-                ..
-            } => self
-                .state
-                .add_surface_renderer(surface_uid)
-                .map(|renderer_uid| WorkspaceAuxSelection::Surface {
-                    scene_uid,
-                    surface_uid,
-                    renderer_uid: Some(renderer_uid),
-                }),
-        };
-        match result {
-            Ok(new_selection) => {
-                self.push_undo_snapshot(undo);
-                self.workspace_aux_selection = Some(new_selection);
-                self.rebuild_snapshot();
-                self.set_status("Renderer added");
             }
             Err(error) => self.set_error(error),
         }
@@ -15870,12 +16056,22 @@ mod tests {
         let map_uid = app
             .state
             .add_density_map(scene_uid, "density map", synthetic_gaussian_map());
-        let renderer_uid = app.state.add_density_renderer(map_uid, "contour").unwrap();
         app.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
             scene_uid,
             map_uid,
-            renderer_uid: Some(renderer_uid),
+            renderer_uid: None,
         });
+        app.open_aux_renderer_dialog(app.workspace_aux_selection.unwrap());
+        app.new_renderer_type = "isosurf".to_string();
+        app.new_renderer_name = "map surface".to_string();
+        app.create_renderer_from_dialog();
+        let renderer_uid = match app.workspace_aux_selection.unwrap() {
+            WorkspaceAuxSelection::DensityMap {
+                renderer_uid: Some(renderer_uid),
+                ..
+            } => renderer_uid,
+            _ => panic!("new density renderer must be selected"),
+        };
 
         let mut object = NativeObjectProperties::from_density_state(&app.state, map_uid).unwrap();
         object.name = "edited density".to_string();
@@ -15994,11 +16190,18 @@ mod tests {
         assert_eq!(surface.renderers[0].specific["drawmode"], "line");
         assert_eq!(surface.renderers[0].specific["colormode"], "multigrad");
 
-        app.add_aux_renderer(WorkspaceAuxSelection::Surface {
+        app.open_aux_renderer_dialog(WorkspaceAuxSelection::Surface {
             scene_uid,
             surface_uid,
             renderer_uid: None,
         });
+        assert_eq!(
+            app.new_renderer_owner,
+            Some(NativePropertyObject::Surface(surface_uid))
+        );
+        assert_eq!(app.new_renderer_type, "molsurf");
+        app.new_renderer_name = "second surface".to_string();
+        app.create_renderer_from_dialog();
         assert_eq!(
             app.state
                 .surface_summary(surface_uid)
@@ -16048,6 +16251,69 @@ mod tests {
         assert!(qsc.contains("name=\"surface mesh\""));
         assert!(qsc.contains("colormode=\"multigrad\""));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn native_workspace_zoom_fits_renderer_object_and_density_map() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        app.viewport_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 400.0),
+        ));
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      2  CA  GLY A   2      10.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      3  CA  GLY B   1     100.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", molecule);
+        let renderer_uid = {
+            let object = app
+                .state
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .unwrap();
+            let renderer_uid = object.add_renderer("simple", "chain A");
+            object
+                .renderer_mut(renderer_uid)
+                .unwrap()
+                .set_selection(cuemol_molstr::parse_selector("chain A").unwrap());
+            renderer_uid
+        };
+
+        let mut camera = CameraController::default();
+        app.selected_object = Some(object_uid);
+        app.selected_renderer = Some(renderer_uid);
+        assert!(app.fit_workspace_selection(&mut camera).unwrap());
+        assert!((camera.target.x - 5.0).abs() < 1.0e-5);
+        assert!((camera.ortho_scale - 1000.0 / 7.0).abs() < 1.0e-4);
+
+        app.selected_renderer = None;
+        assert!(app.fit_workspace_selection(&mut camera).unwrap());
+        assert!((camera.target.x - 50.0).abs() < 1.0e-5);
+        assert!((camera.ortho_scale - 1000.0 / 70.0).abs() < 1.0e-4);
+
+        let mut map = cuemol_xtal::DensityMap::new();
+        map.set_map_byte_array(&[0, 255], [2, 1, 1], 0.0, 1.0, 0.5, 0.5);
+        map.set_map_params([0, 0, 0], [2, 1, 1]);
+        map.set_xtal_params(20.0, 10.0, 10.0, 90.0, 90.0, 90.0);
+        let map_uid = app.state.add_density_map(scene_uid, "density", map);
+        app.selected_object = None;
+        app.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
+            scene_uid,
+            map_uid,
+            renderer_uid: None,
+        });
+        assert!(app.fit_workspace_selection(&mut camera).unwrap());
+        assert!((camera.target.x - 10.0).abs() < 1.0e-5);
+        assert!((camera.target.y - 5.0).abs() < 1.0e-5);
+        assert!((camera.ortho_scale - 100.0).abs() < 1.0e-4);
     }
 
     #[test]
