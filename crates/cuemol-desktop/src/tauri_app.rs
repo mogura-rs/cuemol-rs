@@ -242,6 +242,39 @@ struct StructObjectDto {
     chains: Vec<StructChainDto>,
 }
 
+fn struct_object_dto(object: crate::GuiStructObject) -> StructObjectDto {
+    StructObjectDto {
+        object_uid: object.object_uid.get(),
+        object_name: object.object_name,
+        chains: object
+            .chains
+            .into_iter()
+            .map(|chain| StructChainDto {
+                chain_id: chain.chain_id,
+                residues: chain
+                    .residues
+                    .into_iter()
+                    .map(|residue| StructResidueDto {
+                        res_name: residue.res_name,
+                        res_id: residue.res_id,
+                        ins_code: residue.ins_code,
+                        atoms: residue
+                            .atoms
+                            .into_iter()
+                            .map(|atom| StructAtomDto {
+                                atom_index: atom.atom_index,
+                                serial: atom.serial,
+                                name: atom.name,
+                                element: atom.element,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SequenceResidueDto {
@@ -406,6 +439,7 @@ struct AppSnapshot {
 #[serde(rename_all = "camelCase")]
 struct MoleculeDetailsDto {
     structure_key: String,
+    structure_object_uid: Option<u64>,
     sequence_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     structure: Option<Vec<StructObjectDto>>,
@@ -1571,45 +1605,28 @@ impl AppModel {
     fn molecule_details(
         &self,
         known_structure_key: &str,
+        known_structure_object_uid: Option<u64>,
         known_sequence_key: &str,
         include_sequence: bool,
+        object_uid: Option<u64>,
     ) -> MoleculeDetailsDto {
         let structure_key = self.molecule_structure_key();
-        let structure = (known_structure_key != structure_key).then(|| {
-            self.desktop
-                .active_structure_tree()
-                .into_iter()
-                .map(|object| StructObjectDto {
-                    object_uid: object.object_uid.get(),
-                    object_name: object.object_name,
-                    chains: object
-                        .chains
-                        .into_iter()
-                        .map(|chain| StructChainDto {
-                            chain_id: chain.chain_id,
-                            residues: chain
-                                .residues
-                                .into_iter()
-                                .map(|residue| StructResidueDto {
-                                    res_name: residue.res_name,
-                                    res_id: residue.res_id,
-                                    ins_code: residue.ins_code,
-                                    atoms: residue
-                                        .atoms
-                                        .into_iter()
-                                        .map(|atom| StructAtomDto {
-                                            atom_index: atom.atom_index,
-                                            serial: atom.serial,
-                                            name: atom.name,
-                                            element: atom.element,
-                                        })
-                                        .collect(),
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                })
-                .collect()
+        let structure_changed = known_structure_key != structure_key;
+        let object_changed = object_uid.is_some() && known_structure_object_uid != object_uid;
+        let structure = (structure_changed || object_changed).then(|| {
+            if let Some(object_uid) = object_uid {
+                self.desktop
+                    .active_structure_tree_for_object(Uid::new(object_uid))
+                    .into_iter()
+                    .map(struct_object_dto)
+                    .collect()
+            } else {
+                self.desktop
+                    .active_structure_tree()
+                    .into_iter()
+                    .map(struct_object_dto)
+                    .collect()
+            }
         });
         let sequence_key = format!("{structure_key}|{}", self.selection);
         let sequence = (include_sequence && known_sequence_key != sequence_key).then(|| {
@@ -1637,6 +1654,7 @@ impl AppModel {
         MoleculeDetailsDto {
             sequence_key,
             structure_key,
+            structure_object_uid: object_uid,
             structure,
             sequence,
         }
@@ -5029,8 +5047,10 @@ enum ModelRequest {
     GetSnapshot,
     GetMoleculeDetails {
         structure_key: String,
+        structure_object_uid: Option<u64>,
         sequence_key: String,
         include_sequence: bool,
+        object_uid: Option<u64>,
     },
     GetInitialState {
         width: u32,
@@ -6267,10 +6287,18 @@ fn handle_model_request(
         ModelRequest::GetSnapshot => Ok(ModelResponse::Snapshot(Box::new(model.snapshot()))),
         ModelRequest::GetMoleculeDetails {
             structure_key,
+            structure_object_uid,
             sequence_key,
             include_sequence,
+            object_uid,
         } => Ok(ModelResponse::MoleculeDetails(Box::new(
-            model.molecule_details(&structure_key, &sequence_key, include_sequence),
+            model.molecule_details(
+                &structure_key,
+                structure_object_uid,
+                &sequence_key,
+                include_sequence,
+                object_uid,
+            ),
         ))),
         ModelRequest::GetInitialState { width, height } => {
             let viewport = model.viewport_metadata(width, height);
@@ -8104,16 +8132,20 @@ fn get_snapshot(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 #[tauri::command]
 fn get_molecule_details(
     structure_key: String,
+    structure_object_uid: Option<u64>,
     sequence_key: String,
     include_sequence: bool,
+    object_uid: Option<u64>,
     state: State<'_, ManagedState>,
 ) -> Result<MoleculeDetailsDto, String> {
     molecule_details_response(request_model(
         &state,
         ModelRequest::GetMoleculeDetails {
             structure_key,
+            structure_object_uid,
             sequence_key,
             include_sequence,
+            object_uid,
         },
     )?)
 }
@@ -10054,6 +10086,19 @@ mod tests {
     #[test]
     fn initial_state_combines_snapshot_and_viewport_without_starting_the_gpu() {
         let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("initial", cuemol_molstr::MolCoord::new());
+        model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("deferred", cuemol_molstr::MolCoord::new());
         let response = handle_model_request(
             &mut model,
             ModelRequest::GetInitialState {
@@ -10070,29 +10115,53 @@ mod tests {
         assert!(initial.viewport.image.is_none());
         assert!(!initial.startup_paths_pending);
         assert_eq!(initial.snapshot.scenes.len(), 1);
+        assert_eq!(initial.snapshot.objects.len(), 2);
         assert!(!initial.snapshot.structure_key.is_empty());
         assert!(!initial.snapshot.sequence_key.is_empty());
+        let object_uid = initial.snapshot.objects.first().map(|object| object.uid);
         let ModelResponse::MoleculeDetails(details) = handle_model_request(
             &mut model,
             ModelRequest::GetMoleculeDetails {
                 structure_key: String::new(),
+                structure_object_uid: None,
                 sequence_key: String::new(),
                 include_sequence: false,
+                object_uid,
             },
         )
         .unwrap() else {
             panic!("expected molecule details");
         };
         assert_eq!(details.structure_key, initial.snapshot.structure_key);
+        assert_eq!(details.structure_object_uid, object_uid);
         assert_eq!(details.sequence_key, initial.snapshot.sequence_key);
-        assert!(details.structure.is_some());
+        assert_eq!(details.structure.as_ref().map(Vec::len), Some(1));
         assert!(details.sequence.is_none());
+        let second_uid = Some(initial.snapshot.objects[1].uid);
+        let ModelResponse::MoleculeDetails(second) = handle_model_request(
+            &mut model,
+            ModelRequest::GetMoleculeDetails {
+                structure_key: initial.snapshot.structure_key.clone(),
+                structure_object_uid: object_uid,
+                sequence_key: String::new(),
+                include_sequence: false,
+                object_uid: second_uid,
+            },
+        )
+        .unwrap() else {
+            panic!("expected object-scoped molecule details");
+        };
+        assert_eq!(second.structure_object_uid, second_uid);
+        assert_eq!(second.structure.as_ref().map(Vec::len), Some(1));
+        assert_eq!(second.structure.unwrap()[0].object_name, "deferred");
         let ModelResponse::MoleculeDetails(cached) = handle_model_request(
             &mut model,
             ModelRequest::GetMoleculeDetails {
                 structure_key: initial.snapshot.structure_key.clone(),
+                structure_object_uid: object_uid,
                 sequence_key: String::new(),
                 include_sequence: true,
+                object_uid,
             },
         )
         .unwrap() else {
@@ -10104,8 +10173,10 @@ mod tests {
             &mut model,
             ModelRequest::GetMoleculeDetails {
                 structure_key: initial.snapshot.structure_key.clone(),
+                structure_object_uid: object_uid,
                 sequence_key: initial.snapshot.sequence_key.clone(),
                 include_sequence: true,
+                object_uid,
             },
         )
         .unwrap() else {
@@ -10159,7 +10230,8 @@ mod tests {
         let after = model.snapshot();
         assert_eq!(after.structure_key, before.structure_key);
         assert_ne!(after.sequence_key, before.sequence_key);
-        let details = model.molecule_details(&after.structure_key, &before.sequence_key, true);
+        let details =
+            model.molecule_details(&after.structure_key, None, &before.sequence_key, true, None);
         assert!(details.structure.is_none());
         assert!(details.sequence.is_some());
         assert_eq!(details.sequence_key, after.sequence_key);
@@ -13044,10 +13116,11 @@ mod tests {
         let ModelResponse::Snapshot(snapshot) = response else {
             panic!("expected a snapshot");
         };
-        let details = model.molecule_details("", "", true);
+        let details = model.molecule_details("", None, "", true, Some(object_uid.get()));
         assert_eq!(snapshot.structure_key, details.structure_key);
         assert_eq!(snapshot.sequence_key, details.sequence_key);
         let structure = details.structure.as_ref().unwrap();
+        assert_eq!(details.structure_object_uid, Some(object_uid.get()));
         assert_eq!(structure[0].object_name, "1CRN");
         assert_eq!(structure[0].chains[0].chain_id, "A");
         let sequence = details.sequence.as_ref().unwrap();

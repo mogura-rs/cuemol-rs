@@ -241,7 +241,11 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(JS.contains("applyViewport(initial.viewport, sequence)"));
     assert!(JS.contains("if (snapshotHasRenderableContent()) void renderViewport()"));
     assert!(JS.contains(r#"invoke("get_molecule_details", {"#));
-    assert!(JS.contains("scheduleMoleculeDetailsRefresh(delay = 0)"));
+    assert!(JS.contains("const moleculeStructureCache = new Map()"));
+    assert!(JS.contains("structureObjectUid: knownStructureObjectUid"));
+    assert!(JS.contains("objectUid,"));
+    assert!(JS.contains("cachedMoleculeStructure(objectUid)"));
+    assert!(JS.contains("scheduleMoleculeDetailsRefresh(delay = 0, objectUid = null)"));
     assert!(JS.contains("scheduleMoleculeDetailsRefresh()"));
     assert!(JS.contains("includeSequence"));
     assert!(JS.contains("initial.startupPathsPending"));

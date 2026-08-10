@@ -6796,50 +6796,19 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
         };
-        let mut out = Vec::new();
-        for object in scene.objects() {
-            let mol = object.mol();
-            let atoms = mol.atoms();
-            let residues = mol.residue_summaries();
-            let mut residue_index = 0;
-            let mut chains = Vec::new();
-            for chain in mol.chain_summaries() {
-                let mut chain_residues = Vec::new();
-                for key in &chain.residue_keys {
-                    let Some(residue) = next_ordered_residue(&residues, &mut residue_index, key)
-                    else {
-                        continue;
-                    };
-                    let mut res_atoms = Vec::new();
-                    for &index in &residue.atom_indices {
-                        if let Some(atom) = atoms.get(index) {
-                            res_atoms.push(GuiStructAtom {
-                                atom_index: index,
-                                serial: atom.serial,
-                                name: atom.name.trim().to_string(),
-                                element: atom.element.clone(),
-                            });
-                        }
-                    }
-                    chain_residues.push(GuiStructResidue {
-                        res_name: residue.res_name.clone(),
-                        res_id: key.res_id,
-                        ins_code: key.ins_code,
-                        atoms: res_atoms,
-                    });
-                }
-                chains.push(GuiStructChain {
-                    chain_id: chain.chain_id,
-                    residues: chain_residues,
-                });
-            }
-            out.push(GuiStructObject {
-                object_uid: object.uid(),
-                object_name: object.name().to_string(),
-                chains,
-            });
-        }
-        out
+        scene.objects().iter().map(gui_structure_object).collect()
+    }
+
+    /// Builds one active-scene molecule hierarchy without materializing the other
+    /// objects. Front ends use this for object-scoped, lazy hierarchy fetches.
+    pub fn active_structure_tree_for_object(&self, object_uid: Uid) -> Option<GuiStructObject> {
+        let scene_uid = self.active_scene?;
+        self.scene_manager()
+            .scene(scene_uid)?
+            .objects()
+            .iter()
+            .find(|object| object.uid() == object_uid)
+            .map(gui_structure_object)
     }
 
     /// The active scene's molecules as an interactive sequence view (CueMol2 `seqpanel`):
@@ -42692,6 +42661,54 @@ fn next_ordered_residue<'a>(
         }
     }
     None
+}
+
+fn gui_structure_object(object: &MolObject) -> GuiStructObject {
+    let mol = object.mol();
+    let atoms = mol.atoms();
+    let residues = mol.residue_summaries();
+    let mut residue_index = 0;
+    let chains = mol
+        .chain_summaries()
+        .into_iter()
+        .map(|chain| {
+            let chain_residues = chain
+                .residue_keys
+                .iter()
+                .filter_map(|key| {
+                    let residue = next_ordered_residue(&residues, &mut residue_index, key)?;
+                    let atoms = residue
+                        .atom_indices
+                        .iter()
+                        .filter_map(|&index| {
+                            let atom = atoms.get(index)?;
+                            Some(GuiStructAtom {
+                                atom_index: index,
+                                serial: atom.serial,
+                                name: atom.name.trim().to_string(),
+                                element: atom.element.clone(),
+                            })
+                        })
+                        .collect();
+                    Some(GuiStructResidue {
+                        res_name: residue.res_name.clone(),
+                        res_id: key.res_id,
+                        ins_code: key.ins_code,
+                        atoms,
+                    })
+                })
+                .collect();
+            GuiStructChain {
+                chain_id: chain.chain_id,
+                residues: chain_residues,
+            }
+        })
+        .collect();
+    GuiStructObject {
+        object_uid: object.uid(),
+        object_name: object.name().to_string(),
+        chains,
+    }
 }
 
 fn residue_one_letter(name: &str) -> char {

@@ -193,7 +193,15 @@ const trajectoryFrames = new Map();
 let recentFiles = loadRecentFiles();
 let applicationInfoCache = null;
 let preferences = null;
-let moleculeDetails = { structureKey: "", sequenceKey: "", structure: [], sequence: [] };
+let moleculeDetails = {
+  structureKey: "",
+  structureObjectUid: null,
+  sequenceKey: "",
+  structure: [],
+  sequence: [],
+};
+const moleculeStructureCache = new Map();
+const pendingMoleculeObjectUids = new Set();
 let moleculeDetailsTimer = null;
 let moleculeDetailsRequest = null;
 let renderedMolstructKey = "";
@@ -6386,17 +6394,53 @@ function replaceOptions(select, objects, selectedUid = selectedObjectUid) {
   if (selectedUid !== null) select.value = String(selectedUid);
 }
 
-function moleculeStructureIsCurrent() {
-  return Boolean(snapshot && moleculeDetails.structureKey === snapshot.structureKey);
+function activeMoleculeObjects() {
+  if (!snapshot) return [];
+  return snapshot.objects.filter((object) => object.sceneUid === snapshot.activeSceneUid);
+}
+
+function moleculeStructureCacheKey(objectUid, structureKey = snapshot?.structureKey) {
+  return `${structureKey || ""}|${objectUid || ""}`;
+}
+
+function cachedMoleculeStructure(objectUid) {
+  if (!objectUid || !snapshot) return null;
+  return moleculeStructureCache.get(moleculeStructureCacheKey(objectUid)) || null;
+}
+
+function requestedMoleculeObjectUids() {
+  const objects = activeMoleculeObjects();
+  const activeUids = new Set(objects.map((object) => object.uid));
+  const requested = [...new Set([molstructObjectUid, selectionObjectUid])].filter((uid) =>
+    activeUids.has(uid),
+  );
+  if (requested.length === 0) {
+    const fallback = activeUids.has(selectedObjectUid) ? selectedObjectUid : objects[0]?.uid;
+    if (fallback) requested.push(fallback);
+  }
+  return requested;
+}
+
+function moleculeStructureIsCurrent(objectUid = requestedMoleculeObjectUids()[0] ?? null) {
+  return !objectUid || Boolean(cachedMoleculeStructure(objectUid));
 }
 
 function syncEmptyMoleculeDetails() {
-  if (
-    snapshot &&
-    !snapshot.objects.some((object) => object.sceneUid === snapshot.activeSceneUid)
-  ) {
+  if (!snapshot) return;
+  if (moleculeDetails.structureKey !== snapshot.structureKey) {
+    moleculeStructureCache.clear();
+    pendingMoleculeObjectUids.clear();
+    moleculeDetails = {
+      ...moleculeDetails,
+      structureKey: snapshot.structureKey,
+      structureObjectUid: null,
+      structure: [],
+    };
+  }
+  if (activeMoleculeObjects().length === 0) {
     moleculeDetails = {
       structureKey: snapshot.structureKey,
+      structureObjectUid: null,
       sequenceKey: snapshot.sequenceKey,
       structure: [],
       sequence: [],
@@ -6415,12 +6459,20 @@ function sequencePanelIsActive() {
 }
 
 function moleculeDetailsAreCurrent() {
-  return moleculeStructureIsCurrent() &&
+  return requestedMoleculeObjectUids().every((uid) => moleculeStructureIsCurrent(uid)) &&
     (!sequencePanelIsActive() || moleculeSequenceIsCurrent());
 }
 
-function scheduleMoleculeDetailsRefresh(delay = 0) {
-  if (!invoke || !snapshot || moleculeDetailsAreCurrent() || moleculeDetailsRequest) return;
+function scheduleMoleculeDetailsRefresh(delay = 0, objectUid = null) {
+  if (!invoke || !snapshot) return;
+  syncEmptyMoleculeDetails();
+  if (objectUid && !cachedMoleculeStructure(objectUid)) {
+    pendingMoleculeObjectUids.add(objectUid);
+  }
+  for (const uid of requestedMoleculeObjectUids()) {
+    if (!cachedMoleculeStructure(uid)) pendingMoleculeObjectUids.add(uid);
+  }
+  if (moleculeDetailsAreCurrent() || moleculeDetailsRequest) return;
   clearTimeout(moleculeDetailsTimer);
   moleculeDetailsTimer = setTimeout(() => {
     moleculeDetailsTimer = null;
@@ -6429,14 +6481,32 @@ function scheduleMoleculeDetailsRefresh(delay = 0) {
 }
 
 async function refreshMoleculeDetails() {
-  if (!invoke || !snapshot || moleculeDetailsAreCurrent() || moleculeDetailsRequest) return;
+  if (!invoke || !snapshot || moleculeDetailsRequest) return;
+  syncEmptyMoleculeDetails();
+  const activeUids = new Set(activeMoleculeObjects().map((object) => object.uid));
+  const requestedUids = new Set(requestedMoleculeObjectUids());
+  for (const uid of requestedUids) {
+    if (!cachedMoleculeStructure(uid)) pendingMoleculeObjectUids.add(uid);
+  }
+  for (const uid of pendingMoleculeObjectUids) {
+    if (!activeUids.has(uid) || !requestedUids.has(uid) || cachedMoleculeStructure(uid)) {
+      pendingMoleculeObjectUids.delete(uid);
+    }
+  }
+  const objectUid = pendingMoleculeObjectUids.values().next().value ??
+    requestedUids.values().next().value ?? null;
+  const knownStructureObjectUid = cachedMoleculeStructure(objectUid) ? objectUid : null;
+  const includeSequence = sequencePanelIsActive() && !moleculeSequenceIsCurrent();
+  if (!objectUid && !includeSequence) return;
+  if (objectUid) pendingMoleculeObjectUids.delete(objectUid);
   const expectedStructureKey = snapshot.structureKey;
   const expectedSequenceKey = snapshot.sequenceKey;
-  const includeSequence = sequencePanelIsActive();
   moleculeDetailsRequest = invoke("get_molecule_details", {
     structureKey: moleculeDetails.structureKey,
+    structureObjectUid: knownStructureObjectUid,
     sequenceKey: moleculeDetails.sequenceKey,
     includeSequence,
+    objectUid,
   });
   try {
     const details = await moleculeDetailsRequest;
@@ -6447,8 +6517,17 @@ async function refreshMoleculeDetails() {
       snapshot?.sequenceKey === details.sequenceKey &&
       details.sequenceKey === expectedSequenceKey;
     if (structureMatches) {
+      if (details.structure) {
+        for (const object of details.structure) {
+          moleculeStructureCache.set(
+            moleculeStructureCacheKey(object.objectUid, details.structureKey),
+            object,
+          );
+        }
+      }
       moleculeDetails = {
         structureKey: details.structureKey,
+        structureObjectUid: details.structureObjectUid ?? moleculeDetails.structureObjectUid,
         sequenceKey:
           includeSequence && details.sequence && sequenceMatches
             ? details.sequenceKey
@@ -6620,12 +6699,12 @@ function configureMolstructRow(row, properties) {
 }
 
 function renderMolStruct() {
-  const structure = moleculeStructureIsCurrent() ? moleculeDetails.structure : [];
+  const objects = activeMoleculeObjects();
   const previousObjectUid = molstructObjectUid;
-  if (!structure.some((object) => object.objectUid === molstructObjectUid)) {
-    molstructObjectUid = structure.some((object) => object.objectUid === selectedObjectUid)
+  if (!objects.some((object) => object.uid === molstructObjectUid)) {
+    molstructObjectUid = objects.some((object) => object.uid === selectedObjectUid)
       ? selectedObjectUid
-      : structure[0]?.objectUid ?? null;
+      : objects[0]?.uid ?? null;
   }
   if (previousObjectUid !== null && previousObjectUid !== molstructObjectUid) {
     molstructSelectedKeys.clear();
@@ -6634,26 +6713,28 @@ function renderMolStruct() {
   }
   replaceOptions(
     molstructObject,
-    structure.map((object) => ({ uid: object.objectUid, name: object.objectName })),
+    objects,
     molstructObjectUid,
   );
-  const renderKey = moleculeStructureIsCurrent()
+  const structureCurrent = moleculeStructureIsCurrent(molstructObjectUid);
+  const renderKey = structureCurrent
     ? `${moleculeDetails.structureKey}|${molstructObjectUid ?? ""}`
-    : `loading|${snapshot?.structureKey ?? ""}`;
+    : `loading|${snapshot?.structureKey ?? ""}|${molstructObjectUid ?? ""}`;
   if (renderedMolstructKey === renderKey) {
     updateMolstructSelectionUi();
     return;
   }
   renderedMolstructKey = renderKey;
   molstructTree.replaceChildren();
-  if (!moleculeStructureIsCurrent()) {
+  if (!structureCurrent) {
     const loading = document.createElement("p");
     loading.textContent = "Loading molecular hierarchy…";
     molstructTree.append(loading);
+    scheduleMoleculeDetailsRefresh(0, molstructObjectUid);
     updateMolstructSelectionUi();
     return;
   }
-  const object = structure.find((item) => item.objectUid === molstructObjectUid);
+  const object = cachedMoleculeStructure(molstructObjectUid);
   if (!object) {
     const empty = document.createElement("p");
     empty.textContent = "No molecule selected.";
@@ -6760,16 +6841,15 @@ function selectionCandidateValues() {
   if (selectionCandidateCache.key === cacheKey && selectionCandidateCache.values) {
     return selectionCandidateCache.values;
   }
-  const structure = moleculeStructureIsCurrent() ? moleculeDetails.structure : [];
-  const object = structure.find((item) => item.objectUid === selectionObjectUid);
+  const object = cachedMoleculeStructure(selectionObjectUid);
   if (!object) {
+    scheduleMoleculeDetailsRefresh(0, selectionObjectUid);
     const values = {
       chains: ["A", "B", "C"],
       residueNames: [],
       atomNames: ["CA", "CB", "CG"],
       elements: ["C", "N", "O", "S"],
     };
-    selectionCandidateCache = { key: cacheKey, values };
     return values;
   }
   const residueNames = new Set();
@@ -7021,15 +7101,15 @@ function renderSelectionEditor() {
 }
 
 function renderSelectionPanel() {
-  const structure = moleculeStructureIsCurrent() ? moleculeDetails.structure : [];
-  if (!structure.some((object) => object.objectUid === selectionObjectUid)) {
-    selectionObjectUid = structure.some((object) => object.objectUid === selectedObjectUid)
+  const objects = activeMoleculeObjects();
+  if (!objects.some((object) => object.uid === selectionObjectUid)) {
+    selectionObjectUid = objects.some((object) => object.uid === selectedObjectUid)
       ? selectedObjectUid
-      : structure[0]?.objectUid ?? null;
+      : objects[0]?.uid ?? null;
   }
   replaceOptions(
     selectionObject,
-    structure.map((object) => ({ uid: object.objectUid, name: object.objectName })),
+    objects,
     selectionObjectUid,
   );
   document.querySelectorAll("[data-selection-tab]").forEach((tab) => {
@@ -7041,7 +7121,9 @@ function renderSelectionPanel() {
   selectionEditorPanel.hidden = selectionActiveTab !== "editor";
   renderSelectionHistory();
   const candidates = selectionCandidateValues();
-  const candidateKey = `${moleculeDetails.structureKey}|${selectionObjectUid ?? ""}`;
+  const candidateKey = `${moleculeDetails.structureKey}|${selectionObjectUid ?? ""}|${
+    moleculeStructureIsCurrent(selectionObjectUid) ? "ready" : "loading"
+  }`;
   replaceDatalist(selectionChainCandidates, candidates.chains, `${candidateKey}|chain`);
   replaceDatalist(
     selectionResnameCandidates,
