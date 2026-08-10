@@ -2,6 +2,8 @@ const HTML: &str = include_str!("../tauri-ui/index.html");
 const CSS: &str = include_str!("../tauri-ui/styles.css");
 const JS: &str = include_str!("../tauri-ui/app.js");
 const CAPABILITIES: &str = include_str!("../capabilities/default.json");
+const NATIVE_GUI_RS: &str = include_str!("../src/gui.rs");
+const TAURI_APP_RS: &str = include_str!("../src/tauri_app.rs");
 
 #[test]
 fn tauri_shell_matches_the_reference_xul_dock_order() {
@@ -441,6 +443,23 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(!JS.contains("snapshot.sequence.length"));
     assert!(!JS.contains("for (const chain of snapshot.sequence)"));
     assert!(!JS.contains(r#"snapshot = await invoke("get_snapshot");\n    renderShell();"#));
+}
+
+#[test]
+fn desktop_startup_and_fetch_overlap_independent_initialization() {
+    assert!(NATIVE_GUI_RS.contains("app: Option<GuiApplication>"));
+    assert!(NATIVE_GUI_RS.contains("app: None"));
+    let gpu_start = NATIVE_GUI_RS
+        .find("self.gpu_init_receiver = Some(receiver)")
+        .unwrap();
+    let app_start = NATIVE_GUI_RS
+        .find("self.app = Some(GuiApplication::new_persistent())")
+        .unwrap();
+    assert!(gpu_start < app_start);
+
+    assert!(TAURI_APP_RS.contains("ModelRequest::StartRendererWarmup"));
+    assert!(TAURI_APP_RS.contains("request_model(&state, ModelRequest::StartRendererWarmup)"));
+    assert!(!TAURI_APP_RS.contains("spawn_blocking(shared_scene_renderer)"));
 }
 
 #[test]

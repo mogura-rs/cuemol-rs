@@ -164,7 +164,7 @@ struct NativeRunner {
     gpu: Option<GpuState>,
     gpu_init_receiver: Option<mpsc::Receiver<Result<GpuState>>>,
     event_proxy: EventLoopProxy<()>,
-    app: GuiApplication,
+    app: Option<GuiApplication>,
     init_error: Option<CueMolError>,
     started_at: Instant,
     exit_after: Option<Duration>,
@@ -179,7 +179,7 @@ impl NativeRunner {
             gpu: None,
             gpu_init_receiver: None,
             event_proxy,
-            app: GuiApplication::new_persistent(),
+            app: None,
             init_error: None,
             started_at: Instant::now(),
             exit_after: exit_after_from_env(),
@@ -285,7 +285,12 @@ impl NativeRunner {
                 let _ = sender.send(result);
                 let _ = proxy.send_event(());
             }) {
-            Ok(_) => self.gpu_init_receiver = Some(receiver),
+            Ok(_) => {
+                self.gpu_init_receiver = Some(receiver);
+                // Load configuration and construct the desktop state only after the
+                // window exists and GPU initialization is already running off-thread.
+                self.app = Some(GuiApplication::new_persistent());
+            }
             Err(error) => {
                 self.init_error = Some(CueMolError::Io(format!(
                     "failed to start GPU initialization: {error}"
@@ -352,7 +357,10 @@ impl NativeRunner {
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
-        if self.app.handle_window_event(&event, &mut gpu.camera) {
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        if app.handle_window_event(&event, &mut gpu.camera) {
             needs_redraw = true;
         }
         match event {
@@ -363,7 +371,7 @@ impl NativeRunner {
             WindowEvent::RedrawRequested => {
                 let raw_input = egui_state.take_egui_input(window.as_ref());
                 let full_output = self.egui_ctx.run(raw_input, |ctx| {
-                    self.app.ui(ctx, &mut gpu.camera);
+                    app.ui(ctx, &mut gpu.camera);
                 });
                 egui_state.handle_platform_output(window.as_ref(), full_output.platform_output);
                 let paint_jobs = self
@@ -371,10 +379,10 @@ impl NativeRunner {
                     .tessellate(full_output.shapes, full_output.pixels_per_point);
                 match gpu.render(
                     GpuSceneFrame {
-                        snapshot: &self.app.snapshot,
-                        revision: self.app.snapshot_revision,
-                        background: self.app.background.clear_color(),
-                        viewport: self.app.viewport_rect,
+                        snapshot: &app.snapshot,
+                        revision: app.snapshot_revision,
+                        background: app.background.clear_color(),
+                        viewport: app.viewport_rect,
                     },
                     &paint_jobs,
                     &full_output.textures_delta,

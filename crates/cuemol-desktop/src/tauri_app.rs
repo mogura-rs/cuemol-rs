@@ -5366,6 +5366,7 @@ impl AppModel {
 }
 
 enum ModelRequest {
+    StartRendererWarmup,
     GetSnapshot,
     GetMoleculeDetails {
         structure_key: String,
@@ -6836,6 +6837,12 @@ fn handle_model_request(
     request: ModelRequest,
 ) -> Result<ModelResponse, String> {
     match request {
+        ModelRequest::StartRendererWarmup => {
+            model.start_renderer_warmup();
+            Ok(ModelResponse::Message(
+                "Renderer warmup started".to_string(),
+            ))
+        }
         ModelRequest::GetSnapshot => Ok(ModelResponse::Snapshot(Box::new(model.snapshot()))),
         ModelRequest::GetMoleculeDetails {
             structure_key,
@@ -9956,6 +9963,7 @@ fn get_file_renderer_setup(
     if path.trim().is_empty() {
         return Err("a file path is required".to_string());
     }
+    let _ = request_model(&state, ModelRequest::StartRendererWarmup)?;
     match request_model(&state, ModelRequest::GetFileRendererSetup { path })? {
         ModelResponse::FileRendererSetup(setup) => Ok(setup),
         _ => Err("unexpected file renderer setup response".to_string()),
@@ -10025,6 +10033,7 @@ fn get_pdb_renderer_setup(
     state: State<'_, ManagedState>,
 ) -> Result<RendererSetupDto, String> {
     let pdb_id = crate::normalize_pdb_id(&pdb_id)?;
+    let _ = request_model(&state, ModelRequest::StartRendererWarmup)?;
     match request_model(&state, ModelRequest::GetPdbRendererSetup { pdb_id })? {
         ModelResponse::PdbRendererSetup(setup) => Ok(setup),
         _ => Err("unexpected PDB renderer setup response".to_string()),
@@ -10096,7 +10105,7 @@ async fn open_pdb(
         fetch_fofc,
         map_source,
     };
-    let _renderer_warmup = tauri::async_runtime::spawn_blocking(shared_scene_renderer);
+    let _ = request_model(&state, ModelRequest::StartRendererWarmup)?;
     let files = tauri::async_runtime::spawn_blocking(move || crate::download_pdb_files(options))
         .await
         .map_err(|error| format!("PDB download task failed: {error}"))??;
