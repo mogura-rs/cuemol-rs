@@ -1032,10 +1032,10 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("regenerate_surface"));
     assert!(CSS.contains(".workspace-context-menu.has-submenu"));
     assert!(JS.contains("WORKSPACE_PAINT_MONOCHROME"));
-    assert!(JS.contains("Paint · ${group} · ${label}"));
-    assert!(JS.contains("[\"B-factor\", \"bfactor\"]"));
-    assert!(JS.contains("Style · ${style.description || style.name}"));
-    assert!(JS.contains("Edit interaction list..."));
+    assert!(JS.contains("function workspacePaintMenuChildren(action)"));
+    assert!(JS.contains("label: \"B-factor\""));
+    assert!(JS.contains("label: \"Style\", children: styleChildren"));
+    assert!(JS.contains("Edit interaction list…"));
     assert!(JS.contains("kind: \"renderer\""));
     assert!(JS.contains("create_workspace_renderer_group"));
     assert!(JS.contains("rename_workspace_node"));
@@ -1096,6 +1096,41 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(tauri_renderer_group_menu.contains("label: \"Paste Renderer\""));
     assert!(tauri_renderer_group_menu.contains("label: \"New Renderer…\""));
     assert!(tauri_renderer_group_menu.contains("label: \"Properties…\""));
+    let tauri_renderer_menu = JS
+        .split("async function workspaceRendererContextItems(scene, object, renderer)")
+        .nth(1)
+        .and_then(|source| source.split("return items;").nth(1))
+        .and_then(|source| {
+            source
+                .split("function clearWorkspaceRendererDropMarkers")
+                .next()
+        })
+        .expect("Tauri renderer context menu");
+    for item in [
+        "{ label: renderer.name, disabled: true }",
+        "renderer.visible ? \"Hide\" : \"Show\"",
+        "label: \"Change sel\"",
+        "label: \"Change type\"",
+        "label: \"Coloring\"",
+        "label: \"Paint\"",
+        "label: \"Edit style…\"",
+        "label: \"Create style…\"",
+        "label: \"Rename…\"",
+        "label: \"Copy\"",
+        "label: \"New Renderer…\"",
+        "label: \"Delete\"",
+        "label: \"Properties…\"",
+    ] {
+        assert!(
+            tauri_renderer_menu.contains(item),
+            "missing renderer menu item {item}"
+        );
+    }
+    assert!(!tauri_renderer_menu.contains("Change selection ·"));
+    assert!(!tauri_renderer_menu.contains("Change type ·"));
+    assert!(!tauri_renderer_menu.contains("Paint ·"));
+    assert!(!tauri_renderer_menu.contains("Style ·"));
+    assert!(!tauri_renderer_menu.contains("label: \"Paint\", disabled: true"));
     assert!(NATIVE_GUI_RS.contains("ui.button(\"Rename…\")"));
     assert!(NATIVE_GUI_RS.contains("ui.button(\"New Renderer…\")"));
     assert!(CSS.contains(".workspace-context-menu button.checked::before"));

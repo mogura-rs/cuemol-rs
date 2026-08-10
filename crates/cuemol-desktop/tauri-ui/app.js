@@ -7636,6 +7636,31 @@ async function cachedWorkspaceRendererStyles(sceneUid, rendererType) {
   }
 }
 
+function workspacePaintMenuChildren(action) {
+  const family = (label, entries) => ({
+    label,
+    children: entries.map(([itemLabel, color]) => ({
+      label: itemLabel,
+      action: action(color),
+    })),
+  });
+  const children = [family("Monochrome", WORKSPACE_PAINT_MONOCHROME)];
+  for (const [hueName, hue] of WORKSPACE_PAINT_HUES) {
+    children.push(
+      family(hueName, [
+        [hueName, `hsb(${hue}, 1.0, 1.0)`],
+        [`${hueName}, sat 25%`, `hsb(${hue}, 0.25, 1.0)`],
+        [`${hueName}, sat 50%`, `hsb(${hue}, 0.5, 1.0)`],
+        [`${hueName}, sat 75%`, `hsb(${hue}, 0.75, 1.0)`],
+        [`${hueName}, bri 75%`, `hsb(${hue}, 1.0, 0.75)`],
+        [`${hueName}, bri 50%`, `hsb(${hue}, 1.0, 0.50)`],
+        [`${hueName}, bri 25%`, `hsb(${hue}, 1.0, 0.25)`],
+      ]),
+    );
+  }
+  return children;
+}
+
 async function workspaceRendererContextItems(scene, object, renderer) {
   const items = [];
   if (renderer.rendererType === "*group") {
@@ -7698,6 +7723,22 @@ async function workspaceRendererContextItems(scene, object, renderer) {
     );
     return items;
   }
+  items.push(
+    { label: renderer.name, disabled: true },
+    null,
+    {
+      label: renderer.visible ? "Hide" : "Show",
+      action: () =>
+        mutate("set_workspace_visible", {
+          target: {
+            kind: "renderer",
+            objectUid: object.uid,
+            rendererUid: renderer.uid,
+          },
+          visible: !renderer.visible,
+        }),
+    },
+  );
   const styleOptions =
     renderer.rendererType === "*selection"
       ? []
@@ -7706,41 +7747,42 @@ async function workspaceRendererContextItems(scene, object, renderer) {
     renderer.rendererType,
   );
   if (!selectionReadonly) {
-    for (const [label, selection] of [
-      ["Current", object.selection || ""],
-      ["All", "*"],
-      ["Protein", "protein"],
-      ["Nucleic acid", "nucleic"],
-      ["Water", "water"],
-      ["Ligand", "!protein & !nucleic & !water"],
-      ["Sugar", "sugar"],
-    ]) {
-      items.push({
-        label: `Change selection · ${label}`,
-        disabled: label === "Current" && !selection,
-        action: () =>
-          mutate("set_workspace_renderer_selection", {
-            input: { objectUid: object.uid, rendererUid: renderer.uid, selection },
-          }),
-      });
-    }
-    items.push(null);
+    const changeSelection = (label, selection) => ({
+      label,
+      action: () =>
+        mutate("set_workspace_renderer_selection", {
+          input: { objectUid: object.uid, rendererUid: renderer.uid, selection },
+        }),
+    });
+    items.push({
+      label: "Change sel",
+      children: [
+        changeSelection("Current", object.selection || ""),
+        changeSelection("All", "*"),
+        null,
+        changeSelection("Protein", "protein"),
+        changeSelection("Nucleic acid", "nucleic"),
+        changeSelection("Water", "water"),
+        changeSelection("Ligand", "!protein & !nucleic & !water"),
+        changeSelection("Sugar", "sugar"),
+      ],
+    });
   }
   const typeChangeAllowed =
     renderer.rendererType === "*selection" ||
     (!renderer.rendererType.startsWith("*") &&
       !["atomintr", "disorder"].includes(renderer.rendererType));
   if (typeChangeAllowed) {
-    for (const targetType of MOLECULE_RENDERER_TYPES) {
-      if (targetType === renderer.rendererType || ["atomintr", "disorder"].includes(targetType)) {
-        continue;
-      }
-      items.push({
-        label: `Change type · ${targetType}`,
+    items.push({
+      label: "Change type",
+      children: MOLECULE_RENDERER_TYPES.filter(
+        (targetType) =>
+          targetType !== renderer.rendererType && !["atomintr", "disorder"].includes(targetType),
+      ).map((targetType) => ({
+        label: targetType,
         action: () => changeWorkspaceRendererType(object, renderer, targetType),
-      });
-    }
-    items.push(null);
+      })),
+    });
   }
   if (renderer.rendererType !== "*selection") {
     const lowerType = renderer.rendererType.replace(/^\*/, "").toLowerCase();
@@ -7749,7 +7791,10 @@ async function workspaceRendererContextItems(scene, object, renderer) {
       : lowerType === "gpu_mapmesh"
         ? "contour"
         : lowerType;
-    const shapeStyles = styleOptions.filter((style) => style.name.toLowerCase().endsWith(suffix));
+    const shapeStyles = styleOptions.filter((style) => {
+      const name = style.name.toLowerCase();
+      return name.endsWith(suffix) && !name.startsWith("egline");
+    });
     const edgeStyles = styleOptions.filter((style) => style.name.toLowerCase().startsWith("egline"));
     const paintStyles = styleOptions.filter((style) => style.name.toLowerCase().endsWith("paint"));
     const applyStyle = (styleName, component) => () =>
@@ -7765,90 +7810,82 @@ async function workspaceRendererContextItems(scene, object, renderer) {
       renderer.rendererType,
     );
     if (supportsColoring) {
-      for (const [label, styleName] of [
-        ["CPK molcol", "DefaultCPKColoring"],
-        ["CPK dark gray", "DarkCPKColoring"],
-        ["CPK light gray", "LightCPKColoring"],
-      ]) {
-        if (styleOptions.some((style) => style.name.toLowerCase() === styleName.toLowerCase())) {
-          items.push({ label: `Coloring · ${label}`, action: applyStyle(styleName, "coloring") });
-        }
+      const coloringChildren = [];
+      if (paintStyles.length > 0) {
+        coloringChildren.push(
+          {
+            label: "Paint (Secondary str.)",
+            children: paintStyles.map((style) => ({
+              label: style.description || style.name,
+              action: applyStyle(style.name, "coloring"),
+            })),
+          },
+          null,
+        );
       }
-      for (const style of paintStyles) {
-        items.push({
-          label: `Coloring · ${style.description || style.name}`,
-          action: applyStyle(style.name, "coloring"),
-        });
-      }
-      for (const [label, preset] of [["B-factor", "bfactor"], ["Rainbow", "rainbow"]]) {
-        items.push({
-          label: `Coloring · ${label}`,
+      coloringChildren.push(
+        { label: "CPK molcol", action: applyStyle("DefaultCPKColoring", "coloring") },
+        { label: "CPK dark gray", action: applyStyle("DarkCPKColoring", "coloring") },
+        { label: "CPK light gray", action: applyStyle("LightCPKColoring", "coloring") },
+        null,
+        {
+          label: "B-factor",
           action: () =>
             mutate("set_workspace_renderer_coloring", {
-              input: { objectUid: object.uid, rendererUid: renderer.uid, preset },
+              input: { objectUid: object.uid, rendererUid: renderer.uid, preset: "bfactor" },
             }),
-        });
-      }
-    }
-    if (renderer.coloringType === "PaintColoring") {
-      const addPaint = (group, label, color) => {
-        items.push({
-          label: `Paint · ${group} · ${label}`,
+        },
+        {
+          label: "Rainbow",
           action: () =>
-            mutate("insert_workspace_renderer_paint", {
-              input: { objectUid: object.uid, rendererUid: renderer.uid, color },
+            mutate("set_workspace_renderer_coloring", {
+              input: { objectUid: object.uid, rendererUid: renderer.uid, preset: "rainbow" },
             }),
-        });
-      };
-      for (const [label, color] of WORKSPACE_PAINT_MONOCHROME) {
-        addPaint("Monochrome", label, color);
-      }
-      for (const [hueName, hue] of WORKSPACE_PAINT_HUES) {
-        for (const [label, saturation, brightness] of [
-          [hueName, "1.0", "1.0"],
-          [`${hueName}, sat 25%`, "0.25", "1.0"],
-          [`${hueName}, sat 50%`, "0.5", "1.0"],
-          [`${hueName}, sat 75%`, "0.75", "1.0"],
-          [`${hueName}, bri 75%`, "1.0", "0.75"],
-          [`${hueName}, bri 50%`, "1.0", "0.50"],
-          [`${hueName}, bri 25%`, "1.0", "0.25"],
-        ]) {
-          addPaint(hueName, label, `hsb(${hue}, ${saturation}, ${brightness})`);
-        }
-      }
-    } else {
-      items.push({ label: "Paint", disabled: true });
+        },
+      );
+      items.push({ label: "Coloring", children: coloringChildren });
     }
-    for (const style of shapeStyles) {
+    if (renderer.coloringType === "PaintColoring" && object.selection) {
       items.push({
-        label: `Style · ${style.description || style.name}`,
-        action: applyStyle(style.name, "shape"),
+        label: "Paint",
+        children: workspacePaintMenuChildren((color) => () =>
+          mutate("insert_workspace_renderer_paint", {
+            input: { objectUid: object.uid, rendererUid: renderer.uid, color },
+          })),
       });
     }
-    for (const style of edgeStyles) {
-      items.push({
-        label: `Style · ${style.description || style.name}`,
+    const styleChildren = shapeStyles.map((style) => ({
+      label: style.description || style.name,
+      action: applyStyle(style.name, "shape"),
+    }));
+    if (shapeStyles.length > 0 && edgeStyles.length > 0) styleChildren.push(null);
+    styleChildren.push(
+      ...edgeStyles.map((style) => ({
+        label: style.description || style.name,
         action: applyStyle(style.name, "edge"),
-      });
-    }
-    items.push({
-      label: "Edit style...",
+      })),
+    );
+    if (styleChildren.length > 0) items.push({ label: "Style", children: styleChildren });
+  }
+  items.push(
+    {
+      label: "Edit style…",
       action: async () => {
         if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
         await showApplyRendererStyleDialog(object, renderer, styleOptions);
       },
-    });
-  }
-  items.push({
-    label: "Create style...",
-    action: async () => {
-      if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
-      await rendererStyleCreateEditor(object, renderer);
     },
-  });
+    {
+      label: "Create style…",
+      action: async () => {
+        if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
+        await rendererStyleCreateEditor(object, renderer);
+      },
+    },
+  );
   if (renderer.rendererType === "atomintr") {
-    items.push(null, {
-      label: "Edit interaction list...",
+    items.push({
+      label: "Edit interaction list…",
       action: () => showEditInteractionListDialog(object, renderer),
     });
   }
@@ -7862,9 +7899,8 @@ async function workspaceRendererContextItems(scene, object, renderer) {
       label: "Copy",
       action: () => copyWorkspaceRenderer(object.uid, renderer.uid),
     },
-    null,
     {
-      label: "New Renderer...",
+      label: "New Renderer…",
       action: () =>
         mutate("add_renderer", {
           objectUid: object.uid,
@@ -7884,7 +7920,7 @@ async function workspaceRendererContextItems(scene, object, renderer) {
         }),
     },
     null,
-    { label: "Properties...", action: () => showReferenceDialog("Renderer Properties") },
+    { label: "Properties…", action: () => showReferenceDialog("Renderer Properties") },
   );
   return items;
 }
