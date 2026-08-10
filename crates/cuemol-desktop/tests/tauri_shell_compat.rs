@@ -344,6 +344,9 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("cachedWorkspaceRendererStyles"));
     assert!(JS.contains("apply_workspace_renderer_style"));
     assert!(JS.contains("set_workspace_renderer_coloring"));
+    assert!(JS.contains("insert_workspace_renderer_paint"));
+    assert!(JS.contains("WORKSPACE_PAINT_MONOCHROME"));
+    assert!(JS.contains("Paint · ${group} · ${label}"));
     assert!(JS.contains("[\"B-factor\", \"bfactor\"]"));
     assert!(JS.contains("Style · ${style.description || style.name}"));
     assert!(JS.contains("Edit interaction list..."));
@@ -472,6 +475,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "change_workspace_renderer_type",
         "apply_workspace_renderer_style",
         "set_workspace_renderer_coloring",
+        "insert_workspace_renderer_paint",
         "create_workspace_renderer_group",
         "rename_workspace_renderer_group",
         "delete_workspace_item",

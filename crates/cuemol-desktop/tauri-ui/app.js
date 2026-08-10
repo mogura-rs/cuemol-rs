@@ -119,6 +119,22 @@ const MOLECULE_RENDERER_TYPES = [
   "trace",
   "tube",
 ];
+const WORKSPACE_PAINT_MONOCHROME = [
+  ["White", "#FFF"],
+  ["75% Gray", "rgb(0.75,0.75,0.75)"],
+  ["50% Gray", "rgb(0.5,0.5,0.5)"],
+  ["25% Gray", "rgb(0.25,0.25,0.25)"],
+  ["Black", "#000"],
+];
+const WORKSPACE_PAINT_HUES = [
+  ["Red", 0],
+  ["Orange", 30],
+  ["Yellow", 60],
+  ["Green", 120],
+  ["Cyan", 180],
+  ["Blue", 240],
+  ["Purple", 300],
+];
 
 let snapshot = null;
 let selectedObjectUid = null;
@@ -4799,6 +4815,35 @@ async function workspaceRendererContextItems(scene, object, renderer) {
             }),
         });
       }
+    }
+    if (renderer.coloringType === "PaintColoring") {
+      const addPaint = (group, label, color) => {
+        items.push({
+          label: `Paint · ${group} · ${label}`,
+          action: () =>
+            mutate("insert_workspace_renderer_paint", {
+              input: { objectUid: object.uid, rendererUid: renderer.uid, color },
+            }),
+        });
+      };
+      for (const [label, color] of WORKSPACE_PAINT_MONOCHROME) {
+        addPaint("Monochrome", label, color);
+      }
+      for (const [hueName, hue] of WORKSPACE_PAINT_HUES) {
+        for (const [label, saturation, brightness] of [
+          [hueName, "1.0", "1.0"],
+          [`${hueName}, sat 25%`, "0.25", "1.0"],
+          [`${hueName}, sat 50%`, "0.5", "1.0"],
+          [`${hueName}, sat 75%`, "0.75", "1.0"],
+          [`${hueName}, bri 75%`, "1.0", "0.75"],
+          [`${hueName}, bri 50%`, "1.0", "0.50"],
+          [`${hueName}, bri 25%`, "1.0", "0.25"],
+        ]) {
+          addPaint(hueName, label, `hsb(${hue}, ${saturation}, ${brightness})`);
+        }
+      }
+    } else {
+      items.push({ label: "Paint", disabled: true });
     }
     for (const style of shapeStyles) {
       items.push({

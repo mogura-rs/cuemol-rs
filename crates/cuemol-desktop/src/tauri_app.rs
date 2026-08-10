@@ -710,6 +710,14 @@ struct WorkspaceRendererColoringInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceRendererPaintInput {
+    object_uid: u64,
+    renderer_uid: u64,
+    color: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceRendererGroupInput {
     object_uid: u64,
     #[serde(default)]
@@ -2391,6 +2399,22 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Change coloring".to_string();
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn insert_workspace_renderer_paint(
+        &mut self,
+        input: WorkspaceRendererPaintInput,
+    ) -> Result<(), String> {
+        self.desktop
+            .insert_renderer_paint_entry(
+                Uid::new(input.object_uid),
+                Uid::new(input.renderer_uid),
+                &input.color,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = "Insert paint entry".to_string();
         self.invalidate_mesh(false);
         Ok(())
     }
@@ -4903,6 +4927,7 @@ enum ModelRequest {
     ChangeWorkspaceRendererType(WorkspaceRendererTypeInput),
     ApplyWorkspaceRendererStyle(WorkspaceRendererStyleInput),
     SetWorkspaceRendererColoring(WorkspaceRendererColoringInput),
+    InsertWorkspaceRendererPaint(WorkspaceRendererPaintInput),
     CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     FitWorkspaceItem {
@@ -6315,6 +6340,12 @@ fn handle_model_request(
         ModelRequest::SetWorkspaceRendererColoring(input) => {
             let undo = model.capture_undo();
             model.set_workspace_renderer_coloring(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::InsertWorkspaceRendererPaint(input) => {
+            let undo = model.capture_undo();
+            model.insert_workspace_renderer_paint(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -8248,6 +8279,17 @@ fn set_workspace_renderer_coloring(
 }
 
 #[tauri::command]
+fn insert_workspace_renderer_paint(
+    input: WorkspaceRendererPaintInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::InsertWorkspaceRendererPaint(input),
+    )?)
+}
+
+#[tauri::command]
 fn create_workspace_renderer_group(
     input: WorkspaceRendererGroupInput,
     state: State<'_, ManagedState>,
@@ -9382,6 +9424,7 @@ pub fn run() -> Result<(), tauri::Error> {
             change_workspace_renderer_type,
             apply_workspace_renderer_style,
             set_workspace_renderer_coloring,
+            insert_workspace_renderer_paint,
             create_workspace_renderer_group,
             rename_workspace_renderer_group,
             fit_workspace_item,
@@ -10868,6 +10911,42 @@ mod tests {
             .qsc_children()
             .iter()
             .any(|child| child.type_name() == "RainbowColoring"));
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::ApplyWorkspaceRendererStyle(WorkspaceRendererStyleInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                style_name: "WoodyHSCPaint".to_string(),
+                component: "coloring".to_string(),
+            }),
+        )
+        .unwrap();
+        model
+            .desktop
+            .set_molecule_selection_text(object_uid, "protein")
+            .unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::InsertWorkspaceRendererPaint(WorkspaceRendererPaintInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                color: "hsb(120, 1.0, 1.0)".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(snapshot.undo_descriptions[0], "Insert paint entry");
+        assert_eq!(
+            snapshot.objects[0].renderers[0].paint_entries[0].selection,
+            "protein"
+        );
+        assert_eq!(
+            snapshot.objects[0].renderers[0].paint_entries[0].color,
+            "hsb(120, 1.0, 1.0)"
+        );
     }
 
     #[test]

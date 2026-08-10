@@ -4460,6 +4460,117 @@ impl DesktopAppState {
         )
     }
 
+    pub fn renderer_coloring_type(&self, object_uid: Uid, renderer_uid: Uid) -> Option<String> {
+        let scene_uid = self.scene_manager().scene_uid_for_object(object_uid)?;
+        let scene = self.scene_manager().scene(scene_uid)?;
+        let styles = scene_style_manager(scene);
+        let renderer = scene.object(object_uid)?.renderer(renderer_uid)?;
+        let node = renderer
+            .qsc_children()
+            .iter()
+            .find(|node| node.tag_name() == "coloring")
+            .cloned()
+            .or_else(|| {
+                renderer
+                    .style()
+                    .and_then(|style| {
+                        styles.resolve_style_child_node(scene_uid.get(), style, "coloring")
+                    })
+                    .cloned()
+            })?;
+        let coloring_type = if node.type_name().is_empty() {
+            node.str_attr("type").to_string()
+        } else {
+            node.type_name().to_string()
+        };
+        (!coloring_type.is_empty()).then_some(coloring_type)
+    }
+
+    pub fn insert_renderer_paint_entry(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        color: &str,
+    ) -> Result<()> {
+        let color = color.trim();
+        cuemol_gfx::parse_color(color)?;
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let (selection, node) = {
+            let scene = self
+                .scene_manager()
+                .scene(scene_uid)
+                .expect("scene was found above");
+            let styles = scene_style_manager(scene);
+            let object = scene.object(object_uid).expect("object was found above");
+            let selection = object.mol().selection_text().trim().to_string();
+            let renderer = object
+                .renderer(renderer_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+            let node = renderer
+                .qsc_children()
+                .iter()
+                .find(|node| node.tag_name() == "coloring")
+                .cloned()
+                .or_else(|| {
+                    renderer
+                        .style()
+                        .and_then(|style| {
+                            styles.resolve_style_child_node(scene_uid.get(), style, "coloring")
+                        })
+                        .cloned()
+                });
+            (selection, node)
+        };
+        if selection.is_empty() {
+            return Err(CueMolError::invalid_argument("selection is empty"));
+        }
+        let node = node.ok_or_else(|| {
+            CueMolError::invalid_argument(format!(
+                "renderer {} does not use PaintColoring",
+                renderer_uid.get()
+            ))
+        })?;
+        let coloring_type = if node.type_name().is_empty() {
+            node.str_attr("type").to_string()
+        } else {
+            node.type_name().to_string()
+        };
+        if coloring_type != "PaintColoring" {
+            return Err(CueMolError::invalid_argument(format!(
+                "renderer {} does not use PaintColoring",
+                renderer_uid.get()
+            )));
+        }
+        let attrs = node
+            .children()
+            .iter()
+            .filter(|child| child.is_attr() && child.tag_name() != "type")
+            .map(|child| (child.tag_name().to_string(), child.value().to_string()))
+            .collect::<BTreeMap<_, _>>();
+        let mut entries = node
+            .children()
+            .iter()
+            .filter(|child| !child.is_attr() && child.tag_name() == "paint")
+            .filter_map(|child| {
+                let selection = child.str_attr("sel").to_string();
+                let color = child.str_attr("color").to_string();
+                (!selection.is_empty() && !color.is_empty()).then_some((selection, color))
+            })
+            .collect::<Vec<_>>();
+        entries.insert(0, (selection, color.to_string()));
+        self.set_renderer_coloring_details(
+            object_uid,
+            renderer_uid,
+            Some("PaintColoring".to_string()),
+            attrs,
+            entries,
+            None,
+        )
+    }
+
     pub fn set_object_common_properties(
         &mut self,
         object_uid: Uid,
@@ -51287,6 +51398,35 @@ end_header
         assert!(app
             .set_workspace_renderer_coloring_preset(object_uid, renderer_uid, "unknown")
             .is_err());
+
+        app.apply_renderer_style_option(object_uid, renderer_uid, "WoodyHSCPaint", "coloring")
+            .unwrap();
+        assert_eq!(
+            app.renderer_coloring_type(object_uid, renderer_uid)
+                .as_deref(),
+            Some("PaintColoring")
+        );
+        app.set_molecule_selection_text(object_uid, "protein")
+            .unwrap();
+        app.insert_renderer_paint_entry(object_uid, renderer_uid, "hsb(0, 1.0, 1.0)")
+            .unwrap();
+        let renderer = app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        let first_paint = renderer
+            .qsc_children()
+            .iter()
+            .find(|child| child.tag_name() == "coloring")
+            .unwrap()
+            .children()
+            .iter()
+            .find(|child| child.tag_name() == "paint")
+            .unwrap();
+        assert_eq!(first_paint.str_attr("sel").as_str(), "protein");
+        assert_eq!(first_paint.str_attr("color").as_str(), "hsb(0, 1.0, 1.0)");
     }
 
     #[test]

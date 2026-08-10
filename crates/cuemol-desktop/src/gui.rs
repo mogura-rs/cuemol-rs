@@ -68,6 +68,22 @@ const MOUSE_PRESETS: &[(&str, &str)] = &[
     ("TrackpadViewInConf", "Trackpad"),
 ];
 const RENDERER_TYPES: &[&str] = crate::MOLECULE_RENDERER_TYPES;
+const WORKSPACE_PAINT_MONOCHROME: &[(&str, &str)] = &[
+    ("White", "#FFF"),
+    ("75% Gray", "rgb(0.75,0.75,0.75)"),
+    ("50% Gray", "rgb(0.5,0.5,0.5)"),
+    ("25% Gray", "rgb(0.25,0.25,0.25)"),
+    ("Black", "#000"),
+];
+const WORKSPACE_PAINT_HUES: &[(&str, i32)] = &[
+    ("Red", 0),
+    ("Orange", 30),
+    ("Yellow", 60),
+    ("Green", 120),
+    ("Cyan", 180),
+    ("Blue", 240),
+    ("Purple", 300),
+];
 const DENSITY_RENDERER_TYPES: &[&str] = &["contour", "isosurf", "gpu_mapvol"];
 const SURFACE_RENDERER_TYPES: &[&str] = &["molsurf"];
 const LEGACY_MENU_SURFACES: &[&str] = &[
@@ -4207,6 +4223,69 @@ impl GuiApplication {
                 }
             });
         });
+        let paint_enabled = self
+            .state
+            .renderer_coloring_type(object_uid, renderer.uid)
+            .is_some_and(|coloring| coloring == "PaintColoring");
+        ui.add_enabled_ui(paint_enabled, |ui| {
+            ui.menu_button("Paint", |ui| {
+                ui.menu_button("Monochrome", |ui| {
+                    for &(label, color) in WORKSPACE_PAINT_MONOCHROME {
+                        if ui.button(label).clicked() {
+                            self.insert_workspace_renderer_paint(
+                                scene_uid,
+                                object_uid,
+                                renderer.uid,
+                                color,
+                            );
+                            ui.close();
+                        }
+                    }
+                });
+                for &(hue_name, hue) in WORKSPACE_PAINT_HUES {
+                    ui.menu_button(hue_name, |ui| {
+                        let variants = [
+                            (hue_name.to_string(), format!("hsb({hue}, 1.0, 1.0)")),
+                            (
+                                format!("{hue_name}, sat 25%"),
+                                format!("hsb({hue}, 0.25, 1.0)"),
+                            ),
+                            (
+                                format!("{hue_name}, sat 50%"),
+                                format!("hsb({hue}, 0.5, 1.0)"),
+                            ),
+                            (
+                                format!("{hue_name}, sat 75%"),
+                                format!("hsb({hue}, 0.75, 1.0)"),
+                            ),
+                            (
+                                format!("{hue_name}, bri 75%"),
+                                format!("hsb({hue}, 1.0, 0.75)"),
+                            ),
+                            (
+                                format!("{hue_name}, bri 50%"),
+                                format!("hsb({hue}, 1.0, 0.50)"),
+                            ),
+                            (
+                                format!("{hue_name}, bri 25%"),
+                                format!("hsb({hue}, 1.0, 0.25)"),
+                            ),
+                        ];
+                        for (label, color) in variants {
+                            if ui.button(label).clicked() {
+                                self.insert_workspace_renderer_paint(
+                                    scene_uid,
+                                    object_uid,
+                                    renderer.uid,
+                                    &color,
+                                );
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+            });
+        });
         ui.menu_button("Style", |ui| {
             for style in &shape {
                 let label = if style.description.is_empty() {
@@ -4300,6 +4379,28 @@ impl GuiApplication {
                 self.set_status("Change coloring");
             }
             Err(error) => self.set_status(format!("Renderer coloring error: {error}")),
+        }
+    }
+
+    fn insert_workspace_renderer_paint(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        color: &str,
+    ) {
+        let undo = self.capture_undo();
+        match self
+            .state
+            .insert_renderer_paint_entry(object_uid, renderer_uid, color)
+        {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.rebuild_snapshot();
+                self.set_status("Insert paint entry");
+            }
+            Err(error) => self.set_status(format!("Paint error: {error}")),
         }
     }
 
@@ -18767,6 +18868,40 @@ mod tests {
             .qsc_children()
             .iter()
             .any(|child| child.type_name() == "BfacColoring"));
+
+        app.apply_workspace_renderer_style(
+            scene_uid,
+            object_uid,
+            renderer_uid,
+            "WoodyHSCPaint",
+            "coloring",
+        );
+        app.state
+            .set_molecule_selection_text(object_uid, "protein")
+            .unwrap();
+        app.insert_workspace_renderer_paint(
+            scene_uid,
+            object_uid,
+            renderer_uid,
+            "hsb(240, 1.0, 1.0)",
+        );
+        let renderer = app
+            .state
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        let first_paint = renderer
+            .qsc_children()
+            .iter()
+            .find(|child| child.tag_name() == "coloring")
+            .unwrap()
+            .children()
+            .iter()
+            .find(|child| child.tag_name() == "paint")
+            .unwrap();
+        assert_eq!(first_paint.str_attr("sel").as_str(), "protein");
     }
 
     #[test]
