@@ -3741,6 +3741,15 @@ impl GuiApplication {
                                 ui.close();
                             }
                             ui.separator();
+                            if ui.button("Save from view").clicked() {
+                                self.save_workspace_camera_from_view(selection, camera);
+                                ui.close();
+                            }
+                            if ui.button("Apply to view").clicked() {
+                                self.load_workspace_camera_view(selection, camera);
+                                ui.close();
+                            }
+                            ui.separator();
                             if ui.button("Save from scene (with vis flags)").clicked() {
                                 self.save_workspace_camera_from_scene(selection, camera);
                                 ui.close();
@@ -11774,14 +11783,31 @@ impl GuiApplication {
         selection: WorkspaceAuxSelection,
         camera: &mut CameraController,
     ) {
+        self.load_workspace_camera_impl(selection, camera, true);
+    }
+
+    fn load_workspace_camera_view(
+        &mut self,
+        selection: WorkspaceAuxSelection,
+        camera: &mut CameraController,
+    ) {
+        self.load_workspace_camera_impl(selection, camera, false);
+    }
+
+    fn load_workspace_camera_impl(
+        &mut self,
+        selection: WorkspaceAuxSelection,
+        camera: &mut CameraController,
+        load_visibility: bool,
+    ) {
         let Some(summary) = self.camera_summary_for_selection(selection) else {
             self.set_status("Camera not found");
             return;
         };
-        let undo = (summary.visibility_count > 0).then(|| self.capture_undo());
+        let undo = (load_visibility && summary.visibility_count > 0).then(|| self.capture_undo());
         match self
             .state
-            .load_scene_camera(summary.scene_uid, &summary.name, true)
+            .load_scene_camera(summary.scene_uid, &summary.name, load_visibility)
         {
             Ok(saved) => {
                 *camera = CameraController::from_qsys_camera(&saved);
@@ -11801,6 +11827,23 @@ impl GuiApplication {
         selection: WorkspaceAuxSelection,
         camera: &CameraController,
     ) {
+        self.save_workspace_camera_impl(selection, camera, true);
+    }
+
+    fn save_workspace_camera_from_view(
+        &mut self,
+        selection: WorkspaceAuxSelection,
+        camera: &CameraController,
+    ) {
+        self.save_workspace_camera_impl(selection, camera, false);
+    }
+
+    fn save_workspace_camera_impl(
+        &mut self,
+        selection: WorkspaceAuxSelection,
+        camera: &CameraController,
+        save_visibility: bool,
+    ) {
         let Some(summary) = self.camera_summary_for_selection(selection) else {
             self.set_status("Camera not found");
             return;
@@ -11809,7 +11852,7 @@ impl GuiApplication {
         match self.state.save_scene_camera(
             summary.scene_uid,
             camera.to_qsys_camera(&summary.name),
-            true,
+            save_visibility,
         ) {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
@@ -12392,7 +12435,7 @@ impl GuiApplication {
                                 .map_err(|error| error.to_string())?;
                         }
                         self.state
-                            .save_scene_camera(scene_uid, saved, old_name.is_empty())
+                            .save_scene_camera(scene_uid, saved, false)
                             .map_err(|error| error.to_string())?;
                         self.push_undo_snapshot(undo);
                         self.modified_scenes.insert(scene_uid);
@@ -19119,6 +19162,18 @@ mod tests {
             camera_index: 0,
         };
 
+        let mut current = CameraController::default().to_qsys_camera("current");
+        current.set_zoom(64.0);
+        let mut camera = CameraController::from_qsys_camera(&current);
+        app.save_workspace_camera_from_view(selection, &camera);
+        assert_eq!(app.state.camera_summaries(scene_uid)[0].visibility_count, 2);
+        app.state.set_object_visible(object_uid, false).unwrap();
+        let undo_count = app.undo_stack.len();
+        app.load_workspace_camera_view(selection, &mut camera);
+        assert_eq!(camera.to_qsys_camera("loaded").zoom(), 64.0);
+        assert!(!app.state.object_summaries(scene_uid)[0].visible);
+        assert_eq!(app.undo_stack.len(), undo_count);
+
         app.open_camera_visibility_editor(selection);
         let draft = app.camera_visibility_draft.as_mut().unwrap();
         assert_eq!(draft.entries.len(), 2);
@@ -19141,7 +19196,6 @@ mod tests {
 
         app.clear_camera_visibility(scene_uid, "camera_0");
         assert_eq!(app.state.camera_summaries(scene_uid)[0].visibility_count, 0);
-        let mut camera = CameraController::default();
         app.undo(&mut camera);
         assert_eq!(app.state.camera_summaries(scene_uid)[0].visibility_count, 1);
         assert!(app.modified_scenes.contains(&scene_uid));

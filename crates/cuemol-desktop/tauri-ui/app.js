@@ -4867,7 +4867,7 @@ function workspaceCameraContextItems(scene, camera = null) {
         let index = 0;
         while (used.has(`camera_${index}`)) index += 1;
         const name = globalThis.prompt?.("Camera name", `camera_${index}`)?.trim();
-        if (name) await mutate("save_camera", { name });
+        if (name) await mutate("save_camera_view", { name });
       },
     },
     {
@@ -4891,6 +4891,23 @@ function workspaceCameraContextItems(scene, camera = null) {
     action: () => pasteWorkspaceCamera(scene),
   });
   items.push(
+    null,
+    {
+      label: "Save from view",
+      disabled: !camera,
+      action: async () => {
+        if (!(await activate())) return;
+        await mutateWithoutViewport("save_camera_view", { name: camera.name });
+      },
+    },
+    {
+      label: "Apply to view",
+      disabled: !camera,
+      action: async () => {
+        if (!(await activate())) return;
+        await mutate("load_camera_view", { name: camera.name });
+      },
+    },
     null,
     {
       label: "Save from scene (with vis flags)",

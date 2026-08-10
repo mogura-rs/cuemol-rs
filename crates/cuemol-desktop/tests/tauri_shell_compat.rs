@@ -402,6 +402,8 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("workspaceSelectionKind === \"camera\""));
     assert!(JS.contains("mutate(\"save_camera\""));
     assert!(JS.contains("mutate(\"load_camera\""));
+    assert!(JS.contains("mutate(\"save_camera_view\""));
+    assert!(JS.contains("mutate(\"load_camera_view\""));
     assert!(JS.contains("mutate(\"destroy_camera\""));
     assert!(JS.contains("invoke(\"get_camera_properties\""));
     assert!(JS.contains("invoke(\"set_camera_properties\""));
@@ -413,6 +415,8 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("[\"Inc\", \"Obj/Rend\", \"Vis\"]"));
     assert!(JS.contains("label: \"Edit vis flags...\""));
     assert!(JS.contains("label: \"Clear vis flags\""));
+    assert!(JS.contains("label: \"Save from view\""));
+    assert!(JS.contains("label: \"Apply to view\""));
     assert!(JS.contains("camera.visibilityCount > 0"));
     assert!(CSS.contains(".visibility-flag-editor"));
 }

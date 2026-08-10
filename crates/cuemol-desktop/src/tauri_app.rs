@@ -4665,7 +4665,7 @@ impl AppModel {
             .map_err(|error| error.to_string())
     }
 
-    fn save_named_camera(&mut self, name: &str) -> Result<(), String> {
+    fn save_named_camera(&mut self, name: &str, save_visibility: bool) -> Result<(), String> {
         let scene_uid = self
             .desktop
             .active_scene()
@@ -4677,20 +4677,20 @@ impl AppModel {
         let mut camera = self.camera.clone();
         camera.set_name(name);
         self.desktop
-            .save_scene_camera(scene_uid, camera, true)
+            .save_scene_camera(scene_uid, camera, save_visibility)
             .map_err(|error| error.to_string())?;
         self.status = format!("Saved camera {name}");
         Ok(())
     }
 
-    fn load_named_camera(&mut self, name: &str) -> Result<(), String> {
+    fn load_named_camera(&mut self, name: &str, load_visibility: bool) -> Result<(), String> {
         let scene_uid = self
             .desktop
             .active_scene()
             .ok_or_else(|| "no active scene".to_string())?;
         self.camera = self
             .desktop
-            .load_scene_camera(scene_uid, name, true)
+            .load_scene_camera(scene_uid, name, load_visibility)
             .map_err(|error| error.to_string())?;
         self.invalidate_mesh(false);
         self.status = format!("Loaded camera {name}");
@@ -5131,6 +5131,8 @@ enum ModelRequest {
     },
     SaveCamera(String),
     LoadCamera(String),
+    SaveCameraView(String),
+    LoadCameraView(String),
     DestroyCamera(String),
     GetCameraVisibility {
         scene_uid: u64,
@@ -6498,7 +6500,7 @@ fn handle_model_request(
         }
         ModelRequest::SaveCamera(name) => {
             let undo = model.capture_undo();
-            model.save_named_camera(&name)?;
+            model.save_named_camera(&name, true)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -6510,13 +6512,23 @@ fn handle_model_request(
                 .find(|camera| camera.name == name)
                 .is_some_and(|camera| camera.visibility_count > 0);
             let mut undo = has_visibility.then(|| model.capture_undo());
-            model.load_named_camera(&name)?;
+            model.load_named_camera(&name, true)?;
             if let Some(undo) = undo.as_mut() {
                 undo.camera = model.camera.clone();
             }
             if let Some(undo) = undo {
                 model.push_undo(undo);
             }
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SaveCameraView(name) => {
+            let undo = model.capture_undo();
+            model.save_named_camera(&name, false)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::LoadCameraView(name) => {
+            model.load_named_camera(&name, false)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::DestroyCamera(name) => {
@@ -8517,6 +8529,16 @@ fn load_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapsh
 }
 
 #[tauri::command]
+fn save_camera_view(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::SaveCameraView(name))?)
+}
+
+#[tauri::command]
+fn load_camera_view(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::LoadCameraView(name))?)
+}
+
+#[tauri::command]
 fn destroy_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::DestroyCamera(name))?)
 }
@@ -9949,6 +9971,8 @@ pub fn run() -> Result<(), tauri::Error> {
             regenerate_surface,
             save_camera,
             load_camera,
+            save_camera_view,
+            load_camera_view,
             destroy_camera,
             get_camera_visibility,
             set_camera_visibility,
@@ -12710,7 +12734,11 @@ mod tests {
     fn camera_workspace_commands_update_snapshot_and_support_undo() {
         let mut model = model_without_gpu();
         model.camera.set_zoom(63.0);
-        handle_model_request(&mut model, ModelRequest::SaveCamera("camera_0".to_string())).unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SaveCameraView("camera_0".to_string()),
+        )
+        .unwrap();
         let snapshot = model.snapshot();
         assert_eq!(snapshot.cameras.len(), 1);
         assert_eq!(snapshot.cameras[0].name, "camera_0");
@@ -12830,6 +12858,25 @@ mod tests {
         assert!(entries.iter().any(|entry| {
             entry.target_uid == object_uid.get() && entry.is_object && entry.included
         }));
+
+        model.camera.set_zoom(64.0);
+        handle_model_request(
+            &mut model,
+            ModelRequest::SaveCameraView("camera_0".to_string()),
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().cameras[0].visibility_count, 2);
+        model.desktop.set_object_visible(object_uid, false).unwrap();
+        model.camera.set_zoom(10.0);
+        let undo_count = model.undo_stack.len();
+        handle_model_request(
+            &mut model,
+            ModelRequest::LoadCameraView("camera_0".to_string()),
+        )
+        .unwrap();
+        assert_eq!(model.camera.zoom(), 64.0);
+        assert!(!model.desktop.object_summaries(scene_uid)[0].visible);
+        assert_eq!(model.undo_stack.len(), undo_count);
 
         handle_model_request(
             &mut model,

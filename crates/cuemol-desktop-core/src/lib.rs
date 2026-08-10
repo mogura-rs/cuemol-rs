@@ -1800,6 +1800,15 @@ impl DesktopAppState {
             .scene_manager_mut()
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let preserved_visibility = if save_visibility {
+            None
+        } else {
+            scene.camera_by_name(&name).map(|existing| {
+                existing
+                    .visibility_settings()
+                    .collect::<Vec<(u64, bool, bool)>>()
+            })
+        };
         if let Some(existing) = scene.camera_by_name(&name) {
             camera.set_source(existing.source());
             camera.set_alt_source(existing.alt_source());
@@ -1809,6 +1818,11 @@ impl DesktopAppState {
             camera.clear_visibility_settings();
             for (target_uid, visible, is_object) in visibility_settings {
                 camera.vis_append(target_uid.get(), visible, is_object);
+            }
+        } else if let Some(preserved_visibility) = preserved_visibility {
+            camera.clear_visibility_settings();
+            for (target_uid, visible, is_object) in preserved_visibility {
+                camera.vis_append(target_uid, visible, is_object);
             }
         }
         scene.set_camera(camera);
@@ -54260,6 +54274,11 @@ attribute \"dep\" string \"positions\"
         app.save_scene_camera(scene_uid, camera, true).unwrap();
         assert_eq!(app.suggest_camera_name(scene_uid).unwrap(), "camera_1");
         assert_eq!(app.camera_summaries(scene_uid)[0].visibility_count, 6);
+        let mut view_only = cuemol_qsys::Camera::new();
+        view_only.set_name("camera_0");
+        view_only.set_zoom(76.0);
+        app.save_scene_camera(scene_uid, view_only, false).unwrap();
+        assert_eq!(app.camera_summaries(scene_uid)[0].visibility_count, 6);
 
         let object = app
             .scene_manager_mut()
@@ -54276,7 +54295,7 @@ attribute \"dep\" string \"positions\"
         app.set_surface_renderer_visible(surface_uid, surface_renderer_uid, true)
             .unwrap();
         let loaded = app.load_scene_camera(scene_uid, "camera_0", true).unwrap();
-        assert_eq!(loaded.zoom(), 75.0);
+        assert_eq!(loaded.zoom(), 76.0);
         let object = app.scene_manager().object(object_uid).unwrap();
         assert!(!object.is_visible());
         assert!(!object.renderer(renderer_uid).unwrap().is_visible());
@@ -54296,7 +54315,7 @@ attribute \"dep\" string \"positions\"
             .unwrap()
             .camera_by_name(&pasted_name)
             .unwrap();
-        assert_eq!(pasted.zoom(), 75.0);
+        assert_eq!(pasted.zoom(), 76.0);
         assert_eq!(pasted.visibility_size(), 6);
 
         let path = std::env::temp_dir().join(format!(
