@@ -158,6 +158,8 @@ const molstructSelectedKeys = new Set();
 const molstructOpenKeys = new Set();
 let molstructSelectionAnchor = null;
 let selectionObjectUid = null;
+let mergeMoleculeSourceUid = null;
+let mergeMoleculeTargetUid = null;
 let selectionActiveTab = "command";
 let selectionEditorItems = [];
 let selectionEditorSelectedIndex = -1;
@@ -5005,11 +5007,38 @@ async function showReferenceDialog(title) {
     if (objects.length < 2) {
       dialogContent.append(dialogParagraph("At least two molecular objects are required."));
     } else {
-      const objectOptions = objects.map((object) => [object.uid, object.name]);
-      const source = dialogSelect("From molecule", objectOptions, objects[0].uid);
-      const selection = dialogField("Selection", snapshot.selection);
-      const target = dialogSelect("To molecule", objectOptions, objects[1].uid);
-      const copy = dialogCheckbox("Copy", false);
+      if (!objects.some((object) => object.uid === mergeMoleculeSourceUid)) {
+        mergeMoleculeSourceUid = null;
+      }
+      if (!objects.some((object) => object.uid === mergeMoleculeTargetUid)) {
+        mergeMoleculeTargetUid = null;
+      }
+      const objectOptions = [
+        ["", "Select object"],
+        ...objects.map((object) => [object.uid, object.name]),
+      ];
+      const fromSection = dialogGroup("From");
+      const source = dialogSelect(
+        "From molecule",
+        objectOptions,
+        mergeMoleculeSourceUid ?? "",
+        fromSection,
+      );
+      const selection = dialogField("Selection", "", "text", fromSection);
+      const toSection = dialogGroup("To");
+      const target = dialogSelect(
+        "To molecule",
+        objectOptions,
+        mergeMoleculeTargetUid ?? "",
+        toSection,
+      );
+      const sameMolecule = dialogParagraph(
+        "Source and destination must be different molecules.",
+      );
+      sameMolecule.hidden = true;
+      toSection.append(sameMolecule);
+      const options = dialogGroup("Options");
+      const copy = dialogCheckbox("Copy (keep source atoms)", true, options);
       const merge = button("OK", "dialog-primary", async () => {
         await mutate("merge_molecules", {
           sourceObjectUid: Number(source.value),
@@ -5017,9 +5046,23 @@ async function showReferenceDialog(title) {
           targetObjectUid: Number(target.value),
           copy: copy.checked,
         });
+        rememberSelection(selection.value);
         referenceDialog.close();
       });
+      const updateMergeState = () => {
+        mergeMoleculeSourceUid = source.value ? Number(source.value) : null;
+        mergeMoleculeTargetUid = target.value ? Number(target.value) : null;
+        const same =
+          mergeMoleculeSourceUid !== null &&
+          mergeMoleculeSourceUid === mergeMoleculeTargetUid;
+        sameMolecule.hidden = !same;
+        merge.disabled =
+          mergeMoleculeSourceUid === null || mergeMoleculeTargetUid === null || same;
+      };
+      source.addEventListener("change", updateMergeState);
+      target.addEventListener("change", updateMergeState);
       dialogActions(merge);
+      updateMergeState();
     }
   } else if (title === "Delete mol atoms") {
     const object = selectedObject();

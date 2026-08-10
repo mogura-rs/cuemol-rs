@@ -484,6 +484,27 @@ fn png_export_matches_the_reference_options_dialog() {
 }
 
 #[test]
+fn merge_molecule_dialog_matches_the_reference_copy_move_flow() {
+    for value in [
+        "let mergeMoleculeSourceUid = null",
+        "let mergeMoleculeTargetUid = null",
+        "Copy (keep source atoms)",
+        "Source and destination must be different molecules.",
+        "merge.disabled",
+        "rememberSelection(selection.value)",
+    ] {
+        assert!(
+            JS.contains(value),
+            "missing merge molecule behavior {value}"
+        );
+    }
+    assert!(JS.contains("dialogCheckbox(\"Copy (keep source atoms)\", true, options)"));
+    assert!(NATIVE_GUI_RS.contains("fn merge_molecule_dialog"));
+    assert!(NATIVE_GUI_RS.contains("apply_merge_molecule_draft"));
+    assert!(!NATIVE_GUI_RS.contains("NativeFileDialog::MergeObject"));
+}
+
+#[test]
 fn tauri_viewport_render_requests_are_coalesced() {
     assert!(JS.contains("if (viewportRenderRequest)"));
     assert!(JS.contains("viewportRenderQueued = true"));

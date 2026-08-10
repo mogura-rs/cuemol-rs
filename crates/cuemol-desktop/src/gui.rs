@@ -605,6 +605,14 @@ impl Default for NativeMdTrajectoryDraft {
     }
 }
 
+#[derive(Debug, Clone)]
+struct NativeMergeMoleculeDraft {
+    source_object: Option<cuemol_core::Uid>,
+    target_object: Option<cuemol_core::Uid>,
+    selection: String,
+    copy: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativePngUnit {
     Pixel,
@@ -740,6 +748,9 @@ struct GuiApplication {
     pdb_probe_receiver: Option<mpsc::Receiver<PdbProbeMessage>>,
     pdb_probe_result: Option<std::result::Result<Vec<crate::GuiPdbFileKind>, String>>,
     md_trajectory_draft: Option<NativeMdTrajectoryDraft>,
+    merge_molecule_draft: Option<NativeMergeMoleculeDraft>,
+    merge_source_object: Option<cuemol_core::Uid>,
+    merge_target_object: Option<cuemol_core::Uid>,
     png_export_draft: Option<NativePngExportDraft>,
     renderer_setup_draft: Option<NativeRendererSetupDraft>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
@@ -1224,7 +1235,6 @@ enum NativeFileDialog {
     ExportScene,
     OpenScript,
     SaveLog,
-    MergeObject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2536,6 +2546,9 @@ impl GuiApplication {
             pdb_probe_receiver: None,
             pdb_probe_result: None,
             md_trajectory_draft: None,
+            merge_molecule_draft: None,
+            merge_source_object: None,
+            merge_target_object: None,
             png_export_draft: None,
             renderer_setup_draft: None,
             pdb_download_receiver: None,
@@ -3224,7 +3237,7 @@ impl GuiApplication {
                     }
                     ui.separator();
                     if ui.button("Merge molecule...").clicked() {
-                        self.choose_merge_molecule(camera);
+                        self.open_merge_molecule_dialog();
                         ui.close();
                     }
                     if ui.button("Delete mol atoms...").clicked() {
@@ -8635,11 +8648,24 @@ impl GuiApplication {
         });
     }
 
-    fn choose_merge_molecule(&mut self, camera: &mut CameraController) {
-        if let Some(path) = native_file_dialog(NativeFileDialog::MergeObject, &self.open_path) {
-            self.open_path = path.to_string_lossy().into_owned();
-            self.merge_current_path(camera);
+    fn open_merge_molecule_dialog(&mut self) {
+        let objects = self.state.active_object_summaries();
+        if objects.len() < 2 {
+            self.set_status("At least two molecular objects are required");
+            return;
         }
+        self.merge_source_object = self
+            .merge_source_object
+            .filter(|uid| objects.iter().any(|object| object.uid == *uid));
+        self.merge_target_object = self
+            .merge_target_object
+            .filter(|uid| objects.iter().any(|object| object.uid == *uid));
+        self.merge_molecule_draft = Some(NativeMergeMoleculeDraft {
+            source_object: self.merge_source_object,
+            target_object: self.merge_target_object,
+            selection: String::new(),
+            copy: true,
+        });
     }
 
     fn choose_execute_script(&mut self) {
@@ -9200,27 +9226,6 @@ impl GuiApplication {
         match fs::write(self.log_save_path.trim(), self.log_lines.join("\n")) {
             Ok(()) => self.set_status(format!("Saved log {}", self.log_save_path.trim())),
             Err(error) => self.set_status(format!("Error: {error}")),
-        }
-    }
-
-    fn merge_current_path(&mut self, camera: &mut CameraController) {
-        let path = PathBuf::from(self.open_path.trim());
-        let undo = self.capture_undo();
-        match self.state.open_path(&path) {
-            Ok(GuiLoadedPath::Object { object_uid, .. }) => {
-                self.push_undo_snapshot(undo);
-                self.selected_object = Some(object_uid);
-                self.selected_renderer = None;
-                self.last_loaded_path = Some(path.clone());
-                self.add_recent_path(path);
-                self.rebuild_snapshot();
-                camera.fit_snapshot(&self.snapshot);
-                self.set_status(format!("Merged object {}", object_uid.get()));
-            }
-            Ok(GuiLoadedPath::Scene { .. }) | Ok(GuiLoadedPath::Map { .. }) => {
-                self.set_status("Merge molecule expects an object file");
-            }
-            Err(error) => self.set_error(error),
         }
     }
 
@@ -10282,6 +10287,7 @@ impl GuiApplication {
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx);
         self.get_pdb_dialog(ctx);
+        self.merge_molecule_dialog(ctx);
         self.md_trajectory_dialog(ctx);
         self.png_export_dialog(ctx);
         self.renderer_setup_dialog(ctx, camera);
@@ -15215,6 +15221,147 @@ impl GuiApplication {
         );
     }
 
+    fn merge_molecule_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.merge_molecule_draft.take() else {
+            return;
+        };
+        let objects = self.state.active_object_summaries();
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Merge molecule")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.group(|ui| {
+                    ui.strong("From");
+                    egui::Grid::new("merge_molecule_from")
+                        .num_columns(2)
+                        .spacing([12.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("From molecule:");
+                            egui::ComboBox::from_id_salt("merge_molecule_source")
+                                .selected_text(object_combo_label(&objects, draft.source_object))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut draft.source_object,
+                                        None,
+                                        "Select object",
+                                    );
+                                    for object in &objects {
+                                        ui.selectable_value(
+                                            &mut draft.source_object,
+                                            Some(object.uid),
+                                            &object.name,
+                                        );
+                                    }
+                                });
+                            ui.end_row();
+
+                            ui.label("Selection:");
+                            ui.add_sized(
+                                [320.0, 22.0],
+                                egui::TextEdit::singleline(&mut draft.selection),
+                            );
+                            ui.end_row();
+                        });
+                });
+                ui.add_space(6.0);
+                ui.group(|ui| {
+                    ui.strong("To");
+                    ui.horizontal(|ui| {
+                        ui.label("To molecule:");
+                        egui::ComboBox::from_id_salt("merge_molecule_target")
+                            .selected_text(object_combo_label(&objects, draft.target_object))
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut draft.target_object,
+                                    None,
+                                    "Select object",
+                                );
+                                for object in &objects {
+                                    ui.selectable_value(
+                                        &mut draft.target_object,
+                                        Some(object.uid),
+                                        &object.name,
+                                    );
+                                }
+                            });
+                    });
+                    if draft.source_object.is_some() && draft.source_object == draft.target_object {
+                        ui.colored_label(
+                            egui::Color32::DARK_RED,
+                            "Source and destination must be different molecules.",
+                        );
+                    }
+                });
+                ui.add_space(6.0);
+                ui.group(|ui| {
+                    ui.strong("Options");
+                    ui.checkbox(&mut draft.copy, "Copy (keep source atoms)");
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let valid = draft.source_object.is_some()
+                        && draft.target_object.is_some()
+                        && draft.source_object != draft.target_object;
+                    if ui.add_enabled(valid, egui::Button::new("OK")).clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        self.merge_source_object = draft.source_object;
+        self.merge_target_object = draft.target_object;
+        if accept {
+            if !self.apply_merge_molecule_draft(&draft) {
+                self.merge_molecule_draft = Some(draft);
+            }
+        } else if open && !cancel {
+            self.merge_molecule_draft = Some(draft);
+        }
+    }
+
+    fn apply_merge_molecule_draft(&mut self, draft: &NativeMergeMoleculeDraft) -> bool {
+        let (Some(source_object), Some(target_object)) = (draft.source_object, draft.target_object)
+        else {
+            self.set_status("Select source and destination molecules");
+            return false;
+        };
+        if source_object == target_object {
+            self.set_status("Source and destination must be different molecules");
+            return false;
+        }
+        let undo = self.capture_undo();
+        match self
+            .state
+            .merge_molecules(source_object, &draft.selection, target_object, draft.copy)
+        {
+            Ok(count) => {
+                self.push_undo_snapshot(undo);
+                self.selected_object = Some(target_object);
+                self.selected_renderer = None;
+                self.workspace_aux_selection = None;
+                self.invalidate_molecule_panel_caches();
+                self.rebuild_snapshot();
+                self.set_status(format!(
+                    "{} {count} atom(s) into the target molecule",
+                    if draft.copy { "Copied" } else { "Moved" }
+                ));
+                true
+            }
+            Err(error) => {
+                self.set_error(error);
+                false
+            }
+        }
+    }
+
     fn md_trajectory_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut draft) = self.md_trajectory_draft.take() else {
             return;
@@ -18978,12 +19125,6 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             default_extension: Some("log"),
             save: true,
         },
-        NativeFileDialog::MergeObject => NativeFileDialogSpec {
-            title: "Select a molecule to merge",
-            filters: OBJECT_OPEN_FILTERS,
-            default_extension: None,
-            save: false,
-        },
     }
 }
 
@@ -20886,6 +21027,84 @@ mod tests {
         assert!(draft.retain_aspect);
         assert!(!draft.transparent);
         assert!((draft.aspect - 1.5).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn native_merge_dialog_matches_reference_and_is_undoable() {
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().into_owned();
+        app.open_current_path(&mut camera);
+        app.open_current_path(&mut camera);
+        let objects = app.state.active_object_summaries();
+        let source = objects[0].uid;
+        let target = objects[1].uid;
+
+        app.open_merge_molecule_dialog();
+        let initial = app
+            .merge_molecule_draft
+            .take()
+            .expect("merge molecule draft");
+        assert_eq!(initial.source_object, None);
+        assert_eq!(initial.target_object, None);
+        assert!(initial.selection.is_empty());
+        assert!(initial.copy);
+
+        app.state
+            .change_chain_in_object(source, "name CA", "B")
+            .unwrap();
+        let source_atom_count = app
+            .state
+            .scene_manager()
+            .object(source)
+            .unwrap()
+            .mol()
+            .atom_count();
+        let target_atom_count = app
+            .state
+            .scene_manager()
+            .object(target)
+            .unwrap()
+            .mol()
+            .atom_count();
+        let draft = NativeMergeMoleculeDraft {
+            source_object: Some(source),
+            target_object: Some(target),
+            selection: "chain B".to_string(),
+            copy: true,
+        };
+        assert!(app.apply_merge_molecule_draft(&draft));
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(source)
+                .unwrap()
+                .mol()
+                .atom_count(),
+            source_atom_count
+        );
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(target)
+                .unwrap()
+                .mol()
+                .atom_count(),
+            target_atom_count + 46
+        );
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(target)
+                .unwrap()
+                .mol()
+                .atom_count(),
+            target_atom_count
+        );
     }
 
     #[test]
