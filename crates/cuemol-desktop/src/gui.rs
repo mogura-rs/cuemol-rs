@@ -555,7 +555,7 @@ type PdbDownloadMessage = std::result::Result<
     (
         String,
         Vec<crate::PdbDownloadedFile>,
-        Option<crate::GuiPdbRendererSetup>,
+        Option<crate::GuiRendererSetup>,
     ),
     String,
 >;
@@ -565,7 +565,14 @@ type PdbProbeMessage = (
 );
 
 #[derive(Debug, Clone)]
-struct NativePdbRendererSetupDraft {
+enum NativeRendererSetupAction {
+    PdbDownload,
+    OpenPath(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+struct NativeRendererSetupDraft {
+    action: NativeRendererSetupAction,
     object_name: String,
     renderer_type: String,
     renderer_name: String,
@@ -599,7 +606,7 @@ struct GuiApplication {
     pdb_probe_deadline: Option<Instant>,
     pdb_probe_receiver: Option<mpsc::Receiver<PdbProbeMessage>>,
     pdb_probe_result: Option<std::result::Result<Vec<crate::GuiPdbFileKind>, String>>,
-    pdb_renderer_setup_draft: Option<NativePdbRendererSetupDraft>,
+    renderer_setup_draft: Option<NativeRendererSetupDraft>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
@@ -2381,7 +2388,7 @@ impl GuiApplication {
             pdb_probe_deadline: None,
             pdb_probe_receiver: None,
             pdb_probe_result: None,
-            pdb_renderer_setup_draft: None,
+            renderer_setup_draft: None,
             pdb_download_receiver: None,
             url_download_receiver: None,
             script_path: "script.js".to_string(),
@@ -2991,7 +2998,7 @@ impl GuiApplication {
                             let label = path.to_string_lossy();
                             if ui.button(label.as_ref()).clicked() {
                                 self.open_path = label.to_string();
-                                self.open_current_path(camera);
+                                self.request_open_current_path(camera);
                                 ui.close();
                             }
                         }
@@ -7943,7 +7950,7 @@ impl GuiApplication {
     fn choose_open_file(&mut self, camera: &mut CameraController) {
         if let Some(path) = native_file_dialog(NativeFileDialog::OpenObject, &self.open_path) {
             self.open_path = path.to_string_lossy().into_owned();
-            self.open_current_path(camera);
+            self.request_open_current_path(camera);
         }
     }
 
@@ -8063,6 +8070,37 @@ impl GuiApplication {
         Some(egui::KeyboardShortcut::new(modifiers, key))
     }
 
+    fn request_open_current_path(&mut self, camera: &mut CameraController) {
+        let open_path = self.open_path.trim().to_string();
+        if open_path.is_empty() {
+            self.set_status("Open path is empty");
+            return;
+        }
+        if is_network_url(&open_path) {
+            self.open_current_path(camera);
+            return;
+        }
+        let path = PathBuf::from(&open_path);
+        if is_view_file(&path) {
+            self.open_current_path(camera);
+            return;
+        }
+        match self.state.path_supports_molecule_renderer_setup(&path) {
+            Ok(true) => {
+                let object_name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("object")
+                    .to_string();
+                self.open_renderer_setup(&object_name, NativeRendererSetupAction::OpenPath(path));
+            }
+            Ok(false) => self.open_current_path(camera),
+            Err(error) => {
+                self.set_error(error);
+            }
+        }
+    }
+
     fn open_current_path(&mut self, camera: &mut CameraController) {
         let open_path = self.open_path.trim().to_string();
         if open_path.is_empty() {
@@ -8160,6 +8198,44 @@ impl GuiApplication {
                 camera.fit_snapshot(&self.snapshot);
             }
             Err(error) => self.set_error(error),
+        }
+    }
+
+    fn open_path_with_renderer_setup(
+        &mut self,
+        path: PathBuf,
+        setup: crate::GuiRendererSetup,
+        camera: &mut CameraController,
+    ) {
+        let recenter = setup.recenter;
+        let undo = self.capture_undo();
+        match self.state.open_path_with_renderer_setup(&path, &setup) {
+            Ok(GuiLoadedPath::Object {
+                scene_uid,
+                object_uid,
+            }) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.selected_object = Some(object_uid);
+                self.selected_renderer = None;
+                self.workspace_aux_selection = None;
+                self.last_loaded_path = Some(path.clone());
+                self.add_recent_path(path.clone());
+                self.sync_active_scene_properties();
+                self.rebuild_snapshot();
+                if recenter {
+                    camera.fit_snapshot(&self.snapshot);
+                }
+                self.set_status(format!("File: [{}] is loaded.", path.display()));
+            }
+            Ok(_) => {
+                self.restore_undo_snapshot(undo, camera);
+                self.set_status("File did not create a molecule object");
+            }
+            Err(error) => {
+                self.restore_undo_snapshot(undo, camera);
+                self.set_error(error);
+            }
         }
     }
 
@@ -8505,7 +8581,7 @@ impl GuiApplication {
     fn start_pdb_download(
         &mut self,
         ctx: &egui::Context,
-        renderer_setup: Option<crate::GuiPdbRendererSetup>,
+        renderer_setup: Option<crate::GuiRendererSetup>,
     ) {
         if self.pdb_download_receiver.is_some() {
             self.set_status("PDB download is already running");
@@ -8651,7 +8727,7 @@ impl GuiApplication {
             Some(Ok(Ok(path))) => {
                 self.url_download_receiver = None;
                 self.open_path = path.to_string_lossy().to_string();
-                self.open_current_path(camera);
+                self.request_open_current_path(camera);
             }
             Some(Ok(Err(error))) => {
                 self.url_download_receiver = None;
@@ -9481,7 +9557,7 @@ impl GuiApplication {
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx);
         self.get_pdb_dialog(ctx);
-        self.pdb_renderer_setup_dialog(ctx);
+        self.renderer_setup_dialog(ctx, camera);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
     }
@@ -14403,6 +14479,11 @@ impl GuiApplication {
     }
 
     fn open_pdb_renderer_setup(&mut self) {
+        let object_name = self.pdb_id.trim().to_ascii_lowercase();
+        self.open_renderer_setup(&object_name, NativeRendererSetupAction::PdbDownload);
+    }
+
+    fn open_renderer_setup(&mut self, base_object_name: &str, action: NativeRendererSetupAction) {
         let scene_uid = self.state.ensure_active_scene();
         let options = match self.state.molecule_renderer_setup_options(scene_uid) {
             Ok(options) if !options.is_empty() => options,
@@ -14415,20 +14496,21 @@ impl GuiApplication {
                 return;
             }
         };
-        let preferences = crate::load_pdb_renderer_preferences();
+        let preferences = crate::load_renderer_setup_preferences();
         let renderer_type = preferences
             .renderer_type
             .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type))
             .unwrap_or_else(|| options[0].name.clone());
         let object_name = self
             .state
-            .suggest_object_name(scene_uid, &self.pdb_id.trim().to_ascii_lowercase())
-            .unwrap_or_else(|_| self.pdb_id.trim().to_ascii_lowercase());
+            .suggest_object_name(scene_uid, base_object_name)
+            .unwrap_or_else(|_| base_object_name.to_string());
         let renderer_name = self
             .state
             .suggest_renderer_name(scene_uid, &renderer_type)
             .unwrap_or_else(|_| format!("{renderer_type}1"));
-        self.pdb_renderer_setup_draft = Some(NativePdbRendererSetupDraft {
+        self.renderer_setup_draft = Some(NativeRendererSetupDraft {
+            action,
             object_name,
             renderer_type,
             renderer_name,
@@ -14440,8 +14522,8 @@ impl GuiApplication {
         });
     }
 
-    fn pdb_renderer_setup_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut draft) = self.pdb_renderer_setup_draft.take() else {
+    fn renderer_setup_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        let Some(mut draft) = self.renderer_setup_draft.take() else {
             return;
         };
         let mut open = true;
@@ -14551,7 +14633,7 @@ impl GuiApplication {
                 });
             });
         if accept {
-            let setup = crate::GuiPdbRendererSetup {
+            let setup = crate::GuiRendererSetup {
                 object_name: draft.object_name.trim().to_string(),
                 renderer_type: draft.renderer_type.trim().to_string(),
                 renderer_name: draft.renderer_name.trim().to_string(),
@@ -14563,10 +14645,17 @@ impl GuiApplication {
             if let Some(selection) = setup.selection.as_deref() {
                 self.remember_selection_history(selection);
             }
-            let _ = crate::save_pdb_renderer_preferences(&setup.renderer_type, setup.recenter);
-            self.start_pdb_download(ctx, Some(setup));
+            let _ = crate::save_renderer_setup_preferences(&setup.renderer_type, setup.recenter);
+            match draft.action {
+                NativeRendererSetupAction::PdbDownload => {
+                    self.start_pdb_download(ctx, Some(setup));
+                }
+                NativeRendererSetupAction::OpenPath(path) => {
+                    self.open_path_with_renderer_setup(path, setup, camera);
+                }
+            }
         } else if open && !cancel {
-            self.pdb_renderer_setup_draft = Some(draft);
+            self.renderer_setup_draft = Some(draft);
         }
     }
 
@@ -21640,7 +21729,7 @@ mod tests {
 
     #[test]
     fn native_gui_pdb_download_defaults_match_reference_dialog() {
-        let app = GuiApplication::new();
+        let mut app = GuiApplication::new();
         assert!(app.pdb_id.is_empty());
         assert!(app.pdb_history.is_empty());
         assert!(!app.pdb_history_loaded);
@@ -21649,6 +21738,17 @@ mod tests {
         assert!(!app.pdb_fetch_two_fofc);
         assert!(!app.pdb_fetch_fofc);
         assert_eq!(app.pdb_map_source, "RCSB_CIF");
+        let path = PathBuf::from("sample.pdb");
+        app.open_renderer_setup(
+            "sample.pdb",
+            NativeRendererSetupAction::OpenPath(path.clone()),
+        );
+        let setup = app.renderer_setup_draft.as_ref().unwrap();
+        assert_eq!(setup.object_name, "sample.pdb");
+        assert!(matches!(
+            &setup.action,
+            NativeRendererSetupAction::OpenPath(value) if value == &path
+        ));
     }
 
     #[test]

@@ -215,7 +215,11 @@ fn tauri_open_recent_matches_the_reference_mru_contract() {
     assert!(JS.contains("localStorage.setItem(RECENT_STORAGE_KEY"));
     assert!(JS.contains("button(\"Clear Menu\""));
     assert!(JS.contains("await openSelectedPaths([entry.path])"));
-    assert!(JS.contains("mutateWithViewport(\"open_paths\", { paths: objectPaths })"));
+    assert!(JS.contains("multiple: false"));
+    assert!(JS.contains("await invoke(\"get_file_renderer_setup\", { path })"));
+    assert!(JS.contains("const rendererSetup = await showRendererSetup(defaults)"));
+    assert!(JS.contains("mutateWithViewport(\"open_path_with_renderer_setup\""));
+    assert!(JS.contains("mutateWithViewport(\"open_paths\", { paths: directPaths })"));
     assert!(JS.contains("snapshot?.openedPaths"));
 }
 

@@ -28,13 +28,13 @@ const MAX_PDB_HISTORY: usize = 10;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PdbRendererPreferences {
+pub(crate) struct RendererSetupPreferences {
     pub renderer_type: Option<String>,
     pub recenter: bool,
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-impl Default for PdbRendererPreferences {
+impl Default for RendererSetupPreferences {
     fn default() -> Self {
         Self {
             renderer_type: None,
@@ -252,17 +252,21 @@ pub(crate) fn remember_pdb_id(value: &str) -> std::result::Result<Vec<String>, S
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-fn load_pdb_renderer_preferences_from(
+fn load_renderer_setup_preferences_from(
     path: &Path,
-) -> std::result::Result<PdbRendererPreferences, String> {
+) -> std::result::Result<RendererSetupPreferences, String> {
     let input = match std::fs::read_to_string(path) {
         Ok(input) => input,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(PdbRendererPreferences::default());
+            return Ok(RendererSetupPreferences::default());
         }
-        Err(error) => return Err(format!("failed to read PDB renderer preferences: {error}")),
+        Err(error) => {
+            return Err(format!(
+                "failed to read renderer setup preferences: {error}"
+            ))
+        }
     };
-    let mut preferences = PdbRendererPreferences::default();
+    let mut preferences = RendererSetupPreferences::default();
     for line in input.lines() {
         let Some((key, value)) = line.split_once('\t') else {
             continue;
@@ -279,13 +283,17 @@ fn load_pdb_renderer_preferences_from(
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-pub(crate) fn load_pdb_renderer_preferences() -> PdbRendererPreferences {
-    load_pdb_renderer_preferences_from(&configuration_path("pdb-renderer-preferences.txt"))
+pub(crate) fn load_renderer_setup_preferences() -> RendererSetupPreferences {
+    let path = configuration_path("renderer-setup-preferences.txt");
+    if path.exists() {
+        return load_renderer_setup_preferences_from(&path).unwrap_or_default();
+    }
+    load_renderer_setup_preferences_from(&configuration_path("pdb-renderer-preferences.txt"))
         .unwrap_or_default()
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-fn save_pdb_renderer_preferences_at(
+fn save_renderer_setup_preferences_at(
     path: &Path,
     renderer_type: &str,
     recenter: bool,
@@ -296,26 +304,26 @@ fn save_pdb_renderer_preferences_at(
             .chars()
             .any(|character| matches!(character, '\t' | '\r' | '\n'))
     {
-        return Err("invalid PDB renderer type preference".to_string());
+        return Err("invalid renderer type preference".to_string());
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create PDB preference directory: {error}"))?;
+            .map_err(|error| format!("failed to create renderer preference directory: {error}"))?;
     }
     std::fs::write(
         path,
         format!("renderer_type\t{renderer_type}\nrecenter\t{recenter}\n"),
     )
-    .map_err(|error| format!("failed to save PDB renderer preferences: {error}"))
+    .map_err(|error| format!("failed to save renderer setup preferences: {error}"))
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-pub(crate) fn save_pdb_renderer_preferences(
+pub(crate) fn save_renderer_setup_preferences(
     renderer_type: &str,
     recenter: bool,
 ) -> std::result::Result<(), String> {
-    save_pdb_renderer_preferences_at(
-        &configuration_path("pdb-renderer-preferences.txt"),
+    save_renderer_setup_preferences_at(
+        &configuration_path("renderer-setup-preferences.txt"),
         renderer_type,
         recenter,
     )
@@ -788,20 +796,20 @@ mod download_tests {
     }
 
     #[test]
-    fn pdb_renderer_preferences_match_reference_persistence() {
+    fn renderer_setup_preferences_match_reference_persistence() {
         let path = std::env::temp_dir().join(format!(
             "cuemol-pdb-renderer-preferences-test-{}-{}.txt",
             std::process::id(),
             NEXT_DOWNLOAD_ID.fetch_add(1, Ordering::Relaxed)
         ));
         assert_eq!(
-            load_pdb_renderer_preferences_from(&path).unwrap(),
-            PdbRendererPreferences::default()
+            load_renderer_setup_preferences_from(&path).unwrap(),
+            RendererSetupPreferences::default()
         );
-        save_pdb_renderer_preferences_at(&path, "Default2RendPreset", false).unwrap();
+        save_renderer_setup_preferences_at(&path, "Default2RendPreset", false).unwrap();
         assert_eq!(
-            load_pdb_renderer_preferences_from(&path).unwrap(),
-            PdbRendererPreferences {
+            load_renderer_setup_preferences_from(&path).unwrap(),
+            RendererSetupPreferences {
                 renderer_type: Some("Default2RendPreset".to_string()),
                 recenter: false,
             }

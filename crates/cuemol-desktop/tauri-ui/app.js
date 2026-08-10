@@ -3498,6 +3498,11 @@ async function showPdbRendererSetup(pdbId) {
     showError(error);
     return null;
   }
+  return showRendererSetup(setup);
+}
+
+function showRendererSetup(setup) {
+  if (referenceDialog.open) referenceDialog.close();
   dialogTitle.textContent = "Setup renderer";
   dialogContent.replaceChildren();
   dialogFooter.hidden = false;
@@ -3538,8 +3543,10 @@ async function showPdbRendererSetup(pdbId) {
       referenceDialog.removeEventListener("close", onClose);
       resolve(value);
     };
-    const onClose = () => finish(null);
-    referenceDialog.addEventListener("close", onClose, { once: true });
+    const onClose = () => {
+      if (!referenceDialog.open) finish(null);
+    };
+    referenceDialog.addEventListener("close", onClose);
     let ok;
     const updateState = () => {
       ok.disabled =
@@ -3580,6 +3587,9 @@ async function showPdbRendererSetup(pdbId) {
     }
     updateState();
     dialogActions(cancel, ok);
+    if (!referenceDialog.open && referenceDialog.showModal) {
+      referenceDialog.showModal();
+    }
   });
 }
 
@@ -9605,7 +9615,7 @@ async function openFiles() {
     return;
   }
   const chosen = await dialog.open({
-    multiple: true,
+    multiple: false,
     directory: false,
     filters: [
       {
@@ -9623,10 +9633,35 @@ async function openSelectedPaths(paths) {
   const viewPaths = paths.filter((path) => /\.(view|cam)$/i.test(path));
   const objectPaths = paths.filter((path) => !/\.(view|cam)$/i.test(path));
   let opened = false;
-  if (objectPaths.length && (await mutateWithViewport("open_paths", { paths: objectPaths }))) {
+  const directPaths = [];
+  for (const path of objectPaths) {
+    let defaults;
+    try {
+      defaults = await invoke("get_file_renderer_setup", { path });
+    } catch (error) {
+      showError(error);
+      continue;
+    }
+    if (!defaults) {
+      directPaths.push(path);
+      continue;
+    }
+    const rendererSetup = await showRendererSetup(defaults);
+    if (!rendererSetup) continue;
+    if (
+      await mutateWithViewport("open_path_with_renderer_setup", {
+        path,
+        rendererSetup,
+      })
+    ) {
+      addRecentFile(path);
+      opened = true;
+    }
+  }
+  if (directPaths.length && (await mutateWithViewport("open_paths", { paths: directPaths }))) {
     const openedPaths = Array.isArray(snapshot?.openedPaths) ? snapshot.openedPaths : [];
     addRecentFiles(openedPaths.map((path) => ({ path })));
-    opened = openedPaths.length > 0;
+    opened = openedPaths.length > 0 || opened;
   }
   for (const path of viewPaths) {
     opened = (await mutate("load_view", { path })) || opened;

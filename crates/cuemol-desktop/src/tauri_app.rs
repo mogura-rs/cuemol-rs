@@ -128,7 +128,7 @@ struct RendererStyleOptionDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PdbRendererSetupOptionDto {
+struct RendererSetupOptionDto {
     name: String,
     description: String,
     preset: bool,
@@ -136,17 +136,17 @@ struct PdbRendererSetupOptionDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PdbRendererSetupDto {
+struct RendererSetupDto {
     object_name: String,
     renderer_type: String,
     renderer_name: String,
     recenter: bool,
-    options: Vec<PdbRendererSetupOptionDto>,
+    options: Vec<RendererSetupOptionDto>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PdbRendererSetupInput {
+struct RendererSetupInput {
     object_name: String,
     renderer_type: String,
     renderer_name: String,
@@ -154,8 +154,8 @@ struct PdbRendererSetupInput {
     recenter: bool,
 }
 
-impl From<PdbRendererSetupInput> for crate::GuiPdbRendererSetup {
-    fn from(value: PdbRendererSetupInput) -> Self {
+impl From<RendererSetupInput> for crate::GuiRendererSetup {
+    fn from(value: RendererSetupInput) -> Self {
         Self {
             object_name: value.object_name,
             renderer_type: value.renderer_type,
@@ -5301,13 +5301,22 @@ enum ModelRequest {
         height: u32,
     },
     ReloadScene,
+    GetFileRendererSetup {
+        path: String,
+    },
+    OpenPathWithRendererSetup {
+        path: String,
+        renderer_setup: crate::GuiRendererSetup,
+        width: u32,
+        height: u32,
+    },
     GetPdbRendererSetup {
         pdb_id: String,
     },
     OpenPdb {
         pdb_id: String,
         files: Vec<crate::PdbDownloadedFile>,
-        renderer_setup: Option<crate::GuiPdbRendererSetup>,
+        renderer_setup: Option<crate::GuiRendererSetup>,
         width: u32,
         height: u32,
     },
@@ -5580,7 +5589,8 @@ enum ModelResponse {
     ViewPropertiesUpdate(Box<ViewPropertiesUpdateDto>),
     StyleProperties(StylePropertiesDto),
     RendererStyleOptions(Vec<RendererStyleOptionDto>),
-    PdbRendererSetup(PdbRendererSetupDto),
+    FileRendererSetup(Option<RendererSetupDto>),
+    PdbRendererSetup(RendererSetupDto),
     CameraVisibility(Vec<CameraVisibilityEntryDto>),
     PickedAtom(Option<PickedAtomDto>),
     Message(String),
@@ -6458,6 +6468,45 @@ fn apply_open_paths(model: &mut AppModel, paths: Vec<String>) -> Result<(), Stri
     Ok(())
 }
 
+fn renderer_setup_defaults(
+    model: &mut AppModel,
+    base_object_name: &str,
+) -> Result<RendererSetupDto, String> {
+    let scene_uid = model.desktop.ensure_active_scene();
+    let options = model
+        .desktop
+        .molecule_renderer_setup_options(scene_uid)
+        .map_err(|error| error.to_string())?;
+    let preferences = crate::load_renderer_setup_preferences();
+    let renderer_type = preferences
+        .renderer_type
+        .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type))
+        .or_else(|| options.first().map(|option| option.name.clone()))
+        .ok_or_else(|| "no compatible molecular renderers are available".to_string())?;
+    let object_name = model
+        .desktop
+        .suggest_object_name(scene_uid, base_object_name)
+        .map_err(|error| error.to_string())?;
+    let renderer_name = model
+        .desktop
+        .suggest_renderer_name(scene_uid, &renderer_type)
+        .map_err(|error| error.to_string())?;
+    Ok(RendererSetupDto {
+        object_name,
+        renderer_type,
+        renderer_name,
+        recenter: preferences.recenter,
+        options: options
+            .into_iter()
+            .map(|option| RendererSetupOptionDto {
+                name: option.name,
+                description: option.description,
+                preset: option.preset,
+            })
+            .collect(),
+    })
+}
+
 fn handle_model_request(
     model: &mut AppModel,
     request: ModelRequest,
@@ -7003,6 +7052,55 @@ fn handle_model_request(
                 },
             )))
         }
+        ModelRequest::GetFileRendererSetup { path } => {
+            let path = Path::new(&path);
+            if !model
+                .desktop
+                .path_supports_molecule_renderer_setup(path)
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(ModelResponse::FileRendererSetup(None));
+            }
+            let object_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| "the file name is invalid".to_string())?;
+            Ok(ModelResponse::FileRendererSetup(Some(
+                renderer_setup_defaults(model, object_name)?,
+            )))
+        }
+        ModelRequest::OpenPathWithRendererSetup {
+            path,
+            renderer_setup,
+            width,
+            height,
+        } => {
+            model.start_renderer_warmup();
+            let undo = model.capture_undo();
+            let recenter = renderer_setup.recenter;
+            if let Err(error) = model
+                .desktop
+                .open_path_with_renderer_setup(&path, &renderer_setup)
+            {
+                model.restore_undo(undo)?;
+                return Err(error.to_string());
+            }
+            model.opened_paths.clear();
+            model.opened_paths.push(path.clone());
+            model.selection.clear();
+            model.sync_active_scene_properties();
+            model.status = format!("File: [{path}] is loaded.");
+            model.invalidate_mesh(recenter);
+            model.push_undo(undo);
+            model.touch_structure_details();
+            Ok(ModelResponse::MolStructUpdate(Box::new(
+                MolStructUpdateDto {
+                    snapshot: model.snapshot(),
+                    viewport: model.viewport_metadata(width, height),
+                },
+            )))
+        }
         ModelRequest::ReloadScene => {
             let path = model
                 .desktop
@@ -7029,41 +7127,9 @@ fn handle_model_request(
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::GetPdbRendererSetup { pdb_id } => {
-            let scene_uid = model.desktop.ensure_active_scene();
-            let options = model
-                .desktop
-                .molecule_renderer_setup_options(scene_uid)
-                .map_err(|error| error.to_string())?;
-            let preferences = crate::load_pdb_renderer_preferences();
-            let renderer_type = preferences
-                .renderer_type
-                .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type))
-                .or_else(|| options.first().map(|option| option.name.clone()))
-                .ok_or_else(|| "no compatible molecular renderers are available".to_string())?;
-            let object_name = model
-                .desktop
-                .suggest_object_name(scene_uid, &pdb_id.to_ascii_lowercase())
-                .map_err(|error| error.to_string())?;
-            let renderer_name = model
-                .desktop
-                .suggest_renderer_name(scene_uid, &renderer_type)
-                .map_err(|error| error.to_string())?;
-            Ok(ModelResponse::PdbRendererSetup(PdbRendererSetupDto {
-                object_name,
-                renderer_type,
-                renderer_name,
-                recenter: preferences.recenter,
-                options: options
-                    .into_iter()
-                    .map(|option| PdbRendererSetupOptionDto {
-                        name: option.name,
-                        description: option.description,
-                        preset: option.preset,
-                    })
-                    .collect(),
-            }))
-        }
+        ModelRequest::GetPdbRendererSetup { pdb_id } => Ok(ModelResponse::PdbRendererSetup(
+            renderer_setup_defaults(model, &pdb_id.to_ascii_lowercase())?,
+        )),
         ModelRequest::OpenPdb {
             pdb_id,
             files,
@@ -8380,6 +8446,7 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
@@ -8403,6 +8470,7 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
@@ -8426,6 +8494,7 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
@@ -8449,6 +8518,7 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
@@ -8472,6 +8542,7 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
@@ -8495,6 +8566,7 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
@@ -8518,6 +8590,7 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
@@ -8541,6 +8614,7 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
@@ -8566,6 +8640,7 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
@@ -8598,6 +8673,7 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
@@ -8655,6 +8731,7 @@ fn view_properties_update_response(
         | ModelResponse::ViewProperties(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
@@ -9479,10 +9556,48 @@ fn get_pdb_history() -> Vec<String> {
 }
 
 #[tauri::command]
+fn get_file_renderer_setup(
+    path: String,
+    state: State<'_, ManagedState>,
+) -> Result<Option<RendererSetupDto>, String> {
+    if path.trim().is_empty() {
+        return Err("a file path is required".to_string());
+    }
+    match request_model(&state, ModelRequest::GetFileRendererSetup { path })? {
+        ModelResponse::FileRendererSetup(setup) => Ok(setup),
+        _ => Err("unexpected file renderer setup response".to_string()),
+    }
+}
+
+#[tauri::command]
+fn open_path_with_renderer_setup(
+    path: String,
+    renderer_setup: RendererSetupInput,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<MolStructUpdateDto, String> {
+    let renderer_setup = crate::GuiRendererSetup::from(renderer_setup);
+    let _ = crate::save_renderer_setup_preferences(
+        &renderer_setup.renderer_type,
+        renderer_setup.recenter,
+    );
+    molecule_selection_update_response(request_model(
+        &state,
+        ModelRequest::OpenPathWithRendererSetup {
+            path,
+            renderer_setup,
+            width,
+            height,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn get_pdb_renderer_setup(
     pdb_id: String,
     state: State<'_, ManagedState>,
-) -> Result<PdbRendererSetupDto, String> {
+) -> Result<RendererSetupDto, String> {
     let pdb_id = crate::normalize_pdb_id(&pdb_id)?;
     match request_model(&state, ModelRequest::GetPdbRendererSetup { pdb_id })? {
         ModelResponse::PdbRendererSetup(setup) => Ok(setup),
@@ -9530,13 +9645,13 @@ async fn open_pdb(
     fetch_two_fofc: bool,
     fetch_fofc: bool,
     map_source: String,
-    renderer_setup: Option<PdbRendererSetupInput>,
+    renderer_setup: Option<RendererSetupInput>,
     width: u32,
     height: u32,
     state: State<'_, ManagedState>,
 ) -> Result<MolStructUpdateDto, String> {
     let pdb_id = crate::normalize_pdb_id(&pdb_id)?;
-    let renderer_setup = renderer_setup.map(crate::GuiPdbRendererSetup::from);
+    let renderer_setup = renderer_setup.map(crate::GuiRendererSetup::from);
     if fetch_coordinates != renderer_setup.is_some() {
         return Err(if fetch_coordinates {
             "PDB coordinates require renderer setup".to_string()
@@ -9545,7 +9660,7 @@ async fn open_pdb(
         });
     }
     if let Some(setup) = renderer_setup.as_ref() {
-        let _ = crate::save_pdb_renderer_preferences(&setup.renderer_type, setup.recenter);
+        let _ = crate::save_renderer_setup_preferences(&setup.renderer_type, setup.recenter);
     }
     let options = crate::PdbFetchOptions {
         pdb_id: pdb_id.clone(),
@@ -10660,6 +10775,8 @@ pub fn run() -> Result<(), tauri::Error> {
             open_initial_paths,
             reload_scene,
             get_pdb_history,
+            get_file_renderer_setup,
+            open_path_with_renderer_setup,
             get_pdb_renderer_setup,
             check_pdb_availability,
             open_pdb,
@@ -11039,6 +11156,85 @@ mod tests {
         assert!(model.mesh_refit_pending);
         assert_eq!(update.viewport.width, 800);
         assert_eq!(update.viewport.height, 600);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn file_open_renderer_setup_precedes_molecule_loading() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-renderer-setup-open-{}.pdb",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            b"ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+        let mut model = model_without_gpu();
+        let setup_response = handle_model_request(
+            &mut model,
+            ModelRequest::GetFileRendererSetup {
+                path: path_text.clone(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::FileRendererSetup(Some(defaults)) = setup_response else {
+            panic!("expected file renderer setup");
+        };
+        assert_eq!(
+            defaults.object_name,
+            path.file_name().unwrap().to_string_lossy()
+        );
+        assert!(!defaults.options.is_empty());
+
+        let error = match handle_model_request(
+            &mut model,
+            ModelRequest::OpenPathWithRendererSetup {
+                path: path_text.clone(),
+                renderer_setup: crate::GuiRendererSetup {
+                    object_name: "opened.pdb".to_string(),
+                    renderer_type: "invalid".to_string(),
+                    renderer_name: "atoms".to_string(),
+                    selection: None,
+                    recenter: true,
+                },
+                width: 800,
+                height: 600,
+            },
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid renderer setup was accepted"),
+        };
+        assert!(error.contains("unsupported renderer setup type"));
+        assert!(model.snapshot().objects.is_empty());
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::OpenPathWithRendererSetup {
+                path: path_text.clone(),
+                renderer_setup: crate::GuiRendererSetup {
+                    object_name: "opened.pdb".to_string(),
+                    renderer_type: "ballstick".to_string(),
+                    renderer_name: "atoms".to_string(),
+                    selection: Some("name CA".to_string()),
+                    recenter: false,
+                },
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        let ModelResponse::MolStructUpdate(update) = response else {
+            panic!("expected molecule update");
+        };
+        assert_eq!(update.snapshot.objects[0].name, "opened.pdb");
+        assert!(update.snapshot.objects[0]
+            .renderers
+            .iter()
+            .any(|renderer| renderer.name == "atoms" && renderer.renderer_type == "ballstick"));
+        assert!(update.snapshot.can_undo);
+        assert!(!model.mesh_refit_pending);
         fs::remove_file(path).unwrap();
     }
 
@@ -12837,7 +13033,7 @@ mod tests {
                     kind: crate::GuiPdbFileKind::Coordinates,
                     path: path.clone(),
                 }],
-                renderer_setup: Some(crate::GuiPdbRendererSetup {
+                renderer_setup: Some(crate::GuiRendererSetup {
                     object_name: "downloaded".to_string(),
                     renderer_type: "simple".to_string(),
                     renderer_name: "lines".to_string(),

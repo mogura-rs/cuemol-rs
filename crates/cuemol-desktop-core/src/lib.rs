@@ -951,7 +951,7 @@ pub struct GuiRendererSetupOption {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GuiPdbRendererSetup {
+pub struct GuiRendererSetup {
     pub object_name: String,
     pub renderer_type: String,
     pub renderer_name: String,
@@ -7262,11 +7262,54 @@ impl DesktopAppState {
         })
     }
 
-    fn configure_pdb_molecule_renderer(
+    pub fn path_supports_molecule_renderer_setup(&self, path: impl AsRef<Path>) -> Result<bool> {
+        let format = guess_path_format(path.as_ref(), &self.stream_manager)?;
+        Ok(!is_scene_format(format)
+            && format != "pse"
+            && !is_density_map_format(format)
+            && !is_surface_format(format)
+            && format != "qdflwobj")
+    }
+
+    pub fn open_path_with_renderer_setup(
+        &mut self,
+        path: impl AsRef<Path>,
+        setup: &GuiRendererSetup,
+    ) -> Result<GuiLoadedPath> {
+        let path = path.as_ref();
+        if !self.path_supports_molecule_renderer_setup(path)? {
+            return Err(CueMolError::invalid_argument(
+                "the file does not support molecular renderer setup",
+            ));
+        }
+        let loaded = self.open_path(path)?;
+        let GuiLoadedPath::Object {
+            scene_uid,
+            object_uid,
+        } = loaded
+        else {
+            return Err(CueMolError::invalid_argument(
+                "the file did not create a molecule object",
+            ));
+        };
+        self.set_object_common_properties(
+            object_uid,
+            setup.object_name.trim().to_string(),
+            true,
+            false,
+        )?;
+        self.configure_molecule_renderer(scene_uid, object_uid, setup)?;
+        Ok(GuiLoadedPath::Object {
+            scene_uid,
+            object_uid,
+        })
+    }
+
+    fn configure_molecule_renderer(
         &mut self,
         scene_uid: Uid,
         object_uid: Uid,
-        setup: &GuiPdbRendererSetup,
+        setup: &GuiRendererSetup,
     ) -> Result<()> {
         let renderer_type = setup.renderer_type.trim();
         let renderer_name = setup.renderer_name.trim();
@@ -7275,7 +7318,7 @@ impl DesktopAppState {
             || renderer_name.is_empty()
         {
             return Err(CueMolError::invalid_argument(
-                "PDB object, renderer type, and renderer name are required",
+                "object, renderer type, and renderer name are required",
             ));
         }
         let option = self
@@ -7284,7 +7327,7 @@ impl DesktopAppState {
             .find(|option| option.name == renderer_type)
             .ok_or_else(|| {
                 CueMolError::invalid_argument(format!(
-                    "unsupported PDB renderer setup type: {renderer_type}"
+                    "unsupported renderer setup type: {renderer_type}"
                 ))
             })?;
         let renderer_uids = self
@@ -7353,7 +7396,7 @@ impl DesktopAppState {
         &mut self,
         pdb_id: &str,
         files: &[(GuiPdbFileKind, PathBuf)],
-        renderer_setup: Option<&GuiPdbRendererSetup>,
+        renderer_setup: Option<&GuiRendererSetup>,
     ) -> Result<GuiPdbLoadSummary> {
         let pdb_id = pdb_id.trim();
         let bytes = pdb_id.as_bytes();
@@ -7401,7 +7444,7 @@ impl DesktopAppState {
                         true,
                         false,
                     )?;
-                    self.configure_pdb_molecule_renderer(scene_uid, loaded_uid, setup)?;
+                    self.configure_molecule_renderer(scene_uid, loaded_uid, setup)?;
                     object_uid = Some(loaded_uid);
                 }
                 GuiPdbFileKind::TwoFoFc | GuiPdbFileKind::FoFc => {
@@ -54717,6 +54760,42 @@ end_header
     }
 
     #[test]
+    fn desktop_app_state_opens_molecule_with_reference_renderer_setup() {
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        let path = root.join("1CRN.pdb");
+        let mut app = DesktopAppState::new();
+        assert!(app.path_supports_molecule_renderer_setup(&path).unwrap());
+        assert!(!app
+            .path_supports_molecule_renderer_setup("unused.qsc")
+            .unwrap());
+        let setup = GuiRendererSetup {
+            object_name: "1CRN.pdb".to_string(),
+            renderer_type: "ballstick".to_string(),
+            renderer_name: "ballstick1".to_string(),
+            selection: Some("name CA".to_string()),
+            recenter: true,
+        };
+        let GuiLoadedPath::Object { object_uid, .. } =
+            app.open_path_with_renderer_setup(&path, &setup).unwrap()
+        else {
+            panic!("expected object load");
+        };
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.name(), "1CRN.pdb");
+        assert!(object.renderers().iter().any(|renderer| {
+            renderer.name() == "ballstick1"
+                && renderer.renderer_type() == "ballstick"
+                && renderer.selection().to_string() == "name CA"
+        }));
+        assert!(!object
+            .renderers()
+            .iter()
+            .any(|renderer| renderer.name() == "simple"));
+    }
+
+    #[test]
     fn crystal_summary_reports_the_pdb_unit_cell() {
         let Some(root) = reference_test_data_root() else {
             return;
@@ -55060,7 +55139,7 @@ attribute \"dep\" string \"positions\"
             )
             .unwrap_err();
         assert!(error.to_string().contains("PDB ID must be four"));
-        let renderer_setup = GuiPdbRendererSetup {
+        let renderer_setup = GuiRendererSetup {
             object_name: "downloaded".to_string(),
             renderer_type: "ballstick".to_string(),
             renderer_name: "atoms".to_string(),
@@ -55132,7 +55211,7 @@ attribute \"dep\" string \"positions\"
         assert_eq!(maps[1].renderers[1].specific["color"], "#FF0000");
 
         let mut preset_app = DesktopAppState::new();
-        let preset_setup = GuiPdbRendererSetup {
+        let preset_setup = GuiRendererSetup {
             object_name: "preset".to_string(),
             renderer_type: "Default1RendPreset".to_string(),
             renderer_name: "view".to_string(),
