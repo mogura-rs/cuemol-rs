@@ -515,6 +515,7 @@ struct GuiApplication {
     reset_left_panel_layout: bool,
     show_inspector: bool,
     object_properties_draft: Option<NativeObjectProperties>,
+    renderer_properties_draft: Option<NativeRendererProperties>,
     show_bottom_panel: bool,
     show_about: bool,
     show_options: bool,
@@ -1004,6 +1005,150 @@ struct NativeObjectProperties {
     visible: bool,
     locked: bool,
     linked: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct NativeRendererProperties {
+    object_uid: cuemol_core::Uid,
+    renderer_uid: cuemol_core::Uid,
+    renderer_type: String,
+    selected_tab: usize,
+    name: String,
+    selection: String,
+    visible: bool,
+    locked: bool,
+    material: String,
+    alpha: f64,
+    edge_type: String,
+    edge_width: f64,
+    edge_color: String,
+    line_width: f64,
+    detail: i32,
+    bond_width: f64,
+    sphere_radius: f64,
+    show_ring: bool,
+    ring_thickness: f64,
+    ring_color: String,
+    specific: std::collections::BTreeMap<String, String>,
+}
+
+impl NativeRendererProperties {
+    fn from_state(
+        state: &DesktopAppState,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+    ) -> Option<Self> {
+        let object = state.scene_manager().object(object_uid)?;
+        let renderer = object.renderer(renderer_uid)?;
+        let renderer_type = renderer.renderer_type().to_string();
+        let numeric = |name: &str, fallback: f64| {
+            renderer
+                .qsc_attr(name)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(fallback)
+        };
+        let selection = if matches!(renderer_type.as_str(), "*namelabel" | "name_label") {
+            String::new()
+        } else if matches!(renderer_type.as_str(), "*selection" | "selection") {
+            let selection = object.mol().selection_text();
+            if selection.is_empty() {
+                "!*".to_string()
+            } else {
+                selection.to_string()
+            }
+        } else {
+            renderer.qsc_attr("sel").unwrap_or("*").to_string()
+        };
+        Some(Self {
+            object_uid,
+            renderer_uid,
+            renderer_type,
+            selected_tab: 0,
+            name: renderer.name().to_string(),
+            selection,
+            visible: renderer.is_visible(),
+            locked: renderer.qsc_attr("locked").is_some_and(value_is_true),
+            material: renderer.qsc_attr("material").unwrap_or("").to_string(),
+            alpha: numeric("alpha", 1.0),
+            edge_type: renderer.qsc_attr("egtype").unwrap_or("none").to_string(),
+            edge_width: numeric("eglinew", 0.01),
+            edge_color: renderer
+                .qsc_attr("egcolor")
+                .unwrap_or("#000000")
+                .to_string(),
+            line_width: numeric(
+                if renderer.renderer_type() == "spline" {
+                    "line_width"
+                } else {
+                    "width"
+                },
+                1.2,
+            ),
+            detail: numeric("detail", 3.0) as i32,
+            bond_width: numeric("bondw", 0.2),
+            sphere_radius: numeric("sphr", 0.3),
+            show_ring: renderer.qsc_attr("ring").is_some_and(value_is_true),
+            ring_thickness: numeric("thickness", 0.2),
+            ring_color: renderer
+                .qsc_attr("ringcolor")
+                .unwrap_or("#ffffbf")
+                .to_string(),
+            specific: renderer.qsc_attrs().clone(),
+        })
+    }
+
+    fn title(&self) -> &'static str {
+        match self.renderer_type.as_str() {
+            "simple" => "Simple Rend Properties",
+            "trace" => "Trace renderer properties",
+            "spline" => "Spline renderer properties",
+            "*namelabel" | "name_label" => "Name label renderer properties",
+            "*selection" | "selection" => "Selection renderer properties",
+            "atomintr" => "Interaction renderer properties",
+            "anisou" => "Anisotropic U renderer properties",
+            "ballstick" => "Ballstick renderer properties",
+            "cpk" => "CPK Rend Properties",
+            "disorder" => "Disorder renderer properties",
+            "tube" => "Tube Rend Properties",
+            "nucl" => "Nucl renderer properties",
+            "ribbon" => "Ribbon representation properties",
+            "cartoon" => "Cartoon representation properties",
+            "contour" | "gpu_mapmesh" => "Contour renderer properties",
+            "isosurf" => "Isosurf renderer properties",
+            "gpu_mapvol" => "Volume renderer properties",
+            "surface" | "dsurface" | "directsurf" | "dsurf2" => "MolSurf Rend Properties",
+            _ => "Renderer properties",
+        }
+    }
+
+    fn tabs(&self) -> &'static [&'static str] {
+        match self.renderer_type.as_str() {
+            "simple" => &["Simple"],
+            "trace" => &["Trace"],
+            "spline" => &["Common", "Spline"],
+            "*namelabel" | "name_label" => &["Label"],
+            "*selection" | "selection" => &["Selection"],
+            "atomintr" => &["Common", "Interaction"],
+            "anisou" => &["Common", "Ball & Stick", "Anisotropic U"],
+            "ballstick" => &["Common", "Ball & Stick"],
+            "cpk" => &["Common", "Atom radii"],
+            "disorder" => &["Common", "Disorder"],
+            "tube" => &["Common", "Tube"],
+            "nucl" => &["Common", "Nucleic acid", "Tube"],
+            "ribbon" => &["Common", "Helix", "Sheet", "Coil"],
+            "cartoon" => &["Common", "Cartoon", "Helix", "Sheet", "Coil"],
+            "contour" | "gpu_mapmesh" | "isosurf" | "gpu_mapvol" => &["Common", "Map"],
+            "surface" | "dsurface" | "directsurf" | "dsurf2" => &["Common", "MolSurf"],
+            _ => &["Common"],
+        }
+    }
+
+    fn specific_value(&self, key: &str, fallback: &str) -> String {
+        self.specific
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| fallback.to_string())
+    }
 }
 
 impl NativeObjectProperties {
@@ -1709,6 +1854,7 @@ impl GuiApplication {
             // CueMol2 opens properties on demand (no docked inspector); start closed.
             show_inspector: false,
             object_properties_draft: None,
+            renderer_properties_draft: None,
             show_bottom_panel: true,
             show_about: false,
             show_options: false,
@@ -2798,8 +2944,10 @@ impl GuiApplication {
                 }
             }
             if ui.button("Property").clicked() {
-                if self.selected_renderer.is_some() {
-                    self.show_inspector = true;
+                if let (Some(object_uid), Some(renderer_uid)) =
+                    (self.selected_object, self.selected_renderer)
+                {
+                    self.open_renderer_properties(object_uid, renderer_uid);
                 } else if let Some(object_uid) = self.selected_object {
                     self.open_object_properties(object_uid);
                 } else {
@@ -6447,6 +6595,7 @@ impl GuiApplication {
         self.about_dialog(ctx);
         self.options_dialog(ctx);
         self.object_props_dialog(ctx);
+        self.renderer_props_dialog(ctx);
         self.scene_props_dialog(ctx);
         self.view_props_dialog(ctx, camera);
         self.chain_dialog(ctx);
@@ -6952,6 +7101,891 @@ impl GuiApplication {
         self.rebuild_snapshot();
         self.set_status("Object properties updated");
         Ok(())
+    }
+
+    fn open_renderer_properties(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+    ) {
+        let Some(properties) =
+            NativeRendererProperties::from_state(&self.state, object_uid, renderer_uid)
+        else {
+            self.set_status(format!("Renderer {} was not found", renderer_uid.get()));
+            return;
+        };
+        self.renderer_properties_draft = Some(properties);
+    }
+
+    fn renderer_props_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.renderer_properties_draft.take() else {
+            return;
+        };
+        let material_names = self
+            .state
+            .scene_manager()
+            .scene_uid_for_object(draft.object_uid)
+            .map(|scene_uid| self.state.material_names(scene_uid.get()))
+            .unwrap_or_default();
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new(draft.title())
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .min_width(440.0)
+            .default_height(500.0)
+            .show(ctx, |ui| {
+                let tabs = draft.tabs();
+                draft.selected_tab = draft.selected_tab.min(tabs.len().saturating_sub(1));
+                ui.horizontal(|ui| {
+                    for (index, tab) in tabs.iter().enumerate() {
+                        ui.selectable_value(&mut draft.selected_tab, index, *tab);
+                    }
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(370.0)
+                    .show(ui, |ui| {
+                        let one_page = tabs.len() == 1;
+                        if draft.selected_tab == 0 {
+                            if one_page {
+                                Self::renderer_specific_properties_ui(ui, &mut draft);
+                            }
+                            Self::renderer_common_properties_ui(ui, &mut draft, &material_names);
+                        } else {
+                            Self::renderer_specific_properties_ui(ui, &mut draft);
+                        }
+                    });
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if accept {
+            match self.apply_renderer_properties(&draft) {
+                Ok(()) => self.renderer_properties_draft = None,
+                Err(error) => {
+                    self.set_status(format!("Renderer properties error: {error}"));
+                    self.renderer_properties_draft = Some(draft);
+                }
+            }
+        } else if cancel || !open {
+            self.renderer_properties_draft = None;
+        } else {
+            self.renderer_properties_draft = Some(draft);
+        }
+    }
+
+    fn renderer_common_properties_ui(
+        ui: &mut egui::Ui,
+        draft: &mut NativeRendererProperties,
+        material_names: &[String],
+    ) {
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(
+                1.0,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            ))
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.strong("Basic settings");
+                ui.separator();
+                egui::Grid::new("native_renderer_basic_properties")
+                    .num_columns(2)
+                    .spacing([14.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Name:");
+                        ui.add_sized(
+                            [ui.available_width().max(240.0), 22.0],
+                            egui::TextEdit::singleline(&mut draft.name),
+                        );
+                        ui.end_row();
+
+                        ui.label("Selection:");
+                        let selection_readonly = matches!(
+                            draft.renderer_type.as_str(),
+                            "*selection" | "selection" | "*namelabel" | "name_label"
+                        );
+                        if selection_readonly {
+                            let text = if matches!(
+                                draft.renderer_type.as_str(),
+                                "*namelabel" | "name_label"
+                            ) {
+                                "(not available)"
+                            } else {
+                                draft.selection.as_str()
+                            };
+                            ui.monospace(text);
+                        } else {
+                            ui.add_sized(
+                                [ui.available_width().max(240.0), 22.0],
+                                egui::TextEdit::singleline(&mut draft.selection)
+                                    .font(egui::TextStyle::Monospace),
+                            );
+                        }
+                        ui.end_row();
+
+                        ui.label("");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut draft.visible, "Visible");
+                            ui.checkbox(&mut draft.locked, "Locked");
+                        });
+                        ui.end_row();
+
+                        ui.label("Material:");
+                        egui::ComboBox::from_id_salt("native_renderer_material")
+                            .selected_text(if draft.material.is_empty() {
+                                "(none)"
+                            } else {
+                                &draft.material
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut draft.material, String::new(), "(none)");
+                                for name in material_names {
+                                    ui.selectable_value(&mut draft.material, name.clone(), name);
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Opacity:");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.alpha)
+                                .speed(0.1)
+                                .range(0.1..=1.0),
+                        );
+                        ui.end_row();
+                    });
+            });
+        ui.add_space(8.0);
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(
+                1.0,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            ))
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("Edge lines:");
+                    egui::ComboBox::from_id_salt("native_renderer_edge_type")
+                        .selected_text(&draft.edge_type)
+                        .show_ui(ui, |ui| {
+                            for value in ["none", "edges", "silhouette"] {
+                                ui.selectable_value(&mut draft.edge_type, value.to_string(), value);
+                            }
+                        });
+                });
+                ui.separator();
+                ui.add_enabled_ui(draft.edge_type != "none", |ui| {
+                    egui::Grid::new("native_renderer_edge_properties")
+                        .num_columns(2)
+                        .spacing([14.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label("Width:");
+                            ui.add(
+                                egui::DragValue::new(&mut draft.edge_width)
+                                    .speed(0.01)
+                                    .range(0.0..=1.0),
+                            );
+                            ui.end_row();
+                            ui.label("Color:");
+                            ui.text_edit_singleline(&mut draft.edge_color);
+                            ui.end_row();
+                        });
+                });
+            });
+    }
+
+    fn renderer_specific_properties_ui(ui: &mut egui::Ui, draft: &mut NativeRendererProperties) {
+        let page = draft.tabs()[draft.selected_tab];
+        match (draft.renderer_type.as_str(), page) {
+            ("simple", "Simple") | ("trace", "Trace") => {
+                Self::renderer_specific_group(ui, page, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Line width:");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.line_width)
+                                .speed(0.2)
+                                .range(0.2..=10.0),
+                        );
+                    });
+                });
+            }
+            ("spline", "Spline") => {
+                Self::renderer_specific_group(ui, "Spline", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Line width:");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.line_width)
+                                .speed(0.2)
+                                .range(0.2..=10.0),
+                        );
+                    });
+                    Self::renderer_specific_i32(
+                        ui,
+                        draft,
+                        "axialdetail",
+                        "Axial detail:",
+                        6,
+                        1,
+                        100,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "smooth",
+                        "Smoothing:",
+                        0.0,
+                        -1000.0,
+                        1000.0,
+                        0.05,
+                    );
+                    Self::renderer_specific_bool(ui, draft, "smoothcolor", "Smooth colors", true);
+                    Self::renderer_specific_text(ui, draft, "pivotatom", "Pivot atom:", "");
+                });
+            }
+            ("ballstick" | "anisou", "Ball & Stick") => {
+                Self::renderer_specific_group(ui, "Ball & Stick settings", |ui| {
+                    Self::renderer_number_row(ui, "Detail:", &mut draft.detail, 2..=20);
+                    Self::renderer_float_row(
+                        ui,
+                        "Bond width:",
+                        &mut draft.bond_width,
+                        0.0..=3.0,
+                        0.01,
+                    );
+                    Self::renderer_float_row(
+                        ui,
+                        "Atom radius:",
+                        &mut draft.sphere_radius,
+                        0.0..=3.0,
+                        0.01,
+                    );
+                });
+                ui.add_space(8.0);
+                Self::renderer_specific_group(ui, "Ring settings", |ui| {
+                    ui.checkbox(&mut draft.show_ring, "Show ring");
+                    ui.add_enabled_ui(draft.show_ring, |ui| {
+                        Self::renderer_float_row(
+                            ui,
+                            "Thickness:",
+                            &mut draft.ring_thickness,
+                            0.0..=3.0,
+                            0.01,
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("Color:");
+                            ui.text_edit_singleline(&mut draft.ring_color);
+                        });
+                    });
+                });
+            }
+            ("anisou", "Anisotropic U") => {
+                Self::renderer_specific_group(ui, "Thermal ellipsoid", |ui| {
+                    Self::renderer_specific_bool(
+                        ui,
+                        draft,
+                        "drawdisc",
+                        "Draw principal discs",
+                        true,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "discscale",
+                        "Disc scale:",
+                        1.1,
+                        0.0,
+                        10.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "discthick",
+                        "Disc thickness:",
+                        0.1,
+                        0.0,
+                        10.0,
+                        0.05,
+                    );
+                    Self::renderer_specific_i32(
+                        ui,
+                        draft,
+                        "maxverts",
+                        "Maximum vertices:",
+                        1_000_000,
+                        1,
+                        100_000_000,
+                    );
+                });
+            }
+            ("*namelabel" | "name_label", "Label") => {
+                Self::renderer_specific_group(ui, "Atom labels", |ui| {
+                    Self::renderer_specific_i32(
+                        ui,
+                        draft,
+                        "maxlabel",
+                        "Maximum labels:",
+                        50,
+                        0,
+                        1_000_000,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "dispx",
+                        "X displacement:",
+                        0.0,
+                        -100.0,
+                        100.0,
+                        0.5,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "dispy",
+                        "Y displacement:",
+                        0.0,
+                        -100.0,
+                        100.0,
+                        0.5,
+                    );
+                    Self::renderer_specific_text(ui, draft, "color", "Color:", "#ffff00");
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "font_size",
+                        "Font size:",
+                        12.0,
+                        1.0,
+                        512.0,
+                        0.5,
+                    );
+                    Self::renderer_specific_text(
+                        ui,
+                        draft,
+                        "font_name",
+                        "Font family:",
+                        "sans-serif",
+                    );
+                    Self::renderer_specific_choice(
+                        ui,
+                        draft,
+                        "font_style",
+                        "Font style:",
+                        "normal",
+                        &[
+                            ("normal", "Normal"),
+                            ("italic", "Italic"),
+                            ("oblique", "Oblique"),
+                        ],
+                    );
+                    Self::renderer_specific_choice(
+                        ui,
+                        draft,
+                        "font_weight",
+                        "Font weight:",
+                        "normal",
+                        &[("normal", "Normal"), ("bold", "Bold")],
+                    );
+                });
+            }
+            ("*selection" | "selection", "Selection") => {
+                Self::renderer_specific_group(ui, "Selection overlay", |ui| {
+                    Self::renderer_specific_choice(
+                        ui,
+                        draft,
+                        "mode",
+                        "Mode:",
+                        "stick",
+                        &[("stick", "Stick"), ("point", "Point")],
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "linew",
+                        "Line width:",
+                        3.0,
+                        0.0,
+                        20.0,
+                        0.2,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "dispx",
+                        "X displacement:",
+                        3.0,
+                        -100.0,
+                        100.0,
+                        0.5,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "dispy",
+                        "Y displacement:",
+                        3.0,
+                        -100.0,
+                        100.0,
+                        0.5,
+                    );
+                    Self::renderer_specific_text(
+                        ui,
+                        draft,
+                        "color",
+                        "Color:",
+                        "rgba(0,255,255,0.5)",
+                    );
+                });
+            }
+            ("atomintr", "Interaction") => {
+                Self::renderer_specific_group(ui, "Interaction", |ui| {
+                    Self::renderer_specific_choice(
+                        ui,
+                        draft,
+                        "mode",
+                        "Mode:",
+                        "fancy",
+                        &[("simple", "Simple line"), ("fancy", "3D tube")],
+                    );
+                    Self::renderer_specific_bool(ui, draft, "showlabel", "Show label", false);
+                    Self::renderer_specific_f64(ui, draft, "width", "Width:", 0.1, 0.0, 5.0, 0.05);
+                    Self::renderer_specific_text(ui, draft, "color", "Color:", "#ffff00");
+                    Self::renderer_specific_i32(ui, draft, "detail", "Detail:", 5, 0, 20);
+                    Self::renderer_specific_choice(
+                        ui,
+                        draft,
+                        "captype_start",
+                        "Start cap:",
+                        "sphere",
+                        &[("flat", "Flat"), ("sphere", "Round"), ("arrow", "Arrow")],
+                    );
+                    Self::renderer_specific_choice(
+                        ui,
+                        draft,
+                        "captype_end",
+                        "End cap:",
+                        "sphere",
+                        &[("flat", "Flat"), ("sphere", "Round"), ("arrow", "Arrow")],
+                    );
+                    for index in 0..6 {
+                        let key = format!("stipple{index}");
+                        let label = format!("Stipple {}:", index + 1);
+                        let fallback = if index < 2 { 1.0 } else { -1.0 };
+                        Self::renderer_specific_f64_owned(
+                            ui, draft, key, &label, fallback, -1.0, 100.0, 0.05,
+                        );
+                    }
+                });
+            }
+            ("cpk", "Atom radii") => {
+                Self::renderer_specific_group(ui, "Atom radii", |ui| {
+                    for (key, label, fallback) in [
+                        ("vdwr_C", "Carbon:", 1.7),
+                        ("vdwr_N", "Nitrogen:", 1.55),
+                        ("vdwr_O", "Oxygen:", 1.52),
+                        ("vdwr_S", "Sulfur:", 1.8),
+                        ("vdwr_P", "Phosphorus:", 1.8),
+                        ("vdwr_H", "Hydrogen:", 1.2),
+                        ("vdwr_X", "Others:", 1.7),
+                    ] {
+                        Self::renderer_specific_f64(
+                            ui, draft, key, label, fallback, 0.0, 3.0, 0.01,
+                        );
+                    }
+                    Self::renderer_specific_i32(ui, draft, "detail", "Detail:", 10, 2, 20);
+                    Self::renderer_specific_choice(
+                        ui,
+                        draft,
+                        "glrender_mode",
+                        "Rendering mode:",
+                        "default",
+                        &[
+                            ("default", "Default"),
+                            ("shader", "Shader"),
+                            ("vbo", "VBO"),
+                            ("glu", "GLU"),
+                        ],
+                    );
+                });
+            }
+            ("disorder", "Disorder") => {
+                Self::renderer_specific_group(ui, "Disorder", |ui| {
+                    Self::renderer_specific_text(ui, draft, "target", "Target:", "");
+                    Self::renderer_specific_i32(ui, draft, "detail", "Detail:", 5, 2, 20);
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "width",
+                        "Dot size:",
+                        0.3,
+                        0.0,
+                        3.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "dotsep",
+                        "Dot separation:",
+                        1.0,
+                        0.0,
+                        3.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "loopsize",
+                        "Loop size:",
+                        2.0,
+                        0.0,
+                        10.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_f64(
+                        ui,
+                        draft,
+                        "loopsize2",
+                        "Loop size 2:",
+                        -1.0,
+                        -1.0,
+                        10.0,
+                        0.1,
+                    );
+                    Self::renderer_specific_text(ui, draft, "defaultcolor", "Color:", "#ffffff");
+                });
+            }
+            _ => {
+                ui.weak("Properties on this page are inherited from the current style.");
+            }
+        }
+    }
+
+    fn renderer_specific_group(
+        ui: &mut egui::Ui,
+        title: &str,
+        add_contents: impl FnOnce(&mut egui::Ui),
+    ) {
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(
+                1.0,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            ))
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.strong(title);
+                ui.separator();
+                add_contents(ui);
+            });
+    }
+
+    fn renderer_number_row(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: &mut i32,
+        range: std::ops::RangeInclusive<i32>,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.add(egui::DragValue::new(value).speed(1).range(range));
+        });
+    }
+
+    fn renderer_float_row(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: &mut f64,
+        range: std::ops::RangeInclusive<f64>,
+        speed: f64,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.add(egui::DragValue::new(value).speed(speed).range(range));
+        });
+    }
+
+    fn renderer_specific_text(
+        ui: &mut egui::Ui,
+        draft: &mut NativeRendererProperties,
+        key: &str,
+        label: &str,
+        fallback: &str,
+    ) {
+        let mut value = draft.specific_value(key, fallback);
+        ui.horizontal(|ui| {
+            ui.label(label);
+            if ui.text_edit_singleline(&mut value).changed() {
+                draft.specific.insert(key.to_string(), value);
+            }
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn renderer_specific_f64(
+        ui: &mut egui::Ui,
+        draft: &mut NativeRendererProperties,
+        key: &str,
+        label: &str,
+        fallback: f64,
+        minimum: f64,
+        maximum: f64,
+        speed: f64,
+    ) {
+        Self::renderer_specific_f64_owned(
+            ui,
+            draft,
+            key.to_string(),
+            label,
+            fallback,
+            minimum,
+            maximum,
+            speed,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn renderer_specific_f64_owned(
+        ui: &mut egui::Ui,
+        draft: &mut NativeRendererProperties,
+        key: String,
+        label: &str,
+        fallback: f64,
+        minimum: f64,
+        maximum: f64,
+        speed: f64,
+    ) {
+        let mut value = draft
+            .specific_value(&key, &fallback.to_string())
+            .parse::<f64>()
+            .unwrap_or(fallback);
+        ui.horizontal(|ui| {
+            ui.label(label);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut value)
+                        .speed(speed)
+                        .range(minimum..=maximum),
+                )
+                .changed()
+            {
+                draft.specific.insert(key, value.to_string());
+            }
+        });
+    }
+
+    fn renderer_specific_i32(
+        ui: &mut egui::Ui,
+        draft: &mut NativeRendererProperties,
+        key: &str,
+        label: &str,
+        fallback: i32,
+        minimum: i32,
+        maximum: i32,
+    ) {
+        let mut value = draft
+            .specific_value(key, &fallback.to_string())
+            .parse::<i32>()
+            .unwrap_or(fallback);
+        ui.horizontal(|ui| {
+            ui.label(label);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut value)
+                        .speed(1)
+                        .range(minimum..=maximum),
+                )
+                .changed()
+            {
+                draft.specific.insert(key.to_string(), value.to_string());
+            }
+        });
+    }
+
+    fn renderer_specific_bool(
+        ui: &mut egui::Ui,
+        draft: &mut NativeRendererProperties,
+        key: &str,
+        label: &str,
+        fallback: bool,
+    ) {
+        let mut value = draft
+            .specific
+            .get(key)
+            .map(|value| value_is_true(value))
+            .unwrap_or(fallback);
+        if ui.checkbox(&mut value, label).changed() {
+            draft.specific.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    fn renderer_specific_choice(
+        ui: &mut egui::Ui,
+        draft: &mut NativeRendererProperties,
+        key: &str,
+        label: &str,
+        fallback: &str,
+        choices: &[(&str, &str)],
+    ) {
+        let mut value = draft.specific_value(key, fallback);
+        ui.horizontal(|ui| {
+            ui.label(label);
+            egui::ComboBox::from_id_salt(("native_renderer_specific", key))
+                .selected_text(
+                    choices
+                        .iter()
+                        .find_map(|(candidate, caption)| (*candidate == value).then_some(*caption))
+                        .unwrap_or(&value),
+                )
+                .show_ui(ui, |ui| {
+                    for (candidate, caption) in choices {
+                        ui.selectable_value(&mut value, (*candidate).to_string(), *caption);
+                    }
+                });
+        });
+        draft.specific.insert(key.to_string(), value);
+    }
+
+    fn apply_renderer_properties(
+        &mut self,
+        draft: &NativeRendererProperties,
+    ) -> std::result::Result<(), String> {
+        validate_native_renderer_properties(draft)?;
+        let scene_uid = self
+            .state
+            .scene_manager()
+            .scene_uid_for_object(draft.object_uid)
+            .ok_or_else(|| format!("object {} was not found", draft.object_uid.get()))?;
+        let renderer_type = self
+            .state
+            .scene_manager()
+            .object(draft.object_uid)
+            .and_then(|object| object.renderer(draft.renderer_uid))
+            .map(|renderer| renderer.renderer_type().to_string())
+            .ok_or_else(|| format!("renderer {} was not found", draft.renderer_uid.get()))?;
+        if renderer_type != draft.renderer_type {
+            return Err("renderer type changed while the dialog was open".to_string());
+        }
+        let undo = self.capture_undo();
+        self.state
+            .set_renderer_common_properties(
+                draft.object_uid,
+                draft.renderer_uid,
+                draft.name.trim(),
+                &draft.selection,
+                draft.visible,
+                draft.locked,
+                &draft.material,
+                draft.alpha,
+                &draft.edge_type,
+                draft.edge_width,
+                draft.edge_color.trim(),
+            )
+            .map_err(|error| error.to_string())?;
+
+        match renderer_type.as_str() {
+            "simple" | "trace" => self.set_renderer_draft_property(
+                draft,
+                "width",
+                draft.line_width.to_string(),
+                (draft.line_width - 1.2).abs() < f64::EPSILON,
+            )?,
+            "spline" => self.set_renderer_draft_property(
+                draft,
+                "line_width",
+                draft.line_width.to_string(),
+                (draft.line_width - 1.2).abs() < f64::EPSILON,
+            )?,
+            "ballstick" | "anisou" => {
+                for (key, value, is_default) in [
+                    ("detail", draft.detail.to_string(), draft.detail == 3),
+                    (
+                        "bondw",
+                        draft.bond_width.to_string(),
+                        (draft.bond_width - 0.2).abs() < f64::EPSILON,
+                    ),
+                    (
+                        "sphr",
+                        draft.sphere_radius.to_string(),
+                        (draft.sphere_radius - 0.3).abs() < f64::EPSILON,
+                    ),
+                    ("ring", draft.show_ring.to_string(), !draft.show_ring),
+                    (
+                        "thickness",
+                        draft.ring_thickness.to_string(),
+                        (draft.ring_thickness - 0.2).abs() < f64::EPSILON,
+                    ),
+                    (
+                        "ringcolor",
+                        draft.ring_color.trim().to_string(),
+                        draft.ring_color.trim().eq_ignore_ascii_case("#ffffbf"),
+                    ),
+                ] {
+                    self.set_renderer_draft_property(draft, key, value, is_default)?;
+                }
+            }
+            _ => {}
+        }
+        for (key, default) in native_renderer_specific_defaults(&renderer_type) {
+            let value = draft.specific_value(key, default);
+            self.set_renderer_draft_property(
+                draft,
+                key,
+                value.clone(),
+                renderer_value_is_default(&value, default),
+            )?;
+        }
+        self.push_undo_snapshot(undo);
+        self.modified_scenes.insert(scene_uid);
+        self.selected_object = Some(draft.object_uid);
+        self.selected_renderer = Some(draft.renderer_uid);
+        self.rebuild_snapshot();
+        self.set_status("Renderer properties updated");
+        Ok(())
+    }
+
+    fn set_renderer_draft_property(
+        &mut self,
+        draft: &NativeRendererProperties,
+        key: &str,
+        value: String,
+        reset: bool,
+    ) -> std::result::Result<(), String> {
+        let result = if let Some((child, attribute)) = key.split_once('.') {
+            if reset {
+                self.state.reset_renderer_child_property(
+                    draft.object_uid,
+                    draft.renderer_uid,
+                    child,
+                    attribute,
+                )
+            } else {
+                self.state.set_renderer_child_property(
+                    draft.object_uid,
+                    draft.renderer_uid,
+                    child,
+                    attribute,
+                    value,
+                )
+            }
+        } else if reset {
+            self.state
+                .reset_renderer_property(draft.object_uid, draft.renderer_uid, key)
+        } else {
+            self.state
+                .set_renderer_property(draft.object_uid, draft.renderer_uid, key, value)
+        };
+        result.map_err(|error| error.to_string())
     }
 
     fn open_scene_properties(&mut self) {
@@ -9130,6 +10164,295 @@ center_mark\t{}\n",
 
 fn scene_attr_bool(value: Option<&str>, fallback: bool) -> bool {
     value.map_or(fallback, |value| matches!(value, "true" | "1"))
+}
+
+fn value_is_true(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
+}
+
+fn native_renderer_specific_defaults(
+    renderer_type: &str,
+) -> &'static [(&'static str, &'static str)] {
+    match renderer_type {
+        "spline" => &[
+            ("axialdetail", "6"),
+            ("smooth", "0"),
+            ("smoothcolor", "true"),
+            ("pivotatom", ""),
+        ],
+        "*namelabel" | "name_label" => &[
+            ("maxlabel", "50"),
+            ("dispx", "0"),
+            ("dispy", "0"),
+            ("color", "#ffff00"),
+            ("font_size", "12"),
+            ("font_name", "sans-serif"),
+            ("font_style", "normal"),
+            ("font_weight", "normal"),
+        ],
+        "*selection" | "selection" => &[
+            ("mode", "stick"),
+            ("linew", "3"),
+            ("dispx", "3"),
+            ("dispy", "3"),
+            ("color", "rgba(0,255,255,0.5)"),
+        ],
+        "atomintr" => &[
+            ("mode", "fancy"),
+            ("showlabel", "false"),
+            ("detail", "5"),
+            ("stipple0", "1"),
+            ("stipple1", "1"),
+            ("stipple2", "-1"),
+            ("stipple3", "-1"),
+            ("stipple4", "-1"),
+            ("stipple5", "-1"),
+            ("width", "0.1"),
+            ("color", "#ffff00"),
+            ("captype_start", "sphere"),
+            ("captype_end", "sphere"),
+        ],
+        "anisou" => &[
+            ("drawdisc", "true"),
+            ("discscale", "1.1"),
+            ("discthick", "0.1"),
+            ("maxverts", "1000000"),
+        ],
+        "cpk" => &[
+            ("vdwr_H", "1.2"),
+            ("vdwr_C", "1.7"),
+            ("vdwr_N", "1.55"),
+            ("vdwr_O", "1.52"),
+            ("vdwr_S", "1.8"),
+            ("vdwr_P", "1.8"),
+            ("vdwr_X", "1.7"),
+            ("detail", "10"),
+            ("glrender_mode", "default"),
+        ],
+        "disorder" => &[
+            ("target", ""),
+            ("detail", "5"),
+            ("width", "0.3"),
+            ("dotsep", "1"),
+            ("loopsize", "2"),
+            ("loopsize2", "-1"),
+            ("defaultcolor", "#ffffff"),
+        ],
+        _ => &[],
+    }
+}
+
+fn renderer_value_is_default(value: &str, default: &str) -> bool {
+    let value = value.trim();
+    let default = default.trim();
+    match (value.parse::<f64>(), default.parse::<f64>()) {
+        (Ok(value), Ok(default)) => (value - default).abs() < f64::EPSILON,
+        _ => value.eq_ignore_ascii_case(default),
+    }
+}
+
+fn validate_native_renderer_properties(
+    draft: &NativeRendererProperties,
+) -> std::result::Result<(), String> {
+    let name = draft.name.trim();
+    if (name.is_empty() && !matches!(draft.renderer_type.as_str(), "*selection" | "selection"))
+        || name.contains(':')
+    {
+        return Err("renderer name must be non-empty and cannot contain ':'".to_string());
+    }
+    if !draft.alpha.is_finite() || draft.alpha <= 0.0 || draft.alpha > 1.0 {
+        return Err("opacity must be between 0 and 1".to_string());
+    }
+    if !draft.edge_width.is_finite() || !(0.0..=1.0).contains(&draft.edge_width) {
+        return Err("edge width must be between 0 and 1".to_string());
+    }
+    if !matches!(draft.edge_type.as_str(), "none" | "edges" | "silhouette") {
+        return Err(format!("unsupported edge type: {}", draft.edge_type));
+    }
+    validate_renderer_color(&draft.edge_color, "edge color")?;
+    if matches!(draft.renderer_type.as_str(), "simple" | "trace" | "spline")
+        && (!draft.line_width.is_finite() || draft.line_width <= 0.0 || draft.line_width > 10.0)
+    {
+        return Err("line width must be greater than 0 and at most 10".to_string());
+    }
+    if matches!(draft.renderer_type.as_str(), "ballstick" | "anisou") {
+        if !(2..=20).contains(&draft.detail) {
+            return Err("detail must be between 2 and 20".to_string());
+        }
+        for (label, value) in [
+            ("bond width", draft.bond_width),
+            ("atom radius", draft.sphere_radius),
+            ("ring thickness", draft.ring_thickness),
+        ] {
+            if !value.is_finite() || !(0.0..=10.0).contains(&value) {
+                return Err(format!("{label} must be between 0 and 10"));
+            }
+        }
+        validate_renderer_color(&draft.ring_color, "ring color")?;
+    }
+
+    match draft.renderer_type.as_str() {
+        "spline" => {
+            validate_renderer_integer(draft, "axialdetail", "6", "axial detail", 1, 100)?;
+            validate_renderer_number(draft, "smooth", "0", "smoothing", -1000.0, 1000.0)?;
+            if draft.specific_value("pivotatom", "").len() > 16 {
+                return Err("pivot atom must be at most 16 characters".to_string());
+            }
+        }
+        "*namelabel" | "name_label" => {
+            validate_renderer_integer(draft, "maxlabel", "50", "maximum labels", 0, 1_000_000)?;
+            validate_renderer_number(draft, "dispx", "0", "X displacement", -10_000.0, 10_000.0)?;
+            validate_renderer_number(draft, "dispy", "0", "Y displacement", -10_000.0, 10_000.0)?;
+            validate_renderer_number(draft, "font_size", "12", "font size", 1.0, 512.0)?;
+            validate_renderer_color(&draft.specific_value("color", "#ffff00"), "label color")?;
+            for (key, label) in [
+                ("font_name", "font name"),
+                ("font_style", "font style"),
+                ("font_weight", "font weight"),
+            ] {
+                let value = draft.specific_value(key, "normal");
+                if value.trim().is_empty() || value.len() > 128 {
+                    return Err(format!("{label} must contain 1 to 128 characters"));
+                }
+            }
+        }
+        "*selection" | "selection" => {
+            validate_renderer_choice(draft, "mode", "stick", &["stick", "point"])?;
+            validate_renderer_number(draft, "linew", "3", "line width", 0.0, 100.0)?;
+            validate_renderer_number(draft, "dispx", "3", "X displacement", -10_000.0, 10_000.0)?;
+            validate_renderer_number(draft, "dispy", "3", "Y displacement", -10_000.0, 10_000.0)?;
+            validate_renderer_color(
+                &draft.specific_value("color", "rgba(0,255,255,0.5)"),
+                "selection color",
+            )?;
+        }
+        "atomintr" => {
+            validate_renderer_choice(draft, "mode", "fancy", &["simple", "fancy"])?;
+            validate_renderer_integer(draft, "detail", "5", "detail", 0, 20)?;
+            validate_renderer_number(draft, "width", "0.1", "width", 0.0, 10.0)?;
+            validate_renderer_color(
+                &draft.specific_value("color", "#ffff00"),
+                "interaction color",
+            )?;
+            for key in [
+                "stipple0", "stipple1", "stipple2", "stipple3", "stipple4", "stipple5",
+            ] {
+                validate_renderer_number(draft, key, "-1", key, -1.0, 100.0)?;
+            }
+            for key in ["captype_start", "captype_end"] {
+                validate_renderer_choice(draft, key, "sphere", &["flat", "sphere", "arrow"])?;
+            }
+        }
+        "anisou" => {
+            validate_renderer_number(draft, "discscale", "1.1", "disc scale", 0.0, 10.0)?;
+            validate_renderer_number(draft, "discthick", "0.1", "disc thickness", 0.0, 10.0)?;
+            validate_renderer_integer(
+                draft,
+                "maxverts",
+                "1000000",
+                "maximum vertices",
+                1,
+                100_000_000,
+            )?;
+        }
+        "cpk" => {
+            for (key, label, fallback) in [
+                ("vdwr_H", "hydrogen radius", "1.2"),
+                ("vdwr_C", "carbon radius", "1.7"),
+                ("vdwr_N", "nitrogen radius", "1.55"),
+                ("vdwr_O", "oxygen radius", "1.52"),
+                ("vdwr_S", "sulfur radius", "1.8"),
+                ("vdwr_P", "phosphorus radius", "1.8"),
+                ("vdwr_X", "other radius", "1.7"),
+            ] {
+                validate_renderer_number(draft, key, fallback, label, 0.0, 3.0)?;
+            }
+            validate_renderer_integer(draft, "detail", "10", "detail", 2, 20)?;
+            validate_renderer_choice(
+                draft,
+                "glrender_mode",
+                "default",
+                &["default", "shader", "vbo", "glu"],
+            )?;
+        }
+        "disorder" => {
+            validate_renderer_integer(draft, "detail", "5", "detail", 2, 20)?;
+            for (key, label, fallback, minimum, maximum) in [
+                ("width", "dot size", "0.3", 0.0, 3.0),
+                ("dotsep", "dot separation", "1", 0.0, 3.0),
+                ("loopsize", "loop size", "2", 0.0, 10.0),
+                ("loopsize2", "loop size 2", "-1", -1.0, 10.0),
+            ] {
+                validate_renderer_number(draft, key, fallback, label, minimum, maximum)?;
+            }
+            validate_renderer_color(
+                &draft.specific_value("defaultcolor", "#ffffff"),
+                "disorder color",
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_renderer_number(
+    draft: &NativeRendererProperties,
+    key: &str,
+    fallback: &str,
+    label: &str,
+    minimum: f64,
+    maximum: f64,
+) -> std::result::Result<(), String> {
+    let raw = draft.specific_value(key, fallback);
+    let value = raw
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{label} must be a number"))?;
+    if !value.is_finite() || !(minimum..=maximum).contains(&value) {
+        return Err(format!("{label} must be between {minimum} and {maximum}"));
+    }
+    Ok(())
+}
+
+fn validate_renderer_integer(
+    draft: &NativeRendererProperties,
+    key: &str,
+    fallback: &str,
+    label: &str,
+    minimum: i32,
+    maximum: i32,
+) -> std::result::Result<(), String> {
+    let raw = draft.specific_value(key, fallback);
+    let value = raw
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| format!("{label} must be an integer"))?;
+    if !(minimum..=maximum).contains(&value) {
+        return Err(format!("{label} must be between {minimum} and {maximum}"));
+    }
+    Ok(())
+}
+
+fn validate_renderer_choice(
+    draft: &NativeRendererProperties,
+    key: &str,
+    fallback: &str,
+    choices: &[&str],
+) -> std::result::Result<(), String> {
+    let value = draft.specific_value(key, fallback);
+    if !choices.contains(&value.trim()) {
+        return Err(format!("unsupported {key}: {value}"));
+    }
+    Ok(())
+}
+
+fn validate_renderer_color(value: &str, label: &str) -> std::result::Result<(), String> {
+    cuemol_gfx::parse_color(value.trim())
+        .map(|_| ())
+        .map_err(|_| format!("invalid {label}: {value}"))
 }
 
 fn scene_attr_f64(value: Option<&str>, fallback: f64) -> f64 {
@@ -12325,6 +13648,132 @@ mod tests {
     }
 
     #[test]
+    fn native_renderer_property_dialog_applies_undoes_and_persists_common_fields() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", molecule);
+        let renderer_uid = app
+            .state
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("ballstick", "sticks");
+        let mut properties =
+            NativeRendererProperties::from_state(&app.state, object_uid, renderer_uid).unwrap();
+        properties.name = "detailed sticks".to_string();
+        properties.selection = "name CA".to_string();
+        properties.visible = false;
+        properties.locked = true;
+        properties.material = "default".to_string();
+        properties.alpha = 0.6;
+        properties.edge_type = "silhouette".to_string();
+        properties.edge_width = 0.2;
+        properties.edge_color = "#123456".to_string();
+        properties.detail = 8;
+        properties.bond_width = 0.42;
+        properties.sphere_radius = 0.55;
+        properties.show_ring = true;
+        properties.ring_thickness = 0.31;
+        properties.ring_color = "#abcdef".to_string();
+
+        app.apply_renderer_properties(&properties).unwrap();
+        let renderer = app
+            .state
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        assert_eq!(renderer.name(), "detailed sticks");
+        assert_eq!(renderer.qsc_attr("sel"), Some("name CA"));
+        assert!(!renderer.is_visible());
+        assert_eq!(renderer.qsc_attr("locked"), Some("true"));
+        assert_eq!(renderer.qsc_attr("alpha"), Some("0.6"));
+        assert_eq!(renderer.qsc_attr("bondw"), Some("0.42"));
+        assert_eq!(renderer.qsc_attr("ringcolor"), Some("#abcdef"));
+        assert!(app.modified_scenes.contains(&scene_uid));
+
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        let renderer = app
+            .state
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        assert_eq!(renderer.name(), "sticks");
+        assert!(renderer.is_visible());
+        assert_eq!(renderer.qsc_attr("bondw"), None);
+        app.redo(&mut camera);
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-native-renderer-properties-{}.qsc",
+            std::process::id()
+        ));
+        app.save_current_scene_to_path(&camera, &path);
+        let qsc = fs::read_to_string(&path).unwrap();
+        assert!(qsc.contains("name=\"detailed sticks\""));
+        assert!(qsc.contains("bondw=\"0.42\""));
+        assert!(qsc.contains("egtype=\"silhouette\""));
+        fs::remove_file(path).unwrap();
+
+        let undo_len = app.undo_stack.len();
+        properties.edge_color = "not-a-color".to_string();
+        assert_eq!(
+            app.apply_renderer_properties(&properties),
+            Err("invalid edge color: not-a-color".to_string())
+        );
+        assert_eq!(app.undo_stack.len(), undo_len);
+    }
+
+    #[test]
+    fn native_renderer_property_dialog_keeps_an_isolated_draft() {
+        let ctx = egui::Context::default();
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("object", cuemol_molstr::MolCoord::new());
+        let renderer_uid = app
+            .state
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "simple");
+        app.open_renderer_properties(object_uid, renderer_uid);
+        app.renderer_properties_draft.as_mut().unwrap().name = "draft name".to_string();
+        let revision = app.snapshot_revision;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.renderer_props_dialog(ctx)
+        });
+        assert!(app.renderer_properties_draft.is_some());
+        assert_eq!(app.snapshot_revision, revision);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(renderer_uid)
+                .unwrap()
+                .name(),
+            "simple"
+        );
+    }
+
+    #[test]
     fn native_scene_property_dialog_keeps_an_isolated_draft() {
         let ctx = egui::Context::default();
         let mut app = GuiApplication::new();
@@ -13347,7 +14796,38 @@ mod tests {
             save_harness(&mut harness, &out_dir.join("object_properties.png"));
         }
 
-        // (1b5) Generic Scene property editor with the full Scene.qif table.
+        // (1b5) Workspace Renderer property dialog with draft-only editing.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            if let Some(object_uid) = app
+                .state
+                .active_object_summaries()
+                .first()
+                .map(|object| object.uid)
+            {
+                if let Some(renderer_uid) = app
+                    .state
+                    .renderer_summaries(object_uid)
+                    .first()
+                    .map(|renderer| renderer.uid)
+                {
+                    app.selected_object = Some(object_uid);
+                    app.selected_renderer = Some(renderer_uid);
+                    app.open_renderer_properties(object_uid, renderer_uid);
+                }
+            }
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1000.0, 760.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("renderer_properties.png"));
+        }
+
+        // (1b6) Generic Scene property editor with the full Scene.qif table.
         {
             let mut app = GuiApplication::new();
             let mut camera = CameraController::default();
@@ -13361,7 +14841,7 @@ mod tests {
             save_harness(&mut harness, &out_dir.join("scene_properties.png"));
         }
 
-        // (1b6) Generic View property editor with the full reference property table.
+        // (1b7) Generic View property editor with the full reference property table.
         {
             let mut app = GuiApplication::new();
             let mut camera = CameraController::default();
