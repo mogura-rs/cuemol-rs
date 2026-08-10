@@ -65,6 +65,7 @@ struct RendererDto {
     uid: u64,
     name: String,
     renderer_type: String,
+    group: Option<String>,
     selection: String,
     visible: bool,
     locked: bool,
@@ -903,6 +904,7 @@ impl AppModel {
                             uid: renderer.uid.get(),
                             name: renderer.name,
                             renderer_type: renderer.renderer_type,
+                            group: renderer.group,
                             selection: if matches!(
                                 state.renderer_type(),
                                 "*namelabel" | "name_label"
@@ -1033,6 +1035,7 @@ impl AppModel {
                             uid: renderer.uid.get(),
                             name: renderer.name,
                             renderer_type: renderer.renderer_type,
+                            group: None,
                             selection: String::new(),
                             visible: renderer.visible,
                             locked: renderer.locked,
@@ -1114,6 +1117,7 @@ impl AppModel {
                             uid: renderer.uid.get(),
                             name: renderer.name,
                             renderer_type: renderer.renderer_type,
+                            group: None,
                             selection: renderer.selection,
                             visible: renderer.visible,
                             locked: renderer.locked,
@@ -1877,7 +1881,7 @@ impl AppModel {
                 }
                 self.status = format!("Destroy object {name}");
             }
-            "renderer" => {
+            "renderer" | "rendererGroup" => {
                 let renderer_uid = Uid::new(
                     target
                         .renderer_uid
@@ -1893,11 +1897,18 @@ impl AppModel {
                     .renderer(renderer_uid)
                     .map(|renderer| renderer.name().to_string())
                     .ok_or_else(|| format!("renderer {} not found", renderer_uid.get()))?;
-                if !self
-                    .desktop
-                    .destroy_renderer_in_object(object_uid, renderer_uid)
-                    .map_err(|error| error.to_string())?
-                {
+                let is_group = object
+                    .renderer(renderer_uid)
+                    .is_some_and(|renderer| renderer.renderer_type() == "*group");
+                let deleted = if is_group {
+                    self.desktop
+                        .destroy_renderer_group_in_object(object_uid, renderer_uid)
+                } else {
+                    self.desktop
+                        .destroy_renderer_in_object(object_uid, renderer_uid)
+                }
+                .map_err(|error| error.to_string())?;
+                if !deleted {
                     return Err(format!(
                         "renderer {} could not be deleted",
                         renderer_uid.get()
@@ -2032,6 +2043,7 @@ impl AppModel {
                     .fit_molecule_view(object_uid, Some(renderer_uid), &mut view)
                     .map_err(|error| error.to_string())?
             }
+            "rendererGroup" => false,
             "densityMap" | "densityRenderer" => {
                 self.desktop
                     .fit_density_map_view(object_uid, &mut view)
@@ -3112,21 +3124,38 @@ impl AppModel {
             }
             _ => {}
         }
-        self.desktop
-            .set_renderer_common_properties(
-                object_uid,
-                renderer_uid,
-                name,
-                properties.selection,
-                properties.visible,
-                properties.locked,
-                properties.material,
-                properties.alpha,
-                properties.edge_type,
-                properties.edge_width,
-                properties.edge_color,
-            )
-            .map_err(|error| error.to_string())?;
+        if renderer_type == "*group" {
+            self.desktop
+                .set_renderer_group_common_properties(
+                    object_uid,
+                    renderer_uid,
+                    name,
+                    properties.visible,
+                    properties.locked,
+                    properties.material,
+                    properties.alpha,
+                    properties.edge_type,
+                    properties.edge_width,
+                    properties.edge_color,
+                )
+                .map_err(|error| error.to_string())?;
+        } else {
+            self.desktop
+                .set_renderer_common_properties(
+                    object_uid,
+                    renderer_uid,
+                    name,
+                    properties.selection,
+                    properties.visible,
+                    properties.locked,
+                    properties.material,
+                    properties.alpha,
+                    properties.edge_type,
+                    properties.edge_width,
+                    properties.edge_color,
+                )
+                .map_err(|error| error.to_string())?;
+        }
         let mut set_property = |key: &str, value: String, is_default: bool| {
             let result = if let Some((child, attribute)) = key.split_once('.') {
                 if is_default {
@@ -4298,6 +4327,7 @@ enum ModelRequest {
     AddRenderer {
         object_uid: u64,
         renderer_type: String,
+        group_name: Option<String>,
     },
     SetObjectColoring {
         object_uid: u64,
@@ -5774,10 +5804,24 @@ fn handle_model_request(
             visible,
         } => {
             let undo = model.capture_undo();
-            model
+            let object_uid = Uid::new(object_uid);
+            let renderer_uid = Uid::new(renderer_uid);
+            let is_group = model
                 .desktop
-                .set_renderer_visible(Uid::new(object_uid), Uid::new(renderer_uid), visible)
-                .map_err(|error| error.to_string())?;
+                .scene_manager()
+                .object(object_uid)
+                .and_then(|object| object.renderer(renderer_uid))
+                .is_some_and(|renderer| renderer.renderer_type() == "*group");
+            if is_group {
+                model
+                    .desktop
+                    .set_renderer_group_visible(object_uid, renderer_uid, visible)
+            } else {
+                model
+                    .desktop
+                    .set_renderer_visible(object_uid, renderer_uid, visible)
+            }
+            .map_err(|error| error.to_string())?;
             model.status = if visible {
                 "Renderer shown".to_string()
             } else {
@@ -5790,6 +5834,7 @@ fn handle_model_request(
         ModelRequest::AddRenderer {
             object_uid,
             renderer_type,
+            group_name,
         } => {
             if !MOLECULE_RENDERER_TYPES.contains(&renderer_type.as_str()) {
                 return Err(format!("unsupported renderer type: {renderer_type}"));
@@ -5799,14 +5844,33 @@ fn handle_model_request(
                 .desktop
                 .suggest_renderer_name_in_active_scene(&renderer_type)
                 .map_err(|error| error.to_string())?;
-            model
+            if let Some(group_name) = group_name.as_deref() {
+                let group_exists = model
+                    .desktop
+                    .renderer_summaries(Uid::new(object_uid))
+                    .iter()
+                    .any(|renderer| {
+                        renderer.renderer_type == "*group" && renderer.name == group_name
+                    });
+                if !group_exists {
+                    return Err(format!("renderer group not found: {group_name}"));
+                }
+            }
+            let renderer_uid = model
                 .desktop
                 .new_renderer_in_active_scene(
                     Uid::new(object_uid),
                     renderer_type.clone(),
                     renderer_name,
                 )
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.to_string())?
+                .result_renderer;
+            if let Some(group_name) = group_name {
+                model
+                    .desktop
+                    .set_renderer_property(Uid::new(object_uid), renderer_uid, "group", group_name)
+                    .map_err(|error| error.to_string())?;
+            }
             model.status = format!("Added {renderer_type} renderer");
             model.invalidate_mesh(false);
             model.push_undo(undo);
@@ -7427,6 +7491,7 @@ fn set_renderer_visible(
 fn add_renderer(
     object_uid: u64,
     renderer_type: String,
+    group_name: Option<String>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
@@ -7434,6 +7499,7 @@ fn add_renderer(
         ModelRequest::AddRenderer {
             object_uid,
             renderer_type,
+            group_name,
         },
     )?)
 }
@@ -9362,6 +9428,7 @@ mod tests {
                 ModelRequest::AddRenderer {
                     object_uid: object_uid.get(),
                     renderer_type: (*renderer_type).to_string(),
+                    group_name: None,
                 },
             )
             .unwrap();
@@ -9389,9 +9456,114 @@ mod tests {
             ModelRequest::AddRenderer {
                 object_uid: object_uid.get(),
                 renderer_type: "molsurf".to_string(),
+                group_name: None,
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn renderer_group_requests_sync_members_and_are_undoable() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let object_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("group target", cuemol_molstr::MolCoord::new());
+        let (group_uid, child_uid, free_uid) = {
+            let object = model
+                .desktop
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .unwrap();
+            let group_uid = object.add_renderer("*group", "representations");
+            let child_uid = object.add_renderer("simple", "lines");
+            object
+                .renderer_mut(child_uid)
+                .unwrap()
+                .set_qsc_attr("group", "representations");
+            let free_uid = object.add_renderer("cpk", "spacefill");
+            (group_uid, child_uid, free_uid)
+        };
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetRendererVisible {
+                object_uid: object_uid.get(),
+                renderer_uid: group_uid.get(),
+                visible: false,
+            },
+        )
+        .unwrap();
+        let object = model.desktop.scene_manager().object(object_uid).unwrap();
+        assert!(!object.renderer(group_uid).unwrap().is_visible());
+        assert!(!object.renderer(child_uid).unwrap().is_visible());
+        assert!(object.renderer(free_uid).unwrap().is_visible());
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(child_uid)
+            .unwrap()
+            .is_visible());
+
+        let mut properties =
+            default_renderer_properties_input(object_uid, group_uid, "main representations");
+        properties.selection = "invalid selector (".to_string();
+        handle_model_request(&mut model, ModelRequest::SetRendererProperties(properties)).unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(child_uid)
+                .unwrap()
+                .group(),
+            Some("main representations")
+        );
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddRenderer {
+                object_uid: object_uid.get(),
+                renderer_type: "tube".to_string(),
+                group_name: Some("main representations".to_string()),
+            },
+        )
+        .unwrap();
+        let grouped_count = model.snapshot().objects[0]
+            .renderers
+            .iter()
+            .filter(|renderer| renderer.group.as_deref() == Some("main representations"))
+            .count();
+        assert_eq!(grouped_count, 2);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::DeleteWorkspaceItem(WorkspaceDeleteInput {
+                kind: "rendererGroup".to_string(),
+                object_uid: object_uid.get(),
+                renderer_uid: Some(group_uid.get()),
+            }),
+        )
+        .unwrap();
+        let object = model.desktop.scene_manager().object(object_uid).unwrap();
+        assert!(object.renderer(group_uid).is_none());
+        assert!(object.renderer(child_uid).is_none());
+        assert!(object.renderer(free_uid).is_some());
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(group_uid)
+            .is_some());
     }
 
     #[test]

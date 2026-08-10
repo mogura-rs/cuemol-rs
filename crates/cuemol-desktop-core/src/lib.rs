@@ -3666,7 +3666,7 @@ impl DesktopAppState {
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
         let selection_readonly = matches!(
             renderer.renderer_type(),
-            "*selection" | "selection" | "*namelabel" | "name_label"
+            "*selection" | "selection" | "*namelabel" | "name_label" | "*group"
         );
         let selector = if selection_readonly {
             None
@@ -3702,6 +3702,104 @@ impl DesktopAppState {
         renderer.set_qsc_attr("egtype", edge_type.as_ref().trim());
         renderer.set_qsc_attr("eglinew", edge_width.to_string());
         renderer.set_qsc_attr("egcolor", edge_color.as_ref().trim());
+        Ok(())
+    }
+
+    pub fn set_renderer_group_visible(
+        &mut self,
+        object_uid: Uid,
+        group_uid: Uid,
+        visible: bool,
+    ) -> Result<()> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let group_name = object
+            .renderer(group_uid)
+            .filter(|renderer| renderer.renderer_type() == "*group")
+            .map(|renderer| renderer.name().to_string())
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer group {}", group_uid.get())))?;
+        let targets = object
+            .renderers()
+            .iter()
+            .filter(|renderer| {
+                renderer.uid() == group_uid
+                    || renderer.group().is_some_and(|group| group == group_name)
+            })
+            .map(|renderer| renderer.uid())
+            .collect::<Vec<_>>();
+        for renderer_uid in targets {
+            object
+                .renderer_mut(renderer_uid)
+                .expect("renderer group member was collected above")
+                .set_visible(visible);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_renderer_group_common_properties(
+        &mut self,
+        object_uid: Uid,
+        group_uid: Uid,
+        name: impl Into<String>,
+        visible: bool,
+        locked: bool,
+        material: impl AsRef<str>,
+        alpha: f64,
+        edge_type: impl AsRef<str>,
+        edge_width: f64,
+        edge_color: impl AsRef<str>,
+    ) -> Result<()> {
+        let name = name.into();
+        let (old_name, duplicate) = {
+            let object = self
+                .scene_manager()
+                .object(object_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+            let group = object
+                .renderer(group_uid)
+                .filter(|renderer| renderer.renderer_type() == "*group")
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+                })?;
+            let duplicate = object.renderers().iter().any(|renderer| {
+                renderer.uid() != group_uid
+                    && renderer.renderer_type() == "*group"
+                    && renderer.name() == name
+            });
+            (group.name().to_string(), duplicate)
+        };
+        if duplicate {
+            return Err(CueMolError::invalid_argument(format!(
+                "renderer group name already exists: {name}"
+            )));
+        }
+        self.set_renderer_common_properties(
+            object_uid, group_uid, &name, "*", visible, locked, material, alpha, edge_type,
+            edge_width, edge_color,
+        )?;
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .expect("renderer group object was checked above");
+        let members = object
+            .renderers()
+            .iter()
+            .filter(|renderer| {
+                renderer.uid() != group_uid
+                    && renderer.group().is_some_and(|group| group == old_name)
+            })
+            .map(|renderer| renderer.uid())
+            .collect::<Vec<_>>();
+        for renderer_uid in members {
+            let renderer = object
+                .renderer_mut(renderer_uid)
+                .expect("renderer group member was collected above");
+            renderer.set_qsc_attr("group", &name);
+            renderer.set_visible(visible);
+        }
         Ok(())
     }
 
@@ -4022,6 +4120,32 @@ impl DesktopAppState {
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         Ok(object.destroy_renderer(renderer_uid))
+    }
+
+    pub fn destroy_renderer_group_in_object(
+        &mut self,
+        object_uid: Uid,
+        group_uid: Uid,
+    ) -> Result<bool> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let group_name = object
+            .renderer(group_uid)
+            .filter(|renderer| renderer.renderer_type() == "*group")
+            .map(|renderer| renderer.name().to_string())
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer group {}", group_uid.get())))?;
+        let members = object
+            .renderers()
+            .iter()
+            .filter(|renderer| renderer.group().is_some_and(|group| group == group_name))
+            .map(|renderer| renderer.uid())
+            .collect::<Vec<_>>();
+        for renderer_uid in members {
+            object.destroy_renderer(renderer_uid);
+        }
+        Ok(object.destroy_renderer(group_uid))
     }
 
     pub fn destroy_object(&mut self, object_uid: Uid) -> Result<bool> {
@@ -47760,6 +47884,63 @@ end_header
         assert_eq!(atom.atom_index, 0);
         assert_eq!(atom.serial, 1);
         assert_eq!(atom.selection_text, "aid 1");
+    }
+
+    #[test]
+    fn renderer_group_operations_keep_members_in_sync() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("groups", false).result_scene;
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let (group_uid, first_uid, second_uid, free_uid) = {
+            let object = app.scene_manager_mut().object_mut(object_uid).unwrap();
+            let group_uid = object.add_renderer("*group", "group-a");
+            let first_uid = object.add_renderer("simple", "first");
+            object
+                .renderer_mut(first_uid)
+                .unwrap()
+                .set_qsc_attr("group", "group-a");
+            let second_uid = object.add_renderer("cpk", "second");
+            object
+                .renderer_mut(second_uid)
+                .unwrap()
+                .set_qsc_attr("group", "group-a");
+            let free_uid = object.add_renderer("trace", "free");
+            (group_uid, first_uid, second_uid, free_uid)
+        };
+
+        app.set_renderer_group_visible(object_uid, group_uid, false)
+            .unwrap();
+        let object = app.scene_manager().object(object_uid).unwrap();
+        for uid in [group_uid, first_uid, second_uid] {
+            assert!(!object.renderer(uid).unwrap().is_visible());
+        }
+        assert!(object.renderer(free_uid).unwrap().is_visible());
+
+        app.set_renderer_group_common_properties(
+            object_uid, group_uid, "renamed", true, true, "", 1.0, "none", 0.01, "#000000",
+        )
+        .unwrap();
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.renderer(group_uid).unwrap().name(), "renamed");
+        assert_eq!(object.renderer(first_uid).unwrap().group(), Some("renamed"));
+        assert_eq!(
+            object.renderer(second_uid).unwrap().group(),
+            Some("renamed")
+        );
+        assert!(object.renderer(first_uid).unwrap().is_visible());
+
+        assert!(app
+            .destroy_renderer_group_in_object(object_uid, group_uid)
+            .unwrap());
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert!(object.renderer(group_uid).is_none());
+        assert!(object.renderer(first_uid).is_none());
+        assert!(object.renderer(second_uid).is_none());
+        assert!(object.renderer(free_uid).is_some());
     }
 
     #[test]

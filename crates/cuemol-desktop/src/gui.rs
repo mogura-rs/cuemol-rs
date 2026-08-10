@@ -534,6 +534,7 @@ struct GuiApplication {
     show_residue_dialog: bool,
     show_renderer_dialog: bool,
     new_renderer_owner: Option<NativePropertyObject>,
+    new_renderer_group: Option<String>,
     new_renderer_type: String,
     new_renderer_name: String,
     chain_edit_value: String,
@@ -1024,6 +1025,12 @@ enum WorkspaceAuxSelection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeRendererTreeNode {
+    renderer: crate::GuiRendererSummary,
+    children: Vec<crate::GuiRendererSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeObjectProperties {
     target: NativePropertyObject,
     name: String,
@@ -1254,8 +1261,13 @@ impl NativeRendererProperties {
         matches!(self.owner, NativePropertyObject::DensityMap(_))
     }
 
+    fn is_renderer_group(&self) -> bool {
+        self.renderer_type == "*group"
+    }
+
     fn title(&self) -> &'static str {
         match self.renderer_type.as_str() {
+            "*group" => "Renderer group properties",
             "simple" => "Simple Rend Properties",
             "trace" => "Trace renderer properties",
             "spline" => "Spline renderer properties",
@@ -1282,6 +1294,7 @@ impl NativeRendererProperties {
 
     fn tabs(&self) -> &'static [&'static str] {
         match self.renderer_type.as_str() {
+            "*group" => &["Common"],
             "simple" => &["Simple"],
             "trace" => &["Trace"],
             "spline" => &["Common", "Spline"],
@@ -1371,6 +1384,33 @@ fn strip_native_renderer_common_specific(
     ] {
         specific.remove(key);
     }
+}
+
+fn native_renderer_tree_nodes(
+    renderers: Vec<crate::GuiRendererSummary>,
+) -> Vec<NativeRendererTreeNode> {
+    let mut children = std::collections::BTreeMap::<String, Vec<_>>::new();
+    for renderer in renderers.iter().filter(|renderer| renderer.group.is_some()) {
+        children
+            .entry(renderer.group.clone().unwrap_or_default())
+            .or_default()
+            .push(renderer.clone());
+    }
+    renderers
+        .into_iter()
+        .filter(|renderer| renderer.group.is_none())
+        .map(|renderer| {
+            let grouped = if renderer.renderer_type == "*group" {
+                children.remove(&renderer.name).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            NativeRendererTreeNode {
+                renderer,
+                children: grouped,
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2072,6 +2112,7 @@ impl GuiApplication {
             show_residue_dialog: false,
             show_renderer_dialog: false,
             new_renderer_owner: None,
+            new_renderer_group: None,
             new_renderer_type: "simple".to_string(),
             new_renderer_name: "simple".to_string(),
             chain_edit_value: "A".to_string(),
@@ -3094,28 +3135,30 @@ impl GuiApplication {
                         self.workspace_aux_selection = None;
                     }
                     ui.indent(format!("object-{}", object.uid.get()), |ui| {
-                        for renderer in self.state.renderer_summaries(object.uid) {
-                            let selected = self.workspace_aux_selection.is_none()
-                                && self.selected_object == Some(object.uid)
-                                && self.selected_renderer == Some(renderer.uid);
-                            let mut visible = renderer.visible;
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .checkbox(&mut visible, "")
-                                    .on_hover_text("Visible")
-                                    .changed()
-                                {
-                                    self.set_renderer_visibility(object.uid, renderer.uid, visible);
-                                }
-                                let label =
-                                    format!("{} ({})", renderer.name, renderer.renderer_type);
-                                if ui.selectable_label(selected, label).clicked() {
-                                    self.activate_workspace_scene(scene.uid, camera);
-                                    self.selected_object = Some(object.uid);
-                                    self.selected_renderer = Some(renderer.uid);
-                                    self.workspace_aux_selection = None;
-                                }
-                            });
+                        let nodes =
+                            native_renderer_tree_nodes(self.state.renderer_summaries(object.uid));
+                        for node in nodes {
+                            let is_group = node.renderer.renderer_type == "*group";
+                            self.workspace_molecule_renderer_row(
+                                ui,
+                                camera,
+                                scene.uid,
+                                object.uid,
+                                &node.renderer,
+                                is_group,
+                            );
+                            if is_group {
+                                ui.indent(
+                                    format!("renderer-group-{}", node.renderer.uid.get()),
+                                    |ui| {
+                                        for renderer in &node.children {
+                                            self.workspace_molecule_renderer_row(
+                                                ui, camera, scene.uid, object.uid, renderer, false,
+                                            );
+                                        }
+                                    },
+                                );
+                            }
                         }
                     });
                 }
@@ -3241,7 +3284,8 @@ impl GuiApplication {
         }
         ui.separator();
         ui.horizontal(|ui| {
-            let zoom_enabled = self.selected_object.is_some()
+            let zoom_enabled = (self.selected_object.is_some()
+                && !self.selected_renderer_is_group())
                 || matches!(
                     self.workspace_aux_selection,
                     Some(WorkspaceAuxSelection::DensityMap { .. })
@@ -3255,7 +3299,8 @@ impl GuiApplication {
             }
             if ui.button("Add").on_hover_text("Add renderer").clicked() {
                 if let Some(object_uid) = self.selected_object {
-                    self.open_renderer_dialog(object_uid);
+                    let group = self.selected_renderer_group_name();
+                    self.open_renderer_dialog_in_group(object_uid, group);
                 } else if let Some(selection) = self.workspace_aux_selection {
                     self.open_aux_renderer_dialog(selection);
                 } else if let Some(object_uid) = self
@@ -3294,6 +3339,49 @@ impl GuiApplication {
         });
     }
 
+    fn workspace_molecule_renderer_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        camera: &mut CameraController,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer: &crate::GuiRendererSummary,
+        is_group: bool,
+    ) {
+        let selected = self.workspace_aux_selection.is_none()
+            && self.selected_object == Some(object_uid)
+            && self.selected_renderer == Some(renderer.uid);
+        let mut visible = renderer.visible;
+        ui.horizontal(|ui| {
+            if ui
+                .checkbox(&mut visible, "")
+                .on_hover_text(if is_group {
+                    "Toggle all renderers in this group"
+                } else {
+                    "Visible"
+                })
+                .changed()
+            {
+                if is_group {
+                    self.set_renderer_group_visibility(object_uid, renderer.uid, visible);
+                } else {
+                    self.set_renderer_visibility(object_uid, renderer.uid, visible);
+                }
+            }
+            let label = if is_group {
+                format!("{} (group)", renderer.name)
+            } else {
+                format!("{} ({})", renderer.name, renderer.renderer_type)
+            };
+            if ui.selectable_label(selected, label).clicked() {
+                self.activate_workspace_scene(scene_uid, camera);
+                self.selected_object = Some(object_uid);
+                self.selected_renderer = Some(renderer.uid);
+                self.workspace_aux_selection = None;
+            }
+        });
+    }
+
     fn activate_workspace_scene(
         &mut self,
         scene_uid: cuemol_core::Uid,
@@ -3306,6 +3394,26 @@ impl GuiApplication {
         self.sync_active_scene_properties();
         self.rebuild_snapshot();
         camera.fit_snapshot(&self.snapshot);
+    }
+
+    fn selected_renderer_is_group(&self) -> bool {
+        let (Some(object_uid), Some(renderer_uid)) = (self.selected_object, self.selected_renderer)
+        else {
+            return false;
+        };
+        self.state
+            .renderer_summaries(object_uid)
+            .into_iter()
+            .any(|renderer| renderer.uid == renderer_uid && renderer.renderer_type == "*group")
+    }
+
+    fn selected_renderer_group_name(&self) -> Option<String> {
+        let (object_uid, renderer_uid) = (self.selected_object?, self.selected_renderer?);
+        self.state
+            .renderer_summaries(object_uid)
+            .into_iter()
+            .find(|renderer| renderer.uid == renderer_uid && renderer.renderer_type == "*group")
+            .map(|renderer| renderer.name)
     }
 
     fn zoom_workspace_selection(&mut self, camera: &mut CameraController) {
@@ -3334,7 +3442,9 @@ impl GuiApplication {
             viewport.x.max(1.0).round() as u32,
             viewport.y.max(1.0).round() as u32,
         );
-        let fitted = if let Some(object_uid) = self.selected_object {
+        let fitted = if self.selected_renderer_is_group() {
+            false
+        } else if let Some(object_uid) = self.selected_object {
             self.state
                 .fit_molecule_view(object_uid, self.selected_renderer, &mut view)
                 .map_err(|error| error.to_string())?
@@ -7730,12 +7840,14 @@ impl GuiApplication {
 
                         ui.label("Selection:");
                         let selection_readonly = draft.is_density_renderer()
+                            || draft.is_renderer_group()
                             || matches!(
                                 draft.renderer_type.as_str(),
                                 "*selection" | "selection" | "*namelabel" | "name_label"
                             );
                         if selection_readonly {
                             let text = if draft.is_density_renderer()
+                                || draft.is_renderer_group()
                                 || matches!(
                                     draft.renderer_type.as_str(),
                                     "*namelabel" | "name_label"
@@ -9108,21 +9220,38 @@ impl GuiApplication {
             return Err("renderer type changed while the dialog was open".to_string());
         }
         let undo = self.capture_undo();
-        self.state
-            .set_renderer_common_properties(
-                object_uid,
-                draft.renderer_uid,
-                draft.name.trim(),
-                &draft.selection,
-                draft.visible,
-                draft.locked,
-                &draft.material,
-                draft.alpha,
-                &draft.edge_type,
-                draft.edge_width,
-                draft.edge_color.trim(),
-            )
-            .map_err(|error| error.to_string())?;
+        if renderer_type == "*group" {
+            self.state
+                .set_renderer_group_common_properties(
+                    object_uid,
+                    draft.renderer_uid,
+                    draft.name.trim(),
+                    draft.visible,
+                    draft.locked,
+                    &draft.material,
+                    draft.alpha,
+                    &draft.edge_type,
+                    draft.edge_width,
+                    draft.edge_color.trim(),
+                )
+                .map_err(|error| error.to_string())?;
+        } else {
+            self.state
+                .set_renderer_common_properties(
+                    object_uid,
+                    draft.renderer_uid,
+                    draft.name.trim(),
+                    &draft.selection,
+                    draft.visible,
+                    draft.locked,
+                    &draft.material,
+                    draft.alpha,
+                    &draft.edge_type,
+                    draft.edge_width,
+                    draft.edge_color.trim(),
+                )
+                .map_err(|error| error.to_string())?;
+        }
 
         match renderer_type.as_str() {
             "simple" | "trace" => self.set_renderer_draft_property(
@@ -10053,6 +10182,9 @@ impl GuiApplication {
                     };
                     ui.monospace(format!("{kind} uid: {}", uid.get()));
                 }
+                if let Some(group) = self.new_renderer_group.as_deref() {
+                    ui.label(format!("Group: {group}"));
+                }
                 let renderer_types = match self.new_renderer_owner {
                     Some(NativePropertyObject::DensityMap(_)) => DENSITY_RENDERER_TYPES,
                     Some(NativePropertyObject::Surface(_)) => SURFACE_RENDERER_TYPES,
@@ -10610,7 +10742,16 @@ impl GuiApplication {
     }
 
     fn open_renderer_dialog(&mut self, object_uid: cuemol_core::Uid) {
+        self.open_renderer_dialog_in_group(object_uid, None);
+    }
+
+    fn open_renderer_dialog_in_group(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        group: Option<String>,
+    ) {
         self.new_renderer_owner = Some(NativePropertyObject::Molecule(object_uid));
+        self.new_renderer_group = group;
         if !RENDERER_TYPES.contains(&self.new_renderer_type.as_str()) {
             self.new_renderer_type = "simple".to_string();
         }
@@ -10625,6 +10766,7 @@ impl GuiApplication {
         match selection {
             WorkspaceAuxSelection::DensityMap { map_uid, .. } => {
                 self.new_renderer_owner = Some(NativePropertyObject::DensityMap(map_uid));
+                self.new_renderer_group = None;
                 if !DENSITY_RENDERER_TYPES.contains(&self.new_renderer_type.as_str()) {
                     self.new_renderer_type = "contour".to_string();
                 }
@@ -10643,6 +10785,7 @@ impl GuiApplication {
             }
             WorkspaceAuxSelection::Surface { surface_uid, .. } => {
                 self.new_renderer_owner = Some(NativePropertyObject::Surface(surface_uid));
+                self.new_renderer_group = None;
                 self.new_renderer_type = "molsurf".to_string();
                 let serial = self
                     .state
@@ -10667,11 +10810,19 @@ impl GuiApplication {
             return;
         }
         let undo = self.capture_undo();
+        let renderer_group = self.new_renderer_group.clone();
         let created = match owner {
-            NativePropertyObject::Molecule(object_uid) => self
-                .state
-                .new_renderer_in_active_scene(object_uid, renderer_type, renderer_name)
-                .map(|result| result.result_renderer),
+            NativePropertyObject::Molecule(object_uid) => (|| {
+                let renderer_uid = self
+                    .state
+                    .new_renderer_in_active_scene(object_uid, renderer_type, renderer_name)?
+                    .result_renderer;
+                if let Some(group) = renderer_group.as_deref() {
+                    self.state
+                        .set_renderer_property(object_uid, renderer_uid, "group", group)?;
+                }
+                Ok(renderer_uid)
+            })(),
             NativePropertyObject::DensityMap(map_uid) => (|| {
                 if !DENSITY_RENDERER_TYPES.contains(&renderer_type.as_str()) {
                     return Err(CueMolError::invalid_argument(format!(
@@ -10809,6 +10960,30 @@ impl GuiApplication {
                 self.push_undo_snapshot(undo);
                 self.rebuild_snapshot();
                 self.set_status(format!("Renderer visibility: {visible}"));
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn set_renderer_group_visibility(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        group_uid: cuemol_core::Uid,
+        visible: bool,
+    ) {
+        let scene_uid = self.state.scene_manager().scene_uid_for_object(object_uid);
+        let undo = self.capture_undo();
+        match self
+            .state
+            .set_renderer_group_visible(object_uid, group_uid, visible)
+        {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                if let Some(scene_uid) = scene_uid {
+                    self.modified_scenes.insert(scene_uid);
+                }
+                self.rebuild_snapshot();
+                self.set_status(format!("Renderer group visibility: {visible}"));
             }
             Err(error) => self.set_error(error),
         }
@@ -11035,18 +11210,35 @@ impl GuiApplication {
     }
 
     fn delete_renderer(&mut self, object_uid: cuemol_core::Uid, renderer_uid: cuemol_core::Uid) {
-        let undo = self.capture_undo();
-        match self
+        let is_group = self
             .state
-            .destroy_renderer_in_object(object_uid, renderer_uid)
-        {
+            .renderer_summaries(object_uid)
+            .into_iter()
+            .any(|renderer| renderer.uid == renderer_uid && renderer.renderer_type == "*group");
+        let scene_uid = self.state.scene_manager().scene_uid_for_object(object_uid);
+        let undo = self.capture_undo();
+        let result = if is_group {
+            self.state
+                .destroy_renderer_group_in_object(object_uid, renderer_uid)
+        } else {
+            self.state
+                .destroy_renderer_in_object(object_uid, renderer_uid)
+        };
+        match result {
             Ok(true) => {
                 self.push_undo_snapshot(undo);
+                if let Some(scene_uid) = scene_uid {
+                    self.modified_scenes.insert(scene_uid);
+                }
                 if self.selected_renderer == Some(renderer_uid) {
                     self.selected_renderer = None;
                 }
                 self.rebuild_snapshot();
-                self.set_status("Renderer deleted");
+                self.set_status(if is_group {
+                    "Renderer group deleted"
+                } else {
+                    "Renderer deleted"
+                });
             }
             Ok(false) => self.set_status("Renderer was already absent"),
             Err(error) => self.set_error(error),
@@ -16317,6 +16509,132 @@ mod tests {
     }
 
     #[test]
+    fn native_workspace_renderer_groups_are_nested_undoable_and_persisted() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let (group_uid, first_uid, second_uid, free_uid) = {
+            let object = app
+                .state
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .unwrap();
+            let group_uid = object.add_renderer("*group", "representations");
+            let first_uid = object.add_renderer("simple", "lines");
+            object
+                .renderer_mut(first_uid)
+                .unwrap()
+                .set_qsc_attr("group", "representations");
+            let second_uid = object.add_renderer("cpk", "atoms");
+            object
+                .renderer_mut(second_uid)
+                .unwrap()
+                .set_qsc_attr("group", "representations");
+            let free_uid = object.add_renderer("trace", "free");
+            (group_uid, first_uid, second_uid, free_uid)
+        };
+
+        let tree = native_renderer_tree_nodes(app.state.renderer_summaries(object_uid));
+        assert_eq!(tree.len(), 2);
+        let group = tree
+            .iter()
+            .find(|node| node.renderer.uid == group_uid)
+            .unwrap();
+        assert_eq!(group.children.len(), 2);
+        assert!(group
+            .children
+            .iter()
+            .any(|renderer| renderer.uid == first_uid));
+        assert!(group
+            .children
+            .iter()
+            .any(|renderer| renderer.uid == second_uid));
+        assert!(tree.iter().any(|node| node.renderer.uid == free_uid));
+
+        app.selected_object = Some(object_uid);
+        app.selected_renderer = Some(group_uid);
+        assert!(app.selected_renderer_is_group());
+        let mut camera = CameraController::default();
+        assert!(!app.fit_workspace_selection(&mut camera).unwrap());
+
+        app.set_renderer_group_visibility(object_uid, group_uid, false);
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert!(!object.renderer(group_uid).unwrap().is_visible());
+        assert!(!object.renderer(first_uid).unwrap().is_visible());
+        assert!(!object.renderer(second_uid).unwrap().is_visible());
+        assert!(object.renderer(free_uid).unwrap().is_visible());
+        app.undo(&mut camera);
+        assert!(app
+            .state
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(first_uid)
+            .unwrap()
+            .is_visible());
+
+        let mut properties =
+            NativeRendererProperties::from_state(&app.state, object_uid, group_uid).unwrap();
+        assert_eq!(properties.title(), "Renderer group properties");
+        properties.name = "renamed group".to_string();
+        app.apply_renderer_properties(&properties).unwrap();
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert_eq!(
+            object.renderer(first_uid).unwrap().group(),
+            Some("renamed group")
+        );
+        assert_eq!(
+            object.renderer(second_uid).unwrap().group(),
+            Some("renamed group")
+        );
+
+        app.open_renderer_dialog_in_group(object_uid, Some("renamed group".to_string()));
+        app.new_renderer_type = "tube".to_string();
+        app.new_renderer_name = "group tube".to_string();
+        app.create_renderer_from_dialog();
+        let added_uid = app.selected_renderer.unwrap();
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(added_uid)
+                .unwrap()
+                .group(),
+            Some("renamed group")
+        );
+
+        app.selected_renderer = Some(group_uid);
+        app.delete_renderer(object_uid, group_uid);
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert!(object.renderer(group_uid).is_none());
+        assert!(object.renderer(first_uid).is_none());
+        assert!(object.renderer(second_uid).is_none());
+        assert!(object.renderer(added_uid).is_none());
+        assert!(object.renderer(free_uid).is_some());
+        app.undo(&mut camera);
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert!(object.renderer(group_uid).is_some());
+        assert!(object.renderer(added_uid).is_some());
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-native-renderer-groups-{}.qsc",
+            std::process::id()
+        ));
+        app.save_current_scene_to_path(&camera, &path);
+        let qsc = fs::read_to_string(&path).unwrap();
+        assert!(qsc.contains("type=\"*group\""));
+        assert!(qsc.contains("name=\"renamed group\""));
+        assert!(qsc.contains("group=\"renamed group\""));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn native_renderer_property_dialog_keeps_an_isolated_draft() {
         let ctx = egui::Context::default();
         let mut app = GuiApplication::new();
@@ -17363,11 +17681,38 @@ mod tests {
                     raw_data: data.as_bytes().to_vec(),
                     qsc_node: None,
                 });
-            app.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
-                scene_uid,
-                map_uid,
-                renderer_uid: Some(renderer_uid),
-            });
+            if let Some(object_uid) = app
+                .state
+                .active_object_summaries()
+                .first()
+                .map(|object| object.uid)
+            {
+                let group_uid = {
+                    let object = app
+                        .state
+                        .scene_manager_mut()
+                        .object_mut(object_uid)
+                        .unwrap();
+                    let group_uid = object.add_renderer("*group", "Representations");
+                    for (renderer_type, name) in [("ribbon", "Ribbon"), ("cpk", "Atoms")] {
+                        let renderer_uid = object.add_renderer(renderer_type, name);
+                        object
+                            .renderer_mut(renderer_uid)
+                            .unwrap()
+                            .set_qsc_attr("group", "Representations");
+                    }
+                    group_uid
+                };
+                app.selected_object = Some(object_uid);
+                app.selected_renderer = Some(group_uid);
+                app.workspace_aux_selection = None;
+            } else {
+                app.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
+                    scene_uid,
+                    map_uid,
+                    renderer_uid: Some(renderer_uid),
+                });
+            }
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(1100.0, 850.0))
                 .build(|ctx| {

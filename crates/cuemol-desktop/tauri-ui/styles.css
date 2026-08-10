@@ -666,10 +666,31 @@ summary:focus-visible {
   font-size: 11px;
 }
 
+.tree-renderer.renderer-group {
+  padding-left: 38px;
+  font-weight: 600;
+}
+
+.tree-renderer.group-child {
+  padding-left: 58px;
+}
+
 .tree-renderer::before {
   content: "○";
   width: 14px;
   color: #555;
+}
+
+.tree-renderer.renderer-group::before {
+  content: "▾";
+}
+
+.renderer-row.renderer-group {
+  font-weight: 600;
+}
+
+.renderer-row.group-child {
+  padding-left: 22px;
 }
 
 .tree-renderer.density-renderer::before {

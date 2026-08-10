@@ -1452,6 +1452,7 @@ function objectPropertiesEditor(object) {
 function rendererPropertiesEditor(object, renderer) {
   const densityMap = Array.isArray(object.counts);
   const surfaceObject = object.className === "MolSurfObj";
+  const rendererGroup = renderer.rendererType === "*group";
   const directSurfaceLike = ["dsurface", "dsurf2"].includes(renderer.rendererType);
   const surfaceLike = surfaceObject || directSurfaceLike;
   const simpleLike = ["simple", "trace"].includes(renderer.rendererType);
@@ -1470,7 +1471,9 @@ function rendererPropertiesEditor(object, renderer) {
   const contourLike = densityMap && ["contour", "gpu_mapmesh"].includes(renderer.rendererType);
   const isosurfLike = densityMap && renderer.rendererType === "isosurf";
   const volumeLike = densityMap && renderer.rendererType === "gpu_mapvol";
-  if (renderer.rendererType === "simple") {
+  if (rendererGroup) {
+    dialogTitle.textContent = "Renderer group properties";
+  } else if (renderer.rendererType === "simple") {
     dialogTitle.textContent = "Simple Rend Properties";
   } else if (renderer.rendererType === "trace") {
     dialogTitle.textContent = "Trace renderer properties";
@@ -1711,8 +1714,8 @@ function rendererPropertiesEditor(object, renderer) {
   name.value = renderer.name;
   propertyField(basic, "Name:", name);
   const selection = document.createElement("input");
-  selection.value = densityMap || nameLabelLike ? "(not available)" : renderer.selection || "*";
-  selection.disabled = densityMap || selectionLike || nameLabelLike;
+  selection.value = densityMap || rendererGroup || nameLabelLike ? "(not available)" : renderer.selection || "*";
+  selection.disabled = densityMap || rendererGroup || selectionLike || nameLabelLike;
   selection.spellcheck = false;
   propertyField(basic, "Selection:", selection);
   const checks = document.createElement("div");
@@ -2973,7 +2976,7 @@ function rendererPropertiesEditor(object, renderer) {
     control.addEventListener("change", markDirty);
   }
   const reset = button("Reset all to default", "dialog-reset", () => {
-    selection.value = densityMap ? "(not available)" : "*";
+    selection.value = densityMap || rendererGroup ? "(not available)" : "*";
     visible.checked = true;
     locked.checked = false;
     material.value = "";
@@ -3025,7 +3028,9 @@ function rendererPropertiesEditor(object, renderer) {
           rendererUid: renderer.uid,
           name: name.value,
           selection:
-            densityMap || selectionLike || nameLabelLike ? renderer.selection : selection.value,
+            densityMap || rendererGroup || selectionLike || nameLabelLike
+              ? renderer.selection
+              : selection.value,
           visible: visible.checked,
           locked: locked.checked,
           material: material.value,
@@ -4108,6 +4113,23 @@ function selectedRenderer() {
   return selectedObject()?.renderers.find((renderer) => renderer.uid === selectedRendererUid) || null;
 }
 
+function groupedMoleculeRenderers(renderers) {
+  const nodes = [];
+  for (const renderer of renderers) {
+    if (renderer.rendererType === "*group") {
+      nodes.push({
+        renderer,
+        children: renderers.filter(
+          (candidate) => candidate.rendererType !== "*group" && candidate.group === renderer.name,
+        ),
+      });
+    } else if (!renderer.group) {
+      nodes.push({ renderer, children: [] });
+    }
+  }
+  return nodes;
+}
+
 function selectedDensityMap() {
   return snapshot?.densityMaps.find((map) => map.uid === selectedDensityMapUid) || null;
 }
@@ -4137,11 +4159,11 @@ function selectedWorkspaceTarget() {
     const object = selectedObject();
     return object ? { kind: "object", objectUid: object.uid, rendererUid: null } : null;
   }
-  if (workspaceSelectionKind === "renderer") {
+  if (["renderer", "rendererGroup"].includes(workspaceSelectionKind)) {
     const object = selectedObject();
     const renderer = selectedRenderer();
     return object && renderer
-      ? { kind: "renderer", objectUid: object.uid, rendererUid: renderer.uid }
+      ? { kind: workspaceSelectionKind, objectUid: object.uid, rendererUid: renderer.uid }
       : null;
   }
   if (workspaceSelectionKind === "densityMap") {
@@ -4218,7 +4240,9 @@ function normalizeSelection() {
   }
   if (selectedRendererUid !== null && !selectedRenderer()) {
     selectedRendererUid = null;
-    if (workspaceSelectionKind === "renderer") workspaceSelectionKind = "object";
+    if (["renderer", "rendererGroup"].includes(workspaceSelectionKind)) {
+      workspaceSelectionKind = "object";
+    }
   }
 }
 
@@ -4227,6 +4251,7 @@ function workspaceChromeRenderKey() {
     renderer.uid,
     renderer.name,
     renderer.rendererType,
+    renderer.group,
     renderer.visible,
     renderer.locked,
   ];
@@ -4346,14 +4371,18 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       count.textContent = `${object.atomCount} AT`;
       objectRow.append(count);
       sceneTree.append(objectRow);
-      for (const renderer of object.renderers) {
+      const appendMoleculeRendererRow = (renderer, isChild = false) => {
+        const isGroup = renderer.rendererType === "*group";
+        const selectionKind = isGroup ? "rendererGroup" : "renderer";
         const rendererRow = button(
-          `${renderer.rendererType} · ${renderer.name}`,
+          isGroup ? `${renderer.name} (group)` : `${renderer.rendererType} · ${renderer.name}`,
           `tree-renderer${
-            workspaceSelectionKind === "renderer" && renderer.uid === selectedRendererUid
+            workspaceSelectionKind === selectionKind && renderer.uid === selectedRendererUid
               ? " active"
               : ""
-          }${renderer.visible ? "" : " hidden"}`,
+          }${isGroup ? " renderer-group" : ""}${isChild ? " group-child" : ""}${
+            renderer.visible ? "" : " hidden"
+          }`,
           () => {
             selectedObjectUid = object.uid;
             selectedRendererUid = renderer.uid;
@@ -4361,7 +4390,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             selectedDensityRendererUid = null;
             selectedSurfaceUid = null;
             selectedSurfaceRendererUid = null;
-            workspaceSelectionKind = "renderer";
+            workspaceSelectionKind = selectionKind;
             renderShell();
           },
         );
@@ -4369,6 +4398,10 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           showReferenceDialog("Renderer Properties"),
         );
         sceneTree.append(rendererRow);
+      };
+      for (const node of groupedMoleculeRenderers(object.renderers)) {
+        appendMoleculeRendererRow(node.renderer);
+        for (const child of node.children) appendMoleculeRendererRow(child, true);
       }
     }
     for (const surface of (snapshot.surfaces || []).filter(
@@ -4475,7 +4508,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     }
   }
   workspaceProperties.disabled =
-    workspaceSelectionKind === "renderer"
+    ["renderer", "rendererGroup"].includes(workspaceSelectionKind)
       ? !selectedRenderer()
       : workspaceSelectionKind === "densityRenderer"
         ? !selectedDensityRenderer()
@@ -4489,7 +4522,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             ? !selectedObject()
             : !snapshot.scenes.some((scene) => scene.active);
   workspaceDelete.disabled =
-    workspaceSelectionKind === "renderer"
+    ["renderer", "rendererGroup"].includes(workspaceSelectionKind)
       ? !selectedRenderer()
       : workspaceSelectionKind === "densityRenderer"
         ? !selectedDensityRenderer()
@@ -4502,7 +4535,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
               : workspaceSelectionKind === "object"
                 ? !selectedObject()
                 : true;
-  workspaceZoom.disabled = workspaceDelete.disabled;
+  workspaceZoom.disabled = workspaceDelete.disabled || workspaceSelectionKind === "rendererGroup";
 }
 
 function renderInspector(renderKey = workspaceChromeRenderKey()) {
@@ -4515,7 +4548,7 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
     ? selectedSurface()
     : null;
   const object =
-    !map && !surface && ["object", "renderer"].includes(workspaceSelectionKind)
+    !map && !surface && ["object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)
       ? selectedObject()
       : null;
   inspectorTitle.textContent = object?.name || map?.name || surface?.name || "No object";
@@ -4568,14 +4601,22 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
     empty.textContent = "No render representations.";
     rendererList.append(empty);
   }
-  for (const renderer of renderers) {
+  const rendererEntries = object
+    ? groupedMoleculeRenderers(renderers).flatMap((node) => [
+        { renderer: node.renderer, child: false },
+        ...node.children.map((renderer) => ({ renderer, child: true })),
+      ])
+    : renderers.map((renderer) => ({ renderer, child: false }));
+  for (const { renderer, child } of rendererEntries) {
     const row = document.createElement("div");
     const selectedUid = map
       ? selectedDensityRendererUid
       : surface
         ? selectedSurfaceRendererUid
         : selectedRendererUid;
-    row.className = `renderer-row${renderer.uid === selectedUid ? " selected" : ""}`;
+    row.className = `renderer-row${renderer.rendererType === "*group" ? " renderer-group" : ""}${
+      child ? " group-child" : ""
+    }${renderer.uid === selectedUid ? " selected" : ""}`;
     row.tabIndex = 0;
     const visible = document.createElement("input");
     visible.type = "checkbox";
@@ -4621,7 +4662,7 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
         workspaceSelectionKind = "surfaceRenderer";
       } else {
         selectedRendererUid = renderer.uid;
-        workspaceSelectionKind = "renderer";
+        workspaceSelectionKind = renderer.rendererType === "*group" ? "rendererGroup" : "renderer";
       }
       const renderKey = workspaceChromeRenderKey();
       renderSceneTree(renderKey);
@@ -6821,7 +6862,7 @@ async function handleAction(action, depth = 0) {
       renderSelectionEditor();
       break;
     case "add-renderer": {
-      const object = ["object", "renderer"].includes(workspaceSelectionKind)
+      const object = ["object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)
         ? selectedObject()
         : null;
       const map = ["densityMap", "densityRenderer"].includes(workspaceSelectionKind)
@@ -6848,6 +6889,8 @@ async function handleAction(action, depth = 0) {
         await mutate("add_renderer", {
           objectUid: object.uid,
           rendererType: rendererTypeValue,
+          groupName:
+            workspaceSelectionKind === "rendererGroup" ? selectedRenderer()?.name || null : null,
         });
       }
       break;
@@ -6910,7 +6953,7 @@ document.querySelectorAll("[data-dialog]").forEach((element) => {
 });
 
 workspaceProperties.addEventListener("click", () => {
-  if (workspaceSelectionKind === "renderer" && selectedRenderer()) {
+  if (["renderer", "rendererGroup"].includes(workspaceSelectionKind) && selectedRenderer()) {
     showReferenceDialog("Renderer Properties");
   } else if (workspaceSelectionKind === "densityRenderer" && selectedDensityRenderer()) {
     showReferenceDialog("Renderer Properties");

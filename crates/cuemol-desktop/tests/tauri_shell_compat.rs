@@ -293,6 +293,16 @@ fn tauri_workspace_chrome_reuses_unchanged_dom() {
 }
 
 #[test]
+fn tauri_workspace_preserves_renderer_group_hierarchy() {
+    assert!(JS.contains("function groupedMoleculeRenderers(renderers)"));
+    assert!(JS.contains("candidate.group === renderer.name"));
+    assert!(JS.contains("workspaceSelectionKind === \"rendererGroup\""));
+    assert!(JS.contains("groupName:"));
+    assert!(CSS.contains(".tree-renderer.renderer-group"));
+    assert!(CSS.contains(".tree-renderer.group-child"));
+}
+
+#[test]
 fn tauri_projection_toggle_uses_the_compact_viewport_response() {
     assert!(JS.contains("snapshot.perspective = result.perspective"));
     assert!(JS.contains("renderProjectionControls()"));
