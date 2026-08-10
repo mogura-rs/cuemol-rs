@@ -4533,9 +4533,31 @@ async function showReferenceDialog(title) {
   } else if (title === "Open PDB") {
     dialogTitle.textContent = "Download PDB";
     dialogContent.append(dialogParagraph("Enter PDB ID:"));
-    const pdbId = dialogField("PDB ID", "1CRN");
+    let pdbHistory = [];
+    if (invoke) {
+      try {
+        const storedHistory = await invoke("get_pdb_history");
+        if (Array.isArray(storedHistory)) {
+          pdbHistory = storedHistory.filter(
+            (entry) => typeof entry === "string" && /^[0-9][0-9A-Za-z]{3}$/.test(entry),
+          );
+        }
+      } catch {
+        pdbHistory = [];
+      }
+    }
+    const pdbId = dialogField("PDB ID", pdbHistory[0] || "");
     pdbId.maxLength = 4;
     pdbId.pattern = "[0-9][0-9A-Za-z]{3}";
+    const pdbHistoryList = document.createElement("datalist");
+    pdbHistoryList.id = "open-pdb-history";
+    for (const entry of pdbHistory) {
+      const option = document.createElement("option");
+      option.value = entry;
+      pdbHistoryList.append(option);
+    }
+    pdbId.setAttribute("list", pdbHistoryList.id);
+    dialogContent.append(pdbHistoryList);
     const coordinatesGroup = dialogGroup("Coordinates");
     const fetchCoordinates = dialogCheckbox("Fetch pdb file", true, coordinatesGroup);
     const coordinateSource = dialogSelect(

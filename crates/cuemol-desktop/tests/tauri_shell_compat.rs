@@ -410,6 +410,9 @@ fn tauri_open_pdb_matches_reference_coordinate_and_map_options() {
         assert!(JS.contains(label), "missing Open PDB field {label}");
     }
     for binding in [
+        "await invoke(\"get_pdb_history\")",
+        "pdbHistoryList.id = \"open-pdb-history\"",
+        "pdbId.setAttribute(\"list\", pdbHistoryList.id)",
         "fetchCoordinates: fetchCoordinates.checked",
         "coordinateSource: coordinateSource.value",
         "fetchTwoFofc: fetchTwoFofc.checked",

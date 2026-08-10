@@ -9377,6 +9377,11 @@ fn reload_scene(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
+fn get_pdb_history() -> Vec<String> {
+    crate::load_pdb_history()
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn open_pdb(
     pdb_id: String,
@@ -9402,15 +9407,17 @@ async fn open_pdb(
     let files = tauri::async_runtime::spawn_blocking(move || crate::download_pdb_files(options))
         .await
         .map_err(|error| format!("PDB download task failed: {error}"))??;
-    molecule_selection_update_response(request_model(
+    let update = molecule_selection_update_response(request_model(
         &state,
         ModelRequest::OpenPdb {
-            pdb_id,
+            pdb_id: pdb_id.clone(),
             files,
             width,
             height,
         },
-    )?)
+    )?)?;
+    let _ = crate::remember_pdb_id(&pdb_id);
+    Ok(update)
 }
 
 #[tauri::command]
@@ -10499,6 +10506,7 @@ pub fn run() -> Result<(), tauri::Error> {
             open_paths,
             open_initial_paths,
             reload_scene,
+            get_pdb_history,
             open_pdb,
             load_trajectory,
             set_trajectory_frame,

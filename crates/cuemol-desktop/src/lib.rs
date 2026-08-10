@@ -22,6 +22,9 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 static NEXT_DOWNLOAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+const MAX_PDB_HISTORY: usize = 10;
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 type DownloadResult = std::result::Result<PathBuf, String>;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -105,6 +108,86 @@ pub(crate) fn normalize_pdb_id(value: &str) -> std::result::Result<String, Strin
         );
     }
     Ok(pdb_id)
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn pdb_history_path() -> PathBuf {
+    let root = std::env::var_os("CUEMOL2_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            if cfg!(target_os = "windows") {
+                std::env::var_os("APPDATA")
+                    .map(PathBuf::from)
+                    .map(|path| path.join("CueMol2"))
+            } else if cfg!(target_os = "macos") {
+                std::env::var_os("HOME").map(PathBuf::from).map(|path| {
+                    path.join("Library")
+                        .join("Application Support")
+                        .join("CueMol2")
+                })
+            } else {
+                std::env::var_os("XDG_CONFIG_HOME")
+                    .map(PathBuf::from)
+                    .map(|path| path.join("cuemol2"))
+                    .or_else(|| {
+                        std::env::var_os("HOME")
+                            .map(PathBuf::from)
+                            .map(|path| path.join(".config").join("cuemol2"))
+                    })
+            }
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("cuemol2"));
+    root.join("open-pdb-history.txt")
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn load_pdb_history_from(path: &Path) -> std::result::Result<Vec<String>, String> {
+    let input = match std::fs::read_to_string(path) {
+        Ok(input) => input,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("failed to read PDB history: {error}")),
+    };
+    let mut history = Vec::new();
+    for value in input.lines() {
+        let Ok(pdb_id) = normalize_pdb_id(value) else {
+            continue;
+        };
+        let pdb_id = pdb_id.to_ascii_lowercase();
+        if !history.contains(&pdb_id) {
+            history.push(pdb_id);
+        }
+        if history.len() == MAX_PDB_HISTORY {
+            break;
+        }
+    }
+    Ok(history)
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+pub(crate) fn load_pdb_history() -> Vec<String> {
+    load_pdb_history_from(&pdb_history_path()).unwrap_or_default()
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn remember_pdb_id_at(path: &Path, value: &str) -> std::result::Result<Vec<String>, String> {
+    let pdb_id = normalize_pdb_id(value)?.to_ascii_lowercase();
+    let mut history = load_pdb_history_from(path)?;
+    history.retain(|entry| entry != &pdb_id);
+    history.insert(0, pdb_id);
+    history.truncate(MAX_PDB_HISTORY);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create PDB history directory: {error}"))?;
+    }
+    let mut output = history.join("\n");
+    output.push('\n');
+    std::fs::write(path, output).map_err(|error| format!("failed to save PDB history: {error}"))?;
+    Ok(history)
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+pub(crate) fn remember_pdb_id(value: &str) -> std::result::Result<Vec<String>, String> {
+    remember_pdb_id_at(&pdb_history_path(), value)
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -392,6 +475,28 @@ mod download_tests {
         for invalid in ["", "1ABC2", "ABCD", "1AB_", "1AB-"] {
             assert!(normalize_pdb_id(invalid).is_err(), "accepted {invalid}");
         }
+    }
+
+    #[test]
+    fn pdb_history_matches_reference_mru_order_and_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-pdb-history-test-{}-{}.txt",
+            std::process::id(),
+            NEXT_DOWNLOAD_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, "invalid\n1CRN\n1crn\n2xyz\n").unwrap();
+        assert_eq!(load_pdb_history_from(&path).unwrap(), ["1crn", "2xyz"]);
+
+        for index in 0..12 {
+            let pdb_id = format!("{index:04}");
+            remember_pdb_id_at(&path, &pdb_id).unwrap();
+        }
+        let history = remember_pdb_id_at(&path, "0005").unwrap();
+        assert_eq!(history.len(), MAX_PDB_HISTORY);
+        assert_eq!(history[0], "0005");
+        assert_eq!(history[1], "0011");
+        assert_eq!(load_pdb_history_from(&path).unwrap(), history);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

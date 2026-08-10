@@ -565,6 +565,8 @@ struct GuiApplication {
     export_path: String,
     log_save_path: String,
     pdb_id: String,
+    pdb_history: Vec<String>,
+    pdb_history_loaded: bool,
     pdb_fetch_coordinates: bool,
     pdb_coordinate_source: String,
     pdb_fetch_two_fofc: bool,
@@ -2339,7 +2341,9 @@ impl GuiApplication {
             view_save_path: "current_view.cam".to_string(),
             export_path: "scene.pov".to_string(),
             log_save_path: "cuemol.log".to_string(),
-            pdb_id: "1CRN".to_string(),
+            pdb_id: String::new(),
+            pdb_history: Vec::new(),
+            pdb_history_loaded: false,
             pdb_fetch_coordinates: true,
             pdb_coordinate_source: "RCSB_CIF".to_string(),
             pdb_fetch_two_fofc: false,
@@ -8455,6 +8459,13 @@ impl GuiApplication {
                             .iter()
                             .find(|file| file.kind == crate::GuiPdbFileKind::Coordinates)
                             .map(|file| file.path.clone());
+                        let normalized_id = pdb_id.to_ascii_lowercase();
+                        self.pdb_history.retain(|entry| entry != &normalized_id);
+                        self.pdb_history.insert(0, normalized_id);
+                        self.pdb_history.truncate(crate::MAX_PDB_HISTORY);
+                        if let Ok(history) = crate::remember_pdb_id(&pdb_id) {
+                            self.pdb_history = history;
+                        }
                         self.rebuild_snapshot();
                         camera.fit_snapshot(&self.snapshot);
                         self.set_status(format!("Opened PDB {pdb_id}: {} file(s)", files.len()));
@@ -14121,16 +14132,40 @@ impl GuiApplication {
         if !self.show_get_pdb {
             return;
         }
+        if !self.pdb_history_loaded {
+            self.pdb_history = crate::load_pdb_history();
+            if self.pdb_id.is_empty() {
+                self.pdb_id = self.pdb_history.first().cloned().unwrap_or_default();
+            }
+            self.pdb_history_loaded = true;
+        }
         let mut open = self.show_get_pdb;
-        egui::Window::new("Get PDB")
+        egui::Window::new("Download PDB")
             .open(&mut open)
             .collapsible(false)
             .show(ctx, |ui| {
                 ui.label("Enter PDB ID:");
-                ui.add_sized(
-                    [ui.available_width(), 22.0],
-                    egui::TextEdit::singleline(&mut self.pdb_id),
-                );
+                let mut history_pick = None;
+                ui.horizontal(|ui| {
+                    let input_width = (ui.available_width() - 78.0).max(120.0);
+                    ui.add_sized(
+                        [input_width, 22.0],
+                        egui::TextEdit::singleline(&mut self.pdb_id),
+                    );
+                    ui.add_enabled_ui(!self.pdb_history.is_empty(), |ui| {
+                        ui.menu_button("History", |ui| {
+                            for entry in &self.pdb_history {
+                                if ui.button(entry).clicked() {
+                                    history_pick = Some(entry.clone());
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                });
+                if let Some(pdb_id) = history_pick {
+                    self.pdb_id = pdb_id;
+                }
                 let valid_pdb_id = crate::normalize_pdb_id(&self.pdb_id).is_ok();
                 ui.group(|ui| {
                     ui.strong("Coordinates");
@@ -14181,30 +14216,6 @@ impl GuiApplication {
                             });
                     });
                 });
-                let coordinate_extension = if self.pdb_coordinate_source == "RCSB_PDB" {
-                    "pdb.gz"
-                } else {
-                    "cif.gz"
-                };
-                ui.label(format!(
-                    "https://files.rcsb.org/download/{}.{}",
-                    self.pdb_id.trim().to_ascii_lowercase(),
-                    coordinate_extension
-                ));
-                if ui
-                    .add_enabled(
-                        valid_pdb_id && self.pdb_fetch_coordinates,
-                        egui::Button::new("Use as Open Path"),
-                    )
-                    .clicked()
-                {
-                    self.open_path = format!(
-                        "https://files.rcsb.org/download/{}.{}",
-                        self.pdb_id.trim().to_ascii_lowercase(),
-                        coordinate_extension
-                    );
-                    self.set_status("URL copied to Open path");
-                }
                 let any_selected =
                     self.pdb_fetch_coordinates || self.pdb_fetch_two_fofc || self.pdb_fetch_fofc;
                 if ui
@@ -21291,7 +21302,9 @@ mod tests {
     #[test]
     fn native_gui_pdb_download_defaults_match_reference_dialog() {
         let app = GuiApplication::new();
-        assert_eq!(app.pdb_id, "1CRN");
+        assert!(app.pdb_id.is_empty());
+        assert!(app.pdb_history.is_empty());
+        assert!(!app.pdb_history_loaded);
         assert!(app.pdb_fetch_coordinates);
         assert_eq!(app.pdb_coordinate_source, "RCSB_CIF");
         assert!(!app.pdb_fetch_two_fofc);
