@@ -4732,6 +4732,75 @@ impl DesktopAppState {
         Ok(object.destroy_renderer(renderer_uid))
     }
 
+    pub fn move_renderer_in_object(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        target_uid: Uid,
+        position: &str,
+    ) -> Result<bool> {
+        if renderer_uid == target_uid {
+            return Ok(false);
+        }
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let source = object
+            .renderer(renderer_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        let source_is_group = source.renderer_type() == "*group";
+        let source_group = source.group().map(str::to_string);
+        let target = object
+            .renderer(target_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", target_uid.get())))?;
+        let target_is_group = target.renderer_type() == "*group";
+        let target_name = target.name().to_string();
+        let target_group = target.group().map(str::to_string);
+        let (anchor_uid, after, destination_group) = match position {
+            "before" | "after" => {
+                if source_is_group && target_group.is_some() {
+                    return Err(CueMolError::invalid_argument(
+                        "renderer groups cannot be moved into another group",
+                    ));
+                }
+                (
+                    target_uid,
+                    position == "after",
+                    if target_is_group { None } else { target_group },
+                )
+            }
+            "inside" => {
+                if source_is_group || !target_is_group {
+                    return Err(CueMolError::invalid_argument(
+                        "only renderers can be moved into renderer groups",
+                    ));
+                }
+                let anchor_uid = object
+                    .renderers()
+                    .iter()
+                    .rfind(|renderer| renderer.group().is_some_and(|group| group == target_name))
+                    .map_or(target_uid, |renderer| renderer.uid());
+                (anchor_uid, true, Some(target_name))
+            }
+            _ => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unsupported renderer drop position: {position}"
+                )))
+            }
+        };
+        let source = object
+            .renderer_mut(renderer_uid)
+            .expect("source renderer was checked above");
+        let group_changed = source_group.as_deref() != destination_group.as_deref();
+        if let Some(group) = destination_group {
+            source.set_qsc_attr("group", group);
+        } else {
+            source.remove_qsc_attr("group");
+        }
+        Ok(object.move_renderer_relative(renderer_uid, anchor_uid, after) || group_changed)
+    }
+
     pub fn destroy_renderer_group_in_object(
         &mut self,
         object_uid: Uid,
@@ -48572,13 +48641,50 @@ end_header
         assert!(object.renderer(first_uid).unwrap().is_visible());
 
         assert!(app
+            .move_renderer_in_object(object_uid, free_uid, group_uid, "inside")
+            .unwrap());
+        assert_eq!(
+            app.scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(free_uid)
+                .unwrap()
+                .group(),
+            Some("renamed")
+        );
+        assert!(app
+            .move_renderer_in_object(object_uid, first_uid, free_uid, "after")
+            .unwrap());
+        assert!(app
+            .move_renderer_in_object(object_uid, second_uid, group_uid, "before")
+            .unwrap());
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.renderer(second_uid).unwrap().group(), None);
+        assert_eq!(
+            object
+                .renderers()
+                .iter()
+                .map(|renderer| renderer.uid())
+                .collect::<Vec<_>>(),
+            [second_uid, group_uid, free_uid, first_uid]
+        );
+        assert_eq!(
+            object.renderer(second_uid).unwrap().qsc_attr("ui_order"),
+            Some("1")
+        );
+        assert_eq!(
+            object.renderer(first_uid).unwrap().qsc_attr("ui_order"),
+            Some("4")
+        );
+
+        assert!(app
             .destroy_renderer_group_in_object(object_uid, group_uid)
             .unwrap());
         let object = app.scene_manager().object(object_uid).unwrap();
         assert!(object.renderer(group_uid).is_none());
         assert!(object.renderer(first_uid).is_none());
-        assert!(object.renderer(second_uid).is_none());
-        assert!(object.renderer(free_uid).is_some());
+        assert!(object.renderer(free_uid).is_none());
+        assert!(object.renderer(second_uid).is_some());
     }
 
     #[test]

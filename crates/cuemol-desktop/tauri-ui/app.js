@@ -166,6 +166,7 @@ let trajectoryTimer = null;
 let trajectoryTickBusy = false;
 let selectedTrajectoryBlockUid = null;
 let draggedTrajectoryBlockUid = null;
+let draggedWorkspaceRenderer = null;
 const trajectoryFrames = new Map();
 let recentFiles = loadRecentFiles();
 let applicationInfoCache = null;
@@ -4465,6 +4466,34 @@ function groupedMoleculeRenderers(renderers) {
   return nodes;
 }
 
+function clearWorkspaceRendererDropMarkers() {
+  document
+    .querySelectorAll(".tree-renderer.drop-before, .tree-renderer.drop-after, .tree-renderer.drop-inside")
+    .forEach((row) => row.classList.remove("drop-before", "drop-after", "drop-inside"));
+}
+
+function workspaceRendererDropPosition(event, renderer) {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const fraction = bounds.height > 0 ? (event.clientY - bounds.top) / bounds.height : 0.5;
+  if (
+    renderer.rendererType === "*group" &&
+    !draggedWorkspaceRenderer?.isGroup &&
+    fraction >= 0.25 &&
+    fraction <= 0.75
+  ) {
+    return "inside";
+  }
+  return fraction < 0.5 ? "before" : "after";
+}
+
+function canDropWorkspaceRenderer(object, renderer, position) {
+  const source = draggedWorkspaceRenderer;
+  if (!source || source.objectUid !== object.uid || source.rendererUid === renderer.uid) return false;
+  if (position === "inside") return !source.isGroup && renderer.rendererType === "*group";
+  if (source.isGroup && renderer.group) return false;
+  return true;
+}
+
 function selectedDensityMap() {
   return snapshot?.densityMaps.find((map) => map.uid === selectedDensityMapUid) || null;
 }
@@ -4774,6 +4803,55 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             renderShell();
           },
         );
+        rendererRow.draggable = true;
+        rendererRow.addEventListener("dragstart", (event) => {
+          draggedWorkspaceRenderer = {
+            objectUid: object.uid,
+            rendererUid: renderer.uid,
+            isGroup,
+          };
+          rendererRow.classList.add("dragging");
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData(
+            "application/x-cuemol-renderer",
+            JSON.stringify(draggedWorkspaceRenderer),
+          );
+        });
+        rendererRow.addEventListener("dragover", (event) => {
+          const position = workspaceRendererDropPosition(event, renderer);
+          if (!canDropWorkspaceRenderer(object, renderer, position)) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          clearWorkspaceRendererDropMarkers();
+          rendererRow.classList.add(`drop-${position}`);
+          rendererRow.dataset.dropPosition = position;
+        });
+        rendererRow.addEventListener("dragleave", (event) => {
+          if (!rendererRow.contains(event.relatedTarget)) {
+            rendererRow.classList.remove("drop-before", "drop-after", "drop-inside");
+          }
+        });
+        rendererRow.addEventListener("drop", async (event) => {
+          const source = draggedWorkspaceRenderer;
+          const position = rendererRow.dataset.dropPosition || "before";
+          clearWorkspaceRendererDropMarkers();
+          if (!source || !canDropWorkspaceRenderer(object, renderer, position)) return;
+          event.preventDefault();
+          draggedWorkspaceRenderer = null;
+          await mutateWithoutViewport("move_workspace_renderer", {
+            input: {
+              objectUid: object.uid,
+              rendererUid: source.rendererUid,
+              targetUid: renderer.uid,
+              position,
+            },
+          });
+        });
+        rendererRow.addEventListener("dragend", () => {
+          draggedWorkspaceRenderer = null;
+          rendererRow.classList.remove("dragging");
+          clearWorkspaceRendererDropMarkers();
+        });
         rendererRow.addEventListener("dblclick", () =>
           showReferenceDialog("Renderer Properties"),
         );

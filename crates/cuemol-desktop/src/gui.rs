@@ -1068,6 +1068,13 @@ struct NativeRendererTreeNode {
     children: Vec<crate::GuiRendererSummary>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeRendererDragPayload {
+    object_uid: cuemol_core::Uid,
+    renderer_uid: cuemol_core::Uid,
+    is_group: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeObjectProperties {
     target: NativePropertyObject,
@@ -1428,6 +1435,17 @@ fn workspace_lock_toggle(ui: &mut egui::Ui, locked: bool, enabled: bool) -> Opti
         .on_hover_text(if locked { "Unlock" } else { "Lock" })
         .clicked()
         .then_some(!locked)
+}
+
+fn ctx_pointer_vertical_fraction(ctx: &egui::Context, rect: egui::Rect) -> f32 {
+    let y = ctx
+        .input(|input| input.pointer.latest_pos())
+        .map_or(rect.center().y, |position| position.y);
+    if rect.height() <= f32::EPSILON {
+        0.5
+    } else {
+        ((y - rect.top()) / rect.height()).clamp(0.0, 1.0)
+    }
 }
 
 fn strip_native_renderer_common_specific(
@@ -3609,51 +3627,148 @@ impl GuiApplication {
         let selected = self.workspace_aux_selection.is_none()
             && self.selected_object == Some(object_uid)
             && self.selected_renderer == Some(renderer.uid);
-        let mut visible = renderer.visible;
-        ui.horizontal(|ui| {
-            if ui
-                .checkbox(&mut visible, "")
-                .on_hover_text(if is_group {
-                    "Toggle all renderers in this group"
-                } else {
-                    "Visible"
-                })
-                .changed()
-            {
-                if is_group {
-                    self.set_renderer_group_visibility(object_uid, renderer.uid, visible);
-                } else {
-                    self.set_renderer_visibility(object_uid, renderer.uid, visible);
-                }
-            }
-            if let Some(locked) = workspace_lock_toggle(ui, renderer.locked, !is_group) {
-                self.set_workspace_renderer_locked(
-                    NativePropertyObject::Molecule(object_uid),
-                    renderer.uid,
-                    locked,
-                );
-            }
-            let label = if is_group {
-                format!("{} (group)", renderer.name)
-            } else {
-                format!("{} ({})", renderer.name, renderer.renderer_type)
-            };
-            let response = ui.selectable_label(selected, label);
-            if response.clicked() {
-                self.activate_workspace_scene(scene_uid, camera);
-                self.selected_object = Some(object_uid);
-                self.selected_renderer = Some(renderer.uid);
-                self.workspace_aux_selection = None;
-            }
-            if !is_group {
-                response.context_menu(|ui| {
-                    if ui.button("Create style...").clicked() {
-                        self.open_renderer_style_create(scene_uid, object_uid, renderer.uid);
-                        ui.close();
+        let payload = NativeRendererDragPayload {
+            object_uid,
+            renderer_uid: renderer.uid,
+            is_group,
+        };
+        let drag_source = ui.dnd_drag_source(
+            egui::Id::new(("workspace-renderer-drag", renderer.uid.get())),
+            payload,
+            |ui| {
+                let mut visible = renderer.visible;
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut visible, "")
+                        .on_hover_text(if is_group {
+                            "Toggle all renderers in this group"
+                        } else {
+                            "Visible"
+                        })
+                        .changed()
+                    {
+                        if is_group {
+                            self.set_renderer_group_visibility(object_uid, renderer.uid, visible);
+                        } else {
+                            self.set_renderer_visibility(object_uid, renderer.uid, visible);
+                        }
+                    }
+                    if let Some(locked) = workspace_lock_toggle(ui, renderer.locked, !is_group) {
+                        self.set_workspace_renderer_locked(
+                            NativePropertyObject::Molecule(object_uid),
+                            renderer.uid,
+                            locked,
+                        );
+                    }
+                    let label = if is_group {
+                        format!("{} (group)", renderer.name)
+                    } else {
+                        format!("{} ({})", renderer.name, renderer.renderer_type)
+                    };
+                    let response = ui.selectable_label(selected, label);
+                    if response.clicked() {
+                        self.activate_workspace_scene(scene_uid, camera);
+                        self.selected_object = Some(object_uid);
+                        self.selected_renderer = Some(renderer.uid);
+                        self.workspace_aux_selection = None;
+                    }
+                    if !is_group {
+                        response.context_menu(|ui| {
+                            if ui.button("Create style...").clicked() {
+                                self.open_renderer_style_create(
+                                    scene_uid,
+                                    object_uid,
+                                    renderer.uid,
+                                );
+                                ui.close();
+                            }
+                        });
                     }
                 });
+            },
+        );
+        let drop_rect = drag_source.response.rect;
+        if let Some(source) = drag_source
+            .response
+            .dnd_hover_payload::<NativeRendererDragPayload>()
+        {
+            if source.object_uid == object_uid
+                && source.renderer_uid != renderer.uid
+                && (!source.is_group || renderer.group.is_none())
+            {
+                let fraction = ctx_pointer_vertical_fraction(ui.ctx(), drop_rect);
+                let inside = is_group && !source.is_group && (0.25..=0.75).contains(&fraction);
+                let stroke = egui::Stroke::new(2.0, ui.visuals().selection.bg_fill);
+                if inside {
+                    ui.painter()
+                        .rect_stroke(drop_rect, 0.0, stroke, egui::StrokeKind::Inside);
+                } else {
+                    let y = if fraction < 0.5 {
+                        drop_rect.top()
+                    } else {
+                        drop_rect.bottom()
+                    };
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(drop_rect.left(), y),
+                            egui::pos2(drop_rect.right(), y),
+                        ],
+                        stroke,
+                    );
+                }
             }
-        });
+        }
+        let Some(source) = drag_source
+            .response
+            .dnd_release_payload::<NativeRendererDragPayload>()
+        else {
+            return;
+        };
+        if source.object_uid != object_uid || source.renderer_uid == renderer.uid {
+            return;
+        }
+        if source.is_group && renderer.group.is_some() {
+            self.set_status("Renderer groups cannot be moved into another group");
+            return;
+        }
+        let fraction = ctx_pointer_vertical_fraction(ui.ctx(), drop_rect);
+        let position = if is_group && !source.is_group && (0.25..=0.75).contains(&fraction) {
+            "inside"
+        } else if fraction < 0.5 {
+            "before"
+        } else {
+            "after"
+        };
+        self.move_workspace_renderer(
+            scene_uid,
+            object_uid,
+            source.renderer_uid,
+            renderer.uid,
+            position,
+        );
+    }
+
+    fn move_workspace_renderer(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        target_uid: cuemol_core::Uid,
+        position: &str,
+    ) {
+        let undo = self.capture_undo();
+        match self
+            .state
+            .move_renderer_in_object(object_uid, renderer_uid, target_uid, position)
+        {
+            Ok(true) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.set_status("Move renderer");
+            }
+            Ok(false) => {}
+            Err(error) => self.set_status(format!("Move renderer error: {error}")),
+        }
     }
 
     fn activate_workspace_scene(
@@ -17753,6 +17868,29 @@ mod tests {
         assert_eq!(
             object.renderer(second_uid).unwrap().group(),
             Some("renamed group")
+        );
+
+        app.move_workspace_renderer(scene_uid, object_uid, free_uid, group_uid, "inside");
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(free_uid)
+                .unwrap()
+                .group(),
+            Some("renamed group")
+        );
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(free_uid)
+                .unwrap()
+                .group(),
+            None
         );
 
         app.open_renderer_dialog_in_group(object_uid, Some("renamed group".to_string()));

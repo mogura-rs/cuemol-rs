@@ -315,6 +315,16 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
 }
 
 #[test]
+fn tauri_workspace_reorders_and_regroups_renderers_by_dragging() {
+    assert!(JS.contains("rendererRow.draggable = true"));
+    assert!(JS.contains("application/x-cuemol-renderer"));
+    assert!(JS.contains("function workspaceRendererDropPosition(event, renderer)"));
+    assert!(JS.contains("mutateWithoutViewport(\"move_workspace_renderer\""));
+    assert!(CSS.contains(".tree-renderer.drop-before::after"));
+    assert!(CSS.contains(".tree-renderer.drop-inside"));
+}
+
+#[test]
 fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("function activeCameras()"));
     assert!(JS.contains("workspaceSelectionKind === \"cameraRoot\""));
@@ -426,6 +436,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "set_workspace_locked",
         "get_renderer_style_options",
         "create_renderer_style",
+        "move_workspace_renderer",
         "delete_workspace_item",
         "fit_workspace_item",
     ] {

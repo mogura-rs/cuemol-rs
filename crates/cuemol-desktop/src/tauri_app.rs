@@ -653,6 +653,15 @@ struct WorkspaceFitInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceMoveRendererInput {
+    object_uid: u64,
+    renderer_uid: u64,
+    target_uid: u64,
+    position: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RendererPropertiesInput {
     object_uid: u64,
     renderer_uid: u64,
@@ -2206,6 +2215,25 @@ impl AppModel {
         }
         self.invalidate_mesh(false);
         Ok(())
+    }
+
+    fn move_workspace_renderer(
+        &mut self,
+        input: WorkspaceMoveRendererInput,
+    ) -> Result<bool, String> {
+        let moved = self
+            .desktop
+            .move_renderer_in_object(
+                Uid::new(input.object_uid),
+                Uid::new(input.renderer_uid),
+                Uid::new(input.target_uid),
+                &input.position,
+            )
+            .map_err(|error| error.to_string())?;
+        if moved {
+            self.status = "Move renderer".to_string();
+        }
+        Ok(moved)
     }
 
     fn fit_workspace_item(
@@ -4685,6 +4713,7 @@ enum ModelRequest {
         locked: bool,
     },
     DeleteWorkspaceItem(WorkspaceDeleteInput),
+    MoveWorkspaceRenderer(WorkspaceMoveRendererInput),
     FitWorkspaceItem {
         target: WorkspaceFitInput,
         width: u32,
@@ -6058,6 +6087,13 @@ fn handle_model_request(
             model.delete_workspace_item(target)?;
             model.push_undo(undo);
             model.touch_structure_details();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::MoveWorkspaceRenderer(input) => {
+            let undo = model.capture_undo();
+            if model.move_workspace_renderer(input)? {
+                model.push_undo(undo);
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::FitWorkspaceItem {
@@ -7912,6 +7948,17 @@ fn delete_workspace_item(
 }
 
 #[tauri::command]
+fn move_workspace_renderer(
+    input: WorkspaceMoveRendererInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::MoveWorkspaceRenderer(input),
+    )?)
+}
+
+#[tauri::command]
 fn fit_workspace_item(
     target: WorkspaceFitInput,
     width: u32,
@@ -9018,6 +9065,7 @@ pub fn run() -> Result<(), tauri::Error> {
             set_workspace_visible,
             set_workspace_locked,
             delete_workspace_item,
+            move_workspace_renderer,
             fit_workspace_item,
             set_config_value,
             undo,
@@ -10267,6 +10315,46 @@ mod tests {
                 .unwrap()
                 .group(),
             Some("main representations")
+        );
+        model.prepare_mesh_if_needed().unwrap();
+        assert!(model.mesh.is_some());
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::MoveWorkspaceRenderer(WorkspaceMoveRendererInput {
+                object_uid: object_uid.get(),
+                renderer_uid: free_uid.get(),
+                target_uid: group_uid.get(),
+                position: "inside".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(
+            snapshot.objects[0]
+                .renderers
+                .iter()
+                .find(|renderer| renderer.uid == free_uid.get())
+                .unwrap()
+                .group
+                .as_deref(),
+            Some("main representations")
+        );
+        assert_eq!(snapshot.undo_descriptions[0], "Move renderer");
+        assert!(model.mesh.is_some());
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(free_uid)
+                .unwrap()
+                .group(),
+            None
         );
 
         handle_model_request(

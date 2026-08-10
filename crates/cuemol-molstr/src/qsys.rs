@@ -737,6 +737,50 @@ impl MolObject {
         &self.renderers
     }
 
+    pub fn move_renderer_relative(
+        &mut self,
+        renderer_uid: Uid,
+        target_uid: Uid,
+        after: bool,
+    ) -> bool {
+        if renderer_uid == target_uid {
+            return false;
+        }
+        let Some(source_index) = self
+            .renderers
+            .iter()
+            .position(|renderer| renderer.uid == renderer_uid)
+        else {
+            return false;
+        };
+        if !self
+            .renderers
+            .iter()
+            .any(|renderer| renderer.uid == target_uid)
+        {
+            return false;
+        }
+        let renderer = self.renderers.remove(source_index);
+        let target_index = self
+            .renderers
+            .iter()
+            .position(|candidate| candidate.uid == target_uid)
+            .expect("target renderer was checked before removing a different renderer");
+        let insert_index = target_index + usize::from(after);
+        if insert_index == source_index {
+            self.renderers.insert(source_index, renderer);
+            return false;
+        }
+        self.renderers.insert(insert_index, renderer);
+        for (index, renderer) in self.renderers.iter_mut().enumerate() {
+            renderer
+                .qsc_attrs
+                .insert("ui_order".to_string(), (index + 1).to_string());
+        }
+        self.modified = true;
+        true
+    }
+
     /// Object-level paint-coloring entries `(selection, color)`, first-match-wins.
     pub fn paint_coloring(&self) -> &[(String, String)] {
         &self.paint_coloring
