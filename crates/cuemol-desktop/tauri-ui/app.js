@@ -6156,11 +6156,11 @@ async function showReferenceDialog(title) {
       availabilityState = "checking";
       resultText.textContent = "Checking availability…";
       updateOpenState();
+      if (args.fetchCoordinates) {
+        void requestPdbRendererSetup(args.pdbId).catch(() => {});
+      }
       availabilityTimer = setTimeout(async () => {
         if (!referenceDialog.open || !pdbId.isConnected) return;
-        if (args.fetchCoordinates) {
-          void requestPdbRendererSetup(args.pdbId).catch(() => {});
-        }
         try {
           const unavailable = await invoke("check_pdb_availability", args);
           if (sequence !== availabilitySequence || !referenceDialog.open || !pdbId.isConnected) {
@@ -6180,7 +6180,7 @@ async function showReferenceDialog(title) {
           availabilityState = "unavailable";
         }
         updateOpenState();
-      }, 180);
+      }, 100);
     };
     pdbId.addEventListener("input", () => {
       pdbIdEdited = true;

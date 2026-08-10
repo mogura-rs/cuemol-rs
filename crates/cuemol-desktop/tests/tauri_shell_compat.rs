@@ -873,6 +873,19 @@ fn tauri_open_pdb_matches_reference_coordinate_and_map_options() {
     assert!(JS.contains("coordinateSource.disabled = !fetchCoordinates.checked"));
     assert!(JS.contains("mapSource.disabled = !mapsSelected"));
     assert!(JS.contains("Checking availability…"));
+    let pdb_availability_flow = JS
+        .split("const scheduleAvailabilityCheck = () => {")
+        .nth(1)
+        .expect("Open PDB availability flow");
+    assert!(
+        pdb_availability_flow
+            .find("requestPdbRendererSetup(args.pdbId)")
+            .unwrap()
+            < pdb_availability_flow
+                .find("availabilityTimer = setTimeout")
+                .unwrap()
+    );
+    assert!(pdb_availability_flow.contains("}, 100);"));
     assert!(JS.contains("Neither pdb nor map selected"));
     assert!(JS.contains("setTimeout(async () =>"));
 }
