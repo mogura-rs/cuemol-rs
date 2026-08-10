@@ -597,6 +597,27 @@ impl Default for NativeMdTrajectoryDraft {
     }
 }
 
+#[derive(Debug)]
+enum NativeTrajectoryPanelAction {
+    SetFrame {
+        object_uid: cuemol_core::Uid,
+        frame: usize,
+    },
+    AddBlocks {
+        object_uid: cuemol_core::Uid,
+        paths: Vec<PathBuf>,
+    },
+    RemoveBlock {
+        object_uid: cuemol_core::Uid,
+        index: usize,
+    },
+    MoveBlock {
+        object_uid: cuemol_core::Uid,
+        from: usize,
+        to: usize,
+    },
+}
+
 #[derive(Debug, Clone)]
 struct NativeRendererSetupDraft {
     action: NativeRendererSetupAction,
@@ -637,8 +658,6 @@ struct GuiApplication {
     open_path: String,
     save_path: String,
     object_save_path: String,
-    /// AMBER mdcrd trajectory path for the MolAnim animation type.
-    trajectory_path: String,
     view_save_path: String,
     export_path: String,
     log_save_path: String,
@@ -736,6 +755,14 @@ struct GuiApplication {
     background: SceneBackground,
     color_proofing: bool,
     bottom_tab: BottomTab,
+    trajectory_target: Option<cuemol_core::Uid>,
+    trajectory_playing: bool,
+    trajectory_loop: bool,
+    trajectory_fps: f32,
+    trajectory_frame_accumulator: f32,
+    trajectory_selected_block: Option<usize>,
+    trajectory_scrub_preview: Option<usize>,
+    trajectory_append_nevery: usize,
     render_preset: String,
     render_backend: String,
     umbreon_denoise: UmbreonDenoiseMode,
@@ -1075,6 +1102,7 @@ enum CenterMark {
 enum BottomTab {
     Output,
     Sequence,
+    Trajectory,
 }
 
 /// Selection-panel tab (CueMol2 `selection-panel.xul`): the free-text Command tab
@@ -2425,7 +2453,6 @@ impl GuiApplication {
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
             save_path: "scene.qsc".to_string(),
             object_save_path: "object.pdb".to_string(),
-            trajectory_path: String::new(),
             view_save_path: "current_view.cam".to_string(),
             export_path: "scene.pov".to_string(),
             log_save_path: "cuemol.log".to_string(),
@@ -2491,6 +2518,14 @@ impl GuiApplication {
             background: SceneBackground::Black,
             color_proofing: false,
             bottom_tab: BottomTab::Output,
+            trajectory_target: None,
+            trajectory_playing: false,
+            trajectory_loop: false,
+            trajectory_fps: 30.0,
+            trajectory_frame_accumulator: 0.0,
+            trajectory_selected_block: None,
+            trajectory_scrub_preview: None,
+            trajectory_append_nevery: 1,
             render_preset: RENDER_PRESETS[1].0.to_string(),
             render_backend: "POV-Ray".to_string(),
             umbreon_denoise: UmbreonDenoiseMode::default(),
@@ -2637,6 +2672,11 @@ impl GuiApplication {
         if self.animation_playing {
             let dt = ctx.input(|input| input.stable_dt).clamp(0.0, 0.1);
             self.advance_animation(dt, camera);
+            ctx.request_repaint();
+        }
+        if self.trajectory_playing {
+            let dt = ctx.input(|input| input.stable_dt).clamp(0.0, 0.1);
+            self.advance_trajectory_playback(dt);
             ctx.request_repaint();
         }
         // CueMol2 window order (uxp_gui `cuemol2.xul`):
@@ -6863,32 +6903,6 @@ impl GuiApplication {
                 self.animation_elapsed = 0.0;
             }
         });
-        // MolAnim source: load an AMBER mdcrd trajectory onto the active object.
-        ui.horizontal(|ui| {
-            ui.label("Traj:");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.trajectory_path)
-                    .hint_text("trajectory.mdcrd")
-                    .desired_width(120.0),
-            );
-            if ui.button("Load").clicked() {
-                let path = self.trajectory_path.trim().to_string();
-                if let Some(object_uid) = self
-                    .state
-                    .active_object_summaries()
-                    .first()
-                    .map(|object| object.uid)
-                {
-                    match self
-                        .state
-                        .load_amber_trajectory(object_uid, std::path::Path::new(&path))
-                    {
-                        Ok(frames) => self.set_status(format!("Trajectory: {frames} frames")),
-                        Err(error) => self.set_status(format!("Trajectory load failed: {error}")),
-                    }
-                }
-            }
-        });
         ui.separator();
         if self.animation_objects.is_empty() {
             ui.weak("No animation objects — Add a Spin / Rock / Pause (or Play for a spin).");
@@ -7519,15 +7533,22 @@ impl GuiApplication {
         egui::TopBottomPanel::bottom("bottom_panel")
             .resizable(true)
             .default_height(150.0)
+            .min_height(if self.bottom_tab == BottomTab::Trajectory {
+                205.0
+            } else {
+                80.0
+            })
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Output, "Output");
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Sequence, "Sequence");
+                    ui.selectable_value(&mut self.bottom_tab, BottomTab::Trajectory, "Trajectory");
                 });
                 ui.separator();
                 match self.bottom_tab {
                     BottomTab::Output => self.output_tab(ui),
                     BottomTab::Sequence => self.sequence_tab(ui),
+                    BottomTab::Trajectory => self.trajectory_tab(ui),
                 }
             });
     }
@@ -7598,6 +7619,474 @@ impl GuiApplication {
 
         if let Some((object_uid, selection)) = clicked {
             self.apply_molecule_selection(object_uid, selection, "Selected sequence residue");
+        }
+    }
+
+    fn trajectory_tab(&mut self, ui: &mut egui::Ui) {
+        let trajectories = self.state.active_trajectory_summaries();
+        let selected_is_valid = self.trajectory_target.is_some_and(|target| {
+            trajectories
+                .iter()
+                .any(|trajectory| trajectory.object_uid == target)
+        });
+        if !selected_is_valid {
+            self.trajectory_target = trajectories.first().map(|trajectory| trajectory.object_uid);
+            self.trajectory_playing = false;
+            self.trajectory_frame_accumulator = 0.0;
+            self.trajectory_selected_block = None;
+            self.trajectory_scrub_preview = None;
+        }
+        if trajectories.is_empty() {
+            ui.weak("No trajectory loaded.");
+            return;
+        }
+
+        let previous_target = self.trajectory_target;
+        ui.horizontal(|ui| {
+            ui.label("Trajectory:");
+            let selected_name = trajectories
+                .iter()
+                .find(|trajectory| Some(trajectory.object_uid) == self.trajectory_target)
+                .map(|trajectory| trajectory.object_name.as_str())
+                .unwrap_or("Select trajectory");
+            egui::ComboBox::from_id_salt("native_trajectory_target")
+                .selected_text(selected_name)
+                .show_ui(ui, |ui| {
+                    for trajectory in &trajectories {
+                        ui.selectable_value(
+                            &mut self.trajectory_target,
+                            Some(trajectory.object_uid),
+                            &trajectory.object_name,
+                        );
+                    }
+                });
+        });
+        if self.trajectory_target != previous_target {
+            self.trajectory_playing = false;
+            self.trajectory_frame_accumulator = 0.0;
+            self.trajectory_selected_block = None;
+            self.trajectory_scrub_preview = None;
+        }
+        let Some(summary) = trajectories
+            .iter()
+            .find(|trajectory| Some(trajectory.object_uid) == self.trajectory_target)
+            .cloned()
+        else {
+            return;
+        };
+        if self
+            .trajectory_selected_block
+            .is_some_and(|index| index >= summary.blocks.len())
+        {
+            self.trajectory_selected_block = None;
+        }
+        let last_frame = summary.frame_count.saturating_sub(1);
+        let can_control = summary.frame_count > 0;
+        let mut action = None;
+
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(can_control, egui::Button::new("|<"))
+                .on_hover_text("First frame")
+                .clicked()
+            {
+                self.trajectory_playing = false;
+                action = Some(NativeTrajectoryPanelAction::SetFrame {
+                    object_uid: summary.object_uid,
+                    frame: 0,
+                });
+            }
+            let play_label = if self.trajectory_playing {
+                "⏸ Pause"
+            } else {
+                "▶ Play"
+            };
+            if ui
+                .add_enabled(can_control, egui::Button::new(play_label))
+                .clicked()
+            {
+                if !self.trajectory_playing
+                    && summary.current_frame >= last_frame
+                    && last_frame > 0
+                    && !self.trajectory_loop
+                {
+                    action = Some(NativeTrajectoryPanelAction::SetFrame {
+                        object_uid: summary.object_uid,
+                        frame: 0,
+                    });
+                }
+                self.trajectory_playing = !self.trajectory_playing;
+                self.trajectory_frame_accumulator = 0.0;
+            }
+            if ui
+                .add_enabled(can_control, egui::Button::new("■ Stop"))
+                .clicked()
+            {
+                self.trajectory_playing = false;
+                self.trajectory_frame_accumulator = 0.0;
+                action = Some(NativeTrajectoryPanelAction::SetFrame {
+                    object_uid: summary.object_uid,
+                    frame: 0,
+                });
+            }
+            if ui
+                .add_enabled(can_control, egui::Button::new(">|"))
+                .on_hover_text("Last frame")
+                .clicked()
+            {
+                self.trajectory_playing = false;
+                action = Some(NativeTrajectoryPanelAction::SetFrame {
+                    object_uid: summary.object_uid,
+                    frame: last_frame,
+                });
+            }
+            ui.separator();
+            ui.label("Frame:");
+            let mut frame = self
+                .trajectory_scrub_preview
+                .unwrap_or(summary.current_frame)
+                .min(last_frame);
+            if ui
+                .add_enabled(
+                    can_control,
+                    egui::DragValue::new(&mut frame).range(0..=last_frame),
+                )
+                .changed()
+            {
+                self.trajectory_playing = false;
+                self.trajectory_scrub_preview = None;
+                action = Some(NativeTrajectoryPanelAction::SetFrame {
+                    object_uid: summary.object_uid,
+                    frame,
+                });
+            }
+            ui.label(format!("/ {last_frame}"));
+            ui.checkbox(&mut self.trajectory_loop, "Loop");
+            ui.label("FPS:");
+            ui.add(
+                egui::DragValue::new(&mut self.trajectory_fps)
+                    .range(1.0..=120.0)
+                    .speed(1.0),
+            );
+        });
+
+        if can_control {
+            let mut frame = self
+                .trajectory_scrub_preview
+                .unwrap_or(summary.current_frame)
+                .min(last_frame);
+            let response = ui.add(
+                egui::Slider::new(&mut frame, 0..=last_frame)
+                    .show_value(false)
+                    .text("Frame"),
+            );
+            if response.dragged() {
+                self.trajectory_playing = false;
+                self.trajectory_scrub_preview = Some(frame);
+            }
+            if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                self.trajectory_scrub_preview = None;
+                action = Some(NativeTrajectoryPanelAction::SetFrame {
+                    object_uid: summary.object_uid,
+                    frame,
+                });
+            }
+        }
+
+        let track_height = 48.0;
+        let (track_rect, track_response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), track_height),
+            egui::Sense::click_and_drag(),
+        );
+        let visuals = ui.visuals();
+        ui.painter()
+            .rect_filled(track_rect, 2.0, visuals.extreme_bg_color);
+        let block_rects = trajectory_block_rects(&summary.blocks, summary.frame_count, track_rect);
+        for (index, rect) in &block_rects {
+            let selected = self.trajectory_selected_block == Some(*index);
+            let fill = if selected {
+                visuals.selection.bg_fill
+            } else if index % 2 == 0 {
+                visuals.widgets.inactive.bg_fill
+            } else {
+                visuals.widgets.hovered.bg_fill
+            };
+            ui.painter().rect_filled(*rect, 1.0, fill);
+            ui.painter().rect_stroke(
+                *rect,
+                1.0,
+                egui::Stroke::new(1.0, visuals.widgets.inactive.bg_stroke.color),
+                egui::StrokeKind::Inside,
+            );
+            if rect.width() >= 42.0 {
+                ui.painter().with_clip_rect(rect.shrink(2.0)).text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &summary.blocks[*index].name,
+                    egui::FontId::monospace(10.0),
+                    if selected {
+                        visuals.selection.stroke.color
+                    } else {
+                        visuals.text_color()
+                    },
+                );
+            }
+        }
+        ui.painter().text(
+            egui::pos2(track_rect.left() + 2.0, track_rect.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+            "0",
+            egui::FontId::monospace(9.0),
+            visuals.weak_text_color(),
+        );
+        ui.painter().text(
+            egui::pos2(track_rect.right() - 2.0, track_rect.top() + 2.0),
+            egui::Align2::RIGHT_TOP,
+            last_frame.to_string(),
+            egui::FontId::monospace(9.0),
+            visuals.weak_text_color(),
+        );
+        let shown_frame = self
+            .trajectory_scrub_preview
+            .unwrap_or(summary.current_frame)
+            .min(last_frame);
+        let playhead_x = trajectory_frame_x(shown_frame, summary.frame_count, track_rect);
+        ui.painter().line_segment(
+            [
+                egui::pos2(playhead_x, track_rect.top() + 14.0),
+                egui::pos2(playhead_x, track_rect.bottom()),
+            ],
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(220, 72, 60)),
+        );
+        if let Some(pointer) = track_response.interact_pointer_pos() {
+            let frame = trajectory_frame_at_x(pointer.x, summary.frame_count, track_rect);
+            if track_response.dragged() {
+                self.trajectory_playing = false;
+                self.trajectory_scrub_preview = Some(frame);
+            }
+            if track_response.clicked() || track_response.drag_stopped() {
+                self.trajectory_scrub_preview = None;
+                self.trajectory_selected_block = block_rects
+                    .iter()
+                    .find(|(_, rect)| rect.contains(pointer))
+                    .map(|(index, _)| *index);
+                action = Some(NativeTrajectoryPanelAction::SetFrame {
+                    object_uid: summary.object_uid,
+                    frame,
+                });
+            }
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Add...").clicked() {
+                let initial = self
+                    .trajectory_selected_block
+                    .and_then(|index| summary.blocks.get(index))
+                    .map(|block| block.source.as_str())
+                    .unwrap_or_default();
+                if let Some(paths) =
+                    native_multi_file_dialog(NativeFileDialog::OpenTrajectoryBlock, initial)
+                {
+                    action = Some(NativeTrajectoryPanelAction::AddBlocks {
+                        object_uid: summary.object_uid,
+                        paths,
+                    });
+                }
+            }
+            let selected = self.trajectory_selected_block;
+            if ui
+                .add_enabled(selected.is_some(), egui::Button::new("Remove"))
+                .clicked()
+            {
+                action = Some(NativeTrajectoryPanelAction::RemoveBlock {
+                    object_uid: summary.object_uid,
+                    index: selected.expect("enabled only with a selected block"),
+                });
+            }
+            if ui
+                .add_enabled(
+                    selected.is_some_and(|index| index > 0),
+                    egui::Button::new("Move left"),
+                )
+                .clicked()
+            {
+                let from = selected.expect("enabled only with a selected block");
+                action = Some(NativeTrajectoryPanelAction::MoveBlock {
+                    object_uid: summary.object_uid,
+                    from,
+                    to: from - 1,
+                });
+            }
+            if ui
+                .add_enabled(
+                    selected.is_some_and(|index| index + 1 < summary.blocks.len()),
+                    egui::Button::new("Move right"),
+                )
+                .clicked()
+            {
+                let from = selected.expect("enabled only with a selected block");
+                action = Some(NativeTrajectoryPanelAction::MoveBlock {
+                    object_uid: summary.object_uid,
+                    from,
+                    to: from + 1,
+                });
+            }
+            ui.separator();
+            ui.label("Add every N-th:");
+            ui.add(egui::DragValue::new(&mut self.trajectory_append_nevery).range(1..=9999));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.weak(format!("{} blocks", summary.blocks.len()));
+            });
+        });
+
+        if let Some(action) = action {
+            self.apply_trajectory_panel_action(action);
+        }
+    }
+
+    fn apply_trajectory_panel_action(&mut self, action: NativeTrajectoryPanelAction) {
+        match action {
+            NativeTrajectoryPanelAction::SetFrame { object_uid, frame } => {
+                self.set_trajectory_frame(object_uid, frame, true);
+            }
+            NativeTrajectoryPanelAction::AddBlocks { object_uid, paths } => {
+                let undo = self.capture_undo();
+                let previous_count = self
+                    .state
+                    .active_trajectory_summaries()
+                    .into_iter()
+                    .find(|summary| summary.object_uid == object_uid)
+                    .map_or(0, |summary| summary.blocks.len());
+                let mut added = 0;
+                let mut failure = None;
+                for path in paths {
+                    match self.state.append_trajectory_block(
+                        object_uid,
+                        &path,
+                        self.trajectory_append_nevery.max(1),
+                    ) {
+                        Ok(_) => added += 1,
+                        Err(error) => {
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                }
+                if added > 0 {
+                    self.push_undo_snapshot(undo);
+                    self.trajectory_selected_block = Some(previous_count + added - 1);
+                    self.rebuild_snapshot();
+                    self.set_status(format!("Added {added} trajectory block(s)"));
+                }
+                if let Some(error) = failure {
+                    self.set_error(error);
+                }
+            }
+            NativeTrajectoryPanelAction::RemoveBlock { object_uid, index } => {
+                let undo = self.capture_undo();
+                match self.state.remove_trajectory_block(object_uid, index) {
+                    Ok(summary) => {
+                        self.push_undo_snapshot(undo);
+                        self.trajectory_selected_block = if summary.blocks.is_empty() {
+                            None
+                        } else {
+                            Some(index.min(summary.blocks.len() - 1))
+                        };
+                        if summary.frame_count == 0 {
+                            self.trajectory_playing = false;
+                        }
+                        self.rebuild_snapshot();
+                        self.set_status("Removed trajectory block");
+                    }
+                    Err(error) => self.set_error(error),
+                }
+            }
+            NativeTrajectoryPanelAction::MoveBlock {
+                object_uid,
+                from,
+                to,
+            } => {
+                let undo = self.capture_undo();
+                match self.state.move_trajectory_block(object_uid, from, to) {
+                    Ok(_) => {
+                        self.push_undo_snapshot(undo);
+                        self.trajectory_selected_block = Some(to);
+                        self.rebuild_snapshot();
+                        self.set_status("Moved trajectory block");
+                    }
+                    Err(error) => self.set_error(error),
+                }
+            }
+        }
+    }
+
+    fn set_trajectory_frame(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        frame: usize,
+        update_status: bool,
+    ) {
+        match self.state.apply_trajectory_frame(object_uid, frame) {
+            Ok(()) => {
+                self.trajectory_target = Some(object_uid);
+                self.trajectory_scrub_preview = None;
+                self.rebuild_snapshot();
+                if update_status {
+                    self.set_status(format!("Trajectory frame: {frame}"));
+                }
+            }
+            Err(error) => {
+                self.trajectory_playing = false;
+                self.set_error(error);
+            }
+        }
+    }
+
+    fn advance_trajectory_playback(&mut self, dt: f32) {
+        let playback = self.trajectory_target.and_then(|target| {
+            self.state
+                .trajectory_frame_state(target)
+                .map(|(current_frame, frame_count)| (target, current_frame, frame_count))
+        });
+        let playback = playback.or_else(|| {
+            self.state
+                .active_trajectory_summaries()
+                .first()
+                .map(|summary| {
+                    (
+                        summary.object_uid,
+                        summary.current_frame,
+                        summary.frame_count,
+                    )
+                })
+        });
+        let Some((object_uid, current_frame, frame_count)) = playback else {
+            self.trajectory_playing = false;
+            return;
+        };
+        self.trajectory_target = Some(object_uid);
+        if frame_count <= 1 {
+            self.trajectory_playing = false;
+            return;
+        }
+
+        self.trajectory_frame_accumulator += dt * self.trajectory_fps.clamp(1.0, 120.0);
+        let steps = self.trajectory_frame_accumulator.floor() as usize;
+        if steps == 0 {
+            return;
+        }
+        self.trajectory_frame_accumulator -= steps as f32;
+        let candidate = current_frame.saturating_add(steps);
+        let frame = if self.trajectory_loop {
+            candidate % frame_count
+        } else if candidate >= frame_count {
+            self.trajectory_playing = false;
+            frame_count - 1
+        } else {
+            candidate
+        };
+        if frame != current_frame {
+            self.set_trajectory_frame(object_uid, frame, false);
         }
     }
 
@@ -15263,6 +15752,13 @@ impl GuiApplication {
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
                 self.molstruct_object = Some(summary.object_uid);
+                self.trajectory_target = Some(summary.object_uid);
+                self.trajectory_playing = false;
+                self.trajectory_frame_accumulator = 0.0;
+                self.trajectory_selected_block = summary.blocks.first().map(|_| 0);
+                self.trajectory_scrub_preview = None;
+                self.bottom_tab = BottomTab::Trajectory;
+                self.show_bottom_panel = true;
                 self.sync_active_scene_properties();
                 self.rebuild_snapshot();
                 if setup.recenter {
@@ -17961,6 +18457,50 @@ fn format_quaternion(value: [f64; 4]) -> String {
         "({:.6}, {:.6}, {:.6}, {:.6})",
         value[0], value[1], value[2], value[3]
     )
+}
+
+fn trajectory_block_rects(
+    blocks: &[crate::GuiTrajectoryBlockSummary],
+    frame_count: usize,
+    track_rect: egui::Rect,
+) -> Vec<(usize, egui::Rect)> {
+    if frame_count == 0 || track_rect.width() <= 0.0 {
+        return Vec::new();
+    }
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let left = track_rect.left()
+                + track_rect.width() * block.start_index as f32 / frame_count as f32;
+            let right = track_rect.left()
+                + track_rect.width() * block.start_index.saturating_add(block.frame_count) as f32
+                    / frame_count as f32;
+            (
+                index,
+                egui::Rect::from_min_max(
+                    egui::pos2(left, track_rect.top() + 16.0),
+                    egui::pos2(right.max(left + 1.0), track_rect.bottom() - 2.0),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn trajectory_frame_x(frame: usize, frame_count: usize, track_rect: egui::Rect) -> f32 {
+    if frame_count <= 1 {
+        return track_rect.left();
+    }
+    track_rect.left()
+        + track_rect.width() * frame.min(frame_count - 1) as f32 / (frame_count - 1) as f32
+}
+
+fn trajectory_frame_at_x(x: f32, frame_count: usize, track_rect: egui::Rect) -> usize {
+    if frame_count <= 1 || track_rect.width() <= 0.0 {
+        return 0;
+    }
+    let fraction = ((x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
+    (fraction * (frame_count - 1) as f32).round() as usize
 }
 
 fn view_property_is_default(properties: &NativeViewProperties, key: ViewPropertyKey) -> bool {
@@ -22491,6 +23031,117 @@ mod tests {
                     && value.nevery == request.nevery
         ));
         assert_eq!(setup.object_name, "system");
+    }
+
+    #[test]
+    fn native_trajectory_track_uses_frame_proportional_blocks() {
+        let blocks = vec![
+            crate::GuiTrajectoryBlockSummary {
+                uid: 1,
+                name: "short.xtc".to_string(),
+                source: "short.xtc".to_string(),
+                format: "XTC".to_string(),
+                frame_count: 10,
+                start_index: 0,
+            },
+            crate::GuiTrajectoryBlockSummary {
+                uid: 2,
+                name: "long.dcd".to_string(),
+                source: "long.dcd".to_string(),
+                format: "DCD".to_string(),
+                frame_count: 30,
+                start_index: 10,
+            },
+        ];
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 48.0));
+        let segments = trajectory_block_rects(&blocks, 40, rect);
+
+        assert_eq!(segments.len(), 2);
+        assert!((segments[0].1.width() - 100.0).abs() < 1.0e-6);
+        assert!((segments[1].1.width() - 300.0).abs() < 1.0e-6);
+        assert!((trajectory_frame_x(39, 40, rect) - 400.0).abs() < 1.0e-6);
+        assert_eq!(trajectory_frame_at_x(200.0, 40, rect), 20);
+    }
+
+    #[test]
+    fn native_trajectory_playback_skips_stale_frames_without_undo() {
+        let Some(path) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        app.state.open_path(path).unwrap();
+        let object_uid = app.state.active_object_summaries()[0].uid;
+        let atom_count = app
+            .state
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .mol()
+            .atom_count();
+        let frames = (0..5)
+            .map(|frame| vec![cuemol_core::Vector4::new3(frame as f64, 0.0, 0.0); atom_count])
+            .collect();
+        app.state.set_object_trajectory(object_uid, frames);
+        app.trajectory_target = Some(object_uid);
+        app.trajectory_playing = true;
+        app.trajectory_fps = 20.0;
+        app.bottom_tab = BottomTab::Trajectory;
+
+        let ctx = egui::Context::default();
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 600.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |ctx| app.bottom_panel(ctx),
+        );
+        assert!(!output.shapes.is_empty());
+
+        app.advance_trajectory_playback(0.1);
+        assert_eq!(app.state.active_trajectory_summaries()[0].current_frame, 2);
+        assert!(app.undo_stack.is_empty());
+
+        app.trajectory_loop = true;
+        app.advance_trajectory_playback(0.1);
+        assert_eq!(app.state.active_trajectory_summaries()[0].current_frame, 4);
+        app.advance_trajectory_playback(0.1);
+        assert_eq!(app.state.active_trajectory_summaries()[0].current_frame, 1);
+        assert!(app.trajectory_playing);
+        assert!(app.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn native_trajectory_block_edits_are_undoable() {
+        let Some(path) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        app.state.open_path(path).unwrap();
+        let object_uid = app.state.active_object_summaries()[0].uid;
+        let atom_count = app
+            .state
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .mol()
+            .atom_count();
+        app.state.set_object_trajectory(
+            object_uid,
+            vec![vec![cuemol_core::Vector4::ZERO; atom_count]],
+        );
+
+        app.apply_trajectory_panel_action(NativeTrajectoryPanelAction::RemoveBlock {
+            object_uid,
+            index: 0,
+        });
+        assert_eq!(app.state.active_trajectory_summaries()[0].frame_count, 0);
+        assert_eq!(app.undo_stack.len(), 1);
+
+        app.undo(&mut CameraController::default());
+        assert_eq!(app.state.active_trajectory_summaries()[0].frame_count, 1);
     }
 
     #[test]

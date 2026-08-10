@@ -5277,6 +5277,12 @@ impl DesktopAppState {
             .map_or(0, GuiTrajectoryData::frame_count)
     }
 
+    pub fn trajectory_frame_state(&self, object_uid: Uid) -> Option<(usize, usize)> {
+        self.trajectories
+            .get(&object_uid)
+            .map(|trajectory| (trajectory.current_frame, trajectory.frame_count()))
+    }
+
     pub fn trajectory_summaries(&self, scene_uid: Uid) -> Vec<GuiTrajectorySummary> {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
@@ -51677,6 +51683,7 @@ end_header
             }));
 
         app.apply_trajectory_frame(summary.object_uid, 1).unwrap();
+        assert_eq!(app.trajectory_frame_state(summary.object_uid), Some((1, 2)));
         let atoms = app
             .scene_manager()
             .object(summary.object_uid)
