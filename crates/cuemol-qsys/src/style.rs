@@ -506,6 +506,10 @@ impl StyleManager {
             .find(|set| set.uid() == style_set_id)
     }
 
+    pub fn style_sets(&self, scope_id: u64) -> &[StyleSet] {
+        self.scopes.get(&scope_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
     pub fn style_set_source(&self, style_set_id: u64) -> String {
         self.get_style_set(style_set_id)
             .map(|set| set.source().to_string())

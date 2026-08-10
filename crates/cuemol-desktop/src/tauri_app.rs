@@ -70,6 +70,38 @@ struct CameraDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StyleDto {
+    owner_scene_uid: u64,
+    scene_uid: u64,
+    local_index: Option<usize>,
+    name: String,
+    source: String,
+    read_only: bool,
+    modified: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StylePropertiesDto {
+    scene_uid: u64,
+    local_index: usize,
+    name: String,
+    read_only: bool,
+    xml: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StylePropertiesInput {
+    scene_uid: u64,
+    local_index: usize,
+    name: String,
+    read_only: bool,
+    xml: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RendererDto {
     uid: u64,
     name: String,
@@ -312,6 +344,7 @@ struct TrajectoryDto {
 struct AppSnapshot {
     scenes: Vec<SceneDto>,
     cameras: Vec<CameraDto>,
+    styles: Vec<StyleDto>,
     objects: Vec<ObjectDto>,
     structure_key: String,
     sequence_key: String,
@@ -858,6 +891,23 @@ impl AppModel {
                 visibility_count: camera.visibility_count,
             })
             .collect();
+        let styles = scene_summaries
+            .iter()
+            .flat_map(|scene| {
+                self.desktop
+                    .style_summaries(scene.uid)
+                    .into_iter()
+                    .map(move |style| StyleDto {
+                        owner_scene_uid: scene.uid.get(),
+                        scene_uid: style.scene_uid.get(),
+                        local_index: style.local_index,
+                        name: style.name,
+                        source: style.source,
+                        read_only: style.read_only,
+                        modified: style.modified,
+                    })
+            })
+            .collect();
         for scene in scene_summaries {
             let styles = self
                 .desktop
@@ -1243,6 +1293,7 @@ impl AppModel {
         AppSnapshot {
             scenes,
             cameras,
+            styles,
             objects,
             structure_key,
             sequence_key,
@@ -4066,6 +4117,72 @@ impl AppModel {
         Ok(())
     }
 
+    fn create_named_style(&mut self, name: &str) -> Result<(), String> {
+        let scene_uid = self
+            .desktop
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        self.desktop
+            .create_scene_style(scene_uid, name)
+            .map_err(|error| error.to_string())?;
+        self.status = format!("Created style {}", name.trim());
+        Ok(())
+    }
+
+    fn style_properties(
+        &self,
+        scene_uid: u64,
+        local_index: usize,
+    ) -> Result<StylePropertiesDto, String> {
+        let scene_uid = Uid::new(scene_uid);
+        let style = self
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .and_then(|scene| scene.loaded_styles().get(local_index))
+            .ok_or_else(|| format!("style {local_index} not found"))?;
+        let name = style.node.str_attr("id").to_string();
+        Ok(StylePropertiesDto {
+            scene_uid: scene_uid.get(),
+            local_index,
+            name: if name.is_empty() {
+                "(anonymous)".to_string()
+            } else {
+                name
+            },
+            read_only: style.node.str_attr("readonly").equals_ignore_case("true"),
+            xml: style.data.clone(),
+        })
+    }
+
+    fn set_style_properties(&mut self, input: StylePropertiesInput) -> Result<(), String> {
+        self.desktop
+            .update_scene_style(
+                Uid::new(input.scene_uid),
+                input.local_index,
+                &input.name,
+                input.read_only,
+                &input.xml,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = format!("Saved style {}", input.name.trim());
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn destroy_style(&mut self, scene_uid: u64, local_index: usize) -> Result<(), String> {
+        if !self
+            .desktop
+            .destroy_scene_style(Uid::new(scene_uid), local_index)
+            .map_err(|error| error.to_string())?
+        {
+            return Err(format!("style {local_index} not found"));
+        }
+        self.status = "Destroyed style".to_string();
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
     fn pick_atom(&mut self, x: f64, y: f64, width: u32, height: u32) -> Result<(), String> {
         let atoms = self
             .desktop
@@ -4392,6 +4509,16 @@ enum ModelRequest {
     SaveCamera(String),
     LoadCamera(String),
     DestroyCamera(String),
+    CreateStyle(String),
+    GetStyleProperties {
+        scene_uid: u64,
+        local_index: usize,
+    },
+    SetStyleProperties(StylePropertiesInput),
+    DestroyStyle {
+        scene_uid: u64,
+        local_index: usize,
+    },
     DeleteWorkspaceItem(WorkspaceDeleteInput),
     FitWorkspaceItem {
         target: WorkspaceFitInput,
@@ -4650,6 +4777,7 @@ enum ModelResponse {
     PreferencesUpdate(Box<PreferencesUpdateDto>),
     ViewProperties(ViewPropertiesDto),
     ViewPropertiesUpdate(Box<ViewPropertiesUpdateDto>),
+    StyleProperties(StylePropertiesDto),
 }
 
 struct ModelEnvelope {
@@ -5697,6 +5825,33 @@ fn handle_model_request(
         ModelRequest::DestroyCamera(name) => {
             let undo = model.capture_undo();
             model.destroy_named_camera(&name)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::CreateStyle(name) => {
+            let undo = model.capture_undo();
+            model.create_named_style(&name)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::GetStyleProperties {
+            scene_uid,
+            local_index,
+        } => Ok(ModelResponse::StyleProperties(
+            model.style_properties(scene_uid, local_index)?,
+        )),
+        ModelRequest::SetStyleProperties(properties) => {
+            let undo = model.capture_undo();
+            model.set_style_properties(properties)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::DestroyStyle {
+            scene_uid,
+            local_index,
+        } => {
+            let undo = model.capture_undo();
+            model.destroy_style(scene_uid, local_index)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -6944,9 +7099,8 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::Preferences(_)
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
-        | ModelResponse::ViewPropertiesUpdate(_) => {
-            Err("unexpected non-snapshot response".to_string())
-        }
+        | ModelResponse::ViewPropertiesUpdate(_)
+        | ModelResponse::StyleProperties(_) => Err("unexpected non-snapshot response".to_string()),
     }
 }
 
@@ -6963,7 +7117,8 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::Preferences(_)
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
-        | ModelResponse::ViewPropertiesUpdate(_) => {
+        | ModelResponse::ViewPropertiesUpdate(_)
+        | ModelResponse::StyleProperties(_) => {
             Err("unexpected non-molecule-details response".to_string())
         }
     }
@@ -6982,9 +7137,8 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::Preferences(_)
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
-        | ModelResponse::ViewPropertiesUpdate(_) => {
-            Err("unexpected non-viewport response".to_string())
-        }
+        | ModelResponse::ViewPropertiesUpdate(_)
+        | ModelResponse::StyleProperties(_) => Err("unexpected non-viewport response".to_string()),
     }
 }
 
@@ -7001,7 +7155,8 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::Preferences(_)
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
-        | ModelResponse::ViewPropertiesUpdate(_) => {
+        | ModelResponse::ViewPropertiesUpdate(_)
+        | ModelResponse::StyleProperties(_) => {
             Err("unexpected animation frame response".to_string())
         }
     }
@@ -7020,7 +7175,8 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::Preferences(_)
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
-        | ModelResponse::ViewPropertiesUpdate(_) => {
+        | ModelResponse::ViewPropertiesUpdate(_)
+        | ModelResponse::StyleProperties(_) => {
             Err("unexpected trajectory frame response".to_string())
         }
     }
@@ -7039,7 +7195,8 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::Preferences(_)
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
-        | ModelResponse::ViewPropertiesUpdate(_) => {
+        | ModelResponse::ViewPropertiesUpdate(_)
+        | ModelResponse::StyleProperties(_) => {
             Err("unexpected application info response".to_string())
         }
     }
@@ -7058,7 +7215,8 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::ApplicationInfo(_)
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
-        | ModelResponse::ViewPropertiesUpdate(_) => {
+        | ModelResponse::ViewPropertiesUpdate(_)
+        | ModelResponse::StyleProperties(_) => {
             Err("unexpected non-preferences response".to_string())
         }
     }
@@ -7077,7 +7235,8 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::ApplicationInfo(_)
         | ModelResponse::Preferences(_)
         | ModelResponse::ViewProperties(_)
-        | ModelResponse::ViewPropertiesUpdate(_) => {
+        | ModelResponse::ViewPropertiesUpdate(_)
+        | ModelResponse::StyleProperties(_) => {
             Err("unexpected non-preferences-update response".to_string())
         }
     }
@@ -7096,7 +7255,8 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::Preferences(_)
         | ModelResponse::PreferencesUpdate(_)
         | ModelResponse::ViewProperties(_)
-        | ModelResponse::ViewPropertiesUpdate(_) => {
+        | ModelResponse::ViewPropertiesUpdate(_)
+        | ModelResponse::StyleProperties(_) => {
             Err("unexpected non-initial-state response".to_string())
         }
     }
@@ -7124,9 +7284,17 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::ApplicationInfo(_)
         | ModelResponse::Preferences(_)
         | ModelResponse::PreferencesUpdate(_)
-        | ModelResponse::ViewPropertiesUpdate(_) => {
+        | ModelResponse::ViewPropertiesUpdate(_)
+        | ModelResponse::StyleProperties(_) => {
             Err("unexpected non-view-properties response".to_string())
         }
+    }
+}
+
+fn style_properties_response(response: ModelResponse) -> Result<StylePropertiesDto, String> {
+    match response {
+        ModelResponse::StyleProperties(properties) => Ok(properties),
+        _ => Err("unexpected non-style-properties response".to_string()),
     }
 }
 
@@ -7145,7 +7313,8 @@ fn view_properties_update_response(
         | ModelResponse::ApplicationInfo(_)
         | ModelResponse::Preferences(_)
         | ModelResponse::PreferencesUpdate(_)
-        | ModelResponse::ViewProperties(_) => {
+        | ModelResponse::ViewProperties(_)
+        | ModelResponse::StyleProperties(_) => {
             Err("unexpected non-view-properties-update response".to_string())
         }
     }
@@ -7411,6 +7580,52 @@ fn load_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapsh
 #[tauri::command]
 fn destroy_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::DestroyCamera(name))?)
+}
+
+#[tauri::command]
+fn create_style(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::CreateStyle(name))?)
+}
+
+#[tauri::command]
+fn get_style_properties(
+    scene_uid: u64,
+    local_index: usize,
+    state: State<'_, ManagedState>,
+) -> Result<StylePropertiesDto, String> {
+    style_properties_response(request_model(
+        &state,
+        ModelRequest::GetStyleProperties {
+            scene_uid,
+            local_index,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn set_style_properties(
+    properties: StylePropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetStyleProperties(properties),
+    )?)
+}
+
+#[tauri::command]
+fn destroy_style(
+    scene_uid: u64,
+    local_index: usize,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::DestroyStyle {
+            scene_uid,
+            local_index,
+        },
+    )?)
 }
 
 #[tauri::command]
@@ -8522,6 +8737,10 @@ pub fn run() -> Result<(), tauri::Error> {
             save_camera,
             load_camera,
             destroy_camera,
+            create_style,
+            get_style_properties,
+            set_style_properties,
+            destroy_style,
             delete_workspace_item,
             fit_workspace_item,
             set_config_value,
@@ -10704,6 +10923,74 @@ mod tests {
         assert!(model.snapshot().cameras.is_empty());
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().cameras[0].name, "camera_renamed");
+    }
+
+    #[test]
+    fn style_workspace_commands_update_snapshot_and_support_undo() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        handle_model_request(&mut model, ModelRequest::CreateStyle("style_0".to_string())).unwrap();
+        let snapshot = model.snapshot();
+        let local = snapshot
+            .styles
+            .iter()
+            .find(|style| style.local_index.is_some())
+            .unwrap();
+        assert_eq!(local.name, "style_0");
+        assert_eq!(local.scene_uid, scene_uid.get());
+        let local_index = local.local_index.unwrap();
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::GetStyleProperties {
+                scene_uid: scene_uid.get(),
+                local_index,
+            },
+        )
+        .unwrap();
+        let ModelResponse::StyleProperties(properties) = response else {
+            panic!("expected style properties");
+        };
+        assert!(properties.xml.contains("<styles"));
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetStyleProperties(StylePropertiesInput {
+                scene_uid: scene_uid.get(),
+                local_index,
+                name: "custom".to_string(),
+                read_only: true,
+                xml: "<styles><style id=\"Wide\" width=\"3\"/></styles>".to_string(),
+            }),
+        )
+        .unwrap();
+        let local = model
+            .snapshot()
+            .styles
+            .into_iter()
+            .find(|style| style.local_index == Some(local_index))
+            .unwrap();
+        assert_eq!(local.name, "custom");
+        assert!(local.read_only);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::DestroyStyle {
+                scene_uid: scene_uid.get(),
+                local_index,
+            },
+        )
+        .unwrap();
+        assert!(model
+            .snapshot()
+            .styles
+            .iter()
+            .all(|style| style.local_index.is_none()));
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model
+            .snapshot()
+            .styles
+            .iter()
+            .any(|style| style.name == "custom"));
     }
 
     #[test]

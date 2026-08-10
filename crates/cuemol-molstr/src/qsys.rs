@@ -1639,6 +1639,19 @@ impl MolScene {
         &self.loaded_styles
     }
 
+    pub fn loaded_styles_mut(&mut self) -> &mut Vec<LoadedStyle> {
+        &mut self.loaded_styles
+    }
+
+    pub fn add_loaded_style(&mut self, style: LoadedStyle) -> usize {
+        self.loaded_styles.push(style);
+        self.loaded_styles.len() - 1
+    }
+
+    pub fn remove_loaded_style(&mut self, index: usize) -> Option<LoadedStyle> {
+        (index < self.loaded_styles.len()).then(|| self.loaded_styles.remove(index))
+    }
+
     pub fn scene_attributes(&self) -> &BTreeMap<String, String> {
         &self.scene_attributes
     }

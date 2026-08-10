@@ -451,6 +451,7 @@ struct GuiApplication {
     selected_renderer: Option<cuemol_core::Uid>,
     workspace_aux_selection: Option<WorkspaceAuxSelection>,
     editing_saved_camera: Option<(cuemol_core::Uid, String)>,
+    style_properties_draft: Option<NativeStyleProperties>,
     /// Molecule chosen in the MolStruct panel's molecule selector (CueMol2
     /// `molstruct-panel.xul`); independent of the Workspace tree selection.
     molstruct_object: Option<cuemol_core::Uid>,
@@ -1020,6 +1021,13 @@ enum WorkspaceAuxSelection {
         scene_uid: cuemol_core::Uid,
         camera_index: usize,
     },
+    StyleRoot {
+        scene_uid: cuemol_core::Uid,
+    },
+    Style {
+        scene_uid: cuemol_core::Uid,
+        style_index: usize,
+    },
     DensityMap {
         scene_uid: cuemol_core::Uid,
         map_uid: cuemol_core::Uid,
@@ -1030,6 +1038,15 @@ enum WorkspaceAuxSelection {
         surface_uid: cuemol_core::Uid,
         renderer_uid: Option<cuemol_core::Uid>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeStyleProperties {
+    scene_uid: cuemol_core::Uid,
+    local_index: Option<usize>,
+    name: String,
+    read_only: bool,
+    xml: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2064,6 +2081,7 @@ impl GuiApplication {
             selected_object: None,
             workspace_aux_selection: None,
             editing_saved_camera: None,
+            style_properties_draft: None,
             molstruct_object: None,
             molstruct_expand_all: false,
             selection_tab: SelectionTab::Command,
@@ -3121,6 +3139,7 @@ impl GuiApplication {
             let density_maps = self.state.density_map_summaries(scene.uid);
             let surfaces = self.state.surface_summaries(scene.uid);
             let cameras = self.state.camera_summaries(scene.uid);
+            let styles = self.state.style_summaries(scene.uid);
             let object_count = objects.len() + density_maps.len() + surfaces.len();
             let scene_label = format!("{}  [{} objects]", scene.name, object_count);
             let selected_scene = Some(scene.uid) == self.state.active_scene();
@@ -3328,6 +3347,44 @@ impl GuiApplication {
                         }
                     }
                 });
+                let root_selection = WorkspaceAuxSelection::StyleRoot {
+                    scene_uid: scene.uid,
+                };
+                let root_selected = self.selected_object.is_none()
+                    && self.workspace_aux_selection == Some(root_selection);
+                if ui.selectable_label(root_selected, "Styles").clicked() {
+                    self.activate_workspace_scene(scene.uid, camera);
+                    self.selected_object = None;
+                    self.selected_renderer = None;
+                    self.workspace_aux_selection = Some(root_selection);
+                }
+                ui.indent(format!("style-root-{}", scene.uid.get()), |ui| {
+                    for (style_index, summary) in styles.iter().enumerate() {
+                        let selection = WorkspaceAuxSelection::Style {
+                            scene_uid: scene.uid,
+                            style_index,
+                        };
+                        let selected = self.selected_object.is_none()
+                            && self.workspace_aux_selection == Some(selection);
+                        let mut label = summary.name.clone();
+                        if summary.read_only || summary.scene_uid.get() == 0 {
+                            label.push_str("  🔒");
+                        }
+                        if !summary.source.is_empty() {
+                            label.push_str("  ↗");
+                        }
+                        let response = ui.selectable_label(selected, label);
+                        if response.clicked() {
+                            self.activate_workspace_scene(scene.uid, camera);
+                            self.selected_object = None;
+                            self.selected_renderer = None;
+                            self.workspace_aux_selection = Some(selection);
+                        }
+                        if response.double_clicked() && summary.local_index.is_some() {
+                            self.open_style_properties(selection);
+                        }
+                    }
+                });
             });
         }
         ui.separator();
@@ -3351,10 +3408,16 @@ impl GuiApplication {
                     WorkspaceAuxSelection::CameraRoot { .. } | WorkspaceAuxSelection::Camera { .. }
                 )
             );
+            let adding_style = matches!(
+                self.workspace_aux_selection,
+                Some(WorkspaceAuxSelection::StyleRoot { .. } | WorkspaceAuxSelection::Style { .. })
+            );
             if ui
                 .button("Add")
                 .on_hover_text(if adding_camera {
                     "Save current view as camera"
+                } else if adding_style {
+                    "Create scene style"
                 } else {
                     "Add renderer"
                 })
@@ -3369,6 +3432,10 @@ impl GuiApplication {
                         | WorkspaceAuxSelection::Camera { scene_uid, .. } => {
                             self.open_new_camera_properties(scene_uid, camera);
                         }
+                        WorkspaceAuxSelection::StyleRoot { scene_uid }
+                        | WorkspaceAuxSelection::Style { scene_uid, .. } => {
+                            self.open_new_style_properties(scene_uid);
+                        }
                         _ => self.open_aux_renderer_dialog(selection),
                     }
                 } else if let Some(object_uid) = self
@@ -3380,7 +3447,23 @@ impl GuiApplication {
                     self.open_renderer_dialog(object_uid);
                 }
             }
-            if ui.button("Delete").clicked() {
+            let delete_enabled = self.selected_object.is_some()
+                || self
+                    .workspace_aux_selection
+                    .is_some_and(|selection| match selection {
+                        WorkspaceAuxSelection::Camera { .. } => true,
+                        WorkspaceAuxSelection::Style { .. } => self
+                            .style_summary_for_selection(selection)
+                            .is_some_and(|style| style.local_index.is_some()),
+                        WorkspaceAuxSelection::DensityMap { .. }
+                        | WorkspaceAuxSelection::Surface { .. } => true,
+                        WorkspaceAuxSelection::CameraRoot { .. }
+                        | WorkspaceAuxSelection::StyleRoot { .. } => false,
+                    });
+            if ui
+                .add_enabled(delete_enabled, egui::Button::new("Delete"))
+                .clicked()
+            {
                 if let Some(object_uid) = self.selected_object {
                     if let Some(renderer_uid) = self.selected_renderer {
                         self.delete_renderer(object_uid, renderer_uid);
@@ -3391,7 +3474,24 @@ impl GuiApplication {
                     self.delete_aux_selection(selection);
                 }
             }
-            if ui.button("Property").clicked() {
+            let property_enabled = !matches!(
+                self.workspace_aux_selection,
+                Some(
+                    WorkspaceAuxSelection::CameraRoot { .. }
+                        | WorkspaceAuxSelection::StyleRoot { .. }
+                )
+            ) && self.workspace_aux_selection.is_none_or(|selection| {
+                match selection {
+                    WorkspaceAuxSelection::Style { .. } => self
+                        .style_summary_for_selection(selection)
+                        .is_some_and(|style| style.local_index.is_some()),
+                    _ => true,
+                }
+            });
+            if ui
+                .add_enabled(property_enabled, egui::Button::new("Property"))
+                .clicked()
+            {
                 if let (Some(object_uid), Some(renderer_uid)) =
                     (self.selected_object, self.selected_renderer)
                 {
@@ -3404,6 +3504,10 @@ impl GuiApplication {
                             self.open_camera_properties(selection);
                         }
                         WorkspaceAuxSelection::CameraRoot { .. } => {}
+                        WorkspaceAuxSelection::Style { .. } => {
+                            self.open_style_properties(selection);
+                        }
+                        WorkspaceAuxSelection::StyleRoot { .. } => {}
                         _ => self.open_aux_properties(selection),
                     }
                 } else {
@@ -3533,6 +3637,8 @@ impl GuiApplication {
                 Some(
                     WorkspaceAuxSelection::CameraRoot { .. }
                     | WorkspaceAuxSelection::Camera { .. }
+                    | WorkspaceAuxSelection::StyleRoot { .. }
+                    | WorkspaceAuxSelection::Style { .. }
                     | WorkspaceAuxSelection::Surface { .. },
                 )
                 | None => false,
@@ -7200,6 +7306,7 @@ impl GuiApplication {
         self.renderer_props_dialog(ctx);
         self.scene_props_dialog(ctx);
         self.view_props_dialog(ctx, camera);
+        self.style_props_dialog(ctx);
         self.chain_dialog(ctx);
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx);
@@ -10004,6 +10111,155 @@ impl GuiApplication {
         }
     }
 
+    fn style_summary_for_selection(
+        &self,
+        selection: WorkspaceAuxSelection,
+    ) -> Option<crate::GuiStyleSummary> {
+        let WorkspaceAuxSelection::Style {
+            scene_uid,
+            style_index,
+        } = selection
+        else {
+            return None;
+        };
+        self.state
+            .style_summaries(scene_uid)
+            .into_iter()
+            .nth(style_index)
+    }
+
+    fn open_new_style_properties(&mut self, scene_uid: cuemol_core::Uid) {
+        let Ok(name) = self.state.suggest_style_name(scene_uid) else {
+            self.set_status("Cannot create style without a scene");
+            return;
+        };
+        self.style_properties_draft = Some(NativeStyleProperties {
+            scene_uid,
+            local_index: None,
+            xml: format!("<styles id=\"{name}\">\n</styles>\n"),
+            name,
+            read_only: false,
+        });
+    }
+
+    fn open_style_properties(&mut self, selection: WorkspaceAuxSelection) {
+        let Some(summary) = self.style_summary_for_selection(selection) else {
+            self.set_status("Style not found");
+            return;
+        };
+        let Some(local_index) = summary.local_index else {
+            self.set_status("Global styles are read-only");
+            return;
+        };
+        let Some(style) = self
+            .state
+            .scene_manager()
+            .scene(summary.scene_uid)
+            .and_then(|scene| scene.loaded_styles().get(local_index))
+        else {
+            self.set_status("Style not found");
+            return;
+        };
+        self.style_properties_draft = Some(NativeStyleProperties {
+            scene_uid: summary.scene_uid,
+            local_index: Some(local_index),
+            name: summary.name,
+            read_only: summary.read_only,
+            xml: style.data.clone(),
+        });
+    }
+
+    fn style_props_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.style_properties_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut apply = false;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Style editor")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(640.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut draft.name);
+                    ui.checkbox(&mut draft.read_only, "Read only");
+                });
+                ui.label("Style XML");
+                ui.add_sized(
+                    [ui.available_width(), 320.0],
+                    egui::TextEdit::multiline(&mut draft.xml)
+                        .font(egui::TextStyle::Monospace)
+                        .code_editor(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if accept || apply {
+            let undo = self.capture_undo();
+            let result = (|| {
+                let local_index = match draft.local_index {
+                    Some(index) => index,
+                    None => self
+                        .state
+                        .create_scene_style(draft.scene_uid, &draft.name)
+                        .map_err(|error| error.to_string())?,
+                };
+                self.state
+                    .update_scene_style(
+                        draft.scene_uid,
+                        local_index,
+                        &draft.name,
+                        draft.read_only,
+                        &draft.xml,
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok::<usize, String>(local_index)
+            })();
+            match result {
+                Ok(local_index) => {
+                    draft.local_index = Some(local_index);
+                    self.push_undo_snapshot(undo);
+                    self.modified_scenes.insert(draft.scene_uid);
+                    let style_index = self
+                        .state
+                        .style_summaries(draft.scene_uid)
+                        .iter()
+                        .position(|style| style.local_index == Some(local_index))
+                        .unwrap_or(0);
+                    self.workspace_aux_selection = Some(WorkspaceAuxSelection::Style {
+                        scene_uid: draft.scene_uid,
+                        style_index,
+                    });
+                    self.rebuild_snapshot();
+                    self.set_status(format!("Saved style {}", draft.name.trim()));
+                    if !accept {
+                        self.style_properties_draft = Some(draft);
+                    }
+                }
+                Err(error) => {
+                    self.state = undo.state;
+                    self.set_status(format!("Style error: {error}"));
+                    self.style_properties_draft = Some(draft);
+                }
+            }
+        } else if !cancel && open {
+            self.style_properties_draft = Some(draft);
+        }
+    }
+
     fn view_props_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         if !self.show_view_props {
             return;
@@ -11003,9 +11259,10 @@ impl GuiApplication {
 
     fn open_aux_renderer_dialog(&mut self, selection: WorkspaceAuxSelection) {
         match selection {
-            WorkspaceAuxSelection::CameraRoot { .. } | WorkspaceAuxSelection::Camera { .. } => {
-                return
-            }
+            WorkspaceAuxSelection::CameraRoot { .. }
+            | WorkspaceAuxSelection::Camera { .. }
+            | WorkspaceAuxSelection::StyleRoot { .. }
+            | WorkspaceAuxSelection::Style { .. } => return,
             WorkspaceAuxSelection::DensityMap { map_uid, .. } => {
                 self.new_renderer_owner = Some(NativePropertyObject::DensityMap(map_uid));
                 self.new_renderer_group = None;
@@ -11329,7 +11586,10 @@ impl GuiApplication {
 
     fn open_aux_properties(&mut self, selection: WorkspaceAuxSelection) {
         match selection {
-            WorkspaceAuxSelection::CameraRoot { .. } | WorkspaceAuxSelection::Camera { .. } => {}
+            WorkspaceAuxSelection::CameraRoot { .. }
+            | WorkspaceAuxSelection::Camera { .. }
+            | WorkspaceAuxSelection::StyleRoot { .. }
+            | WorkspaceAuxSelection::Style { .. } => {}
             WorkspaceAuxSelection::DensityMap {
                 map_uid,
                 renderer_uid: Some(renderer_uid),
@@ -11371,6 +11631,30 @@ impl GuiApplication {
                         self.set_status(format!("Destroyed camera {}", summary.name));
                     }
                     Ok(false) => self.set_status("Camera was already absent"),
+                    Err(error) => self.set_error(error),
+                }
+            }
+            WorkspaceAuxSelection::StyleRoot { .. } => {}
+            WorkspaceAuxSelection::Style { scene_uid, .. } => {
+                let Some(summary) = self.style_summary_for_selection(selection) else {
+                    self.set_status("Style not found");
+                    return;
+                };
+                let Some(local_index) = summary.local_index else {
+                    self.set_status("Global styles cannot be deleted");
+                    return;
+                };
+                let undo = self.capture_undo();
+                match self.state.destroy_scene_style(scene_uid, local_index) {
+                    Ok(true) => {
+                        self.push_undo_snapshot(undo);
+                        self.modified_scenes.insert(scene_uid);
+                        self.workspace_aux_selection =
+                            Some(WorkspaceAuxSelection::StyleRoot { scene_uid });
+                        self.rebuild_snapshot();
+                        self.set_status(format!("Destroyed style {}", summary.name));
+                    }
+                    Ok(false) => self.set_status("Style was already absent"),
                     Err(error) => self.set_error(error),
                 }
             }
@@ -16530,6 +16814,38 @@ mod tests {
         );
         app.undo(&mut camera);
         assert_eq!(app.state.camera_summaries(scene_uid)[0].name, "camera_0");
+    }
+
+    #[test]
+    fn native_workspace_style_select_delete_and_undo() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let local_index = app.state.create_scene_style(scene_uid, "style_0").unwrap();
+        let style_index = app
+            .state
+            .style_summaries(scene_uid)
+            .iter()
+            .position(|style| style.local_index == Some(local_index))
+            .unwrap();
+        let selection = WorkspaceAuxSelection::Style {
+            scene_uid,
+            style_index,
+        };
+        app.open_style_properties(selection);
+        assert_eq!(app.style_properties_draft.as_ref().unwrap().name, "style_0");
+        app.delete_aux_selection(selection);
+        assert!(app
+            .state
+            .style_summaries(scene_uid)
+            .iter()
+            .all(|style| style.local_index.is_none()));
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert!(app
+            .state
+            .style_summaries(scene_uid)
+            .iter()
+            .any(|style| style.name == "style_0"));
     }
 
     #[test]

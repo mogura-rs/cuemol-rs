@@ -6,7 +6,10 @@ use cuemol_anim::{
 };
 #[cfg(feature = "scripting")]
 use cuemol_core::ByteArray;
-use cuemol_core::{CueMolError, LDom2Node, Matrix4, RangeSet, Result, Uid, Vector4};
+use cuemol_core::{
+    parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Node, LDom2Tree, Matrix4, RangeSet, Result,
+    Uid, Vector4,
+};
 use cuemol_importers::{PseFileReader, PseMeasurementKind, PseRepresentation};
 use cuemol_mdtools::{read_amber_prmtop_file, read_gro_file, read_psf_file};
 use cuemol_molanl::MolAnlManager;
@@ -14,9 +17,9 @@ use cuemol_molstr::{
     parse_selector, read_mmcif_str, read_mol2_file, read_mol2_str, read_pdb_str,
     read_qdf_mol_bytes, read_sdf_str, write_pdb_string, write_qdf_mol_bytes, write_sdf_string,
     AtomIntrKind, LoadObjectResult, LoadedDensityMap, LoadedLWObject, LoadedLWRenderer,
-    LoadedSurface, MolCommandManager, MolCoord, MolObject, MolRenderer, MolSceneManager,
-    NewRendererResult, NewSceneResult, QdfMolFileReader, QdfMolFileWriter, QscLoadStatus, Selector,
-    StreamManager,
+    LoadedStyle, LoadedSurface, MolCommandManager, MolCoord, MolObject, MolRenderer,
+    MolSceneManager, NewRendererResult, NewSceneResult, QdfMolFileReader, QdfMolFileWriter,
+    QscLoadStatus, Selector, StreamManager,
 };
 #[cfg(feature = "scripting")]
 use cuemol_molstr::{write_pdb_string_with_selection, AtomIntrLine};
@@ -494,6 +497,16 @@ pub struct GuiCameraSummary {
     pub name: String,
     pub source: String,
     pub visibility_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiStyleSummary {
+    pub scene_uid: Uid,
+    pub local_index: Option<usize>,
+    pub name: String,
+    pub source: String,
+    pub read_only: bool,
+    pub modified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1772,6 +1785,161 @@ impl DesktopAppState {
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
         let destroyed = scene.destroy_camera(name);
         Ok(destroyed)
+    }
+
+    pub fn style_summaries(&self, scene_uid: Uid) -> Vec<GuiStyleSummary> {
+        static GLOBAL_STYLES: OnceLock<Vec<(String, String, bool)>> = OnceLock::new();
+        let global = GLOBAL_STYLES.get_or_init(|| {
+            let mut styles = cuemol_molvis::default_style_manager();
+            styles.load_style_set_from_xml(DEFAULT_STYLE_SCOPE, "user", "<styles/>", false);
+            styles
+                .style_sets(DEFAULT_STYLE_SCOPE)
+                .iter()
+                .map(|set| {
+                    (
+                        if set.name().is_empty() {
+                            "(anonymous)".to_string()
+                        } else {
+                            set.name().to_string()
+                        },
+                        set.source().to_string(),
+                        set.modified(),
+                    )
+                })
+                .collect()
+        });
+        let mut summaries = global
+            .iter()
+            .map(|(name, source, modified)| GuiStyleSummary {
+                scene_uid: Uid::new(0),
+                local_index: None,
+                name: name.clone(),
+                source: source.clone(),
+                read_only: true,
+                modified: *modified,
+            })
+            .collect::<Vec<_>>();
+        if let Some(scene) = self.scene_manager().scene(scene_uid) {
+            summaries.extend(scene.loaded_styles().iter().enumerate().map(
+                |(local_index, style)| {
+                    let id = style.node.str_attr("id").to_string();
+                    GuiStyleSummary {
+                        scene_uid,
+                        local_index: Some(local_index),
+                        name: if id.is_empty() {
+                            "(anonymous)".to_string()
+                        } else {
+                            id
+                        },
+                        source: style.node.str_attr("src").to_string(),
+                        read_only: style.node.str_attr("readonly").equals_ignore_case("true"),
+                        modified: style.node.str_attr("modified").equals_ignore_case("true"),
+                    }
+                },
+            ));
+        }
+        summaries
+    }
+
+    pub fn suggest_style_name(&self, scene_uid: Uid) -> Result<String> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        Ok((0..)
+            .map(|index| format!("style_{index}"))
+            .find(|name| {
+                !scene
+                    .loaded_styles()
+                    .iter()
+                    .any(|style| style.node.str_attr("id").as_str() == name)
+            })
+            .expect("the style name space cannot be exhausted"))
+    }
+
+    pub fn create_scene_style(&mut self, scene_uid: Uid, name: &str) -> Result<usize> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CueMolError::invalid_argument("style name is required"));
+        }
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        if scene
+            .loaded_styles()
+            .iter()
+            .any(|style| style.node.str_attr("id").as_str() == name)
+        {
+            return Err(CueMolError::invalid_argument(format!(
+                "style already exists: {name}"
+            )));
+        }
+        let mut node = LDom2Node::new();
+        node.set_tag_name("styles");
+        node.set_str_attr("id", name);
+        let data = write_ldom2_xml(&LDom2Tree::from(node.clone()));
+        Ok(scene.add_loaded_style(LoadedStyle { node, data }))
+    }
+
+    pub fn update_scene_style(
+        &mut self,
+        scene_uid: Uid,
+        local_index: usize,
+        name: &str,
+        read_only: bool,
+        xml: &str,
+    ) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CueMolError::invalid_argument("style name is required"));
+        }
+        let mut tree = parse_ldom2_xml(xml)?;
+        if tree.top().tag_name() != "styles" {
+            return Err(CueMolError::invalid_argument(
+                "style XML root must be <styles>",
+            ));
+        }
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        if scene
+            .loaded_styles()
+            .iter()
+            .enumerate()
+            .any(|(index, style)| {
+                index != local_index && style.node.str_attr("id").as_str() == name
+            })
+        {
+            return Err(CueMolError::invalid_argument(format!(
+                "style already exists: {name}"
+            )));
+        }
+        tree.top_mut().set_str_attr("id", name);
+        if read_only {
+            tree.top_mut().set_str_attr("readonly", "true");
+        } else {
+            tree.top_mut().remove_child("readonly");
+        }
+        tree.top_mut().remove_child("src");
+        tree.top_mut().remove_child("modified");
+        let data = write_ldom2_xml(&tree);
+        let style = scene
+            .loaded_styles_mut()
+            .get_mut(local_index)
+            .ok_or_else(|| CueMolError::NotFound(format!("style {local_index}")))?;
+        style.node = tree.top().clone();
+        style.data = data;
+        Ok(())
+    }
+
+    pub fn destroy_scene_style(&mut self, scene_uid: Uid, local_index: usize) -> Result<bool> {
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        Ok(scene.remove_loaded_style(local_index).is_some())
     }
 
     pub fn object_summaries(&self, scene_uid: Uid) -> Vec<GuiObjectSummary> {
@@ -51717,6 +51885,48 @@ attribute \"dep\" string \"positions\"
 
         assert!(app.destroy_scene_camera(scene_uid, "camera_0").unwrap());
         assert!(app.camera_summaries(scene_uid).is_empty());
+    }
+
+    #[test]
+    fn desktop_style_workspace_api_edits_and_persists_local_styles() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("styles", true).result_scene;
+        assert!(app
+            .style_summaries(scene_uid)
+            .iter()
+            .all(|style| style.local_index.is_none()));
+        let local_index = app.create_scene_style(scene_uid, "style_0").unwrap();
+        app.update_scene_style(
+            scene_uid,
+            local_index,
+            "custom",
+            true,
+            "<styles><style id=\"Wide\" type=\"renderer\" width=\"3\"/></styles>",
+        )
+        .unwrap();
+        let local = app
+            .style_summaries(scene_uid)
+            .into_iter()
+            .find(|style| style.local_index == Some(local_index))
+            .unwrap();
+        assert_eq!(local.name, "custom");
+        assert!(local.read_only);
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-desktop-style-workspace-{}.qsc",
+            std::process::id()
+        ));
+        app.save_active_scene_qsc(&path).unwrap();
+        let qsc = std::fs::read_to_string(&path).unwrap();
+        assert!(qsc.contains("<styles id=\"custom\" readonly=\"true\">"));
+        assert!(qsc.contains("id=\"Wide\""));
+        let _ = std::fs::remove_file(path);
+
+        assert!(app.destroy_scene_style(scene_uid, local_index).unwrap());
+        assert!(app
+            .style_summaries(scene_uid)
+            .iter()
+            .all(|style| style.local_index.is_none()));
     }
 
     #[test]

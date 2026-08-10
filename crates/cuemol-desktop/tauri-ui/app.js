@@ -128,6 +128,7 @@ let selectedDensityRendererUid = null;
 let selectedSurfaceUid = null;
 let selectedSurfaceRendererUid = null;
 let selectedCameraName = null;
+let selectedStyleIndex = null;
 let workspaceSelectionKind = "object";
 let molstructObjectUid = null;
 const molstructSelectedKeys = new Set();
@@ -3114,6 +3115,76 @@ async function chooseOutputPath(defaultPath, name, extensions) {
   });
 }
 
+async function showStyleProperties(style) {
+  if (!style || style.localIndex === null) {
+    showError("Global styles are read-only.");
+    return;
+  }
+  let properties;
+  try {
+    properties = await invoke("get_style_properties", {
+      sceneUid: style.sceneUid,
+      localIndex: style.localIndex,
+    });
+  } catch (error) {
+    showError(error);
+    return;
+  }
+  dialogTitle.textContent = "Style editor";
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog wide has-actions";
+  const name = dialogField("Name", properties.name);
+  const readOnlyLabel = document.createElement("label");
+  readOnlyLabel.className = "dialog-checkbox";
+  const readOnly = document.createElement("input");
+  readOnly.type = "checkbox";
+  readOnly.checked = properties.readOnly;
+  readOnlyLabel.append(readOnly, document.createTextNode("Read only"));
+  const xmlLabel = document.createElement("label");
+  xmlLabel.className = "dialog-field";
+  const xmlTitle = document.createElement("span");
+  xmlTitle.textContent = "Style XML";
+  const xml = document.createElement("textarea");
+  xml.rows = 18;
+  xml.spellcheck = false;
+  xml.value = properties.xml;
+  xmlLabel.append(xmlTitle, xml);
+  dialogContent.append(name.closest("label") || name, readOnlyLabel, xmlLabel);
+  const submit = async (closeAfter) => {
+    setBusy(true);
+    try {
+      snapshot = await invoke("set_style_properties", {
+        properties: {
+          sceneUid: properties.sceneUid,
+          localIndex: properties.localIndex,
+          name: name.value,
+          readOnly: readOnly.checked,
+          xml: xml.value,
+        },
+      });
+      const styles = activeStyles();
+      selectedStyleIndex = styles.findIndex(
+        (candidate) =>
+          candidate.sceneUid === properties.sceneUid &&
+          candidate.localIndex === properties.localIndex,
+      );
+      workspaceSelectionKind = "style";
+      renderShell();
+      if (closeAfter) referenceDialog.close();
+    } catch (error) {
+      showError(error);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const cancel = button("Cancel", "", () => referenceDialog.close());
+  const apply = button("Apply", "", () => submit(false));
+  const ok = button("OK", "dialog-primary", () => submit(true));
+  dialogActions(cancel, apply, ok);
+  if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
+}
+
 async function showReferenceDialog(title) {
   dialogTitle.textContent = title;
   dialogContent.replaceChildren();
@@ -4164,6 +4235,17 @@ function selectedCamera() {
   return activeCameras().find((camera) => camera.name === selectedCameraName) || null;
 }
 
+function activeStyles() {
+  if (!snapshot) return [];
+  return (snapshot.styles || []).filter(
+    (style) => style.ownerSceneUid === snapshot.activeSceneUid,
+  );
+}
+
+function selectedStyle() {
+  return selectedStyleIndex === null ? null : activeStyles()[selectedStyleIndex] || null;
+}
+
 function selectedObject() {
   return activeObjects().find((object) => object.uid === selectedObjectUid) || null;
 }
@@ -4255,6 +4337,10 @@ function normalizeSelection() {
     selectedCameraName = null;
     workspaceSelectionKind = "cameraRoot";
   }
+  if (workspaceSelectionKind === "style" && !selectedStyle()) {
+    selectedStyleIndex = null;
+    workspaceSelectionKind = "styleRoot";
+  }
   if (["densityMap", "densityRenderer"].includes(workspaceSelectionKind)) {
     if (!selectedDensityMap()) {
       selectedDensityMapUid = null;
@@ -4284,6 +4370,8 @@ function normalizeSelection() {
         "scene",
         "cameraRoot",
         "camera",
+        "styleRoot",
+        "style",
         "densityMap",
         "densityRenderer",
         "surface",
@@ -4334,6 +4422,7 @@ function workspaceChromeRenderKey() {
       selectedSurfaceUid,
       selectedSurfaceRendererUid,
       selectedCameraName,
+      selectedStyleIndex,
     ],
     scenes: snapshot.scenes.map((scene) => [
       scene.uid,
@@ -4374,6 +4463,15 @@ function workspaceChromeRenderKey() {
       camera.name,
       camera.source,
       camera.visibilityCount,
+    ]),
+    styles: (snapshot.styles || []).map((style) => [
+      style.ownerSceneUid,
+      style.sceneUid,
+      style.localIndex,
+      style.name,
+      style.source,
+      style.readOnly,
+      style.modified,
     ]),
   });
 }
@@ -4417,6 +4515,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         selectedSurfaceUid = null;
         selectedSurfaceRendererUid = null;
         selectedCameraName = null;
+        selectedStyleIndex = null;
         if (!scene.active) {
           await mutate("activate_scene", { sceneUid: scene.uid });
         } else {
@@ -4632,6 +4731,54 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       });
       sceneTree.append(cameraRow);
     }
+    const sceneStyles = (snapshot.styles || []).filter(
+      (style) => style.ownerSceneUid === scene.uid,
+    );
+    const styleRoot = button(
+      "Styles",
+      `tree-object style-root${
+        workspaceSelectionKind === "styleRoot" && scene.active ? " active" : ""
+      }`,
+      async () => {
+        workspaceSelectionKind = "styleRoot";
+        selectedStyleIndex = null;
+        if (!scene.active) {
+          await mutate("activate_scene", { sceneUid: scene.uid });
+        } else {
+          renderShell();
+        }
+      },
+    );
+    const styleCount = document.createElement("small");
+    styleCount.textContent = `${sceneStyles.length} STYLE`;
+    styleRoot.append(styleCount);
+    sceneTree.append(styleRoot);
+    sceneStyles.forEach((style, styleIndex) => {
+      const markers = `${style.readOnly || style.sceneUid === 0 ? " 🔒" : ""}${
+        style.source ? " ↗" : ""
+      }`;
+      const styleRow = button(
+        `${style.name}${markers}`,
+        `tree-renderer style-node${
+          workspaceSelectionKind === "style" && styleIndex === selectedStyleIndex
+            ? " active"
+            : ""
+        }`,
+        async () => {
+          workspaceSelectionKind = "style";
+          selectedStyleIndex = styleIndex;
+          if (!scene.active) {
+            await mutate("activate_scene", { sceneUid: scene.uid });
+          } else {
+            renderShell();
+          }
+        },
+      );
+      if (style.localIndex !== null) {
+        styleRow.addEventListener("dblclick", () => showStyleProperties(style));
+      }
+      sceneTree.append(styleRow);
+    });
   }
   workspaceProperties.disabled =
     ["renderer", "rendererGroup"].includes(workspaceSelectionKind)
@@ -4647,6 +4794,10 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           : workspaceSelectionKind === "camera"
             ? !selectedCamera()
           : workspaceSelectionKind === "cameraRoot"
+            ? true
+          : workspaceSelectionKind === "style"
+            ? !selectedStyle() || selectedStyle().localIndex === null
+          : workspaceSelectionKind === "styleRoot"
             ? true
           : workspaceSelectionKind === "object"
             ? !selectedObject()
@@ -4664,12 +4815,16 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
               ? !selectedSurface()
               : workspaceSelectionKind === "camera"
                 ? !selectedCamera()
+              : workspaceSelectionKind === "style"
+                ? !selectedStyle() || selectedStyle().localIndex === null
               : workspaceSelectionKind === "object"
                 ? !selectedObject()
                 : true;
   workspaceZoom.disabled =
     workspaceDelete.disabled ||
-    ["rendererGroup", "cameraRoot", "camera"].includes(workspaceSelectionKind);
+    ["rendererGroup", "cameraRoot", "camera", "styleRoot", "style"].includes(
+      workspaceSelectionKind,
+    );
 }
 
 function renderInspector(renderKey = workspaceChromeRenderKey()) {
@@ -4686,16 +4841,21 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
       ? selectedObject()
       : null;
   const camera = workspaceSelectionKind === "camera" ? selectedCamera() : null;
+  const style = workspaceSelectionKind === "style" ? selectedStyle() : null;
   inspectorTitle.textContent =
-    object?.name || map?.name || surface?.name || camera?.name || "No object";
-  const labels = camera
+    object?.name || map?.name || surface?.name || camera?.name || style?.name || "No object";
+  const labels = style
+    ? ["Scope", "Read only", "Source"]
+    : camera
     ? ["Source", "Visibility", "Kind"]
     : map
     ? ["Columns", "Rows", "Sections"]
     : surface
       ? ["Type", "Format", "Renderers"]
       : ["Atoms", "Residues", "Bonds"];
-  const values = camera
+  const values = style
+    ? [style.sceneUid === 0 ? "Global" : "Scene", style.readOnly, style.source || "—"]
+    : camera
     ? [camera.source || "—", camera.visibilityCount, "Camera"]
     : object
     ? [object.atomCount, object.residueCount, object.bondCount]
@@ -7015,6 +7175,25 @@ async function handleAction(action, depth = 0) {
       renderSelectionEditor();
       break;
     case "add-renderer": {
+      if (["styleRoot", "style"].includes(workspaceSelectionKind)) {
+        const used = new Set(
+          activeStyles()
+            .filter((style) => style.localIndex !== null)
+            .map((style) => style.name),
+        );
+        let index = 0;
+        while (used.has(`style_${index}`)) index += 1;
+        const name = globalThis.prompt?.("Style name", `style_${index}`)?.trim();
+        if (name) {
+          await mutate("create_style", { name });
+          selectedStyleIndex = activeStyles().findIndex(
+            (style) => style.localIndex !== null && style.name === name,
+          );
+          workspaceSelectionKind = "style";
+          renderShell();
+        }
+        break;
+      }
       if (["cameraRoot", "camera"].includes(workspaceSelectionKind)) {
         const used = new Set(activeCameras().map((camera) => camera.name));
         let index = 0;
@@ -7062,6 +7241,21 @@ async function handleAction(action, depth = 0) {
       break;
     }
     case "delete-workspace-item": {
+      if (
+        workspaceSelectionKind === "style" &&
+        selectedStyle() &&
+        selectedStyle().localIndex !== null
+      ) {
+        const style = selectedStyle();
+        await mutate("destroy_style", {
+          sceneUid: style.sceneUid,
+          localIndex: style.localIndex,
+        });
+        selectedStyleIndex = null;
+        workspaceSelectionKind = "styleRoot";
+        renderShell();
+        break;
+      }
       if (workspaceSelectionKind === "camera" && selectedCamera()) {
         const name = selectedCameraName;
         await mutate("destroy_camera", { name });
@@ -7127,7 +7321,13 @@ document.querySelectorAll("[data-dialog]").forEach((element) => {
 });
 
 workspaceProperties.addEventListener("click", async () => {
-  if (workspaceSelectionKind === "camera" && selectedCamera()) {
+  if (
+    workspaceSelectionKind === "style" &&
+    selectedStyle() &&
+    selectedStyle().localIndex !== null
+  ) {
+    await showStyleProperties(selectedStyle());
+  } else if (workspaceSelectionKind === "camera" && selectedCamera()) {
     await showReferenceDialog("Camera Properties");
   } else if (["renderer", "rendererGroup"].includes(workspaceSelectionKind) && selectedRenderer()) {
     showReferenceDialog("Renderer Properties");

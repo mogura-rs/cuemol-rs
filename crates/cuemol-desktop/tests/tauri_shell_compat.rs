@@ -328,6 +328,17 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
 }
 
 #[test]
+fn tauri_workspace_exposes_reference_style_nodes_and_actions() {
+    assert!(JS.contains("function activeStyles()"));
+    assert!(JS.contains("workspaceSelectionKind === \"styleRoot\""));
+    assert!(JS.contains("workspaceSelectionKind === \"style\""));
+    assert!(JS.contains("mutate(\"create_style\""));
+    assert!(JS.contains("mutate(\"destroy_style\""));
+    assert!(JS.contains("invoke(\"get_style_properties\""));
+    assert!(JS.contains("invoke(\"set_style_properties\""));
+}
+
+#[test]
 fn tauri_projection_toggle_uses_the_compact_viewport_response() {
     assert!(JS.contains("snapshot.perspective = result.perspective"));
     assert!(JS.contains("renderProjectionControls()"));
