@@ -166,6 +166,8 @@ let selectionHistoryEntries = loadSelectionHistory();
 let renderTimer = null;
 let viewportRenderRequest = null;
 let viewportRenderQueued = false;
+let cameraRequest = null;
+const cameraQueue = [];
 let renderedViewportSize = "";
 let wheelTimer = null;
 let wheelPending = null;
@@ -8991,16 +8993,45 @@ function snapshotHasRenderableContent() {
   );
 }
 
-async function cameraCommand(action, x = 0, y = 0) {
-  if (!invoke) return;
-  const size = viewportDimensions();
-  const sequence = ++requestSequence;
-  try {
-    const result = await invoke("update_camera", { action, x, y, ...size });
-    applyViewport(result, sequence);
-  } catch (error) {
-    showError(error);
+function enqueueCameraCommand(action, x, y) {
+  const pending = cameraQueue.at(-1);
+  if (pending?.action === action) {
+    if (action === "pan" || action === "rotate") {
+      pending.x += x;
+      pending.y += y;
+      return;
+    }
+    if (action === "zoom" || action === "slab") {
+      pending.x *= x;
+      return;
+    }
   }
+  cameraQueue.push({ action, x, y });
+}
+
+async function flushCameraCommands() {
+  try {
+    while (cameraQueue.length) {
+      const command = cameraQueue.shift();
+      const size = viewportDimensions();
+      const sequence = ++requestSequence;
+      try {
+        const result = await invoke("update_camera", { ...command, ...size });
+        applyViewport(result, sequence);
+      } catch (error) {
+        showError(error);
+      }
+    }
+  } finally {
+    cameraRequest = null;
+  }
+}
+
+function cameraCommand(action, x = 0, y = 0) {
+  if (!invoke) return Promise.resolve();
+  enqueueCameraCommand(action, x, y);
+  if (!cameraRequest) cameraRequest = flushCameraCommands();
+  return cameraRequest;
 }
 
 async function fitWorkspaceItem() {

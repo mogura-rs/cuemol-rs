@@ -320,6 +320,16 @@ fn tauri_viewport_selection_uses_one_compact_ipc_round_trip() {
 }
 
 #[test]
+fn tauri_camera_updates_coalesce_pending_input() {
+    assert!(JS.contains("const cameraQueue = []"));
+    assert!(JS.contains("function enqueueCameraCommand(action, x, y)"));
+    assert!(JS.contains("pending.x += x"));
+    assert!(JS.contains("pending.x *= x"));
+    assert!(JS.contains("while (cameraQueue.length)"));
+    assert!(JS.contains("cameraRequest = flushCameraCommands()"));
+}
+
+#[test]
 fn tauri_workspace_chrome_reuses_unchanged_dom() {
     assert!(JS.contains("function workspaceChromeRenderKey()"));
     let workspace_key = JS
