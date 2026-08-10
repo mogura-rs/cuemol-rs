@@ -2628,6 +2628,103 @@ impl DesktopAppState {
         Ok(scene.add_loaded_style(LoadedStyle { node, data }))
     }
 
+    pub fn load_scene_style_file(
+        &mut self,
+        scene_uid: Uid,
+        path: impl AsRef<Path>,
+        read_only: bool,
+    ) -> Result<usize> {
+        let resolved_path = self.resolve_scene_path(scene_uid, path.as_ref())?;
+        let data = fs::read_to_string(&resolved_path)?;
+        let tree = parse_ldom2_xml(&data)?;
+        if tree.top().tag_name() != "styles" {
+            return Err(CueMolError::invalid_argument(
+                "style XML root must be <styles>",
+            ));
+        }
+        let name = tree.top().str_attr("id").to_string();
+        if name.trim().is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "external style file must have an id",
+            ));
+        }
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        if scene
+            .loaded_styles()
+            .iter()
+            .any(|style| style.node.str_attr("id").as_str() == name)
+        {
+            return Err(CueMolError::invalid_argument(format!(
+                "style already exists: {name}"
+            )));
+        }
+        let mut node = LDom2Node::new();
+        node.set_tag_name("styles");
+        node.set_str_attr("id", name);
+        node.set_str_attr("src", resolved_path.to_string_lossy());
+        if read_only {
+            node.set_str_attr("readonly", "true");
+        }
+        Ok(scene.add_loaded_style(LoadedStyle { node, data }))
+    }
+
+    pub fn save_scene_style_file(
+        &mut self,
+        scene_uid: Uid,
+        local_index: usize,
+        path: impl AsRef<Path>,
+    ) -> Result<()> {
+        let path = path.as_ref();
+        let resolved_path = self.resolve_scene_path(scene_uid, path)?;
+        let style = self
+            .scene_manager()
+            .scene(scene_uid)
+            .and_then(|scene| scene.loaded_styles().get(local_index))
+            .cloned()
+            .ok_or_else(|| CueMolError::NotFound(format!("style {local_index}")))?;
+        let has_inline_data = style.node.children().iter().any(|child| !child.is_attr());
+        let mut tree = if has_inline_data {
+            LDom2Tree::from(style.node.clone())
+        } else {
+            parse_ldom2_xml(&style.data)?
+        };
+        if tree.top().tag_name() != "styles" {
+            return Err(CueMolError::invalid_argument(
+                "style XML root must be <styles>",
+            ));
+        }
+        let name = style.node.str_attr("id").to_string();
+        tree.top_mut().set_str_attr("id", &name);
+        for attr in ["src", "alt_src", "readonly", "modified"] {
+            tree.top_mut().remove_child(attr);
+        }
+        clear_xml_formatting_whitespace(tree.top_mut());
+        let data = write_ldom2_xml(&tree);
+        fs::write(&resolved_path, &data)?;
+
+        let read_only = style.node.str_attr("readonly").equals_ignore_case("true");
+        let mut node = LDom2Node::new();
+        node.set_tag_name("styles");
+        node.set_str_attr("id", name);
+        node.set_str_attr("src", path.to_string_lossy());
+        if read_only {
+            node.set_str_attr("readonly", "true");
+        }
+        let style = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .expect("style scene was checked above")
+            .loaded_styles_mut()
+            .get_mut(local_index)
+            .expect("style index was checked above");
+        style.node = node;
+        style.data = data;
+        Ok(())
+    }
+
     pub fn create_scene_renderer_style(
         &mut self,
         scene_uid: Uid,
@@ -54899,6 +54996,67 @@ attribute \"dep\" string \"positions\"
         assert!(qsc.contains("<styles id=\"custom\" readonly=\"true\">"));
         assert!(qsc.contains("id=\"Wide\""));
         let _ = std::fs::remove_file(path);
+
+        let style_path = std::env::temp_dir().join(format!(
+            "cuemol-desktop-style-workspace-{}.xml",
+            std::process::id()
+        ));
+        app.save_scene_style_file(scene_uid, local_index, &style_path)
+            .unwrap();
+        let style_xml = std::fs::read_to_string(&style_path).unwrap();
+        assert!(style_xml.contains("<styles id=\"custom\">"));
+        assert!(style_xml.contains("id=\"Wide\""));
+        assert!(!style_xml.contains("src="));
+        assert!(!style_xml.contains("readonly="));
+        let linked = app
+            .style_summaries(scene_uid)
+            .into_iter()
+            .find(|style| style.local_index == Some(local_index))
+            .unwrap();
+        assert_eq!(linked.source, style_path.to_string_lossy());
+        assert!(!linked.modified);
+
+        let linked_qsc_path = std::env::temp_dir().join(format!(
+            "cuemol-desktop-style-linked-{}.qsc",
+            std::process::id()
+        ));
+        app.save_active_scene_qsc(&linked_qsc_path).unwrap();
+        let linked_qsc = std::fs::read_to_string(&linked_qsc_path).unwrap();
+        assert!(linked_qsc.contains("<styles id=\"custom\""));
+        assert!(linked_qsc.contains("src="));
+        let mut reloaded = DesktopAppState::new();
+        let reloaded_scene_uid = reloaded.load_qsc_file(&linked_qsc_path).unwrap().unwrap();
+        let reloaded_style = reloaded
+            .style_summaries(reloaded_scene_uid)
+            .into_iter()
+            .find(|style| style.local_index.is_some())
+            .unwrap();
+        assert_eq!(reloaded_style.name, "custom");
+        assert_eq!(reloaded_style.source, style_path.to_string_lossy());
+        assert!(reloaded
+            .scene_manager()
+            .scene(reloaded_scene_uid)
+            .unwrap()
+            .loaded_styles()[0]
+            .data
+            .contains("id=\"Wide\""));
+        let _ = std::fs::remove_file(linked_qsc_path);
+
+        let loaded_scene_uid = app.new_scene("loaded styles", false).result_scene;
+        let loaded_index = app
+            .load_scene_style_file(loaded_scene_uid, &style_path, true)
+            .unwrap();
+        let loaded = app
+            .style_summaries(loaded_scene_uid)
+            .into_iter()
+            .find(|style| style.local_index == Some(loaded_index))
+            .unwrap();
+        assert_eq!(loaded.name, "custom");
+        assert!(loaded.read_only);
+        assert!(app
+            .load_scene_style_file(loaded_scene_uid, &style_path, true)
+            .is_err());
+        let _ = std::fs::remove_file(style_path);
 
         assert!(app.destroy_scene_style(scene_uid, local_index).unwrap());
         assert!(app

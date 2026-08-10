@@ -897,10 +897,12 @@ enum NativeFileDialog {
     OpenObject,
     OpenScene,
     OpenCamera,
+    OpenStyle,
     SaveObject,
     SaveScene,
     SaveView,
     SaveCamera,
+    SaveStyle,
     ExportScene,
     OpenScript,
     SaveLog,
@@ -3849,6 +3851,16 @@ impl GuiApplication {
                         self.request_paste_workspace_style(scene.uid);
                         ui.close();
                     }
+                    ui.separator();
+                    ui.menu_button("Style file", |ui| {
+                        if ui.button("Load ...").clicked() {
+                            self.choose_load_workspace_style_file(scene.uid, camera);
+                            ui.close();
+                        }
+                        ui.add_enabled(false, egui::Button::new("Reload"));
+                        ui.add_enabled(false, egui::Button::new("Save"));
+                        ui.add_enabled(false, egui::Button::new("Save As..."));
+                    });
                 });
                 ui.indent(format!("style-root-{}", scene.uid.get()), |ui| {
                     for (style_index, summary) in styles.iter().enumerate() {
@@ -3913,6 +3925,43 @@ impl GuiApplication {
                                 self.delete_aux_selection(selection);
                                 ui.close();
                             }
+                            ui.separator();
+                            ui.menu_button("Style file", |ui| {
+                                if ui.button("Load ...").clicked() {
+                                    self.choose_load_workspace_style_file(scene.uid, camera);
+                                    ui.close();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        summary.local_index.is_some() && !summary.source.is_empty(),
+                                        egui::Button::new("Reload"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.set_status("Not implemented!!");
+                                    ui.close();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        summary.local_index.is_some(),
+                                        egui::Button::new("Save"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.choose_save_workspace_style_file(selection, false);
+                                    ui.close();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        summary.local_index.is_some(),
+                                        egui::Button::new("Save As..."),
+                                    )
+                                    .clicked()
+                                {
+                                    self.choose_save_workspace_style_file(selection, true);
+                                    ui.close();
+                                }
+                            });
                             ui.separator();
                             let mut read_only = summary.read_only;
                             if ui
@@ -12088,6 +12137,80 @@ impl GuiApplication {
         }
     }
 
+    fn choose_load_workspace_style_file(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        camera: &mut CameraController,
+    ) {
+        if self.state.active_scene() != Some(scene_uid) {
+            self.activate_workspace_scene(scene_uid, camera);
+        }
+        if let Some(path) = native_file_dialog(NativeFileDialog::OpenStyle, "") {
+            let undo = self.capture_undo();
+            match self.state.load_scene_style_file(scene_uid, &path, true) {
+                Ok(local_index) => {
+                    self.push_undo_snapshot(undo);
+                    self.modified_scenes.insert(scene_uid);
+                    self.rebuild_snapshot();
+                    let style_index = self
+                        .state
+                        .style_summaries(scene_uid)
+                        .iter()
+                        .position(|style| style.local_index == Some(local_index))
+                        .expect("the loaded style was just inserted");
+                    self.selected_object = None;
+                    self.selected_renderer = None;
+                    self.workspace_aux_selection = Some(WorkspaceAuxSelection::Style {
+                        scene_uid,
+                        style_index,
+                    });
+                    self.set_status(format!("Loaded style file {}", path.display()));
+                }
+                Err(error) => self.set_status(format!("Style file error: {error}")),
+            }
+        }
+    }
+
+    fn choose_save_workspace_style_file(
+        &mut self,
+        selection: WorkspaceAuxSelection,
+        save_as: bool,
+    ) {
+        let Some(summary) = self.style_summary_for_selection(selection) else {
+            self.set_status("Style not found");
+            return;
+        };
+        let Some(local_index) = summary.local_index else {
+            self.set_status("Global styles cannot be saved here");
+            return;
+        };
+        let path = if !save_as && !summary.source.is_empty() {
+            Some(PathBuf::from(&summary.source))
+        } else {
+            let base_name = if summary.name == "(anonymous)" {
+                "style"
+            } else {
+                &summary.name
+            };
+            native_file_dialog(NativeFileDialog::SaveStyle, &format!("{base_name}.xml"))
+        };
+        let Some(path) = path else {
+            return;
+        };
+        let undo = self.capture_undo();
+        match self
+            .state
+            .save_scene_style_file(summary.scene_uid, local_index, &path)
+        {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(summary.scene_uid);
+                self.set_status(format!("Saved style file {}", path.display()));
+            }
+            Err(error) => self.set_status(format!("Style file error: {error}")),
+        }
+    }
+
     fn paste_workspace_style_clipboard(&mut self, scene_uid: cuemol_core::Uid, replace: bool) {
         let Some(clipboard) = self.workspace_style_clipboard.clone() else {
             self.set_status("No copied style");
@@ -16095,6 +16218,10 @@ const VIEW_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "Camera setting",
     extensions: &["cam"],
 }];
+const STYLE_FILE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "Style file",
+    extensions: &["xml"],
+}];
 const EXPORT_FILTERS: &[NativeFileFilter] = &[
     NativeFileFilter {
         label: "POV-Ray scene",
@@ -16134,6 +16261,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             default_extension: None,
             save: false,
         },
+        NativeFileDialog::OpenStyle => NativeFileDialogSpec {
+            title: "Open style file",
+            filters: STYLE_FILE_FILTERS,
+            default_extension: None,
+            save: false,
+        },
         NativeFileDialog::SaveObject => NativeFileDialogSpec {
             title: "Save File As",
             filters: OBJECT_SAVE_FILTERS,
@@ -16156,6 +16289,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             title: "Save camera to file",
             filters: VIEW_SAVE_FILTERS,
             default_extension: Some("cam"),
+            save: true,
+        },
+        NativeFileDialog::SaveStyle => NativeFileDialogSpec {
+            title: "Save style to file",
+            filters: STYLE_FILE_FILTERS,
+            default_extension: Some("xml"),
             save: true,
         },
         NativeFileDialog::ExportScene => NativeFileDialogSpec {
@@ -18446,6 +18585,12 @@ mod tests {
         let save_camera = native_file_dialog_spec(NativeFileDialog::SaveCamera);
         assert!(save_camera.save);
         assert_eq!(save_camera.default_extension, Some("cam"));
+        let open_style = native_file_dialog_spec(NativeFileDialog::OpenStyle);
+        assert!(!open_style.save);
+        assert_eq!(open_style.filters[0].extensions, &["xml"]);
+        let save_style = native_file_dialog_spec(NativeFileDialog::SaveStyle);
+        assert!(save_style.save);
+        assert_eq!(save_style.default_extension, Some("xml"));
 
         assert_eq!(
             MainShortcutCommand::OpenFile.shortcut(),

@@ -5157,6 +5157,15 @@ enum ModelRequest {
         name: String,
     },
     CreateStyle(String),
+    LoadStyleFile {
+        scene_uid: u64,
+        path: String,
+    },
+    SaveStyleFile {
+        scene_uid: u64,
+        local_index: usize,
+        path: String,
+    },
     CreateRendererStyle(RendererStyleCreateInput),
     GetStyleProperties {
         scene_uid: u64,
@@ -6646,6 +6655,40 @@ fn handle_model_request(
         ModelRequest::CreateStyle(name) => {
             let undo = model.capture_undo();
             model.create_named_style(&name)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::LoadStyleFile { scene_uid, path } => {
+            let scene_uid = Uid::new(scene_uid);
+            let undo = model.capture_undo();
+            let local_index = model
+                .desktop
+                .load_scene_style_file(scene_uid, &path, true)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Loaded style file {path}");
+            if model.desktop.active_scene() == Some(scene_uid) {
+                model.invalidate_mesh(false);
+            }
+            model.push_undo(undo);
+            debug_assert!(model
+                .desktop
+                .style_summaries(scene_uid)
+                .iter()
+                .any(|style| style.local_index == Some(local_index)));
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SaveStyleFile {
+            scene_uid,
+            local_index,
+            path,
+        } => {
+            let scene_uid = Uid::new(scene_uid);
+            let undo = model.capture_undo();
+            model
+                .desktop
+                .save_scene_style_file(scene_uid, local_index, &path)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Saved style file {path}");
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -8684,6 +8727,35 @@ fn create_style(name: String, state: State<'_, ManagedState>) -> Result<AppSnaps
 }
 
 #[tauri::command]
+fn load_style_file(
+    scene_uid: u64,
+    path: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::LoadStyleFile { scene_uid, path },
+    )?)
+}
+
+#[tauri::command]
+fn save_style_file(
+    scene_uid: u64,
+    local_index: usize,
+    path: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SaveStyleFile {
+            scene_uid,
+            local_index,
+            path,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn create_renderer_style(
     input: RendererStyleCreateInput,
     state: State<'_, ManagedState>,
@@ -10081,6 +10153,8 @@ pub fn run() -> Result<(), tauri::Error> {
             set_camera_visibility,
             clear_camera_visibility,
             create_style,
+            load_style_file,
+            save_style_file,
             create_renderer_style,
             get_style_properties,
             get_renderer_style_options,
@@ -13208,6 +13282,78 @@ mod tests {
             .styles
             .iter()
             .any(|style| style.name == "custom"));
+    }
+
+    #[test]
+    fn style_file_commands_load_save_and_undo_linkage() {
+        let input_path = std::env::temp_dir().join(format!(
+            "cuemol-tauri-style-file-input-{}.xml",
+            std::process::id()
+        ));
+        let output_path = std::env::temp_dir().join(format!(
+            "cuemol-tauri-style-file-output-{}.xml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &input_path,
+            "<styles id=\"external\"><style id=\"Wide\" width=\"3\"/></styles>",
+        )
+        .unwrap();
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::LoadStyleFile {
+                scene_uid: scene_uid.get(),
+                path: input_path.to_string_lossy().into_owned(),
+            },
+        )
+        .unwrap();
+        let loaded = model
+            .snapshot()
+            .styles
+            .into_iter()
+            .find(|style| style.name == "external")
+            .unwrap();
+        assert!(loaded.read_only);
+        let local_index = loaded.local_index.unwrap();
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::SaveStyleFile {
+                scene_uid: scene_uid.get(),
+                local_index,
+                path: output_path.to_string_lossy().into_owned(),
+            },
+        )
+        .unwrap();
+        let saved = std::fs::read_to_string(&output_path).unwrap();
+        assert!(saved.contains("id=\"Wide\""));
+        assert!(!saved.contains("readonly="));
+        assert_eq!(
+            model
+                .snapshot()
+                .styles
+                .into_iter()
+                .find(|style| style.name == "external")
+                .unwrap()
+                .source,
+            output_path.to_string_lossy()
+        );
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(
+            model
+                .snapshot()
+                .styles
+                .into_iter()
+                .find(|style| style.name == "external")
+                .unwrap()
+                .source,
+            input_path.to_string_lossy()
+        );
+
+        let _ = std::fs::remove_file(input_path);
+        let _ = std::fs::remove_file(output_path);
     }
 
     #[test]

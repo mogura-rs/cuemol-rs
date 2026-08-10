@@ -5146,12 +5146,63 @@ async function updateWorkspaceStyle(style, update) {
   });
 }
 
+async function loadWorkspaceStyleFile(scene) {
+  if (!dialog?.open) {
+    showError("The Tauri dialog plugin is unavailable.");
+    return;
+  }
+  const path = await dialog.open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Style file", extensions: ["xml"] }],
+  });
+  if (!path) return;
+  const previous = new Set(
+    activeStyles()
+      .filter((style) => style.localIndex !== null)
+      .map((style) => style.name),
+  );
+  if (!(await mutate("load_style_file", { sceneUid: scene.uid, path }))) return;
+  const loaded = activeStyles().find(
+    (style) => style.localIndex !== null && !previous.has(style.name),
+  );
+  selectedStyleIndex = loaded ? activeStyles().indexOf(loaded) : null;
+  workspaceSelectionKind = loaded ? "style" : "styleRoot";
+  renderShell();
+}
+
+async function saveWorkspaceStyleFile(scene, style, saveAs) {
+  let path = !saveAs ? style.source : "";
+  if (!path) {
+    const baseName = style.name === "(anonymous)" ? "style" : style.name;
+    path = await chooseOutputPath(`${baseName}.xml`, "Style file", ["xml"]);
+  }
+  if (!path) return;
+  if (
+    await mutateWithoutViewport("save_style_file", {
+      sceneUid: scene.uid,
+      localIndex: style.localIndex,
+      path,
+    })
+  ) {
+    selectedStyleIndex = activeStyles().findIndex(
+      (candidate) => candidate.localIndex === style.localIndex,
+    );
+    workspaceSelectionKind = "style";
+    renderShell();
+  }
+}
+
 function workspaceStyleContextItems(scene, style = null) {
+  const activate = async () => {
+    if (scene.active) return true;
+    return mutate("activate_scene", { sceneUid: scene.uid });
+  };
   return [
     {
       label: "New Style...",
       action: async () => {
-        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        if (!(await activate())) return;
         const used = new Set(
           activeStyles()
             .filter((candidate) => candidate.localIndex !== null)
@@ -5184,6 +5235,40 @@ function workspaceStyleContextItems(scene, style = null) {
     },
     null,
     {
+      label: "Style file",
+      children: [
+        {
+          label: "Load ...",
+          action: async () => {
+            if (!(await activate())) return;
+            await loadWorkspaceStyleFile(scene);
+          },
+        },
+        {
+          label: "Reload",
+          disabled: !style?.source,
+          action: () => globalThis.alert?.("Not implemented!!"),
+        },
+        {
+          label: "Save",
+          disabled: !style || style.localIndex === null,
+          action: async () => {
+            if (!(await activate())) return;
+            await saveWorkspaceStyleFile(scene, style, false);
+          },
+        },
+        {
+          label: "Save As...",
+          disabled: !style || style.localIndex === null,
+          action: async () => {
+            if (!(await activate())) return;
+            await saveWorkspaceStyleFile(scene, style, true);
+          },
+        },
+      ],
+    },
+    null,
+    {
       label: "Read-only",
       checked: Boolean(style?.readOnly),
       disabled:
@@ -5202,7 +5287,7 @@ function workspaceStyleContextItems(scene, style = null) {
       label: "Edit...",
       disabled: !style || style.localIndex === null,
       action: async () => {
-        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        if (!(await activate())) return;
         await showStyleProperties(style);
       },
     },
