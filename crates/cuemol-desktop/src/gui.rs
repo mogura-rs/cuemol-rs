@@ -7,6 +7,7 @@ use crate::{
 use ab_glyph::{point, Font, FontRef, ScaleFont};
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::Rgba8;
+use cuemol_qsys::StereoMode;
 use cuemol_render::{
     tessellate_snapshot, MeshVertex, PovSceneExporter, RenderAtom, RenderBond, RenderSceneSnapshot,
     UmbreonDenoiseMode, UmbreonSceneExporter,
@@ -500,7 +501,6 @@ struct GuiApplication {
     /// during camera-only and egui-only redraws.
     snapshot_revision: u64,
     background: SceneBackground,
-    center_mark: CenterMark,
     color_proofing: bool,
     bottom_tab: BottomTab,
     render_preset: String,
@@ -521,6 +521,8 @@ struct GuiApplication {
     options_draft: Option<NativePreferences>,
     show_scene_props: bool,
     show_view_props: bool,
+    view_properties_draft: Option<NativeViewProperties>,
+    view_property_selected: usize,
     show_chain_dialog: bool,
     show_residue_dialog: bool,
     show_renderer_dialog: bool,
@@ -955,6 +957,274 @@ struct NativePreferences {
     shortcuts: Vec<NativeShortcut>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct NativeViewProperties {
+    name: String,
+    uid: u64,
+    active: bool,
+    zoom: f64,
+    distance: f64,
+    slab: f64,
+    center: [f64; 3],
+    rotation: [f64; 4],
+    perspective: bool,
+    width: u32,
+    height: u32,
+    trans_mms: bool,
+    rot_mms: bool,
+    stereo_mode: StereoMode,
+    has_hw_stereo: bool,
+    stereo_dist: f64,
+    swap_stereo_eyes: bool,
+    center_mark: CenterMark,
+}
+
+impl NativeViewProperties {
+    fn from_camera(camera: &CameraController, viewport: Option<egui::Rect>) -> Self {
+        let size = viewport.map_or(egui::Vec2::ZERO, |rect| rect.size());
+        Self {
+            name: camera.name.clone(),
+            uid: 1,
+            active: true,
+            zoom: 1000.0 / f64::from(camera.ortho_scale.max(0.1)),
+            distance: f64::from(camera.distance),
+            slab: f64::from(camera.slab_depth),
+            center: camera.target.to_array().map(f64::from),
+            rotation: camera.orientation.to_array().map(f64::from),
+            perspective: camera.perspective,
+            width: size.x.max(0.0).round() as u32,
+            height: size.y.max(0.0).round() as u32,
+            trans_mms: camera.trans_mms,
+            rot_mms: camera.rot_mms,
+            stereo_mode: camera.stereo_mode,
+            has_hw_stereo: false,
+            stereo_dist: f64::from(camera.stereo_distance),
+            swap_stereo_eyes: camera.swap_stereo_eyes,
+            center_mark: camera.center_mark,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewPropertyKey {
+    Name,
+    Uid,
+    Active,
+    Zoom,
+    Distance,
+    Slab,
+    Center,
+    CenterX,
+    CenterY,
+    CenterZ,
+    Rotation,
+    RotationX,
+    RotationY,
+    RotationZ,
+    RotationW,
+    Perspective,
+    Width,
+    Height,
+    TransMms,
+    RotMms,
+    StereoMode,
+    HasHwStereo,
+    StereoDist,
+    SwapStereoEyes,
+    UpVec,
+    UpVecX,
+    UpVecY,
+    UpVecZ,
+    RightVec,
+    RightVecX,
+    RightVecY,
+    RightVecZ,
+    ForwardVec,
+    ForwardVecX,
+    ForwardVecY,
+    ForwardVecZ,
+    CenterMark,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ViewPropertyDefinition {
+    key: ViewPropertyKey,
+    name: &'static str,
+    type_name: &'static str,
+    readonly: bool,
+    has_default: bool,
+}
+
+const VIEW_PROPERTY_DEFINITIONS: &[ViewPropertyDefinition] = &[
+    view_property(ViewPropertyKey::Name, "name", "string", false, true),
+    view_property(ViewPropertyKey::Uid, "uid", "integer", true, false),
+    view_property(ViewPropertyKey::Active, "active", "boolean", true, false),
+    view_property(ViewPropertyKey::Zoom, "zoom", "real", false, true),
+    view_property(ViewPropertyKey::Distance, "distance", "real", false, true),
+    view_property(ViewPropertyKey::Slab, "slab", "real", false, true),
+    view_property(ViewPropertyKey::Center, "center", "Vector", true, false),
+    view_property(ViewPropertyKey::CenterX, "  center.x", "real", false, true),
+    view_property(ViewPropertyKey::CenterY, "  center.y", "real", false, true),
+    view_property(ViewPropertyKey::CenterZ, "  center.z", "real", false, true),
+    view_property(ViewPropertyKey::Rotation, "rotation", "Quat", true, false),
+    view_property(
+        ViewPropertyKey::RotationX,
+        "  rotation.x",
+        "real",
+        false,
+        true,
+    ),
+    view_property(
+        ViewPropertyKey::RotationY,
+        "  rotation.y",
+        "real",
+        false,
+        true,
+    ),
+    view_property(
+        ViewPropertyKey::RotationZ,
+        "  rotation.z",
+        "real",
+        false,
+        true,
+    ),
+    view_property(
+        ViewPropertyKey::RotationW,
+        "  rotation.w",
+        "real",
+        false,
+        true,
+    ),
+    view_property(
+        ViewPropertyKey::Perspective,
+        "perspective",
+        "boolean",
+        false,
+        true,
+    ),
+    view_property(ViewPropertyKey::Width, "width", "integer", true, false),
+    view_property(ViewPropertyKey::Height, "height", "integer", true, false),
+    view_property(
+        ViewPropertyKey::TransMms,
+        "trans_mms",
+        "boolean",
+        false,
+        true,
+    ),
+    view_property(ViewPropertyKey::RotMms, "rot_mms", "boolean", false, true),
+    view_property(
+        ViewPropertyKey::StereoMode,
+        "stereoMode",
+        "enum",
+        false,
+        true,
+    ),
+    view_property(
+        ViewPropertyKey::HasHwStereo,
+        "hasHWStereo",
+        "boolean",
+        true,
+        false,
+    ),
+    view_property(
+        ViewPropertyKey::StereoDist,
+        "stereoDist",
+        "real",
+        false,
+        true,
+    ),
+    view_property(
+        ViewPropertyKey::SwapStereoEyes,
+        "swapStereoEyes",
+        "boolean",
+        false,
+        true,
+    ),
+    view_property(ViewPropertyKey::UpVec, "up_vec", "Vector", true, false),
+    view_property(ViewPropertyKey::UpVecX, "  up_vec.x", "real", true, false),
+    view_property(ViewPropertyKey::UpVecY, "  up_vec.y", "real", true, false),
+    view_property(ViewPropertyKey::UpVecZ, "  up_vec.z", "real", true, false),
+    view_property(
+        ViewPropertyKey::RightVec,
+        "right_vec",
+        "Vector",
+        true,
+        false,
+    ),
+    view_property(
+        ViewPropertyKey::RightVecX,
+        "  right_vec.x",
+        "real",
+        true,
+        false,
+    ),
+    view_property(
+        ViewPropertyKey::RightVecY,
+        "  right_vec.y",
+        "real",
+        true,
+        false,
+    ),
+    view_property(
+        ViewPropertyKey::RightVecZ,
+        "  right_vec.z",
+        "real",
+        true,
+        false,
+    ),
+    view_property(
+        ViewPropertyKey::ForwardVec,
+        "forward_vec",
+        "Vector",
+        true,
+        false,
+    ),
+    view_property(
+        ViewPropertyKey::ForwardVecX,
+        "  forward_vec.x",
+        "real",
+        true,
+        false,
+    ),
+    view_property(
+        ViewPropertyKey::ForwardVecY,
+        "  forward_vec.y",
+        "real",
+        true,
+        false,
+    ),
+    view_property(
+        ViewPropertyKey::ForwardVecZ,
+        "  forward_vec.z",
+        "real",
+        true,
+        false,
+    ),
+    view_property(
+        ViewPropertyKey::CenterMark,
+        "centerMark",
+        "enum",
+        false,
+        true,
+    ),
+];
+
+const fn view_property(
+    key: ViewPropertyKey,
+    name: &'static str,
+    type_name: &'static str,
+    readonly: bool,
+    has_default: bool,
+) -> ViewPropertyDefinition {
+    ViewPropertyDefinition {
+        key,
+        name,
+        type_name,
+        readonly,
+        has_default,
+    }
+}
+
 impl NativePreferences {
     fn from_state(state: &DesktopAppState) -> Self {
         let input = state.view_input_config();
@@ -1085,7 +1355,6 @@ impl GuiApplication {
             snapshot: RenderSceneSnapshot::empty(),
             snapshot_revision: 0,
             background: SceneBackground::Black,
-            center_mark: CenterMark::Cross,
             color_proofing: false,
             bottom_tab: BottomTab::Output,
             render_preset: RENDER_PRESETS[1].0.to_string(),
@@ -1107,6 +1376,8 @@ impl GuiApplication {
             options_draft: None,
             show_scene_props: false,
             show_view_props: false,
+            view_properties_draft: None,
+            view_property_selected: 0,
             show_chain_dialog: false,
             show_residue_dialog: false,
             show_renderer_dialog: false,
@@ -1257,7 +1528,7 @@ impl GuiApplication {
                 let rect = ui.max_rect();
                 self.viewport_rect = Some(rect);
                 self.draw_screen_lines(ui, camera, rect);
-                self.draw_center_mark(ui, rect);
+                self.draw_center_mark(ui, rect, camera);
                 self.draw_name_labels(ui, camera, rect);
                 self.draw_atom_labels(ui, camera, rect);
                 ui.allocate_ui(rect.size(), |ui| {
@@ -1769,15 +2040,15 @@ impl GuiApplication {
                     }
                     ui.separator();
                     ui.menu_button("Center mark", |ui| {
-                        ui.radio_value(&mut self.center_mark, CenterMark::Cross, "Cross");
-                        ui.radio_value(&mut self.center_mark, CenterMark::Axis, "Axis");
-                        ui.radio_value(&mut self.center_mark, CenterMark::None, "None");
+                        ui.radio_value(&mut camera.center_mark, CenterMark::Cross, "Cross");
+                        ui.radio_value(&mut camera.center_mark, CenterMark::Axis, "Axis");
+                        ui.radio_value(&mut camera.center_mark, CenterMark::None, "None");
                     });
                     ui.separator();
                     ui.add_enabled(false, egui::Button::new("Hardware stereo"))
                         .on_hover_text("No hardware stereo buffer is available");
                     if ui.button("View property...").clicked() {
-                        self.show_view_props = true;
+                        self.open_view_properties(camera);
                         ui.close();
                     }
                 });
@@ -5739,8 +6010,8 @@ impl GuiApplication {
         }
     }
 
-    fn draw_center_mark(&self, ui: &egui::Ui, rect: egui::Rect) {
-        if self.center_mark == CenterMark::None {
+    fn draw_center_mark(&self, ui: &egui::Ui, rect: egui::Rect, camera: &CameraController) {
+        if camera.center_mark == CenterMark::None {
             return;
         }
         let center = rect.center();
@@ -5752,7 +6023,7 @@ impl GuiApplication {
             },
         );
         let painter = ui.painter();
-        match self.center_mark {
+        match camera.center_mark {
             CenterMark::Cross => {
                 painter.line_segment(
                     [
@@ -6209,23 +6480,280 @@ impl GuiApplication {
         self.show_scene_props = open;
     }
 
+    fn open_view_properties(&mut self, camera: &CameraController) {
+        self.view_properties_draft = Some(NativeViewProperties::from_camera(
+            camera,
+            self.viewport_rect,
+        ));
+        self.view_property_selected = 0;
+        self.show_view_props = true;
+    }
+
     fn view_props_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         if !self.show_view_props {
             return;
         }
+        let mut draft = self
+            .view_properties_draft
+            .take()
+            .unwrap_or_else(|| NativeViewProperties::from_camera(camera, self.viewport_rect));
+        let mut selected = self
+            .view_property_selected
+            .min(VIEW_PROPERTY_DEFINITIONS.len().saturating_sub(1));
         let mut open = self.show_view_props;
-        egui::Window::new("View Property")
+        let mut apply = false;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Object properties")
             .open(&mut open)
             .collapsible(false)
+            .resizable(true)
+            .default_width(640.0)
+            .min_width(560.0)
             .show(ctx, |ui| {
-                ui.radio_value(&mut camera.perspective, true, "Perspective");
-                ui.radio_value(&mut camera.perspective, false, "Orthographic");
+                let _ = ui.selectable_label(true, "Generic");
                 ui.separator();
-                ui.radio_value(&mut self.center_mark, CenterMark::Cross, "Cross");
-                ui.radio_value(&mut self.center_mark, CenterMark::Axis, "Axis");
-                ui.radio_value(&mut self.center_mark, CenterMark::None, "None");
+                Self::view_property_editor_ui(ui, &mut draft, &mut selected);
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
             });
-        self.show_view_props = open;
+        self.view_property_selected = selected;
+        if accept || apply {
+            match Self::apply_view_properties(camera, &draft) {
+                Ok(()) => {
+                    self.set_status("View properties updated");
+                    if accept {
+                        self.show_view_props = false;
+                        self.view_properties_draft = None;
+                    } else {
+                        self.show_view_props = true;
+                        self.view_properties_draft = Some(draft);
+                    }
+                }
+                Err(error) => {
+                    self.set_status(format!("View properties error: {error}"));
+                    self.show_view_props = true;
+                    self.view_properties_draft = Some(draft);
+                }
+            }
+        } else if cancel || !open {
+            self.show_view_props = false;
+            self.view_properties_draft = None;
+        } else {
+            self.show_view_props = true;
+            self.view_properties_draft = Some(draft);
+        }
+    }
+
+    fn view_property_editor_ui(
+        ui: &mut egui::Ui,
+        draft: &mut NativeViewProperties,
+        selected: &mut usize,
+    ) {
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(
+                1.0,
+                ui.visuals().widgets.noninteractive.bg_stroke.color,
+            ))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("native_view_property_table")
+                            .striped(true)
+                            .num_columns(4)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                for heading in ["Name", "R", "Type", "Value"] {
+                                    ui.strong(heading);
+                                }
+                                ui.end_row();
+                                for (index, definition) in
+                                    VIEW_PROPERTY_DEFINITIONS.iter().enumerate()
+                                {
+                                    if ui
+                                        .selectable_label(*selected == index, definition.name)
+                                        .clicked()
+                                    {
+                                        *selected = index;
+                                    }
+                                    ui.label(if definition.readonly { "R" } else { "" });
+                                    ui.label(definition.type_name);
+                                    ui.monospace(view_property_value(draft, definition.key));
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+        ui.add_space(8.0);
+        let definition = VIEW_PROPERTY_DEFINITIONS[*selected];
+        egui::Grid::new("native_view_property_detail")
+            .num_columns(2)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("Name:");
+                ui.monospace(definition.name);
+                ui.end_row();
+                ui.label("Type:");
+                ui.monospace(definition.type_name);
+                ui.end_row();
+                ui.label("Value:");
+                ui.horizontal(|ui| {
+                    let mut is_default = view_property_is_default(draft, definition.key);
+                    if ui
+                        .add_enabled(
+                            definition.has_default && !definition.readonly,
+                            egui::Checkbox::new(&mut is_default, "default"),
+                        )
+                        .changed()
+                        && is_default
+                    {
+                        reset_view_property(draft, definition.key);
+                    }
+                    Self::view_property_control_ui(ui, draft, definition);
+                });
+                ui.end_row();
+            });
+    }
+
+    fn view_property_control_ui(
+        ui: &mut egui::Ui,
+        draft: &mut NativeViewProperties,
+        definition: ViewPropertyDefinition,
+    ) {
+        use ViewPropertyKey as Key;
+        match definition.key {
+            Key::Name => {
+                ui.text_edit_singleline(&mut draft.name);
+            }
+            Key::Zoom => {
+                ui.add(egui::DragValue::new(&mut draft.zoom).speed(1.0));
+            }
+            Key::Distance => {
+                ui.add(egui::DragValue::new(&mut draft.distance).speed(1.0));
+            }
+            Key::Slab => {
+                ui.add(egui::DragValue::new(&mut draft.slab).speed(1.0));
+            }
+            Key::CenterX | Key::CenterY | Key::CenterZ => {
+                let index = match definition.key {
+                    Key::CenterX => 0,
+                    Key::CenterY => 1,
+                    _ => 2,
+                };
+                ui.add(egui::DragValue::new(&mut draft.center[index]).speed(0.1));
+            }
+            Key::RotationX | Key::RotationY | Key::RotationZ | Key::RotationW => {
+                let index = match definition.key {
+                    Key::RotationX => 0,
+                    Key::RotationY => 1,
+                    Key::RotationZ => 2,
+                    _ => 3,
+                };
+                ui.add(egui::DragValue::new(&mut draft.rotation[index]).speed(0.01));
+            }
+            Key::Perspective => {
+                ui.checkbox(&mut draft.perspective, "");
+            }
+            Key::TransMms => {
+                ui.checkbox(&mut draft.trans_mms, "");
+            }
+            Key::RotMms => {
+                ui.checkbox(&mut draft.rot_mms, "");
+            }
+            Key::StereoMode => {
+                egui::ComboBox::from_id_salt("native_view_stereo_mode")
+                    .selected_text(stereo_mode_name(draft.stereo_mode))
+                    .show_ui(ui, |ui| {
+                        for (mode, name) in [
+                            (StereoMode::None, "none"),
+                            (StereoMode::Parallel, "para"),
+                            (StereoMode::Cross, "cross"),
+                            (StereoMode::Hardware, "hardware"),
+                        ] {
+                            ui.selectable_value(&mut draft.stereo_mode, mode, name);
+                        }
+                    });
+            }
+            Key::StereoDist => {
+                ui.add(egui::DragValue::new(&mut draft.stereo_dist).speed(0.1));
+            }
+            Key::SwapStereoEyes => {
+                ui.checkbox(&mut draft.swap_stereo_eyes, "");
+            }
+            Key::CenterMark => {
+                egui::ComboBox::from_id_salt("native_view_center_mark")
+                    .selected_text(center_mark_name(draft.center_mark))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut draft.center_mark, CenterMark::None, "none");
+                        ui.selectable_value(&mut draft.center_mark, CenterMark::Cross, "crosshair");
+                        ui.selectable_value(&mut draft.center_mark, CenterMark::Axis, "axis");
+                    });
+            }
+            _ => {
+                ui.monospace(view_property_value(draft, definition.key));
+            }
+        }
+    }
+
+    fn apply_view_properties(
+        camera: &mut CameraController,
+        draft: &NativeViewProperties,
+    ) -> std::result::Result<(), String> {
+        if !draft.zoom.is_finite() || draft.zoom <= 0.0 {
+            return Err("view zoom must be a positive finite number".to_string());
+        }
+        if !draft.distance.is_finite() || draft.distance <= 0.0 {
+            return Err("view distance must be a positive finite number".to_string());
+        }
+        if !draft.slab.is_finite() || draft.slab <= 0.0 {
+            return Err("view slab must be a positive finite number".to_string());
+        }
+        if !draft.stereo_dist.is_finite() || draft.stereo_dist < 0.0 {
+            return Err("stereo distance must be a non-negative finite number".to_string());
+        }
+        if !draft.center.iter().all(|value| value.is_finite())
+            || !draft.rotation.iter().all(|value| value.is_finite())
+        {
+            return Err("view vectors must contain finite numbers".to_string());
+        }
+        let rotation = Quat::from_xyzw(
+            draft.rotation[0] as f32,
+            draft.rotation[1] as f32,
+            draft.rotation[2] as f32,
+            draft.rotation[3] as f32,
+        );
+        if !rotation.is_finite() || rotation.length_squared() <= f32::EPSILON {
+            return Err("view rotation must be a non-zero finite quaternion".to_string());
+        }
+        camera.name = draft.name.clone();
+        camera.ortho_scale = (1000.0 / draft.zoom) as f32;
+        camera.distance = draft.distance as f32;
+        camera.slab_depth = draft.slab as f32;
+        camera.target = Vec3::new(
+            draft.center[0] as f32,
+            draft.center[1] as f32,
+            draft.center[2] as f32,
+        );
+        camera.orientation = rotation.normalize();
+        camera.perspective = draft.perspective;
+        camera.trans_mms = draft.trans_mms;
+        camera.rot_mms = draft.rot_mms;
+        camera.stereo_mode = draft.stereo_mode;
+        camera.stereo_distance = draft.stereo_dist as f32;
+        camera.swap_stereo_eyes = draft.swap_stereo_eyes;
+        camera.center_mark = draft.center_mark;
+        Ok(())
     }
 
     fn chain_dialog(&mut self, ctx: &egui::Context) {
@@ -7356,6 +7884,7 @@ impl GuiApplication {
 
 #[derive(Debug, Clone)]
 struct CameraController {
+    name: String,
     target: Vec3,
     /// Accumulated trackball orientation (object-to-camera rotation).
     ///
@@ -7365,7 +7894,14 @@ struct CameraController {
     orientation: Quat,
     distance: f32,
     ortho_scale: f32,
+    slab_depth: f32,
     perspective: bool,
+    trans_mms: bool,
+    rot_mms: bool,
+    stereo_mode: StereoMode,
+    stereo_distance: f32,
+    swap_stereo_eyes: bool,
+    center_mark: CenterMark,
     drag_mode: Option<CameraDragMode>,
     last_cursor: Option<egui::Pos2>,
     last_drag_cursor: Option<egui::Pos2>,
@@ -7399,11 +7935,19 @@ impl CameraDragMode {
 impl Default for CameraController {
     fn default() -> Self {
         Self {
+            name: "__current".to_string(),
             target: Vec3::ZERO,
             orientation: Quat::IDENTITY,
             distance: 120.0,
             ortho_scale: 40.0,
+            slab_depth: 240.0,
             perspective: true,
+            trans_mms: false,
+            rot_mms: false,
+            stereo_mode: StereoMode::None,
+            stereo_distance: 1.0,
+            swap_stereo_eyes: false,
+            center_mark: CenterMark::Cross,
             drag_mode: None,
             last_cursor: None,
             last_drag_cursor: None,
@@ -7424,6 +7968,7 @@ impl CameraController {
         self.target = center;
         self.distance = (radius * 3.2).max(8.0);
         self.ortho_scale = (radius * 1.25).max(4.0);
+        self.slab_depth = (radius * 4.0).max(50.0);
     }
 
     fn rotate_by(&mut self, dx: f32, dy: f32) {
@@ -7514,16 +8059,19 @@ impl CameraController {
         let rotation = self.rotation();
         let up = rotation * Vec3::Y;
         let view = Mat4::look_at_rh(self.eye(), self.target, up);
+        let half_slab = self.slab_depth.max(0.1) * 0.5;
+        let near = (self.distance - half_slab).max(0.01);
+        let far = (self.distance + self.slab_depth.max(0.1)).max(near + 0.01);
         let proj = if self.perspective {
-            Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 20000.0)
+            Mat4::perspective_rh(45.0_f32.to_radians(), aspect, near, far)
         } else {
             Mat4::orthographic_rh(
                 -self.ortho_scale * aspect,
                 self.ortho_scale * aspect,
                 -self.ortho_scale,
                 self.ortho_scale,
-                -20000.0,
-                20000.0,
+                near,
+                far,
             )
         };
         proj * view
@@ -7571,12 +8119,21 @@ impl CameraController {
 
     fn to_view_data(&self) -> String {
         format!(
-            "cuemol2-rs-view\t2\n\
+            "cuemol2-rs-view\t3\n\
+name\t{}\n\
 target\t{:.6}\t{:.6}\t{:.6}\n\
 rotation\t{:.6}\t{:.6}\t{:.6}\t{:.6}\n\
 distance\t{:.6}\n\
 ortho_scale\t{:.6}\n\
-perspective\t{}\n",
+slab\t{:.6}\n\
+perspective\t{}\n\
+trans_mms\t{}\n\
+rot_mms\t{}\n\
+stereo_mode\t{}\n\
+stereo_distance\t{:.6}\n\
+swap_stereo_eyes\t{}\n\
+center_mark\t{}\n",
+            self.name,
             self.target.x,
             self.target.y,
             self.target.z,
@@ -7586,7 +8143,14 @@ perspective\t{}\n",
             self.orientation.w,
             self.distance,
             self.ortho_scale,
-            self.perspective
+            self.slab_depth,
+            self.perspective,
+            self.trans_mms,
+            self.rot_mms,
+            stereo_mode_name(self.stereo_mode),
+            self.stereo_distance,
+            self.swap_stereo_eyes,
+            center_mark_name(self.center_mark),
         )
     }
 
@@ -7600,9 +8164,12 @@ perspective\t{}\n",
             self.target.z as f64,
         ));
         camera.set_cam_dist(self.distance as f64);
-        camera.set_slab_depth((self.distance * 2.0).max(1.0) as f64);
+        camera.set_slab_depth(self.slab_depth as f64);
         camera.set_zoom((1000.0 / self.ortho_scale.max(0.1)) as f64);
         camera.set_perspective(self.perspective);
+        camera.set_stereo_mode(self.stereo_mode);
+        camera.set_stereo_distance(self.stereo_distance as f64);
+        camera.set_center_mark(qsys_center_mark(self.center_mark));
         camera.set_rotation(cuemol_core::Quat::new(
             rotation.x as f64,
             rotation.y as f64,
@@ -7628,12 +8195,17 @@ perspective\t{}\n",
         };
         let center = camera.center();
         Self {
+            name: nonempty_or(camera.name().to_string(), "__current"),
             target: Vec3::new(center.x as f32, center.y as f32, center.z as f32),
             orientation: Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32)
                 .normalize(),
             distance: camera.cam_dist() as f32,
             ortho_scale,
+            slab_depth: camera.slab_depth().max(0.1) as f32,
             perspective: camera.is_perspective(),
+            stereo_mode: camera.stereo_mode(),
+            stereo_distance: camera.stereo_distance().max(0.0) as f32,
+            center_mark: center_mark_from_qsys(camera.center_mark()),
             ..defaults
         }
     }
@@ -7649,9 +8221,13 @@ perspective\t{}\n",
             if trimmed.is_empty() {
                 continue;
             }
+            if let Some(name) = line.strip_prefix("name\t") {
+                camera.name = name.to_string();
+                continue;
+            }
             let parts = trimmed.split_whitespace().collect::<Vec<_>>();
             match parts.as_slice() {
-                ["cuemol2-rs-view", "1" | "2"] => saw_header = true,
+                ["cuemol2-rs-view", "1" | "2" | "3"] => saw_header = true,
                 ["target", x, y, z] => {
                     camera.target = Vec3::new(parse_f32(x)?, parse_f32(y)?, parse_f32(z)?);
                 }
@@ -7666,13 +8242,16 @@ perspective\t{}\n",
                 ["ortho_scale", value] => {
                     camera.ortho_scale = parse_f32(value)?.clamp(0.2, 10000.0);
                 }
+                ["slab", value] => camera.slab_depth = parse_f32(value)?.clamp(0.1, 100_000.0),
                 ["perspective", value] => {
-                    camera.perspective = match *value {
-                        "true" => true,
-                        "false" => false,
-                        _ => return Err(CueMolError::parse("invalid perspective value")),
-                    };
+                    camera.perspective = parse_view_bool(value)?;
                 }
+                ["trans_mms", value] => camera.trans_mms = parse_view_bool(value)?,
+                ["rot_mms", value] => camera.rot_mms = parse_view_bool(value)?,
+                ["stereo_mode", value] => camera.stereo_mode = parse_stereo_mode(value)?,
+                ["stereo_distance", value] => camera.stereo_distance = parse_f32(value)?.max(0.0),
+                ["swap_stereo_eyes", value] => camera.swap_stereo_eyes = parse_view_bool(value)?,
+                ["center_mark", value] => camera.center_mark = parse_center_mark(value)?,
                 _ => return Err(CueMolError::parse(format!("invalid view line: {trimmed}"))),
             }
         }
@@ -7686,6 +8265,188 @@ perspective\t{}\n",
         }
         Ok(camera)
     }
+}
+
+fn stereo_mode_name(mode: StereoMode) -> &'static str {
+    match mode {
+        StereoMode::None => "none",
+        StereoMode::Parallel => "para",
+        StereoMode::Cross => "cross",
+        StereoMode::Hardware => "hardware",
+    }
+}
+
+fn parse_stereo_mode(value: &str) -> Result<StereoMode> {
+    match value {
+        "none" => Ok(StereoMode::None),
+        "para" | "parallel" => Ok(StereoMode::Parallel),
+        "cross" => Ok(StereoMode::Cross),
+        "hardware" | "hw" => Ok(StereoMode::Hardware),
+        _ => Err(CueMolError::parse(format!("invalid stereo mode: {value}"))),
+    }
+}
+
+fn center_mark_name(mark: CenterMark) -> &'static str {
+    match mark {
+        CenterMark::None => "none",
+        CenterMark::Cross => "crosshair",
+        CenterMark::Axis => "axis",
+    }
+}
+
+fn parse_center_mark(value: &str) -> Result<CenterMark> {
+    match value {
+        "none" => Ok(CenterMark::None),
+        "cross" | "crosshair" => Ok(CenterMark::Cross),
+        "axis" => Ok(CenterMark::Axis),
+        _ => Err(CueMolError::parse(format!("invalid center mark: {value}"))),
+    }
+}
+
+fn qsys_center_mark(mark: CenterMark) -> cuemol_qsys::CenterMark {
+    match mark {
+        CenterMark::None => cuemol_qsys::CenterMark::None,
+        CenterMark::Cross => cuemol_qsys::CenterMark::Cross,
+        CenterMark::Axis => cuemol_qsys::CenterMark::Axis,
+    }
+}
+
+fn center_mark_from_qsys(mark: cuemol_qsys::CenterMark) -> CenterMark {
+    match mark {
+        cuemol_qsys::CenterMark::None => CenterMark::None,
+        cuemol_qsys::CenterMark::Cross => CenterMark::Cross,
+        cuemol_qsys::CenterMark::Axis => CenterMark::Axis,
+    }
+}
+
+fn parse_view_bool(value: &str) -> Result<bool> {
+    match value {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(CueMolError::parse(format!("invalid boolean: {value}"))),
+    }
+}
+
+fn view_property_vectors(properties: &NativeViewProperties) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let rotation = normalized_or_identity(Quat::from_xyzw(
+        properties.rotation[0] as f32,
+        properties.rotation[1] as f32,
+        properties.rotation[2] as f32,
+        properties.rotation[3] as f32,
+    ));
+    let right = (rotation * Vec3::X).to_array().map(f64::from);
+    let up = (rotation * Vec3::Y).to_array().map(f64::from);
+    let forward = (rotation * -Vec3::Z).to_array().map(f64::from);
+    (up, right, forward)
+}
+
+fn view_property_value(properties: &NativeViewProperties, key: ViewPropertyKey) -> String {
+    use ViewPropertyKey as Key;
+    let (up, right, forward) = view_property_vectors(properties);
+    match key {
+        Key::Name => properties.name.clone(),
+        Key::Uid => properties.uid.to_string(),
+        Key::Active => properties.active.to_string(),
+        Key::Zoom => format!("{:.6}", properties.zoom),
+        Key::Distance => format!("{:.6}", properties.distance),
+        Key::Slab => format!("{:.6}", properties.slab),
+        Key::Center => format_vector(properties.center),
+        Key::CenterX => format!("{:.6}", properties.center[0]),
+        Key::CenterY => format!("{:.6}", properties.center[1]),
+        Key::CenterZ => format!("{:.6}", properties.center[2]),
+        Key::Rotation => format_quaternion(properties.rotation),
+        Key::RotationX => format!("{:.6}", properties.rotation[0]),
+        Key::RotationY => format!("{:.6}", properties.rotation[1]),
+        Key::RotationZ => format!("{:.6}", properties.rotation[2]),
+        Key::RotationW => format!("{:.6}", properties.rotation[3]),
+        Key::Perspective => properties.perspective.to_string(),
+        Key::Width => properties.width.to_string(),
+        Key::Height => properties.height.to_string(),
+        Key::TransMms => properties.trans_mms.to_string(),
+        Key::RotMms => properties.rot_mms.to_string(),
+        Key::StereoMode => stereo_mode_name(properties.stereo_mode).to_string(),
+        Key::HasHwStereo => properties.has_hw_stereo.to_string(),
+        Key::StereoDist => format!("{:.6}", properties.stereo_dist),
+        Key::SwapStereoEyes => properties.swap_stereo_eyes.to_string(),
+        Key::UpVec => format_vector(up),
+        Key::UpVecX => format!("{:.6}", up[0]),
+        Key::UpVecY => format!("{:.6}", up[1]),
+        Key::UpVecZ => format!("{:.6}", up[2]),
+        Key::RightVec => format_vector(right),
+        Key::RightVecX => format!("{:.6}", right[0]),
+        Key::RightVecY => format!("{:.6}", right[1]),
+        Key::RightVecZ => format!("{:.6}", right[2]),
+        Key::ForwardVec => format_vector(forward),
+        Key::ForwardVecX => format!("{:.6}", forward[0]),
+        Key::ForwardVecY => format!("{:.6}", forward[1]),
+        Key::ForwardVecZ => format!("{:.6}", forward[2]),
+        Key::CenterMark => center_mark_name(properties.center_mark).to_string(),
+    }
+}
+
+fn format_vector(value: [f64; 3]) -> String {
+    format!("({:.6}, {:.6}, {:.6})", value[0], value[1], value[2])
+}
+
+fn format_quaternion(value: [f64; 4]) -> String {
+    format!(
+        "({:.6}, {:.6}, {:.6}, {:.6})",
+        value[0], value[1], value[2], value[3]
+    )
+}
+
+fn view_property_is_default(properties: &NativeViewProperties, key: ViewPropertyKey) -> bool {
+    use ViewPropertyKey as Key;
+    match key {
+        Key::Name => properties.name.is_empty(),
+        Key::Zoom => approx_property(properties.zoom, 50.0),
+        Key::Distance => approx_property(properties.distance, 200.0),
+        Key::Slab => approx_property(properties.slab, 50.0),
+        Key::CenterX => approx_property(properties.center[0], 0.0),
+        Key::CenterY => approx_property(properties.center[1], 0.0),
+        Key::CenterZ => approx_property(properties.center[2], 0.0),
+        Key::RotationX => approx_property(properties.rotation[0], 0.0),
+        Key::RotationY => approx_property(properties.rotation[1], 0.0),
+        Key::RotationZ => approx_property(properties.rotation[2], 0.0),
+        Key::RotationW => approx_property(properties.rotation[3], 1.0),
+        Key::Perspective => !properties.perspective,
+        Key::TransMms => !properties.trans_mms,
+        Key::RotMms => !properties.rot_mms,
+        Key::StereoMode => properties.stereo_mode == StereoMode::None,
+        Key::StereoDist => approx_property(properties.stereo_dist, 1.0),
+        Key::SwapStereoEyes => !properties.swap_stereo_eyes,
+        Key::CenterMark => properties.center_mark == CenterMark::Cross,
+        _ => false,
+    }
+}
+
+fn reset_view_property(properties: &mut NativeViewProperties, key: ViewPropertyKey) {
+    use ViewPropertyKey as Key;
+    match key {
+        Key::Name => properties.name.clear(),
+        Key::Zoom => properties.zoom = 50.0,
+        Key::Distance => properties.distance = 200.0,
+        Key::Slab => properties.slab = 50.0,
+        Key::CenterX => properties.center[0] = 0.0,
+        Key::CenterY => properties.center[1] = 0.0,
+        Key::CenterZ => properties.center[2] = 0.0,
+        Key::RotationX => properties.rotation[0] = 0.0,
+        Key::RotationY => properties.rotation[1] = 0.0,
+        Key::RotationZ => properties.rotation[2] = 0.0,
+        Key::RotationW => properties.rotation[3] = 1.0,
+        Key::Perspective => properties.perspective = false,
+        Key::TransMms => properties.trans_mms = false,
+        Key::RotMms => properties.rot_mms = false,
+        Key::StereoMode => properties.stereo_mode = StereoMode::None,
+        Key::StereoDist => properties.stereo_dist = 1.0,
+        Key::SwapStereoEyes => properties.swap_stereo_eyes = false,
+        Key::CenterMark => properties.center_mark = CenterMark::Cross,
+        _ => {}
+    }
+}
+
+fn approx_property(actual: f64, expected: f64) -> bool {
+    (actual - expected).abs() <= 1.0e-9
 }
 
 fn tool_status_text(_title: &str) -> &'static str {
@@ -10211,7 +10972,15 @@ mod tests {
     #[test]
     fn camera_controller_roundtrips_view_data_and_mutates_by_mouse_actions() {
         let mut camera = CameraController {
+            name: "custom view".to_string(),
             target: Vec3::new(1.0, 2.0, 3.0),
+            slab_depth: 83.0,
+            trans_mms: true,
+            rot_mms: true,
+            stereo_mode: StereoMode::Cross,
+            stereo_distance: 2.25,
+            swap_stereo_eyes: true,
+            center_mark: CenterMark::Axis,
             ..Default::default()
         };
         camera.rotate_by(20.0, -10.0);
@@ -10225,10 +10994,22 @@ mod tests {
         assert!((parsed.target.z - camera.target.z).abs() < 1.0e-5);
         assert!(parsed.orientation.abs_diff_eq(camera.orientation, 1.0e-5));
         assert!(parsed.distance < 120.0);
+        assert_eq!(parsed.name, camera.name);
+        assert_eq!(parsed.slab_depth, camera.slab_depth);
+        assert!(parsed.trans_mms);
+        assert!(parsed.rot_mms);
+        assert_eq!(parsed.stereo_mode, StereoMode::Cross);
+        assert_eq!(parsed.stereo_distance, camera.stereo_distance);
+        assert!(parsed.swap_stereo_eyes);
+        assert_eq!(parsed.center_mark, CenterMark::Axis);
         let qsys_camera = parsed.to_qsys_camera("__current");
         assert_eq!(qsys_camera.name(), "__current");
         assert_eq!(qsys_camera.center().x, parsed.target.x as f64);
         assert_eq!(qsys_camera.is_perspective(), parsed.perspective);
+        assert_eq!(qsys_camera.slab_depth(), parsed.slab_depth as f64);
+        assert_eq!(qsys_camera.stereo_mode(), StereoMode::Cross);
+        assert_eq!(qsys_camera.stereo_distance(), 2.25);
+        assert_eq!(qsys_camera.center_mark(), cuemol_qsys::CenterMark::Axis);
         assert_eq!(
             CameraDragMode::from_button(MouseButton::Left),
             Some(CameraDragMode::Rotate)
@@ -10250,7 +11031,11 @@ mod tests {
                 .normalize(),
             distance: 84.0,
             ortho_scale: 22.5,
+            slab_depth: 74.0,
             perspective: false,
+            stereo_mode: StereoMode::Parallel,
+            stereo_distance: 3.5,
+            center_mark: CenterMark::None,
             ..Default::default()
         };
         // Sanity: a non-identity orientation, so the quaternion path is exercised.
@@ -10265,6 +11050,10 @@ mod tests {
             "ortho_scale"
         );
         assert_eq!(back.perspective, cc.perspective, "perspective");
+        assert_eq!(back.slab_depth, cc.slab_depth, "slab_depth");
+        assert_eq!(back.stereo_mode, cc.stereo_mode, "stereo_mode");
+        assert_eq!(back.stereo_distance, cc.stereo_distance, "stereo_distance");
+        assert_eq!(back.center_mark, cc.center_mark, "center_mark");
         // q and -q are the same rotation; accept either sign.
         let diff = (back.orientation - cc.orientation)
             .length()
@@ -10274,6 +11063,113 @@ mod tests {
         // The perspective flag round-trips both ways.
         cc.perspective = true;
         assert!(CameraController::from_qsys_camera(&cc.to_qsys_camera("x")).perspective);
+    }
+
+    #[test]
+    fn native_view_property_editor_matches_reference_contract_and_applies_values() {
+        let names = VIEW_PROPERTY_DEFINITIONS
+            .iter()
+            .map(|definition| definition.name.trim())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "name",
+                "uid",
+                "active",
+                "zoom",
+                "distance",
+                "slab",
+                "center",
+                "center.x",
+                "center.y",
+                "center.z",
+                "rotation",
+                "rotation.x",
+                "rotation.y",
+                "rotation.z",
+                "rotation.w",
+                "perspective",
+                "width",
+                "height",
+                "trans_mms",
+                "rot_mms",
+                "stereoMode",
+                "hasHWStereo",
+                "stereoDist",
+                "swapStereoEyes",
+                "up_vec",
+                "up_vec.x",
+                "up_vec.y",
+                "up_vec.z",
+                "right_vec",
+                "right_vec.x",
+                "right_vec.y",
+                "right_vec.z",
+                "forward_vec",
+                "forward_vec.x",
+                "forward_vec.y",
+                "forward_vec.z",
+                "centerMark",
+            ]
+        );
+
+        let viewport = egui::Rect::from_min_size(egui::pos2(5.0, 7.0), egui::vec2(800.0, 600.0));
+        let mut camera = CameraController::default();
+        let mut properties = NativeViewProperties::from_camera(&camera, Some(viewport));
+        assert_eq!((properties.width, properties.height), (800, 600));
+        properties.name = "edited view".to_string();
+        properties.zoom = 62.5;
+        properties.distance = 160.0;
+        properties.slab = 90.0;
+        properties.center = [1.0, -2.0, 3.5];
+        properties.rotation = [0.0, 0.0, 1.0, 1.0];
+        properties.perspective = false;
+        properties.trans_mms = true;
+        properties.rot_mms = true;
+        properties.stereo_mode = StereoMode::Hardware;
+        properties.stereo_dist = 2.5;
+        properties.swap_stereo_eyes = true;
+        properties.center_mark = CenterMark::Axis;
+
+        GuiApplication::apply_view_properties(&mut camera, &properties).unwrap();
+        assert_eq!(camera.name, "edited view");
+        assert!((camera.ortho_scale - 16.0).abs() < 1.0e-5);
+        assert_eq!(camera.distance, 160.0);
+        assert_eq!(camera.slab_depth, 90.0);
+        assert_eq!(camera.target, Vec3::new(1.0, -2.0, 3.5));
+        assert!(camera.orientation.is_normalized());
+        assert!(!camera.perspective);
+        assert!(camera.trans_mms);
+        assert!(camera.rot_mms);
+        assert_eq!(camera.stereo_mode, StereoMode::Hardware);
+        assert_eq!(camera.stereo_distance, 2.5);
+        assert!(camera.swap_stereo_eyes);
+        assert_eq!(camera.center_mark, CenterMark::Axis);
+
+        properties.rotation = [0.0; 4];
+        assert_eq!(
+            GuiApplication::apply_view_properties(&mut camera, &properties),
+            Err("view rotation must be a non-zero finite quaternion".to_string())
+        );
+    }
+
+    #[test]
+    fn native_view_property_dialog_keeps_an_isolated_draft() {
+        let ctx = egui::Context::default();
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.viewport_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(900.0, 640.0),
+        ));
+        app.open_view_properties(&camera);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.view_props_dialog(ctx, &mut camera)
+        });
+        assert!(app.show_view_props);
+        assert!(app.view_properties_draft.is_some());
+        assert_eq!(camera.name, "__current");
     }
 
     #[test]
@@ -11245,6 +12141,24 @@ mod tests {
                 });
             harness.run();
             save_harness(&mut harness, &out_dir.join("options.png"));
+        }
+
+        // (1b4) Generic View property editor with the full reference property table.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            app.viewport_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 640.0),
+            ));
+            app.open_view_properties(&camera);
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1100.0, 820.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("view_properties.png"));
         }
 
         // (1c) Atom labels overlaid on a small selection. The egui painter text DOES
