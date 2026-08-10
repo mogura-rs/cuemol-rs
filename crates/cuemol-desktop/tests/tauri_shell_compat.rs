@@ -484,6 +484,30 @@ fn desktop_startup_and_fetch_overlap_independent_initialization() {
 }
 
 #[test]
+fn new_tab_dialog_matches_scene_and_inherited_view_flow() {
+    for label in [
+        "New Tab/Window",
+        "Create new tab for:",
+        "New Scene",
+        "New View for ${currentSceneName}",
+        "New View (no current scene)",
+        "Inherit view props",
+    ] {
+        assert!(JS.contains(label), "missing new-tab behavior {label}");
+    }
+    assert!(JS.contains(r#"mutate("new_tab", result)"#));
+    assert!(JS.contains(r#"mutate("activate_view", { viewUid: view.uid })"#));
+    assert!(JS.contains("for (const view of snapshot.views || [])"));
+    assert!(JS.contains("let defaultSceneName = `Untitled ${sceneIndex}`"));
+    assert!(JS.contains("const label = `${scene.name}:${view.name}`"));
+    assert!(CSS.contains(".reference-dialog.new-tab-dialog"));
+    assert!(NATIVE_GUI_RS.contains("fn new_tab_dialog"));
+    assert!(NATIVE_GUI_RS.contains("NativeNewTabMode::View"));
+    assert!(TAURI_APP_RS.contains("ModelRequest::NewTab"));
+    assert!(TAURI_APP_RS.contains("ModelRequest::ActivateView"));
+}
+
+#[test]
 fn png_export_matches_the_reference_options_dialog() {
     for label in [
         "PNG options",

@@ -2046,6 +2046,26 @@ summary:focus-visible {
   width: min(360px, calc(100vw - 48px));
 }
 
+.reference-dialog.new-tab-dialog {
+  width: min(360px, calc(100vw - 48px));
+}
+
+.new-tab-options {
+  display: grid;
+  gap: 7px;
+}
+
+.new-tab-options .dialog-radio {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.new-tab-options .dialog-field,
+.new-tab-options .dialog-checkbox {
+  margin-left: 24px;
+}
+
 .reference-dialog form {
   display: grid;
   grid-template-rows: 30px minmax(110px, auto) 36px;

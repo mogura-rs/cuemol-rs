@@ -680,6 +680,22 @@ struct NativeSceneSaveDraft {
     base64: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeNewTabMode {
+    Scene,
+    View,
+}
+
+#[derive(Debug, Clone)]
+struct NativeNewTabDraft {
+    mode: NativeNewTabMode,
+    scene_name: String,
+    view_name: String,
+    default_scene_name: String,
+    default_view_name: String,
+    inherit_view_props: bool,
+}
+
 #[derive(Debug)]
 enum NativeTrajectoryPanelAction {
     SetFrame {
@@ -762,6 +778,7 @@ struct GuiApplication {
     merge_target_object: Option<cuemol_core::Uid>,
     png_export_draft: Option<NativePngExportDraft>,
     scene_save_draft: Option<NativeSceneSaveDraft>,
+    new_tab_draft: Option<NativeNewTabDraft>,
     renderer_setup_draft: Option<NativeRendererSetupDraft>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
@@ -2534,7 +2551,7 @@ impl LeftPanel {
 impl GuiApplication {
     fn new() -> Self {
         let mut state = DesktopAppState::new();
-        state.new_scene("Untitled", true);
+        state.new_scene("Untitled 1", true);
         Self {
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
@@ -2561,6 +2578,7 @@ impl GuiApplication {
             merge_target_object: None,
             png_export_draft: None,
             scene_save_draft: None,
+            new_tab_draft: None,
             renderer_setup_draft: None,
             pdb_download_receiver: None,
             url_download_receiver: None,
@@ -3119,21 +3137,32 @@ impl GuiApplication {
         egui::TopBottomPanel::top("scene_tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 let scenes = self.state.scene_summaries();
-                let active = self.state.active_scene();
-                for scene in &scenes {
-                    let selected = Some(scene.uid) == active;
-                    if ui.selectable_label(selected, &scene.name).clicked() && !selected {
-                        self.state.set_active_scene(Some(scene.uid));
+                let views = self.state.view_summaries();
+                for view in &views {
+                    let Some(scene) = scenes.iter().find(|scene| scene.uid == view.scene_uid)
+                    else {
+                        continue;
+                    };
+                    let label = format!("{}:{}", scene.name, view.name);
+                    if ui.selectable_label(view.active, label).clicked() && !view.active {
+                        let current = camera.to_qsys_camera("__current");
+                        let _ = self.state.set_active_view_camera(&current);
+                        match self.state.activate_view(view.uid) {
+                            Ok(next) => *camera = CameraController::from_qsys_camera(&next),
+                            Err(error) => {
+                                self.set_error(error);
+                                continue;
+                            }
+                        }
                         self.selected_object = None;
                         self.selected_renderer = None;
                         self.workspace_aux_selection = None;
                         self.sync_active_scene_properties();
                         self.rebuild_snapshot();
-                        camera.fit_snapshot(&self.snapshot);
                     }
                 }
                 if ui.button("+").on_hover_text("New scene tab").clicked() {
-                    self.new_scene(camera);
+                    self.open_new_tab_dialog();
                 }
             });
         });
@@ -3164,7 +3193,7 @@ impl GuiApplication {
                         ui.close();
                     }
                     if ui.button("New Tab").clicked() {
-                        self.new_scene(camera);
+                        self.open_new_tab_dialog();
                         ui.close();
                     }
                     ui.separator();
@@ -3452,7 +3481,7 @@ impl GuiApplication {
     fn ribbon_home(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         ui.horizontal(|ui| {
             if ui.button("New Tab").on_hover_text("New scene").clicked() {
-                self.new_scene(camera);
+                self.open_new_tab_dialog();
             }
             if ui.button("Open").on_hover_text("Open file").clicked() {
                 self.choose_open_file(camera);
@@ -5474,10 +5503,24 @@ impl GuiApplication {
         if self.state.active_scene() == Some(scene_uid) {
             return;
         }
-        self.state.set_active_scene(Some(scene_uid));
+        if self.state.active_view_summary().is_some() {
+            let current = camera.to_qsys_camera("__current");
+            if let Err(error) = self.state.set_active_view_camera(&current) {
+                self.set_error(error);
+                return;
+            }
+        }
+        if !self.state.set_active_scene(Some(scene_uid)) {
+            self.set_status(format!("Scene {} was not found", scene_uid.get()));
+            return;
+        }
         self.sync_active_scene_properties();
         self.rebuild_snapshot();
-        camera.fit_snapshot(&self.snapshot);
+        if let Some(next) = self.state.active_view_camera() {
+            *camera = CameraController::from_qsys_camera(&next);
+        } else {
+            camera.fit_snapshot(&self.snapshot);
+        }
     }
 
     fn selected_renderer_is_group(&self) -> bool {
@@ -8720,7 +8763,7 @@ impl GuiApplication {
             .find(|command| ctx.input_mut(|input| input.consume_shortcut(&command.shortcut())));
         match command {
             Some(MainShortcutCommand::OpenScene) => self.choose_open_scene(camera),
-            Some(MainShortcutCommand::NewTab) => self.new_scene(camera),
+            Some(MainShortcutCommand::NewTab) => self.open_new_tab_dialog(),
             Some(MainShortcutCommand::NewWindow) => self.new_window(camera),
             Some(MainShortcutCommand::OpenFile) => self.choose_open_file(camera),
             Some(MainShortcutCommand::ReloadScene) => self.reload_current_path(camera),
@@ -9044,17 +9087,111 @@ impl GuiApplication {
     }
 
     fn new_scene(&mut self, camera: &mut CameraController) {
+        let (scene_name, _) = self.proposed_new_tab_names();
+        self.create_new_scene(&scene_name, camera);
+    }
+
+    fn create_new_scene(&mut self, name: &str, camera: &mut CameraController) {
         let undo = self.capture_undo();
-        self.state.new_scene("Untitled", true);
+        let current = camera.to_qsys_camera("__current");
+        let _ = self.state.set_active_view_camera(&current);
+        self.state.new_scene(name, true);
         self.push_undo_snapshot(undo);
         self.selected_object = None;
         self.selected_renderer = None;
         self.workspace_aux_selection = None;
         self.last_loaded_path = None;
         self.sync_active_scene_properties();
-        self.set_status("New scene created");
+        self.set_status(format!("New scene: {name}"));
         self.rebuild_snapshot();
-        camera.fit_snapshot(&self.snapshot);
+        *camera = CameraController::default();
+    }
+
+    fn proposed_new_tab_names(&self) -> (String, String) {
+        let scene_names = self
+            .state
+            .scene_summaries()
+            .into_iter()
+            .map(|scene| scene.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut scene_index = 1_u64;
+        let mut scene_name = format!("Untitled {scene_index}");
+        while scene_names.contains(&scene_name) {
+            scene_index += 1;
+            scene_name = format!("Untitled {scene_index}");
+        }
+        let active_scene = self.state.active_scene();
+        let view_names = self
+            .state
+            .view_summaries()
+            .into_iter()
+            .filter(|view| Some(view.scene_uid) == active_scene)
+            .map(|view| view.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut view_index = u64::from(active_scene.is_none());
+        let mut view_name = view_index.to_string();
+        while view_names.contains(&view_name) {
+            view_index += 1;
+            view_name = view_index.to_string();
+        }
+        (scene_name, view_name)
+    }
+
+    fn open_new_tab_dialog(&mut self) {
+        let (scene_name, view_name) = self.proposed_new_tab_names();
+        self.new_tab_draft = Some(NativeNewTabDraft {
+            mode: NativeNewTabMode::Scene,
+            scene_name: scene_name.clone(),
+            view_name: view_name.clone(),
+            default_scene_name: scene_name,
+            default_view_name: view_name,
+            inherit_view_props: true,
+        });
+    }
+
+    fn apply_new_tab_draft(&mut self, draft: NativeNewTabDraft, camera: &mut CameraController) {
+        match draft.mode {
+            NativeNewTabMode::Scene => {
+                let name = draft.scene_name.trim();
+                self.create_new_scene(
+                    if name.is_empty() {
+                        &draft.default_scene_name
+                    } else {
+                        name
+                    },
+                    camera,
+                );
+            }
+            NativeNewTabMode::View => {
+                let Some(scene_uid) = self.state.active_scene() else {
+                    self.set_status("Error: no active scene");
+                    return;
+                };
+                let undo = self.capture_undo();
+                let current = camera.to_qsys_camera("__current");
+                if let Err(error) = self.state.set_active_view_camera(&current) {
+                    self.set_error(error);
+                    return;
+                }
+                let name = draft.view_name.trim();
+                let inherited = draft.inherit_view_props.then_some(&current);
+                let name = if name.is_empty() {
+                    draft.default_view_name.as_str()
+                } else {
+                    name
+                };
+                match self.state.new_view(scene_uid, name, inherited) {
+                    Ok(_) => {
+                        self.push_undo_snapshot(undo);
+                        *camera = CameraController::from_qsys_camera(
+                            &self.state.active_view_camera().unwrap_or_default(),
+                        );
+                        self.set_status(format!("New view: {name}"));
+                    }
+                    Err(error) => self.set_error(error),
+                }
+            }
+        }
     }
 
     fn new_window(&mut self, camera: &mut CameraController) {
@@ -9063,7 +9200,11 @@ impl GuiApplication {
     }
 
     fn close_current_scene(&mut self, camera: &mut CameraController) {
-        let modified_scenes = self.modified_scenes.clone();
+        let closed_scene = self.state.active_scene();
+        let mut modified_scenes = self.modified_scenes.clone();
+        if let Some(scene_uid) = closed_scene {
+            modified_scenes.remove(&scene_uid);
+        }
         let undo = self.capture_undo();
         match self.state.close_active_scene() {
             Ok(Some(_)) => {
@@ -9076,12 +9217,17 @@ impl GuiApplication {
                 self.sync_active_scene_properties();
                 self.set_status("Current tab closed");
                 self.rebuild_snapshot();
-                camera.fit_snapshot(&self.snapshot);
+                if let Some(next) = self.state.active_view_camera() {
+                    *camera = CameraController::from_qsys_camera(&next);
+                } else {
+                    camera.fit_snapshot(&self.snapshot);
+                }
             }
             Ok(None) => {
                 self.push_undo_snapshot(undo);
                 self.modified_scenes = modified_scenes;
-                self.state.new_scene("Untitled", true);
+                let (scene_name, _) = self.proposed_new_tab_names();
+                self.state.new_scene(scene_name, true);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
@@ -9089,7 +9235,9 @@ impl GuiApplication {
                 self.sync_active_scene_properties();
                 self.set_status("Last tab closed; new scene created");
                 self.rebuild_snapshot();
-                camera.fit_snapshot(&self.snapshot);
+                *camera = CameraController::from_qsys_camera(
+                    &self.state.active_view_camera().unwrap_or_default(),
+                );
             }
             Err(error) => self.set_error(error),
         }
@@ -9119,10 +9267,14 @@ impl GuiApplication {
         path: &Path,
         options: Option<crate::GuiSceneSaveOptions>,
     ) {
-        if let Err(error) = self
-            .state
-            .set_active_scene_camera(camera.to_qsys_camera("__current"))
-        {
+        let saved_camera = camera.to_qsys_camera("__current");
+        if self.state.active_view_summary().is_some() {
+            if let Err(error) = self.state.set_active_view_camera(&saved_camera) {
+                self.set_error(error);
+                return;
+            }
+        }
+        if let Err(error) = self.state.set_active_scene_camera(saved_camera) {
             self.set_error(error);
             return;
         }
@@ -10319,6 +10471,7 @@ impl GuiApplication {
         self.md_trajectory_dialog(ctx);
         self.png_export_dialog(ctx);
         self.scene_save_options_dialog(ctx, camera);
+        self.new_tab_dialog(ctx, camera);
         self.renderer_setup_dialog(ctx, camera);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
@@ -15696,6 +15849,74 @@ impl GuiApplication {
             }
         } else if open && !cancel {
             self.png_export_draft = Some(draft);
+        }
+    }
+
+    fn new_tab_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        let Some(mut draft) = self.new_tab_draft.take() else {
+            return;
+        };
+        let active_scene_name = self
+            .state
+            .active_scene_summary()
+            .map(|scene| scene.name)
+            .filter(|name| !name.is_empty());
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("New Tab/Window")
+            .default_width(360.0)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Create new tab for:");
+                ui.add_space(4.0);
+                ui.radio_value(&mut draft.mode, NativeNewTabMode::Scene, "New Scene");
+                ui.horizontal(|ui| {
+                    ui.add_space(24.0);
+                    ui.label("Name:");
+                    ui.add_enabled(
+                        draft.mode == NativeNewTabMode::Scene,
+                        egui::TextEdit::singleline(&mut draft.scene_name).desired_width(200.0),
+                    );
+                });
+                let view_label = active_scene_name.as_deref().map_or_else(
+                    || "New View (no current scene)".to_string(),
+                    |name| format!("New View for {name}"),
+                );
+                ui.add_enabled_ui(active_scene_name.is_some(), |ui| {
+                    ui.radio_value(&mut draft.mode, NativeNewTabMode::View, view_label);
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(24.0);
+                    ui.label("Name:");
+                    ui.add_enabled(
+                        draft.mode == NativeNewTabMode::View,
+                        egui::TextEdit::singleline(&mut draft.view_name).desired_width(200.0),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(24.0);
+                    ui.add_enabled(
+                        draft.mode == NativeNewTabMode::View,
+                        egui::Checkbox::new(&mut draft.inherit_view_props, "Inherit view props"),
+                    );
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                });
+            });
+        if accept {
+            self.apply_new_tab_draft(draft, camera);
+        } else if open && !cancel {
+            self.new_tab_draft = Some(draft);
         }
     }
 
@@ -21270,6 +21491,50 @@ mod tests {
         assert_eq!(draft.version, crate::GuiQscVersion::Qdf0);
         assert_eq!(draft.compression, crate::GuiQscCompression::Xz);
         assert!(!draft.base64);
+    }
+
+    #[test]
+    fn native_new_tab_dialog_creates_inherited_views_and_scenes() {
+        let mut app = GuiApplication::new();
+        app.open_new_tab_dialog();
+        let ctx = egui::Context::default();
+        let mut camera = CameraController {
+            ortho_scale: 79.0,
+            ..CameraController::default()
+        };
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.new_tab_dialog(ctx, &mut camera)
+        });
+        let mut draft = app
+            .new_tab_draft
+            .take()
+            .expect("new tab dialog remains open");
+        assert_eq!(draft.mode, NativeNewTabMode::Scene);
+        assert_eq!(draft.default_scene_name, "Untitled 2");
+        assert_eq!(draft.default_view_name, "1");
+        assert!(draft.inherit_view_props);
+
+        draft.mode = NativeNewTabMode::View;
+        draft.view_name = "Detail".to_string();
+        app.apply_new_tab_draft(draft, &mut camera);
+        assert_eq!(app.state.view_summaries().len(), 2);
+        assert_eq!(app.state.active_view_summary().unwrap().name, "Detail");
+        assert_eq!(camera.ortho_scale, 79.0);
+
+        app.apply_new_tab_draft(
+            NativeNewTabDraft {
+                mode: NativeNewTabMode::Scene,
+                scene_name: "Second".to_string(),
+                view_name: "2".to_string(),
+                default_scene_name: "Untitled 2".to_string(),
+                default_view_name: "2".to_string(),
+                inherit_view_props: false,
+            },
+            &mut camera,
+        );
+        assert_eq!(app.state.scene_summaries().len(), 2);
+        assert_eq!(app.state.view_summaries().len(), 3);
+        assert_eq!(app.state.active_scene_summary().unwrap().name, "Second");
     }
 
     #[test]

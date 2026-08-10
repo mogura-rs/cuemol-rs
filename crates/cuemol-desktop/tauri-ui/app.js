@@ -4138,6 +4138,106 @@ function showSceneSaveOptions() {
   });
 }
 
+function showNewTabDialog() {
+  if (referenceDialog.open) referenceDialog.close();
+  dialogTitle.textContent = "New Tab/Window";
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog new-tab-dialog";
+
+  const activeScene = snapshot.scenes.find((scene) => scene.active) || null;
+  const currentSceneName = activeScene?.name || null;
+  const existingSceneNames = new Set(snapshot.scenes.map((scene) => scene.name));
+  let sceneIndex = 1;
+  let defaultSceneName = `Untitled ${sceneIndex}`;
+  while (existingSceneNames.has(defaultSceneName)) {
+    defaultSceneName = `Untitled ${++sceneIndex}`;
+  }
+  const sceneViews = (snapshot.views || []).filter(
+    (view) => view.sceneUid === activeScene?.uid,
+  );
+  const existingViewNames = new Set(sceneViews.map((view) => view.name));
+  let viewIndex = activeScene ? 0 : 1;
+  let defaultViewName = `${viewIndex}`;
+  while (existingViewNames.has(defaultViewName)) {
+    defaultViewName = `${++viewIndex}`;
+  }
+
+  dialogContent.append(dialogParagraph("Create new tab for:"));
+  const group = document.createElement("div");
+  group.className = "new-tab-options";
+  const sceneChoice = document.createElement("label");
+  sceneChoice.className = "dialog-radio";
+  const sceneRadio = document.createElement("input");
+  sceneRadio.type = "radio";
+  sceneRadio.name = "new-tab-mode";
+  sceneRadio.value = "new-scene";
+  sceneRadio.checked = true;
+  sceneChoice.append(sceneRadio, document.createTextNode("New Scene"));
+  group.append(sceneChoice);
+  const sceneName = dialogField("Name:", defaultSceneName, "text", group);
+
+  const viewChoice = document.createElement("label");
+  viewChoice.className = "dialog-radio";
+  const viewRadio = document.createElement("input");
+  viewRadio.type = "radio";
+  viewRadio.name = "new-tab-mode";
+  viewRadio.value = "new-view";
+  viewRadio.disabled = !currentSceneName;
+  viewChoice.append(
+    viewRadio,
+    document.createTextNode(
+      currentSceneName ? `New View for ${currentSceneName}` : "New View (no current scene)",
+    ),
+  );
+  group.append(viewChoice);
+  const viewName = dialogField("Name:", defaultViewName, "text", group);
+  const inherit = dialogCheckbox("Inherit view props", true, group);
+  dialogContent.append(group);
+
+  const updateState = () => {
+    sceneName.disabled = !sceneRadio.checked;
+    viewName.disabled = !viewRadio.checked;
+    inherit.disabled = !viewRadio.checked;
+  };
+  sceneRadio.addEventListener("change", updateState);
+  viewRadio.addEventListener("change", updateState);
+  updateState();
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      referenceDialog.removeEventListener("close", onClose);
+      resolve(value);
+    };
+    const onClose = () => {
+      if (!referenceDialog.open) finish(null);
+    };
+    referenceDialog.addEventListener("close", onClose);
+    const cancel = button("Cancel", "", () => {
+      finish(null);
+      referenceDialog.close();
+    });
+    const ok = button("OK", "dialog-primary", () => {
+      const mode = viewRadio.checked ? "new-view" : "new-scene";
+      const fallback = mode === "new-view" ? defaultViewName : defaultSceneName;
+      const value = (mode === "new-view" ? viewName.value : sceneName.value).trim();
+      finish({
+        mode,
+        name: value || fallback,
+        inheritViewProps: inherit.checked,
+      });
+      referenceDialog.close();
+    });
+    dialogActions(cancel, ok);
+    if (!referenceDialog.open && referenceDialog.showModal) {
+      referenceDialog.showModal();
+    }
+  });
+}
+
 async function showReferenceDialog(title) {
   if (referenceDialog.open) referenceDialog.close();
   atomPickerTarget = null;
@@ -7202,6 +7302,12 @@ function workspaceChromeRenderKey() {
       scene.objectCount,
       scene.mapCount,
     ]),
+    views: (snapshot.views || []).map((view) => [
+      view.uid,
+      view.sceneUid,
+      view.name,
+      view.active,
+    ]),
     objects: snapshot.objects.map((object) => [
       object.sceneUid,
       object.uid,
@@ -7258,9 +7364,12 @@ function renderSceneTabs(renderKey = workspaceChromeRenderKey()) {
   if (renderedSceneTabsKey === renderKey) return;
   renderedSceneTabsKey = renderKey;
   sceneTabs.replaceChildren();
-  for (const scene of snapshot.scenes) {
-    const tab = button(scene.name || `Scene ${scene.uid}`, `scene-tab${scene.active ? " active" : ""}`, () => {
-      if (!scene.active) mutate("activate_scene", { sceneUid: scene.uid });
+  for (const view of snapshot.views || []) {
+    const scene = snapshot.scenes.find((candidate) => candidate.uid === view.sceneUid);
+    if (!scene) continue;
+    const label = `${scene.name}:${view.name}`;
+    const tab = button(label, `scene-tab${view.active ? " active" : ""}`, () => {
+      if (!view.active) mutate("activate_view", { viewUid: view.uid });
     });
     tab.title = `${scene.objectCount} objects / ${scene.mapCount} maps`;
     sceneTabs.append(tab);
@@ -10335,7 +10444,10 @@ async function handleAction(action, depth = 0) {
       await exportPng();
       break;
     case "new-scene":
-      await mutate("new_scene", { name: null });
+      {
+        const result = await showNewTabDialog();
+        if (result) await mutate("new_tab", result);
+      }
       break;
     case "close-scene":
       await mutate("close_active_scene");

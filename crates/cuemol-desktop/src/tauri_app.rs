@@ -62,6 +62,15 @@ struct SceneDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ViewDto {
+    uid: u64,
+    scene_uid: u64,
+    name: String,
+    active: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CameraDto {
     scene_uid: u64,
     name: String,
@@ -719,6 +728,7 @@ struct TrajectoryDto {
 #[serde(rename_all = "camelCase")]
 struct AppSnapshot {
     scenes: Vec<SceneDto>,
+    views: Vec<ViewDto>,
     cameras: Vec<CameraDto>,
     styles: Vec<StyleDto>,
     objects: Vec<ObjectDto>,
@@ -1345,6 +1355,7 @@ impl AppModel {
 
     fn snapshot(&self) -> AppSnapshot {
         let scene_summaries = self.desktop.scene_summaries();
+        let view_summaries = self.desktop.view_summaries();
         let scenes = scene_summaries
             .iter()
             .map(|summary| {
@@ -1359,10 +1370,12 @@ impl AppModel {
                     .map(|object| object.uid().get().to_string())
                     .collect::<Vec<_>>()
                     .join(",");
-                let view_uids = scene
-                    .active_view_uid()
-                    .map(|uid| uid.get().to_string())
-                    .unwrap_or_default();
+                let view_uids = view_summaries
+                    .iter()
+                    .filter(|view| view.scene_uid == summary.uid)
+                    .map(|view| view.uid.get().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 SceneDto {
                     uid: summary.uid.get(),
                     name: summary.name.clone(),
@@ -1406,6 +1419,15 @@ impl AppModel {
                 }
             })
             .collect::<Vec<_>>();
+        let views = view_summaries
+            .into_iter()
+            .map(|view| ViewDto {
+                uid: view.uid.get(),
+                scene_uid: view.scene_uid.get(),
+                name: view.name,
+                active: view.active,
+            })
+            .collect();
         let mut objects = Vec::new();
         let cameras = scene_summaries
             .iter()
@@ -1826,6 +1848,7 @@ impl AppModel {
         let sequence_key = format!("{structure_key}|{}", self.selection);
         AppSnapshot {
             scenes,
+            views,
             cameras,
             styles,
             objects,
@@ -4959,6 +4982,11 @@ impl AppModel {
     fn persist_camera(&mut self) -> Result<(), String> {
         let mut camera = self.camera.clone();
         camera.set_name("__current");
+        if self.desktop.active_view_summary().is_some() {
+            self.desktop
+                .set_active_view_camera(&camera)
+                .map_err(|error| error.to_string())?;
+        }
         self.desktop
             .set_active_scene_camera(camera)
             .map_err(|error| error.to_string())
@@ -5607,7 +5635,13 @@ enum ModelRequest {
         to: usize,
     },
     NewScene(Option<String>),
+    NewTab {
+        mode: String,
+        name: String,
+        inherit_view_props: bool,
+    },
     ActivateScene(u64),
+    ActivateView(u64),
     CloseActiveScene,
     SetSelection(String),
     MolStructAction {
@@ -7711,7 +7745,7 @@ fn handle_model_request(
             let undo = model.capture_undo();
             let name = name
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "Untitled".to_string());
+                .unwrap_or_else(|| "Untitled 1".to_string());
             model.desktop.new_scene(name, true);
             model.selection.clear();
             model.sync_active_scene_properties();
@@ -7721,30 +7755,91 @@ fn handle_model_request(
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::NewTab {
+            mode,
+            name,
+            inherit_view_props,
+        } => {
+            let undo = model.capture_undo();
+            if model.desktop.active_scene().is_some() {
+                model.persist_camera()?;
+            }
+            let name = name.trim();
+            match mode.as_str() {
+                "new-scene" => {
+                    let name = if name.is_empty() { "Untitled 1" } else { name };
+                    model.desktop.new_scene(name, true);
+                    model.camera = Camera::new();
+                    model.status = format!("New scene: {name}");
+                    model.touch_structure_details();
+                }
+                "new-view" => {
+                    let scene_uid = model
+                        .desktop
+                        .active_scene()
+                        .ok_or_else(|| "no active scene".to_string())?;
+                    let name = if name.is_empty() { "1" } else { name };
+                    let inherited = inherit_view_props.then(|| model.camera.clone());
+                    model
+                        .desktop
+                        .new_view(scene_uid, name, inherited.as_ref())
+                        .map_err(|error| error.to_string())?;
+                    model.camera = model.desktop.active_view_camera().unwrap_or_default();
+                    model.status = format!("New view: {name}");
+                }
+                other => return Err(format!("unsupported new tab mode: {other}")),
+            }
+            model.selection.clear();
+            model.sync_active_scene_properties();
+            model.invalidate_mesh(mode == "new-scene");
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::ActivateScene(scene_uid) => {
+            if model.desktop.active_scene().is_some() {
+                model.persist_camera()?;
+            }
             if !model.desktop.set_active_scene(Some(Uid::new(scene_uid))) {
                 return Err(format!("scene {scene_uid} was not found"));
+            }
+            if let Some(camera) = model.desktop.active_view_camera() {
+                model.camera = camera;
             }
             model.selection.clear();
             model.sync_active_scene_properties();
             model.status = format!("Activated scene {scene_uid}");
-            model.invalidate_mesh(true);
+            model.invalidate_mesh(false);
+            model.touch_structure_details();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ActivateView(view_uid) => {
+            model.persist_camera()?;
+            model.camera = model
+                .desktop
+                .activate_view(Uid::new(view_uid))
+                .map_err(|error| error.to_string())?;
+            model.selection.clear();
+            model.sync_active_scene_properties();
+            model.status = format!("Activated view {view_uid}");
+            model.invalidate_mesh(false);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::CloseActiveScene => {
             let undo = model.capture_undo();
+            let closed_scene = model.desktop.active_scene();
             model
                 .desktop
                 .close_active_scene()
                 .map_err(|error| error.to_string())?;
             model.desktop.ensure_active_scene();
+            model.camera = model.desktop.active_view_camera().unwrap_or_default();
             model.selection.clear();
             model.sync_active_scene_properties();
             model.status = "Scene closed".to_string();
-            model.invalidate_mesh(true);
+            model.invalidate_mesh(false);
             model.push_undo(undo);
-            if let Some(scene_uid) = model.desktop.active_scene() {
+            if let Some(scene_uid) = closed_scene {
                 model.modified_scenes.remove(&scene_uid);
             }
             model.touch_structure_details();
@@ -10295,11 +10390,33 @@ fn new_scene(name: Option<String>, state: State<'_, ManagedState>) -> Result<App
 }
 
 #[tauri::command]
+fn new_tab(
+    mode: String,
+    name: String,
+    inherit_view_props: bool,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::NewTab {
+            mode,
+            name,
+            inherit_view_props,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn activate_scene(scene_uid: u64, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
         &state,
         ModelRequest::ActivateScene(scene_uid),
     )?)
+}
+
+#[tauri::command]
+fn activate_view(view_uid: u64, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::ActivateView(view_uid))?)
 }
 
 #[tauri::command]
@@ -11305,7 +11422,9 @@ pub fn run() -> Result<(), tauri::Error> {
             remove_trajectory_block,
             move_trajectory_block,
             new_scene,
+            new_tab,
             activate_scene,
+            activate_view,
             close_active_scene,
             set_selection,
             molecule_selection_action,
@@ -11620,6 +11739,7 @@ mod tests {
         assert!(initial.viewport.image.is_none());
         assert!(!initial.startup_paths_pending);
         assert_eq!(initial.snapshot.scenes.len(), 1);
+        assert_eq!(initial.snapshot.views.len(), 1);
         assert_eq!(initial.snapshot.objects.len(), 2);
         assert!(!initial.snapshot.structure_key.is_empty());
         assert!(!initial.snapshot.sequence_key.is_empty());
@@ -11690,6 +11810,57 @@ mod tests {
         assert!(unchanged.structure.is_none());
         assert!(unchanged.sequence.is_none());
         assert!(model.renderer.is_none());
+    }
+
+    #[test]
+    fn new_tab_request_creates_inherited_views_and_named_scenes() {
+        let mut model = model_without_gpu();
+        assert_eq!(
+            model.desktop.active_scene_summary().unwrap().name,
+            "Untitled 1"
+        );
+        let first_summary = model.desktop.active_view_summary().unwrap();
+        assert_eq!(first_summary.name, "0");
+        let first_view = first_summary.uid;
+        model.camera.set_zoom(81.0);
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::NewTab {
+                mode: "new-view".to_string(),
+                name: "Detail".to_string(),
+                inherit_view_props: true,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(snapshot.views.len(), 2);
+        assert!(snapshot
+            .views
+            .iter()
+            .any(|view| view.name == "Detail" && view.active));
+        assert_eq!(model.camera.zoom(), 81.0);
+
+        model.camera.set_zoom(42.0);
+        handle_model_request(&mut model, ModelRequest::ActivateView(first_view.get())).unwrap();
+        assert_eq!(model.camera.zoom(), 81.0);
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::NewTab {
+                mode: "new-scene".to_string(),
+                name: "Second".to_string(),
+                inherit_view_props: false,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(snapshot.scenes.len(), 2);
+        assert_eq!(snapshot.views.len(), 3);
+        assert!(snapshot.scenes.iter().any(|scene| scene.name == "Second"));
     }
 
     #[test]

@@ -491,6 +491,14 @@ pub struct GuiSceneSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiViewSummary {
+    pub uid: Uid,
+    pub scene_uid: Uid,
+    pub name: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiCameraSummary {
     pub scene_uid: Uid,
     pub name: String,
@@ -1990,6 +1998,27 @@ impl DesktopAppState {
         self.scene_summaries()
             .into_iter()
             .find(|scene| Some(scene.uid) == self.active_scene)
+    }
+
+    pub fn view_summaries(&self) -> Vec<GuiViewSummary> {
+        self.command_manager
+            .views()
+            .iter()
+            .map(|view| GuiViewSummary {
+                uid: view.uid(),
+                scene_uid: view.scene_uid(),
+                name: view.name().to_string(),
+                active: self.active_scene == Some(view.scene_uid())
+                    && self
+                        .scene_manager()
+                        .scene(view.scene_uid())
+                        .is_some_and(|scene| scene.active_view_uid() == Some(view.uid())),
+            })
+            .collect()
+    }
+
+    pub fn active_view_summary(&self) -> Option<GuiViewSummary> {
+        self.view_summaries().into_iter().find(|view| view.active)
     }
 
     pub fn camera_summaries(&self, scene_uid: Uid) -> Vec<GuiCameraSummary> {
@@ -5696,6 +5725,9 @@ impl DesktopAppState {
             .command_manager
             .new_scene_command(name.into(), create_view);
         if let Some(view_uid) = result.result_view {
+            if let Some(view) = self.command_manager.view_mut(view_uid) {
+                view.set_name("0");
+            }
             if let Some(scene) = self
                 .command_manager
                 .scene_manager_mut()
@@ -5706,6 +5738,61 @@ impl DesktopAppState {
         }
         self.active_scene = Some(result.result_scene);
         result
+    }
+
+    pub fn new_view(
+        &mut self,
+        scene_uid: Uid,
+        name: impl Into<String>,
+        inherited_camera: Option<&cuemol_qsys::Camera>,
+    ) -> Result<Uid> {
+        let view_uid = self.command_manager.new_view_command(scene_uid)?;
+        let view = self
+            .command_manager
+            .view_mut(view_uid)
+            .expect("the view was just created");
+        if let Some(camera) = inherited_camera {
+            view.set_camera(camera);
+        }
+        view.set_name(name);
+        self.active_scene = Some(scene_uid);
+        Ok(view_uid)
+    }
+
+    pub fn activate_view(&mut self, view_uid: Uid) -> Result<cuemol_qsys::Camera> {
+        let scene_uid = self.command_manager.activate_view_command(view_uid)?;
+        self.active_scene = Some(scene_uid);
+        Ok(self
+            .command_manager
+            .view(view_uid)
+            .expect("the activated view exists")
+            .camera())
+    }
+
+    pub fn active_view_camera(&self) -> Option<cuemol_qsys::Camera> {
+        let scene = self.scene_manager().scene(self.active_scene?)?;
+        self.command_manager
+            .view(scene.active_view_uid()?)
+            .map(View::camera)
+    }
+
+    pub fn set_active_view_camera(&mut self, camera: &cuemol_qsys::Camera) -> Result<()> {
+        let scene_uid = self
+            .active_scene
+            .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
+        let view_uid = self
+            .scene_manager()
+            .scene(scene_uid)
+            .and_then(|scene| scene.active_view_uid())
+            .ok_or_else(|| CueMolError::invalid_argument("active scene has no view"))?;
+        let view = self
+            .command_manager
+            .view_mut(view_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("view {}", view_uid.get())))?;
+        let name = view.name().to_string();
+        view.set_camera(camera);
+        view.set_name(name);
+        Ok(())
     }
 
     pub fn destroy_scene(&mut self, scene_uid: Uid) -> bool {
@@ -7390,6 +7477,23 @@ impl DesktopAppState {
         self.last_qsc_status = Some(result.status.clone());
         self.active_scene = result.result_scene;
         if let Some(scene_uid) = result.result_scene {
+            if !self
+                .command_manager
+                .views()
+                .iter()
+                .any(|view| view.scene_uid() == scene_uid)
+            {
+                let camera = self.active_scene_saved_camera();
+                let view_uid = self.command_manager.new_view_command(scene_uid)?;
+                if let (Some(camera), Some(view)) =
+                    (camera.as_ref(), self.command_manager.view_mut(view_uid))
+                {
+                    view.set_camera(camera);
+                }
+                if let Some(view) = self.command_manager.view_mut(view_uid) {
+                    view.set_name("0");
+                }
+            }
             if target_scene.is_some() {
                 self.density_maps
                     .retain(|_, map| map.scene_uid != scene_uid);
@@ -8822,16 +8926,9 @@ impl DesktopAppState {
         let scene_uid = self
             .active_scene
             .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
-        if !self.scene_manager_mut().destroy_scene(scene_uid) {
+        if !self.destroy_scene(scene_uid) {
             return Err(CueMolError::NotFound(format!("scene {}", scene_uid.get())));
         }
-        self.density_maps
-            .retain(|_, map| map.scene_uid != scene_uid);
-        self.active_scene = self
-            .scene_manager()
-            .scenes()
-            .first()
-            .map(|scene| scene.uid());
         Ok(self.active_scene)
     }
 
@@ -9775,7 +9872,7 @@ impl DesktopAppState {
                 return scene_uid;
             }
         }
-        self.new_scene("Untitled", true).result_scene
+        self.new_scene("Untitled 1", true).result_scene
     }
 
     pub fn delete_atoms_in_object(
@@ -58076,11 +58173,39 @@ attribute \"dep\" string \"positions\"
         let mut app = DesktopAppState::new();
         let first = app.new_scene("first", true).result_scene;
         let second = app.new_scene("second", true).result_scene;
+        assert_eq!(app.view_summaries().len(), 2);
         assert_eq!(app.active_scene(), Some(second));
         assert_eq!(app.close_active_scene().unwrap(), Some(first));
         assert_eq!(app.active_scene(), Some(first));
+        assert_eq!(app.view_summaries().len(), 1);
         assert_eq!(app.close_active_scene().unwrap(), None);
         assert_eq!(app.active_scene(), None);
+        assert!(app.view_summaries().is_empty());
+    }
+
+    #[test]
+    fn desktop_app_state_creates_and_activates_inherited_views() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("scene", true).result_scene;
+        let first_summary = app.active_view_summary().unwrap();
+        assert_eq!(first_summary.name, "0");
+        let first_view = first_summary.uid;
+        let mut first_camera = cuemol_qsys::Camera::new();
+        first_camera.set_zoom(73.0);
+        first_camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
+        app.set_active_view_camera(&first_camera).unwrap();
+
+        let second_view = app
+            .new_view(scene_uid, "View 2", Some(&first_camera))
+            .unwrap();
+        assert_eq!(app.view_summaries().len(), 2);
+        assert_eq!(app.active_view_summary().unwrap().uid, second_view);
+        assert_eq!(app.active_view_summary().unwrap().name, "View 2");
+        assert_eq!(app.active_view_camera().unwrap().zoom(), 73.0);
+
+        let restored = app.activate_view(first_view).unwrap();
+        assert_eq!(restored.zoom(), 73.0);
+        assert_eq!(restored.center(), Vector4::new3(1.0, 2.0, 3.0));
     }
 
     #[test]

@@ -3301,6 +3301,32 @@ impl MolCommandManager {
         }
     }
 
+    pub fn new_view_command(&mut self, scene_uid: Uid) -> Result<Uid> {
+        if self.scene_manager.scene(scene_uid).is_none() {
+            return Err(CueMolError::NotFound(format!("scene {}", scene_uid.get())));
+        }
+        let uid = Uid::new(self.next_view_uid);
+        self.next_view_uid = self.next_view_uid.saturating_add(1);
+        self.views.push(MolView::new(uid, scene_uid));
+        self.scene_manager
+            .scene_mut(scene_uid)
+            .expect("scene was checked above")
+            .set_active_view_uid(Some(uid));
+        Ok(uid)
+    }
+
+    pub fn activate_view_command(&mut self, view_uid: Uid) -> Result<Uid> {
+        let scene_uid = self
+            .view(view_uid)
+            .map(MolView::scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("view {}", view_uid.get())))?;
+        self.scene_manager
+            .scene_mut(scene_uid)
+            .expect("view must reference a live scene")
+            .set_active_view_uid(Some(view_uid));
+        Ok(scene_uid)
+    }
+
     pub fn load_object_command(
         &mut self,
         target_scene: Uid,
