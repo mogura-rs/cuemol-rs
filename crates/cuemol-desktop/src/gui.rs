@@ -3483,6 +3483,15 @@ impl GuiApplication {
                                 owner,
                                 &drag_source.response,
                             );
+                            drag_source.response.context_menu(|ui| {
+                                self.workspace_aux_object_context_menu(
+                                    ui,
+                                    camera,
+                                    scene.uid,
+                                    object_selection,
+                                    owner,
+                                );
+                            });
                             ui.indent(format!("density-map-{}", map.uid.get()), |ui| {
                                 for renderer in map.renderers {
                                     let selection = WorkspaceAuxSelection::DensityMap {
@@ -3493,37 +3502,42 @@ impl GuiApplication {
                                     let selected = self.selected_object.is_none()
                                         && self.workspace_aux_selection == Some(selection);
                                     let mut visible = renderer.visible;
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .checkbox(&mut visible, "")
-                                            .on_hover_text("Visible")
-                                            .changed()
-                                        {
-                                            self.set_density_renderer_visibility(
-                                                map.uid,
-                                                renderer.uid,
-                                                visible,
+                                    let response = ui
+                                        .horizontal(|ui| {
+                                            if ui
+                                                .checkbox(&mut visible, "")
+                                                .on_hover_text("Visible")
+                                                .changed()
+                                            {
+                                                self.set_density_renderer_visibility(
+                                                    map.uid,
+                                                    renderer.uid,
+                                                    visible,
+                                                );
+                                            }
+                                            if let Some(locked) =
+                                                workspace_lock_toggle(ui, renderer.locked, true)
+                                            {
+                                                self.set_workspace_renderer_locked(
+                                                    NativePropertyObject::DensityMap(map.uid),
+                                                    renderer.uid,
+                                                    locked,
+                                                );
+                                            }
+                                            let label = format!(
+                                                "{} ({})",
+                                                renderer.name, renderer.renderer_type
                                             );
-                                        }
-                                        if let Some(locked) =
-                                            workspace_lock_toggle(ui, renderer.locked, true)
-                                        {
-                                            self.set_workspace_renderer_locked(
-                                                NativePropertyObject::DensityMap(map.uid),
-                                                renderer.uid,
-                                                locked,
-                                            );
-                                        }
-                                        let label = format!(
-                                            "{} ({})",
-                                            renderer.name, renderer.renderer_type
-                                        );
-                                        if ui.selectable_label(selected, label).clicked() {
-                                            self.activate_workspace_scene(scene.uid, camera);
-                                            self.selected_object = None;
-                                            self.selected_renderer = None;
-                                            self.workspace_aux_selection = Some(selection);
-                                        }
+                                            if ui.selectable_label(selected, label).clicked() {
+                                                self.activate_workspace_scene(scene.uid, camera);
+                                                self.selected_object = None;
+                                                self.selected_renderer = None;
+                                                self.workspace_aux_selection = Some(selection);
+                                            }
+                                        })
+                                        .response;
+                                    response.context_menu(|ui| {
+                                        self.workspace_aux_renderer_context_menu(ui, selection);
                                     });
                                 }
                             });
@@ -3578,6 +3592,15 @@ impl GuiApplication {
                                 owner,
                                 &drag_source.response,
                             );
+                            drag_source.response.context_menu(|ui| {
+                                self.workspace_aux_object_context_menu(
+                                    ui,
+                                    camera,
+                                    scene.uid,
+                                    object_selection,
+                                    owner,
+                                );
+                            });
                             ui.indent(format!("surface-{}", surface.uid.get()), |ui| {
                                 for renderer in surface.renderers {
                                     let selection = WorkspaceAuxSelection::Surface {
@@ -3588,37 +3611,42 @@ impl GuiApplication {
                                     let selected = self.selected_object.is_none()
                                         && self.workspace_aux_selection == Some(selection);
                                     let mut visible = renderer.visible;
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .checkbox(&mut visible, "")
-                                            .on_hover_text("Visible")
-                                            .changed()
-                                        {
-                                            self.set_surface_renderer_visibility(
-                                                surface.uid,
-                                                renderer.uid,
-                                                visible,
+                                    let response = ui
+                                        .horizontal(|ui| {
+                                            if ui
+                                                .checkbox(&mut visible, "")
+                                                .on_hover_text("Visible")
+                                                .changed()
+                                            {
+                                                self.set_surface_renderer_visibility(
+                                                    surface.uid,
+                                                    renderer.uid,
+                                                    visible,
+                                                );
+                                            }
+                                            if let Some(locked) =
+                                                workspace_lock_toggle(ui, renderer.locked, true)
+                                            {
+                                                self.set_workspace_renderer_locked(
+                                                    NativePropertyObject::Surface(surface.uid),
+                                                    renderer.uid,
+                                                    locked,
+                                                );
+                                            }
+                                            let label = format!(
+                                                "{} ({})",
+                                                renderer.name, renderer.renderer_type
                                             );
-                                        }
-                                        if let Some(locked) =
-                                            workspace_lock_toggle(ui, renderer.locked, true)
-                                        {
-                                            self.set_workspace_renderer_locked(
-                                                NativePropertyObject::Surface(surface.uid),
-                                                renderer.uid,
-                                                locked,
-                                            );
-                                        }
-                                        let label = format!(
-                                            "{} ({})",
-                                            renderer.name, renderer.renderer_type
-                                        );
-                                        if ui.selectable_label(selected, label).clicked() {
-                                            self.activate_workspace_scene(scene.uid, camera);
-                                            self.selected_object = None;
-                                            self.selected_renderer = None;
-                                            self.workspace_aux_selection = Some(selection);
-                                        }
+                                            if ui.selectable_label(selected, label).clicked() {
+                                                self.activate_workspace_scene(scene.uid, camera);
+                                                self.selected_object = None;
+                                                self.selected_renderer = None;
+                                                self.workspace_aux_selection = Some(selection);
+                                            }
+                                        })
+                                        .response;
+                                    response.context_menu(|ui| {
+                                        self.workspace_aux_renderer_context_menu(ui, selection);
                                     });
                                 }
                             });
@@ -4156,6 +4184,46 @@ impl GuiApplication {
         ui.separator();
         if ui.button("Properties...").clicked() {
             self.open_object_properties(object_uid);
+            ui.close();
+        }
+    }
+
+    fn workspace_aux_object_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        camera: &mut CameraController,
+        scene_uid: cuemol_core::Uid,
+        selection: WorkspaceAuxSelection,
+        owner: NativePropertyObject,
+    ) {
+        if ui.button("New Renderer...").clicked() {
+            self.activate_workspace_scene(scene_uid, camera);
+            self.open_aux_renderer_dialog(selection);
+            ui.close();
+        }
+        if ui.button("Delete Object").clicked() {
+            self.delete_workspace_object(owner);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Properties...").clicked() {
+            self.open_aux_properties(selection);
+            ui.close();
+        }
+    }
+
+    fn workspace_aux_renderer_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        selection: WorkspaceAuxSelection,
+    ) {
+        if ui.button("Delete").clicked() {
+            self.delete_aux_selection(selection);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Properties...").clicked() {
+            self.open_aux_properties(selection);
             ui.close();
         }
     }

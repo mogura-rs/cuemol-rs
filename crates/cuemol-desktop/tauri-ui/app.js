@@ -5060,6 +5060,73 @@ function workspaceObjectContextItems(scene, object) {
   return items;
 }
 
+function selectWorkspaceAuxItem(kind, objectUid, rendererUid = null) {
+  selectedObjectUid = null;
+  selectedRendererUid = null;
+  selectedDensityMapUid = kind.startsWith("density") ? objectUid : null;
+  selectedDensityRendererUid = kind === "densityRenderer" ? rendererUid : null;
+  selectedSurfaceUid = kind.startsWith("surface") ? objectUid : null;
+  selectedSurfaceRendererUid = kind === "surfaceRenderer" ? rendererUid : null;
+  workspaceSelectionKind = kind;
+}
+
+function workspaceAuxObjectContextItems(scene, kind, object) {
+  const isDensityMap = kind === "densityMap";
+  return [
+    {
+      label: "New Renderer...",
+      action: async () => {
+        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        if (isDensityMap) {
+          await mutate("add_density_renderer", {
+            mapUid: object.uid,
+            rendererType: rendererType.value,
+          });
+        } else {
+          await mutate("add_surface_renderer", { surfaceUid: object.uid });
+        }
+      },
+    },
+    {
+      label: "Delete Object",
+      action: () =>
+        mutate("delete_workspace_item", {
+          target: { kind, objectUid: object.uid, rendererUid: null },
+        }),
+    },
+    null,
+    {
+      label: "Properties...",
+      action: async () => {
+        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        selectWorkspaceAuxItem(kind, object.uid);
+        showReferenceDialog("Object Properties");
+      },
+    },
+  ];
+}
+
+function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
+  return [
+    {
+      label: "Delete",
+      action: () =>
+        mutate("delete_workspace_item", {
+          target: { kind, objectUid: object.uid, rendererUid: renderer.uid },
+        }),
+    },
+    null,
+    {
+      label: "Properties...",
+      action: async () => {
+        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
+        showReferenceDialog("Renderer Properties");
+      },
+    },
+  ];
+}
+
 function workspaceStyleSignature(sceneUid) {
   return JSON.stringify(
     (snapshot?.styles || [])
@@ -5791,6 +5858,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         },
       );
       surfaceRow.addEventListener("dblclick", () => showReferenceDialog("Object Properties"));
+      surfaceRow.addEventListener("contextmenu", (event) => {
+        selectWorkspaceAuxItem("surface", surface.uid);
+        showWorkspaceContextMenu(
+          event,
+          workspaceAuxObjectContextItems(scene, "surface", surface),
+        );
+      });
       surfaceRow.prepend(
         workspaceStateControls(
           { kind: "surface", objectUid: surface.uid },
@@ -5826,6 +5900,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         rendererRow.addEventListener("dblclick", () =>
           showReferenceDialog("Renderer Properties"),
         );
+        rendererRow.addEventListener("contextmenu", (event) => {
+          selectWorkspaceAuxItem("surfaceRenderer", surface.uid, renderer.uid);
+          showWorkspaceContextMenu(
+            event,
+            workspaceAuxRendererContextItems(scene, "surfaceRenderer", surface, renderer),
+          );
+        });
         rendererRow.prepend(
           workspaceStateControls(
             {
@@ -5867,6 +5948,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         },
       );
       mapRow.addEventListener("dblclick", () => showReferenceDialog("Object Properties"));
+      mapRow.addEventListener("contextmenu", (event) => {
+        selectWorkspaceAuxItem("densityMap", map.uid);
+        showWorkspaceContextMenu(
+          event,
+          workspaceAuxObjectContextItems(scene, "densityMap", map),
+        );
+      });
       mapRow.prepend(
         workspaceStateControls(
           { kind: "densityMap", objectUid: map.uid },
@@ -5902,6 +5990,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         rendererRow.addEventListener("dblclick", () =>
           showReferenceDialog("Renderer Properties"),
         );
+        rendererRow.addEventListener("contextmenu", (event) => {
+          selectWorkspaceAuxItem("densityRenderer", map.uid, renderer.uid);
+          showWorkspaceContextMenu(
+            event,
+            workspaceAuxRendererContextItems(scene, "densityRenderer", map, renderer),
+          );
+        });
         rendererRow.prepend(
           workspaceStateControls(
             {
