@@ -3510,12 +3510,15 @@ function showRendererSetup(setup) {
   referenceDialog.className = "reference-dialog";
   const readerDefaults = setup.readerOptions || null;
   const ccp4Defaults = setup.ccp4MapOptions || null;
+  const mtzDefaults = setup.mtzMapOptions || null;
   const readerTab = readerDefaults
     ? readerDefaults.kind === "mmcif"
       ? "mmCIF options"
       : "PDB options"
     : ccp4Defaults
       ? "CCP4Map options"
+      : mtzDefaults
+        ? "MTZ options"
       : null;
   const pages = readerTab
     ? workspacePropertyPage([
@@ -3645,6 +3648,66 @@ function showRendererSetup(setup) {
     };
     readerPage.prepend(ccp4Controls.normalize.closest("label"));
   }
+  let mtzControls = null;
+  if (mtzDefaults) {
+    const readerPage = pages.panes[1];
+    const columns = Array.isArray(mtzDefaults.columns) ? mtzDefaults.columns : [];
+    const amplitude = dialogSelect(
+      "Amplitude (F):",
+      columns.filter((column) => column.kind === "F").map((column) => [column.name, column.name]),
+      mtzDefaults.columnF,
+      readerPage,
+    );
+    const phase = dialogOptionalField(
+      "Phase:",
+      mtzDefaults.columnPhi,
+      columns.filter((column) => column.kind === "P").map((column) => column.name),
+      readerPage,
+    );
+    phase.enabled.checked = mtzDefaults.usePhase;
+    phase.enabled.disabled = !columns.some((column) => column.kind === "P");
+    phase.input.disabled = !phase.enabled.checked;
+    const weight = dialogOptionalField(
+      "Weight:",
+      mtzDefaults.columnWeight,
+      columns.filter((column) => column.kind === "W").map((column) => column.name),
+      readerPage,
+    );
+    weight.enabled.checked = mtzDefaults.useWeight;
+    weight.enabled.disabled = !columns.some((column) => column.kind === "W");
+    weight.input.disabled = !weight.enabled.checked;
+    const resolution = dialogField(
+      "Max resolution (Å):",
+      String(mtzDefaults.resolution),
+      "number",
+      readerPage,
+    );
+    resolution.step = "0.1";
+    if (mtzDefaults.minResolution > 0) resolution.min = String(mtzDefaults.minResolution);
+    if (mtzDefaults.maxResolution > 0) resolution.max = String(mtzDefaults.maxResolution);
+    const gridSize = dialogField(
+      "Grid spacing:",
+      String(mtzDefaults.gridSize),
+      "number",
+      readerPage,
+    );
+    gridSize.step = "any";
+    gridSize.min = "0";
+    const gridChoices = document.createElement("datalist");
+    gridChoices.id = `mtz-grid-spacing-${Date.now()}`;
+    for (const [value, label] of [
+      ["0.25", "Fine (0.25)"],
+      ["0.333333", "Coarse (0.33)"],
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.label = label;
+      gridChoices.append(option);
+    }
+    gridSize.setAttribute("list", gridChoices.id);
+    readerPage.append(gridChoices);
+    mtzControls = { amplitude, phase, weight, resolution, gridSize };
+  }
   let rendererNameDefault = true;
   rendererType.addEventListener("change", () => {
     if (rendererNameDefault) {
@@ -3681,7 +3744,16 @@ function showRendererSetup(setup) {
             !Number.isFinite(Number(ccp4Controls.truncateMin.input.value)))) ||
         (ccp4Controls?.truncateMax.enabled.checked &&
           (!ccp4Controls.truncateMax.input.value.trim() ||
-            !Number.isFinite(Number(ccp4Controls.truncateMax.input.value))));
+            !Number.isFinite(Number(ccp4Controls.truncateMax.input.value)))) ||
+        (mtzControls &&
+          (!mtzControls.amplitude.value ||
+            (mtzControls.phase.enabled.checked && !mtzControls.phase.input.value) ||
+            (mtzControls.weight.enabled.checked && !mtzControls.weight.input.value) ||
+            !mtzControls.resolution.value.trim() ||
+            !Number.isFinite(Number(mtzControls.resolution.value)) ||
+            !mtzControls.gridSize.value.trim() ||
+            !Number.isFinite(Number(mtzControls.gridSize.value)) ||
+            Number(mtzControls.gridSize.value) <= 0));
     };
     const cancel = button("Cancel", "", () => {
       finish(null);
@@ -3727,6 +3799,20 @@ function showRendererSetup(setup) {
               max: Math.trunc(Number(ccp4Controls.truncateMax.input.value)),
             }
           : null,
+        mtzMapOptions: mtzControls
+          ? {
+              columns: mtzDefaults.columns,
+              columnF: mtzControls.amplitude.value,
+              usePhase: mtzControls.phase.enabled.checked,
+              columnPhi: mtzControls.phase.input.value,
+              useWeight: mtzControls.weight.enabled.checked,
+              columnWeight: mtzControls.weight.input.value,
+              resolution: Number(mtzControls.resolution.value),
+              minResolution: mtzDefaults.minResolution,
+              maxResolution: mtzDefaults.maxResolution,
+              gridSize: Number(mtzControls.gridSize.value),
+            }
+          : null,
       });
       referenceDialog.close();
     });
@@ -3743,6 +3829,17 @@ function showRendererSetup(setup) {
             ccp4Controls.truncateMin.input,
             ccp4Controls.truncateMax.enabled,
             ccp4Controls.truncateMax.input,
+          ]
+        : []),
+      ...(mtzControls
+        ? [
+            mtzControls.amplitude,
+            mtzControls.phase.enabled,
+            mtzControls.phase.input,
+            mtzControls.weight.enabled,
+            mtzControls.weight.input,
+            mtzControls.resolution,
+            mtzControls.gridSize,
           ]
         : []),
     ]) {
@@ -9820,6 +9917,7 @@ async function openSelectedPaths(paths) {
           rendererSetup: setup.rendererSetup,
           readerOptions: setup.readerOptions,
           ccp4MapOptions: setup.ccp4MapOptions,
+          mtzMapOptions: setup.mtzMapOptions,
         },
       })
     ) {

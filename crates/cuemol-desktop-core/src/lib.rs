@@ -42,9 +42,9 @@ use cuemol_render::{PovSceneExporter, RenderSceneSnapshot, UmbreonFrame, Umbreon
 use cuemol_surface::XyzrFileWriter;
 use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter};
 use cuemol_xtal::{
-    density_map_from_cif, read_mmcif_map_file, read_opendx_file, read_opendx_str, BrixMapReader,
-    Ccp4MapReader, MapColorMode, MapMeshRenderer, MapSurfRenderer, MapSurfaceDrawMode,
-    Mtz2MapReader, QdfDenMapReader, XplorMapReader,
+    density_map_from_cif, read_mmcif_map_file, read_mtz_metadata_file, read_opendx_file,
+    read_opendx_str, BrixMapReader, Ccp4MapReader, MapColorMode, MapMeshRenderer, MapSurfRenderer,
+    MapSurfaceDrawMode, Mtz2MapReader, MtzFile, QdfDenMapReader, XplorMapReader,
 };
 // Re-exported so consumers (and tests) can name the scalar-field types the surface
 // potential API takes — e.g. `set_surface_potential_map(DensityMap)`.
@@ -990,6 +990,32 @@ pub struct GuiCcp4MapReaderOptions {
     pub max: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiMtzColumnOption {
+    pub name: String,
+    pub kind: char,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuiMtzMapReaderOptions {
+    pub columns: Vec<GuiMtzColumnOption>,
+    pub column_f: String,
+    pub use_phase: bool,
+    pub column_phi: String,
+    pub use_weight: bool,
+    pub column_weight: String,
+    pub resolution: f64,
+    pub min_resolution: f64,
+    pub max_resolution: f64,
+    pub grid_size: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GuiDensityMapReaderOptions {
+    Ccp4(GuiCcp4MapReaderOptions),
+    Mtz(GuiMtzMapReaderOptions),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuiFileRendererTarget {
     Molecule,
@@ -1000,7 +1026,7 @@ pub enum GuiFileRendererTarget {
 pub struct GuiFileRendererSetup {
     pub target: GuiFileRendererTarget,
     pub molecule_reader_options: Option<GuiMoleculeReaderOptions>,
-    pub ccp4_map_reader_options: Option<GuiCcp4MapReaderOptions>,
+    pub density_map_reader_options: Option<GuiDensityMapReaderOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7351,20 +7377,27 @@ impl DesktopAppState {
             return Ok(Some(GuiFileRendererSetup {
                 target: GuiFileRendererTarget::Molecule,
                 molecule_reader_options: molecule_reader_options_for_format(format),
-                ccp4_map_reader_options: None,
+                density_map_reader_options: None,
             }));
         }
         if is_density_map_format(format) {
-            return Ok(Some(GuiFileRendererSetup {
-                target: GuiFileRendererTarget::DensityMap,
-                molecule_reader_options: None,
-                ccp4_map_reader_options: (format == "ccp4map").then_some(GuiCcp4MapReaderOptions {
+            let density_map_reader_options = match format {
+                "ccp4map" => Some(GuiDensityMapReaderOptions::Ccp4(GuiCcp4MapReaderOptions {
                     normalize: false,
                     truncate_min: false,
                     min: 0.0,
                     truncate_max: false,
                     max: 5.0,
-                }),
+                })),
+                "mtzmap" => Some(GuiDensityMapReaderOptions::Mtz(mtz_map_reader_options(
+                    &read_mtz_metadata_file(path.as_ref())?,
+                )?)),
+                _ => None,
+            };
+            return Ok(Some(GuiFileRendererSetup {
+                target: GuiFileRendererTarget::DensityMap,
+                molecule_reader_options: None,
+                density_map_reader_options,
             }));
         }
         Ok(None)
@@ -7574,7 +7607,7 @@ impl DesktopAppState {
     pub fn open_density_map_path_with_renderer_setup(
         &mut self,
         path: impl AsRef<Path>,
-        reader_options: Option<&GuiCcp4MapReaderOptions>,
+        reader_options: Option<&GuiDensityMapReaderOptions>,
         renderer_center: Option<Vector4>,
         setup: &GuiRendererSetup,
     ) -> Result<GuiLoadedPath> {
@@ -7598,26 +7631,51 @@ impl DesktopAppState {
                 "unsupported density renderer setup type: {renderer_type}"
             )));
         }
-        let map = if let Some(options) = reader_options {
-            if format != "ccp4map" {
-                return Err(CueMolError::invalid_argument(
-                    "CCP4 reader options do not match the density-map file format",
-                ));
+        let map = match reader_options {
+            Some(GuiDensityMapReaderOptions::Ccp4(options)) => {
+                if format != "ccp4map" {
+                    return Err(CueMolError::invalid_argument(
+                        "CCP4 reader options do not match the density-map file format",
+                    ));
+                }
+                if !options.min.is_finite() || !options.max.is_finite() {
+                    return Err(CueMolError::invalid_argument(
+                        "CCP4 truncation limits must be finite",
+                    ));
+                }
+                let mut reader = Ccp4MapReader::new();
+                reader.set_normalize(options.normalize);
+                reader.set_truncate_min(options.truncate_min);
+                reader.set_min(options.min.trunc());
+                reader.set_truncate_max(options.truncate_max);
+                reader.set_max(options.max.trunc());
+                reader.read_density_map_file(path)?
             }
-            if !options.min.is_finite() || !options.max.is_finite() {
-                return Err(CueMolError::invalid_argument(
-                    "CCP4 truncation limits must be finite",
-                ));
+            Some(GuiDensityMapReaderOptions::Mtz(options)) => {
+                if format != "mtzmap" {
+                    return Err(CueMolError::invalid_argument(
+                        "MTZ reader options do not match the density-map file format",
+                    ));
+                }
+                validate_mtz_map_reader_options(options)?;
+                let mut reader = Mtz2MapReader::new();
+                reader.set_column_f(&options.column_f);
+                reader.set_column_phi(if options.use_phase {
+                    &options.column_phi
+                } else {
+                    ""
+                });
+                reader.set_column_weight(if options.use_weight {
+                    &options.column_weight
+                } else {
+                    ""
+                });
+                reader.set_resolution(options.resolution);
+                reader.set_grid_size(options.grid_size);
+                reader.read_bytes(&fs::read(path)?)?;
+                reader.build_density_map()?
             }
-            let mut reader = Ccp4MapReader::new();
-            reader.set_normalize(options.normalize);
-            reader.set_truncate_min(options.truncate_min);
-            reader.set_min(options.min.trunc());
-            reader.set_truncate_max(options.truncate_max);
-            reader.set_max(options.max.trunc());
-            reader.read_density_map_file(path)?
-        } else {
-            read_density_map(path, format)?
+            None => read_density_map(path, format)?,
         };
         let scene_uid = self.ensure_active_scene();
         let map_uid =
@@ -44308,6 +44366,108 @@ fn molecule_reader_options_for_format(format: &str) -> Option<GuiMoleculeReaderO
     }
 }
 
+fn mtz_map_reader_options(mtz: &MtzFile) -> Result<GuiMtzMapReaderOptions> {
+    let columns = mtz
+        .columns
+        .iter()
+        .map(|column| GuiMtzColumnOption {
+            name: column.name.clone(),
+            kind: column.kind,
+        })
+        .collect::<Vec<_>>();
+    let first_name = |kind| {
+        columns
+            .iter()
+            .find(|column| column.kind == kind)
+            .map(|column| column.name.clone())
+    };
+    let contains = |name: &str, kind| {
+        columns
+            .iter()
+            .any(|column| column.name == name && column.kind == kind)
+    };
+    let mut column_f =
+        first_name('F').ok_or_else(|| CueMolError::parse("MTZ has no amplitude (F) column"))?;
+    let mut column_phi = first_name('P').unwrap_or_default();
+    let mut column_weight = first_name('W').unwrap_or_default();
+    let mut use_phase = !column_phi.is_empty();
+    let mut use_weight = false;
+
+    for (candidate_f, candidate_phi, candidate_weight) in [
+        ("2FOFCWT", "PH2FOFCWT", None),
+        ("FWT", "PHWT", None),
+        ("FWT", "PHIC", None),
+        ("FP", "PHIM", Some("FOMM")),
+        ("FDM", "PHIDM", Some("FOMDM")),
+    ] {
+        if contains(candidate_f, 'F')
+            && contains(candidate_phi, 'P')
+            && candidate_weight.is_none_or(|weight| contains(weight, 'W'))
+        {
+            column_f = candidate_f.to_string();
+            column_phi = candidate_phi.to_string();
+            use_phase = true;
+            if let Some(weight) = candidate_weight {
+                column_weight = weight.to_string();
+                use_weight = true;
+            }
+            break;
+        }
+    }
+
+    let (resolution, min_resolution, max_resolution) = mtz
+        .resolution
+        .map(|resolution| (resolution.max, resolution.max, resolution.min))
+        .unwrap_or((-1.0, 0.0, 0.0));
+    Ok(GuiMtzMapReaderOptions {
+        columns,
+        column_f,
+        use_phase,
+        column_phi,
+        use_weight,
+        column_weight,
+        resolution,
+        min_resolution,
+        max_resolution,
+        grid_size: 0.25,
+    })
+}
+
+fn validate_mtz_map_reader_options(options: &GuiMtzMapReaderOptions) -> Result<()> {
+    let has_column = |name: &str, kind| {
+        options
+            .columns
+            .iter()
+            .any(|column| column.name == name && column.kind == kind)
+    };
+    if !has_column(&options.column_f, 'F') {
+        return Err(CueMolError::invalid_argument(
+            "MTZ amplitude column is required",
+        ));
+    }
+    if options.use_phase && !has_column(&options.column_phi, 'P') {
+        return Err(CueMolError::invalid_argument(
+            "MTZ phase column is required when phase is enabled",
+        ));
+    }
+    if options.use_weight && !has_column(&options.column_weight, 'W') {
+        return Err(CueMolError::invalid_argument(
+            "MTZ weight column is required when weight is enabled",
+        ));
+    }
+    if !options.resolution.is_finite()
+        || !options.min_resolution.is_finite()
+        || !options.max_resolution.is_finite()
+        || !options.grid_size.is_finite()
+        || options.grid_size <= 0.0
+    {
+        return Err(CueMolError::invalid_argument(
+            "MTZ resolution and grid spacing must be finite, with positive grid spacing",
+        ));
+    }
+    Ok(())
+}
+
 fn read_density_map(path: &Path, format: &str) -> Result<DensityMap> {
     if format == "qdfmap" {
         return QdfDenMapReader::new().read_file(path);
@@ -55484,22 +55644,22 @@ attribute \"dep\" string \"positions\"
             .expect("density-map setup");
         assert_eq!(defaults.target, GuiFileRendererTarget::DensityMap);
         assert_eq!(
-            defaults.ccp4_map_reader_options,
-            Some(GuiCcp4MapReaderOptions {
+            defaults.density_map_reader_options,
+            Some(GuiDensityMapReaderOptions::Ccp4(GuiCcp4MapReaderOptions {
                 normalize: false,
                 truncate_min: false,
                 min: 0.0,
                 truncate_max: false,
                 max: 5.0,
-            })
+            }))
         );
-        let options = GuiCcp4MapReaderOptions {
+        let options = GuiDensityMapReaderOptions::Ccp4(GuiCcp4MapReaderOptions {
             normalize: true,
             truncate_min: true,
             min: 0.0,
             truncate_max: true,
             max: 2.0,
-        };
+        });
         let setup = GuiRendererSetup {
             object_name: "density".to_string(),
             renderer_type: "isosurf".to_string(),
@@ -55529,6 +55689,91 @@ attribute \"dep\" string \"positions\"
             summary.renderers[0].specific.get("center"),
             Some(&Vector4::new3(4.0, 5.0, 6.0).to_string())
         );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn density_map_file_setup_applies_mtz_columns_and_fft_options() {
+        let columns = [
+            ("H", 'H'),
+            ("K", 'H'),
+            ("L", 'H'),
+            ("FP", 'F'),
+            ("PHIM", 'P'),
+            ("FOMM", 'W'),
+        ];
+        let header_offset = 80 + columns.len() * 4;
+        let header_start_word = header_offset / 4 + 1;
+        let mut bytes = vec![0_u8; 80];
+        bytes[0..4].copy_from_slice(b"MTZ ");
+        bytes[4..8].copy_from_slice(&(header_start_word as i32).to_le_bytes());
+        for value in [1.0_f32, 0.0, 0.0, 1000.0, 0.0, 0.5] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut records = vec![
+            format!("NCOL {} 1 0", columns.len()),
+            "CELL 10 10 10 90 90 90".to_string(),
+            "SYMINF 1 1 P 1 'P 1'".to_string(),
+            "RESO 0.01 0.25".to_string(),
+        ];
+        records.extend(
+            columns
+                .iter()
+                .map(|(name, kind)| format!("COLUMN {name} {kind} 0 0 0")),
+        );
+        records.push("END".to_string());
+        for record in records {
+            let mut padded = [b' '; 80];
+            padded[..record.len()].copy_from_slice(record.as_bytes());
+            bytes.extend_from_slice(&padded);
+        }
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-map-renderer-setup-{}.mtz",
+            std::process::id()
+        ));
+        fs::write(&path, bytes).unwrap();
+
+        let mut app = DesktopAppState::new();
+        let defaults = app
+            .file_renderer_setup_for_path(&path)
+            .unwrap()
+            .expect("MTZ setup");
+        let Some(GuiDensityMapReaderOptions::Mtz(options)) = defaults.density_map_reader_options
+        else {
+            panic!("expected MTZ reader options");
+        };
+        assert_eq!(options.column_f, "FP");
+        assert!(options.use_phase);
+        assert_eq!(options.column_phi, "PHIM");
+        assert!(options.use_weight);
+        assert_eq!(options.column_weight, "FOMM");
+        assert_eq!(options.resolution, 2.0);
+        assert_eq!(options.min_resolution, 2.0);
+        assert_eq!(options.max_resolution, 10.0);
+        assert_eq!(options.grid_size, 0.25);
+
+        let setup = GuiRendererSetup {
+            object_name: "mtz-density".to_string(),
+            renderer_type: "contour".to_string(),
+            renderer_name: "contour1".to_string(),
+            selection: None,
+            recenter: true,
+        };
+        let GuiLoadedPath::Map { map_uid, .. } = app
+            .open_density_map_path_with_renderer_setup(
+                &path,
+                Some(&GuiDensityMapReaderOptions::Mtz(options)),
+                None,
+                &setup,
+            )
+            .unwrap()
+        else {
+            panic!("expected density-map load");
+        };
+        let summary = app.density_map_summary(map_uid).unwrap();
+        assert_eq!(summary.name, "mtz-density");
+        assert_eq!(summary.format, "mtzmap");
+        assert_eq!(summary.renderers[0].name, "contour1");
         fs::remove_file(path).unwrap();
     }
 

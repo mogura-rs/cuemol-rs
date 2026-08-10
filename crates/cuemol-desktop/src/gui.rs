@@ -575,7 +575,7 @@ struct NativeRendererSetupDraft {
     action: NativeRendererSetupAction,
     target: crate::GuiFileRendererTarget,
     reader_options: Option<crate::GuiMoleculeReaderOptions>,
-    ccp4_map_options: Option<crate::GuiCcp4MapReaderOptions>,
+    density_map_options: Option<crate::GuiDensityMapReaderOptions>,
     object_name: String,
     renderer_type: String,
     renderer_name: String,
@@ -8100,7 +8100,7 @@ impl GuiApplication {
                     NativeRendererSetupAction::OpenPath(path),
                     file_setup.target,
                     file_setup.molecule_reader_options,
-                    file_setup.ccp4_map_reader_options,
+                    file_setup.density_map_reader_options,
                 );
             }
             Ok(None) => self.open_current_path(camera),
@@ -8215,7 +8215,7 @@ impl GuiApplication {
         path: PathBuf,
         target: crate::GuiFileRendererTarget,
         reader_options: Option<&crate::GuiMoleculeReaderOptions>,
-        ccp4_map_options: Option<&crate::GuiCcp4MapReaderOptions>,
+        density_map_options: Option<&crate::GuiDensityMapReaderOptions>,
         setup: crate::GuiRendererSetup,
         camera: &mut CameraController,
     ) {
@@ -8235,7 +8235,7 @@ impl GuiApplication {
             crate::GuiFileRendererTarget::DensityMap => {
                 self.state.open_density_map_path_with_renderer_setup(
                     &path,
-                    ccp4_map_options,
+                    density_map_options,
                     map_renderer_center,
                     &setup,
                 )
@@ -14546,7 +14546,7 @@ impl GuiApplication {
         action: NativeRendererSetupAction,
         target: crate::GuiFileRendererTarget,
         reader_options: Option<crate::GuiMoleculeReaderOptions>,
-        ccp4_map_options: Option<crate::GuiCcp4MapReaderOptions>,
+        density_map_options: Option<crate::GuiDensityMapReaderOptions>,
     ) {
         let scene_uid = self.state.ensure_active_scene();
         let available_options = match target {
@@ -14585,7 +14585,7 @@ impl GuiApplication {
             action,
             target,
             reader_options,
-            ccp4_map_options,
+            density_map_options,
             object_name,
             renderer_type,
             renderer_name,
@@ -14732,26 +14732,130 @@ impl GuiApplication {
                         "Auto-generate non-standard topology",
                     );
                 }
-                if let Some(options) = draft.ccp4_map_options.as_mut() {
+                if let Some(options) = draft.density_map_options.as_mut() {
                     ui.separator();
-                    ui.strong("CCP4Map options");
-                    ui.checkbox(&mut options.normalize, "Normalize by mean and stdev");
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut options.truncate_min, "Truncate density lower than:");
-                        ui.add_enabled(
-                            options.truncate_min,
-                            egui::DragValue::new(&mut options.min).speed(0.1),
-                        );
-                        ui.label("σ");
-                    });
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut options.truncate_max, "Truncate density higher than:");
-                        ui.add_enabled(
-                            options.truncate_max,
-                            egui::DragValue::new(&mut options.max).speed(0.1),
-                        );
-                        ui.label("σ");
-                    });
+                    match options {
+                        crate::GuiDensityMapReaderOptions::Ccp4(options) => {
+                            ui.strong("CCP4Map options");
+                            ui.checkbox(&mut options.normalize, "Normalize by mean and stdev");
+                            ui.horizontal(|ui| {
+                                ui.checkbox(
+                                    &mut options.truncate_min,
+                                    "Truncate density lower than:",
+                                );
+                                ui.add_enabled(
+                                    options.truncate_min,
+                                    egui::DragValue::new(&mut options.min).speed(0.1),
+                                );
+                                ui.label("σ");
+                            });
+                            ui.horizontal(|ui| {
+                                ui.checkbox(
+                                    &mut options.truncate_max,
+                                    "Truncate density higher than:",
+                                );
+                                ui.add_enabled(
+                                    options.truncate_max,
+                                    egui::DragValue::new(&mut options.max).speed(0.1),
+                                );
+                                ui.label("σ");
+                            });
+                        }
+                        crate::GuiDensityMapReaderOptions::Mtz(options) => {
+                            ui.strong("MTZ options");
+                            let amplitudes = options
+                                .columns
+                                .iter()
+                                .filter(|column| column.kind == 'F')
+                                .map(|column| column.name.clone())
+                                .collect::<Vec<_>>();
+                            let phases = options
+                                .columns
+                                .iter()
+                                .filter(|column| column.kind == 'P')
+                                .map(|column| column.name.clone())
+                                .collect::<Vec<_>>();
+                            let weights = options
+                                .columns
+                                .iter()
+                                .filter(|column| column.kind == 'W')
+                                .map(|column| column.name.clone())
+                                .collect::<Vec<_>>();
+                            egui::Grid::new("mtz_reader_options_grid")
+                                .num_columns(2)
+                                .spacing([8.0, 6.0])
+                                .show(ui, |ui| {
+                                    ui.label("Amplitude (F):");
+                                    egui::ComboBox::from_id_salt("mtz_amplitude")
+                                        .selected_text(&options.column_f)
+                                        .show_ui(ui, |ui| {
+                                            for name in &amplitudes {
+                                                ui.selectable_value(
+                                                    &mut options.column_f,
+                                                    name.clone(),
+                                                    name,
+                                                );
+                                            }
+                                        });
+                                    ui.end_row();
+                                    ui.add_enabled(
+                                        !phases.is_empty(),
+                                        egui::Checkbox::new(&mut options.use_phase, "Phase:"),
+                                    );
+                                    ui.add_enabled_ui(options.use_phase, |ui| {
+                                        egui::ComboBox::from_id_salt("mtz_phase")
+                                            .selected_text(&options.column_phi)
+                                            .show_ui(ui, |ui| {
+                                                for name in &phases {
+                                                    ui.selectable_value(
+                                                        &mut options.column_phi,
+                                                        name.clone(),
+                                                        name,
+                                                    );
+                                                }
+                                            });
+                                    });
+                                    ui.end_row();
+                                    ui.add_enabled(
+                                        !weights.is_empty(),
+                                        egui::Checkbox::new(&mut options.use_weight, "Weight:"),
+                                    );
+                                    ui.add_enabled_ui(options.use_weight, |ui| {
+                                        egui::ComboBox::from_id_salt("mtz_weight")
+                                            .selected_text(&options.column_weight)
+                                            .show_ui(ui, |ui| {
+                                                for name in &weights {
+                                                    ui.selectable_value(
+                                                        &mut options.column_weight,
+                                                        name.clone(),
+                                                        name,
+                                                    );
+                                                }
+                                            });
+                                    });
+                                    ui.end_row();
+                                    ui.label("Max resolution (Å):");
+                                    ui.add(
+                                        egui::DragValue::new(&mut options.resolution).speed(0.1),
+                                    );
+                                    ui.end_row();
+                                    ui.label("Grid spacing:");
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::DragValue::new(&mut options.grid_size)
+                                                .speed(0.01),
+                                        );
+                                        if ui.small_button("Fine (0.25)").clicked() {
+                                            options.grid_size = 0.25;
+                                        }
+                                        if ui.small_button("Coarse (0.33)").clicked() {
+                                            options.grid_size = 0.333_333;
+                                        }
+                                    });
+                                    ui.end_row();
+                                });
+                        }
+                    }
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -14761,9 +14865,23 @@ impl GuiApplication {
                         && (draft.target == crate::GuiFileRendererTarget::DensityMap
                             || !draft.selection_enabled
                             || !draft.selection.trim().is_empty())
-                        && draft.ccp4_map_options.as_ref().is_none_or(|options| {
-                            options.min.is_finite() && options.max.is_finite()
-                        });
+                        && draft
+                            .density_map_options
+                            .as_ref()
+                            .is_none_or(|options| match options {
+                                crate::GuiDensityMapReaderOptions::Ccp4(options) => {
+                                    options.min.is_finite() && options.max.is_finite()
+                                }
+                                crate::GuiDensityMapReaderOptions::Mtz(options) => {
+                                    !options.column_f.is_empty()
+                                        && (!options.use_phase || !options.column_phi.is_empty())
+                                        && (!options.use_weight
+                                            || !options.column_weight.is_empty())
+                                        && options.resolution.is_finite()
+                                        && options.grid_size.is_finite()
+                                        && options.grid_size > 0.0
+                                }
+                            });
                     if ui.add_enabled(valid, egui::Button::new("OK")).clicked() {
                         accept = true;
                     }
@@ -14785,7 +14903,9 @@ impl GuiApplication {
             if let Some(selection) = setup.selection.as_deref() {
                 self.remember_selection_history(selection);
             }
-            if let Some(options) = draft.ccp4_map_options.as_mut() {
+            if let Some(crate::GuiDensityMapReaderOptions::Ccp4(options)) =
+                draft.density_map_options.as_mut()
+            {
                 options.min = options.min.trunc();
                 options.max = options.max.trunc();
             }
@@ -14799,7 +14919,7 @@ impl GuiApplication {
                         path,
                         draft.target,
                         draft.reader_options.as_ref(),
-                        draft.ccp4_map_options.as_ref(),
+                        draft.density_map_options.as_ref(),
                         setup,
                         camera,
                     );

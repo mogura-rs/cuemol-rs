@@ -25,8 +25,8 @@ pub use map_renderers::{
 };
 pub use mtz::{
     density_map_from_mtz, density_map_from_mtz_weighted, density_map_from_reflections,
-    density_map_from_reflections_with_cell, read_mtz_bytes, read_mtz_file, Mtz2MapReader,
-    MtzColumn, MtzFile, MtzReflection, MtzResolution,
+    density_map_from_reflections_with_cell, read_mtz_bytes, read_mtz_file, read_mtz_metadata_file,
+    Mtz2MapReader, MtzColumn, MtzFile, MtzReflection, MtzResolution,
 };
 pub use qdf_map::{
     read_qdf_denmap_bytes, write_qdf_denmap_bytes, QdfDenMapReader, QdfDenMapWriter,

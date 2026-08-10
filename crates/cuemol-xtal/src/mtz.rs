@@ -3,6 +3,7 @@ use crate::map_renderers::DensityMap;
 use cuemol_core::{CueMolError, Result};
 use cuemol_qsys::{InOutHandler, ObjReader};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -407,6 +408,25 @@ pub fn read_mtz_file(path: impl AsRef<Path>) -> Result<MtzFile> {
     read_mtz_bytes(&bytes)
 }
 
+pub fn read_mtz_metadata_file(path: impl AsRef<Path>) -> Result<MtzFile> {
+    let mut file = fs::File::open(path)?;
+    let file_len = file.metadata()?.len() as usize;
+    let mut prefix = [0_u8; 12];
+    file.read_exact(&mut prefix)?;
+    if prefix.get(0..4) != Some(b"MTZ ".as_slice()) {
+        return Err(CueMolError::parse("missing MTZ magic"));
+    }
+
+    let (header_start_word, byte_swapped) = detect_mtz_header_start_for_len(&prefix, file_len)?;
+    let header_offset = (header_start_word - 1)
+        .checked_mul(4)
+        .ok_or_else(|| CueMolError::parse("MTZ header offset overflow"))?;
+    file.seek(SeekFrom::Start(header_offset as u64))?;
+    let mut header = Vec::with_capacity(file_len.saturating_sub(header_offset));
+    file.read_to_end(&mut header)?;
+    parse_mtz_header(&header, header_start_word, byte_swapped)
+}
+
 pub fn read_mtz_bytes(bytes: &[u8]) -> Result<MtzFile> {
     if bytes.len() < 12 {
         return Err(CueMolError::parse("MTZ file is too short"));
@@ -423,6 +443,16 @@ pub fn read_mtz_bytes(bytes: &[u8]) -> Result<MtzFile> {
         return Err(CueMolError::parse("MTZ header offset is outside file"));
     }
 
+    let mut mtz = parse_mtz_header(&bytes[header_offset..], header_start_word, byte_swapped)?;
+    mtz.reflections = read_reflection_body(bytes, header_offset, &mtz)?;
+    Ok(mtz)
+}
+
+fn parse_mtz_header(
+    header: &[u8],
+    header_start_word: usize,
+    byte_swapped: bool,
+) -> Result<MtzFile> {
     let mut mtz = MtzFile {
         header_start_word,
         column_count: 0,
@@ -435,9 +465,9 @@ pub fn read_mtz_bytes(bytes: &[u8]) -> Result<MtzFile> {
         reflections: Vec::new(),
     };
 
-    let mut offset = header_offset;
-    while offset + 80 <= bytes.len() {
-        let record = std::str::from_utf8(&bytes[offset..offset + 80])
+    let mut offset = 0;
+    while offset + 80 <= header.len() {
+        let record = std::str::from_utf8(&header[offset..offset + 80])
             .map_err(|_| CueMolError::parse("invalid MTZ header text"))?
             .trim_matches(['\0', ' ', '\r', '\n']);
         offset += 80;
@@ -453,7 +483,6 @@ pub fn read_mtz_bytes(bytes: &[u8]) -> Result<MtzFile> {
     if mtz.column_count == 0 && !mtz.columns.is_empty() {
         mtz.column_count = mtz.columns.len();
     }
-    mtz.reflections = read_reflection_body(bytes, header_offset, &mtz)?;
     Ok(mtz)
 }
 
@@ -538,24 +567,28 @@ fn escape_json(input: &str) -> String {
 }
 
 fn detect_mtz_header_start(bytes: &[u8]) -> Result<(usize, bool)> {
+    detect_mtz_header_start_for_len(bytes, bytes.len())
+}
+
+fn detect_mtz_header_start_for_len(bytes: &[u8], file_len: usize) -> Result<(usize, bool)> {
     let little = read_i32(bytes, 4, false);
-    if let Some(value) = plausible_header_start(bytes, little) {
+    if let Some(value) = plausible_header_start(file_len, little) {
         return Ok((value, false));
     }
     let big = read_i32(bytes, 4, true);
-    if let Some(value) = plausible_header_start(bytes, big) {
+    if let Some(value) = plausible_header_start(file_len, big) {
         return Ok((value, true));
     }
     Err(CueMolError::parse("invalid MTZ header start"))
 }
 
-fn plausible_header_start(bytes: &[u8], value: i32) -> Option<usize> {
+fn plausible_header_start(file_len: usize, value: i32) -> Option<usize> {
     if value <= 0 {
         return None;
     }
     let value = value as usize;
     let offset = value.checked_sub(1)?.checked_mul(4)?;
-    (offset < bytes.len()).then_some(value)
+    (offset < file_len).then_some(value)
 }
 
 fn read_mtz_record(record: &str, mtz: &mut MtzFile) -> Result<()> {
@@ -672,12 +705,67 @@ fn read_f32(bytes: &[u8], offset: usize, byte_swapped: bool) -> f32 {
 mod tests {
     use super::*;
 
+    fn test_mtz_bytes() -> Vec<u8> {
+        let columns = [
+            ("H", 'H'),
+            ("K", 'H'),
+            ("L", 'H'),
+            ("FWT", 'F'),
+            ("PHWT", 'P'),
+        ];
+        let header_offset = 80 + columns.len() * 4;
+        let header_start_word = header_offset / 4 + 1;
+        let mut bytes = vec![0_u8; 80];
+        bytes[0..4].copy_from_slice(b"MTZ ");
+        bytes[4..8].copy_from_slice(&(header_start_word as i32).to_le_bytes());
+        for value in [1.0_f32, 0.0, 0.0, 1000.0, 0.0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut records = vec![
+            format!("NCOL {} 1 0", columns.len()),
+            "CELL 10 10 10 90 90 90".to_string(),
+            "SYMINF 1 1 P 1 'P 1'".to_string(),
+            "RESO 0.01 0.25".to_string(),
+        ];
+        records.extend(
+            columns
+                .iter()
+                .map(|(name, kind)| format!("COLUMN {name} {kind} 0 0 0")),
+        );
+        records.push("END".to_string());
+        for record in records {
+            let mut padded = [b' '; 80];
+            padded[..record.len()].copy_from_slice(record.as_bytes());
+            bytes.extend_from_slice(&padded);
+        }
+        bytes
+    }
+
     fn column(name: &str, kind: char, index: usize) -> MtzColumn {
         MtzColumn {
             name: name.to_string(),
             kind,
             index,
         }
+    }
+
+    #[test]
+    fn metadata_file_reader_skips_reflection_body() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-mtz-metadata-{}.mtz", std::process::id()));
+        let bytes = test_mtz_bytes();
+        fs::write(&path, &bytes).unwrap();
+
+        let metadata = read_mtz_metadata_file(&path).unwrap();
+        let full = read_mtz_bytes(&bytes).unwrap();
+        assert_eq!(metadata.columns, full.columns);
+        assert_eq!(metadata.cell, full.cell);
+        assert_eq!(metadata.space_group, full.space_group);
+        assert_eq!(metadata.resolution, full.resolution);
+        assert_eq!(metadata.reflection_count, 1);
+        assert!(metadata.reflections.is_empty());
+        assert_eq!(full.reflections.len(), 1);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -145,6 +145,7 @@ struct RendererSetupDto {
     options: Vec<RendererSetupOptionDto>,
     reader_options: Option<MoleculeReaderOptionsDto>,
     ccp4_map_options: Option<Ccp4MapReaderOptionsDto>,
+    mtz_map_options: Option<MtzMapReaderOptionsDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,6 +233,76 @@ impl From<Ccp4MapReaderOptionsDto> for crate::GuiCcp4MapReaderOptions {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct MtzColumnOptionDto {
+    name: String,
+    kind: char,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct MtzMapReaderOptionsDto {
+    columns: Vec<MtzColumnOptionDto>,
+    column_f: String,
+    use_phase: bool,
+    column_phi: String,
+    use_weight: bool,
+    column_weight: String,
+    resolution: f64,
+    min_resolution: f64,
+    max_resolution: f64,
+    grid_size: f64,
+}
+
+impl From<crate::GuiMtzMapReaderOptions> for MtzMapReaderOptionsDto {
+    fn from(value: crate::GuiMtzMapReaderOptions) -> Self {
+        Self {
+            columns: value
+                .columns
+                .into_iter()
+                .map(|column| MtzColumnOptionDto {
+                    name: column.name,
+                    kind: column.kind,
+                })
+                .collect(),
+            column_f: value.column_f,
+            use_phase: value.use_phase,
+            column_phi: value.column_phi,
+            use_weight: value.use_weight,
+            column_weight: value.column_weight,
+            resolution: value.resolution,
+            min_resolution: value.min_resolution,
+            max_resolution: value.max_resolution,
+            grid_size: value.grid_size,
+        }
+    }
+}
+
+impl From<MtzMapReaderOptionsDto> for crate::GuiMtzMapReaderOptions {
+    fn from(value: MtzMapReaderOptionsDto) -> Self {
+        Self {
+            columns: value
+                .columns
+                .into_iter()
+                .map(|column| crate::GuiMtzColumnOption {
+                    name: column.name,
+                    kind: column.kind,
+                })
+                .collect(),
+            column_f: value.column_f,
+            use_phase: value.use_phase,
+            column_phi: value.column_phi,
+            use_weight: value.use_weight,
+            column_weight: value.column_weight,
+            resolution: value.resolution,
+            min_resolution: value.min_resolution,
+            max_resolution: value.max_resolution,
+            grid_size: value.grid_size,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RendererSetupInput {
@@ -248,6 +319,7 @@ struct FileRendererSetupInput {
     target_kind: String,
     reader_options: Option<MoleculeReaderOptionsDto>,
     ccp4_map_options: Option<Ccp4MapReaderOptionsDto>,
+    mtz_map_options: Option<MtzMapReaderOptionsDto>,
     renderer_setup: RendererSetupInput,
 }
 
@@ -5405,7 +5477,7 @@ enum ModelRequest {
         path: String,
         target: crate::GuiFileRendererTarget,
         reader_options: Option<crate::GuiMoleculeReaderOptions>,
-        ccp4_map_options: Option<crate::GuiCcp4MapReaderOptions>,
+        density_map_options: Option<crate::GuiDensityMapReaderOptions>,
         renderer_setup: crate::GuiRendererSetup,
         width: u32,
         height: u32,
@@ -6600,6 +6672,7 @@ fn renderer_setup_defaults(
         recenter: preferences.recenter,
         reader_options: reader_options.map(MoleculeReaderOptionsDto::from),
         ccp4_map_options: None,
+        mtz_map_options: None,
         options: options
             .into_iter()
             .map(|option| RendererSetupOptionDto {
@@ -6614,7 +6687,7 @@ fn renderer_setup_defaults(
 fn density_map_renderer_setup_defaults(
     model: &mut AppModel,
     base_object_name: &str,
-    reader_options: Option<crate::GuiCcp4MapReaderOptions>,
+    reader_options: Option<crate::GuiDensityMapReaderOptions>,
 ) -> Result<RendererSetupDto, String> {
     let scene_uid = model.desktop.ensure_active_scene();
     let options = model.desktop.density_map_renderer_setup_options();
@@ -6632,6 +6705,15 @@ fn density_map_renderer_setup_defaults(
         .desktop
         .suggest_renderer_name(scene_uid, &renderer_type)
         .map_err(|error| error.to_string())?;
+    let (ccp4_map_options, mtz_map_options) = match reader_options {
+        Some(crate::GuiDensityMapReaderOptions::Ccp4(options)) => {
+            (Some(Ccp4MapReaderOptionsDto::from(options)), None)
+        }
+        Some(crate::GuiDensityMapReaderOptions::Mtz(options)) => {
+            (None, Some(MtzMapReaderOptionsDto::from(options)))
+        }
+        None => (None, None),
+    };
     Ok(RendererSetupDto {
         target_kind: "densityMap".to_string(),
         object_name,
@@ -6639,7 +6721,8 @@ fn density_map_renderer_setup_defaults(
         renderer_name,
         recenter: false,
         reader_options: None,
-        ccp4_map_options: reader_options.map(Ccp4MapReaderOptionsDto::from),
+        ccp4_map_options,
+        mtz_map_options,
         options: options
             .into_iter()
             .map(|option| RendererSetupOptionDto {
@@ -7219,7 +7302,7 @@ fn handle_model_request(
                 crate::GuiFileRendererTarget::DensityMap => density_map_renderer_setup_defaults(
                     model,
                     object_name,
-                    file_setup.ccp4_map_reader_options,
+                    file_setup.density_map_reader_options,
                 )?,
             };
             Ok(ModelResponse::FileRendererSetup(Some(setup)))
@@ -7228,7 +7311,7 @@ fn handle_model_request(
             path,
             target,
             reader_options,
-            ccp4_map_options,
+            density_map_options,
             renderer_setup,
             width,
             height,
@@ -7238,9 +7321,9 @@ fn handle_model_request(
             let recenter = renderer_setup.recenter;
             let map_renderer_center = (!recenter).then(|| model.camera.center());
             let result = match target {
-                crate::GuiFileRendererTarget::Molecule if ccp4_map_options.is_some() => {
+                crate::GuiFileRendererTarget::Molecule if density_map_options.is_some() => {
                     Err(cuemol_core::CueMolError::invalid_argument(
-                        "CCP4 reader options require a density-map target",
+                        "density-map reader options require a density-map target",
                     ))
                 }
                 crate::GuiFileRendererTarget::Molecule => {
@@ -7258,7 +7341,7 @@ fn handle_model_request(
                 crate::GuiFileRendererTarget::DensityMap => {
                     model.desktop.open_density_map_path_with_renderer_setup(
                         &path,
-                        ccp4_map_options.as_ref(),
+                        density_map_options.as_ref(),
                         map_renderer_center,
                         &renderer_setup,
                     )
@@ -9768,9 +9851,18 @@ fn open_path_with_renderer_setup(
         .reader_options
         .map(crate::GuiMoleculeReaderOptions::try_from)
         .transpose()?;
-    let ccp4_map_options = file_setup
-        .ccp4_map_options
-        .map(crate::GuiCcp4MapReaderOptions::from);
+    let density_map_options = match (file_setup.ccp4_map_options, file_setup.mtz_map_options) {
+        (Some(_), Some(_)) => {
+            return Err("only one density-map reader option set is allowed".to_string())
+        }
+        (Some(options), None) => Some(crate::GuiDensityMapReaderOptions::Ccp4(
+            crate::GuiCcp4MapReaderOptions::from(options),
+        )),
+        (None, Some(options)) => Some(crate::GuiDensityMapReaderOptions::Mtz(
+            crate::GuiMtzMapReaderOptions::from(options),
+        )),
+        (None, None) => None,
+    };
     let renderer_setup = crate::GuiRendererSetup::from(file_setup.renderer_setup);
     let _ = crate::save_renderer_setup_preferences(
         &renderer_setup.renderer_type,
@@ -9782,7 +9874,7 @@ fn open_path_with_renderer_setup(
             path,
             target,
             reader_options,
-            ccp4_map_options,
+            density_map_options,
             renderer_setup,
             width,
             height,
@@ -11405,7 +11497,7 @@ mod tests {
                     .map(crate::GuiMoleculeReaderOptions::try_from)
                     .transpose()
                     .unwrap(),
-                ccp4_map_options: None,
+                density_map_options: None,
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "opened.pdb".to_string(),
                     renderer_type: "invalid".to_string(),
@@ -11434,7 +11526,7 @@ mod tests {
                     .map(crate::GuiMoleculeReaderOptions::try_from)
                     .transpose()
                     .unwrap(),
-                ccp4_map_options: None,
+                density_map_options: None,
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "opened.pdb".to_string(),
                     renderer_type: "ballstick".to_string(),
@@ -11489,6 +11581,7 @@ mod tests {
         assert!(!defaults.recenter);
         assert!(defaults.reader_options.is_none());
         assert!(defaults.ccp4_map_options.is_none());
+        assert!(defaults.mtz_map_options.is_none());
 
         let response = handle_model_request(
             &mut model,
@@ -11496,7 +11589,7 @@ mod tests {
                 path: path_text,
                 target: crate::GuiFileRendererTarget::DensityMap,
                 reader_options: None,
-                ccp4_map_options: None,
+                density_map_options: None,
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "density".to_string(),
                     renderer_type: "contour".to_string(),
@@ -11527,6 +11620,46 @@ mod tests {
         );
         assert!(!model.mesh_refit_pending);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn mtz_renderer_setup_dto_roundtrips_reader_columns_and_fft_options() {
+        let options = crate::GuiMtzMapReaderOptions {
+            columns: vec![
+                crate::GuiMtzColumnOption {
+                    name: "FWT".to_string(),
+                    kind: 'F',
+                },
+                crate::GuiMtzColumnOption {
+                    name: "PHWT".to_string(),
+                    kind: 'P',
+                },
+            ],
+            column_f: "FWT".to_string(),
+            use_phase: true,
+            column_phi: "PHWT".to_string(),
+            use_weight: false,
+            column_weight: String::new(),
+            resolution: 2.0,
+            min_resolution: 2.0,
+            max_resolution: 10.0,
+            grid_size: 0.25,
+        };
+        let mut model = model_without_gpu();
+        let defaults = density_map_renderer_setup_defaults(
+            &mut model,
+            "sample.mtz",
+            Some(crate::GuiDensityMapReaderOptions::Mtz(options.clone())),
+        )
+        .unwrap();
+
+        assert_eq!(defaults.target_kind, "densityMap");
+        assert!(defaults.ccp4_map_options.is_none());
+        let roundtrip = defaults
+            .mtz_map_options
+            .map(crate::GuiMtzMapReaderOptions::from)
+            .expect("MTZ options");
+        assert_eq!(roundtrip, options);
     }
 
     #[test]

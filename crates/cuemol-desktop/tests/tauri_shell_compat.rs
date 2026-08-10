@@ -277,6 +277,32 @@ fn tauri_file_open_matches_reference_ccp4_map_options() {
 }
 
 #[test]
+fn tauri_file_open_matches_reference_mtz_map_options() {
+    for label in [
+        "MTZ options",
+        "Amplitude (F):",
+        "Phase:",
+        "Weight:",
+        "Max resolution (Å):",
+        "Grid spacing:",
+        "Fine (0.25)",
+        "Coarse (0.33)",
+    ] {
+        assert!(JS.contains(label), "missing MTZ map option {label}");
+    }
+    for binding in [
+        "const mtzDefaults = setup.mtzMapOptions || null",
+        "mtzMapOptions: setup.mtzMapOptions",
+        "columnF: mtzControls.amplitude.value",
+        "usePhase: mtzControls.phase.enabled.checked",
+        "useWeight: mtzControls.weight.enabled.checked",
+        "gridSize: Number(mtzControls.gridSize.value)",
+    ] {
+        assert!(JS.contains(binding), "missing MTZ map binding {binding}");
+    }
+}
+
+#[test]
 fn tauri_reload_scene_uses_the_active_scene_source() {
     assert!(HTML.contains("data-local-action=\"reload-scene\""));
     assert!(JS.contains("scene?.modified"));
