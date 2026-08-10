@@ -141,6 +141,7 @@ let selectedObjectUid = null;
 let selectedRendererUid = null;
 const workspaceRendererStyleCache = new Map();
 const spaceGroupOptionsCache = new Map();
+const pdbRendererSetupCache = new Map();
 let workspaceCameraClipboardAvailable = false;
 let workspaceObjectClipboardAvailable = false;
 let workspaceRendererClipboardAvailable = false;
@@ -164,6 +165,9 @@ let coloringTargetKey = null;
 let coloringPaintSelectedIndex = -1;
 let coloringGradientSelectedIndex = -1;
 let selectionHistoryEntries = loadSelectionHistory();
+let pdbHistoryEntries = [];
+let pdbHistoryRequest = null;
+let pdbHistoryLoaded = false;
 let renderTimer = null;
 let viewportRenderRequest = null;
 let viewportRenderQueued = false;
@@ -285,6 +289,37 @@ function renderSelectionHistory() {
   }
   selectionHistory.value = "";
   selectionHistory.disabled = selectionHistoryEntries.length === 0;
+}
+
+function requestPdbHistory() {
+  if (!invoke || pdbHistoryLoaded) return Promise.resolve(pdbHistoryEntries);
+  if (pdbHistoryRequest) return pdbHistoryRequest;
+  pdbHistoryRequest = invoke("get_pdb_history")
+    .then((storedHistory) => {
+      pdbHistoryEntries = Array.isArray(storedHistory)
+        ? storedHistory.filter(
+            (entry) => typeof entry === "string" && /^[0-9][0-9A-Za-z]{3}$/.test(entry),
+          )
+        : [];
+      pdbHistoryLoaded = true;
+      return pdbHistoryEntries;
+    })
+    .catch(() => pdbHistoryEntries)
+    .finally(() => {
+      pdbHistoryRequest = null;
+    });
+  return pdbHistoryRequest;
+}
+
+function rememberPdbHistory(pdbId) {
+  const value = pdbId.trim().toLowerCase();
+  if (!/^[0-9][0-9a-z]{3}$/.test(value)) return;
+  pdbHistoryEntries = pdbHistoryEntries.filter(
+    (entry) => entry.toLowerCase() !== value,
+  );
+  pdbHistoryEntries.unshift(value);
+  pdbHistoryEntries = pdbHistoryEntries.slice(0, 10);
+  pdbHistoryLoaded = true;
 }
 
 function recentFileType(path) {
@@ -3432,10 +3467,33 @@ function suggestedRendererName(rendererType) {
   }
 }
 
+function requestPdbRendererSetup(pdbId) {
+  const key = `${snapshot?.activeSceneUid ?? 0}:${snapshot?.structureKey ?? ""}:${pdbId}`;
+  const cached = pdbRendererSetupCache.get(key);
+  if (cached) return Promise.resolve(cached);
+  const request = invoke("get_pdb_renderer_setup", { pdbId })
+    .then((setup) => {
+      pdbRendererSetupCache.set(key, setup);
+      for (const cachedKey of pdbRendererSetupCache.keys()) {
+        if (pdbRendererSetupCache.size <= 8) break;
+        if (cachedKey !== key) pdbRendererSetupCache.delete(cachedKey);
+      }
+      return setup;
+    })
+    .catch((error) => {
+      if (pdbRendererSetupCache.get(key) === request) {
+        pdbRendererSetupCache.delete(key);
+      }
+      throw error;
+    });
+  pdbRendererSetupCache.set(key, request);
+  return request;
+}
+
 async function showPdbRendererSetup(pdbId) {
   let setup;
   try {
-    setup = await invoke("get_pdb_renderer_setup", { pdbId });
+    setup = await requestPdbRendererSetup(pdbId);
   } catch (error) {
     showError(error);
     return null;
@@ -4672,22 +4730,14 @@ async function showReferenceDialog(title) {
     updateOpenState();
     dialogActions(open);
   } else if (title === "Open PDB") {
+    pdbRendererSetupCache.clear();
     dialogTitle.textContent = "Download PDB";
     dialogContent.append(dialogParagraph("Enter PDB ID:"));
-    let pdbHistory = [];
-    if (invoke) {
-      try {
-        const storedHistory = await invoke("get_pdb_history");
-        if (Array.isArray(storedHistory)) {
-          pdbHistory = storedHistory.filter(
-            (entry) => typeof entry === "string" && /^[0-9][0-9A-Za-z]{3}$/.test(entry),
-          );
-        }
-      } catch {
-        pdbHistory = [];
-      }
-    }
+    const initialHistoryValue = pdbHistoryEntries[0] || "";
+    const historyRequest = requestPdbHistory();
+    const pdbHistory = pdbHistoryEntries;
     const pdbId = dialogField("PDB ID", pdbHistory[0] || "");
+    let pdbIdEdited = false;
     pdbId.maxLength = 4;
     pdbId.pattern = "[0-9][0-9A-Za-z]{3}";
     const pdbHistoryList = document.createElement("datalist");
@@ -4752,7 +4802,10 @@ async function showReferenceDialog(title) {
         ...args,
         rendererSetup,
       });
-      if (changed && referenceDialog.open) referenceDialog.close();
+      if (changed) {
+        rememberPdbHistory(id);
+        if (referenceDialog.open) referenceDialog.close();
+      }
     });
     const updateOpenState = () => {
       const validId = /^[0-9][0-9A-Z]{3}$/.test(pdbId.value.trim().toUpperCase());
@@ -4788,6 +4841,9 @@ async function showReferenceDialog(title) {
       updateOpenState();
       availabilityTimer = setTimeout(async () => {
         if (!referenceDialog.open || !pdbId.isConnected) return;
+        if (args.fetchCoordinates) {
+          void requestPdbRendererSetup(args.pdbId).catch(() => {});
+        }
         try {
           const unavailable = await invoke("check_pdb_availability", args);
           if (sequence !== availabilitySequence || !referenceDialog.open || !pdbId.isConnected) {
@@ -4809,13 +4865,29 @@ async function showReferenceDialog(title) {
         updateOpenState();
       }, 180);
     };
-    pdbId.addEventListener("input", scheduleAvailabilityCheck);
+    pdbId.addEventListener("input", () => {
+      pdbIdEdited = true;
+      scheduleAvailabilityCheck();
+    });
     fetchCoordinates.addEventListener("change", scheduleAvailabilityCheck);
     coordinateSource.addEventListener("change", scheduleAvailabilityCheck);
     fetchTwoFofc.addEventListener("change", scheduleAvailabilityCheck);
     fetchFofc.addEventListener("change", scheduleAvailabilityCheck);
     mapSource.addEventListener("change", scheduleAvailabilityCheck);
     scheduleAvailabilityCheck();
+    void historyRequest.then((history) => {
+      if (!pdbId.isConnected) return;
+      pdbHistoryList.replaceChildren();
+      for (const entry of history) {
+        const option = document.createElement("option");
+        option.value = entry;
+        pdbHistoryList.append(option);
+      }
+      if (!pdbIdEdited && pdbId.value === initialHistoryValue && history[0]) {
+        pdbId.value = history[0];
+        scheduleAvailabilityCheck();
+      }
+    });
     dialogActions(open);
   } else {
     dialogContent.append(dialogParagraph(`${title} dialog`));
@@ -10417,6 +10489,12 @@ async function start() {
     if (snapshotHasRenderableContent()) void renderViewport();
     renderShell();
     scheduleMoleculeDetailsRefresh();
+    const preloadPdbHistory = () => void requestPdbHistory();
+    if (typeof globalThis.requestIdleCallback === "function") {
+      globalThis.requestIdleCallback(preloadPdbHistory, { timeout: 250 });
+    } else {
+      setTimeout(preloadPdbHistory, 0);
+    }
     new ResizeObserver(() => {
       const size = viewportDimensions();
       if (`${size.width}x${size.height}` !== renderedViewportSize) scheduleRender(140);

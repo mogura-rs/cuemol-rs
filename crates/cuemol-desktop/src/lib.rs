@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+use std::time::{Duration, Instant};
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 static NEXT_DOWNLOAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -85,13 +87,39 @@ struct DownloadGate {
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+type AvailabilityResult = std::result::Result<bool, String>;
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+struct AvailabilityGate {
+    result: Mutex<Option<AvailabilityResult>>,
+    ready: Condvar,
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[derive(Debug, Clone, Copy)]
+struct AvailabilityCacheEntry {
+    available: bool,
+    checked_at: Instant,
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 type DownloadGates = Mutex<HashMap<PathBuf, Arc<DownloadGate>>>;
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+type AvailabilityGates = Mutex<HashMap<String, Arc<AvailabilityGate>>>;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 static DOWNLOAD_GATES: OnceLock<DownloadGates> = OnceLock::new();
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-static PDB_AVAILABILITY_CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+static PDB_AVAILABILITY_GATES: OnceLock<AvailabilityGates> = OnceLock::new();
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+static PDB_AVAILABILITY_CACHE: OnceLock<Mutex<HashMap<String, AvailabilityCacheEntry>>> =
+    OnceLock::new();
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+const PDB_UNAVAILABLE_CACHE_TTL: Duration = Duration::from_secs(15);
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 pub(crate) fn download_cache_path(filename: &str) -> std::path::PathBuf {
@@ -454,40 +482,110 @@ pub(crate) fn probe_pdb_files(
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 fn probe_url_available(url: &str) -> std::result::Result<bool, String> {
-    let cache = PDB_AVAILABILITY_CACHE.get_or_init(Default::default);
-    if let Some(available) = cache
+    probe_url_available_with(url, |url| {
+        let status = std::process::Command::new("curl")
+            .args([
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--head",
+                "--connect-timeout",
+                "3",
+                "--max-time",
+                "8",
+            ])
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|error| format!("failed to start PDB availability check: {error}"))?;
+        Ok(status.success())
+    })
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn probe_url_available_with(
+    url: &str,
+    operation: impl FnOnce(&str) -> AvailabilityResult,
+) -> AvailabilityResult {
+    if let Some(available) = cached_pdb_availability(url) {
+        return Ok(available);
+    }
+
+    let gates = PDB_AVAILABILITY_GATES.get_or_init(Default::default);
+    let (gate, leader) = {
+        let mut entries = gates.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(gate) = entries.get(url) {
+            (Arc::clone(gate), false)
+        } else {
+            let gate = Arc::new(AvailabilityGate {
+                result: Mutex::new(None),
+                ready: Condvar::new(),
+            });
+            entries.insert(url.to_string(), Arc::clone(&gate));
+            (gate, true)
+        }
+    };
+    if !leader {
+        let mut result = gate
+            .result
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        while result.is_none() {
+            result = gate
+                .ready
+                .wait(result)
+                .unwrap_or_else(|poison| poison.into_inner());
+        }
+        return result
+            .as_ref()
+            .expect("availability gate result was checked")
+            .clone();
+    }
+
+    let result = cached_pdb_availability(url).map_or_else(|| operation(url), Ok);
+    if let Ok(available) = &result {
+        PDB_AVAILABILITY_CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(
+                url.to_string(),
+                AvailabilityCacheEntry {
+                    available: *available,
+                    checked_at: Instant::now(),
+                },
+            );
+    }
+    {
+        let mut stored = gate
+            .result
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        *stored = Some(result.clone());
+        gate.ready.notify_all();
+    }
+    let mut entries = gates.lock().unwrap_or_else(|poison| poison.into_inner());
+    if entries
+        .get(url)
+        .is_some_and(|current| Arc::ptr_eq(current, &gate))
+    {
+        entries.remove(url);
+    }
+    result
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn cached_pdb_availability(url: &str) -> Option<bool> {
+    let entry = PDB_AVAILABILITY_CACHE
+        .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .get(url)
-        .copied()
-    {
-        return Ok(available);
-    }
-    let status = std::process::Command::new("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--head",
-            "--connect-timeout",
-            "3",
-            "--max-time",
-            "8",
-        ])
-        .arg(url)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|error| format!("failed to start PDB availability check: {error}"))?;
-    let available = status.success();
-    if available {
-        cache
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .insert(url.to_string(), true);
-    }
-    Ok(available)
+        .copied()?;
+    (entry.available || entry.checked_at.elapsed() <= PDB_UNAVAILABLE_CACHE_TTL)
+        .then_some(entry.available)
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -787,6 +885,63 @@ mod download_tests {
             [GuiPdbFileKind::TwoFoFc, GuiPdbFileKind::FoFc]
         );
         assert!(probes[1].url.ends_with("/1crn_map.mtz"));
+    }
+
+    #[test]
+    fn pdb_availability_checks_share_inflight_and_recent_negative_results() {
+        let url = format!(
+            "test://pdb-availability-{}-{}",
+            std::process::id(),
+            NEXT_DOWNLOAD_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let starts = Arc::new(AtomicUsize::new(0));
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let leader_url = url.clone();
+        let leader_starts = starts.clone();
+        let leader = std::thread::spawn(move || {
+            probe_url_available_with(&leader_url, |_| {
+                leader_starts.fetch_add(1, Ordering::Relaxed);
+                started_sender.send(()).unwrap();
+                release_receiver.recv().unwrap();
+                Ok(false)
+            })
+        });
+        started_receiver.recv().unwrap();
+
+        let follower_url = url.clone();
+        let follower_starts = starts.clone();
+        let follower = std::thread::spawn(move || {
+            probe_url_available_with(&follower_url, |_| {
+                follower_starts.fetch_add(1, Ordering::Relaxed);
+                Ok(true)
+            })
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let follower_is_waiting = PDB_AVAILABILITY_GATES
+                .get()
+                .and_then(|gates| {
+                    let entries = gates.lock().unwrap_or_else(|poison| poison.into_inner());
+                    entries.get(&url).map(Arc::strong_count)
+                })
+                .is_some_and(|strong_count| strong_count >= 3);
+            if follower_is_waiting {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        release_sender.send(()).unwrap();
+
+        assert!(!leader.join().unwrap().unwrap());
+        assert!(!follower.join().unwrap().unwrap());
+        assert!(!probe_url_available_with(&url, |_| {
+            starts.fetch_add(1, Ordering::Relaxed);
+            Ok(true)
+        })
+        .unwrap());
+        assert_eq!(starts.load(Ordering::Relaxed), 1);
     }
 
     #[test]
