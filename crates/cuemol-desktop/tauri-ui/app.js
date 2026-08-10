@@ -123,6 +123,7 @@ const MOLECULE_RENDERER_TYPES = [
 let snapshot = null;
 let selectedObjectUid = null;
 let selectedRendererUid = null;
+const workspaceRendererStyleCache = new Map();
 let selectedDensityMapUid = null;
 let selectedDensityRendererUid = null;
 let selectedSurfaceUid = null;
@@ -4643,7 +4644,34 @@ function workspaceObjectContextItems(scene, object) {
   return items;
 }
 
-function workspaceRendererContextItems(scene, object, renderer) {
+function workspaceStyleSignature(sceneUid) {
+  return JSON.stringify(
+    (snapshot?.styles || [])
+      .filter((style) => style.ownerSceneUid === sceneUid)
+      .map((style) => [style.name, style.source, style.modified]),
+  );
+}
+
+async function cachedWorkspaceRendererStyles(sceneUid, rendererType) {
+  if (!invoke) return [];
+  const key = `${sceneUid}:${rendererType}`;
+  const signature = workspaceStyleSignature(sceneUid);
+  const cached = workspaceRendererStyleCache.get(key);
+  if (cached?.signature === signature) return cached.options;
+  try {
+    const options = await invoke("get_renderer_style_options", {
+      sceneUid,
+      rendererType,
+    });
+    workspaceRendererStyleCache.set(key, { signature, options });
+    return options;
+  } catch (error) {
+    showError(error);
+    return [];
+  }
+}
+
+async function workspaceRendererContextItems(scene, object, renderer) {
   const items = [];
   if (renderer.rendererType === "*group") {
     items.push(
@@ -4680,6 +4708,10 @@ function workspaceRendererContextItems(scene, object, renderer) {
     );
     return items;
   }
+  const styleOptions =
+    renderer.rendererType === "*selection"
+      ? []
+      : await cachedWorkspaceRendererStyles(scene.uid, renderer.rendererType);
   const selectionReadonly = ["*selection", "selection", "*namelabel", "name_label"].includes(
     renderer.rendererType,
   );
@@ -4720,14 +4752,104 @@ function workspaceRendererContextItems(scene, object, renderer) {
     }
     items.push(null);
   }
-  items.push(
-    {
-      label: "Create style...",
-      action: async () => {
-        if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
-        await rendererStyleCreateEditor(object, renderer);
-      },
+  if (renderer.rendererType !== "*selection") {
+    const lowerType = renderer.rendererType.replace(/^\*/, "").toLowerCase();
+    const suffix = ["name_label", "namelabel"].includes(lowerType)
+      ? "label"
+      : lowerType === "gpu_mapmesh"
+        ? "contour"
+        : lowerType;
+    const shapeStyles = styleOptions.filter((style) => style.name.toLowerCase().endsWith(suffix));
+    const edgeStyles = styleOptions.filter((style) => style.name.toLowerCase().startsWith("egline"));
+    const paintStyles = styleOptions.filter((style) => style.name.toLowerCase().endsWith("paint"));
+    const applyStyle = (styleName, component) => () =>
+      mutate("apply_workspace_renderer_style", {
+        input: {
+          objectUid: object.uid,
+          rendererUid: renderer.uid,
+          styleName,
+          component,
+        },
+      });
+    const supportsColoring = !["selection", "*selection", "name_label", "*namelabel", "atomintr"].includes(
+      renderer.rendererType,
+    );
+    if (supportsColoring) {
+      for (const [label, styleName] of [
+        ["CPK molcol", "DefaultCPKColoring"],
+        ["CPK dark gray", "DarkCPKColoring"],
+        ["CPK light gray", "LightCPKColoring"],
+      ]) {
+        if (styleOptions.some((style) => style.name.toLowerCase() === styleName.toLowerCase())) {
+          items.push({ label: `Coloring · ${label}`, action: applyStyle(styleName, "coloring") });
+        }
+      }
+      for (const style of paintStyles) {
+        items.push({
+          label: `Coloring · ${style.description || style.name}`,
+          action: applyStyle(style.name, "coloring"),
+        });
+      }
+      for (const [label, preset] of [["B-factor", "bfactor"], ["Rainbow", "rainbow"]]) {
+        items.push({
+          label: `Coloring · ${label}`,
+          action: () =>
+            mutate("set_workspace_renderer_coloring", {
+              input: { objectUid: object.uid, rendererUid: renderer.uid, preset },
+            }),
+        });
+      }
+    }
+    for (const style of shapeStyles) {
+      items.push({
+        label: `Style · ${style.description || style.name}`,
+        action: applyStyle(style.name, "shape"),
+      });
+    }
+    for (const style of edgeStyles) {
+      items.push({
+        label: `Style · ${style.description || style.name}`,
+        action: applyStyle(style.name, "edge"),
+      });
+    }
+    items.push({ label: "Edit style...", action: () => showReferenceDialog("Renderer Properties") });
+  }
+  items.push({
+    label: "Create style...",
+    action: async () => {
+      if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
+      await rendererStyleCreateEditor(object, renderer);
     },
+  });
+  if (renderer.rendererType === "atomintr") {
+    items.push(null, {
+      label: "Edit interaction list...",
+      action: () => showReferenceDialog("Renderer Properties"),
+    });
+  }
+  items.push(
+    null,
+    {
+      label: "New Renderer...",
+      action: () =>
+        mutate("add_renderer", {
+          objectUid: object.uid,
+          rendererType: rendererType.value,
+          groupName: null,
+        }),
+    },
+    {
+      label: "Delete",
+      action: () =>
+        mutate("delete_workspace_item", {
+          target: {
+            kind: "renderer",
+            objectUid: object.uid,
+            rendererUid: renderer.uid,
+          },
+        }),
+    },
+    null,
     { label: "Properties...", action: () => showReferenceDialog("Renderer Properties") },
   );
   return items;
@@ -5139,13 +5261,14 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         rendererRow.addEventListener("dblclick", () =>
           showReferenceDialog("Renderer Properties"),
         );
-        rendererRow.addEventListener("contextmenu", (event) => {
+        rendererRow.addEventListener("contextmenu", async (event) => {
+          event.preventDefault();
           selectedObjectUid = object.uid;
           selectedRendererUid = renderer.uid;
           workspaceSelectionKind = isGroup ? "rendererGroup" : "renderer";
           showWorkspaceContextMenu(
             event,
-            workspaceRendererContextItems(scene, object, renderer),
+            await workspaceRendererContextItems(scene, object, renderer),
           );
         });
         rendererRow.prepend(
@@ -7631,6 +7754,18 @@ async function mutate(command, args = {}, render = renderShell, refreshViewport 
   setBusy(true);
   try {
     snapshot = await invoke(command, args);
+    if (
+      [
+        "create_style",
+        "create_renderer_style",
+        "set_style_properties",
+        "destroy_style",
+        "undo",
+        "redo",
+      ].includes(command)
+    ) {
+      workspaceRendererStyleCache.clear();
+    }
     syncEmptyMoleculeDetails();
     if (refreshViewport) void renderViewport();
     render();

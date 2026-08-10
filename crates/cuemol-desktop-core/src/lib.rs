@@ -4341,6 +4341,125 @@ impl DesktopAppState {
         Ok(())
     }
 
+    /// Replace one Workspace renderer style component and append the selected style.
+    /// The component categories mirror CueMol2's separate Style and Coloring menus.
+    pub fn apply_renderer_style_option(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        style_name: &str,
+        component: &str,
+    ) -> Result<String> {
+        let style_name = style_name.trim();
+        let (scene_uid, renderer_type, current_styles) = {
+            let scene_uid = self
+                .scene_manager()
+                .scene_uid_for_object(object_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+            let object = self
+                .scene_manager()
+                .object(object_uid)
+                .expect("object was found above");
+            let renderer = object
+                .renderer(renderer_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+            (
+                scene_uid,
+                renderer.renderer_type().to_string(),
+                renderer.style().unwrap_or_default().to_string(),
+            )
+        };
+        if !self
+            .renderer_style_options(scene_uid, &renderer_type)
+            .iter()
+            .any(|style| style.name.eq_ignore_ascii_case(style_name))
+        {
+            return Err(CueMolError::NotFound(format!(
+                "renderer style {style_name}"
+            )));
+        }
+        let renderer_type = renderer_type.trim_start_matches('*').to_ascii_lowercase();
+        let suffix = match renderer_type.as_str() {
+            "name_label" | "namelabel" => "label",
+            "gpu_mapmesh" => "contour",
+            other => other,
+        };
+        let target = style_name.to_ascii_lowercase();
+        let valid = match component {
+            "shape" => target.ends_with(suffix),
+            "edge" => target.starts_with("egline"),
+            "coloring" => target.ends_with("coloring") || target.ends_with("paint"),
+            _ => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unsupported renderer style component: {component}"
+                )))
+            }
+        };
+        if !valid {
+            return Err(CueMolError::invalid_argument(format!(
+                "style {style_name} is not a {component} style for {renderer_type}"
+            )));
+        }
+
+        let mut styles = current_styles
+            .split(',')
+            .map(str::trim)
+            .filter(|style| !style.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        styles.retain(|style| {
+            let style = style.to_ascii_lowercase();
+            let same_component = match component {
+                "shape" => style.ends_with(suffix),
+                "edge" => style.starts_with("egline"),
+                // CueMol2's coloring menu removes Paint styles before appending
+                // the selected CPK/Paint style.
+                "coloring" => style.ends_with("paint"),
+                _ => unreachable!("component was validated above"),
+            };
+            !same_component && !style.eq_ignore_ascii_case(&target)
+        });
+        styles.push(style_name.to_string());
+        let styles = styles.join(",");
+        self.set_renderer_styles(object_uid, renderer_uid, &styles)?;
+        if component == "coloring" {
+            self.set_renderer_coloring_details(
+                object_uid,
+                renderer_uid,
+                None,
+                BTreeMap::new(),
+                Vec::new(),
+                None,
+            )?;
+        }
+        Ok(styles)
+    }
+
+    pub fn set_workspace_renderer_coloring_preset(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        preset: &str,
+    ) -> Result<()> {
+        let coloring_type = match preset {
+            "bfactor" => "BfacColoring",
+            "rainbow" => "RainbowColoring",
+            _ => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unsupported renderer coloring preset: {preset}"
+                )))
+            }
+        };
+        self.set_renderer_coloring_details(
+            object_uid,
+            renderer_uid,
+            Some(coloring_type.to_string()),
+            BTreeMap::new(),
+            Vec::new(),
+            None,
+        )
+    }
+
     pub fn set_object_common_properties(
         &mut self,
         object_uid: Uid,
@@ -51123,6 +51242,51 @@ end_header
             converted.qsc_attr("style"),
             Some("DefaultCPK,DefaultCPKColoring")
         );
+    }
+
+    #[test]
+    fn workspace_renderer_style_and_coloring_actions_replace_components() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("renderer styles", false).result_scene;
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let renderer_uid = app
+            .new_renderer(scene_uid, object_uid, "simple", "lines")
+            .unwrap()
+            .result_renderer;
+
+        let styles = app
+            .apply_renderer_style_option(object_uid, renderer_uid, "ThickSimple", "shape")
+            .unwrap();
+        assert_eq!(styles, "DefaultCPKColoring,ThickSimple");
+        let styles = app
+            .apply_renderer_style_option(object_uid, renderer_uid, "DarkCPKColoring", "coloring")
+            .unwrap();
+        assert_eq!(styles, "DefaultCPKColoring,ThickSimple,DarkCPKColoring");
+        assert!(app
+            .apply_renderer_style_option(object_uid, renderer_uid, "DefaultSimple", "edge")
+            .is_err());
+
+        app.set_workspace_renderer_coloring_preset(object_uid, renderer_uid, "rainbow")
+            .unwrap();
+        let renderer = app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        let coloring = renderer
+            .qsc_children()
+            .iter()
+            .find(|child| child.tag_name() == "coloring")
+            .unwrap();
+        assert_eq!(coloring.type_name(), "RainbowColoring");
+        assert!(app
+            .set_workspace_renderer_coloring_preset(object_uid, renderer_uid, "unknown")
+            .is_err());
     }
 
     #[test]

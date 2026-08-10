@@ -4019,6 +4019,11 @@ impl GuiApplication {
                                 });
                                 ui.separator();
                             }
+                            if renderer.renderer_type != "*selection" {
+                                self.workspace_renderer_style_menus(
+                                    ui, scene_uid, object_uid, renderer,
+                                );
+                            }
                             if ui.button("Create style...").clicked() {
                                 self.open_renderer_style_create(
                                     scene_uid,
@@ -4027,6 +4032,23 @@ impl GuiApplication {
                                 );
                                 ui.close();
                             }
+                            ui.separator();
+                            if renderer.renderer_type == "atomintr" {
+                                if ui.button("Edit interaction list...").clicked() {
+                                    self.open_renderer_properties(object_uid, renderer.uid);
+                                    ui.close();
+                                }
+                                ui.separator();
+                            }
+                            if ui.button("New Renderer...").clicked() {
+                                self.open_renderer_dialog(object_uid);
+                                ui.close();
+                            }
+                            if ui.button("Delete").clicked() {
+                                self.delete_renderer(object_uid, renderer.uid);
+                                ui.close();
+                            }
+                            ui.separator();
                             if ui.button("Properties...").clicked() {
                                 self.open_renderer_properties(object_uid, renderer.uid);
                                 ui.close();
@@ -4095,6 +4117,190 @@ impl GuiApplication {
             renderer.uid,
             position,
         );
+    }
+
+    fn workspace_renderer_style_menus(
+        &mut self,
+        ui: &mut egui::Ui,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer: &crate::GuiRendererSummary,
+    ) {
+        let options = self
+            .state
+            .renderer_style_options(scene_uid, &renderer.renderer_type);
+        let renderer_type = renderer
+            .renderer_type
+            .trim_start_matches('*')
+            .to_ascii_lowercase();
+        let suffix = match renderer_type.as_str() {
+            "name_label" | "namelabel" => "label",
+            "gpu_mapmesh" => "contour",
+            other => other,
+        };
+        let shape = options
+            .iter()
+            .filter(|style| style.name.to_ascii_lowercase().ends_with(suffix))
+            .collect::<Vec<_>>();
+        let edge = options
+            .iter()
+            .filter(|style| style.name.to_ascii_lowercase().starts_with("egline"))
+            .collect::<Vec<_>>();
+        let paint = options
+            .iter()
+            .filter(|style| style.name.to_ascii_lowercase().ends_with("paint"))
+            .collect::<Vec<_>>();
+        let supports_coloring = !matches!(
+            renderer.renderer_type.as_str(),
+            "*selection" | "selection" | "*namelabel" | "name_label" | "atomintr"
+        );
+        ui.add_enabled_ui(supports_coloring, |ui| {
+            ui.menu_button("Coloring", |ui| {
+                for (label, style_name) in [
+                    ("CPK molcol", "DefaultCPKColoring"),
+                    ("CPK dark gray", "DarkCPKColoring"),
+                    ("CPK light gray", "LightCPKColoring"),
+                ] {
+                    if options
+                        .iter()
+                        .any(|style| style.name.eq_ignore_ascii_case(style_name))
+                        && ui.button(label).clicked()
+                    {
+                        self.apply_workspace_renderer_style(
+                            scene_uid,
+                            object_uid,
+                            renderer.uid,
+                            style_name,
+                            "coloring",
+                        );
+                        ui.close();
+                    }
+                }
+                for style in &paint {
+                    let label = if style.description.is_empty() {
+                        style.name.as_str()
+                    } else {
+                        style.description.as_str()
+                    };
+                    if ui.button(label).clicked() {
+                        self.apply_workspace_renderer_style(
+                            scene_uid,
+                            object_uid,
+                            renderer.uid,
+                            &style.name,
+                            "coloring",
+                        );
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                for (label, preset) in [("B-factor", "bfactor"), ("Rainbow", "rainbow")] {
+                    if ui.button(label).clicked() {
+                        self.set_workspace_renderer_coloring_preset(
+                            scene_uid,
+                            object_uid,
+                            renderer.uid,
+                            preset,
+                        );
+                        ui.close();
+                    }
+                }
+            });
+        });
+        ui.menu_button("Style", |ui| {
+            for style in &shape {
+                let label = if style.description.is_empty() {
+                    style.name.as_str()
+                } else {
+                    style.description.as_str()
+                };
+                if ui.button(label).clicked() {
+                    self.apply_workspace_renderer_style(
+                        scene_uid,
+                        object_uid,
+                        renderer.uid,
+                        &style.name,
+                        "shape",
+                    );
+                    ui.close();
+                }
+            }
+            if !shape.is_empty() && !edge.is_empty() {
+                ui.separator();
+            }
+            for style in &edge {
+                let label = if style.description.is_empty() {
+                    style.name.as_str()
+                } else {
+                    style.description.as_str()
+                };
+                if ui.button(label).clicked() {
+                    self.apply_workspace_renderer_style(
+                        scene_uid,
+                        object_uid,
+                        renderer.uid,
+                        &style.name,
+                        "edge",
+                    );
+                    ui.close();
+                }
+            }
+        });
+        if ui.button("Edit style...").clicked() {
+            self.open_renderer_properties(object_uid, renderer.uid);
+            ui.close();
+        }
+    }
+
+    fn apply_workspace_renderer_style(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        style_name: &str,
+        component: &str,
+    ) {
+        let undo = self.capture_undo();
+        match self.state.apply_renderer_style_option(
+            object_uid,
+            renderer_uid,
+            style_name,
+            component,
+        ) {
+            Ok(_) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.rebuild_snapshot();
+                self.set_status(if component == "coloring" {
+                    "Change coloring style"
+                } else {
+                    "Change style"
+                });
+            }
+            Err(error) => self.set_status(format!("Renderer style error: {error}")),
+        }
+    }
+
+    fn set_workspace_renderer_coloring_preset(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        preset: &str,
+    ) {
+        let undo = self.capture_undo();
+        match self
+            .state
+            .set_workspace_renderer_coloring_preset(object_uid, renderer_uid, preset)
+        {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.rebuild_snapshot();
+                self.set_status("Change coloring");
+            }
+            Err(error) => self.set_status(format!("Renderer coloring error: {error}")),
+        }
     }
 
     fn change_workspace_renderer_type(
@@ -18514,6 +18720,53 @@ mod tests {
         let object = app.state.scene_manager().object(object_uid).unwrap();
         assert!(object.renderer(renderer_uid).is_some());
         assert!(object.renderer(replacement_uid).is_none());
+    }
+
+    #[test]
+    fn native_workspace_renderer_style_and_coloring_actions_are_undoable() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let renderer_uid = app
+            .state
+            .new_renderer(scene_uid, object_uid, "simple", "lines")
+            .unwrap()
+            .result_renderer;
+
+        app.apply_workspace_renderer_style(
+            scene_uid,
+            object_uid,
+            renderer_uid,
+            "ThickSimple",
+            "shape",
+        );
+        assert_eq!(
+            app.state.renderer_summaries(object_uid)[0].style.as_deref(),
+            Some("DefaultCPKColoring,ThickSimple")
+        );
+        app.set_workspace_renderer_coloring_preset(scene_uid, object_uid, renderer_uid, "bfactor");
+        assert_eq!(app.undo_stack.len(), 2);
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert!(object
+            .renderer(renderer_uid)
+            .unwrap()
+            .qsc_children()
+            .iter()
+            .any(|child| child.type_name() == "BfacColoring"));
+
+        app.undo(&mut CameraController::default());
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert!(!object
+            .renderer(renderer_uid)
+            .unwrap()
+            .qsc_children()
+            .iter()
+            .any(|child| child.type_name() == "BfacColoring"));
     }
 
     #[test]

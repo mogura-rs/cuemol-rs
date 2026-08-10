@@ -693,6 +693,23 @@ struct WorkspaceRendererTypeInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceRendererStyleInput {
+    object_uid: u64,
+    renderer_uid: u64,
+    style_name: String,
+    component: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceRendererColoringInput {
+    object_uid: u64,
+    renderer_uid: u64,
+    preset: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceRendererGroupInput {
     object_uid: u64,
     #[serde(default)]
@@ -2337,6 +2354,43 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = format!("Change renderer type to {}", input.renderer_type);
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn apply_workspace_renderer_style(
+        &mut self,
+        input: WorkspaceRendererStyleInput,
+    ) -> Result<(), String> {
+        self.desktop
+            .apply_renderer_style_option(
+                Uid::new(input.object_uid),
+                Uid::new(input.renderer_uid),
+                &input.style_name,
+                &input.component,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = if input.component == "coloring" {
+            "Change coloring style".to_string()
+        } else {
+            "Change style".to_string()
+        };
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn set_workspace_renderer_coloring(
+        &mut self,
+        input: WorkspaceRendererColoringInput,
+    ) -> Result<(), String> {
+        self.desktop
+            .set_workspace_renderer_coloring_preset(
+                Uid::new(input.object_uid),
+                Uid::new(input.renderer_uid),
+                &input.preset,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = "Change coloring".to_string();
         self.invalidate_mesh(false);
         Ok(())
     }
@@ -4847,6 +4901,8 @@ enum ModelRequest {
     MoveWorkspaceRenderer(WorkspaceMoveRendererInput),
     SetWorkspaceRendererSelection(WorkspaceRendererSelectionInput),
     ChangeWorkspaceRendererType(WorkspaceRendererTypeInput),
+    ApplyWorkspaceRendererStyle(WorkspaceRendererStyleInput),
+    SetWorkspaceRendererColoring(WorkspaceRendererColoringInput),
     CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     FitWorkspaceItem {
@@ -6247,6 +6303,18 @@ fn handle_model_request(
         ModelRequest::ChangeWorkspaceRendererType(input) => {
             let undo = model.capture_undo();
             model.change_workspace_renderer_type(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ApplyWorkspaceRendererStyle(input) => {
+            let undo = model.capture_undo();
+            model.apply_workspace_renderer_style(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetWorkspaceRendererColoring(input) => {
+            let undo = model.capture_undo();
+            model.set_workspace_renderer_coloring(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -8158,6 +8226,28 @@ fn change_workspace_renderer_type(
 }
 
 #[tauri::command]
+fn apply_workspace_renderer_style(
+    input: WorkspaceRendererStyleInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ApplyWorkspaceRendererStyle(input),
+    )?)
+}
+
+#[tauri::command]
+fn set_workspace_renderer_coloring(
+    input: WorkspaceRendererColoringInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetWorkspaceRendererColoring(input),
+    )?)
+}
+
+#[tauri::command]
 fn create_workspace_renderer_group(
     input: WorkspaceRendererGroupInput,
     state: State<'_, ManagedState>,
@@ -9290,6 +9380,8 @@ pub fn run() -> Result<(), tauri::Error> {
             move_workspace_renderer,
             set_workspace_renderer_selection,
             change_workspace_renderer_type,
+            apply_workspace_renderer_style,
+            set_workspace_renderer_coloring,
             create_workspace_renderer_group,
             rename_workspace_renderer_group,
             fit_workspace_item,
@@ -10718,6 +10810,64 @@ mod tests {
             .unwrap()
             .renderer(renderer_uid)
             .is_some());
+    }
+
+    #[test]
+    fn workspace_renderer_style_and_coloring_requests_are_undoable() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        model.prepare_mesh_if_needed().unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::ApplyWorkspaceRendererStyle(WorkspaceRendererStyleInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                style_name: "DefaultSimple".to_string(),
+                component: "shape".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(snapshot.objects[0].renderers[0].style, "DefaultSimple");
+        assert_eq!(snapshot.undo_descriptions[0], "Change style");
+        assert!(model.mesh.is_none());
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceRendererColoring(WorkspaceRendererColoringInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                preset: "rainbow".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(snapshot.undo_descriptions[0], "Change coloring");
+        assert!(model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap()
+            .qsc_children()
+            .iter()
+            .any(|child| child.type_name() == "RainbowColoring"));
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(!model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap()
+            .qsc_children()
+            .iter()
+            .any(|child| child.type_name() == "RainbowColoring"));
     }
 
     #[test]
