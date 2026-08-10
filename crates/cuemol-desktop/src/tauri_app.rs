@@ -10360,6 +10360,24 @@ fn get_pdb_renderer_setup(
     }
 }
 
+fn pdb_fetch_options(
+    pdb_id: String,
+    fetch_coordinates: bool,
+    coordinate_source: String,
+    fetch_two_fofc: bool,
+    fetch_fofc: bool,
+    map_source: String,
+) -> crate::PdbFetchOptions {
+    crate::PdbFetchOptions {
+        pdb_id,
+        fetch_coordinates,
+        coordinate_source,
+        fetch_two_fofc,
+        fetch_fofc,
+        map_source,
+    }
+}
+
 #[tauri::command]
 async fn check_pdb_availability(
     pdb_id: String,
@@ -10369,14 +10387,14 @@ async fn check_pdb_availability(
     fetch_fofc: bool,
     map_source: String,
 ) -> Result<Vec<String>, String> {
-    let options = crate::PdbFetchOptions {
+    let options = pdb_fetch_options(
         pdb_id,
         fetch_coordinates,
         coordinate_source,
         fetch_two_fofc,
         fetch_fofc,
         map_source,
-    };
+    );
     let unavailable = tauri::async_runtime::spawn_blocking(move || crate::probe_pdb_files(options))
         .await
         .map_err(|error| format!("PDB availability task failed: {error}"))??;
@@ -10400,17 +10418,56 @@ async fn prefetch_pdb(
     fetch_fofc: bool,
     map_source: String,
 ) -> Result<(), String> {
-    let options = crate::PdbFetchOptions {
+    let options = pdb_fetch_options(
         pdb_id,
         fetch_coordinates,
         coordinate_source,
         fetch_two_fofc,
         fetch_fofc,
         map_source,
-    };
+    );
     tauri::async_runtime::spawn_blocking(move || crate::download_pdb_files(options))
         .await
         .map_err(|error| format!("PDB prefetch task failed: {error}"))??;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_pdb_download_progress(
+    pdb_id: String,
+    fetch_coordinates: bool,
+    coordinate_source: String,
+    fetch_two_fofc: bool,
+    fetch_fofc: bool,
+    map_source: String,
+) -> Result<u64, String> {
+    crate::pdb_downloaded_bytes(&pdb_fetch_options(
+        pdb_id,
+        fetch_coordinates,
+        coordinate_source,
+        fetch_two_fofc,
+        fetch_fofc,
+        map_source,
+    ))
+}
+
+#[tauri::command]
+fn cancel_pdb_download(
+    pdb_id: String,
+    fetch_coordinates: bool,
+    coordinate_source: String,
+    fetch_two_fofc: bool,
+    fetch_fofc: bool,
+    map_source: String,
+) -> Result<(), String> {
+    crate::cancel_pdb_download(&pdb_fetch_options(
+        pdb_id,
+        fetch_coordinates,
+        coordinate_source,
+        fetch_two_fofc,
+        fetch_fofc,
+        map_source,
+    ))?;
     Ok(())
 }
 
@@ -10440,14 +10497,14 @@ async fn open_pdb(
     if let Some(setup) = renderer_setup.as_ref() {
         let _ = crate::save_renderer_setup_preferences(&setup.renderer_type, setup.recenter);
     }
-    let options = crate::PdbFetchOptions {
-        pdb_id: pdb_id.clone(),
+    let options = pdb_fetch_options(
+        pdb_id.clone(),
         fetch_coordinates,
         coordinate_source,
         fetch_two_fofc,
         fetch_fofc,
         map_source,
-    };
+    );
     let _ = request_model(&state, ModelRequest::StartRendererWarmup)?;
     let files = tauri::async_runtime::spawn_blocking(move || crate::download_pdb_files(options))
         .await
@@ -11597,6 +11654,8 @@ pub fn run() -> Result<(), tauri::Error> {
             get_pdb_renderer_setup,
             check_pdb_availability,
             prefetch_pdb,
+            get_pdb_download_progress,
+            cancel_pdb_download,
             open_pdb,
             load_trajectory,
             set_trajectory_frame,

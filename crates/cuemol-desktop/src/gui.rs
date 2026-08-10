@@ -572,6 +572,16 @@ type PdbProbeMessage = (
     std::result::Result<Vec<crate::GuiPdbFileKind>, String>,
 );
 
+fn format_download_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} bytes")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
 #[derive(Debug, Clone)]
 enum NativeRendererSetupAction {
     PdbDownload,
@@ -806,6 +816,8 @@ struct GuiApplication {
     renderer_setup_draft: Option<NativeRendererSetupDraft>,
     error_alert: Option<String>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
+    pdb_download_options: Option<crate::PdbFetchOptions>,
+    pdb_download_canceling: bool,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
     console_input: String,
@@ -2791,6 +2803,8 @@ impl GuiApplication {
             renderer_setup_draft: None,
             error_alert: None,
             pdb_download_receiver: None,
+            pdb_download_options: None,
+            pdb_download_canceling: false,
             url_download_receiver: None,
             script_path: "script.js".to_string(),
             console_input: String::new(),
@@ -9786,6 +9800,7 @@ impl GuiApplication {
         let (sender, receiver) = mpsc::channel();
         let repaint = ctx.clone();
         let result_pdb_id = pdb_id.clone();
+        let download_options = options.clone();
         let spawn = std::thread::Builder::new()
             .name(format!("cuemol-pdb-{pdb_id}"))
             .spawn(move || {
@@ -9797,6 +9812,8 @@ impl GuiApplication {
         match spawn {
             Ok(_) => {
                 self.pdb_download_receiver = Some(receiver);
+                self.pdb_download_options = Some(download_options);
+                self.pdb_download_canceling = false;
                 self.set_status(format!("Downloading PDB {pdb_id}…"));
             }
             Err(error) => self.set_status(format!("Error: failed to start PDB download: {error}")),
@@ -9811,6 +9828,8 @@ impl GuiApplication {
         match result {
             Some(Ok(Ok((pdb_id, files, renderer_setup)))) => {
                 self.pdb_download_receiver = None;
+                self.pdb_download_options = None;
+                self.pdb_download_canceling = false;
                 let undo = self.capture_undo();
                 let input = files
                     .iter()
@@ -9866,11 +9885,20 @@ impl GuiApplication {
                 }
             }
             Some(Ok(Err(error))) => {
+                let canceled = self.pdb_download_canceling && error == "download canceled";
                 self.pdb_download_receiver = None;
-                self.set_status(format!("Error: {error}"));
+                self.pdb_download_options = None;
+                self.pdb_download_canceling = false;
+                if canceled {
+                    self.set_status("PDB download canceled");
+                } else {
+                    self.set_status(format!("Error: {error}"));
+                }
             }
             Some(Err(mpsc::TryRecvError::Disconnected)) => {
                 self.pdb_download_receiver = None;
+                self.pdb_download_options = None;
+                self.pdb_download_canceling = false;
                 self.set_status("Error: PDB download task stopped");
             }
             Some(Err(mpsc::TryRecvError::Empty)) | None => {}
@@ -10739,6 +10767,7 @@ impl GuiApplication {
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx);
         self.get_pdb_dialog(ctx);
+        self.pdb_download_progress_dialog(ctx);
         self.merge_molecule_dialog(ctx);
         self.md_trajectory_dialog(ctx);
         self.png_export_dialog(ctx);
@@ -16293,6 +16322,46 @@ impl GuiApplication {
             crate::GuiFileRendererTarget::Molecule,
             NativeRendererReaderOptions::default(),
         );
+    }
+
+    fn pdb_download_progress_dialog(&mut self, ctx: &egui::Context) {
+        if self.pdb_download_receiver.is_none() {
+            return;
+        }
+        let Some(options) = self.pdb_download_options.clone() else {
+            return;
+        };
+        if self.pdb_download_canceling {
+            let _ = crate::cancel_pdb_download(&options);
+        }
+        let bytes = crate::pdb_downloaded_bytes(&options).unwrap_or(0);
+        let mut cancel = false;
+        egui::Window::new(format!("Downloading PDB {}", options.pdb_id))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.add(egui::ProgressBar::new(0.5).animate(true));
+                ui.label(if self.pdb_download_canceling {
+                    "Canceling…".to_string()
+                } else {
+                    format!("Read {}", format_download_bytes(bytes))
+                });
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(!self.pdb_download_canceling, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel {
+            self.pdb_download_canceling = true;
+            let _ = crate::cancel_pdb_download(&options);
+        }
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
 
     fn merge_molecule_dialog(&mut self, ctx: &egui::Context) {

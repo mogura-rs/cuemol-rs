@@ -34,6 +34,10 @@ const dragReadout = document.getElementById("drag-readout");
 const errorAlertDialog = document.getElementById("error-alert-dialog");
 const errorAlertTitle = document.getElementById("error-alert-title");
 const errorAlertMessage = document.getElementById("error-alert-message");
+const streamProgressDialog = document.getElementById("stream-progress-dialog");
+const streamProgressTitle = document.getElementById("stream-progress-title");
+const streamProgressReadout = document.getElementById("stream-progress-readout");
+const streamProgressCancel = document.getElementById("stream-progress-cancel");
 const measureReadout = document.getElementById("measure-readout");
 const molstructObject = document.getElementById("molstruct-object");
 const molstructTree = document.getElementById("molstruct-tree");
@@ -440,6 +444,52 @@ function showError(error, title = "Error") {
   if (!errorAlertDialog.open && errorAlertDialog.showModal) {
     errorAlertDialog.showModal();
   }
+}
+
+function formatDownloadBytes(bytes) {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+async function waitForPdbDownload(title, args, resultPromise) {
+  let canceling = false;
+  let progressPending = false;
+  let cancelTimer = null;
+  streamProgressTitle.textContent = title;
+  streamProgressReadout.textContent = "Read 0 bytes";
+  streamProgressCancel.disabled = false;
+  const requestCancel = () => void invoke("cancel_pdb_download", args).catch(() => {});
+  streamProgressCancel.onclick = () => {
+    if (canceling) return;
+    canceling = true;
+    streamProgressCancel.disabled = true;
+    streamProgressReadout.textContent = "Canceling…";
+    requestCancel();
+    cancelTimer = setInterval(requestCancel, 100);
+  };
+  if (!streamProgressDialog.open && streamProgressDialog.showModal) {
+    streamProgressDialog.showModal();
+  }
+  const progressTimer = setInterval(async () => {
+    if (canceling || progressPending) return;
+    progressPending = true;
+    try {
+      const bytes = await invoke("get_pdb_download_progress", args);
+      streamProgressReadout.textContent = `Read ${formatDownloadBytes(Number(bytes) || 0)}`;
+    } catch {
+      // The download result reports actionable errors.
+    } finally {
+      progressPending = false;
+    }
+  }, 100);
+  const result = await resultPromise;
+  clearInterval(progressTimer);
+  clearInterval(cancelTimer);
+  streamProgressCancel.onclick = null;
+  if (streamProgressDialog.open) streamProgressDialog.close();
+  if (!result.ok && !canceling) throw result.error;
+  return !canceling;
 }
 
 function recordStatus(message) {
@@ -5986,13 +6036,23 @@ async function showReferenceDialog(title) {
       const args = availabilityArgs();
       const id = args.pdbId;
       if (!/^[0-9][0-9A-Z]{3}$/.test(id)) return;
-      if (args.fetchCoordinates) {
-        void invoke("prefetch_pdb", args).catch(() => {});
-      }
+      const prefetchResult = invoke("prefetch_pdb", args).then(
+        () => ({ ok: true }),
+        (error) => ({ ok: false, error }),
+      );
       const rendererSetup = args.fetchCoordinates
         ? await showPdbRendererSetup(id)
         : null;
-      if (args.fetchCoordinates && !rendererSetup) return;
+      if (args.fetchCoordinates && !rendererSetup) {
+        void prefetchResult;
+        return;
+      }
+      try {
+        if (!(await waitForPdbDownload(`Downloading PDB ${id}`, args, prefetchResult))) return;
+      } catch (error) {
+        showError(error);
+        return;
+      }
       const changed = await mutateWithViewport("open_pdb", {
         ...args,
         rendererSetup,

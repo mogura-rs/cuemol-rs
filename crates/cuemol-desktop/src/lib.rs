@@ -14,6 +14,8 @@ pub use cuemol_desktop_core::*;
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 use std::collections::{BTreeMap, HashMap};
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+use std::io::Read;
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 use std::path::{Path, PathBuf};
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -92,6 +94,8 @@ struct PdbProbeSpec {
 struct DownloadGate {
     result: Mutex<Option<DownloadResult>>,
     ready: Condvar,
+    bytes_received: std::sync::atomic::AtomicU64,
+    cancelled: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -647,6 +651,42 @@ pub(crate) fn download_pdb_files(
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+pub(crate) fn pdb_downloaded_bytes(options: &PdbFetchOptions) -> std::result::Result<u64, String> {
+    let groups = group_pdb_download_specs(pdb_download_specs(options)?);
+    let gates = DOWNLOAD_GATES.get_or_init(Default::default);
+    let entries = gates.lock().unwrap_or_else(|poison| poison.into_inner());
+    Ok(groups
+        .iter()
+        .map(|group| {
+            std::fs::metadata(&group.path)
+                .map(|metadata| metadata.len())
+                .unwrap_or_else(|_| {
+                    entries.get(&group.path).map_or(0, |gate| {
+                        gate.bytes_received
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                    })
+                })
+        })
+        .sum())
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+pub(crate) fn cancel_pdb_download(options: &PdbFetchOptions) -> std::result::Result<usize, String> {
+    let groups = group_pdb_download_specs(pdb_download_specs(options)?);
+    let gates = DOWNLOAD_GATES.get_or_init(Default::default);
+    let entries = gates.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut cancelled = 0;
+    for group in groups {
+        if let Some(gate) = entries.get(&group.path) {
+            gate.cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            cancelled += 1;
+        }
+    }
+    Ok(cancelled)
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 fn group_pdb_download_specs(specs: Vec<PdbDownloadSpec>) -> Vec<PdbDownloadGroup> {
     let mut groups = BTreeMap::<(String, PathBuf), Vec<(usize, GuiPdbFileKind)>>::new();
     for (index, spec) in specs.into_iter().enumerate() {
@@ -686,11 +726,14 @@ pub(crate) fn download_to_shared_cache(url: &str, path: &Path) -> DownloadResult
     if nonempty_file(path) {
         return Ok(path.to_path_buf());
     }
-    with_download_gate(path, || download_uncached(url, path))
+    with_download_gate(path, |gate| download_uncached(url, path, gate))
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-fn with_download_gate(path: &Path, operation: impl FnOnce() -> DownloadResult) -> DownloadResult {
+fn with_download_gate(
+    path: &Path,
+    operation: impl FnOnce(&DownloadGate) -> DownloadResult,
+) -> DownloadResult {
     let gates = DOWNLOAD_GATES.get_or_init(Default::default);
     let (gate, leader) = {
         let mut entries = gates.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -700,6 +743,8 @@ fn with_download_gate(path: &Path, operation: impl FnOnce() -> DownloadResult) -
             let gate = Arc::new(DownloadGate {
                 result: Mutex::new(None),
                 ready: Condvar::new(),
+                bytes_received: std::sync::atomic::AtomicU64::new(0),
+                cancelled: std::sync::atomic::AtomicBool::new(false),
             });
             entries.insert(path.to_path_buf(), gate.clone());
             (gate, true)
@@ -707,7 +752,7 @@ fn with_download_gate(path: &Path, operation: impl FnOnce() -> DownloadResult) -
     };
 
     if leader {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&gate)))
             .unwrap_or_else(|_| Err("download task panicked".to_string()));
         *gate
             .result
@@ -740,7 +785,7 @@ fn with_download_gate(path: &Path, operation: impl FnOnce() -> DownloadResult) -
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-fn download_uncached(url: &str, path: &Path) -> DownloadResult {
+fn download_uncached(url: &str, path: &Path, gate: &DownloadGate) -> DownloadResult {
     if nonempty_file(path) {
         return Ok(path.to_path_buf());
     }
@@ -757,7 +802,7 @@ fn download_uncached(url: &str, path: &Path) -> DownloadResult {
         "{filename}.{}.{download_id}.partial",
         std::process::id(),
     ));
-    let output = std::process::Command::new("curl")
+    let mut child = std::process::Command::new("curl")
         .args([
             "--fail",
             "--silent",
@@ -772,16 +817,47 @@ fn download_uncached(url: &str, path: &Path) -> DownloadResult {
         .arg("--output")
         .arg(&partial_path)
         .arg(url)
-        .output()
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|error| format!("failed to start curl: {error}"))?;
-    if !output.status.success() {
+    let status = loop {
+        if gate.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&partial_path);
+            return Err("download canceled".to_string());
+        }
+        if let Ok(metadata) = std::fs::metadata(&partial_path) {
+            gate.bytes_received
+                .store(metadata.len(), std::sync::atomic::Ordering::Relaxed);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(40)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&partial_path);
+                return Err(format!("failed to monitor curl: {error}"));
+            }
+        }
+    };
+    let mut detail = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut detail);
+    }
+    if !status.success() {
         let _ = std::fs::remove_file(&partial_path);
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = detail.trim();
         return Err(if detail.is_empty() {
-            format!("curl failed with status {}", output.status)
+            format!("curl failed with status {status}")
         } else {
             format!("curl failed: {detail}")
         });
+    }
+    if let Ok(metadata) = std::fs::metadata(&partial_path) {
+        gate.bytes_received
+            .store(metadata.len(), std::sync::atomic::Ordering::Relaxed);
     }
     if !nonempty_file(&partial_path) {
         let _ = std::fs::remove_file(&partial_path);
@@ -1038,7 +1114,7 @@ mod download_tests {
         let leader_path = path.clone();
         let leader_starts = starts.clone();
         let leader = std::thread::spawn(move || {
-            with_download_gate(&leader_path, || {
+            with_download_gate(&leader_path, |_| {
                 leader_starts.fetch_add(1, Ordering::Relaxed);
                 started_sender.send(()).unwrap();
                 release_receiver.recv().unwrap();
@@ -1050,7 +1126,7 @@ mod download_tests {
         let follower_path = path.clone();
         let follower_starts = starts.clone();
         let follower = std::thread::spawn(move || {
-            with_download_gate(&follower_path, || {
+            with_download_gate(&follower_path, |_| {
                 follower_starts.fetch_add(1, Ordering::Relaxed);
                 Ok(follower_path.clone())
             })
@@ -1075,5 +1151,46 @@ mod download_tests {
         assert_eq!(leader.join().unwrap().unwrap(), path);
         assert_eq!(follower.join().unwrap().unwrap(), path);
         assert_eq!(starts.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn download_gate_exposes_progress_and_honors_cancellation() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-download-progress-test-{}",
+            std::process::id()
+        ));
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let leader_path = path.clone();
+        let leader = std::thread::spawn(move || {
+            with_download_gate(&leader_path, |gate| {
+                gate.bytes_received.store(1536, Ordering::Relaxed);
+                started_sender.send(()).unwrap();
+                while !gate.cancelled.load(Ordering::Relaxed) {
+                    std::thread::yield_now();
+                }
+                Err("download canceled".to_string())
+            })
+        });
+        started_receiver.recv().unwrap();
+
+        let gate = DOWNLOAD_GATES
+            .get()
+            .and_then(|gates| {
+                gates
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .get(&path)
+                    .cloned()
+            })
+            .expect("the download gate is active");
+        assert_eq!(gate.bytes_received.load(Ordering::Relaxed), 1536);
+        gate.cancelled.store(true, Ordering::Relaxed);
+        assert_eq!(leader.join().unwrap(), Err("download canceled".to_string()));
+        assert!(!DOWNLOAD_GATES
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .contains_key(&path));
     }
 }

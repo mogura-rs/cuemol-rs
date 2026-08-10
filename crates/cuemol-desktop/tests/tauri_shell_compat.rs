@@ -4,6 +4,7 @@ const JS: &str = include_str!("../tauri-ui/app.js");
 const CAPABILITIES: &str = include_str!("../capabilities/default.json");
 const NATIVE_GUI_RS: &str = include_str!("../src/gui.rs");
 const TAURI_APP_RS: &str = include_str!("../src/tauri_app.rs");
+const DESKTOP_LIB_RS: &str = include_str!("../src/lib.rs");
 
 #[test]
 fn tauri_shell_matches_the_reference_xul_dock_order() {
@@ -656,6 +657,29 @@ fn error_alert_requires_explicit_acknowledgement() {
     assert!(CSS.contains(".reference-dialog.error-alert-dialog"));
     assert!(NATIVE_GUI_RS.contains("fn error_alert_dialog"));
     assert!(NATIVE_GUI_RS.contains("self.error_alert = Some(message.clone())"));
+}
+
+#[test]
+fn pdb_download_uses_cancellable_stream_progress() {
+    for id in [
+        "id=\"stream-progress-dialog\"",
+        "id=\"stream-progress-title\"",
+        "id=\"stream-progress-bar\"",
+        "id=\"stream-progress-readout\"",
+        "id=\"stream-progress-cancel\"",
+    ] {
+        assert!(HTML.contains(id), "missing stream progress element {id}");
+    }
+    assert!(JS.contains("waitForPdbDownload(`Downloading PDB ${id}`"));
+    assert!(JS.contains("invoke(\"get_pdb_download_progress\", args)"));
+    assert!(JS.contains("invoke(\"cancel_pdb_download\", args)"));
+    assert!(JS.contains("streamProgressReadout.textContent = \"Canceling…\""));
+    assert!(CSS.contains(".reference-dialog.stream-progress-dialog"));
+    assert!(TAURI_APP_RS.contains("fn get_pdb_download_progress("));
+    assert!(TAURI_APP_RS.contains("fn cancel_pdb_download("));
+    assert!(DESKTOP_LIB_RS.contains("bytes_received: std::sync::atomic::AtomicU64"));
+    assert!(DESKTOP_LIB_RS.contains("cancelled: std::sync::atomic::AtomicBool"));
+    assert!(NATIVE_GUI_RS.contains("fn pdb_download_progress_dialog("));
 }
 
 #[test]
