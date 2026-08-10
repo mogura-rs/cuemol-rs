@@ -7348,6 +7348,15 @@ function workspaceObjectContextItems(scene, object) {
       ],
     },
   ];
+  if (current) {
+    items.push({
+      label: "Paint",
+      children: workspacePaintMenuChildren((color) => () =>
+        mutate("insert_workspace_object_paint", {
+          input: { objectUid: object.uid, color },
+        })),
+    });
+  }
   items.push(
     null,
     {

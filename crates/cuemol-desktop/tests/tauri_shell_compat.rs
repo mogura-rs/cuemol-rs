@@ -975,6 +975,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("apply_workspace_renderer_style"));
     assert!(JS.contains("set_workspace_renderer_coloring"));
     assert!(JS.contains("insert_workspace_renderer_paint"));
+    assert!(JS.contains("insert_workspace_object_paint"));
     assert!(JS.contains("copy_workspace_renderer"));
     assert!(JS.contains("paste_workspace_renderers"));
     assert!(JS.contains("copy_workspace_object"));
@@ -1081,6 +1082,8 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(!tauri_object_menu.contains("Copy Object"));
     assert!(!tauri_object_menu.contains("Save As ..."));
     assert!(!tauri_object_menu.contains("Delete Object"));
+    assert!(tauri_object_menu.contains("if (current)"));
+    assert!(tauri_object_menu.contains("label: \"Paint\""));
     let tauri_renderer_group_menu = JS
         .split("async function workspaceRendererContextItems(scene, object, renderer)")
         .nth(1)
@@ -1381,6 +1384,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "apply_workspace_renderer_style",
         "set_workspace_renderer_coloring",
         "insert_workspace_renderer_paint",
+        "insert_workspace_object_paint",
         "copy_workspace_renderer",
         "paste_workspace_renderers",
         "copy_workspace_object",

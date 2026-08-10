@@ -6515,6 +6515,40 @@ impl DesktopAppState {
         )
     }
 
+    pub fn insert_object_paint_entry(&mut self, object_uid: Uid, color: &str) -> Result<()> {
+        let color = color.trim();
+        cuemol_gfx::parse_color(color)?;
+        let (selection, coloring_type, attrs, mut entries) = {
+            let object = self
+                .scene_manager()
+                .object(object_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+            (
+                object.mol().selection_text().trim().to_string(),
+                object.coloring_type().map(str::to_string),
+                object.coloring_attrs().clone(),
+                object.paint_coloring().to_vec(),
+            )
+        };
+        if selection.is_empty() {
+            return Err(CueMolError::invalid_argument("selection is empty"));
+        }
+        if coloring_type.as_deref() != Some("PaintColoring") {
+            return Err(CueMolError::invalid_argument(format!(
+                "object {} does not use PaintColoring",
+                object_uid.get()
+            )));
+        }
+        entries.insert(0, (selection, color.to_string()));
+        self.set_object_coloring_details(
+            object_uid,
+            Some("PaintColoring".to_string()),
+            attrs,
+            entries,
+            None,
+        )
+    }
+
     pub fn set_object_common_properties(
         &mut self,
         object_uid: Uid,
@@ -55198,6 +55232,39 @@ end_header
             .unwrap();
         assert_eq!(first_paint.str_attr("sel").as_str(), "protein");
         assert_eq!(first_paint.str_attr("color").as_str(), "hsb(0, 1.0, 1.0)");
+    }
+
+    #[test]
+    fn workspace_object_paint_inserts_the_current_selection_first() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("object paint", false).result_scene;
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        app.set_object_coloring_details(
+            object_uid,
+            Some("PaintColoring".to_string()),
+            BTreeMap::new(),
+            vec![("*".to_string(), "white".to_string())],
+            None,
+        )
+        .unwrap();
+        app.set_molecule_selection_text(object_uid, "protein")
+            .unwrap();
+        app.insert_object_paint_entry(object_uid, "hsb(120, 1.0, 1.0)")
+            .unwrap();
+        assert_eq!(
+            app.scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .paint_coloring(),
+            &[
+                ("protein".to_string(), "hsb(120, 1.0, 1.0)".to_string()),
+                ("*".to_string(), "white".to_string()),
+            ]
+        );
     }
 
     #[test]
