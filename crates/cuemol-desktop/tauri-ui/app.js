@@ -422,6 +422,8 @@ function showBottomPanel(name) {
   if (name === "sequence") {
     renderSequence();
     scheduleMoleculeDetailsRefresh(0);
+  } else if (name === "trajectory") {
+    renderTrajectory();
   }
 }
 
@@ -4306,6 +4308,36 @@ function sidePanelCard(name) {
   );
 }
 
+function sidePanelIsExpanded(name) {
+  const card = sidePanelCard(name);
+  return Boolean(card && !card.hidden && card.classList.contains("open"));
+}
+
+function renderSidePanel(name) {
+  switch (name) {
+    case "MolStruct":
+      renderMolStruct();
+      scheduleMoleculeDetailsRefresh(0);
+      break;
+    case "Selection":
+      renderSelectionPanel();
+      scheduleMoleculeDetailsRefresh(0, selectionObjectUid);
+      break;
+    case "Coloring":
+      renderColoring();
+      break;
+    case "Symmetry":
+      renderSymmetry();
+      break;
+    case "Density map":
+      renderDensity();
+      break;
+    case "Animation":
+      renderAnimation();
+      break;
+  }
+}
+
 function syncSidePanelVisibility() {
   const cards = [...document.querySelectorAll("[data-side-card]")];
   sidePanel.hidden = !cards.some((card) => !card.hidden);
@@ -6738,10 +6770,11 @@ function cachedMoleculeStructure(objectUid) {
 function requestedMoleculeObjectUids() {
   const objects = activeMoleculeObjects();
   const activeUids = new Set(objects.map((object) => object.uid));
-  const requested = [...new Set([molstructObjectUid, selectionObjectUid])].filter((uid) =>
-    activeUids.has(uid),
-  );
-  if (requested.length === 0) {
+  const visibleObjectUids = [];
+  if (sidePanelIsExpanded("MolStruct")) visibleObjectUids.push(molstructObjectUid);
+  if (sidePanelIsExpanded("Selection")) visibleObjectUids.push(selectionObjectUid);
+  const requested = [...new Set(visibleObjectUids)].filter((uid) => activeUids.has(uid));
+  if (requested.length === 0 && visibleObjectUids.length > 0) {
     const fallback = activeUids.has(selectedObjectUid) ? selectedObjectUid : objects[0]?.uid;
     if (fallback) requested.push(fallback);
   }
@@ -8534,13 +8567,20 @@ function scheduleSecondaryPanelRender() {
   const generation = ++secondaryPanelRenderGeneration;
   const render = () => {
     if (generation !== secondaryPanelRenderGeneration || !snapshot) return;
-    renderSelectionPanel();
-    renderColoring();
-    renderSymmetry();
-    renderDensity();
+    if (sidePanelIsExpanded("Selection")) renderSelectionPanel();
+    if (sidePanelIsExpanded("Coloring")) renderColoring();
+    if (sidePanelIsExpanded("Symmetry")) renderSymmetry();
+    if (sidePanelIsExpanded("Density map")) renderDensity();
     renderSequence();
-    renderTrajectory();
-    renderAnimation();
+    if (document.querySelector('[data-bottom-panel="trajectory"]')?.classList.contains("active")) {
+      renderTrajectory();
+    }
+    if (
+      sidePanelIsExpanded("Animation") ||
+      document.querySelector('[data-ribbon-panel="animation"]')?.classList.contains("active")
+    ) {
+      renderAnimation();
+    }
   };
   if (typeof globalThis.requestIdleCallback === "function") {
     globalThis.requestIdleCallback(render, { timeout: 100 });
@@ -9233,10 +9273,7 @@ document.querySelectorAll("[data-panel-menu]").forEach((element) => {
     card.hidden = !card.hidden;
     syncSidePanelVisibility();
     if (!card.hidden) card.scrollIntoView({ block: "nearest" });
-    if (!card.hidden && element.dataset.panelMenu === "MolStruct") {
-      renderMolStruct();
-      scheduleMoleculeDetailsRefresh(0);
-    }
+    if (!card.hidden && card.classList.contains("open")) renderSidePanel(element.dataset.panelMenu);
     scheduleRender(140);
   });
 });
@@ -9261,6 +9298,7 @@ document.querySelectorAll("[data-ribbon-select]").forEach((element) => {
     document.querySelectorAll("[data-ribbon-panel]").forEach((panel) => {
       panel.classList.toggle("active", panel.dataset.ribbonPanel === target);
     });
+    if (target === "animation") renderAnimation();
     scheduleRender(140);
   });
 });
@@ -9277,10 +9315,8 @@ document.querySelectorAll("[data-panel-toggle]").forEach((element) => {
     const open = card.classList.toggle("open");
     element.setAttribute("aria-expanded", String(open));
     element.querySelector(".disclosure").textContent = open ? "▾" : "▸";
-    if (open && element.textContent.includes("MolStruct")) {
-      renderMolStruct();
-      scheduleMoleculeDetailsRefresh(0);
-    }
+    const name = element.querySelector("span:nth-child(2)")?.textContent;
+    if (open && name) renderSidePanel(name);
     scheduleRender(140);
   });
 });

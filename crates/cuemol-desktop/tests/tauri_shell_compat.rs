@@ -251,6 +251,9 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(JS.contains("initial.startupPathsPending"));
     assert!(JS.contains("function scheduleSecondaryPanelRender()"));
     assert!(JS.contains("globalThis.requestIdleCallback(render, { timeout: 100 })"));
+    assert!(JS.contains("function sidePanelIsExpanded(name)"));
+    assert!(JS.contains("if (sidePanelIsExpanded(\"MolStruct\")) visibleObjectUids.push"));
+    assert!(JS.contains("if (sidePanelIsExpanded(\"Selection\")) visibleObjectUids.push"));
     let render_shell = JS
         .split("function renderShell()")
         .nth(1)
@@ -259,6 +262,14 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(render_shell.contains("scheduleSecondaryPanelRender()"));
     assert!(!render_shell.contains("renderColoring()"));
     assert!(!render_shell.contains("renderTrajectory()"));
+    let secondary_render = JS
+        .split("function scheduleSecondaryPanelRender()")
+        .nth(1)
+        .and_then(|source| source.split("function renderShell").next())
+        .expect("secondary panel render function");
+    assert!(secondary_render.contains("if (sidePanelIsExpanded(\"Symmetry\")) renderSymmetry()"));
+    assert!(secondary_render.contains("[data-bottom-panel=\"trajectory\"]"));
+    assert!(secondary_render.contains("[data-ribbon-panel=\"animation\"]"));
     assert!(JS.contains("void mutateWithViewport(\"open_initial_paths\")"));
     assert!(JS.contains("mutateWithViewport(\"open_paths\""));
     assert!(JS.contains("mutateWithViewport(\"open_pdb\""));
