@@ -514,6 +514,7 @@ struct GuiApplication {
     left_panel_visible: [bool; LeftPanel::ALL.len()],
     reset_left_panel_layout: bool,
     show_inspector: bool,
+    object_properties_draft: Option<NativeObjectProperties>,
     show_bottom_panel: bool,
     show_about: bool,
     show_options: bool,
@@ -994,6 +995,36 @@ struct NativePreferences {
     multitouch_pad: bool,
     emulate_right_button: bool,
     shortcuts: Vec<NativeShortcut>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeObjectProperties {
+    object_uid: cuemol_core::Uid,
+    name: String,
+    visible: bool,
+    locked: bool,
+    linked: String,
+}
+
+impl NativeObjectProperties {
+    fn from_state(state: &DesktopAppState, object_uid: cuemol_core::Uid) -> Option<Self> {
+        let object = state.scene_manager().object(object_uid)?;
+        let source = object.source();
+        let linked = if source.is_empty() || source.starts_with("datachunk:") {
+            "(embeded)".to_string()
+        } else if object.source_type().is_empty() {
+            source.to_string()
+        } else {
+            format!("{source}  ({})", object.source_type())
+        };
+        Some(Self {
+            object_uid,
+            name: object.name().to_string(),
+            visible: object.is_visible(),
+            locked: object.is_ui_locked(),
+            linked,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1677,6 +1708,7 @@ impl GuiApplication {
             reset_left_panel_layout: false,
             // CueMol2 opens properties on demand (no docked inspector); start closed.
             show_inspector: false,
+            object_properties_draft: None,
             show_bottom_panel: true,
             show_about: false,
             show_options: false,
@@ -2703,6 +2735,12 @@ impl GuiApplication {
                         object.name, object.atom_count, object.bond_count
                     );
                     if ui.selectable_label(selected, label).clicked() {
+                        if self.state.active_scene() != Some(scene.uid) {
+                            self.state.set_active_scene(Some(scene.uid));
+                            self.sync_active_scene_properties();
+                            self.rebuild_snapshot();
+                            camera.fit_snapshot(&self.snapshot);
+                        }
                         self.selected_object = Some(object.uid);
                         self.selected_renderer = None;
                     }
@@ -2721,6 +2759,12 @@ impl GuiApplication {
                                 let label =
                                     format!("{} ({})", renderer.name, renderer.renderer_type);
                                 if ui.selectable_label(selected, label).clicked() {
+                                    if self.state.active_scene() != Some(scene.uid) {
+                                        self.state.set_active_scene(Some(scene.uid));
+                                        self.sync_active_scene_properties();
+                                        self.rebuild_snapshot();
+                                        camera.fit_snapshot(&self.snapshot);
+                                    }
                                     self.selected_object = Some(object.uid);
                                     self.selected_renderer = Some(renderer.uid);
                                 }
@@ -2754,7 +2798,13 @@ impl GuiApplication {
                 }
             }
             if ui.button("Property").clicked() {
-                self.show_inspector = true;
+                if self.selected_renderer.is_some() {
+                    self.show_inspector = true;
+                } else if let Some(object_uid) = self.selected_object {
+                    self.open_object_properties(object_uid);
+                } else {
+                    self.open_scene_properties();
+                }
             }
         });
     }
@@ -2839,7 +2889,9 @@ impl GuiApplication {
                 zoom = true;
             }
             if ui.button("Property").clicked() {
-                self.show_inspector = true;
+                self.selected_object = Some(object.object_uid);
+                self.selected_renderer = None;
+                self.open_object_properties(object.object_uid);
             }
             let toggle = if self.molstruct_expand_all {
                 "Collapse"
@@ -6394,6 +6446,7 @@ impl GuiApplication {
     fn dialogs(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         self.about_dialog(ctx);
         self.options_dialog(ctx);
+        self.object_props_dialog(ctx);
         self.scene_props_dialog(ctx);
         self.view_props_dialog(ctx, camera);
         self.chain_dialog(ctx);
@@ -6787,6 +6840,118 @@ impl GuiApplication {
         input.set_style(style);
         input.set_tbrad(tbrad);
         input.set_hitprec(hitprec);
+    }
+
+    fn open_object_properties(&mut self, object_uid: cuemol_core::Uid) {
+        let Some(properties) = NativeObjectProperties::from_state(&self.state, object_uid) else {
+            self.set_status(format!("Object {} was not found", object_uid.get()));
+            return;
+        };
+        self.object_properties_draft = Some(properties);
+    }
+
+    fn object_props_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.object_properties_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Object properties")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(500.0)
+            .min_width(420.0)
+            .show(ctx, |ui| {
+                let _ = ui.selectable_label(true, "Common");
+                ui.separator();
+                egui::Frame::new()
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        ui.visuals().widgets.noninteractive.bg_stroke.color,
+                    ))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        egui::Grid::new("native_object_common_properties")
+                            .num_columns(2)
+                            .spacing([14.0, 8.0])
+                            .show(ui, |ui| {
+                                ui.label("Name:");
+                                ui.add_sized(
+                                    [ui.available_width().max(240.0), 22.0],
+                                    egui::TextEdit::singleline(&mut draft.name),
+                                );
+                                ui.end_row();
+
+                                ui.label("Selection:");
+                                ui.monospace("(not available)");
+                                ui.end_row();
+
+                                ui.label("");
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut draft.visible, "Visible");
+                                    ui.checkbox(&mut draft.locked, "Locked");
+                                });
+                                ui.end_row();
+
+                                ui.label("Linked:");
+                                ui.add_enabled(
+                                    false,
+                                    egui::TextEdit::singleline(&mut draft.linked),
+                                );
+                                ui.end_row();
+                            });
+                    });
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if accept {
+            match self.apply_object_properties(&draft) {
+                Ok(()) => self.object_properties_draft = None,
+                Err(error) => {
+                    self.set_status(format!("Object properties error: {error}"));
+                    self.object_properties_draft = Some(draft);
+                }
+            }
+        } else if cancel || !open {
+            self.object_properties_draft = None;
+        } else {
+            self.object_properties_draft = Some(draft);
+        }
+    }
+
+    fn apply_object_properties(
+        &mut self,
+        draft: &NativeObjectProperties,
+    ) -> std::result::Result<(), String> {
+        let name = draft.name.trim();
+        if name.is_empty() || name.contains(':') {
+            return Err("object name must be non-empty and cannot contain ':'".to_string());
+        }
+        let scene_uid = self
+            .state
+            .scene_manager()
+            .scene_uid_for_object(draft.object_uid)
+            .ok_or_else(|| format!("object {} was not found", draft.object_uid.get()))?;
+        let undo = self.capture_undo();
+        self.state
+            .set_object_common_properties(draft.object_uid, name, draft.visible, draft.locked)
+            .map_err(|error| error.to_string())?;
+        self.push_undo_snapshot(undo);
+        self.modified_scenes.insert(scene_uid);
+        self.selected_object = Some(draft.object_uid);
+        self.selected_renderer = None;
+        self.rebuild_snapshot();
+        self.set_status("Object properties updated");
+        Ok(())
     }
 
     fn open_scene_properties(&mut self) {
@@ -12085,6 +12250,81 @@ mod tests {
     }
 
     #[test]
+    fn native_object_property_dialog_applies_undoes_and_persists_common_fields() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("original", molecule);
+        let mut properties = NativeObjectProperties::from_state(&app.state, object_uid).unwrap();
+        assert_eq!(properties.linked, "(embeded)");
+        properties.name = "renamed molecule".to_string();
+        properties.visible = false;
+        properties.locked = true;
+
+        app.apply_object_properties(&properties).unwrap();
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.name(), "renamed molecule");
+        assert!(!object.is_visible());
+        assert!(object.is_ui_locked());
+        assert!(app.modified_scenes.contains(&scene_uid));
+
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.name(), "original");
+        assert!(object.is_visible());
+        assert!(!object.is_ui_locked());
+        app.redo(&mut camera);
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-native-object-properties-{}.qsc",
+            std::process::id()
+        ));
+        app.save_current_scene_to_path(&camera, &path);
+        let qsc = fs::read_to_string(&path).unwrap();
+        assert!(qsc.contains("name=\"renamed molecule\""));
+        assert!(qsc.contains("visible=\"false\""));
+        assert!(qsc.contains("locked=\"true\""));
+        fs::remove_file(path).unwrap();
+
+        properties.name = "bad:name".to_string();
+        assert_eq!(
+            app.apply_object_properties(&properties),
+            Err("object name must be non-empty and cannot contain ':'".to_string())
+        );
+    }
+
+    #[test]
+    fn native_object_property_dialog_keeps_an_isolated_draft() {
+        let ctx = egui::Context::default();
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("object", cuemol_molstr::MolCoord::new());
+        app.open_object_properties(object_uid);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.object_props_dialog(ctx)
+        });
+        assert!(app.object_properties_draft.is_some());
+        assert_eq!(
+            app.state.scene_manager().object(object_uid).unwrap().name(),
+            "object"
+        );
+    }
+
+    #[test]
     fn native_scene_property_dialog_keeps_an_isolated_draft() {
         let ctx = egui::Context::default();
         let mut app = GuiApplication::new();
@@ -13084,7 +13324,30 @@ mod tests {
             save_harness(&mut harness, &out_dir.join("options.png"));
         }
 
-        // (1b4) Generic Scene property editor with the full Scene.qif table.
+        // (1b4) Workspace Object property dialog with the reference Common page.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            load(&mut app, &mut camera);
+            if let Some(object_uid) = app
+                .state
+                .active_object_summaries()
+                .first()
+                .map(|object| object.uid)
+            {
+                app.selected_object = Some(object_uid);
+                app.open_object_properties(object_uid);
+            }
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1000.0, 760.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("object_properties.png"));
+        }
+
+        // (1b5) Generic Scene property editor with the full Scene.qif table.
         {
             let mut app = GuiApplication::new();
             let mut camera = CameraController::default();
@@ -13098,7 +13361,7 @@ mod tests {
             save_harness(&mut harness, &out_dir.join("scene_properties.png"));
         }
 
-        // (1b5) Generic View property editor with the full reference property table.
+        // (1b6) Generic View property editor with the full reference property table.
         {
             let mut app = GuiApplication::new();
             let mut camera = CameraController::default();
