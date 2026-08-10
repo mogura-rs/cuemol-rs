@@ -217,10 +217,39 @@ fn tauri_open_recent_matches_the_reference_mru_contract() {
     assert!(JS.contains("await openSelectedPaths([entry.path])"));
     assert!(JS.contains("multiple: false"));
     assert!(JS.contains("await invoke(\"get_file_renderer_setup\", { path })"));
-    assert!(JS.contains("const rendererSetup = await showRendererSetup(defaults)"));
+    assert!(JS.contains("const setup = await showRendererSetup(defaults)"));
+    assert!(JS.contains("readerOptions: setup.readerOptions"));
     assert!(JS.contains("mutateWithViewport(\"open_path_with_renderer_setup\""));
     assert!(JS.contains("mutateWithViewport(\"open_paths\", { paths: directPaths })"));
     assert!(JS.contains("snapshot?.openedPaths"));
+}
+
+#[test]
+fn tauri_file_open_matches_reference_molecule_reader_options() {
+    for label in [
+        "PDB options",
+        "mmCIF options",
+        "Ignore multilpe models",
+        "Ignore anisotropic U",
+        "Ignore alternate conformation",
+        "Load SEGID as chain name",
+        "Calculate protein secondary structure",
+        "Auto-generate non-standard topology",
+    ] {
+        assert!(JS.contains(label), "missing molecule reader option {label}");
+    }
+    for binding in [
+        "ignoreMultipleModels: readerControls.ignoreMultipleModels.checked",
+        "ignoreAnisou: readerControls.ignoreAnisou.checked",
+        "ignoreAltConf: readerControls.ignoreAltConf.checked",
+        "calculateSecondaryStructure:",
+        "autoGenerateTopology: readerControls.autoGenerateTopology.checked",
+    ] {
+        assert!(
+            JS.contains(binding),
+            "missing molecule reader binding {binding}"
+        );
+    }
 }
 
 #[test]

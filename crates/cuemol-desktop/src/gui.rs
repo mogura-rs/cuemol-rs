@@ -573,6 +573,7 @@ enum NativeRendererSetupAction {
 #[derive(Debug, Clone)]
 struct NativeRendererSetupDraft {
     action: NativeRendererSetupAction,
+    reader_options: Option<crate::GuiMoleculeReaderOptions>,
     object_name: String,
     renderer_type: String,
     renderer_name: String,
@@ -8204,12 +8205,16 @@ impl GuiApplication {
     fn open_path_with_renderer_setup(
         &mut self,
         path: PathBuf,
+        reader_options: Option<&crate::GuiMoleculeReaderOptions>,
         setup: crate::GuiRendererSetup,
         camera: &mut CameraController,
     ) {
         let recenter = setup.recenter;
         let undo = self.capture_undo();
-        match self.state.open_path_with_renderer_setup(&path, &setup) {
+        match self
+            .state
+            .open_path_with_reader_and_renderer_setup(&path, reader_options, &setup)
+        {
             Ok(GuiLoadedPath::Object {
                 scene_uid,
                 object_uid,
@@ -14484,6 +14489,18 @@ impl GuiApplication {
     }
 
     fn open_renderer_setup(&mut self, base_object_name: &str, action: NativeRendererSetupAction) {
+        let reader_options = match &action {
+            NativeRendererSetupAction::OpenPath(path) => {
+                match self.state.molecule_reader_options_for_path(path) {
+                    Ok(options) => options,
+                    Err(error) => {
+                        self.set_error(error);
+                        return;
+                    }
+                }
+            }
+            NativeRendererSetupAction::PdbDownload => None,
+        };
         let scene_uid = self.state.ensure_active_scene();
         let options = match self.state.molecule_renderer_setup_options(scene_uid) {
             Ok(options) if !options.is_empty() => options,
@@ -14511,6 +14528,7 @@ impl GuiApplication {
             .unwrap_or_else(|_| format!("{renderer_type}1"));
         self.renderer_setup_draft = Some(NativeRendererSetupDraft {
             action,
+            reader_options,
             object_name,
             renderer_type,
             renderer_name,
@@ -14618,6 +14636,33 @@ impl GuiApplication {
                         ui.end_row();
                     });
                 ui.checkbox(&mut draft.recenter, "Recenter view");
+                if let Some(options) = draft.reader_options.as_mut() {
+                    ui.separator();
+                    ui.strong(match options.kind {
+                        crate::GuiMoleculeReaderKind::Pdb => "PDB options",
+                        crate::GuiMoleculeReaderKind::Mmcif => "mmCIF options",
+                    });
+                    ui.checkbox(
+                        &mut options.ignore_multiple_models,
+                        "Ignore multilpe models",
+                    );
+                    ui.checkbox(&mut options.ignore_anisou, "Ignore anisotropic U");
+                    ui.checkbox(
+                        &mut options.ignore_alt_conf,
+                        "Ignore alternate conformation",
+                    );
+                    if options.kind == crate::GuiMoleculeReaderKind::Pdb {
+                        ui.checkbox(&mut options.load_segid_as_chain, "Load SEGID as chain name");
+                    }
+                    ui.checkbox(
+                        &mut options.calculate_secondary_structure,
+                        "Calculate protein secondary structure",
+                    );
+                    ui.checkbox(
+                        &mut options.auto_generate_topology,
+                        "Auto-generate non-standard topology",
+                    );
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
                     let valid = !draft.object_name.trim().is_empty()
@@ -14651,7 +14696,12 @@ impl GuiApplication {
                     self.start_pdb_download(ctx, Some(setup));
                 }
                 NativeRendererSetupAction::OpenPath(path) => {
-                    self.open_path_with_renderer_setup(path, setup, camera);
+                    self.open_path_with_renderer_setup(
+                        path,
+                        draft.reader_options.as_ref(),
+                        setup,
+                        camera,
+                    );
                 }
             }
         } else if open && !cancel {

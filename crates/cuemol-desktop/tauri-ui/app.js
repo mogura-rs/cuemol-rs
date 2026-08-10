@@ -472,7 +472,7 @@ function dialogParagraph(text) {
   return paragraph;
 }
 
-function dialogField(label, value, type = "text") {
+function dialogField(label, value, type = "text", parent = dialogContent) {
   const wrapper = document.createElement("label");
   wrapper.className = "dialog-field";
   const text = document.createElement("span");
@@ -481,7 +481,7 @@ function dialogField(label, value, type = "text") {
   input.type = type;
   input.value = value;
   wrapper.append(text, input);
-  dialogContent.append(wrapper);
+  parent.append(wrapper);
   return input;
 }
 
@@ -529,7 +529,7 @@ function dialogCheckbox(label, checked, parent = dialogContent) {
   return input;
 }
 
-function dialogOptionalField(label, value, options = []) {
+function dialogOptionalField(label, value, options = [], parent = dialogContent) {
   const wrapper = document.createElement("label");
   wrapper.className = "dialog-field dialog-optional-field";
   const labelControl = document.createElement("span");
@@ -550,13 +550,13 @@ function dialogOptionalField(label, value, options = []) {
       list.append(option);
     }
     input.setAttribute("list", list.id);
-    dialogContent.append(list);
+    parent.append(list);
   }
   enabled.addEventListener("change", () => {
     input.disabled = !enabled.checked;
   });
   wrapper.append(labelControl, input);
-  dialogContent.append(wrapper);
+  parent.append(wrapper);
   return { enabled, input };
 }
 
@@ -3498,7 +3498,8 @@ async function showPdbRendererSetup(pdbId) {
     showError(error);
     return null;
   }
-  return showRendererSetup(setup);
+  const result = await showRendererSetup(setup);
+  return result?.rendererSetup ?? null;
 }
 
 function showRendererSetup(setup) {
@@ -3507,11 +3508,21 @@ function showRendererSetup(setup) {
   dialogContent.replaceChildren();
   dialogFooter.hidden = false;
   referenceDialog.className = "reference-dialog";
-  const objectName = dialogField("Object:", setup.objectName);
+  const readerDefaults = setup.readerOptions || null;
+  const pages = readerDefaults
+    ? workspacePropertyPage([
+        "Renderer",
+        readerDefaults.kind === "mmcif" ? "mmCIF options" : "PDB options",
+      ])
+    : null;
+  const rendererPage = pages?.panes[0] || dialogContent;
+  if (pages) dialogContent.append(pages.editor);
+  const objectName = dialogField("Object:", setup.objectName, "text", rendererPage);
   const rendererType = dialogSelect(
     "Renderer type:",
     setup.options.map((option) => [option.name, option.description]),
     setup.rendererType,
+    rendererPage,
   );
   const firstRendererIndex = setup.options.findIndex((option) => !option.preset);
   if (firstRendererIndex > 0) {
@@ -3520,9 +3531,48 @@ function showRendererSetup(setup) {
     separator.textContent = "────────";
     rendererType.options[firstRendererIndex].before(separator);
   }
-  const rendererName = dialogField("Renderer name:", setup.rendererName);
-  const selection = dialogOptionalField("Selection:", "", selectionHistoryEntries);
-  const recenter = dialogCheckbox("Recenter view", setup.recenter);
+  const rendererName = dialogField("Renderer name:", setup.rendererName, "text", rendererPage);
+  const selection = dialogOptionalField("Selection:", "", selectionHistoryEntries, rendererPage);
+  const recenter = dialogCheckbox("Recenter view", setup.recenter, rendererPage);
+  let readerControls = null;
+  if (readerDefaults) {
+    const readerPage = pages.panes[1];
+    readerControls = {
+      ignoreMultipleModels: dialogCheckbox(
+        "Ignore multilpe models",
+        readerDefaults.ignoreMultipleModels,
+        readerPage,
+      ),
+      ignoreAnisou: dialogCheckbox(
+        "Ignore anisotropic U",
+        readerDefaults.ignoreAnisou,
+        readerPage,
+      ),
+      ignoreAltConf: dialogCheckbox(
+        "Ignore alternate conformation",
+        readerDefaults.ignoreAltConf,
+        readerPage,
+      ),
+      loadSegidAsChain:
+        readerDefaults.kind === "pdb"
+          ? dialogCheckbox(
+              "Load SEGID as chain name",
+              readerDefaults.loadSegidAsChain,
+              readerPage,
+            )
+          : null,
+      calculateSecondaryStructure: dialogCheckbox(
+        "Calculate protein secondary structure",
+        readerDefaults.calculateSecondaryStructure,
+        readerPage,
+      ),
+      autoGenerateTopology: dialogCheckbox(
+        "Auto-generate non-standard topology",
+        readerDefaults.autoGenerateTopology,
+        readerPage,
+      ),
+    };
+  }
   let rendererNameDefault = true;
   rendererType.addEventListener("change", () => {
     if (rendererNameDefault) {
@@ -3567,11 +3617,25 @@ function showRendererSetup(setup) {
         rememberSelection(selection.input.value);
       }
       finish({
-        objectName: objectName.value.trim(),
-        rendererType: rendererType.value,
-        rendererName: rendererName.value.trim(),
-        selection: selection.enabled.checked ? selection.input.value.trim() : null,
-        recenter: recenter.checked,
+        rendererSetup: {
+          objectName: objectName.value.trim(),
+          rendererType: rendererType.value,
+          rendererName: rendererName.value.trim(),
+          selection: selection.enabled.checked ? selection.input.value.trim() : null,
+          recenter: recenter.checked,
+        },
+        readerOptions: readerControls
+          ? {
+              kind: readerDefaults.kind,
+              ignoreMultipleModels: readerControls.ignoreMultipleModels.checked,
+              ignoreAnisou: readerControls.ignoreAnisou.checked,
+              ignoreAltConf: readerControls.ignoreAltConf.checked,
+              loadSegidAsChain: readerControls.loadSegidAsChain?.checked || false,
+              calculateSecondaryStructure:
+                readerControls.calculateSecondaryStructure.checked,
+              autoGenerateTopology: readerControls.autoGenerateTopology.checked,
+            }
+          : null,
       });
       referenceDialog.close();
     });
@@ -9646,12 +9710,13 @@ async function openSelectedPaths(paths) {
       directPaths.push(path);
       continue;
     }
-    const rendererSetup = await showRendererSetup(defaults);
-    if (!rendererSetup) continue;
+    const setup = await showRendererSetup(defaults);
+    if (!setup) continue;
     if (
       await mutateWithViewport("open_path_with_renderer_setup", {
         path,
-        rendererSetup,
+        rendererSetup: setup.rendererSetup,
+        readerOptions: setup.readerOptions,
       })
     ) {
       addRecentFile(path);

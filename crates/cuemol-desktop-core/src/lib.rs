@@ -959,6 +959,23 @@ pub struct GuiRendererSetup {
     pub recenter: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuiMoleculeReaderKind {
+    Pdb,
+    Mmcif,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiMoleculeReaderOptions {
+    pub kind: GuiMoleculeReaderKind,
+    pub ignore_multiple_models: bool,
+    pub ignore_anisou: bool,
+    pub ignore_alt_conf: bool,
+    pub load_segid_as_chain: bool,
+    pub calculate_secondary_structure: bool,
+    pub auto_generate_topology: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiPdbLoadSummary {
     pub object_uid: Option<Uid>,
@@ -7271,9 +7288,46 @@ impl DesktopAppState {
             && format != "qdflwobj")
     }
 
+    pub fn molecule_reader_options_for_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<Option<GuiMoleculeReaderOptions>> {
+        let format = guess_path_format(path.as_ref(), &self.stream_manager)?;
+        Ok(match format {
+            "pdb" => Some(GuiMoleculeReaderOptions {
+                kind: GuiMoleculeReaderKind::Pdb,
+                ignore_multiple_models: true,
+                ignore_anisou: false,
+                ignore_alt_conf: false,
+                load_segid_as_chain: false,
+                calculate_secondary_structure: true,
+                auto_generate_topology: true,
+            }),
+            "mmcif" => Some(GuiMoleculeReaderOptions {
+                kind: GuiMoleculeReaderKind::Mmcif,
+                ignore_multiple_models: true,
+                ignore_anisou: false,
+                ignore_alt_conf: false,
+                load_segid_as_chain: false,
+                calculate_secondary_structure: false,
+                auto_generate_topology: true,
+            }),
+            _ => None,
+        })
+    }
+
     pub fn open_path_with_renderer_setup(
         &mut self,
         path: impl AsRef<Path>,
+        setup: &GuiRendererSetup,
+    ) -> Result<GuiLoadedPath> {
+        self.open_path_with_reader_and_renderer_setup(path, None, setup)
+    }
+
+    pub fn open_path_with_reader_and_renderer_setup(
+        &mut self,
+        path: impl AsRef<Path>,
+        reader_options: Option<&GuiMoleculeReaderOptions>,
         setup: &GuiRendererSetup,
     ) -> Result<GuiLoadedPath> {
         let path = path.as_ref();
@@ -7282,15 +7336,66 @@ impl DesktopAppState {
                 "the file does not support molecular renderer setup",
             ));
         }
-        let loaded = self.open_path(path)?;
-        let GuiLoadedPath::Object {
-            scene_uid,
-            object_uid,
-        } = loaded
-        else {
-            return Err(CueMolError::invalid_argument(
-                "the file did not create a molecule object",
-            ));
+        let (scene_uid, object_uid) = if let Some(options) = reader_options {
+            let format = guess_path_format(path, &self.stream_manager)?;
+            let molecule = match (format, options.kind) {
+                ("pdb", GuiMoleculeReaderKind::Pdb) => cuemol_molstr::read_pdb_file_with_options(
+                    path,
+                    cuemol_molstr::PdbReadOptions {
+                        load_model: !options.ignore_multiple_models,
+                        load_anisou: !options.ignore_anisou,
+                        load_alt_conf: !options.ignore_alt_conf,
+                        build_secondary: options.calculate_secondary_structure,
+                        load_seg_id: options.load_segid_as_chain,
+                        auto_topo_gen: options.auto_generate_topology,
+                    },
+                )?,
+                ("mmcif", GuiMoleculeReaderKind::Mmcif) => {
+                    let mut molecule = cuemol_molstr::read_mmcif_file_with_options(
+                        path,
+                        cuemol_molstr::MmcifReadOptions {
+                            load_model: !options.ignore_multiple_models,
+                            load_anisou: !options.ignore_anisou,
+                            load_alt_conf: !options.ignore_alt_conf,
+                            load_secstr: !options.calculate_secondary_structure,
+                            auto_topo_gen: options.auto_generate_topology,
+                        },
+                    )?;
+                    if options.calculate_secondary_structure {
+                        molecule.calc_prot_2ndry(-500.0, false);
+                    }
+                    molecule
+                }
+                _ => {
+                    return Err(CueMolError::invalid_argument(
+                        "reader options do not match the molecular file format",
+                    ));
+                }
+            };
+            let scene_uid = self.ensure_active_scene();
+            let scene = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+            let object_uid =
+                scene.add_molecule_with_source_type(setup.object_name.trim(), molecule, format);
+            if let Some(object) = scene.object_mut(object_uid) {
+                object.set_source(path.to_string_lossy());
+                object.set_modified(false);
+            }
+            (scene_uid, object_uid)
+        } else {
+            let loaded = self.open_path(path)?;
+            let GuiLoadedPath::Object {
+                scene_uid,
+                object_uid,
+            } = loaded
+            else {
+                return Err(CueMolError::invalid_argument(
+                    "the file did not create a molecule object",
+                ));
+            };
+            (scene_uid, object_uid)
         };
         self.set_object_common_properties(
             object_uid,
@@ -54793,6 +54898,62 @@ end_header
             .renderers()
             .iter()
             .any(|renderer| renderer.name() == "simple"));
+    }
+
+    #[test]
+    fn molecule_reader_options_match_reference_defaults_and_change_pdb_loading() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-reader-options-{}.pdb", std::process::id()));
+        fs::write(
+            &path,
+            b"MODEL        1\nATOM      1  CA AALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nANISOU    1  CA AALA A   1     1111   2222   3333    444    555    666       C  \nATOM      2  CA BALA A   1       1.000   0.000   0.000  1.00 10.00           C  \nENDMDL\nMODEL        2\nATOM      3  N   GLY A   2       2.000   0.000   0.000  1.00 10.00           N  \nENDMDL\n",
+        )
+        .unwrap();
+        let mut app = DesktopAppState::new();
+        let defaults = app
+            .molecule_reader_options_for_path(&path)
+            .unwrap()
+            .expect("PDB options");
+        assert_eq!(defaults.kind, GuiMoleculeReaderKind::Pdb);
+        assert!(defaults.ignore_multiple_models);
+        assert!(!defaults.ignore_anisou);
+        assert!(!defaults.ignore_alt_conf);
+        assert!(!defaults.load_segid_as_chain);
+        assert!(defaults.calculate_secondary_structure);
+        assert!(defaults.auto_generate_topology);
+
+        let cif_path = path.with_extension("cif");
+        fs::write(&cif_path, b"data_test\n").unwrap();
+        let mmcif = app
+            .molecule_reader_options_for_path(&cif_path)
+            .unwrap()
+            .expect("mmCIF options");
+        assert_eq!(mmcif.kind, GuiMoleculeReaderKind::Mmcif);
+        assert!(!mmcif.calculate_secondary_structure);
+
+        let options = GuiMoleculeReaderOptions {
+            ignore_multiple_models: false,
+            ignore_anisou: true,
+            ..defaults
+        };
+        let setup = GuiRendererSetup {
+            object_name: "models".to_string(),
+            renderer_type: "ballstick".to_string(),
+            renderer_name: "atoms".to_string(),
+            selection: None,
+            recenter: false,
+        };
+        let GuiLoadedPath::Object { object_uid, .. } = app
+            .open_path_with_reader_and_renderer_setup(&path, Some(&options), &setup)
+            .unwrap()
+        else {
+            panic!("expected object load");
+        };
+        let molecule = app.scene_manager().object(object_uid).unwrap().mol();
+        assert_eq!(molecule.atom_count(), 3);
+        assert_eq!(molecule.atoms()[0].int_prop("anisou_u11"), None);
+        fs::remove_file(path).unwrap();
+        fs::remove_file(cif_path).unwrap();
     }
 
     #[test]

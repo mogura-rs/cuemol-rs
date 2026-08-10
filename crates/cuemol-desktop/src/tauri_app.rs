@@ -142,6 +142,58 @@ struct RendererSetupDto {
     renderer_name: String,
     recenter: bool,
     options: Vec<RendererSetupOptionDto>,
+    reader_options: Option<MoleculeReaderOptionsDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct MoleculeReaderOptionsDto {
+    kind: String,
+    ignore_multiple_models: bool,
+    ignore_anisou: bool,
+    ignore_alt_conf: bool,
+    load_segid_as_chain: bool,
+    calculate_secondary_structure: bool,
+    auto_generate_topology: bool,
+}
+
+impl From<&crate::GuiMoleculeReaderOptions> for MoleculeReaderOptionsDto {
+    fn from(value: &crate::GuiMoleculeReaderOptions) -> Self {
+        Self {
+            kind: match value.kind {
+                crate::GuiMoleculeReaderKind::Pdb => "pdb",
+                crate::GuiMoleculeReaderKind::Mmcif => "mmcif",
+            }
+            .to_string(),
+            ignore_multiple_models: value.ignore_multiple_models,
+            ignore_anisou: value.ignore_anisou,
+            ignore_alt_conf: value.ignore_alt_conf,
+            load_segid_as_chain: value.load_segid_as_chain,
+            calculate_secondary_structure: value.calculate_secondary_structure,
+            auto_generate_topology: value.auto_generate_topology,
+        }
+    }
+}
+
+impl TryFrom<MoleculeReaderOptionsDto> for crate::GuiMoleculeReaderOptions {
+    type Error = String;
+
+    fn try_from(value: MoleculeReaderOptionsDto) -> Result<Self, Self::Error> {
+        let kind = match value.kind.as_str() {
+            "pdb" => crate::GuiMoleculeReaderKind::Pdb,
+            "mmcif" => crate::GuiMoleculeReaderKind::Mmcif,
+            kind => return Err(format!("unsupported molecule reader kind: {kind}")),
+        };
+        Ok(Self {
+            kind,
+            ignore_multiple_models: value.ignore_multiple_models,
+            ignore_anisou: value.ignore_anisou,
+            ignore_alt_conf: value.ignore_alt_conf,
+            load_segid_as_chain: value.load_segid_as_chain,
+            calculate_secondary_structure: value.calculate_secondary_structure,
+            auto_generate_topology: value.auto_generate_topology,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -5306,6 +5358,7 @@ enum ModelRequest {
     },
     OpenPathWithRendererSetup {
         path: String,
+        reader_options: Option<crate::GuiMoleculeReaderOptions>,
         renderer_setup: crate::GuiRendererSetup,
         width: u32,
         height: u32,
@@ -6471,6 +6524,7 @@ fn apply_open_paths(model: &mut AppModel, paths: Vec<String>) -> Result<(), Stri
 fn renderer_setup_defaults(
     model: &mut AppModel,
     base_object_name: &str,
+    reader_options: Option<&crate::GuiMoleculeReaderOptions>,
 ) -> Result<RendererSetupDto, String> {
     let scene_uid = model.desktop.ensure_active_scene();
     let options = model
@@ -6496,6 +6550,7 @@ fn renderer_setup_defaults(
         renderer_type,
         renderer_name,
         recenter: preferences.recenter,
+        reader_options: reader_options.map(MoleculeReaderOptionsDto::from),
         options: options
             .into_iter()
             .map(|option| RendererSetupOptionDto {
@@ -7066,12 +7121,17 @@ fn handle_model_request(
                 .and_then(|name| name.to_str())
                 .filter(|name| !name.trim().is_empty())
                 .ok_or_else(|| "the file name is invalid".to_string())?;
+            let reader_options = model
+                .desktop
+                .molecule_reader_options_for_path(path)
+                .map_err(|error| error.to_string())?;
             Ok(ModelResponse::FileRendererSetup(Some(
-                renderer_setup_defaults(model, object_name)?,
+                renderer_setup_defaults(model, object_name, reader_options.as_ref())?,
             )))
         }
         ModelRequest::OpenPathWithRendererSetup {
             path,
+            reader_options,
             renderer_setup,
             width,
             height,
@@ -7079,10 +7139,11 @@ fn handle_model_request(
             model.start_renderer_warmup();
             let undo = model.capture_undo();
             let recenter = renderer_setup.recenter;
-            if let Err(error) = model
-                .desktop
-                .open_path_with_renderer_setup(&path, &renderer_setup)
-            {
+            if let Err(error) = model.desktop.open_path_with_reader_and_renderer_setup(
+                &path,
+                reader_options.as_ref(),
+                &renderer_setup,
+            ) {
                 model.restore_undo(undo)?;
                 return Err(error.to_string());
             }
@@ -7128,7 +7189,7 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::GetPdbRendererSetup { pdb_id } => Ok(ModelResponse::PdbRendererSetup(
-            renderer_setup_defaults(model, &pdb_id.to_ascii_lowercase())?,
+            renderer_setup_defaults(model, &pdb_id.to_ascii_lowercase(), None)?,
         )),
         ModelRequest::OpenPdb {
             pdb_id,
@@ -9572,11 +9633,15 @@ fn get_file_renderer_setup(
 #[tauri::command]
 fn open_path_with_renderer_setup(
     path: String,
+    reader_options: Option<MoleculeReaderOptionsDto>,
     renderer_setup: RendererSetupInput,
     width: u32,
     height: u32,
     state: State<'_, ManagedState>,
 ) -> Result<MolStructUpdateDto, String> {
+    let reader_options = reader_options
+        .map(crate::GuiMoleculeReaderOptions::try_from)
+        .transpose()?;
     let renderer_setup = crate::GuiRendererSetup::from(renderer_setup);
     let _ = crate::save_renderer_setup_preferences(
         &renderer_setup.renderer_type,
@@ -9586,6 +9651,7 @@ fn open_path_with_renderer_setup(
         &state,
         ModelRequest::OpenPathWithRendererSetup {
             path,
+            reader_options,
             renderer_setup,
             width,
             height,
@@ -11187,11 +11253,25 @@ mod tests {
             path.file_name().unwrap().to_string_lossy()
         );
         assert!(!defaults.options.is_empty());
+        assert_eq!(
+            defaults.reader_options.as_ref().map(|options| (
+                options.kind.as_str(),
+                options.ignore_multiple_models,
+                options.calculate_secondary_structure,
+            )),
+            Some(("pdb", true, true))
+        );
 
         let error = match handle_model_request(
             &mut model,
             ModelRequest::OpenPathWithRendererSetup {
                 path: path_text.clone(),
+                reader_options: defaults
+                    .reader_options
+                    .clone()
+                    .map(crate::GuiMoleculeReaderOptions::try_from)
+                    .transpose()
+                    .unwrap(),
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "opened.pdb".to_string(),
                     renderer_type: "invalid".to_string(),
@@ -11213,6 +11293,12 @@ mod tests {
             &mut model,
             ModelRequest::OpenPathWithRendererSetup {
                 path: path_text.clone(),
+                reader_options: defaults
+                    .reader_options
+                    .clone()
+                    .map(crate::GuiMoleculeReaderOptions::try_from)
+                    .transpose()
+                    .unwrap(),
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "opened.pdb".to_string(),
                     renderer_type: "ballstick".to_string(),
