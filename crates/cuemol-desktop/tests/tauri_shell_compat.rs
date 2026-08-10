@@ -1017,9 +1017,11 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("defaultValue: `group${serial}`"));
     assert!(!JS.contains("globalThis.prompt?.(\"Name for new group\""));
     assert!(JS.contains("label: \"Read-only\""));
-    assert!(JS.contains("Background color · White"));
-    assert!(JS.contains("Background color · Black"));
+    assert!(JS.contains("label: \"Background color\""));
+    assert!(JS.contains("label: \"White\""));
+    assert!(JS.contains("label: \"Black\""));
     assert!(JS.contains("option: \"color-proof\", value"));
+    assert!(JS.contains("currentScene.useColorProof && currentScene.iccFilename"));
     assert!(JS.contains("showReferenceDialog(\"Scene Properties\")"));
     assert!(JS.contains("role\", \"menuitemcheckbox"));
     assert!(JS.contains("workspaceRendererClipboardAvailable"));

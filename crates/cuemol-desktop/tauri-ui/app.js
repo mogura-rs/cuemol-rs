@@ -6714,39 +6714,48 @@ function workspaceSceneContextItems(scene) {
     if (!(await activate()) || snapshot.background === background) return;
     await mutate("set_background", { background });
   };
-  return [
+  const items = [
+    { label: currentScene.name || "Untitled", disabled: true },
+    null,
     {
-      label: "Background color · White",
-      checked: currentScene.background === "white",
-      action: setBackground("white"),
-    },
-    {
-      label: "Background color · Black",
-      checked: currentScene.background === "black",
-      action: setBackground("black"),
+      label: "Background color",
+      children: [
+        {
+          label: "White",
+          checked: currentScene.background === "white",
+          action: setBackground("white"),
+        },
+        {
+          label: "Black",
+          checked: currentScene.background === "black",
+          action: setBackground("black"),
+        },
+      ],
     },
     {
       label: "Use color proofing",
-      checked: Boolean(currentScene.useColorProof),
+      checked: Boolean(currentScene.useColorProof && currentScene.iccFilename),
       action: async () => {
         const value = !currentScene.useColorProof;
         if (!(await activate())) return;
         await mutate("set_display_option", { option: "color-proof", value });
       },
     },
+    null,
+  ];
+  if (workspaceObjectClipboardAvailable) {
+    items.push({ label: "Paste Object", action: () => pasteWorkspaceObject(scene) }, null);
+  }
+  items.push(
     {
-      label: "Paste Object",
-      disabled: !workspaceObjectClipboardAvailable,
-      action: () => pasteWorkspaceObject(scene),
-    },
-    {
-      label: "Properties...",
+      label: "Properties…",
       action: async () => {
         if (!(await activate())) return;
         showReferenceDialog("Scene Properties");
       },
     },
-  ];
+  );
+  return items;
 }
 
 async function copyWorkspaceCamera(sceneUid, name) {
