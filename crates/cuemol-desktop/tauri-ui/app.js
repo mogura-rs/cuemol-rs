@@ -4571,7 +4571,13 @@ function showWorkspaceContextMenu(event, items) {
       await item.action?.();
     });
     entry.disabled = Boolean(item.disabled);
-    entry.setAttribute("role", "menuitem");
+    if (typeof item.checked === "boolean") {
+      entry.classList.toggle("checked", item.checked);
+      entry.setAttribute("role", "menuitemcheckbox");
+      entry.setAttribute("aria-checked", String(item.checked));
+    } else {
+      entry.setAttribute("role", "menuitem");
+    }
     menu.append(entry);
   }
   document.body.append(menu);
@@ -4655,11 +4661,46 @@ function pasteWorkspaceObject(scene) {
 }
 
 function workspaceSceneContextItems(scene) {
+  const currentScene = snapshot.scenes.find((candidate) => candidate.uid === scene.uid) || scene;
+  const activate = async () => {
+    if (snapshot.activeSceneUid === scene.uid) return true;
+    return mutate("activate_scene", { sceneUid: scene.uid });
+  };
+  const setBackground = (background) => async () => {
+    if (!(await activate()) || snapshot.background === background) return;
+    await mutate("set_background", { background });
+  };
   return [
+    {
+      label: "Background color · White",
+      checked: currentScene.background === "white",
+      action: setBackground("white"),
+    },
+    {
+      label: "Background color · Black",
+      checked: currentScene.background === "black",
+      action: setBackground("black"),
+    },
+    {
+      label: "Use color proofing",
+      checked: Boolean(currentScene.useColorProof),
+      action: async () => {
+        const value = !currentScene.useColorProof;
+        if (!(await activate())) return;
+        await mutate("set_display_option", { option: "color-proof", value });
+      },
+    },
     {
       label: "Paste Object",
       disabled: !workspaceObjectClipboardAvailable,
       action: () => pasteWorkspaceObject(scene),
+    },
+    {
+      label: "Properties...",
+      action: async () => {
+        if (!(await activate())) return;
+        showReferenceDialog("Scene Properties");
+      },
     },
   ];
 }
@@ -4831,6 +4872,17 @@ function workspaceObjectContextItems(scene, object) {
     },
     null,
     {
+      label: "New Renderer...",
+      action: async () => {
+        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        await mutate("add_renderer", {
+          objectUid: object.uid,
+          rendererType: rendererType.value,
+          groupName: null,
+        });
+      },
+    },
+    {
       label: "New Group...",
       action: async () => {
         const used = new Set(
@@ -4847,6 +4899,23 @@ function workspaceObjectContextItems(scene, object) {
         });
       },
     },
+    {
+      label: "Save As ...",
+      action: async () => {
+        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        selectedObjectUid = object.uid;
+        workspaceSelectionKind = "object";
+        showReferenceDialog("Save File As");
+      },
+    },
+    {
+      label: "Delete Object",
+      action: () =>
+        mutate("delete_workspace_item", {
+          target: { kind: "object", objectUid: object.uid, rendererUid: null },
+        }),
+    },
+    null,
     {
       label: "Properties...",
       action: async () => {

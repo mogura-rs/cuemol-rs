@@ -189,7 +189,8 @@ summary:focus-visible {
   color: var(--selection-text);
 }
 
-.menu-popup button.checked::before {
+.menu-popup button.checked::before,
+.workspace-context-menu button.checked::before {
   content: "✓";
   position: absolute;
   margin-left: -16px;

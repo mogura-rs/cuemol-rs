@@ -3292,7 +3292,43 @@ impl GuiApplication {
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
             }
+            let scene_background = self
+                .state
+                .scene_manager()
+                .scene(scene.uid)
+                .and_then(|value| value.scene_attribute("bgcolor"))
+                .and_then(|value| SceneBackground::parse(value).ok())
+                .unwrap_or(SceneBackground::Black);
+            let scene_color_proofing = self
+                .state
+                .scene_manager()
+                .scene(scene.uid)
+                .is_some_and(|value| scene_attr_bool(value.scene_attribute("use_colproof"), false));
             scene_response.context_menu(|ui| {
+                ui.menu_button("Background color", |ui| {
+                    for (label, background, value) in [
+                        ("White", SceneBackground::White, "white"),
+                        ("Black", SceneBackground::Black, "black"),
+                    ] {
+                        if ui.radio(scene_background == background, label).clicked() {
+                            self.activate_workspace_scene(scene.uid, camera);
+                            if self.background != background {
+                                self.persist_scene_background(value);
+                            }
+                            ui.close();
+                        }
+                    }
+                });
+                let mut color_proofing = scene_color_proofing;
+                if ui
+                    .checkbox(&mut color_proofing, "Use color proofing")
+                    .changed()
+                {
+                    self.activate_workspace_scene(scene.uid, camera);
+                    self.color_proofing = color_proofing;
+                    self.persist_scene_color_proofing();
+                    ui.close();
+                }
                 if ui
                     .add_enabled(
                         self.workspace_object_clipboard.is_some(),
@@ -3302,6 +3338,11 @@ impl GuiApplication {
                 {
                     self.activate_workspace_scene(scene.uid, camera);
                     self.paste_workspace_object_clipboard(scene.uid);
+                    ui.close();
+                }
+                if ui.button("Properties...").clicked() {
+                    self.activate_workspace_scene(scene.uid, camera);
+                    self.open_scene_properties();
                     ui.close();
                 }
             });
@@ -4019,6 +4060,19 @@ impl GuiApplication {
             self.open_renderer_dialog(object_uid);
             ui.close();
         }
+        if ui.button("Save As ...").clicked() {
+            self.activate_workspace_scene(scene_uid, camera);
+            self.selected_object = Some(object_uid);
+            self.selected_renderer = None;
+            self.workspace_aux_selection = None;
+            self.choose_save_selected_object();
+            ui.close();
+        }
+        if ui.button("Delete Object").clicked() {
+            self.delete_workspace_object(NativePropertyObject::Molecule(object_uid));
+            ui.close();
+        }
+        ui.separator();
         if ui.button("Properties...").clicked() {
             self.open_object_properties(object_uid);
             ui.close();
