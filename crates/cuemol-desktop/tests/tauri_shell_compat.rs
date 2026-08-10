@@ -312,6 +312,14 @@ fn tauri_viewport_render_requests_are_coalesced() {
 }
 
 #[test]
+fn tauri_viewport_selection_uses_one_compact_ipc_round_trip() {
+    assert!(JS.contains("mutateWithViewport(\"pick_atom\""));
+    assert!(JS.contains("mutateWithViewport(\"select_screen_rect\""));
+    assert!(!JS.contains("mutate(\"pick_atom\""));
+    assert!(!JS.contains("mutate(\"select_screen_rect\""));
+}
+
+#[test]
 fn tauri_workspace_chrome_reuses_unchanged_dom() {
     assert!(JS.contains("function workspaceChromeRenderKey()"));
     let workspace_key = JS

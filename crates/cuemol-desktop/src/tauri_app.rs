@@ -7826,7 +7826,13 @@ fn handle_model_request(
             height,
         } => {
             model.pick_atom(x, y, width, height)?;
-            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+            let viewport = model.render(width, height);
+            Ok(ModelResponse::MolStructUpdate(Box::new(
+                MolStructUpdateDto {
+                    snapshot: model.snapshot(),
+                    viewport,
+                },
+            )))
         }
         ModelRequest::PickAtomIdentifier {
             x,
@@ -7845,7 +7851,13 @@ fn handle_model_request(
             height,
         } => {
             model.select_screen_rect(x1, y1, x2, y2, width, height)?;
-            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+            let viewport = model.render(width, height);
+            Ok(ModelResponse::MolStructUpdate(Box::new(
+                MolStructUpdateDto {
+                    snapshot: model.snapshot(),
+                    viewport,
+                },
+            )))
         }
         ModelRequest::AddAnimationObject(kind) => {
             let kind =
@@ -9807,8 +9819,8 @@ fn pick_atom(
     width: u32,
     height: u32,
     state: State<'_, ManagedState>,
-) -> Result<AppSnapshot, String> {
-    snapshot_response(request_model(
+) -> Result<MolStructUpdateDto, String> {
+    molecule_selection_update_response(request_model(
         &state,
         ModelRequest::PickAtom {
             x,
@@ -9847,8 +9859,8 @@ fn select_screen_rect(
     width: u32,
     height: u32,
     state: State<'_, ManagedState>,
-) -> Result<AppSnapshot, String> {
-    snapshot_response(request_model(
+) -> Result<MolStructUpdateDto, String> {
+    molecule_selection_update_response(request_model(
         &state,
         ModelRequest::SelectScreenRect {
             x1,
@@ -14043,7 +14055,7 @@ mod tests {
         assert_eq!(atom.object_uid, object_uid.get());
         assert_eq!(atom.aid, 1);
         assert!(model.selection.is_empty());
-        handle_model_request(
+        let response = handle_model_request(
             &mut model,
             ModelRequest::PickAtom {
                 x: f64::from(labels[0].x),
@@ -14053,6 +14065,12 @@ mod tests {
             },
         )
         .unwrap();
+        let ModelResponse::MolStructUpdate(update) = response else {
+            panic!("expected a compact selection and viewport response");
+        };
+        assert_eq!(update.snapshot.selection, "aid 1");
+        assert_eq!(update.viewport.width, 800);
+        assert_eq!(update.viewport.height, 600);
         assert_eq!(model.snapshot().selection, "aid 1");
     }
 

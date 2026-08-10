@@ -9779,7 +9779,7 @@ function finishDrag(event) {
         void fillAtomPicker(startX, startY);
         return;
       }
-      mutate("pick_atom", {
+      mutateWithViewport("pick_atom", {
         x: startX,
         y: startY,
         ...viewportDimensions(),
@@ -9788,7 +9788,7 @@ function finishDrag(event) {
     return;
   }
   if (completed.action === "rect-select") {
-    mutate("select_screen_rect", {
+    mutateWithViewport("select_screen_rect", {
       x1: startX,
       y1: startY,
       x2: startX + completed.dx,
