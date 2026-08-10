@@ -3200,6 +3200,36 @@ impl AppModel {
                     .map_err(|error| error.to_string())?;
                 self.status = format!("Rename to {name}");
             }
+            "densityMap" => {
+                self.desktop
+                    .rename_density_map(object_uid, name)
+                    .map_err(|error| error.to_string())?;
+                self.status = format!("Rename to {name}");
+            }
+            "densityRenderer" => {
+                let renderer_uid = input
+                    .renderer_uid
+                    .ok_or_else(|| "density renderer UID is required".to_string())?;
+                self.desktop
+                    .rename_density_renderer(object_uid, Uid::new(renderer_uid), name)
+                    .map_err(|error| error.to_string())?;
+                self.status = format!("Rename to {name}");
+            }
+            "surface" => {
+                self.desktop
+                    .rename_surface(object_uid, name)
+                    .map_err(|error| error.to_string())?;
+                self.status = format!("Rename to {name}");
+            }
+            "surfaceRenderer" => {
+                let renderer_uid = input
+                    .renderer_uid
+                    .ok_or_else(|| "surface renderer UID is required".to_string())?;
+                self.desktop
+                    .rename_surface_renderer(object_uid, Uid::new(renderer_uid), name)
+                    .map_err(|error| error.to_string())?;
+                self.status = format!("Rename to {name}");
+            }
             kind => return Err(format!("unsupported Workspace item type: {kind}")),
         }
         Ok(())
@@ -15099,6 +15129,38 @@ mod tests {
 
         handle_model_request(
             &mut model,
+            ModelRequest::RenameWorkspaceNode(WorkspaceRenameInput {
+                kind: "densityMap".to_string(),
+                object_uid: map_uid.get(),
+                renderer_uid: None,
+                name: "inline density".to_string(),
+            }),
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::RenameWorkspaceNode(WorkspaceRenameInput {
+                kind: "densityRenderer".to_string(),
+                object_uid: map_uid.get(),
+                renderer_uid: Some(renderer_uid),
+                name: "inline contour".to_string(),
+            }),
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.density_maps[0].name, "inline density");
+        assert_eq!(snapshot.density_maps[0].renderers[0].name, "inline contour");
+        assert_eq!(snapshot.undo_descriptions[0], "Rename to inline contour");
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().density_maps[0].name, "renamed density");
+        assert_eq!(
+            model.snapshot().density_maps[0].renderers[0].name,
+            "edited contour"
+        );
+
+        handle_model_request(
+            &mut model,
             ModelRequest::AddDensityRenderer {
                 map_uid: map_uid.get(),
                 renderer_type: "isosurf".to_string(),
@@ -15201,6 +15263,40 @@ mod tests {
         assert_eq!(snapshot.surfaces[0].name, "renamed surface");
         assert!(!snapshot.surfaces[0].visible);
         assert!(snapshot.surfaces[0].locked);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::RenameWorkspaceNode(WorkspaceRenameInput {
+                kind: "surface".to_string(),
+                object_uid: surface_uid.get(),
+                renderer_uid: None,
+                name: "inline surface".to_string(),
+            }),
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::RenameWorkspaceNode(WorkspaceRenameInput {
+                kind: "surfaceRenderer".to_string(),
+                object_uid: surface_uid.get(),
+                renderer_uid: Some(renderer_uid),
+                name: "inline surface renderer".to_string(),
+            }),
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.surfaces[0].name, "inline surface");
+        assert_eq!(
+            snapshot.surfaces[0].renderers[0].name,
+            "inline surface renderer"
+        );
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().surfaces[0].name, "renamed surface");
+        assert_eq!(
+            model.snapshot().surfaces[0].renderers[0].name,
+            "surface wire"
+        );
     }
 
     #[test]

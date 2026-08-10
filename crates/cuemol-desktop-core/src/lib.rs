@@ -3459,6 +3459,22 @@ impl DesktopAppState {
         Ok(())
     }
 
+    pub fn rename_surface(&mut self, surface_uid: Uid, name: impl Into<String>) -> Result<()> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_surface(surface_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?;
+        let surface = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_surface_mut(surface_uid))
+            .expect("surface was checked above");
+        let name = name.into();
+        surface.name = name.clone();
+        ensure_surface_qsc_node(surface).set_str_attr("name", name);
+        Ok(())
+    }
+
     pub fn set_surface_renderer_visible(
         &mut self,
         surface_uid: Uid,
@@ -3476,6 +3492,26 @@ impl DesktopAppState {
             .expect("surface was checked above");
         let node = ensure_surface_renderer_node(surface, scene_uid, renderer_uid)?;
         set_qsc_bool_attr(node, "visible", visible, true);
+        Ok(())
+    }
+
+    pub fn rename_surface_renderer(
+        &mut self,
+        surface_uid: Uid,
+        renderer_uid: Uid,
+        name: impl Into<String>,
+    ) -> Result<()> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_surface(surface_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?;
+        let surface = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_surface_mut(surface_uid))
+            .expect("surface was checked above");
+        ensure_surface_renderer_node(surface, scene_uid, renderer_uid)?
+            .set_str_attr("name", name.into());
         Ok(())
     }
 
@@ -3773,6 +3809,16 @@ impl DesktopAppState {
         Ok(())
     }
 
+    pub fn rename_density_map(&mut self, map_uid: Uid, name: impl Into<String>) -> Result<()> {
+        let map = self
+            .density_maps
+            .get_mut(&map_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+        map.name = name.into();
+        map.modified = true;
+        Ok(())
+    }
+
     pub fn set_density_renderer_visible(
         &mut self,
         map_uid: Uid,
@@ -3791,6 +3837,28 @@ impl DesktopAppState {
                 CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
             })?;
         renderer.visible = visible;
+        map.modified = true;
+        Ok(())
+    }
+
+    pub fn rename_density_renderer(
+        &mut self,
+        map_uid: Uid,
+        renderer_uid: Uid,
+        name: impl Into<String>,
+    ) -> Result<()> {
+        let map = self
+            .density_maps
+            .get_mut(&map_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+        let renderer = map
+            .renderers
+            .iter_mut()
+            .find(|renderer| renderer.uid == renderer_uid)
+            .ok_or_else(|| {
+                CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
+            })?;
+        renderer.name = name.into();
         map.modified = true;
         Ok(())
     }

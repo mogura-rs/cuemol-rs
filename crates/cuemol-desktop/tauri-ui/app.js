@@ -7463,6 +7463,46 @@ function workspaceRenameTarget(kind, objectUid, rendererUid = null) {
   return `${kind}:${objectUid}:${rendererUid ?? ""}`;
 }
 
+function selectedWorkspaceRenameCoordinates(kind = workspaceSelectionKind) {
+  switch (kind) {
+    case "scene":
+      return snapshot?.activeSceneUid == null
+        ? null
+        : { objectUid: snapshot.activeSceneUid, rendererUid: null };
+    case "object":
+      return selectedObjectUid == null
+        ? null
+        : { objectUid: selectedObjectUid, rendererUid: null };
+    case "renderer":
+    case "rendererGroup":
+      return selectedObjectUid == null || selectedRendererUid == null
+        ? null
+        : { objectUid: selectedObjectUid, rendererUid: selectedRendererUid };
+    case "densityMap":
+      return selectedDensityMapUid == null
+        ? null
+        : { objectUid: selectedDensityMapUid, rendererUid: null };
+    case "densityRenderer":
+      return selectedDensityMapUid == null || selectedDensityRendererUid == null
+        ? null
+        : { objectUid: selectedDensityMapUid, rendererUid: selectedDensityRendererUid };
+    case "surface":
+      return selectedSurfaceUid == null
+        ? null
+        : { objectUid: selectedSurfaceUid, rendererUid: null };
+    case "surfaceRenderer":
+      return selectedSurfaceUid == null || selectedSurfaceRendererUid == null
+        ? null
+        : { objectUid: selectedSurfaceUid, rendererUid: selectedSurfaceRendererUid };
+    case "camera":
+      return snapshot?.activeSceneUid == null || selectedCameraName == null
+        ? null
+        : { objectUid: snapshot.activeSceneUid, rendererUid: selectedCameraName };
+    default:
+      return null;
+  }
+}
+
 function beginWorkspaceInlineRename(kind, objectUid, rendererUid = null) {
   clearWorkspaceRenameTimer();
   workspaceInlineRename = { kind, objectUid, rendererUid };
@@ -7478,17 +7518,13 @@ function scheduleWorkspaceInlineRename(kind, objectUid, rendererUid = null) {
   clearWorkspaceRenameTimer();
   workspaceRenameTimer = setTimeout(() => {
     workspaceRenameTimer = null;
-    const isSelected =
-      kind === "camera"
-        ? workspaceSelectionKind === kind &&
-          snapshot.activeSceneUid === objectUid &&
-          selectedCameraName === rendererUid
-        : kind === "scene"
-          ? workspaceSelectionKind === kind && snapshot.activeSceneUid === objectUid
-          : workspaceSelectionKind === kind &&
-            selectedObjectUid === objectUid &&
-            selectedRendererUid === rendererUid;
-    if (isSelected) {
+    const selected = selectedWorkspaceRenameCoordinates(kind);
+    if (
+      workspaceSelectionKind === kind &&
+      selected &&
+      workspaceRenameTarget(kind, selected.objectUid, selected.rendererUid) ===
+        workspaceRenameTarget(kind, objectUid, rendererUid)
+    ) {
       beginWorkspaceInlineRename(kind, objectUid, rendererUid);
     }
   }, 500);
@@ -7591,8 +7627,10 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
     return mutate("activate_scene", { sceneUid: scene.uid });
   };
   const items = [
+    { label: object.name, disabled: true },
+    null,
     {
-      label: "New Renderer...",
+      label: "New Renderer…",
       action: async () => {
         if (!(await activate())) return;
         if (isDensityMap) {
@@ -7605,8 +7643,17 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
         }
       },
     },
+    null,
     {
-      label: "Delete Object",
+      label: "Rename…",
+      action: async () => {
+        if (!(await activate())) return;
+        selectWorkspaceAuxItem(kind, object.uid);
+        beginWorkspaceInlineRename(kind, object.uid);
+      },
+    },
+    {
+      label: "Delete",
       action: () =>
         mutate("delete_workspace_item", {
           target: { kind, objectUid: object.uid, rendererUid: null },
@@ -7614,7 +7661,7 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
     },
     null,
     {
-      label: "Properties...",
+      label: "Properties…",
       action: async () => {
         if (!(await activate())) return;
         selectWorkspaceAuxItem(kind, object.uid);
@@ -7623,8 +7670,8 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
     },
   ];
   if (!isDensityMap && object.originalMolecule) {
-    items.splice(1, 0, {
-      label: "Regenerate surface...",
+    items.splice(3, 0, {
+      label: "Regenerate surface…",
       action: async () => {
         if (!(await activate())) return;
         await mutate("regenerate_surface", { surfaceUid: object.uid });
@@ -7640,6 +7687,16 @@ function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
     return mutate("activate_scene", { sceneUid: scene.uid });
   };
   const items = [
+    { label: renderer.name, disabled: true },
+    null,
+    {
+      label: "Rename…",
+      action: async () => {
+        if (!(await activate())) return;
+        selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
+        beginWorkspaceInlineRename(kind, object.uid, renderer.uid);
+      },
+    },
     {
       label: "Delete",
       action: () =>
@@ -7649,7 +7706,7 @@ function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
     },
     null,
     {
-      label: "Properties...",
+      label: "Properties…",
       action: async () => {
         if (!(await activate())) return;
         selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
@@ -7658,7 +7715,9 @@ function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
     },
   ];
   if (kind === "densityRenderer" && renderer.rendererType === "isosurf") {
-    items.unshift(
+    items.splice(
+      2,
+      0,
       {
         label: "Generate surface obj",
         action: async () => {
@@ -8513,25 +8572,33 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       (item) => item.sceneUid === scene.uid,
     )) {
       const surfaceBlock = document.createDocumentFragment();
+      const surfaceIsRenaming =
+        workspaceInlineRename?.kind === "surface" &&
+        workspaceInlineRename.objectUid === surface.uid;
       const surfaceRow = button(
-        surface.name,
+        surfaceIsRenaming ? "" : surface.name,
         `tree-object surface-object${
           workspaceSelectionKind === "surface" && surface.uid === selectedSurfaceUid
             ? " active"
             : ""
         }${surface.visible ? "" : " hidden"}`,
         () => {
-          selectedObjectUid = null;
-          selectedRendererUid = null;
-          selectedDensityMapUid = null;
-          selectedDensityRendererUid = null;
-          selectedSurfaceUid = surface.uid;
-          selectedSurfaceRendererUid = null;
-          workspaceSelectionKind = "surface";
+          const alreadySelected =
+            workspaceSelectionKind === "surface" && selectedSurfaceUid === surface.uid;
+          selectWorkspaceAuxItem("surface", surface.uid);
+          if (alreadySelected && !surfaceIsRenaming) {
+            scheduleWorkspaceInlineRename("surface", surface.uid);
+            return;
+          }
+          clearWorkspaceRenameTimer();
           renderShell();
         },
       );
-      surfaceRow.addEventListener("dblclick", () => showReferenceDialog("Object Properties"));
+      surfaceRow.dataset.workspaceRenameTarget = workspaceRenameTarget("surface", surface.uid);
+      surfaceRow.addEventListener("dblclick", () => {
+        clearWorkspaceRenameTimer();
+        showReferenceDialog("Object Properties");
+      });
       surfaceRow.addEventListener("contextmenu", (event) => {
         selectWorkspaceAuxItem("surface", surface.uid);
         showWorkspaceContextMenu(
@@ -8546,14 +8613,22 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           surface.locked,
         ),
       );
+      if (surfaceIsRenaming) {
+        surfaceRow.append(workspaceInlineRenameInput("surface", surface));
+      }
       const count = document.createElement("small");
       count.textContent = "SURF";
       surfaceRow.append(count);
       configureWorkspaceObjectDrag(surfaceRow, scene.uid, "surface", surface.uid);
+      surfaceRow.draggable = !surfaceIsRenaming;
       surfaceBlock.append(surfaceRow);
       for (const renderer of surface.renderers) {
+        const rendererIsRenaming =
+          workspaceInlineRename?.kind === "surfaceRenderer" &&
+          workspaceInlineRename.objectUid === surface.uid &&
+          workspaceInlineRename.rendererUid === renderer.uid;
         const rendererRow = button(
-          `${renderer.rendererType} · ${renderer.name}`,
+          rendererIsRenaming ? "" : `${renderer.rendererType} · ${renderer.name}`,
           `tree-renderer surface-renderer${
             workspaceSelectionKind === "surfaceRenderer" &&
             renderer.uid === selectedSurfaceRendererUid
@@ -8561,19 +8636,28 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
               : ""
           }${renderer.visible ? "" : " hidden"}`,
           () => {
-            selectedObjectUid = null;
-            selectedRendererUid = null;
-            selectedDensityMapUid = null;
-            selectedDensityRendererUid = null;
-            selectedSurfaceUid = surface.uid;
-            selectedSurfaceRendererUid = renderer.uid;
-            workspaceSelectionKind = "surfaceRenderer";
+            const alreadySelected =
+              workspaceSelectionKind === "surfaceRenderer" &&
+              selectedSurfaceUid === surface.uid &&
+              selectedSurfaceRendererUid === renderer.uid;
+            selectWorkspaceAuxItem("surfaceRenderer", surface.uid, renderer.uid);
+            if (alreadySelected && !rendererIsRenaming) {
+              scheduleWorkspaceInlineRename("surfaceRenderer", surface.uid, renderer.uid);
+              return;
+            }
+            clearWorkspaceRenameTimer();
             renderShell();
           },
         );
-        rendererRow.addEventListener("dblclick", () =>
-          showReferenceDialog("Renderer Properties"),
+        rendererRow.dataset.workspaceRenameTarget = workspaceRenameTarget(
+          "surfaceRenderer",
+          surface.uid,
+          renderer.uid,
         );
+        rendererRow.addEventListener("dblclick", () => {
+          clearWorkspaceRenameTimer();
+          showReferenceDialog("Renderer Properties");
+        });
         rendererRow.addEventListener("contextmenu", (event) => {
           selectWorkspaceAuxItem("surfaceRenderer", surface.uid, renderer.uid);
           showWorkspaceContextMenu(
@@ -8592,6 +8676,11 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             renderer.locked,
           ),
         );
+        if (rendererIsRenaming) {
+          rendererRow.append(
+            workspaceInlineRenameInput("surfaceRenderer", surface, renderer),
+          );
+        }
         surfaceBlock.append(rendererRow);
       }
       workspaceObjectBlocks.push({
@@ -8603,25 +8692,33 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     }
     for (const map of snapshot.densityMaps.filter((item) => item.sceneUid === scene.uid)) {
       const mapBlock = document.createDocumentFragment();
+      const mapIsRenaming =
+        workspaceInlineRename?.kind === "densityMap" &&
+        workspaceInlineRename.objectUid === map.uid;
       const mapRow = button(
-        map.name,
+        mapIsRenaming ? "" : map.name,
         `tree-object density-map${
           workspaceSelectionKind === "densityMap" && map.uid === selectedDensityMapUid
             ? " active"
             : ""
         }${map.visible ? "" : " hidden"}`,
         () => {
-          selectedObjectUid = null;
-          selectedRendererUid = null;
-          selectedDensityMapUid = map.uid;
-          selectedDensityRendererUid = null;
-          selectedSurfaceUid = null;
-          selectedSurfaceRendererUid = null;
-          workspaceSelectionKind = "densityMap";
+          const alreadySelected =
+            workspaceSelectionKind === "densityMap" && selectedDensityMapUid === map.uid;
+          selectWorkspaceAuxItem("densityMap", map.uid);
+          if (alreadySelected && !mapIsRenaming) {
+            scheduleWorkspaceInlineRename("densityMap", map.uid);
+            return;
+          }
+          clearWorkspaceRenameTimer();
           renderShell();
         },
       );
-      mapRow.addEventListener("dblclick", () => showReferenceDialog("Object Properties"));
+      mapRow.dataset.workspaceRenameTarget = workspaceRenameTarget("densityMap", map.uid);
+      mapRow.addEventListener("dblclick", () => {
+        clearWorkspaceRenameTimer();
+        showReferenceDialog("Object Properties");
+      });
       mapRow.addEventListener("contextmenu", (event) => {
         selectWorkspaceAuxItem("densityMap", map.uid);
         showWorkspaceContextMenu(
@@ -8636,14 +8733,20 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           map.locked,
         ),
       );
+      if (mapIsRenaming) mapRow.append(workspaceInlineRenameInput("densityMap", map));
       const count = document.createElement("small");
       count.textContent = `${map.counts.join("×")} MAP`;
       mapRow.append(count);
       configureWorkspaceObjectDrag(mapRow, scene.uid, "densityMap", map.uid);
+      mapRow.draggable = !mapIsRenaming;
       mapBlock.append(mapRow);
       for (const renderer of map.renderers) {
+        const rendererIsRenaming =
+          workspaceInlineRename?.kind === "densityRenderer" &&
+          workspaceInlineRename.objectUid === map.uid &&
+          workspaceInlineRename.rendererUid === renderer.uid;
         const rendererRow = button(
-          `${renderer.rendererType} · ${renderer.name}`,
+          rendererIsRenaming ? "" : `${renderer.rendererType} · ${renderer.name}`,
           `tree-renderer density-renderer${
             workspaceSelectionKind === "densityRenderer" &&
             renderer.uid === selectedDensityRendererUid
@@ -8651,19 +8754,28 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
               : ""
           }${renderer.visible ? "" : " hidden"}`,
           () => {
-            selectedObjectUid = null;
-            selectedRendererUid = null;
-            selectedDensityMapUid = map.uid;
-            selectedDensityRendererUid = renderer.uid;
-            selectedSurfaceUid = null;
-            selectedSurfaceRendererUid = null;
-            workspaceSelectionKind = "densityRenderer";
+            const alreadySelected =
+              workspaceSelectionKind === "densityRenderer" &&
+              selectedDensityMapUid === map.uid &&
+              selectedDensityRendererUid === renderer.uid;
+            selectWorkspaceAuxItem("densityRenderer", map.uid, renderer.uid);
+            if (alreadySelected && !rendererIsRenaming) {
+              scheduleWorkspaceInlineRename("densityRenderer", map.uid, renderer.uid);
+              return;
+            }
+            clearWorkspaceRenameTimer();
             renderShell();
           },
         );
-        rendererRow.addEventListener("dblclick", () =>
-          showReferenceDialog("Renderer Properties"),
+        rendererRow.dataset.workspaceRenameTarget = workspaceRenameTarget(
+          "densityRenderer",
+          map.uid,
+          renderer.uid,
         );
+        rendererRow.addEventListener("dblclick", () => {
+          clearWorkspaceRenameTimer();
+          showReferenceDialog("Renderer Properties");
+        });
         rendererRow.addEventListener("contextmenu", (event) => {
           selectWorkspaceAuxItem("densityRenderer", map.uid, renderer.uid);
           showWorkspaceContextMenu(
@@ -8682,6 +8794,9 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             renderer.locked,
           ),
         );
+        if (rendererIsRenaming) {
+          rendererRow.append(workspaceInlineRenameInput("densityRenderer", map, renderer));
+        }
         mapBlock.append(rendererRow);
       }
       workspaceObjectBlocks.push({
@@ -12233,12 +12348,14 @@ window.addEventListener("keydown", (event) => {
 
 document.addEventListener("pointerdown", (event) => {
   if (workspaceRenameTimer === null) return;
-  const selectedTarget =
-    workspaceSelectionKind === "camera"
-      ? workspaceRenameTarget("camera", snapshot.activeSceneUid, selectedCameraName)
-      : workspaceSelectionKind === "scene"
-        ? workspaceRenameTarget("scene", snapshot.activeSceneUid)
-        : workspaceRenameTarget(workspaceSelectionKind, selectedObjectUid, selectedRendererUid);
+  const selected = selectedWorkspaceRenameCoordinates();
+  const selectedTarget = selected
+    ? workspaceRenameTarget(
+        workspaceSelectionKind,
+        selected.objectUid,
+        selected.rendererUid,
+      )
+    : null;
   const row = event.target.closest("[data-workspace-rename-target]");
   if (row?.dataset.workspaceRenameTarget !== selectedTarget) clearWorkspaceRenameTimer();
 });
@@ -12247,27 +12364,14 @@ sceneTree.addEventListener("keydown", (event) => {
   if (event.key !== "F2") {
     return;
   }
-  if (workspaceSelectionKind === "camera") {
-    if (snapshot.activeSceneUid === null || selectedCameraName === null) return;
-    event.preventDefault();
-    beginWorkspaceInlineRename("camera", snapshot.activeSceneUid, selectedCameraName);
-    return;
-  }
-  if (!["scene", "object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)) {
-    return;
-  }
-  if (workspaceSelectionKind === "scene") {
-    if (snapshot.activeSceneUid === null) return;
-    event.preventDefault();
-    beginWorkspaceInlineRename("scene", snapshot.activeSceneUid);
-    return;
-  }
-  const object = selectedObject();
-  if (!object) return;
-  const renderer = workspaceSelectionKind === "object" ? null : selectedRenderer();
-  if (workspaceSelectionKind !== "object" && !renderer) return;
+  const selected = selectedWorkspaceRenameCoordinates();
+  if (!selected) return;
   event.preventDefault();
-  beginWorkspaceInlineRename(workspaceSelectionKind, object.uid, renderer?.uid ?? null);
+  beginWorkspaceInlineRename(
+    workspaceSelectionKind,
+    selected.objectUid,
+    selected.rendererUid,
+  );
 });
 
 window.addEventListener("dragover", (event) => event.preventDefault());

@@ -1026,10 +1026,10 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("Paste Renderer"));
     assert!(JS.contains("Paste Object"));
     assert!(JS.contains("label: \"Save As…\""));
-    assert!(JS.contains("label: \"Delete Object\""));
+    assert!(JS.contains("label: \"Delete\""));
     assert!(JS.contains("label: \"Generate surface obj\""));
     assert!(JS.contains("generate_density_surface"));
-    assert!(JS.contains("label: \"Regenerate surface...\""));
+    assert!(JS.contains("label: \"Regenerate surface…\""));
     assert!(JS.contains("regenerate_surface"));
     assert!(CSS.contains(".workspace-context-menu.has-submenu"));
     assert!(JS.contains("WORKSPACE_PAINT_MONOCHROME"));
@@ -1049,7 +1049,11 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("}, 500);"));
     assert!(JS.contains("workspaceSelectionKind === kind"));
     assert!(JS.contains("`Scene: ${scene.name || \"Untitled\"}`"));
-    assert!(JS.contains("beginWorkspaceInlineRename(\"scene\", snapshot.activeSceneUid)"));
+    assert!(JS.contains("function selectedWorkspaceRenameCoordinates("));
+    assert!(JS.contains("case \"densityMap\":"));
+    assert!(JS.contains("case \"densityRenderer\":"));
+    assert!(JS.contains("case \"surface\":"));
+    assert!(JS.contains("case \"surfaceRenderer\":"));
     assert!(JS.contains("beginWorkspaceInlineRename(\"object\", object.uid)"));
     assert!(JS.contains("beginWorkspaceInlineRename(\"renderer\", object.uid, renderer.uid)"));
     assert!(JS.contains("input.addEventListener(\"blur\", () => void finish(true))"));
