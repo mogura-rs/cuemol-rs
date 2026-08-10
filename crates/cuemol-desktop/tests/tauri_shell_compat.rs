@@ -347,8 +347,12 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("insert_workspace_renderer_paint"));
     assert!(JS.contains("copy_workspace_renderer"));
     assert!(JS.contains("paste_workspace_renderers"));
+    assert!(JS.contains("copy_workspace_object"));
+    assert!(JS.contains("paste_workspace_object"));
+    assert!(JS.contains("workspaceSceneContextItems"));
     assert!(JS.contains("workspaceRendererClipboardAvailable"));
     assert!(JS.contains("Paste Renderer"));
+    assert!(JS.contains("Paste Object"));
     assert!(JS.contains("WORKSPACE_PAINT_MONOCHROME"));
     assert!(JS.contains("Paint · ${group} · ${label}"));
     assert!(JS.contains("[\"B-factor\", \"bfactor\"]"));
@@ -482,6 +486,8 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "insert_workspace_renderer_paint",
         "copy_workspace_renderer",
         "paste_workspace_renderers",
+        "copy_workspace_object",
+        "paste_workspace_object",
         "create_workspace_renderer_group",
         "rename_workspace_renderer_group",
         "delete_workspace_item",

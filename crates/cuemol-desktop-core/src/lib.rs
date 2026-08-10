@@ -555,6 +555,17 @@ pub struct WorkspaceRendererPasteResult {
     pub renderer_uids: Vec<Uid>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceObjectClipboard {
+    object: MolObject,
+}
+
+impl WorkspaceObjectClipboard {
+    pub fn name(&self) -> &str {
+        self.object.name()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiAtomSummary {
     pub object_uid: Uid,
@@ -4896,6 +4907,54 @@ impl DesktopAppState {
             group_uid,
             renderer_uids,
         })
+    }
+
+    pub fn copy_workspace_object(&self, object_uid: Uid) -> Result<WorkspaceObjectClipboard> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        Ok(WorkspaceObjectClipboard {
+            object: object.clone(),
+        })
+    }
+
+    pub fn paste_workspace_object(
+        &mut self,
+        scene_uid: Uid,
+        clipboard: &WorkspaceObjectClipboard,
+    ) -> Result<Uid> {
+        let ui_order = self
+            .object_summaries(scene_uid)
+            .into_iter()
+            .map(|object| object.ui_order)
+            .chain(
+                self.density_map_summaries(scene_uid)
+                    .into_iter()
+                    .map(|map| map.ui_order),
+            )
+            .chain(
+                self.surface_summaries(scene_uid)
+                    .into_iter()
+                    .map(|surface| surface.ui_order),
+            )
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let source_name = clipboard.name();
+        let name = if scene.object_by_name(source_name).is_none() {
+            source_name.to_string()
+        } else {
+            (1_u64..)
+                .map(|index| format!("copy{index}_{source_name}"))
+                .find(|candidate| scene.object_by_name(candidate).is_none())
+                .expect("the object name suffix space is inexhaustible")
+        };
+        Ok(scene.attach_molecule_copy(&clipboard.object, name, ui_order))
     }
 
     pub fn rename_renderer_group(
@@ -49465,6 +49524,50 @@ end_header
             Some("destination")
         );
         assert!(target.renderer(second_uid).is_none());
+    }
+
+    #[test]
+    fn workspace_object_clipboard_reassigns_runtime_uids_and_names() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("clipboard", false).result_scene;
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let renderer_uid = {
+            let object = app.scene_manager_mut().object_mut(object_uid).unwrap();
+            object.set_source("source.pdb");
+            object.set_ui_locked(true);
+            let renderer_uid = object.add_renderer("simple", "lines");
+            object
+                .renderer_mut(renderer_uid)
+                .unwrap()
+                .set_qsc_attr("style", "DefaultSimple");
+            renderer_uid
+        };
+        let clipboard = app.copy_workspace_object(object_uid).unwrap();
+
+        let pasted_uid = app.paste_workspace_object(scene_uid, &clipboard).unwrap();
+        let pasted = app.scene_manager().object(pasted_uid).unwrap();
+        assert_ne!(pasted_uid, object_uid);
+        assert_eq!(pasted.name(), "copy1_molecule");
+        assert_eq!(pasted.source(), "source.pdb");
+        assert!(pasted.is_ui_locked());
+        assert_eq!(pasted.renderers().len(), 1);
+        assert_ne!(pasted.renderers()[0].uid(), renderer_uid);
+        assert_eq!(
+            pasted.renderers()[0].qsc_attr("style"),
+            Some("DefaultSimple")
+        );
+        assert!(pasted.modified());
+
+        app.destroy_object(object_uid).unwrap();
+        let second_uid = app.paste_workspace_object(scene_uid, &clipboard).unwrap();
+        assert_eq!(
+            app.scene_manager().object(second_uid).unwrap().name(),
+            "molecule"
+        );
     }
 
     #[test]

@@ -2027,6 +2027,42 @@ impl MolScene {
         self.insert_molecule(uid, name, mol, source_type)
     }
 
+    /// Attach a detached molecule copy with fresh object and renderer runtime UIDs.
+    pub fn attach_molecule_copy(
+        &mut self,
+        object: &MolObject,
+        name: impl Into<String>,
+        ui_order: i32,
+    ) -> Uid {
+        let uid = Uid::new(self.next_object_uid);
+        self.next_object_uid += 1;
+        let object_base = OBJECT_UID_BASE + self.uid.get() * UID_SCENE_STRIDE;
+        let object_local = uid.get().checked_sub(object_base);
+        let mut next_renderer_uid = object_local
+            .filter(|local| *local < UID_SCENE_STRIDE)
+            .map_or_else(
+                || uid.get().saturating_add(1),
+                |local| {
+                    RENDERER_UID_BASE
+                        + self.uid.get() * UID_SCENE_STRIDE
+                        + local * UID_OBJECT_STRIDE
+                        + 1
+                },
+            );
+        let mut object = object.clone();
+        object.uid = uid;
+        object.name = name.into();
+        object.ui_order = ui_order;
+        object.modified = true;
+        for renderer in &mut object.renderers {
+            renderer.uid = Uid::new(next_renderer_uid);
+            next_renderer_uid += 1;
+        }
+        object.next_renderer_uid = next_renderer_uid;
+        self.objects.push(object);
+        uid
+    }
+
     fn insert_molecule(
         &mut self,
         uid: Uid,

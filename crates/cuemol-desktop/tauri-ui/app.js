@@ -140,6 +140,7 @@ let snapshot = null;
 let selectedObjectUid = null;
 let selectedRendererUid = null;
 const workspaceRendererStyleCache = new Map();
+let workspaceObjectClipboardAvailable = false;
 let workspaceRendererClipboardAvailable = false;
 let selectedDensityMapUid = null;
 let selectedDensityRendererUid = null;
@@ -4623,6 +4624,44 @@ function pasteWorkspaceRenderers(objectUid, destinationGroupUid = null) {
   });
 }
 
+async function copyWorkspaceObject(objectUid) {
+  if (!invoke) return false;
+  setBusy(true);
+  try {
+    const status = await invoke("copy_workspace_object", {
+      input: { objectUid },
+    });
+    workspaceObjectClipboardAvailable = true;
+    snapshot.status = status;
+    renderStatusAndLog();
+    return true;
+  } catch (error) {
+    showError(error);
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+function pasteWorkspaceObject(scene) {
+  return mutate(
+    "paste_workspace_object",
+    { input: { sceneUid: scene.uid } },
+    renderShell,
+    Boolean(scene.active),
+  );
+}
+
+function workspaceSceneContextItems(scene) {
+  return [
+    {
+      label: "Paste Object",
+      disabled: !workspaceObjectClipboardAvailable,
+      action: () => pasteWorkspaceObject(scene),
+    },
+  ];
+}
+
 function workspaceObjectContextItems(scene, object) {
   const select = (selection) => () =>
     runMoleculeSelectionAction(object.uid, selection, "select");
@@ -4658,6 +4697,10 @@ function workspaceObjectContextItems(scene, object) {
   }
   items.push(
     null,
+    {
+      label: "Copy Object",
+      action: () => copyWorkspaceObject(object.uid),
+    },
     {
       label: "Paste Renderer",
       disabled: !workspaceRendererClipboardAvailable,
@@ -5235,6 +5278,18 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       },
     );
     sceneRow.addEventListener("dblclick", () => showReferenceDialog("Scene Properties"));
+    sceneRow.addEventListener("contextmenu", (event) => {
+      workspaceSelectionKind = "scene";
+      selectedObjectUid = null;
+      selectedRendererUid = null;
+      selectedDensityMapUid = null;
+      selectedDensityRendererUid = null;
+      selectedSurfaceUid = null;
+      selectedSurfaceRendererUid = null;
+      selectedCameraName = null;
+      selectedStyleIndex = null;
+      showWorkspaceContextMenu(event, workspaceSceneContextItems(scene));
+    });
     sceneTree.append(sceneRow);
     const workspaceObjectBlocks = [];
     for (const object of snapshot.objects.filter((item) => item.sceneUid === scene.uid)) {

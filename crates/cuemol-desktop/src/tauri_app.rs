@@ -14,7 +14,7 @@ use tauri::State;
 use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
     anim_step, atoms_in_screen_rect, pick_atom_screen, AnimKind, AnimObject, DesktopAppState,
-    WorkspaceRendererClipboard, MOLECULE_RENDERER_TYPES,
+    WorkspaceObjectClipboard, WorkspaceRendererClipboard, MOLECULE_RENDERER_TYPES,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
@@ -733,6 +733,18 @@ struct WorkspaceRendererPasteInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceObjectCopyInput {
+    object_uid: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceObjectPasteInput {
+    scene_uid: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceRendererGroupInput {
     object_uid: u64,
     #[serde(default)]
@@ -831,6 +843,7 @@ struct AppModel {
     opened_paths: Vec<String>,
     structure_revision: u64,
     modified_scenes: BTreeSet<Uid>,
+    workspace_object_clipboard: Option<WorkspaceObjectClipboard>,
     workspace_renderer_clipboard: Option<WorkspaceRendererClipboard>,
     undo_stack: Vec<AppModelUndoEntry>,
     redo_stack: Vec<AppModelUndoEntry>,
@@ -925,6 +938,7 @@ impl AppModel {
             opened_paths: Vec::new(),
             structure_revision: 1,
             modified_scenes: BTreeSet::new(),
+            workspace_object_clipboard: None,
             workspace_renderer_clipboard: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -2448,6 +2462,33 @@ impl AppModel {
         self.workspace_renderer_clipboard = Some(clipboard);
         self.status = format!("Copied {count} renderer(s)");
         Ok(self.status.clone())
+    }
+
+    fn copy_workspace_object(&mut self, input: WorkspaceObjectCopyInput) -> Result<String, String> {
+        let clipboard = self
+            .desktop
+            .copy_workspace_object(Uid::new(input.object_uid))
+            .map_err(|error| error.to_string())?;
+        let name = clipboard.name().to_string();
+        self.workspace_object_clipboard = Some(clipboard);
+        self.status = format!("Copied object {name}");
+        Ok(self.status.clone())
+    }
+
+    fn paste_workspace_object(&mut self, input: WorkspaceObjectPasteInput) -> Result<(), String> {
+        let clipboard = self
+            .workspace_object_clipboard
+            .clone()
+            .ok_or_else(|| "No copied object".to_string())?;
+        let scene_uid = Uid::new(input.scene_uid);
+        self.desktop
+            .paste_workspace_object(scene_uid, &clipboard)
+            .map_err(|error| error.to_string())?;
+        self.modified_scenes.insert(scene_uid);
+        self.status = "Paste object".to_string();
+        self.touch_structure_details();
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn paste_workspace_renderers(
@@ -4982,6 +5023,8 @@ enum ModelRequest {
     InsertWorkspaceRendererPaint(WorkspaceRendererPaintInput),
     CopyWorkspaceRenderer(WorkspaceRendererCopyInput),
     PasteWorkspaceRenderers(WorkspaceRendererPasteInput),
+    CopyWorkspaceObject(WorkspaceObjectCopyInput),
+    PasteWorkspaceObject(WorkspaceObjectPasteInput),
     CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     FitWorkspaceItem {
@@ -6410,6 +6453,15 @@ fn handle_model_request(
         ModelRequest::PasteWorkspaceRenderers(input) => {
             let undo = model.capture_undo();
             model.paste_workspace_renderers(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::CopyWorkspaceObject(input) => {
+            Ok(ModelResponse::Message(model.copy_workspace_object(input)?))
+        }
+        ModelRequest::PasteWorkspaceObject(input) => {
+            let undo = model.capture_undo();
+            model.paste_workspace_object(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -8376,6 +8428,28 @@ fn paste_workspace_renderers(
 }
 
 #[tauri::command]
+fn copy_workspace_object(
+    input: WorkspaceObjectCopyInput,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::CopyWorkspaceObject(input),
+    )?)
+}
+
+#[tauri::command]
+fn paste_workspace_object(
+    input: WorkspaceObjectPasteInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::PasteWorkspaceObject(input),
+    )?)
+}
+
+#[tauri::command]
 fn create_workspace_renderer_group(
     input: WorkspaceRendererGroupInput,
     state: State<'_, ManagedState>,
@@ -9513,6 +9587,8 @@ pub fn run() -> Result<(), tauri::Error> {
             insert_workspace_renderer_paint,
             copy_workspace_renderer,
             paste_workspace_renderers,
+            copy_workspace_object,
+            paste_workspace_object,
             create_workspace_renderer_group,
             rename_workspace_renderer_group,
             fit_workspace_item,
@@ -9619,6 +9695,7 @@ mod tests {
             opened_paths: Vec::new(),
             structure_revision: 1,
             modified_scenes: BTreeSet::new(),
+            workspace_object_clipboard: None,
             workspace_renderer_clipboard: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -11078,6 +11155,50 @@ mod tests {
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(model.snapshot().objects[0].renderers.is_empty());
         assert!(model.workspace_renderer_clipboard.is_some());
+    }
+
+    #[test]
+    fn workspace_object_copy_uses_small_response_and_paste_is_undoable() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CopyWorkspaceObject(WorkspaceObjectCopyInput {
+                object_uid: object_uid.get(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Message(message) = response else {
+            panic!("expected copy status message");
+        };
+        assert_eq!(message, "Copied object molecule");
+        assert!(model.undo_stack.is_empty());
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::PasteWorkspaceObject(WorkspaceObjectPasteInput {
+                scene_uid: scene_uid.get(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected paste snapshot");
+        };
+        assert_eq!(snapshot.objects.len(), 2);
+        let pasted = snapshot
+            .objects
+            .iter()
+            .find(|object| object.uid != object_uid.get())
+            .unwrap();
+        assert_eq!(pasted.name, "copy1_molecule");
+        assert_eq!(pasted.renderers.len(), 1);
+        assert_ne!(pasted.renderers[0].uid, renderer_uid.get());
+        assert_eq!(snapshot.undo_descriptions[0], "Paste object");
+        assert!(model.mesh.is_none());
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().objects.len(), 1);
+        assert!(model.workspace_object_clipboard.is_some());
     }
 
     #[test]
