@@ -7109,24 +7109,20 @@ fn handle_model_request(
         }
         ModelRequest::GetFileRendererSetup { path } => {
             let path = Path::new(&path);
-            if !model
+            let Some(file_setup) = model
                 .desktop
-                .path_supports_molecule_renderer_setup(path)
+                .molecule_file_setup_for_path(path)
                 .map_err(|error| error.to_string())?
-            {
+            else {
                 return Ok(ModelResponse::FileRendererSetup(None));
-            }
+            };
             let object_name = path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .filter(|name| !name.trim().is_empty())
                 .ok_or_else(|| "the file name is invalid".to_string())?;
-            let reader_options = model
-                .desktop
-                .molecule_reader_options_for_path(path)
-                .map_err(|error| error.to_string())?;
             Ok(ModelResponse::FileRendererSetup(Some(
-                renderer_setup_defaults(model, object_name, reader_options.as_ref())?,
+                renderer_setup_defaults(model, object_name, file_setup.reader_options.as_ref())?,
             )))
         }
         ModelRequest::OpenPathWithRendererSetup {

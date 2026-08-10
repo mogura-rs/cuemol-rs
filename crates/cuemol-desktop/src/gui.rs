@@ -8086,16 +8086,20 @@ impl GuiApplication {
             self.open_current_path(camera);
             return;
         }
-        match self.state.path_supports_molecule_renderer_setup(&path) {
-            Ok(true) => {
+        match self.state.molecule_file_setup_for_path(&path) {
+            Ok(Some(file_setup)) => {
                 let object_name = path
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or("object")
                     .to_string();
-                self.open_renderer_setup(&object_name, NativeRendererSetupAction::OpenPath(path));
+                self.open_renderer_setup(
+                    &object_name,
+                    NativeRendererSetupAction::OpenPath(path),
+                    file_setup.reader_options,
+                );
             }
-            Ok(false) => self.open_current_path(camera),
+            Ok(None) => self.open_current_path(camera),
             Err(error) => {
                 self.set_error(error);
             }
@@ -14485,22 +14489,15 @@ impl GuiApplication {
 
     fn open_pdb_renderer_setup(&mut self) {
         let object_name = self.pdb_id.trim().to_ascii_lowercase();
-        self.open_renderer_setup(&object_name, NativeRendererSetupAction::PdbDownload);
+        self.open_renderer_setup(&object_name, NativeRendererSetupAction::PdbDownload, None);
     }
 
-    fn open_renderer_setup(&mut self, base_object_name: &str, action: NativeRendererSetupAction) {
-        let reader_options = match &action {
-            NativeRendererSetupAction::OpenPath(path) => {
-                match self.state.molecule_reader_options_for_path(path) {
-                    Ok(options) => options,
-                    Err(error) => {
-                        self.set_error(error);
-                        return;
-                    }
-                }
-            }
-            NativeRendererSetupAction::PdbDownload => None,
-        };
+    fn open_renderer_setup(
+        &mut self,
+        base_object_name: &str,
+        action: NativeRendererSetupAction,
+        reader_options: Option<crate::GuiMoleculeReaderOptions>,
+    ) {
         let scene_uid = self.state.ensure_active_scene();
         let options = match self.state.molecule_renderer_setup_options(scene_uid) {
             Ok(options) if !options.is_empty() => options,
@@ -21792,6 +21789,15 @@ mod tests {
         app.open_renderer_setup(
             "sample.pdb",
             NativeRendererSetupAction::OpenPath(path.clone()),
+            Some(crate::GuiMoleculeReaderOptions {
+                kind: crate::GuiMoleculeReaderKind::Pdb,
+                ignore_multiple_models: true,
+                ignore_anisou: false,
+                ignore_alt_conf: false,
+                load_segid_as_chain: false,
+                calculate_secondary_structure: true,
+                auto_generate_topology: true,
+            }),
         );
         let setup = app.renderer_setup_draft.as_ref().unwrap();
         assert_eq!(setup.object_name, "sample.pdb");
@@ -21799,6 +21805,10 @@ mod tests {
             &setup.action,
             NativeRendererSetupAction::OpenPath(value) if value == &path
         ));
+        assert_eq!(
+            setup.reader_options.as_ref().map(|options| options.kind),
+            Some(crate::GuiMoleculeReaderKind::Pdb)
+        );
     }
 
     #[test]

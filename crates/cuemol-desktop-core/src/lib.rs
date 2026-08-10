@@ -977,6 +977,11 @@ pub struct GuiMoleculeReaderOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiMoleculeFileSetup {
+    pub reader_options: Option<GuiMoleculeReaderOptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiPdbLoadSummary {
     pub object_uid: Option<Uid>,
     pub map_uids: Vec<Uid>,
@@ -7228,6 +7233,14 @@ impl DesktopAppState {
     pub fn open_path(&mut self, path: impl AsRef<Path>) -> Result<GuiLoadedPath> {
         let path = path.as_ref();
         let format = guess_path_format(path, &self.stream_manager)?;
+        self.open_path_with_format(path, format)
+    }
+
+    fn open_path_with_format(
+        &mut self,
+        path: &Path,
+        format: &'static str,
+    ) -> Result<GuiLoadedPath> {
         if is_scene_format(format) {
             let scene_uid = self
                 .load_qsc_file(path)?
@@ -7280,40 +7293,29 @@ impl DesktopAppState {
     }
 
     pub fn path_supports_molecule_renderer_setup(&self, path: impl AsRef<Path>) -> Result<bool> {
+        Ok(self.molecule_file_setup_for_path(path)?.is_some())
+    }
+
+    pub fn molecule_file_setup_for_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<Option<GuiMoleculeFileSetup>> {
         let format = guess_path_format(path.as_ref(), &self.stream_manager)?;
-        Ok(!is_scene_format(format)
-            && format != "pse"
-            && !is_density_map_format(format)
-            && !is_surface_format(format)
-            && format != "qdflwobj")
+        if !format_supports_molecule_renderer_setup(format) {
+            return Ok(None);
+        }
+        Ok(Some(GuiMoleculeFileSetup {
+            reader_options: molecule_reader_options_for_format(format),
+        }))
     }
 
     pub fn molecule_reader_options_for_path(
         &self,
         path: impl AsRef<Path>,
     ) -> Result<Option<GuiMoleculeReaderOptions>> {
-        let format = guess_path_format(path.as_ref(), &self.stream_manager)?;
-        Ok(match format {
-            "pdb" => Some(GuiMoleculeReaderOptions {
-                kind: GuiMoleculeReaderKind::Pdb,
-                ignore_multiple_models: true,
-                ignore_anisou: false,
-                ignore_alt_conf: false,
-                load_segid_as_chain: false,
-                calculate_secondary_structure: true,
-                auto_generate_topology: true,
-            }),
-            "mmcif" => Some(GuiMoleculeReaderOptions {
-                kind: GuiMoleculeReaderKind::Mmcif,
-                ignore_multiple_models: true,
-                ignore_anisou: false,
-                ignore_alt_conf: false,
-                load_segid_as_chain: false,
-                calculate_secondary_structure: false,
-                auto_generate_topology: true,
-            }),
-            _ => None,
-        })
+        Ok(self
+            .molecule_file_setup_for_path(path)?
+            .and_then(|setup| setup.reader_options))
     }
 
     pub fn open_path_with_renderer_setup(
@@ -7331,13 +7333,13 @@ impl DesktopAppState {
         setup: &GuiRendererSetup,
     ) -> Result<GuiLoadedPath> {
         let path = path.as_ref();
-        if !self.path_supports_molecule_renderer_setup(path)? {
+        let format = guess_path_format(path, &self.stream_manager)?;
+        if !format_supports_molecule_renderer_setup(format) {
             return Err(CueMolError::invalid_argument(
                 "the file does not support molecular renderer setup",
             ));
         }
         let (scene_uid, object_uid) = if let Some(options) = reader_options {
-            let format = guess_path_format(path, &self.stream_manager)?;
             let molecule = match (format, options.kind) {
                 ("pdb", GuiMoleculeReaderKind::Pdb) => cuemol_molstr::read_pdb_file_with_options(
                     path,
@@ -7385,7 +7387,7 @@ impl DesktopAppState {
             }
             (scene_uid, object_uid)
         } else {
-            let loaded = self.open_path(path)?;
+            let loaded = self.open_path_with_format(path, format)?;
             let GuiLoadedPath::Object {
                 scene_uid,
                 object_uid,
@@ -44133,6 +44135,38 @@ fn is_density_map_format(format: &str) -> bool {
         format,
         "apbs" | "ccp4map" | "xplormap" | "brix" | "mmcifmap" | "mtzmap" | "qdfmap" | "qdfpot"
     )
+}
+
+fn format_supports_molecule_renderer_setup(format: &str) -> bool {
+    !is_scene_format(format)
+        && format != "pse"
+        && !is_density_map_format(format)
+        && !is_surface_format(format)
+        && format != "qdflwobj"
+}
+
+fn molecule_reader_options_for_format(format: &str) -> Option<GuiMoleculeReaderOptions> {
+    match format {
+        "pdb" => Some(GuiMoleculeReaderOptions {
+            kind: GuiMoleculeReaderKind::Pdb,
+            ignore_multiple_models: true,
+            ignore_anisou: false,
+            ignore_alt_conf: false,
+            load_segid_as_chain: false,
+            calculate_secondary_structure: true,
+            auto_generate_topology: true,
+        }),
+        "mmcif" => Some(GuiMoleculeReaderOptions {
+            kind: GuiMoleculeReaderKind::Mmcif,
+            ignore_multiple_models: true,
+            ignore_anisou: false,
+            ignore_alt_conf: false,
+            load_segid_as_chain: false,
+            calculate_secondary_structure: false,
+            auto_generate_topology: true,
+        }),
+        _ => None,
+    }
 }
 
 fn read_density_map(path: &Path, format: &str) -> Result<DensityMap> {
