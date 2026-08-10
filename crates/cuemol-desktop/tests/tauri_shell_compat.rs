@@ -406,11 +406,18 @@ fn tauri_open_pdb_matches_reference_coordinate_and_map_options() {
         "Fetch map file (Fo-Fc)",
         "RCSB (files.rcsb.org)",
         "EBI (www.ebi.ac.uk)",
+        "Setup renderer",
+        "Object:",
+        "Renderer type:",
+        "Renderer name:",
+        "Selection:",
+        "Recenter view",
     ] {
         assert!(JS.contains(label), "missing Open PDB field {label}");
     }
     for binding in [
         "await invoke(\"get_pdb_history\")",
+        "await invoke(\"get_pdb_renderer_setup\", { pdbId })",
         "await invoke(\"check_pdb_availability\", args)",
         "pdbHistoryList.id = \"open-pdb-history\"",
         "pdbId.setAttribute(\"list\", pdbHistoryList.id)",
@@ -419,6 +426,7 @@ fn tauri_open_pdb_matches_reference_coordinate_and_map_options() {
         "fetchTwoFofc: fetchTwoFofc.checked",
         "fetchFofc: fetchFofc.checked",
         "mapSource: mapSource.value",
+        "rendererSetup",
     ] {
         assert!(JS.contains(binding), "missing Open PDB binding {binding}");
     }

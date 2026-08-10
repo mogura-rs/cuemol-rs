@@ -494,6 +494,37 @@ function dialogCheckbox(label, checked, parent = dialogContent) {
   return input;
 }
 
+function dialogOptionalField(label, value, options = []) {
+  const wrapper = document.createElement("label");
+  wrapper.className = "dialog-field dialog-optional-field";
+  const labelControl = document.createElement("span");
+  const enabled = document.createElement("input");
+  enabled.type = "checkbox";
+  const text = document.createElement("span");
+  text.textContent = label;
+  labelControl.append(enabled, text);
+  const input = document.createElement("input");
+  input.value = value;
+  input.disabled = true;
+  if (options.length) {
+    const list = document.createElement("datalist");
+    list.id = "dialog-optional-field-options";
+    for (const value of options) {
+      const option = document.createElement("option");
+      option.value = value;
+      list.append(option);
+    }
+    input.setAttribute("list", list.id);
+    dialogContent.append(list);
+  }
+  enabled.addEventListener("change", () => {
+    input.disabled = !enabled.checked;
+  });
+  wrapper.append(labelControl, input);
+  dialogContent.append(wrapper);
+  return { enabled, input };
+}
+
 function dialogGroup(title) {
   const group = document.createElement("fieldset");
   group.className = "property-common-group";
@@ -3384,6 +3415,116 @@ async function showStyleProperties(style) {
   if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
 }
 
+function suggestedRendererName(rendererType) {
+  const prefix = rendererType.replace(/^\*/, "");
+  const activeSceneUid = snapshot.activeSceneUid;
+  const rendererNames = [
+    ...snapshot.objects,
+    ...snapshot.densityMaps,
+    ...snapshot.surfaces,
+  ]
+    .filter((object) => object.sceneUid === activeSceneUid)
+    .flatMap((object) => object.renderers || [])
+    .map((renderer) => renderer.name);
+  for (let index = 1; ; index += 1) {
+    const candidate = `${prefix}${index}`;
+    if (!rendererNames.includes(candidate)) return candidate;
+  }
+}
+
+async function showPdbRendererSetup(pdbId) {
+  let setup;
+  try {
+    setup = await invoke("get_pdb_renderer_setup", { pdbId });
+  } catch (error) {
+    showError(error);
+    return null;
+  }
+  dialogTitle.textContent = "Setup renderer";
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog";
+  const objectName = dialogField("Object:", setup.objectName);
+  const rendererType = dialogSelect(
+    "Renderer type:",
+    setup.options.map((option) => [option.name, option.description]),
+    setup.rendererType,
+  );
+  const firstRendererIndex = setup.options.findIndex((option) => !option.preset);
+  if (firstRendererIndex > 0) {
+    const separator = document.createElement("option");
+    separator.disabled = true;
+    separator.textContent = "────────";
+    rendererType.options[firstRendererIndex].before(separator);
+  }
+  const rendererName = dialogField("Renderer name:", setup.rendererName);
+  const selection = dialogOptionalField("Selection:", "", selectionHistoryEntries);
+  const recenter = dialogCheckbox("Recenter view", setup.recenter);
+  let rendererNameDefault = true;
+  rendererType.addEventListener("change", () => {
+    if (rendererNameDefault) {
+      rendererName.value = suggestedRendererName(rendererType.value);
+    }
+  });
+  rendererName.addEventListener("change", () => {
+    rendererNameDefault = !rendererName.value.trim();
+    if (rendererNameDefault) {
+      rendererName.value = suggestedRendererName(rendererType.value);
+    }
+  });
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      referenceDialog.removeEventListener("close", onClose);
+      resolve(value);
+    };
+    const onClose = () => finish(null);
+    referenceDialog.addEventListener("close", onClose, { once: true });
+    let ok;
+    const updateState = () => {
+      ok.disabled =
+        !objectName.value.trim() ||
+        !rendererType.value ||
+        !rendererName.value.trim() ||
+        (selection.enabled.checked && !selection.input.value.trim());
+    };
+    const cancel = button("Cancel", "", () => {
+      finish(null);
+      referenceDialog.close();
+    });
+    ok = button("OK", "dialog-primary", () => {
+      updateState();
+      if (ok.disabled) return;
+      ok.disabled = true;
+      if (selection.enabled.checked) {
+        rememberSelection(selection.input.value);
+      }
+      finish({
+        objectName: objectName.value.trim(),
+        rendererType: rendererType.value,
+        rendererName: rendererName.value.trim(),
+        selection: selection.enabled.checked ? selection.input.value.trim() : null,
+        recenter: recenter.checked,
+      });
+      referenceDialog.close();
+    });
+    for (const input of [
+      objectName,
+      rendererType,
+      rendererName,
+      selection.enabled,
+      selection.input,
+    ]) {
+      input.addEventListener("input", updateState);
+      input.addEventListener("change", updateState);
+    }
+    updateState();
+    dialogActions(cancel, ok);
+  });
+}
+
 async function showReferenceDialog(title) {
   if (referenceDialog.open) referenceDialog.close();
   atomPickerTarget = null;
@@ -4603,8 +4744,15 @@ async function showReferenceDialog(title) {
       const args = availabilityArgs();
       const id = args.pdbId;
       if (!/^[0-9][0-9A-Z]{3}$/.test(id)) return;
-      const changed = await mutateWithViewport("open_pdb", args);
-      if (changed) referenceDialog.close();
+      const rendererSetup = args.fetchCoordinates
+        ? await showPdbRendererSetup(id)
+        : null;
+      if (args.fetchCoordinates && !rendererSetup) return;
+      const changed = await mutateWithViewport("open_pdb", {
+        ...args,
+        rendererSetup,
+      });
+      if (changed && referenceDialog.open) referenceDialog.close();
     });
     const updateOpenState = () => {
       const validId = /^[0-9][0-9A-Z]{3}$/.test(pdbId.value.trim().toUpperCase());

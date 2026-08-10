@@ -551,11 +551,30 @@ fn restrict_crystal_draft(draft: &mut NativeCrystalDraft, space_group_name: &str
     }
 }
 
-type PdbDownloadMessage = std::result::Result<(String, Vec<crate::PdbDownloadedFile>), String>;
+type PdbDownloadMessage = std::result::Result<
+    (
+        String,
+        Vec<crate::PdbDownloadedFile>,
+        Option<crate::GuiPdbRendererSetup>,
+    ),
+    String,
+>;
 type PdbProbeMessage = (
     crate::PdbFetchOptions,
     std::result::Result<Vec<crate::GuiPdbFileKind>, String>,
 );
+
+#[derive(Debug, Clone)]
+struct NativePdbRendererSetupDraft {
+    object_name: String,
+    renderer_type: String,
+    renderer_name: String,
+    renderer_name_default: bool,
+    selection_enabled: bool,
+    selection: String,
+    recenter: bool,
+    options: Vec<crate::GuiRendererSetupOption>,
+}
 
 #[derive(Debug)]
 struct GuiApplication {
@@ -580,6 +599,7 @@ struct GuiApplication {
     pdb_probe_deadline: Option<Instant>,
     pdb_probe_receiver: Option<mpsc::Receiver<PdbProbeMessage>>,
     pdb_probe_result: Option<std::result::Result<Vec<crate::GuiPdbFileKind>, String>>,
+    pdb_renderer_setup_draft: Option<NativePdbRendererSetupDraft>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
@@ -2361,6 +2381,7 @@ impl GuiApplication {
             pdb_probe_deadline: None,
             pdb_probe_receiver: None,
             pdb_probe_result: None,
+            pdb_renderer_setup_draft: None,
             pdb_download_receiver: None,
             url_download_receiver: None,
             script_path: "script.js".to_string(),
@@ -5939,11 +5960,16 @@ impl GuiApplication {
     /// Push the current selection text onto the most-recently-used history list.
     fn push_selection_history(&mut self) {
         let sel = self.selection_text.trim().to_string();
-        if sel.is_empty() {
+        self.remember_selection_history(&sel);
+    }
+
+    fn remember_selection_history(&mut self, selection: &str) {
+        let selection = selection.trim();
+        if selection.is_empty() {
             return;
         }
-        self.selection_history.retain(|entry| entry != &sel);
-        self.selection_history.push(sel);
+        self.selection_history.retain(|entry| entry != selection);
+        self.selection_history.push(selection.to_string());
         if self.selection_history.len() > 20 {
             self.selection_history.remove(0);
         }
@@ -8476,7 +8502,11 @@ impl GuiApplication {
         }
     }
 
-    fn start_pdb_download(&mut self, ctx: &egui::Context) {
+    fn start_pdb_download(
+        &mut self,
+        ctx: &egui::Context,
+        renderer_setup: Option<crate::GuiPdbRendererSetup>,
+    ) {
         if self.pdb_download_receiver.is_some() {
             self.set_status("PDB download is already running");
             return;
@@ -8502,7 +8532,8 @@ impl GuiApplication {
         let spawn = std::thread::Builder::new()
             .name(format!("cuemol-pdb-{pdb_id}"))
             .spawn(move || {
-                let result = crate::download_pdb_files(options).map(|files| (result_pdb_id, files));
+                let result = crate::download_pdb_files(options)
+                    .map(|files| (result_pdb_id, files, renderer_setup));
                 let _ = sender.send(result);
                 repaint.request_repaint();
             });
@@ -8521,14 +8552,18 @@ impl GuiApplication {
             .as_ref()
             .map(mpsc::Receiver::try_recv);
         match result {
-            Some(Ok(Ok((pdb_id, files)))) => {
+            Some(Ok(Ok((pdb_id, files, renderer_setup)))) => {
                 self.pdb_download_receiver = None;
                 let undo = self.capture_undo();
                 let input = files
                     .iter()
                     .map(|file| (file.kind, file.path.clone()))
                     .collect::<Vec<_>>();
-                match self.state.open_pdb_files(&pdb_id, &input) {
+                let recenter = renderer_setup.as_ref().is_some_and(|setup| setup.recenter);
+                match self
+                    .state
+                    .open_pdb_files(&pdb_id, &input, renderer_setup.as_ref())
+                {
                     Ok(summary) => {
                         self.push_undo_snapshot(undo);
                         self.selected_object = summary.object_uid;
@@ -8558,7 +8593,9 @@ impl GuiApplication {
                             self.pdb_history = history;
                         }
                         self.rebuild_snapshot();
-                        camera.fit_snapshot(&self.snapshot);
+                        if recenter {
+                            camera.fit_snapshot(&self.snapshot);
+                        }
                         self.set_status(format!("Opened PDB {pdb_id}: {} file(s)", files.len()));
                         self.show_get_pdb = false;
                     }
@@ -9444,6 +9481,7 @@ impl GuiApplication {
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx);
         self.get_pdb_dialog(ctx);
+        self.pdb_renderer_setup_dialog(ctx);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
     }
@@ -14231,6 +14269,7 @@ impl GuiApplication {
             self.pdb_history_loaded = true;
         }
         let mut open = self.show_get_pdb;
+        let mut proceed = false;
         egui::Window::new("Download PDB")
             .open(&mut open)
             .collapsible(false)
@@ -14350,10 +14389,185 @@ impl GuiApplication {
                     )
                     .clicked()
                 {
-                    self.start_pdb_download(ctx);
+                    proceed = true;
                 }
             });
-        self.show_get_pdb = open;
+        self.show_get_pdb = open && !proceed;
+        if proceed {
+            if self.pdb_fetch_coordinates {
+                self.open_pdb_renderer_setup();
+            } else {
+                self.start_pdb_download(ctx, None);
+            }
+        }
+    }
+
+    fn open_pdb_renderer_setup(&mut self) {
+        let scene_uid = self.state.ensure_active_scene();
+        let options = match self.state.molecule_renderer_setup_options(scene_uid) {
+            Ok(options) if !options.is_empty() => options,
+            Ok(_) => {
+                self.set_status("No compatible molecular renderers are available");
+                return;
+            }
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
+        };
+        let preferences = crate::load_pdb_renderer_preferences();
+        let renderer_type = preferences
+            .renderer_type
+            .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type))
+            .unwrap_or_else(|| options[0].name.clone());
+        let object_name = self
+            .state
+            .suggest_object_name(scene_uid, &self.pdb_id.trim().to_ascii_lowercase())
+            .unwrap_or_else(|_| self.pdb_id.trim().to_ascii_lowercase());
+        let renderer_name = self
+            .state
+            .suggest_renderer_name(scene_uid, &renderer_type)
+            .unwrap_or_else(|_| format!("{renderer_type}1"));
+        self.pdb_renderer_setup_draft = Some(NativePdbRendererSetupDraft {
+            object_name,
+            renderer_type,
+            renderer_name,
+            renderer_name_default: true,
+            selection_enabled: false,
+            selection: String::new(),
+            recenter: preferences.recenter,
+            options,
+        });
+    }
+
+    fn pdb_renderer_setup_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.pdb_renderer_setup_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        let selection_history = self.selection_history.clone();
+        egui::Window::new("Setup renderer")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                egui::Grid::new("pdb_renderer_setup_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Object:");
+                        ui.add_sized(
+                            [240.0, 22.0],
+                            egui::TextEdit::singleline(&mut draft.object_name),
+                        );
+                        ui.end_row();
+
+                        ui.label("Renderer type:");
+                        let selected_label = draft
+                            .options
+                            .iter()
+                            .find(|option| option.name == draft.renderer_type)
+                            .map(|option| option.description.as_str())
+                            .unwrap_or(draft.renderer_type.as_str());
+                        let mut selected_type = None;
+                        egui::ComboBox::from_id_salt("pdb_renderer_setup_type")
+                            .selected_text(selected_label)
+                            .show_ui(ui, |ui| {
+                                let mut separator_added = false;
+                                for option in &draft.options {
+                                    if !option.preset && !separator_added {
+                                        ui.separator();
+                                        separator_added = true;
+                                    }
+                                    if ui
+                                        .selectable_label(
+                                            draft.renderer_type == option.name,
+                                            &option.description,
+                                        )
+                                        .clicked()
+                                    {
+                                        selected_type = Some(option.name.clone());
+                                    }
+                                }
+                            });
+                        if let Some(renderer_type) = selected_type {
+                            draft.renderer_type = renderer_type;
+                            if draft.renderer_name_default {
+                                let scene_uid = self.state.ensure_active_scene();
+                                draft.renderer_name = self
+                                    .state
+                                    .suggest_renderer_name(scene_uid, &draft.renderer_type)
+                                    .unwrap_or_else(|_| format!("{}1", draft.renderer_type));
+                            }
+                        }
+                        ui.end_row();
+
+                        ui.label("Renderer name:");
+                        let name_response = ui.add_sized(
+                            [240.0, 22.0],
+                            egui::TextEdit::singleline(&mut draft.renderer_name),
+                        );
+                        if name_response.changed() && !draft.renderer_name.trim().is_empty() {
+                            draft.renderer_name_default = false;
+                        }
+                        ui.end_row();
+
+                        ui.checkbox(&mut draft.selection_enabled, "Selection:");
+                        ui.add_enabled_ui(draft.selection_enabled, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    [166.0, 22.0],
+                                    egui::TextEdit::singleline(&mut draft.selection),
+                                );
+                                ui.add_enabled_ui(!selection_history.is_empty(), |ui| {
+                                    ui.menu_button("History", |ui| {
+                                        for entry in selection_history.iter().rev() {
+                                            if ui.button(entry).clicked() {
+                                                draft.selection = entry.clone();
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                                });
+                            });
+                        });
+                        ui.end_row();
+                    });
+                ui.checkbox(&mut draft.recenter, "Recenter view");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let valid = !draft.object_name.trim().is_empty()
+                        && !draft.renderer_type.trim().is_empty()
+                        && !draft.renderer_name.trim().is_empty()
+                        && (!draft.selection_enabled || !draft.selection.trim().is_empty());
+                    if ui.add_enabled(valid, egui::Button::new("OK")).clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if accept {
+            let setup = crate::GuiPdbRendererSetup {
+                object_name: draft.object_name.trim().to_string(),
+                renderer_type: draft.renderer_type.trim().to_string(),
+                renderer_name: draft.renderer_name.trim().to_string(),
+                selection: draft
+                    .selection_enabled
+                    .then(|| draft.selection.trim().to_string()),
+                recenter: draft.recenter,
+            };
+            if let Some(selection) = setup.selection.as_deref() {
+                self.remember_selection_history(selection);
+            }
+            let _ = crate::save_pdb_renderer_preferences(&setup.renderer_type, setup.recenter);
+            self.start_pdb_download(ctx, Some(setup));
+        } else if open && !cancel {
+            self.pdb_renderer_setup_draft = Some(draft);
+        }
     }
 
     fn console_dialog(&mut self, ctx: &egui::Context) {

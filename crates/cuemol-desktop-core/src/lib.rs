@@ -944,6 +944,22 @@ pub enum GuiPdbFileKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiRendererSetupOption {
+    pub name: String,
+    pub description: String,
+    pub preset: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiPdbRendererSetup {
+    pub object_name: String,
+    pub renderer_type: String,
+    pub renderer_name: String,
+    pub selection: Option<String>,
+    pub recenter: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiPdbLoadSummary {
     pub object_uid: Option<Uid>,
     pub map_uids: Vec<Uid>,
@@ -5456,6 +5472,74 @@ impl DesktopAppState {
         self.load_object(scene_uid, file_path, object_name, file_format)
     }
 
+    pub fn suggest_object_name(&self, target_scene: Uid, base_name: &str) -> Result<String> {
+        let base_name = base_name.trim();
+        if base_name.is_empty() {
+            return Err(CueMolError::invalid_argument("object name is empty"));
+        }
+        let scene = self
+            .scene_manager()
+            .scene(target_scene)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", target_scene.get())))?;
+        if !scene
+            .objects()
+            .iter()
+            .any(|object| object.name() == base_name)
+        {
+            return Ok(base_name.to_string());
+        }
+        for index in 1_u64.. {
+            let candidate = format!("{base_name}({index})");
+            if !scene
+                .objects()
+                .iter()
+                .any(|object| object.name() == candidate)
+            {
+                return Ok(candidate);
+            }
+        }
+        unreachable!("the object name suffix space is inexhaustible")
+    }
+
+    pub fn molecule_renderer_setup_options(
+        &self,
+        scene_uid: Uid,
+    ) -> Result<Vec<GuiRendererSetupOption>> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let styles = scene_style_manager(scene);
+        let mut style_infos = styles.style_infos(DEFAULT_STYLE_SCOPE);
+        if scene_uid.get() != DEFAULT_STYLE_SCOPE {
+            style_infos.extend(styles.style_infos(scene_uid.get()));
+        }
+        let mut options = Vec::new();
+        let mut seen = BTreeSet::new();
+        for style in style_infos {
+            if style.style_type != "MolCoord-rendpreset" || !seen.insert(style.name.clone()) {
+                continue;
+            }
+            options.push(GuiRendererSetupOption {
+                description: if style.description.is_empty() {
+                    style.name.clone()
+                } else {
+                    style.description
+                },
+                name: style.name,
+                preset: true,
+            });
+        }
+        options.extend(MOLECULE_RENDERER_TYPES.iter().map(|renderer_type| {
+            GuiRendererSetupOption {
+                name: (*renderer_type).to_string(),
+                description: (*renderer_type).to_string(),
+                preset: false,
+            }
+        }));
+        Ok(options)
+    }
+
     /// Suggest the first scene-unique renderer name using CueMol2's
     /// `<type><number>` convention (`simple1`, `simple2`, ...).
     pub fn suggest_renderer_name(&self, target_scene: Uid, renderer_type: &str) -> Result<String> {
@@ -7178,10 +7262,98 @@ impl DesktopAppState {
         })
     }
 
+    fn configure_pdb_molecule_renderer(
+        &mut self,
+        scene_uid: Uid,
+        object_uid: Uid,
+        setup: &GuiPdbRendererSetup,
+    ) -> Result<()> {
+        let renderer_type = setup.renderer_type.trim();
+        let renderer_name = setup.renderer_name.trim();
+        if setup.object_name.trim().is_empty()
+            || renderer_type.is_empty()
+            || renderer_name.is_empty()
+        {
+            return Err(CueMolError::invalid_argument(
+                "PDB object, renderer type, and renderer name are required",
+            ));
+        }
+        let option = self
+            .molecule_renderer_setup_options(scene_uid)?
+            .into_iter()
+            .find(|option| option.name == renderer_type)
+            .ok_or_else(|| {
+                CueMolError::invalid_argument(format!(
+                    "unsupported PDB renderer setup type: {renderer_type}"
+                ))
+            })?;
+        let renderer_uids = self
+            .renderer_summaries(object_uid)
+            .into_iter()
+            .map(|renderer| renderer.uid)
+            .collect::<Vec<_>>();
+        for renderer_uid in renderer_uids {
+            self.destroy_renderer_in_object(object_uid, renderer_uid)?;
+        }
+        self.set_object_coloring_details(
+            object_uid,
+            Some("PaintColoring".to_string()),
+            BTreeMap::new(),
+            vec![
+                ("sheet".to_string(), "SteelBlue".to_string()),
+                ("helix".to_string(), "khaki".to_string()),
+                ("nucleic".to_string(), "yellow".to_string()),
+                ("*".to_string(), "FloralWhite".to_string()),
+            ],
+            None,
+        )?;
+        if option.preset {
+            let styles = {
+                let scene = self
+                    .scene_manager()
+                    .scene(scene_uid)
+                    .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+                scene_style_manager(scene)
+            };
+            let object = self
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+            object.create_preset_renderer_with_style(
+                &styles,
+                scene_uid.get(),
+                renderer_type,
+                renderer_name,
+                renderer_name,
+            )?;
+            if !object
+                .renderers()
+                .iter()
+                .any(|renderer| matches!(renderer.renderer_type(), "*selection" | "selection"))
+            {
+                object.add_renderer("*selection", "");
+            }
+        } else {
+            let renderer_uid = self
+                .new_renderer(scene_uid, object_uid, renderer_type, renderer_name)?
+                .result_renderer;
+            if let Some(selection) = setup
+                .selection
+                .as_deref()
+                .map(str::trim)
+                .filter(|selection| !selection.is_empty())
+            {
+                self.set_renderer_selection_text(object_uid, renderer_uid, selection)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn open_pdb_files(
         &mut self,
         pdb_id: &str,
         files: &[(GuiPdbFileKind, PathBuf)],
+        renderer_setup: Option<&GuiPdbRendererSetup>,
     ) -> Result<GuiPdbLoadSummary> {
         let pdb_id = pdb_id.trim();
         let bytes = pdb_id.as_bytes();
@@ -7198,15 +7370,25 @@ impl DesktopAppState {
                 "at least one PDB coordinate or density-map file is required",
             ));
         }
+        if files
+            .iter()
+            .any(|(kind, _)| *kind == GuiPdbFileKind::Coordinates)
+            && renderer_setup.is_none()
+        {
+            return Err(CueMolError::invalid_argument(
+                "PDB coordinates require renderer setup",
+            ));
+        }
         let object_name = pdb_id.to_ascii_lowercase();
         let mut object_uid = None;
         let mut map_uids = Vec::new();
         for (kind, path) in files {
             match kind {
                 GuiPdbFileKind::Coordinates => {
+                    let setup = renderer_setup.expect("coordinate setup was checked above");
                     let GuiLoadedPath::Object {
+                        scene_uid,
                         object_uid: loaded_uid,
-                        ..
                     } = self.open_path(path)?
                     else {
                         return Err(CueMolError::parse(
@@ -7215,10 +7397,11 @@ impl DesktopAppState {
                     };
                     self.set_object_common_properties(
                         loaded_uid,
-                        object_name.clone(),
+                        setup.object_name.trim().to_string(),
                         true,
                         false,
                     )?;
+                    self.configure_pdb_molecule_renderer(scene_uid, loaded_uid, setup)?;
                     object_uid = Some(loaded_uid);
                 }
                 GuiPdbFileKind::TwoFoFc | GuiPdbFileKind::FoFc => {
@@ -54873,9 +55056,17 @@ attribute \"dep\" string \"positions\"
             .open_pdb_files(
                 "ABCD",
                 &[(GuiPdbFileKind::Coordinates, dir.join("unused.pdb"))],
+                None,
             )
             .unwrap_err();
         assert!(error.to_string().contains("PDB ID must be four"));
+        let renderer_setup = GuiPdbRendererSetup {
+            object_name: "downloaded".to_string(),
+            renderer_type: "ballstick".to_string(),
+            renderer_name: "atoms".to_string(),
+            selection: Some("name CA".to_string()),
+            recenter: false,
+        };
         let summary = app
             .open_pdb_files(
                 "1CRN",
@@ -54884,6 +55075,7 @@ attribute \"dep\" string \"positions\"
                     (GuiPdbFileKind::TwoFoFc, two_fofc_path.clone()),
                     (GuiPdbFileKind::FoFc, fofc_path.clone()),
                 ],
+                Some(&renderer_setup),
             )
             .unwrap();
 
@@ -54892,7 +55084,37 @@ attribute \"dep\" string \"positions\"
             .scene_manager()
             .object(summary.object_uid.expect("coordinate object"))
             .unwrap();
-        assert_eq!(object.name(), "1crn");
+        assert_eq!(object.name(), "downloaded");
+        assert_eq!(object.coloring_type(), Some("PaintColoring"));
+        assert_eq!(
+            object.paint_coloring(),
+            [
+                ("sheet".to_string(), "SteelBlue".to_string()),
+                ("helix".to_string(), "khaki".to_string()),
+                ("nucleic".to_string(), "yellow".to_string()),
+                ("*".to_string(), "FloralWhite".to_string()),
+            ]
+        );
+        let atoms = object
+            .renderers()
+            .iter()
+            .find(|renderer| renderer.name() == "atoms")
+            .unwrap();
+        assert_eq!(atoms.renderer_type(), "ballstick");
+        assert_eq!(atoms.selection().to_string(), "name CA");
+        assert!(object
+            .renderers()
+            .iter()
+            .any(|renderer| renderer.renderer_type() == "*selection"));
+        assert!(!object
+            .renderers()
+            .iter()
+            .any(|renderer| renderer.name() == "simple"));
+        let scene_uid = app.active_scene().unwrap();
+        let setup_options = app.molecule_renderer_setup_options(scene_uid).unwrap();
+        assert_eq!(setup_options[0].name, "Default1RendPreset");
+        assert_eq!(setup_options[0].description, "Default preset 1");
+        assert!(setup_options[0].preset);
         let maps = app.active_density_map_summaries();
         assert_eq!(maps.len(), 2);
         assert_eq!(maps[0].name, "1crn_2fofc");
@@ -54908,6 +55130,36 @@ attribute \"dep\" string \"positions\"
         assert_eq!(maps[1].renderers[1].name, "neg-cont");
         assert_eq!(maps[1].renderers[1].specific["siglevel"], "-3");
         assert_eq!(maps[1].renderers[1].specific["color"], "#FF0000");
+
+        let mut preset_app = DesktopAppState::new();
+        let preset_setup = GuiPdbRendererSetup {
+            object_name: "preset".to_string(),
+            renderer_type: "Default1RendPreset".to_string(),
+            renderer_name: "view".to_string(),
+            selection: None,
+            recenter: true,
+        };
+        let preset_summary = preset_app
+            .open_pdb_files(
+                "1CRN",
+                &[(GuiPdbFileKind::Coordinates, pdb_path.clone())],
+                Some(&preset_setup),
+            )
+            .unwrap();
+        let preset_object = preset_app
+            .scene_manager()
+            .object(preset_summary.object_uid.unwrap())
+            .unwrap();
+        assert!(preset_object
+            .renderers()
+            .iter()
+            .any(|renderer| renderer.renderer_type() == "*group" && renderer.name() == "view"));
+        for renderer_type in ["ribbon", "nucl", "ballstick"] {
+            assert!(preset_object.renderers().iter().any(|renderer| {
+                renderer.renderer_type() == renderer_type
+                    && renderer.name() == format!("view{renderer_type}")
+            }));
+        }
 
         for path in [pdb_path, two_fofc_path, fofc_path] {
             let _ = std::fs::remove_file(path);

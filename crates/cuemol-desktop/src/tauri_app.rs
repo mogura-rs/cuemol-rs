@@ -126,6 +126,46 @@ struct RendererStyleOptionDto {
     description: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdbRendererSetupOptionDto {
+    name: String,
+    description: String,
+    preset: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdbRendererSetupDto {
+    object_name: String,
+    renderer_type: String,
+    renderer_name: String,
+    recenter: bool,
+    options: Vec<PdbRendererSetupOptionDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PdbRendererSetupInput {
+    object_name: String,
+    renderer_type: String,
+    renderer_name: String,
+    selection: Option<String>,
+    recenter: bool,
+}
+
+impl From<PdbRendererSetupInput> for crate::GuiPdbRendererSetup {
+    fn from(value: PdbRendererSetupInput) -> Self {
+        Self {
+            object_name: value.object_name,
+            renderer_type: value.renderer_type,
+            renderer_name: value.renderer_name,
+            selection: value.selection,
+            recenter: value.recenter,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StylePropertiesInput {
@@ -5261,9 +5301,13 @@ enum ModelRequest {
         height: u32,
     },
     ReloadScene,
+    GetPdbRendererSetup {
+        pdb_id: String,
+    },
     OpenPdb {
         pdb_id: String,
         files: Vec<crate::PdbDownloadedFile>,
+        renderer_setup: Option<crate::GuiPdbRendererSetup>,
         width: u32,
         height: u32,
     },
@@ -5536,6 +5580,7 @@ enum ModelResponse {
     ViewPropertiesUpdate(Box<ViewPropertiesUpdateDto>),
     StyleProperties(StylePropertiesDto),
     RendererStyleOptions(Vec<RendererStyleOptionDto>),
+    PdbRendererSetup(PdbRendererSetupDto),
     CameraVisibility(Vec<CameraVisibilityEntryDto>),
     PickedAtom(Option<PickedAtomDto>),
     Message(String),
@@ -6984,9 +7029,45 @@ fn handle_model_request(
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::GetPdbRendererSetup { pdb_id } => {
+            let scene_uid = model.desktop.ensure_active_scene();
+            let options = model
+                .desktop
+                .molecule_renderer_setup_options(scene_uid)
+                .map_err(|error| error.to_string())?;
+            let preferences = crate::load_pdb_renderer_preferences();
+            let renderer_type = preferences
+                .renderer_type
+                .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type))
+                .or_else(|| options.first().map(|option| option.name.clone()))
+                .ok_or_else(|| "no compatible molecular renderers are available".to_string())?;
+            let object_name = model
+                .desktop
+                .suggest_object_name(scene_uid, &pdb_id.to_ascii_lowercase())
+                .map_err(|error| error.to_string())?;
+            let renderer_name = model
+                .desktop
+                .suggest_renderer_name(scene_uid, &renderer_type)
+                .map_err(|error| error.to_string())?;
+            Ok(ModelResponse::PdbRendererSetup(PdbRendererSetupDto {
+                object_name,
+                renderer_type,
+                renderer_name,
+                recenter: preferences.recenter,
+                options: options
+                    .into_iter()
+                    .map(|option| PdbRendererSetupOptionDto {
+                        name: option.name,
+                        description: option.description,
+                        preset: option.preset,
+                    })
+                    .collect(),
+            }))
+        }
         ModelRequest::OpenPdb {
             pdb_id,
             files,
+            renderer_setup,
             width,
             height,
         } => {
@@ -6996,19 +7077,24 @@ fn handle_model_request(
                 .iter()
                 .map(|file| (file.kind, file.path.clone()))
                 .collect::<Vec<_>>();
-            let summary = match model.desktop.open_pdb_files(&pdb_id, &input) {
-                Ok(summary) => summary,
-                Err(error) => {
-                    model.restore_undo(undo)?;
-                    for file in files {
-                        let _ = fs::remove_file(file.path);
+            let recenter = renderer_setup.as_ref().is_some_and(|setup| setup.recenter);
+            let summary =
+                match model
+                    .desktop
+                    .open_pdb_files(&pdb_id, &input, renderer_setup.as_ref())
+                {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        model.restore_undo(undo)?;
+                        for file in files {
+                            let _ = fs::remove_file(file.path);
+                        }
+                        return Err(error.to_string());
                     }
-                    return Err(error.to_string());
-                }
-            };
+                };
             model.selection.clear();
             model.status = format!("Opened PDB {pdb_id}: {} file(s)", files.len());
-            model.invalidate_mesh(true);
+            model.invalidate_mesh(recenter);
             model.push_undo(undo);
             if summary.object_uid.is_some() {
                 model.touch_structure_details();
@@ -8294,6 +8380,7 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-snapshot response".to_string()),
@@ -8316,6 +8403,7 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-molecule-details response".to_string()),
@@ -8338,6 +8426,7 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-viewport response".to_string()),
@@ -8360,6 +8449,7 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected animation frame response".to_string()),
@@ -8382,6 +8472,7 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected trajectory frame response".to_string()),
@@ -8404,6 +8495,7 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected application info response".to_string()),
@@ -8426,6 +8518,7 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-preferences response".to_string()),
@@ -8448,6 +8541,7 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => {
@@ -8472,6 +8566,7 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-initial-state response".to_string()),
@@ -8503,6 +8598,7 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-view-properties response".to_string()),
@@ -8559,6 +8655,7 @@ fn view_properties_update_response(
         | ModelResponse::ViewProperties(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => {
@@ -9382,6 +9479,18 @@ fn get_pdb_history() -> Vec<String> {
 }
 
 #[tauri::command]
+fn get_pdb_renderer_setup(
+    pdb_id: String,
+    state: State<'_, ManagedState>,
+) -> Result<PdbRendererSetupDto, String> {
+    let pdb_id = crate::normalize_pdb_id(&pdb_id)?;
+    match request_model(&state, ModelRequest::GetPdbRendererSetup { pdb_id })? {
+        ModelResponse::PdbRendererSetup(setup) => Ok(setup),
+        _ => Err("unexpected PDB renderer setup response".to_string()),
+    }
+}
+
+#[tauri::command]
 async fn check_pdb_availability(
     pdb_id: String,
     fetch_coordinates: bool,
@@ -9421,11 +9530,23 @@ async fn open_pdb(
     fetch_two_fofc: bool,
     fetch_fofc: bool,
     map_source: String,
+    renderer_setup: Option<PdbRendererSetupInput>,
     width: u32,
     height: u32,
     state: State<'_, ManagedState>,
 ) -> Result<MolStructUpdateDto, String> {
     let pdb_id = crate::normalize_pdb_id(&pdb_id)?;
+    let renderer_setup = renderer_setup.map(crate::GuiPdbRendererSetup::from);
+    if fetch_coordinates != renderer_setup.is_some() {
+        return Err(if fetch_coordinates {
+            "PDB coordinates require renderer setup".to_string()
+        } else {
+            "renderer setup is only valid when coordinates are selected".to_string()
+        });
+    }
+    if let Some(setup) = renderer_setup.as_ref() {
+        let _ = crate::save_pdb_renderer_preferences(&setup.renderer_type, setup.recenter);
+    }
     let options = crate::PdbFetchOptions {
         pdb_id: pdb_id.clone(),
         fetch_coordinates,
@@ -9443,6 +9564,7 @@ async fn open_pdb(
         ModelRequest::OpenPdb {
             pdb_id: pdb_id.clone(),
             files,
+            renderer_setup,
             width,
             height,
         },
@@ -10538,6 +10660,7 @@ pub fn run() -> Result<(), tauri::Error> {
             open_initial_paths,
             reload_scene,
             get_pdb_history,
+            get_pdb_renderer_setup,
             check_pdb_availability,
             open_pdb,
             load_trajectory,
@@ -12691,6 +12814,21 @@ mod tests {
         )
         .unwrap();
         let mut model = model_without_gpu();
+        let setup_response = handle_model_request(
+            &mut model,
+            ModelRequest::GetPdbRendererSetup {
+                pdb_id: "1CRN".to_string(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::PdbRendererSetup(setup_defaults) = setup_response else {
+            panic!("expected PDB renderer setup");
+        };
+        assert_eq!(setup_defaults.object_name, "1crn");
+        assert!(setup_defaults
+            .options
+            .iter()
+            .any(|option| option.name == "Default1RendPreset" && option.preset));
         let response = handle_model_request(
             &mut model,
             ModelRequest::OpenPdb {
@@ -12699,6 +12837,13 @@ mod tests {
                     kind: crate::GuiPdbFileKind::Coordinates,
                     path: path.clone(),
                 }],
+                renderer_setup: Some(crate::GuiPdbRendererSetup {
+                    object_name: "downloaded".to_string(),
+                    renderer_type: "simple".to_string(),
+                    renderer_name: "lines".to_string(),
+                    selection: None,
+                    recenter: false,
+                }),
                 width: 640,
                 height: 480,
             },
@@ -12708,7 +12853,11 @@ mod tests {
             panic!("expected PDB viewport update");
         };
         assert_eq!(update.snapshot.objects.len(), 1);
-        assert_eq!(update.snapshot.objects[0].name, "1crn");
+        assert_eq!(update.snapshot.objects[0].name, "downloaded");
+        assert!(update.snapshot.objects[0]
+            .renderers
+            .iter()
+            .any(|renderer| renderer.name == "lines" && renderer.renderer_type == "simple"));
         assert!(update.snapshot.can_undo);
         assert_eq!(update.snapshot.status, "Opened PDB 1CRN: 1 file(s)");
         model.undo(0).unwrap();
