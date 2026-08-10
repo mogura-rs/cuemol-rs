@@ -936,6 +936,19 @@ pub struct GuiSurfaceCutSummary {
     pub section_triangle_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuiPdbFileKind {
+    Coordinates,
+    TwoFoFc,
+    FoFc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiPdbLoadSummary {
+    pub object_uid: Option<Uid>,
+    pub map_uids: Vec<Uid>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiApbsSummary {
     pub object_uid: Uid,
@@ -3811,6 +3824,36 @@ impl DesktopAppState {
                 ("cullface".to_string(), "false".to_string()),
             ]),
         });
+        map.modified = true;
+        Ok(uid)
+    }
+
+    pub fn add_density_contour_renderer(
+        &mut self,
+        map_uid: Uid,
+        name: impl Into<String>,
+        color: &str,
+        siglevel: f64,
+    ) -> Result<Uid> {
+        if !siglevel.is_finite() {
+            return Err(CueMolError::invalid_argument(
+                "density contour sigma level must be finite",
+            ));
+        }
+        let color = cuemol_gfx::parse_color(color)?;
+        let uid = self.add_density_renderer(map_uid, "contour")?;
+        let map = self
+            .density_maps
+            .get_mut(&map_uid)
+            .expect("density map was checked by add_density_renderer");
+        let renderer = map
+            .renderers
+            .iter_mut()
+            .find(|renderer| renderer.uid == uid)
+            .expect("new density renderer must exist");
+        renderer.name = name.into();
+        renderer.color = color;
+        renderer.siglevel = siglevel;
         map.modified = true;
         Ok(uid)
     }
@@ -7135,6 +7178,116 @@ impl DesktopAppState {
         })
     }
 
+    pub fn open_pdb_files(
+        &mut self,
+        pdb_id: &str,
+        files: &[(GuiPdbFileKind, PathBuf)],
+    ) -> Result<GuiPdbLoadSummary> {
+        let pdb_id = pdb_id.trim();
+        let bytes = pdb_id.as_bytes();
+        if bytes.len() != 4
+            || !bytes[0].is_ascii_digit()
+            || !bytes[1..].iter().all(u8::is_ascii_alphanumeric)
+        {
+            return Err(CueMolError::invalid_argument(
+                "PDB ID must be four ASCII characters starting with a digit",
+            ));
+        }
+        if files.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "at least one PDB coordinate or density-map file is required",
+            ));
+        }
+        let object_name = pdb_id.to_ascii_lowercase();
+        let mut object_uid = None;
+        let mut map_uids = Vec::new();
+        for (kind, path) in files {
+            match kind {
+                GuiPdbFileKind::Coordinates => {
+                    let GuiLoadedPath::Object {
+                        object_uid: loaded_uid,
+                        ..
+                    } = self.open_path(path)?
+                    else {
+                        return Err(CueMolError::parse(
+                            "downloaded PDB coordinates did not produce a molecule",
+                        ));
+                    };
+                    self.set_object_common_properties(
+                        loaded_uid,
+                        object_name.clone(),
+                        true,
+                        false,
+                    )?;
+                    object_uid = Some(loaded_uid);
+                }
+                GuiPdbFileKind::TwoFoFc | GuiPdbFileKind::FoFc => {
+                    let (suffix, columns) = match kind {
+                        GuiPdbFileKind::TwoFoFc => ("2fofc", Some(("FWT", "PHWT"))),
+                        GuiPdbFileKind::FoFc => ("fofc", Some(("DELFWT", "PHDELWT"))),
+                        GuiPdbFileKind::Coordinates => unreachable!(),
+                    };
+                    let map_uid = self.open_density_map_path(
+                        path,
+                        format!("{object_name}_{suffix}"),
+                        columns,
+                    )?;
+                    match kind {
+                        GuiPdbFileKind::TwoFoFc => {
+                            self.add_density_contour_renderer(map_uid, "contour1", "#0000FF", 1.0)?;
+                        }
+                        GuiPdbFileKind::FoFc => {
+                            self.add_density_contour_renderer(map_uid, "pos-cont", "#00FF00", 3.0)?;
+                            self.add_density_contour_renderer(
+                                map_uid, "neg-cont", "#FF0000", -3.0,
+                            )?;
+                        }
+                        GuiPdbFileKind::Coordinates => unreachable!(),
+                    }
+                    map_uids.push(map_uid);
+                }
+            }
+        }
+        Ok(GuiPdbLoadSummary {
+            object_uid,
+            map_uids,
+        })
+    }
+
+    pub fn open_density_map_path(
+        &mut self,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        mtz_columns: Option<(&str, &str)>,
+    ) -> Result<Uid> {
+        let path = path.as_ref();
+        let format = guess_path_format(path, &self.stream_manager)?;
+        if !is_density_map_format(format) {
+            return Err(CueMolError::invalid_argument(format!(
+                "downloaded map has unsupported format {format}"
+            )));
+        }
+        let map = match format {
+            "mtzmap" => {
+                let mut reader = Mtz2MapReader::new();
+                reader.set_grid_size(0.25);
+                if let Some((column_f, column_phi)) = mtz_columns {
+                    reader.set_column_f(column_f);
+                    reader.set_column_phi(column_phi);
+                }
+                reader.read_bytes(&fs::read(path)?)?;
+                reader.build_density_map()?
+            }
+            "mmcifmap" => {
+                let input = cuemol_molstr::read_text_maybe_compressed(path)?;
+                density_map_from_cif(&input, -1.0, 0.25)?
+            }
+            _ => read_density_map(path, format)?,
+        };
+        let scene_uid = self.ensure_active_scene();
+        self.store_density_map(scene_uid, path, name.into(), format, map)
+    }
+
     fn load_density_map(
         &mut self,
         scene_uid: Uid,
@@ -7142,10 +7295,21 @@ impl DesktopAppState {
         map_name: String,
         format: &str,
     ) -> Result<Uid> {
+        let map = read_density_map(path, format)?;
+        self.store_density_map(scene_uid, path, map_name, format, map)
+    }
+
+    fn store_density_map(
+        &mut self,
+        scene_uid: Uid,
+        path: &Path,
+        map_name: String,
+        format: &str,
+        map: DensityMap,
+    ) -> Result<Uid> {
         if self.scene_manager().scene(scene_uid).is_none() {
             return Err(CueMolError::NotFound(format!("scene {}", scene_uid.get())));
         }
-        let map = read_density_map(path, format)?;
         let raw_data = cuemol_xtal::write_qdf_denmap_bytes(&map);
         let storage_index = self
             .scene_manager()
@@ -54672,6 +54836,82 @@ attribute \"dep\" string \"positions\"
         let _ = std::fs::remove_file(dx_path);
         let _ = std::fs::remove_file(xplor_path);
         let _ = std::fs::remove_file(cif_path);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn open_pdb_files_matches_reference_coordinate_and_map_setup() {
+        let dir =
+            std::env::temp_dir().join(format!("cuemol-open-pdb-files-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdb_path = dir.join("coordinates.pdb");
+        let two_fofc_path = dir.join("two_fofc.cif");
+        let fofc_path = dir.join("fofc.cif");
+        std::fs::write(
+            &pdb_path,
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let map_header = "data_map\n\
+             _cell.length_a 10.0\n_cell.length_b 10.0\n_cell.length_c 10.0\n\
+             _cell.angle_alpha 90.0\n_cell.angle_beta 90.0\n_cell.angle_gamma 90.0\n\
+             _symmetry.Int_Tables_number 1\nloop_\n_refln.index_h\n_refln.index_k\n\
+             _refln.index_l\n";
+        std::fs::write(
+            &two_fofc_path,
+            format!("{map_header}_refln.pdbx_FWT\n_refln.pdbx_PHWT\n1 0 0 1000.0 0.0\n#\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            &fofc_path,
+            format!("{map_header}_refln.pdbx_DELFWT\n_refln.pdbx_DELPHWT\n1 0 0 500.0 180.0\n#\n"),
+        )
+        .unwrap();
+
+        let mut app = DesktopAppState::new();
+        let error = app
+            .open_pdb_files(
+                "ABCD",
+                &[(GuiPdbFileKind::Coordinates, dir.join("unused.pdb"))],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("PDB ID must be four"));
+        let summary = app
+            .open_pdb_files(
+                "1CRN",
+                &[
+                    (GuiPdbFileKind::Coordinates, pdb_path.clone()),
+                    (GuiPdbFileKind::TwoFoFc, two_fofc_path.clone()),
+                    (GuiPdbFileKind::FoFc, fofc_path.clone()),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(summary.map_uids.len(), 2);
+        let object = app
+            .scene_manager()
+            .object(summary.object_uid.expect("coordinate object"))
+            .unwrap();
+        assert_eq!(object.name(), "1crn");
+        let maps = app.active_density_map_summaries();
+        assert_eq!(maps.len(), 2);
+        assert_eq!(maps[0].name, "1crn_2fofc");
+        assert_eq!(maps[0].renderers.len(), 1);
+        assert_eq!(maps[0].renderers[0].name, "contour1");
+        assert_eq!(maps[0].renderers[0].specific["siglevel"], "1");
+        assert_eq!(maps[0].renderers[0].specific["color"], "#0000FF");
+        assert_eq!(maps[1].name, "1crn_fofc");
+        assert_eq!(maps[1].renderers.len(), 2);
+        assert_eq!(maps[1].renderers[0].name, "pos-cont");
+        assert_eq!(maps[1].renderers[0].specific["siglevel"], "3");
+        assert_eq!(maps[1].renderers[0].specific["color"], "#00FF00");
+        assert_eq!(maps[1].renderers[1].name, "neg-cont");
+        assert_eq!(maps[1].renderers[1].specific["siglevel"], "-3");
+        assert_eq!(maps[1].renderers[1].specific["color"], "#FF0000");
+
+        for path in [pdb_path, two_fofc_path, fofc_path] {
+            let _ = std::fs::remove_file(path);
+        }
         let _ = std::fs::remove_dir(dir);
     }
 

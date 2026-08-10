@@ -25,6 +25,32 @@ static NEXT_DOWNLOAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 type DownloadResult = std::result::Result<PathBuf, String>;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PdbFetchOptions {
+    pub pdb_id: String,
+    pub fetch_coordinates: bool,
+    pub coordinate_source: String,
+    pub fetch_two_fofc: bool,
+    pub fetch_fofc: bool,
+    pub map_source: String,
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PdbDownloadedFile {
+    pub kind: GuiPdbFileKind,
+    pub path: PathBuf,
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PdbDownloadSpec {
+    kind: GuiPdbFileKind,
+    url: String,
+    path: PathBuf,
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 struct DownloadGate {
     result: Mutex<Option<DownloadResult>>,
     ready: Condvar,
@@ -79,6 +105,146 @@ pub(crate) fn normalize_pdb_id(value: &str) -> std::result::Result<String, Strin
         );
     }
     Ok(pdb_id)
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn pdb_download_specs(
+    options: &PdbFetchOptions,
+) -> std::result::Result<Vec<PdbDownloadSpec>, String> {
+    let pdb_id = normalize_pdb_id(&options.pdb_id)?;
+    if !options.fetch_coordinates && !options.fetch_two_fofc && !options.fetch_fofc {
+        return Err("select coordinates or at least one density map".to_string());
+    }
+    let lowercase_id = pdb_id.to_ascii_lowercase();
+    let mut specs = Vec::new();
+    if options.fetch_coordinates {
+        let (extension, source) = match options.coordinate_source.as_str() {
+            "RCSB_CIF" => ("cif.gz", "cif.gz"),
+            "RCSB_PDB" => ("pdb.gz", "pdb.gz"),
+            source => return Err(format!("unsupported PDB coordinate source: {source}")),
+        };
+        specs.push(PdbDownloadSpec {
+            kind: GuiPdbFileKind::Coordinates,
+            url: format!("https://files.rcsb.org/download/{lowercase_id}.{source}"),
+            path: pdb_cached_path(
+                &format!("cuemol-pdb-{pdb_id}.{extension}"),
+                Some(&format!(
+                    "cuemol-pdb-{pdb_id}.{}",
+                    extension.trim_end_matches(".gz")
+                )),
+            ),
+        });
+    }
+    if options.fetch_two_fofc || options.fetch_fofc {
+        match options.map_source.as_str() {
+            "RCSB_CIF" => {
+                let middle = &lowercase_id[1..3];
+                for (enabled, kind, map_type, suffix) in [
+                    (
+                        options.fetch_two_fofc,
+                        GuiPdbFileKind::TwoFoFc,
+                        "2fo-fc",
+                        "2fofc",
+                    ),
+                    (options.fetch_fofc, GuiPdbFileKind::FoFc, "fo-fc", "fofc"),
+                ] {
+                    if !enabled {
+                        continue;
+                    }
+                    specs.push(PdbDownloadSpec {
+                        kind,
+                        url: format!(
+                            "https://files.rcsb.org/pub/pdb/validation_reports/{middle}/{lowercase_id}/{lowercase_id}_validation_{map_type}_map_coef.cif.gz"
+                        ),
+                        path: pdb_cached_path(
+                            &format!("cuemol-pdb-{pdb_id}-{suffix}.cif.gz"),
+                            None,
+                        ),
+                    });
+                }
+            }
+            "EBI_MTZ" => {
+                let url =
+                    format!("https://www.ebi.ac.uk/pdbe/coordinates/files/{lowercase_id}_map.mtz");
+                let path = pdb_cached_path(&format!("cuemol-pdb-{pdb_id}-map.mtz"), None);
+                if options.fetch_two_fofc {
+                    specs.push(PdbDownloadSpec {
+                        kind: GuiPdbFileKind::TwoFoFc,
+                        url: url.clone(),
+                        path: path.clone(),
+                    });
+                }
+                if options.fetch_fofc {
+                    specs.push(PdbDownloadSpec {
+                        kind: GuiPdbFileKind::FoFc,
+                        url,
+                        path,
+                    });
+                }
+            }
+            source => return Err(format!("unsupported PDB map source: {source}")),
+        }
+    }
+    Ok(specs)
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn pdb_cached_path(primary_filename: &str, legacy_filename: Option<&str>) -> PathBuf {
+    let filenames = legacy_filename.map_or_else(
+        || vec![primary_filename],
+        |legacy| vec![primary_filename, legacy],
+    );
+    for filename in &filenames {
+        let path = download_cache_path(filename);
+        if nonempty_file(&path) {
+            return path;
+        }
+    }
+    for filename in &filenames {
+        let path = std::env::temp_dir().join(filename);
+        if nonempty_file(&path) {
+            return path;
+        }
+    }
+    let persistent = download_cache_path(primary_filename);
+    if persistent
+        .parent()
+        .is_some_and(|parent| std::fs::create_dir_all(parent).is_ok())
+    {
+        persistent
+    } else {
+        std::env::temp_dir().join(primary_filename)
+    }
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+pub(crate) fn download_pdb_files(
+    options: PdbFetchOptions,
+) -> std::result::Result<Vec<PdbDownloadedFile>, String> {
+    let specs = pdb_download_specs(&options)?;
+    let handles = specs
+        .into_iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            std::thread::Builder::new()
+                .name(format!("cuemol-pdb-download-{index}"))
+                .spawn(move || {
+                    download_to_shared_cache(&spec.url, &spec.path).map(|path| PdbDownloadedFile {
+                        kind: spec.kind,
+                        path,
+                    })
+                })
+                .map_err(|error| format!("failed to start PDB download: {error}"))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    handles
+        .into_iter()
+        .map(|handle| {
+            handle
+                .join()
+                .map_err(|_| "PDB download task panicked".to_string())?
+        })
+        .collect()
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -226,6 +392,64 @@ mod download_tests {
         for invalid in ["", "1ABC2", "ABCD", "1AB_", "1AB-"] {
             assert!(normalize_pdb_id(invalid).is_err(), "accepted {invalid}");
         }
+    }
+
+    #[test]
+    fn pdb_download_specs_match_reference_coordinate_and_map_urls() {
+        let options = PdbFetchOptions {
+            pdb_id: "1CRN".to_string(),
+            fetch_coordinates: true,
+            coordinate_source: "RCSB_CIF".to_string(),
+            fetch_two_fofc: true,
+            fetch_fofc: true,
+            map_source: "RCSB_CIF".to_string(),
+        };
+        let specs = pdb_download_specs(&options).unwrap();
+        assert_eq!(specs.len(), 3);
+        assert_eq!(specs[0].kind, GuiPdbFileKind::Coordinates);
+        assert_eq!(specs[0].url, "https://files.rcsb.org/download/1crn.cif.gz");
+        assert_eq!(specs[1].kind, GuiPdbFileKind::TwoFoFc);
+        assert_eq!(
+            specs[1].url,
+            "https://files.rcsb.org/pub/pdb/validation_reports/cr/1crn/1crn_validation_2fo-fc_map_coef.cif.gz"
+        );
+        assert_eq!(specs[2].kind, GuiPdbFileKind::FoFc);
+        assert_eq!(
+            specs[2].url,
+            "https://files.rcsb.org/pub/pdb/validation_reports/cr/1crn/1crn_validation_fo-fc_map_coef.cif.gz"
+        );
+
+        let mtz_specs = pdb_download_specs(&PdbFetchOptions {
+            fetch_coordinates: false,
+            coordinate_source: "RCSB_PDB".to_string(),
+            map_source: "EBI_MTZ".to_string(),
+            ..options
+        })
+        .unwrap();
+        assert_eq!(mtz_specs.len(), 2);
+        assert_eq!(mtz_specs[0].url, mtz_specs[1].url);
+        assert_eq!(mtz_specs[0].path, mtz_specs[1].path);
+        assert!(mtz_specs[0].url.ends_with("/1crn_map.mtz"));
+    }
+
+    #[test]
+    fn pdb_download_specs_reject_empty_or_unknown_sources() {
+        let mut options = PdbFetchOptions {
+            pdb_id: "1CRN".to_string(),
+            fetch_coordinates: false,
+            coordinate_source: "RCSB_CIF".to_string(),
+            fetch_two_fofc: false,
+            fetch_fofc: false,
+            map_source: "RCSB_CIF".to_string(),
+        };
+        assert!(pdb_download_specs(&options).is_err());
+        options.fetch_coordinates = true;
+        options.coordinate_source = "unknown".to_string();
+        assert!(pdb_download_specs(&options).is_err());
+        options.fetch_coordinates = false;
+        options.fetch_two_fofc = true;
+        options.map_source = "unknown".to_string();
+        assert!(pdb_download_specs(&options).is_err());
     }
 
     #[test]

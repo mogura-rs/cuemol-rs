@@ -393,6 +393,36 @@ fn tauri_surface_cutter_matches_reference_object_modes() {
 }
 
 #[test]
+fn tauri_open_pdb_matches_reference_coordinate_and_map_options() {
+    for label in [
+        "Download PDB",
+        "Enter PDB ID:",
+        "Coordinates",
+        "Fetch pdb file",
+        "RCSB (files.rcsb.org)/cif.gz",
+        "RCSB (files.rcsb.org)/pdb.gz",
+        "Density maps",
+        "Fetch map file (2Fo-Fc)",
+        "Fetch map file (Fo-Fc)",
+        "RCSB (files.rcsb.org)",
+        "EBI (www.ebi.ac.uk)",
+    ] {
+        assert!(JS.contains(label), "missing Open PDB field {label}");
+    }
+    for binding in [
+        "fetchCoordinates: fetchCoordinates.checked",
+        "coordinateSource: coordinateSource.value",
+        "fetchTwoFofc: fetchTwoFofc.checked",
+        "fetchFofc: fetchFofc.checked",
+        "mapSource: mapSource.value",
+    ] {
+        assert!(JS.contains(binding), "missing Open PDB binding {binding}");
+    }
+    assert!(JS.contains("coordinateSource.disabled = !fetchCoordinates.checked"));
+    assert!(JS.contains("mapSource.disabled = !mapsSelected"));
+}
+
+#[test]
 fn tauri_workspace_chrome_reuses_unchanged_dom() {
     assert!(JS.contains("function workspaceChromeRenderKey()"));
     let workspace_key = JS

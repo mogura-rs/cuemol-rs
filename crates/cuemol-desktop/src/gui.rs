@@ -551,6 +551,8 @@ fn restrict_crystal_draft(draft: &mut NativeCrystalDraft, space_group_name: &str
     }
 }
 
+type PdbDownloadMessage = std::result::Result<(String, Vec<crate::PdbDownloadedFile>), String>;
+
 #[derive(Debug)]
 struct GuiApplication {
     state: DesktopAppState,
@@ -563,7 +565,12 @@ struct GuiApplication {
     export_path: String,
     log_save_path: String,
     pdb_id: String,
-    pdb_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
+    pdb_fetch_coordinates: bool,
+    pdb_coordinate_source: String,
+    pdb_fetch_two_fofc: bool,
+    pdb_fetch_fofc: bool,
+    pdb_map_source: String,
+    pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
     console_input: String,
@@ -2333,6 +2340,11 @@ impl GuiApplication {
             export_path: "scene.pov".to_string(),
             log_save_path: "cuemol.log".to_string(),
             pdb_id: "1CRN".to_string(),
+            pdb_fetch_coordinates: true,
+            pdb_coordinate_source: "RCSB_CIF".to_string(),
+            pdb_fetch_two_fofc: false,
+            pdb_fetch_fofc: false,
+            pdb_map_source: "RCSB_CIF".to_string(),
             pdb_download_receiver: None,
             url_download_receiver: None,
             script_path: "script.js".to_string(),
@@ -8374,19 +8386,28 @@ impl GuiApplication {
             self.set_status("PDB download is already running");
             return;
         }
-        let (pdb_id, url, path) = match pdb_download_target(&self.pdb_id) {
-            Ok(target) => target,
+        let pdb_id = match crate::normalize_pdb_id(&self.pdb_id) {
+            Ok(pdb_id) => pdb_id,
             Err(error) => {
-                self.set_error(error);
+                self.set_status(format!("Error: {error}"));
                 return;
             }
         };
+        let options = crate::PdbFetchOptions {
+            pdb_id: pdb_id.clone(),
+            fetch_coordinates: self.pdb_fetch_coordinates,
+            coordinate_source: self.pdb_coordinate_source.clone(),
+            fetch_two_fofc: self.pdb_fetch_two_fofc,
+            fetch_fofc: self.pdb_fetch_fofc,
+            map_source: self.pdb_map_source.clone(),
+        };
         let (sender, receiver) = mpsc::channel();
         let repaint = ctx.clone();
+        let result_pdb_id = pdb_id.clone();
         let spawn = std::thread::Builder::new()
             .name(format!("cuemol-pdb-{pdb_id}"))
             .spawn(move || {
-                let result = download_to_cache(&url, &path).map_err(|error| error.to_string());
+                let result = crate::download_pdb_files(options).map(|files| (result_pdb_id, files));
                 let _ = sender.send(result);
                 repaint.request_repaint();
             });
@@ -8405,11 +8426,48 @@ impl GuiApplication {
             .as_ref()
             .map(mpsc::Receiver::try_recv);
         match result {
-            Some(Ok(Ok(path))) => {
+            Some(Ok(Ok((pdb_id, files)))) => {
                 self.pdb_download_receiver = None;
-                self.open_path = path.to_string_lossy().to_string();
-                self.open_current_path(camera);
-                self.show_get_pdb = false;
+                let undo = self.capture_undo();
+                let input = files
+                    .iter()
+                    .map(|file| (file.kind, file.path.clone()))
+                    .collect::<Vec<_>>();
+                match self.state.open_pdb_files(&pdb_id, &input) {
+                    Ok(summary) => {
+                        self.push_undo_snapshot(undo);
+                        self.selected_object = summary.object_uid;
+                        self.selected_renderer = None;
+                        self.workspace_aux_selection = if summary.object_uid.is_none() {
+                            summary.map_uids.last().and_then(|map_uid| {
+                                self.state.active_scene().map(|scene_uid| {
+                                    WorkspaceAuxSelection::DensityMap {
+                                        scene_uid,
+                                        map_uid: *map_uid,
+                                        renderer_uid: None,
+                                    }
+                                })
+                            })
+                        } else {
+                            None
+                        };
+                        self.last_loaded_path = files
+                            .iter()
+                            .find(|file| file.kind == crate::GuiPdbFileKind::Coordinates)
+                            .map(|file| file.path.clone());
+                        self.rebuild_snapshot();
+                        camera.fit_snapshot(&self.snapshot);
+                        self.set_status(format!("Opened PDB {pdb_id}: {} file(s)", files.len()));
+                        self.show_get_pdb = false;
+                    }
+                    Err(error) => {
+                        self.restore_undo_snapshot(undo, camera);
+                        for file in files {
+                            let _ = fs::remove_file(file.path);
+                        }
+                        self.set_error(error);
+                    }
+                }
             }
             Some(Ok(Err(error))) => {
                 self.pdb_download_receiver = None;
@@ -14068,28 +14126,90 @@ impl GuiApplication {
             .open(&mut open)
             .collapsible(false)
             .show(ctx, |ui| {
+                ui.label("Enter PDB ID:");
                 ui.add_sized(
                     [ui.available_width(), 22.0],
                     egui::TextEdit::singleline(&mut self.pdb_id),
                 );
                 let valid_pdb_id = crate::normalize_pdb_id(&self.pdb_id).is_ok();
+                ui.group(|ui| {
+                    ui.strong("Coordinates");
+                    ui.checkbox(&mut self.pdb_fetch_coordinates, "Fetch pdb file");
+                    ui.add_enabled_ui(self.pdb_fetch_coordinates, |ui| {
+                        egui::ComboBox::from_label("Coordinate source")
+                            .selected_text(if self.pdb_coordinate_source == "RCSB_PDB" {
+                                "RCSB (files.rcsb.org)/pdb.gz"
+                            } else {
+                                "RCSB (files.rcsb.org)/cif.gz"
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.pdb_coordinate_source,
+                                    "RCSB_CIF".to_string(),
+                                    "RCSB (files.rcsb.org)/cif.gz",
+                                );
+                                ui.selectable_value(
+                                    &mut self.pdb_coordinate_source,
+                                    "RCSB_PDB".to_string(),
+                                    "RCSB (files.rcsb.org)/pdb.gz",
+                                );
+                            });
+                    });
+                });
+                ui.group(|ui| {
+                    ui.strong("Density maps");
+                    ui.checkbox(&mut self.pdb_fetch_two_fofc, "Fetch map file (2Fo-Fc)");
+                    ui.checkbox(&mut self.pdb_fetch_fofc, "Fetch map file (Fo-Fc)");
+                    ui.add_enabled_ui(self.pdb_fetch_two_fofc || self.pdb_fetch_fofc, |ui| {
+                        egui::ComboBox::from_label("Map source")
+                            .selected_text(if self.pdb_map_source == "EBI_MTZ" {
+                                "EBI (www.ebi.ac.uk)"
+                            } else {
+                                "RCSB (files.rcsb.org)"
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.pdb_map_source,
+                                    "RCSB_CIF".to_string(),
+                                    "RCSB (files.rcsb.org)",
+                                );
+                                ui.selectable_value(
+                                    &mut self.pdb_map_source,
+                                    "EBI_MTZ".to_string(),
+                                    "EBI (www.ebi.ac.uk)",
+                                );
+                            });
+                    });
+                });
+                let coordinate_extension = if self.pdb_coordinate_source == "RCSB_PDB" {
+                    "pdb.gz"
+                } else {
+                    "cif.gz"
+                };
                 ui.label(format!(
-                    "https://files.rcsb.org/download/{}.cif.gz",
-                    self.pdb_id.trim().to_ascii_uppercase()
+                    "https://files.rcsb.org/download/{}.{}",
+                    self.pdb_id.trim().to_ascii_lowercase(),
+                    coordinate_extension
                 ));
                 if ui
-                    .add_enabled(valid_pdb_id, egui::Button::new("Use as Open Path"))
+                    .add_enabled(
+                        valid_pdb_id && self.pdb_fetch_coordinates,
+                        egui::Button::new("Use as Open Path"),
+                    )
                     .clicked()
                 {
                     self.open_path = format!(
-                        "https://files.rcsb.org/download/{}.cif.gz",
-                        self.pdb_id.trim().to_ascii_uppercase()
+                        "https://files.rcsb.org/download/{}.{}",
+                        self.pdb_id.trim().to_ascii_lowercase(),
+                        coordinate_extension
                     );
                     self.set_status("URL copied to Open path");
                 }
+                let any_selected =
+                    self.pdb_fetch_coordinates || self.pdb_fetch_two_fofc || self.pdb_fetch_fofc;
                 if ui
                     .add_enabled(
-                        valid_pdb_id && self.pdb_download_receiver.is_none(),
+                        valid_pdb_id && any_selected && self.pdb_download_receiver.is_none(),
                         egui::Button::new("Download and Open"),
                     )
                     .clicked()
@@ -18384,14 +18504,6 @@ fn download_url_to_cache(url: &str) -> Result<PathBuf> {
     download_to_cache(url, &path)
 }
 
-fn pdb_download_target(pdb_id: &str) -> Result<(String, String, PathBuf)> {
-    let pdb_id = crate::normalize_pdb_id(pdb_id).map_err(CueMolError::invalid_argument)?;
-    let url = format!("https://files.rcsb.org/download/{pdb_id}.cif.gz");
-    let filename = format!("cuemol-pdb-{pdb_id}.cif.gz");
-    let path = cached_download_path(&filename);
-    Ok((pdb_id, url, path))
-}
-
 fn download_to_cache(url: &str, path: &Path) -> Result<PathBuf> {
     crate::download_to_shared_cache(url, path).map_err(CueMolError::invalid_argument)
 }
@@ -21177,13 +21289,14 @@ mod tests {
     }
 
     #[test]
-    fn native_gui_pdb_download_uses_shared_compressed_cache() {
-        let (pdb_id, url, path) = pdb_download_target(" 1crn ").unwrap();
-        assert_eq!(pdb_id, "1CRN");
-        assert_eq!(url, "https://files.rcsb.org/download/1CRN.cif.gz");
-        assert!(path.ends_with("cuemol-pdb-1CRN.cif.gz"));
-        assert!(pdb_download_target("bad").is_err());
-        assert!(pdb_download_target("ACRN").is_err());
+    fn native_gui_pdb_download_defaults_match_reference_dialog() {
+        let app = GuiApplication::new();
+        assert_eq!(app.pdb_id, "1CRN");
+        assert!(app.pdb_fetch_coordinates);
+        assert_eq!(app.pdb_coordinate_source, "RCSB_CIF");
+        assert!(!app.pdb_fetch_two_fofc);
+        assert!(!app.pdb_fetch_fofc);
+        assert_eq!(app.pdb_map_source, "RCSB_CIF");
     }
 
     #[test]

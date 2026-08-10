@@ -463,7 +463,7 @@ function dialogTextArea(label, value) {
   return input;
 }
 
-function dialogSelect(label, options, value) {
+function dialogSelect(label, options, value, parent = dialogContent) {
   const wrapper = document.createElement("label");
   wrapper.className = "dialog-field";
   const text = document.createElement("span");
@@ -477,11 +477,11 @@ function dialogSelect(label, options, value) {
   }
   select.value = String(value);
   wrapper.append(text, select);
-  dialogContent.append(wrapper);
+  parent.append(wrapper);
   return select;
 }
 
-function dialogCheckbox(label, checked) {
+function dialogCheckbox(label, checked, parent = dialogContent) {
   const wrapper = document.createElement("label");
   wrapper.className = "dialog-check";
   const input = document.createElement("input");
@@ -490,8 +490,18 @@ function dialogCheckbox(label, checked) {
   const text = document.createElement("span");
   text.textContent = label;
   wrapper.append(input, text);
-  dialogContent.append(wrapper);
+  parent.append(wrapper);
   return input;
+}
+
+function dialogGroup(title) {
+  const group = document.createElement("fieldset");
+  group.className = "property-common-group";
+  const legend = document.createElement("legend");
+  legend.textContent = title;
+  group.append(legend);
+  dialogContent.append(group);
+  return group;
 }
 
 function dialogActions(...actions) {
@@ -4521,19 +4531,63 @@ async function showReferenceDialog(title) {
     updateOpenState();
     dialogActions(open);
   } else if (title === "Open PDB") {
+    dialogTitle.textContent = "Download PDB";
+    dialogContent.append(dialogParagraph("Enter PDB ID:"));
     const pdbId = dialogField("PDB ID", "1CRN");
     pdbId.maxLength = 4;
     pdbId.pattern = "[0-9][0-9A-Za-z]{3}";
+    const coordinatesGroup = dialogGroup("Coordinates");
+    const fetchCoordinates = dialogCheckbox("Fetch pdb file", true, coordinatesGroup);
+    const coordinateSource = dialogSelect(
+      "Coordinate source",
+      [
+        ["RCSB_CIF", "RCSB (files.rcsb.org)/cif.gz"],
+        ["RCSB_PDB", "RCSB (files.rcsb.org)/pdb.gz"],
+      ],
+      "RCSB_CIF",
+      coordinatesGroup,
+    );
+    const mapsGroup = dialogGroup("Density maps");
+    const fetchTwoFofc = dialogCheckbox(
+      "Fetch map file (2Fo-Fc)",
+      false,
+      mapsGroup,
+    );
+    const fetchFofc = dialogCheckbox("Fetch map file (Fo-Fc)", false, mapsGroup);
+    const mapSource = dialogSelect(
+      "Map source",
+      [
+        ["RCSB_CIF", "RCSB (files.rcsb.org)"],
+        ["EBI_MTZ", "EBI (www.ebi.ac.uk)"],
+      ],
+      "RCSB_CIF",
+      mapsGroup,
+    );
     const open = button("Download and Open", "dialog-primary", async () => {
       const id = pdbId.value.trim().toUpperCase();
       if (!/^[0-9][0-9A-Z]{3}$/.test(id)) return;
-      await mutateWithViewport("open_pdb", { pdbId: id });
-      referenceDialog.close();
+      const changed = await mutateWithViewport("open_pdb", {
+        pdbId: id,
+        fetchCoordinates: fetchCoordinates.checked,
+        coordinateSource: coordinateSource.value,
+        fetchTwoFofc: fetchTwoFofc.checked,
+        fetchFofc: fetchFofc.checked,
+        mapSource: mapSource.value,
+      });
+      if (changed) referenceDialog.close();
     });
     const updateOpenState = () => {
-      open.disabled = !/^[0-9][0-9A-Z]{3}$/.test(pdbId.value.trim().toUpperCase());
+      const mapsSelected = fetchTwoFofc.checked || fetchFofc.checked;
+      coordinateSource.disabled = !fetchCoordinates.checked;
+      mapSource.disabled = !mapsSelected;
+      open.disabled =
+        !/^[0-9][0-9A-Z]{3}$/.test(pdbId.value.trim().toUpperCase()) ||
+        (!fetchCoordinates.checked && !mapsSelected);
     };
     pdbId.addEventListener("input", updateOpenState);
+    fetchCoordinates.addEventListener("change", updateOpenState);
+    fetchTwoFofc.addEventListener("change", updateOpenState);
+    fetchFofc.addEventListener("change", updateOpenState);
     updateOpenState();
     dialogActions(open);
   } else {

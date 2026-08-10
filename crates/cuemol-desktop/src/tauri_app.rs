@@ -5263,7 +5263,7 @@ enum ModelRequest {
     ReloadScene,
     OpenPdb {
         pdb_id: String,
-        path: PathBuf,
+        files: Vec<crate::PdbDownloadedFile>,
         width: u32,
         height: u32,
     },
@@ -6986,25 +6986,33 @@ fn handle_model_request(
         }
         ModelRequest::OpenPdb {
             pdb_id,
-            path,
+            files,
             width,
             height,
         } => {
             model.start_renderer_warmup();
             let undo = model.capture_undo();
-            let result = model
-                .desktop
-                .open_path(&path)
-                .map_err(|error| error.to_string());
-            if result.is_err() {
-                let _ = fs::remove_file(&path);
-            }
-            result?;
+            let input = files
+                .iter()
+                .map(|file| (file.kind, file.path.clone()))
+                .collect::<Vec<_>>();
+            let summary = match model.desktop.open_pdb_files(&pdb_id, &input) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    model.restore_undo(undo)?;
+                    for file in files {
+                        let _ = fs::remove_file(file.path);
+                    }
+                    return Err(error.to_string());
+                }
+            };
             model.selection.clear();
-            model.status = format!("Opened PDB {}", pdb_id.trim().to_ascii_uppercase());
+            model.status = format!("Opened PDB {pdb_id}: {} file(s)", files.len());
             model.invalidate_mesh(true);
             model.push_undo(undo);
-            model.touch_structure_details();
+            if summary.object_uid.is_some() {
+                model.touch_structure_details();
+            }
             let viewport = model.viewport_metadata(width, height);
             Ok(ModelResponse::MolStructUpdate(Box::new(
                 MolStructUpdateDto {
@@ -9369,23 +9377,36 @@ fn reload_scene(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn open_pdb(
     pdb_id: String,
+    fetch_coordinates: bool,
+    coordinate_source: String,
+    fetch_two_fofc: bool,
+    fetch_fofc: bool,
+    map_source: String,
     width: u32,
     height: u32,
     state: State<'_, ManagedState>,
 ) -> Result<MolStructUpdateDto, String> {
     let pdb_id = crate::normalize_pdb_id(&pdb_id)?;
+    let options = crate::PdbFetchOptions {
+        pdb_id: pdb_id.clone(),
+        fetch_coordinates,
+        coordinate_source,
+        fetch_two_fofc,
+        fetch_fofc,
+        map_source,
+    };
     let _renderer_warmup = tauri::async_runtime::spawn_blocking(shared_scene_renderer);
-    let download_id = pdb_id.clone();
-    let path = tauri::async_runtime::spawn_blocking(move || download_pdb_to_cache(&download_id))
+    let files = tauri::async_runtime::spawn_blocking(move || crate::download_pdb_files(options))
         .await
         .map_err(|error| format!("PDB download task failed: {error}"))??;
     molecule_selection_update_response(request_model(
         &state,
         ModelRequest::OpenPdb {
             pdb_id,
-            path,
+            files,
             width,
             height,
         },
@@ -10235,35 +10256,6 @@ fn export_png(
             height,
         },
     )?)
-}
-
-fn download_pdb_to_cache(pdb_id: &str) -> Result<PathBuf, String> {
-    let pdb_id = crate::normalize_pdb_id(pdb_id)?;
-    let filename = format!("cuemol-pdb-{pdb_id}.cif.gz");
-    let persistent_path = crate::download_cache_path(&filename);
-    let persistent_legacy_path = crate::download_cache_path(&format!("cuemol-pdb-{pdb_id}.cif"));
-    let temporary_path = std::env::temp_dir().join(&filename);
-    let temporary_legacy_path = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif"));
-    for path in [
-        &persistent_path,
-        &persistent_legacy_path,
-        &temporary_path,
-        &temporary_legacy_path,
-    ] {
-        if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
-            return Ok(path.clone());
-        }
-    }
-    let path = if persistent_path
-        .parent()
-        .is_some_and(|parent| fs::create_dir_all(parent).is_ok())
-    {
-        persistent_path
-    } else {
-        temporary_path
-    };
-    let url = format!("https://files.rcsb.org/download/{pdb_id}.cif.gz");
-    crate::download_to_shared_cache(&url, &path)
 }
 
 fn backup_scene_file(path: &Path) -> Result<(), String> {
@@ -12648,24 +12640,40 @@ mod tests {
     }
 
     #[test]
-    fn pdb_download_reuses_a_nonempty_cached_file() {
-        let pdb_id = format!("8{:03}", std::process::id() % 1_000);
-        let path = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif"));
-        fs::write(&path, b"cached mmCIF").unwrap();
-        assert_eq!(download_pdb_to_cache(&pdb_id).unwrap(), path);
+    fn open_pdb_request_loads_downloaded_files_and_supports_undo() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-open-pdb-request-{}.pdb",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            b"ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let mut model = model_without_gpu();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::OpenPdb {
+                pdb_id: "1CRN".to_string(),
+                files: vec![crate::PdbDownloadedFile {
+                    kind: crate::GuiPdbFileKind::Coordinates,
+                    path: path.clone(),
+                }],
+                width: 640,
+                height: 480,
+            },
+        )
+        .unwrap();
+        let ModelResponse::MolStructUpdate(update) = response else {
+            panic!("expected PDB viewport update");
+        };
+        assert_eq!(update.snapshot.objects.len(), 1);
+        assert_eq!(update.snapshot.objects[0].name, "1crn");
+        assert!(update.snapshot.can_undo);
+        assert_eq!(update.snapshot.status, "Opened PDB 1CRN: 1 file(s)");
+        model.undo(0).unwrap();
+        assert!(model.snapshot().objects.is_empty());
         fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn pdb_download_prefers_the_compressed_cache() {
-        let pdb_id = format!("9{:03}", std::process::id() % 1_000);
-        let compressed = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif.gz"));
-        let legacy = std::env::temp_dir().join(format!("cuemol-pdb-{pdb_id}.cif"));
-        fs::write(&compressed, b"cached gzip mmCIF").unwrap();
-        fs::write(&legacy, b"cached plain mmCIF").unwrap();
-        assert_eq!(download_pdb_to_cache(&pdb_id).unwrap(), compressed);
-        fs::remove_file(compressed).unwrap();
-        fs::remove_file(legacy).unwrap();
     }
 
     #[test]
