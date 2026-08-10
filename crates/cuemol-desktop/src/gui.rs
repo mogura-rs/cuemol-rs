@@ -2,7 +2,7 @@
 // so both desktop front ends drive the animation timeline identically.
 use crate::{
     anim_step, AnimKind, AnimObject, DesktopAppState, GuiAtomLabel, GuiLoadedPath,
-    GuiSequenceSummary, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
+    GuiSequenceSummary, GuiStructObject, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
     WorkspaceRendererClipboard, WorkspaceStyleClipboard,
 };
 use ab_glyph::{point, Font, FontRef, ScaleFont};
@@ -484,6 +484,11 @@ struct GuiApplication {
     /// persistent id so toggling recreates every chain/residue node with this as the
     /// default-open state (egui only honours `default_open` on first creation).
     molstruct_expand_all: bool,
+    /// Immutable molecule-panel data is reused across egui redraws. Camera motion and
+    /// animation frames do not alter hierarchy labels, so rebuilding them every frame
+    /// only creates avoidable allocations for large molecules.
+    molstruct_tree_cache: Option<(MoleculePanelCacheKey, Arc<Vec<GuiStructObject>>)>,
+    sequence_summary_cache: Option<(MoleculePanelCacheKey, Arc<Vec<GuiSequenceSummary>>)>,
     /// Active tab of the Selection side panel (Command vs Editor).
     selection_tab: SelectionTab,
     /// Whether the crystallographic unit-cell box is drawn (Symmetry panel "Unit cell").
@@ -642,6 +647,12 @@ struct GuiUndoSnapshot {
     selection_text: String,
     last_loaded_path: Option<PathBuf>,
     modified_scenes: std::collections::BTreeSet<cuemol_core::Uid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MoleculePanelCacheKey {
+    scene_uid: Option<cuemol_core::Uid>,
+    objects: Vec<(cuemol_core::Uid, String, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2226,6 +2237,8 @@ impl GuiApplication {
             pending_style_paste_scene: None,
             molstruct_object: None,
             molstruct_expand_all: false,
+            molstruct_tree_cache: None,
+            sequence_summary_cache: None,
             selection_tab: SelectionTab::Command,
             show_unit_cell: false,
             show_symm_mates: false,
@@ -5173,12 +5186,75 @@ impl GuiApplication {
         Ok(fitted)
     }
 
+    fn molecule_panel_cache_key(&self) -> MoleculePanelCacheKey {
+        let scene_uid = self.state.active_scene();
+        let objects = scene_uid
+            .and_then(|uid| self.state.scene_manager().scene(uid))
+            .map(|scene| {
+                scene
+                    .objects()
+                    .iter()
+                    .map(|object| {
+                        (
+                            object.uid(),
+                            object.name().to_string(),
+                            object.mol().atom_count(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        MoleculePanelCacheKey { scene_uid, objects }
+    }
+
+    fn cached_active_structure_tree(&mut self) -> Arc<Vec<GuiStructObject>> {
+        let key = self.molecule_panel_cache_key();
+        let current = self
+            .molstruct_tree_cache
+            .as_ref()
+            .is_some_and(|(cached_key, _)| cached_key == &key);
+        if !current {
+            self.molstruct_tree_cache = Some((key, Arc::new(self.state.active_structure_tree())));
+        }
+        Arc::clone(
+            &self
+                .molstruct_tree_cache
+                .as_ref()
+                .expect("molecule structure cache was initialized")
+                .1,
+        )
+    }
+
+    fn cached_active_sequence_summaries(&mut self) -> Arc<Vec<GuiSequenceSummary>> {
+        let key = self.molecule_panel_cache_key();
+        let current = self
+            .sequence_summary_cache
+            .as_ref()
+            .is_some_and(|(cached_key, _)| cached_key == &key);
+        if !current {
+            self.sequence_summary_cache =
+                Some((key, Arc::new(self.state.active_sequence_summaries())));
+        }
+        Arc::clone(
+            &self
+                .sequence_summary_cache
+                .as_ref()
+                .expect("molecule sequence cache was initialized")
+                .1,
+        )
+    }
+
+    fn invalidate_molecule_panel_caches(&mut self) {
+        self.molstruct_tree_cache = None;
+        self.sequence_summary_cache = None;
+    }
+
     /// MolStruct section — the molecule's chain → residue → atom hierarchy
     /// (CueMol2 `molstruct-panel.xul` `molStructTree`): a molecule selector menulist,
     /// a Select/Center/Zoom/Property toolbar, and a collapsible tree where each row is
     /// click-to-select (the triangle toggles, the label selects, like the XUL tree).
     fn molstruct_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
-        let tree = self.state.active_structure_tree();
+        let tree = self.cached_active_structure_tree();
         if tree.is_empty() {
             ui.weak("No molecule loaded.");
             return;
@@ -5199,7 +5275,7 @@ impl GuiApplication {
         egui::ComboBox::from_id_salt("molstruct-molecule")
             .selected_text(selected_name)
             .show_ui(ui, |ui| {
-                for object in &tree {
+                for object in tree.iter() {
                     ui.selectable_value(
                         &mut selected,
                         Some(object.object_uid),
@@ -5506,7 +5582,7 @@ impl GuiApplication {
     fn selection_section(&mut self, ui: &mut egui::Ui) {
         // Molecule selector menulist (parity with the XUL panel; the chosen molecule
         // scopes the Editor tab's per-chain quick-selects).
-        let sequences = self.state.active_sequence_summaries();
+        let sequences = self.cached_active_sequence_summaries();
         if !sequences.is_empty() {
             let mut selected = self
                 .molstruct_object
@@ -5522,7 +5598,7 @@ impl GuiApplication {
                 .selected_text(name)
                 .show_ui(ui, |ui| {
                     let mut seen = std::collections::BTreeSet::new();
-                    for seq in &sequences {
+                    for seq in sequences.iter() {
                         if seen.insert(seq.object_uid) {
                             ui.selectable_value(
                                 &mut selected,
@@ -5552,7 +5628,7 @@ impl GuiApplication {
 
         match self.selection_tab {
             SelectionTab::Command => self.selection_command_tab(ui),
-            SelectionTab::Editor => self.selection_editor_tab(ui, &sequences),
+            SelectionTab::Editor => self.selection_editor_tab(ui, sequences.as_slice()),
         }
 
         let selected_count = self
@@ -11702,6 +11778,7 @@ impl GuiApplication {
     }
 
     fn sync_active_scene_properties(&mut self) {
+        self.invalidate_molecule_panel_caches();
         let Some(scene) = self
             .state
             .active_scene()
@@ -14403,6 +14480,7 @@ impl GuiApplication {
             Ok(count) => {
                 self.push_undo_snapshot(undo);
                 self.show_chain_dialog = false;
+                self.invalidate_molecule_panel_caches();
                 self.rebuild_snapshot();
                 self.set_status(format!("Changed chain ID on {count} atoms"));
             }
@@ -14433,6 +14511,7 @@ impl GuiApplication {
             Ok(count) => {
                 self.push_undo_snapshot(undo);
                 self.show_residue_dialog = false;
+                self.invalidate_molecule_panel_caches();
                 self.rebuild_snapshot();
                 self.set_status(format!("Renumbered residues for {count} atoms"));
             }
@@ -20564,6 +20643,41 @@ mod tests {
                 ("Animation", false),
             ]
         );
+    }
+
+    #[test]
+    fn native_molecule_panels_reuse_unchanged_hierarchy_data() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        app.state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("cached", cuemol_molstr::MolCoord::new());
+
+        let structure = app.cached_active_structure_tree();
+        let sequence = app.cached_active_sequence_summaries();
+        assert_eq!(structure.len(), 1);
+        assert!(sequence.is_empty());
+        assert!(Arc::ptr_eq(&structure, &app.cached_active_structure_tree()));
+        assert!(Arc::ptr_eq(
+            &sequence,
+            &app.cached_active_sequence_summaries()
+        ));
+
+        app.rebuild_snapshot();
+        assert!(Arc::ptr_eq(&structure, &app.cached_active_structure_tree()));
+
+        app.state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("new", cuemol_molstr::MolCoord::new());
+        assert!(!Arc::ptr_eq(
+            &structure,
+            &app.cached_active_structure_tree()
+        ));
+        assert_eq!(app.cached_active_structure_tree().len(), 2);
     }
 
     /// Exercise the whole shell + every left-panel section headlessly so a runtime

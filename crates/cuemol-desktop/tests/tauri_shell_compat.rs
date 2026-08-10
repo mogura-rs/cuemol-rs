@@ -187,6 +187,7 @@ fn tauri_window_menu_toggles_reference_panels_and_lists_windows() {
     assert!(CSS.contains("z-index: 40"));
     assert!(JS.contains("card.hidden = !card.hidden"));
     assert!(JS.contains("sidePanel.hidden = !cards.some"));
+    assert!(JS.contains("for (const name of openPanels) renderSidePanel(name)"));
     assert!(JS.contains("getAllWebviewWindows"));
     assert!(JS.contains("await appWindow.setFocus()"));
     assert!(CAPABILITIES.contains(r#""cuemol-*""#));

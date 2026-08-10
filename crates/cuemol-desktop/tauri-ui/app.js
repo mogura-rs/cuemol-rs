@@ -4298,6 +4298,7 @@ function restoreDefaultPanels() {
     if (disclosure) disclosure.textContent = open ? "▾" : "▸";
   });
   syncSidePanelVisibility();
+  for (const name of openPanels) renderSidePanel(name);
   document.querySelector(".side-panel")?.scrollTo({ top: 0 });
   scheduleRender(140);
 }
