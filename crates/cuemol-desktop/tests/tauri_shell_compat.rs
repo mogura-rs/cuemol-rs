@@ -609,6 +609,31 @@ fn renderer_edit_style_uses_the_ordered_style_list_dialog() {
 }
 
 #[test]
+fn style_set_editor_uses_live_structured_tabs() {
+    for label in [
+        "Style editor: ${properties.name}",
+        "Color",
+        "Selection",
+        "Styles",
+        "Named colors",
+        "Named selections",
+        "Style entries",
+        "(no named colors)",
+        "(no named selections)",
+        "(no style entries)",
+        "(read-only style set)",
+        "New color name",
+        "New selection name",
+    ] {
+        assert!(JS.contains(label), "missing structured style editor behavior {label}");
+    }
+    assert!(JS.contains("new XMLSerializer().serializeToString(documentNode)"));
+    assert!(JS.contains("snapshot = await invoke(\"set_style_properties\""));
+    assert!(CSS.contains(".reference-dialog.style-set-editor-dialog"));
+    assert!(!JS.contains("xmlTitle.textContent = \"Style XML\""));
+}
+
+#[test]
 fn png_export_matches_the_reference_options_dialog() {
     for label in [
         "PNG options",

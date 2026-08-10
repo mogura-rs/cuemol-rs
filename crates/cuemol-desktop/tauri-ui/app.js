@@ -3575,39 +3575,29 @@ async function showStyleProperties(style) {
     showError(error);
     return;
   }
-  dialogTitle.textContent = "Style editor";
+  const documentNode = new DOMParser().parseFromString(properties.xml, "application/xml");
+  if (documentNode.querySelector("parsererror") || documentNode.documentElement.tagName !== "styles") {
+    showError("Style XML is invalid.");
+    return;
+  }
+  let activeTab = "color";
+  dialogTitle.textContent = `Style editor: ${properties.name}`;
   dialogContent.replaceChildren();
   dialogFooter.hidden = false;
-  referenceDialog.className = "reference-dialog wide has-actions";
-  const name = dialogField("Name", properties.name);
-  const readOnlyLabel = document.createElement("label");
-  readOnlyLabel.className = "dialog-checkbox";
-  const readOnly = document.createElement("input");
-  readOnly.type = "checkbox";
-  readOnly.checked = properties.readOnly;
-  readOnlyLabel.append(readOnly, document.createTextNode("Read only"));
-  const xmlLabel = document.createElement("label");
-  xmlLabel.className = "dialog-field";
-  const xmlTitle = document.createElement("span");
-  xmlTitle.textContent = "Style XML";
-  const xml = document.createElement("textarea");
-  xml.rows = 18;
-  xml.spellcheck = false;
-  xml.value = properties.xml;
-  xmlLabel.append(xmlTitle, xml);
-  dialogContent.append(name.closest("label") || name, readOnlyLabel, xmlLabel);
-  const submit = async (closeAfter) => {
+  referenceDialog.className = "reference-dialog style-set-editor-dialog has-actions";
+  const commit = async () => {
     setBusy(true);
     try {
       snapshot = await invoke("set_style_properties", {
         properties: {
           sceneUid: properties.sceneUid,
           localIndex: properties.localIndex,
-          name: name.value,
-          readOnly: readOnly.checked,
-          xml: xml.value,
+          name: properties.name,
+          readOnly: properties.readOnly,
+          xml: new XMLSerializer().serializeToString(documentNode),
         },
       });
+      workspaceRendererStyleCache.clear();
       const styles = activeStyles();
       selectedStyleIndex = styles.findIndex(
         (candidate) =>
@@ -3616,18 +3606,166 @@ async function showStyleProperties(style) {
       );
       workspaceSelectionKind = "style";
       renderShell();
-      if (closeAfter) referenceDialog.close();
+      return true;
     } catch (error) {
       showError(error);
+      return false;
     } finally {
       setBusy(false);
     }
   };
-  const cancel = button("Cancel", "", () => referenceDialog.close());
-  const apply = button("Apply", "", () => submit(false));
-  const ok = button("OK", "dialog-primary", () => submit(true));
-  dialogActions(cancel, apply, ok);
+  const root = documentNode.documentElement;
+  const entries = (tagName) =>
+    [...root.children].filter((node) => node.tagName === tagName);
+  const removeEntry = async (node) => {
+    const parent = node.parentNode;
+    const next = node.nextSibling;
+    node.remove();
+    if (!(await commit())) parent.insertBefore(node, next);
+    renderEditor();
+  };
+  const addEntry = async (tagName, name, value) => {
+    const existing = entries(tagName).find((node) => node.getAttribute("id") === name);
+    if (existing) {
+      const before = existing.getAttribute("value") || "";
+      existing.setAttribute("value", value);
+      if (!(await commit())) existing.setAttribute("value", before);
+      renderEditor();
+      return;
+    }
+    const node = documentNode.createElement(tagName);
+    node.setAttribute("id", name);
+    node.setAttribute("value", value);
+    root.append(node);
+    if (!(await commit())) node.remove();
+    renderEditor();
+  };
+  const editor = document.createElement("div");
+  editor.className = "style-set-editor";
+  const tabs = document.createElement("div");
+  tabs.className = "style-set-editor-tabs";
+  const panel = document.createElement("div");
+  panel.className = "style-set-editor-panel";
+  const renderEditor = () => {
+    tabs.replaceChildren();
+    for (const [id, label] of [["color", "Color"], ["selection", "Selection"], ["styles", "Styles"]]) {
+      const tab = button(label, id === activeTab ? "active" : "", () => {
+        activeTab = id;
+        renderEditor();
+      });
+      tabs.append(tab);
+    }
+    panel.replaceChildren();
+    const list = document.createElement("div");
+    list.className = "style-set-entry-list";
+    list.setAttribute("role", "list");
+    const ro = properties.readOnly;
+    if (activeTab === "color") {
+      list.setAttribute("aria-label", "Named colors");
+      const colors = entries("color");
+      for (const color of colors) {
+        const row = document.createElement("div");
+        row.className = "style-set-entry-row";
+        const name = document.createElement("span");
+        name.textContent = color.getAttribute("id") || "";
+        const value = document.createElement("input");
+        value.type = "color";
+        const current = color.getAttribute("value") || "#ffffff";
+        value.value = /^#[0-9a-f]{6}$/i.test(current) ? current : "#ffffff";
+        value.disabled = ro;
+        value.addEventListener("change", async () => {
+          const before = color.getAttribute("value") || "";
+          color.setAttribute("value", value.value);
+          if (!(await commit())) color.setAttribute("value", before);
+        });
+        const remove = button("×", "style-set-remove", () => removeEntry(color));
+        remove.disabled = ro;
+        remove.setAttribute("aria-label", `Delete color ${name.textContent}`);
+        row.append(name, value, remove);
+        list.append(row);
+      }
+      if (!colors.length) list.append(dialogParagraph("(no named colors)"));
+      panel.append(list, styleSetAddRow("New color name", ro, (name) => addEntry("color", name, "#ffffff")));
+    } else if (activeTab === "selection") {
+      list.setAttribute("aria-label", "Named selections");
+      const selections = entries("sel");
+      for (const selection of selections) {
+        const row = document.createElement("div");
+        row.className = "style-set-entry-row";
+        const name = document.createElement("span");
+        name.textContent = selection.getAttribute("id") || "";
+        const value = document.createElement("input");
+        value.value = selection.getAttribute("value") || "";
+        value.disabled = ro;
+        const applyValue = async () => {
+          const before = selection.getAttribute("value") || "";
+          if (value.value === before) return;
+          selection.setAttribute("value", value.value);
+          if (!(await commit())) selection.setAttribute("value", before);
+        };
+        value.addEventListener("blur", applyValue);
+        value.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") value.blur();
+        });
+        const remove = button("×", "style-set-remove", () => removeEntry(selection));
+        remove.disabled = ro;
+        remove.setAttribute("aria-label", `Delete selection ${name.textContent}`);
+        row.append(name, value, remove);
+        list.append(row);
+      }
+      if (!selections.length) list.append(dialogParagraph("(no named selections)"));
+      panel.append(list, styleSetAddRow("New selection name", ro, (name) => addEntry("sel", name, "*")));
+    } else {
+      list.setAttribute("aria-label", "Style entries");
+      const styles = entries("style");
+      for (const styleEntry of styles) {
+        const row = document.createElement("div");
+        row.className = "style-set-entry-row style-entry";
+        const name = document.createElement("span");
+        name.textContent = styleEntry.getAttribute("id") || "";
+        const type = document.createElement("span");
+        type.textContent = styleEntry.getAttribute("type") || "";
+        const remove = button("×", "style-set-remove", () => removeEntry(styleEntry));
+        remove.disabled = ro;
+        remove.setAttribute("aria-label", `Delete style ${name.textContent}`);
+        row.append(name, type, remove);
+        list.append(row);
+      }
+      if (!styles.length) list.append(dialogParagraph("(no style entries)"));
+      panel.append(list);
+    }
+  };
+  if (properties.readOnly) {
+    const note = dialogParagraph("(read-only style set)");
+    note.className = "dialog-note";
+    dialogContent.append(note);
+  }
+  editor.append(tabs, panel);
+  dialogContent.append(editor);
+  renderEditor();
+  const close = button("Close", "dialog-primary", () => referenceDialog.close());
+  dialogActions(close);
   if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
+}
+
+function styleSetAddRow(placeholder, disabled, onAdd) {
+  const row = document.createElement("div");
+  row.className = "style-set-add-row";
+  const name = document.createElement("input");
+  name.placeholder = placeholder;
+  name.disabled = disabled;
+  const add = button("Add", "", () => {
+    const value = name.value.trim();
+    if (!value) return;
+    name.value = "";
+    onAdd(value);
+  });
+  add.disabled = true;
+  name.addEventListener("input", () => {
+    add.disabled = disabled || !name.value.trim();
+  });
+  row.append(name, add);
+  return row;
 }
 
 function suggestedRendererName(rendererType) {
