@@ -107,19 +107,39 @@
         </details>
         <details class="menu">
           <summary>Window</summary>
-          <div class="menu-popup">
+          <div class="menu-popup window-menu-popup">
             <button type="button" data-local-action="toggle-ribbon">Show/Hide Topbar</button>
             <button type="button" data-local-action="clear-log">Clear log contents</button>
             <button type="button" data-local-action="restore-panels">Restore default panel location</button>
             <span class="menu-separator"></span>
-            <button type="button" data-panel-menu="Workspace">Panel: Workspace</button>
-            <button type="button" data-panel-menu="MolStruct">Panel: MolStruct</button>
-            <button type="button" data-panel-menu="Selection">Panel: Selection</button>
-            <button type="button" data-panel-menu="Coloring">Panel: Coloring</button>
-            <button type="button" data-panel-menu="Symmetry">Panel: Symmetry</button>
-            <button type="button" data-panel-menu="Density map">Panel: Density map</button>
-            <button type="button" data-panel-menu="View">Panel: View</button>
-            <button type="button" data-panel-menu="Animation">Panel: Animation</button>
+            <div class="menu-submenu">
+              <button type="button" class="menu-submenu-trigger" aria-haspopup="menu">
+                <span>Panels</span><span class="menu-arrow" aria-hidden="true">›</span>
+              </button>
+              <div class="menu-popup nested-menu" role="menu">
+                <button type="button" class="checked" data-panel-menu="Workspace">Workspace</button>
+                <button type="button" class="checked" data-panel-menu="MolStruct">MolStruct</button>
+                <button type="button" class="checked" data-panel-menu="Selection">Selection</button>
+                <button type="button" class="checked" data-panel-menu="Coloring">Coloring</button>
+                <button type="button" class="checked" data-panel-menu="Symmetry">Symmetry</button>
+                <button type="button" class="checked" data-panel-menu="Density map">Density map</button>
+                <button type="button" class="checked" data-panel-menu="View">View</button>
+                <button type="button" class="checked" data-panel-menu="Animation">Animation</button>
+              </div>
+            </div>
+            <div class="menu-submenu">
+              <button
+                id="windows-menu-trigger"
+                type="button"
+                class="menu-submenu-trigger"
+                aria-haspopup="menu"
+              >
+                <span>Windows</span><span class="menu-arrow" aria-hidden="true">›</span>
+              </button>
+              <div class="menu-popup nested-menu" id="windows-menu" role="menu">
+                <button type="button" class="checked">CueMol2</button>
+              </div>
+            </div>
           </div>
         </details>
         <details class="menu">

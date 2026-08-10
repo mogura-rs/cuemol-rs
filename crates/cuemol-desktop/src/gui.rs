@@ -61,7 +61,7 @@ const POV_RADIOSITY_MODES: &[(i32, &str)] = &[
 ];
 const RENDERER_TYPES: &[&str] = crate::MOLECULE_RENDERER_TYPES;
 const LEGACY_MENU_SURFACES: &[&str] = &[
-    "About CueMol3-tritium",
+    "About CueMol2",
     "Preferences...",
     "New Window",
     "New Tab",
@@ -95,6 +95,7 @@ const LEGACY_MENU_SURFACES: &[&str] = &[
     "Cross",
     "Axis",
     "None",
+    "Hardware stereo",
     "View property...",
     "Molecular superposition...",
     "Mol bond editor...",
@@ -503,6 +504,8 @@ struct GuiApplication {
     measure_mode: MeasureMode,
     show_toolbar: bool,
     show_workspace: bool,
+    left_panel_visible: [bool; LeftPanel::ALL.len()],
+    reset_left_panel_layout: bool,
     show_inspector: bool,
     show_bottom_panel: bool,
     show_about: bool,
@@ -943,6 +946,10 @@ impl LeftPanel {
                 | LeftPanel::DensityMap
         )
     }
+
+    fn index(self) -> usize {
+        self as usize
+    }
 }
 
 impl GuiApplication {
@@ -1002,6 +1009,8 @@ impl GuiApplication {
             measure_mode: MeasureMode::Distance,
             show_toolbar: true,
             show_workspace: true,
+            left_panel_visible: [true; LeftPanel::ALL.len()],
+            reset_left_panel_layout: false,
             // CueMol2 opens properties on demand (no docked inspector); start closed.
             show_inspector: false,
             show_bottom_panel: true,
@@ -1113,7 +1122,7 @@ impl GuiApplication {
         if self.show_bottom_panel {
             self.bottom_panel(ctx);
         }
-        if self.show_workspace {
+        if self.show_workspace && self.left_panel_visible.iter().any(|visible| *visible) {
             self.left_panel(ctx, camera);
         }
         // Scene-tab strip registered after the side/bottom docks, so it is confined to
@@ -1638,21 +1647,6 @@ impl GuiApplication {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    ui.menu_button("Theme", |ui| {
-                        if ui
-                            .radio_value(&mut self.light_theme, false, "Dark")
-                            .clicked()
-                        {
-                            self.set_status("Dark theme");
-                        }
-                        if ui
-                            .radio_value(&mut self.light_theme, true, "Light")
-                            .clicked()
-                        {
-                            self.set_status("Light theme");
-                        }
-                    });
-                    ui.separator();
                     if ui
                         .radio_value(&mut camera.perspective, true, "Perspective")
                         .clicked()
@@ -1672,13 +1666,10 @@ impl GuiApplication {
                         ui.radio_value(&mut self.center_mark, CenterMark::None, "None");
                     });
                     ui.separator();
+                    ui.add_enabled(false, egui::Button::new("Hardware stereo"))
+                        .on_hover_text("No hardware stereo buffer is available");
                     if ui.button("View property...").clicked() {
                         self.show_view_props = true;
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.button("Fit").clicked() {
-                        camera.fit_snapshot(&self.snapshot);
                         ui.close();
                     }
                 });
@@ -1728,9 +1719,20 @@ impl GuiApplication {
                         self.restore_panels();
                         ui.close();
                     }
+                    ui.menu_button("Panels", |ui| {
+                        for panel in LeftPanel::ALL {
+                            let visible = &mut self.left_panel_visible[panel.index()];
+                            if ui.checkbox(visible, panel.title()).clicked() && *visible {
+                                self.show_workspace = true;
+                            }
+                        }
+                    });
+                    ui.menu_button("Windows", |ui| {
+                        let _ = ui.radio(true, "CueMol2");
+                    });
                 });
                 ui.menu_button("Help", |ui| {
-                    if ui.button("About CueMol3-tritium").clicked() {
+                    if ui.button("About CueMol2").clicked() {
                         self.show_about = true;
                         ui.close();
                     }
@@ -1944,14 +1946,30 @@ impl GuiApplication {
             .width_range(220.0..=360.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::both().show(ui, |ui| {
+                    let reset_layout = self.reset_left_panel_layout;
                     for panel in LeftPanel::ALL {
-                        egui::CollapsingHeader::new(panel.title())
-                            .default_open(panel.default_open())
-                            .open(self.force_open_all_panels.then_some(true))
-                            .show(ui, |ui| {
+                        if !self.left_panel_visible[panel.index()] {
+                            continue;
+                        }
+                        let id = ui.make_persistent_id(("left-panel", panel.title()));
+                        let mut state =
+                            egui::collapsing_header::CollapsingState::load_with_default_open(
+                                ui.ctx(),
+                                id,
+                                panel.default_open(),
+                            );
+                        if self.force_open_all_panels {
+                            state.set_open(true);
+                        } else if reset_layout {
+                            state.set_open(panel.default_open());
+                        }
+                        state
+                            .show_header(ui, |ui| ui.label(panel.title()))
+                            .body(|ui| {
                                 self.left_panel_body(ui, camera, panel);
                             });
                     }
+                    self.reset_left_panel_layout = false;
                 });
             });
     }
@@ -5649,12 +5667,12 @@ impl GuiApplication {
         }
         let mut open = self.show_about;
         let mut close = false;
-        egui::Window::new("About CueMol2-rs")
+        egui::Window::new("About CueMol2")
             .open(&mut open)
             .collapsible(false)
             .show(ctx, |ui| {
-                ui.heading("CueMol2-rs");
-                ui.label("Native Rust GUI");
+                ui.heading("CueMol2");
+                ui.label("Molecular visualization system — Rust desktop implementation.");
                 ui.label(format!("Menu surfaces: {}", LEGACY_MENU_SURFACES.len()));
                 if ui.button("Close").clicked() {
                     close = true;
@@ -6331,11 +6349,9 @@ impl GuiApplication {
     }
 
     fn restore_panels(&mut self) {
-        self.show_toolbar = true;
         self.show_workspace = true;
-        self.show_inspector = true;
-        self.show_bottom_panel = true;
-        self.bottom_tab = BottomTab::Output;
+        self.left_panel_visible.fill(true);
+        self.reset_left_panel_layout = true;
         self.set_status("Panel layout restored");
     }
 
@@ -9358,10 +9374,29 @@ mod tests {
         assert!(LEGACY_MENU_SURFACES.contains(&"Open File..."));
         assert!(LEGACY_MENU_SURFACES.contains(&"Mol surface generation..."));
         assert!(LEGACY_MENU_SURFACES.contains(&"Restore default panel location"));
+        assert!(LEGACY_MENU_SURFACES.contains(&"Hardware stereo"));
+        assert!(LEGACY_MENU_SURFACES.contains(&"About CueMol2"));
+        assert!(!LEGACY_MENU_SURFACES.contains(&"About CueMol3-tritium"));
         assert!(RENDERER_TYPES.contains(&"ballstick"));
         assert!(RENDERER_TYPES.contains(&"disorder"));
         assert!(!RENDERER_TYPES.contains(&"molsurf"));
         assert_eq!(renderer_type_label("cartoon"), "cartoon");
+    }
+
+    #[test]
+    fn native_window_panel_menu_restores_reference_defaults() {
+        let mut app = GuiApplication::new();
+        assert!(app.left_panel_visible.iter().all(|visible| *visible));
+        app.left_panel_visible[LeftPanel::Workspace.index()] = false;
+        app.reset_left_panel_layout = false;
+        app.show_workspace = false;
+
+        app.restore_panels();
+
+        assert!(app.show_workspace);
+        assert!(app.left_panel_visible.iter().all(|visible| *visible));
+        assert!(app.reset_left_panel_layout);
+        assert!(!app.show_inspector);
     }
 
     #[test]

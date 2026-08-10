@@ -103,7 +103,7 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   gap: 0;
-  z-index: 20;
+  z-index: 40;
   padding: 1px 7px;
   border-bottom: 1px solid #b5b5b5;
   background: linear-gradient(#f8f8f8, #e6e6e6);
@@ -179,7 +179,8 @@ summary:focus-visible {
   margin-left: -16px;
 }
 
-.file-menu-popup {
+.file-menu-popup,
+.window-menu-popup {
   overflow: visible;
 }
 

@@ -1,6 +1,7 @@
 "use strict";
 
 const appShell = document.querySelector(".app-shell");
+const sidePanel = document.querySelector(".side-panel");
 const viewport = document.getElementById("viewport");
 const viewportImage = document.getElementById("viewport-image");
 const viewportLines = document.getElementById("viewport-lines");
@@ -87,6 +88,8 @@ const trajectoryBlockLeft = document.getElementById("trajectory-block-left");
 const trajectoryBlockRight = document.getElementById("trajectory-block-right");
 const trajectoryBlockCount = document.getElementById("trajectory-block-count");
 const recentMenu = document.getElementById("recent-menu");
+const windowsMenu = document.getElementById("windows-menu");
+const windowsMenuTrigger = document.getElementById("windows-menu-trigger");
 const workspaceProperties = document.getElementById("workspace-properties");
 const workspaceDelete = document.getElementById("workspace-delete");
 const workspaceZoom = document.getElementById("workspace-zoom");
@@ -3964,6 +3967,7 @@ function applyCenterMark(value) {
 function restoreDefaultPanels() {
   const openPanels = new Set(["Workspace", "MolStruct", "Selection", "Coloring", "Density map"]);
   document.querySelectorAll("[data-side-card]").forEach((card) => {
+    card.hidden = false;
     const title = card.querySelector(".side-title span:nth-child(2)")?.textContent;
     const open = openPanels.has(title);
     card.classList.toggle("open", open);
@@ -3972,8 +3976,43 @@ function restoreDefaultPanels() {
     const disclosure = card.querySelector(".disclosure");
     if (disclosure) disclosure.textContent = open ? "▾" : "▸";
   });
+  syncSidePanelVisibility();
   document.querySelector(".side-panel")?.scrollTo({ top: 0 });
   scheduleRender(140);
+}
+
+function sidePanelCard(name) {
+  return [...document.querySelectorAll("[data-side-card]")].find(
+    (item) => item.querySelector(".side-title span:nth-child(2)")?.textContent === name,
+  );
+}
+
+function syncSidePanelVisibility() {
+  const cards = [...document.querySelectorAll("[data-side-card]")];
+  sidePanel.hidden = !cards.some((card) => !card.hidden);
+  document.querySelectorAll("[data-panel-menu]").forEach((element) => {
+    element.classList.toggle("checked", !sidePanelCard(element.dataset.panelMenu)?.hidden);
+  });
+}
+
+async function renderWindowsMenu() {
+  const getAll = tauri?.webviewWindow?.getAllWebviewWindows;
+  const getCurrent = tauri?.webviewWindow?.getCurrentWebviewWindow;
+  if (!windowsMenu || !getAll || !getCurrent) return;
+  try {
+    const [windows, current] = await Promise.all([getAll(), getCurrent()]);
+    windowsMenu.replaceChildren();
+    windows.forEach((appWindow, index) => {
+      const suffix = windows.length > 1 ? ` (${index + 1})` : "";
+      const item = button(`CueMol2${suffix}`, appWindow.label === current.label ? "checked" : "", async () => {
+        closeMenus();
+        await appWindow.setFocus();
+      });
+      windowsMenu.append(item);
+    });
+  } catch (error) {
+    console.warn("Cannot enumerate CueMol2 windows:", error);
+  }
 }
 
 async function handleLocalAction(action) {
@@ -6850,24 +6889,21 @@ document.querySelectorAll("[data-center-mark]").forEach((element) => {
 document.querySelectorAll("[data-panel-menu]").forEach((element) => {
   element.addEventListener("click", () => {
     closeMenus();
-    const card = [...document.querySelectorAll("[data-side-card]")].find(
-      (item) =>
-        item.querySelector(".side-title span:nth-child(2)")?.textContent ===
-        element.dataset.panelMenu,
-    );
+    const card = sidePanelCard(element.dataset.panelMenu);
     if (!card) return;
-    card.classList.add("open");
-    card.querySelector("[data-panel-toggle]")?.setAttribute("aria-expanded", "true");
-    const disclosure = card.querySelector(".disclosure");
-    if (disclosure) disclosure.textContent = "▾";
-    card.scrollIntoView({ block: "nearest" });
-    if (element.dataset.panelMenu === "MolStruct") {
+    card.hidden = !card.hidden;
+    syncSidePanelVisibility();
+    if (!card.hidden) card.scrollIntoView({ block: "nearest" });
+    if (!card.hidden && element.dataset.panelMenu === "MolStruct") {
       renderMolStruct();
       scheduleMoleculeDetailsRefresh(0);
     }
     scheduleRender(140);
   });
 });
+
+windowsMenuTrigger?.addEventListener("pointerenter", renderWindowsMenu);
+windowsMenuTrigger?.addEventListener("focus", renderWindowsMenu);
 
 document.querySelectorAll(".menu").forEach((menu) => {
   menu.addEventListener("toggle", () => {

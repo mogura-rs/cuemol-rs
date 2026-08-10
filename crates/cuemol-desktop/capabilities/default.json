@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
   "description": "Permissions for the local CueMol2 desktop window",
-  "windows": ["main"],
+  "windows": ["main", "cuemol-*"],
   "permissions": ["core:default", "dialog:default"]
 }

@@ -1,6 +1,7 @@
 const HTML: &str = include_str!("../tauri-ui/index.html");
 const CSS: &str = include_str!("../tauri-ui/styles.css");
 const JS: &str = include_str!("../tauri-ui/app.js");
+const CAPABILITIES: &str = include_str!("../capabilities/default.json");
 
 #[test]
 fn tauri_shell_matches_the_reference_xul_dock_order() {
@@ -173,6 +174,22 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     }
     assert!(HTML.contains("data-interaction=\"rotate\""));
     assert!(HTML.contains("data-interaction=\"rect-select\""));
+}
+
+#[test]
+fn tauri_window_menu_toggles_reference_panels_and_lists_windows() {
+    assert!(HTML.contains("<span>Panels</span>"));
+    assert!(HTML.contains("<span>Windows</span>"));
+    assert_eq!(HTML.matches("data-panel-menu=").count(), 8);
+    assert!(HTML.contains("id=\"windows-menu\""));
+    assert!(CSS.contains(".window-menu-popup"));
+    assert!(CSS.contains(".application-menu {"));
+    assert!(CSS.contains("z-index: 40"));
+    assert!(JS.contains("card.hidden = !card.hidden"));
+    assert!(JS.contains("sidePanel.hidden = !cards.some"));
+    assert!(JS.contains("getAllWebviewWindows"));
+    assert!(JS.contains("await appWindow.setFocus()"));
+    assert!(CAPABILITIES.contains(r#""cuemol-*""#));
 }
 
 #[test]
