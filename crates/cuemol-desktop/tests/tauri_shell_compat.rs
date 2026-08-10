@@ -1170,10 +1170,15 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("defaultValue: `camera_${index}`"));
     assert!(JS.contains("confirmLabel: \"Create\""));
     assert!(JS.contains("mutateWithoutViewport(\"create_camera\", { name }, () => {})"));
+    assert!(JS.contains("function workspaceCameraInlineRenameInput(scene, camera)"));
+    assert!(JS.contains("beginWorkspaceInlineRename(\"camera\", scene.uid, camera.name)"));
+    assert!(JS.contains("\"rename_workspace_camera\""));
     assert!(!JS.contains("globalThis.prompt?.(\"Camera name\""));
     assert!(CSS.contains(".reference-dialog.text-prompt-dialog"));
     assert!(TAURI_APP_RS.contains("ModelRequest::CreateCamera(name)"));
     assert!(TAURI_APP_RS.contains("fn create_camera(name: String"));
+    assert!(TAURI_APP_RS.contains("RenameWorkspaceCamera(WorkspaceCameraRenameInput)"));
+    assert!(TAURI_APP_RS.contains("fn rename_workspace_camera("));
     assert!(NATIVE_GUI_RS.contains("struct NativeNewCameraDraft"));
     assert!(NATIVE_GUI_RS.contains("fn new_camera_dialog("));
     assert!(NATIVE_GUI_RS.contains("ui.label(\"Name for new camera:\")"));

@@ -7039,7 +7039,8 @@ function workspaceCameraContextItems(scene, camera = null) {
       action: async () => {
         if (!(await activate())) return;
         selectedCameraName = camera.name;
-        await showReferenceDialog("Camera Properties");
+        workspaceSelectionKind = "camera";
+        beginWorkspaceInlineRename("camera", scene.uid, camera.name);
       },
     },
     null,
@@ -7477,11 +7478,15 @@ function scheduleWorkspaceInlineRename(kind, objectUid, rendererUid = null) {
   clearWorkspaceRenameTimer();
   workspaceRenameTimer = setTimeout(() => {
     workspaceRenameTimer = null;
-    if (
-      workspaceSelectionKind === kind &&
-      selectedObjectUid === objectUid &&
-      selectedRendererUid === rendererUid
-    ) {
+    const isSelected =
+      kind === "camera"
+        ? workspaceSelectionKind === kind &&
+          snapshot.activeSceneUid === objectUid &&
+          selectedCameraName === rendererUid
+        : workspaceSelectionKind === kind &&
+          selectedObjectUid === objectUid &&
+          selectedRendererUid === rendererUid;
+    if (isSelected) {
       beginWorkspaceInlineRename(kind, objectUid, rendererUid);
     }
   }, 500);
@@ -7509,6 +7514,56 @@ function workspaceInlineRenameInput(kind, object, renderer = null) {
       input: { kind, objectUid: object.uid, rendererUid: renderer?.uid ?? null, name },
     });
     if (!renamed) rerenderWorkspaceTree();
+  };
+  input.addEventListener("mousedown", (event) => event.stopPropagation());
+  input.addEventListener("click", (event) => event.stopPropagation());
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      void finish(true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      void finish(false);
+    }
+  });
+  input.addEventListener("blur", () => void finish(true));
+  return input;
+}
+
+function workspaceCameraInlineRenameInput(scene, camera) {
+  const input = document.createElement("input");
+  input.className = "workspace-inline-rename";
+  input.type = "text";
+  input.value = camera.name;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  let finished = false;
+  const finish = async (commit) => {
+    if (finished) return;
+    finished = true;
+    const name = input.value.trim();
+    workspaceInlineRename = null;
+    if (!commit || name === "" || name === camera.name) {
+      rerenderWorkspaceTree();
+      return;
+    }
+    const renamed = await mutateWithoutViewport(
+      "rename_workspace_camera",
+      {
+        input: { sceneUid: scene.uid, oldName: camera.name, newName: name },
+      },
+      () => {},
+    );
+    const sceneCameras = renamed
+      ? snapshot.cameras.filter((candidate) => candidate.sceneUid === scene.uid)
+      : [];
+    const renameSucceeded =
+      sceneCameras.some((candidate) => candidate.name === name) &&
+      !sceneCameras.some((candidate) => candidate.name === camera.name);
+    selectedCameraName = renameSucceeded ? name : camera.name;
+    rerenderWorkspaceTree();
   };
   input.addEventListener("mousedown", (event) => event.stopPropagation());
   input.addEventListener("click", (event) => event.stopPropagation());
@@ -8659,24 +8714,39 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     sceneTree.append(cameraRoot);
     for (const camera of sceneCameras) {
       const markers = `${camera.source ? " ↗" : ""}${camera.visibilityCount > 0 ? " ◉" : ""}`;
+      const cameraIsRenaming =
+        workspaceInlineRename?.kind === "camera" &&
+        workspaceInlineRename.objectUid === scene.uid &&
+        workspaceInlineRename.rendererUid === camera.name;
       const cameraRow = button(
-        `${camera.name}${markers}`,
+        cameraIsRenaming ? "" : `${camera.name}${markers}`,
         `tree-renderer camera-node${
           workspaceSelectionKind === "camera" && camera.name === selectedCameraName
             ? " active"
             : ""
         }`,
         async () => {
+          const alreadySelected =
+            workspaceSelectionKind === "camera" && camera.name === selectedCameraName;
           workspaceSelectionKind = "camera";
           selectedCameraName = camera.name;
           if (!scene.active) {
             await mutate("activate_scene", { sceneUid: scene.uid });
+          } else if (alreadySelected && !cameraIsRenaming) {
+            scheduleWorkspaceInlineRename("camera", scene.uid, camera.name);
           } else {
+            clearWorkspaceRenameTimer();
             renderShell();
           }
         },
       );
+      cameraRow.dataset.workspaceRenameTarget = workspaceRenameTarget(
+        "camera",
+        scene.uid,
+        camera.name,
+      );
       cameraRow.addEventListener("dblclick", async () => {
+        clearWorkspaceRenameTimer();
         workspaceSelectionKind = "camera";
         selectedCameraName = camera.name;
         if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
@@ -8687,6 +8757,14 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         selectedCameraName = camera.name;
         showWorkspaceContextMenu(event, workspaceCameraContextItems(scene, camera));
       });
+      if (cameraIsRenaming) {
+        cameraRow.append(workspaceCameraInlineRenameInput(scene, camera));
+        if (markers) {
+          const marker = document.createElement("small");
+          marker.textContent = markers;
+          cameraRow.append(marker);
+        }
+      }
       sceneTree.append(cameraRow);
     }
     const sceneStyles = (snapshot.styles || []).filter(
@@ -12141,22 +12219,25 @@ window.addEventListener("keydown", (event) => {
 
 document.addEventListener("pointerdown", (event) => {
   if (workspaceRenameTimer === null) return;
-  const selectedTarget = workspaceRenameTarget(
-    workspaceSelectionKind,
-    selectedObjectUid,
-    selectedRendererUid,
-  );
+  const selectedTarget =
+    workspaceSelectionKind === "camera"
+      ? workspaceRenameTarget("camera", snapshot.activeSceneUid, selectedCameraName)
+      : workspaceRenameTarget(workspaceSelectionKind, selectedObjectUid, selectedRendererUid);
   const row = event.target.closest("[data-workspace-rename-target]");
   if (row?.dataset.workspaceRenameTarget !== selectedTarget) clearWorkspaceRenameTimer();
 });
 
 sceneTree.addEventListener("keydown", (event) => {
-  if (
-    event.key !== "F2" ||
-    !["object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)
-  ) {
+  if (event.key !== "F2") {
     return;
   }
+  if (workspaceSelectionKind === "camera") {
+    if (snapshot.activeSceneUid === null || selectedCameraName === null) return;
+    event.preventDefault();
+    beginWorkspaceInlineRename("camera", snapshot.activeSceneUid, selectedCameraName);
+    return;
+  }
+  if (!["object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)) return;
   const object = selectedObject();
   if (!object) return;
   const renderer = workspaceSelectionKind === "object" ? null : selectedRenderer();

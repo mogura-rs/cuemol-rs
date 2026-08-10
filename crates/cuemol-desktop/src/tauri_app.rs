@@ -1166,6 +1166,14 @@ struct WorkspaceCameraPasteInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceCameraRenameInput {
+    scene_uid: u64,
+    old_name: String,
+    new_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceStyleCopyInput {
     scene_uid: u64,
     local_index: usize,
@@ -3108,6 +3116,35 @@ impl AppModel {
             .map_err(|error| error.to_string())?;
         self.status = "Rename renderer group".to_string();
         Ok(())
+    }
+
+    fn rename_workspace_camera(
+        &mut self,
+        input: WorkspaceCameraRenameInput,
+    ) -> Result<bool, String> {
+        let new_name = input.new_name.trim();
+        if new_name.is_empty() || new_name == input.old_name {
+            return Ok(false);
+        }
+        let scene_uid = Uid::new(input.scene_uid);
+        let Some(scene) = self.desktop.scene_manager().scene(scene_uid) else {
+            return Ok(false);
+        };
+        if scene.camera_by_name(new_name).is_some() {
+            return Ok(false);
+        }
+        let Some(mut camera) = scene.camera_by_name(&input.old_name).cloned() else {
+            return Ok(false);
+        };
+        self.desktop
+            .destroy_scene_camera(scene_uid, &input.old_name)
+            .map_err(|error| error.to_string())?;
+        camera.set_name(new_name);
+        self.desktop
+            .save_scene_camera(scene_uid, camera, false)
+            .map_err(|error| error.to_string())?;
+        self.status = format!("Rename to {new_name}");
+        Ok(true)
     }
 
     fn rename_workspace_node(&mut self, input: WorkspaceRenameInput) -> Result<(), String> {
@@ -5739,6 +5776,7 @@ enum ModelRequest {
     PasteWorkspaceObject(WorkspaceObjectPasteInput),
     CopyWorkspaceCamera(WorkspaceCameraCopyInput),
     PasteWorkspaceCamera(WorkspaceCameraPasteInput),
+    RenameWorkspaceCamera(WorkspaceCameraRenameInput),
     CopyWorkspaceStyle(WorkspaceStyleCopyInput),
     PasteWorkspaceStyle(WorkspaceStylePasteInput),
     CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
@@ -7643,6 +7681,13 @@ fn handle_model_request(
             let undo = model.capture_undo();
             model.paste_workspace_camera(input)?;
             model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::RenameWorkspaceCamera(input) => {
+            let undo = model.capture_undo();
+            if model.rename_workspace_camera(input)? {
+                model.push_undo(undo);
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::CopyWorkspaceStyle(input) => {
@@ -10291,6 +10336,17 @@ fn paste_workspace_camera(
 }
 
 #[tauri::command]
+fn rename_workspace_camera(
+    input: WorkspaceCameraRenameInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::RenameWorkspaceCamera(input),
+    )?)
+}
+
+#[tauri::command]
 fn copy_workspace_style(
     input: WorkspaceStyleCopyInput,
     state: State<'_, ManagedState>,
@@ -11815,6 +11871,7 @@ pub fn run() -> Result<(), tauri::Error> {
             paste_workspace_object,
             copy_workspace_camera,
             paste_workspace_camera,
+            rename_workspace_camera,
             copy_workspace_style,
             paste_workspace_style,
             create_workspace_renderer_group,
@@ -15339,6 +15396,27 @@ mod tests {
         );
 
         let scene_uid = model.desktop.active_scene().unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::RenameWorkspaceCamera(WorkspaceCameraRenameInput {
+                scene_uid: scene_uid.get(),
+                old_name: "camera_renamed".to_string(),
+                new_name: " camera_inline ".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected camera rename snapshot");
+        };
+        assert_eq!(snapshot.cameras[0].name, "camera_inline");
+        assert_eq!(snapshot.undo_descriptions[0], "Rename to camera_inline");
+        assert_eq!(
+            model.named_camera_properties("camera_inline").unwrap().zoom,
+            91.0
+        );
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().cameras[0].name, "camera_renamed");
+
         let undo_count = model.undo_stack.len();
         let response = handle_model_request(
             &mut model,
