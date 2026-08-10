@@ -904,6 +904,17 @@ fn tauri_playback_reuses_static_animation_and_trajectory_dom() {
 }
 
 #[test]
+fn tauri_high_frequency_viewport_updates_reuse_measured_dimensions() {
+    assert!(JS.contains("let cachedViewportDimensions = null"));
+    assert!(JS.contains("let cachedViewportPixelRatio = null"));
+    assert!(JS.contains("function viewportDimensions(forceMeasure = false)"));
+    assert!(JS.contains("cachedViewportPixelRatio === pixelRatio"));
+    assert!(JS.contains("const size = viewportDimensions(true)"));
+    assert!(JS.contains("async function seekTrajectory(frame, indicateBusy = true)"));
+    assert!(JS.contains("await seekTrajectory(next, false)"));
+}
+
+#[test]
 fn tauri_workspace_preserves_renderer_group_hierarchy() {
     assert!(JS.contains("function groupedMoleculeRenderers(renderers)"));
     assert!(JS.contains("candidate.group === renderer.name"));

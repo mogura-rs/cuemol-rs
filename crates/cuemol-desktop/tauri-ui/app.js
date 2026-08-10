@@ -184,6 +184,8 @@ let viewportRenderQueued = false;
 let cameraRequest = null;
 const cameraQueue = [];
 let renderedViewportSize = "";
+let cachedViewportDimensions = null;
+let cachedViewportPixelRatio = null;
 let wheelTimer = null;
 let wheelPending = null;
 let requestSequence = 0;
@@ -10280,7 +10282,7 @@ function selectedTrajectory() {
   );
 }
 
-async function seekTrajectory(frame) {
+async function seekTrajectory(frame, indicateBusy = true) {
   const trajectory = selectedTrajectory();
   if (!trajectory || !invoke) return false;
   const last = Math.max(0, trajectory.frameCount - 1);
@@ -10288,7 +10290,7 @@ async function seekTrajectory(frame) {
   trajectoryFrames.set(trajectory.objectUid, target);
   const size = viewportDimensions();
   const sequence = ++requestSequence;
-  setBusy(true);
+  if (indicateBusy) setBusy(true);
   try {
     const result = await invoke("set_trajectory_frame_viewport", {
       objectUid: trajectory.objectUid,
@@ -10304,7 +10306,7 @@ async function seekTrajectory(frame) {
     showError(error);
     return false;
   } finally {
-    setBusy(false);
+    if (indicateBusy) setBusy(false);
   }
 }
 
@@ -10334,7 +10336,7 @@ function syncTrajectoryTimer() {
       }
       trajectoryTickBusy = true;
       try {
-        await seekTrajectory(next);
+        await seekTrajectory(next, false);
       } finally {
         trajectoryTickBusy = false;
       }
@@ -10579,13 +10581,22 @@ function renderUndoAndStatus() {
   renderStatusAndLog();
 }
 
-function viewportDimensions() {
-  const bounds = viewport.getBoundingClientRect();
+function viewportDimensions(forceMeasure = false) {
   const pixelRatio = preferences?.useHidpi ? window.devicePixelRatio || 1 : 1;
-  return {
+  if (
+    !forceMeasure &&
+    cachedViewportDimensions &&
+    cachedViewportPixelRatio === pixelRatio
+  ) {
+    return cachedViewportDimensions;
+  }
+  const bounds = viewport.getBoundingClientRect();
+  cachedViewportPixelRatio = pixelRatio;
+  cachedViewportDimensions = {
     width: Math.max(64, Math.round(bounds.width * pixelRatio)),
     height: Math.max(64, Math.round(bounds.height * pixelRatio)),
   };
+  return cachedViewportDimensions;
 }
 
 function applyViewport(result, sequence) {
@@ -11869,7 +11880,7 @@ async function start() {
       setTimeout(preloadPdbHistory, 0);
     }
     new ResizeObserver(() => {
-      const size = viewportDimensions();
+      const size = viewportDimensions(true);
       if (`${size.width}x${size.height}` !== renderedViewportSize) scheduleRender(140);
     }).observe(viewport);
     if (initial.startupPathsPending) {
