@@ -1315,11 +1315,40 @@ impl AppModel {
     }
 
     fn new_with_config(open_paths: Vec<PathBuf>, config_path: Option<PathBuf>) -> Self {
+        let config_path_to_load = config_path.as_ref().filter(|path| path.exists()).cloned();
+        let (config_loader, config_fallback) = config_path_to_load.map_or((None, None), |path| {
+            let worker_path = path.clone();
+            match std::thread::Builder::new()
+                .name("cuemol-tauri-config-init".to_string())
+                .spawn(move || fs::read_to_string(&worker_path).map_err(|error| error.to_string()))
+            {
+                Ok(loader) => (Some((path, loader)), None),
+                Err(_) => (None, Some(path)),
+            }
+        });
         let mut desktop = DesktopAppState::new();
         let mut failures = Vec::new();
-        if let Some(path) = config_path.as_ref().filter(|path| path.exists()) {
-            if let Err(error) = desktop.load_config_file(path) {
-                failures.push(format!("{}: {error}", path.display()));
+        let config_source = if let Some((path, loader)) = config_loader {
+            Some((
+                path,
+                loader
+                    .join()
+                    .unwrap_or_else(|_| Err("configuration loader panicked".to_string())),
+            ))
+        } else {
+            config_fallback.map(|path| {
+                let source = fs::read_to_string(&path).map_err(|error| error.to_string());
+                (path, source)
+            })
+        };
+        if let Some((path, source)) = config_source {
+            match source {
+                Ok(input) => {
+                    if let Err(error) = desktop.load_config_text(&input) {
+                        failures.push(format!("{}: {error}", path.display()));
+                    }
+                }
+                Err(error) => failures.push(format!("{}: {error}", path.display())),
             }
         }
         desktop.ensure_active_scene();

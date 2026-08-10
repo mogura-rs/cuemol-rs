@@ -485,6 +485,18 @@ fn desktop_startup_and_fetch_overlap_independent_initialization() {
     assert!(NATIVE_GUI_RS.contains("fs::read_to_string(&path)"));
     assert!(NATIVE_GUI_RS.contains("poll_config_init(event_loop)"));
 
+    let tauri_config_start = TAURI_APP_RS.find("cuemol-tauri-config-init").unwrap();
+    let tauri_desktop_start = TAURI_APP_RS
+        .find("let mut desktop = DesktopAppState::new();")
+        .unwrap();
+    let tauri_config_join = TAURI_APP_RS
+        .find("let config_source = if let Some((path, loader))")
+        .unwrap();
+    assert!(tauri_config_start < tauri_desktop_start);
+    assert!(tauri_desktop_start < tauri_config_join);
+    assert!(TAURI_APP_RS.contains("desktop.load_config_text(&input)"));
+    assert!(!TAURI_APP_RS.contains("desktop.load_config_file(path)"));
+
     assert!(TAURI_APP_RS.contains("ModelRequest::StartRendererWarmup"));
     assert!(TAURI_APP_RS.contains("request_model(&state, ModelRequest::StartRendererWarmup)"));
     assert!(!TAURI_APP_RS.contains("spawn_blocking(shared_scene_renderer)"));
