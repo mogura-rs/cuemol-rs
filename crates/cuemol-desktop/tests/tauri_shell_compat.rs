@@ -1027,7 +1027,27 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("kind: \"renderer\""));
     assert!(JS.contains("create_workspace_renderer_group"));
     assert!(JS.contains("rename_workspace_renderer_group"));
-    assert!(JS.contains("Change Name..."));
+    assert!(JS.contains("label: \"Rename…\""));
+    assert!(!JS.contains("globalThis.prompt"));
+    assert!(JS.contains("title: \"Rename Renderer Group\""));
+    assert!(JS.contains("label: \"New name:\""));
+    let tauri_renderer_group_menu = JS
+        .split("async function workspaceRendererContextItems(scene, object, renderer)")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("if (renderer.rendererType === \"*group\") {")
+                .nth(1)
+        })
+        .and_then(|source| source.split("return items;").next())
+        .expect("Tauri renderer-group context menu");
+    assert!(tauri_renderer_group_menu.contains("{ label: renderer.name, disabled: true }"));
+    assert!(tauri_renderer_group_menu.contains("renderer.visible ? \"Hide\" : \"Show\""));
+    assert!(tauri_renderer_group_menu.contains("label: \"Paste Renderer\""));
+    assert!(tauri_renderer_group_menu.contains("label: \"New Renderer…\""));
+    assert!(tauri_renderer_group_menu.contains("label: \"Properties…\""));
+    assert!(NATIVE_GUI_RS.contains("ui.button(\"Rename…\")"));
+    assert!(NATIVE_GUI_RS.contains("ui.button(\"New Renderer…\")"));
     assert!(CSS.contains(".workspace-context-menu button.checked::before"));
 }
 

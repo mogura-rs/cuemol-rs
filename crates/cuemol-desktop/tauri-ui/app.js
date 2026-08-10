@@ -7539,11 +7539,29 @@ async function workspaceRendererContextItems(scene, object, renderer) {
   const items = [];
   if (renderer.rendererType === "*group") {
     items.push(
+      { label: renderer.name, disabled: true },
+      null,
       {
-        label: "Change Name...",
+        label: renderer.visible ? "Hide" : "Show",
+        action: () =>
+          mutate("set_workspace_visible", {
+            target: {
+              kind: "rendererGroup",
+              objectUid: object.uid,
+              rendererUid: renderer.uid,
+            },
+            visible: !renderer.visible,
+          }),
+      },
+      {
+        label: "Rename…",
         action: async () => {
-          const name = globalThis.prompt?.("Change renderer group name", renderer.name)?.trim();
-          if (!name || name === renderer.name) return;
+          const name = await showTextPromptDialog({
+            title: "Rename Renderer Group",
+            label: "New name:",
+            defaultValue: renderer.name,
+          });
+          if (name === null || name === renderer.name) return;
           await mutateWithoutViewport("rename_workspace_renderer_group", {
             input: { objectUid: object.uid, groupUid: renderer.uid, name },
           });
@@ -7553,14 +7571,16 @@ async function workspaceRendererContextItems(scene, object, renderer) {
         label: "Copy",
         action: () => copyWorkspaceRenderer(object.uid, renderer.uid),
       },
-      {
+    );
+    if (workspaceRendererClipboardAvailable) {
+      items.push({
         label: "Paste Renderer",
-        disabled: !workspaceRendererClipboardAvailable,
         action: () => pasteWorkspaceRenderers(object.uid, renderer.uid),
-      },
-      null,
+      });
+    }
+    items.push(
       {
-        label: "New Renderer...",
+        label: "New Renderer…",
         action: () =>
           mutate("add_renderer", {
             objectUid: object.uid,
@@ -7578,6 +7598,11 @@ async function workspaceRendererContextItems(scene, object, renderer) {
               rendererUid: renderer.uid,
             },
           }),
+      },
+      null,
+      {
+        label: "Properties…",
+        action: () => showReferenceDialog("Renderer Properties"),
       },
     );
     return items;

@@ -5129,7 +5129,20 @@ impl GuiApplication {
                     }
                     response.context_menu(|ui| {
                         if is_group {
-                            if ui.button("Change Name...").clicked() {
+                            ui.weak(&renderer.name);
+                            ui.separator();
+                            if ui
+                                .button(if renderer.visible { "Hide" } else { "Show" })
+                                .clicked()
+                            {
+                                self.set_renderer_group_visibility(
+                                    object_uid,
+                                    renderer.uid,
+                                    !renderer.visible,
+                                );
+                                ui.close();
+                            }
+                            if ui.button("Rename…").clicked() {
                                 self.open_renderer_properties(object_uid, renderer.uid);
                                 ui.close();
                             }
@@ -5137,12 +5150,8 @@ impl GuiApplication {
                                 self.copy_workspace_renderer_to_clipboard(object_uid, renderer.uid);
                                 ui.close();
                             }
-                            if ui
-                                .add_enabled(
-                                    self.workspace_renderer_clipboard.is_some(),
-                                    egui::Button::new("Paste Renderer"),
-                                )
-                                .clicked()
+                            if self.workspace_renderer_clipboard.is_some()
+                                && ui.button("Paste Renderer").clicked()
                             {
                                 self.paste_workspace_renderer_clipboard(
                                     scene_uid,
@@ -5151,8 +5160,7 @@ impl GuiApplication {
                                 );
                                 ui.close();
                             }
-                            ui.separator();
-                            if ui.button("New Renderer...").clicked() {
+                            if ui.button("New Renderer…").clicked() {
                                 self.open_renderer_dialog_in_group(
                                     object_uid,
                                     Some(renderer.name.clone()),
@@ -5161,6 +5169,11 @@ impl GuiApplication {
                             }
                             if ui.button("Delete").clicked() {
                                 self.delete_renderer(object_uid, renderer.uid);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Properties…").clicked() {
+                                self.open_renderer_properties(object_uid, renderer.uid);
                                 ui.close();
                             }
                         } else {
