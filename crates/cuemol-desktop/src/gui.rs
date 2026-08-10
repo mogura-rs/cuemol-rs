@@ -59,6 +59,13 @@ const POV_RADIOSITY_MODES: &[(i32, &str)] = &[
     (9, "IndoorLQ"),
     (10, "IndoorHQ"),
 ];
+const MOUSE_PRESETS: &[(&str, &str)] = &[
+    ("DefaultViewInConf", "Default"),
+    ("CootViewInConf", "Coot"),
+    ("PymolViewInConf", "Pymol"),
+    ("IphoneViewInConf", "iPhone"),
+    ("TrackpadViewInConf", "Trackpad"),
+];
 const RENDERER_TYPES: &[&str] = crate::MOLECULE_RENDERER_TYPES;
 const LEGACY_MENU_SURFACES: &[&str] = &[
     "About CueMol2",
@@ -152,7 +159,7 @@ impl NativeRunner {
             gpu: None,
             gpu_init_receiver: None,
             event_proxy,
-            app: GuiApplication::new(),
+            app: GuiApplication::new_persistent(),
             init_error: None,
             started_at: Instant::now(),
             exit_after: exit_after_from_env(),
@@ -510,6 +517,8 @@ struct GuiApplication {
     show_bottom_panel: bool,
     show_about: bool,
     show_options: bool,
+    options_pane: OptionsPane,
+    options_draft: Option<NativePreferences>,
     show_scene_props: bool,
     show_view_props: bool,
     show_chain_dialog: bool,
@@ -526,6 +535,7 @@ struct GuiApplication {
     viewport_rect: Option<egui::Rect>,
     pixels_per_point: f32,
     shift_down: bool,
+    ctrl_down: bool,
     rect_select_start: Option<egui::Pos2>,
     rect_select_current: Option<egui::Pos2>,
     viewport_menu: Option<ViewportMenu>,
@@ -911,6 +921,83 @@ enum LeftPanel {
     Animation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptionsPane {
+    Misc,
+    Key,
+    Mouse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeShortcut {
+    id: String,
+    key: String,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct NativePreferences {
+    atom_label_font: String,
+    atom_label_size: f64,
+    atom_label_color: String,
+    atom_label_italic: bool,
+    atom_label_bold: bool,
+    ui_language: String,
+    use_hidpi: bool,
+    mouse_preset: String,
+    trackball_radius: f64,
+    hit_precision: f64,
+    momentum_scroll: bool,
+    multitouch_pad: bool,
+    emulate_right_button: bool,
+    shortcuts: Vec<NativeShortcut>,
+}
+
+impl NativePreferences {
+    fn from_state(state: &DesktopAppState) -> Self {
+        let input = state.view_input_config();
+        Self {
+            atom_label_font: nonempty_or(
+                state.style_value(0, "", "DefaultLabel.font_name"),
+                "san-serif",
+            ),
+            atom_label_size: state
+                .style_value(0, "", "DefaultLabel.font_size")
+                .parse()
+                .unwrap_or(12.0),
+            atom_label_color: nonempty_or(state.style_value(0, "", "DefaultLabel.color"), "Yellow"),
+            atom_label_italic: matches!(
+                state.style_value(0, "", "DefaultLabel.font_style").as_str(),
+                "italic" | "oblique"
+            ),
+            atom_label_bold: state.style_value(0, "", "DefaultLabel.font_weight") == "bold",
+            ui_language: nonempty_or(state.config_value("general.useragent.locale"), "en-US"),
+            use_hidpi: config_bool(state, "cuemol2.ui.view.use_hidpi", false),
+            mouse_preset: nonempty_or(
+                state.config_value("cuemol2.ui.viewinconf"),
+                "DefaultViewInConf",
+            ),
+            trackball_radius: input.tbrad(),
+            hit_precision: input.hitprec(),
+            momentum_scroll: config_bool(state, "cuemol2.ui.mouse-momentum-scroll", false),
+            multitouch_pad: config_bool(state, "cuemol2.ui.mouse-multitouch-pad", false),
+            emulate_right_button: config_bool(state, "cuemol2.ui.mouse-emulate-rbutton", false),
+            shortcuts: ["view-trans-plusx", "view-trans-minusx"]
+                .into_iter()
+                .map(|id| NativeShortcut {
+                    id: id.to_string(),
+                    key: state.config_value(&format!("shortcut:{id}:key")),
+                    ctrl: config_bool(state, &format!("shortcut:{id}:ctrl"), true),
+                    alt: config_bool(state, &format!("shortcut:{id}:alt"), false),
+                    shift: config_bool(state, &format!("shortcut:{id}:shift"), false),
+                })
+                .collect(),
+        }
+    }
+}
+
 impl LeftPanel {
     const ALL: [LeftPanel; 8] = [
         LeftPanel::Workspace,
@@ -1016,6 +1103,8 @@ impl GuiApplication {
             show_bottom_panel: true,
             show_about: false,
             show_options: false,
+            options_pane: OptionsPane::Misc,
+            options_draft: None,
             show_scene_props: false,
             show_view_props: false,
             show_chain_dialog: false,
@@ -1032,6 +1121,7 @@ impl GuiApplication {
             viewport_rect: None,
             pixels_per_point: 1.0,
             shift_down: false,
+            ctrl_down: false,
             rect_select_start: None,
             rect_select_current: None,
             viewport_menu: None,
@@ -1089,6 +1179,24 @@ impl GuiApplication {
             selection_history: Vec::new(),
         };
         app.rebuild_snapshot();
+        app
+    }
+
+    fn new_persistent() -> Self {
+        let mut app = Self::new();
+        let Some(path) = default_config_path() else {
+            return app;
+        };
+        app.config_path = path.to_string_lossy().into_owned();
+        if path.is_file() {
+            match app.state.load_config_file(&path) {
+                Ok(_) => {
+                    app.apply_stored_preferences();
+                    app.status = format!("Loaded config {}", path.display());
+                }
+                Err(error) => app.status = format!("Config load failed: {error}"),
+            }
+        }
         app
     }
 
@@ -1597,7 +1705,7 @@ impl GuiApplication {
                     }
                     ui.separator();
                     if ui.button("Options").clicked() {
-                        self.show_options = true;
+                        self.open_options_dialog();
                         ui.close();
                     }
                 });
@@ -4398,7 +4506,7 @@ impl GuiApplication {
                     }
                 });
             if ui.button("Settings").clicked() {
-                self.show_options = true;
+                self.open_options_dialog();
             }
             if ui.button("Render").clicked() {
                 self.export_current_scene();
@@ -4494,6 +4602,20 @@ impl GuiApplication {
         if ctx.wants_keyboard_input() {
             return;
         }
+        for (id, direction) in [("view-trans-plusx", 1.0_f32), ("view-trans-minusx", -1.0)] {
+            let Some(shortcut) = self.configured_view_shortcut(id) else {
+                continue;
+            };
+            if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
+                camera.pan_by(direction * 24.0, 0.0);
+                self.set_status(if direction > 0.0 {
+                    "Translated view +X"
+                } else {
+                    "Translated view -X"
+                });
+                return;
+            }
+        }
         let command = MainShortcutCommand::ALL
             .into_iter()
             .find(|command| ctx.input_mut(|input| input.consume_shortcut(&command.shortcut())));
@@ -4506,10 +4628,29 @@ impl GuiApplication {
             Some(MainShortcutCommand::SaveScene) => self.save_current_scene(camera),
             Some(MainShortcutCommand::Undo) => self.undo(camera),
             Some(MainShortcutCommand::Redo) => self.redo(camera),
-            Some(MainShortcutCommand::Config) => self.show_options = true,
+            Some(MainShortcutCommand::Config) => self.open_options_dialog(),
             Some(MainShortcutCommand::Performance) => self.perf_measure = !self.perf_measure,
             None => {}
         }
+    }
+
+    fn configured_view_shortcut(&self, id: &str) -> Option<egui::KeyboardShortcut> {
+        let key = match self
+            .state
+            .config_value(&format!("shortcut:{id}:key"))
+            .as_str()
+        {
+            "ArrowRight" => egui::Key::ArrowRight,
+            "ArrowLeft" => egui::Key::ArrowLeft,
+            "ArrowUp" => egui::Key::ArrowUp,
+            "ArrowDown" => egui::Key::ArrowDown,
+            _ => return None,
+        };
+        let mut modifiers = egui::Modifiers::NONE;
+        modifiers.ctrl = config_bool(&self.state, &format!("shortcut:{id}:ctrl"), true);
+        modifiers.alt = config_bool(&self.state, &format!("shortcut:{id}:alt"), false);
+        modifiers.shift = config_bool(&self.state, &format!("shortcut:{id}:shift"), false);
+        Some(egui::KeyboardShortcut::new(modifiers, key))
     }
 
     fn open_current_path(&mut self, camera: &mut CameraController) {
@@ -5681,27 +5822,369 @@ impl GuiApplication {
         self.show_about = open && !close;
     }
 
+    fn open_options_dialog(&mut self) {
+        self.options_pane = OptionsPane::Misc;
+        self.options_draft = Some(NativePreferences::from_state(&self.state));
+        self.show_options = true;
+    }
+
     fn options_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_options {
             return;
         }
+        let mut draft = self
+            .options_draft
+            .take()
+            .unwrap_or_else(|| NativePreferences::from_state(&self.state));
         let mut open = self.show_options;
+        let mut accept = false;
+        let mut cancel = false;
         egui::Window::new("Options")
             .open(&mut open)
             .collapsible(false)
+            .resizable(true)
+            .default_width(620.0)
+            .min_width(520.0)
             .show(ctx, |ui| {
-                ui.checkbox(&mut self.show_toolbar, "Topbar");
-                ui.checkbox(&mut self.show_workspace, "Workspace panel");
-                ui.checkbox(&mut self.show_inspector, "Inspector panel");
-                ui.checkbox(&mut self.show_bottom_panel, "Bottom panel");
-                if ui
-                    .checkbox(&mut self.color_proofing, "Color proofing")
-                    .changed()
-                {
-                    self.rebuild_snapshot();
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.options_pane, OptionsPane::Misc, "Misc");
+                    ui.selectable_value(&mut self.options_pane, OptionsPane::Key, "Key");
+                    ui.selectable_value(&mut self.options_pane, OptionsPane::Mouse, "Mouse");
+                });
+                ui.separator();
+                match self.options_pane {
+                    OptionsPane::Misc => Self::options_misc_ui(ui, &mut draft),
+                    OptionsPane::Key => Self::options_key_ui(ui, &mut draft),
+                    OptionsPane::Mouse => Self::options_mouse_ui(ui, &mut draft),
+                }
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if accept {
+            match self.apply_preferences(&draft) {
+                Ok(()) => {
+                    self.show_options = false;
+                    self.options_draft = None;
+                    self.set_status("Options updated");
+                }
+                Err(error) => {
+                    self.show_options = true;
+                    self.options_draft = Some(draft);
+                    self.set_status(format!("Options error: {error}"));
+                }
+            }
+        } else if cancel || !open {
+            self.show_options = false;
+            self.options_draft = None;
+        } else {
+            self.show_options = true;
+            self.options_draft = Some(draft);
+        }
+    }
+
+    fn options_misc_ui(ui: &mut egui::Ui, draft: &mut NativePreferences) {
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.strong("Atom label");
+            egui::Grid::new("options_misc_atom_label")
+                .num_columns(2)
+                .spacing([12.0, 7.0])
+                .show(ui, |ui| {
+                    ui.label("Font:");
+                    ui.text_edit_singleline(&mut draft.atom_label_font);
+                    ui.end_row();
+                    ui.label("Size:");
+                    ui.add(
+                        egui::DragValue::new(&mut draft.atom_label_size)
+                            .range(4.0..=144.0)
+                            .speed(1.0),
+                    );
+                    ui.end_row();
+                    ui.label("Color:");
+                    ui.text_edit_singleline(&mut draft.atom_label_color);
+                    ui.end_row();
+                    ui.label("");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut draft.atom_label_italic, "Italic");
+                        ui.checkbox(&mut draft.atom_label_bold, "Bold");
+                    });
+                    ui.end_row();
+                    ui.label("Sample:");
+                    let mut sample = egui::RichText::new("ABC abc 123")
+                        .size(draft.atom_label_size.clamp(4.0, 72.0) as f32);
+                    if draft.atom_label_italic {
+                        sample = sample.italics();
+                    }
+                    if draft.atom_label_bold {
+                        sample = sample.strong();
+                    }
+                    if let Ok(color) = cuemol_gfx::parse_color(&draft.atom_label_color) {
+                        if let Some(color) = color.rgba8() {
+                            sample = sample.color(egui::Color32::from_rgba_unmultiplied(
+                                color.r, color.g, color.b, color.a,
+                            ));
+                        }
+                    }
+                    egui::Frame::new()
+                        .fill(egui::Color32::WHITE)
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::GRAY))
+                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .show(ui, |ui| {
+                            ui.label(sample);
+                        });
+                    ui.end_row();
+                });
+        });
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.strong("Misc settings");
+            egui::ComboBox::from_label("UI language")
+                .selected_text(match draft.ui_language.as_str() {
+                    "ja" => "Japanese (ja)",
+                    _ => "English (en-US)",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut draft.ui_language,
+                        "en-US".to_string(),
+                        "English (en-US)",
+                    );
+                    ui.selectable_value(&mut draft.ui_language, "ja".to_string(), "Japanese (ja)");
+                });
+            ui.checkbox(&mut draft.use_hidpi, "Enable HiDPI (Retina) display");
+        });
+    }
+
+    fn options_key_ui(ui: &mut egui::Ui, draft: &mut NativePreferences) {
+        ui.label("Key config:");
+        egui::Grid::new("options_key_bindings")
+            .striped(true)
+            .num_columns(5)
+            .spacing([12.0, 7.0])
+            .show(ui, |ui| {
+                for heading in ["Name", "Key", "Ctrl", "Alt", "Shift"] {
+                    ui.strong(heading);
+                }
+                ui.end_row();
+                for shortcut in &mut draft.shortcuts {
+                    let name = match shortcut.id.as_str() {
+                        "view-trans-plusx" => "Translate view +X",
+                        "view-trans-minusx" => "Translate view −X",
+                        _ => shortcut.id.as_str(),
+                    };
+                    ui.label(name);
+                    egui::ComboBox::from_id_salt(format!("options-key-{}", shortcut.id))
+                        .selected_text(&shortcut.key)
+                        .show_ui(ui, |ui| {
+                            for key in ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"] {
+                                ui.selectable_value(&mut shortcut.key, key.to_string(), key);
+                            }
+                        });
+                    ui.checkbox(&mut shortcut.ctrl, "");
+                    ui.checkbox(&mut shortcut.alt, "");
+                    ui.checkbox(&mut shortcut.shift, "");
+                    ui.end_row();
                 }
             });
-        self.show_options = open;
+    }
+
+    fn options_mouse_ui(ui: &mut egui::Ui, draft: &mut NativePreferences) {
+        egui::ComboBox::from_label("View operation preset")
+            .selected_text(mouse_preset_label(&draft.mouse_preset))
+            .show_ui(ui, |ui| {
+                for (value, label) in MOUSE_PRESETS {
+                    ui.selectable_value(&mut draft.mouse_preset, value.to_string(), *label);
+                }
+            });
+        egui::Grid::new("options_mouse_values")
+            .num_columns(2)
+            .spacing([12.0, 7.0])
+            .show(ui, |ui| {
+                ui.label("XY-rot sensitivity:");
+                ui.add(
+                    egui::DragValue::new(&mut draft.trackball_radius)
+                        .range(0.1..=10.0)
+                        .speed(0.1),
+                );
+                ui.end_row();
+                ui.label("Pick precision:");
+                ui.add(
+                    egui::DragValue::new(&mut draft.hit_precision)
+                        .range(0.0..=100.0)
+                        .speed(1.0),
+                );
+                ui.end_row();
+            });
+        ui.checkbox(&mut draft.momentum_scroll, "Momentum scroll");
+        ui.checkbox(&mut draft.multitouch_pad, "Enable multi-touch trackpad");
+        ui.checkbox(&mut draft.emulate_right_button, "Emulate mouse R button");
+    }
+
+    fn apply_preferences(
+        &mut self,
+        preferences: &NativePreferences,
+    ) -> std::result::Result<(), String> {
+        validate_native_preferences(preferences)?;
+        self.state.set_style_value(
+            0,
+            "user",
+            "DefaultLabel.font_name",
+            preferences.atom_label_font.trim(),
+        );
+        self.state.set_style_value(
+            0,
+            "user",
+            "DefaultLabel.font_size",
+            preferences.atom_label_size.to_string(),
+        );
+        self.state.set_style_value(
+            0,
+            "user",
+            "DefaultLabel.color",
+            preferences.atom_label_color.trim(),
+        );
+        self.state.set_style_value(
+            0,
+            "user",
+            "DefaultLabel.font_style",
+            if preferences.atom_label_italic {
+                "italic"
+            } else {
+                "normal"
+            },
+        );
+        self.state.set_style_value(
+            0,
+            "user",
+            "DefaultLabel.font_weight",
+            if preferences.atom_label_bold {
+                "bold"
+            } else {
+                "normal"
+            },
+        );
+        {
+            let input = self.state.view_input_config_mut();
+            input.set_style(preferences.mouse_preset.clone());
+            input.set_tbrad(preferences.trackball_radius);
+            input.set_hitprec(preferences.hit_precision);
+        }
+        for (key, value) in [
+            (
+                "style:DefaultLabel.font_name",
+                preferences.atom_label_font.trim().to_string(),
+            ),
+            (
+                "style:DefaultLabel.font_size",
+                preferences.atom_label_size.to_string(),
+            ),
+            (
+                "style:DefaultLabel.color",
+                preferences.atom_label_color.trim().to_string(),
+            ),
+            (
+                "style:DefaultLabel.font_style",
+                if preferences.atom_label_italic {
+                    "italic".to_string()
+                } else {
+                    "normal".to_string()
+                },
+            ),
+            (
+                "style:DefaultLabel.font_weight",
+                if preferences.atom_label_bold {
+                    "bold".to_string()
+                } else {
+                    "normal".to_string()
+                },
+            ),
+            ("general.useragent.locale", preferences.ui_language.clone()),
+            (
+                "cuemol2.ui.view.use_hidpi",
+                preferences.use_hidpi.to_string(),
+            ),
+            ("cuemol2.ui.viewinconf", preferences.mouse_preset.clone()),
+            ("view_input:tbrad", preferences.trackball_radius.to_string()),
+            ("view_input:hitprec", preferences.hit_precision.to_string()),
+            (
+                "cuemol2.ui.mouse-momentum-scroll",
+                preferences.momentum_scroll.to_string(),
+            ),
+            (
+                "cuemol2.ui.mouse-multitouch-pad",
+                preferences.multitouch_pad.to_string(),
+            ),
+            (
+                "cuemol2.ui.mouse-emulate-rbutton",
+                preferences.emulate_right_button.to_string(),
+            ),
+        ] {
+            self.state.put_config_value(key, value);
+        }
+        for shortcut in &preferences.shortcuts {
+            for (field, value) in [
+                ("key", shortcut.key.clone()),
+                ("ctrl", shortcut.ctrl.to_string()),
+                ("alt", shortcut.alt.to_string()),
+                ("shift", shortcut.shift.to_string()),
+            ] {
+                self.state
+                    .put_config_value(&format!("shortcut:{}:{field}", shortcut.id), value);
+            }
+        }
+        let path = PathBuf::from(self.config_path.trim());
+        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create config directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        self.state
+            .save_config_file(&path)
+            .map_err(|error| format!("failed to save config {}: {error}", path.display()))
+    }
+
+    fn apply_stored_preferences(&mut self) {
+        for (style_key, config_key) in [
+            ("DefaultLabel.font_name", "style:DefaultLabel.font_name"),
+            ("DefaultLabel.font_size", "style:DefaultLabel.font_size"),
+            ("DefaultLabel.color", "style:DefaultLabel.color"),
+            ("DefaultLabel.font_style", "style:DefaultLabel.font_style"),
+            ("DefaultLabel.font_weight", "style:DefaultLabel.font_weight"),
+        ] {
+            let value = self.state.config_value(config_key);
+            if !value.is_empty() {
+                self.state.set_style_value(0, "user", style_key, value);
+            }
+        }
+        let style = nonempty_or(
+            self.state.config_value("cuemol2.ui.viewinconf"),
+            "DefaultViewInConf",
+        );
+        let tbrad = self
+            .state
+            .config_value("view_input:tbrad")
+            .parse()
+            .unwrap_or(0.8);
+        let hitprec = self
+            .state
+            .config_value("view_input:hitprec")
+            .parse()
+            .unwrap_or(10.0);
+        let input = self.state.view_input_config_mut();
+        input.set_style(style);
+        input.set_tbrad(tbrad);
+        input.set_hitprec(hitprec);
     }
 
     fn scene_props_dialog(&mut self, ctx: &egui::Context) {
@@ -6531,6 +7014,7 @@ impl GuiApplication {
         match event {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.shift_down = modifiers.state().shift_key();
+                self.ctrl_down = modifiers.state().control_key();
                 false
             }
             WindowEvent::MouseInput { state, button, .. } => match state {
@@ -6546,12 +7030,7 @@ impl GuiApplication {
                         self.viewport_menu = None;
                         return self.rect_select_start.is_some();
                     }
-                    // Shift+left = zoom drag (CueMol2 default view-input preset).
-                    camera.drag_mode = if *button == MouseButton::Left && self.shift_down {
-                        Some(CameraDragMode::Zoom)
-                    } else {
-                        CameraDragMode::from_button(*button)
-                    };
+                    camera.drag_mode = self.camera_drag_mode(*button);
                     camera.last_drag_cursor = camera.last_cursor;
                     camera.drag_total = 0.0;
                     self.viewport_menu = None;
@@ -6588,9 +7067,7 @@ impl GuiApplication {
                     }
                     // Right-click (no drag) opens the atom context menu
                     // (CueMol2 `navi-ctxtmenu-atom`).
-                    let should_menu = *button == MouseButton::Right
-                        && camera.drag_mode == Some(CameraDragMode::Pan)
-                        && is_click;
+                    let should_menu = *button == MouseButton::Right && is_click;
                     if should_menu {
                         if let Some(position) = camera.last_cursor {
                             let hit = self.pick_hit(camera, position);
@@ -6635,6 +7112,7 @@ impl GuiApplication {
                                         ((pos.y - rect.top()) / height) as f64,
                                         ((last.x - rect.left()) / width) as f64,
                                         ((last.y - rect.top()) / height) as f64,
+                                        self.state.view_input_config().tbrad(),
                                     );
                                 }
                                 None => camera.rotate_by(dx, dy),
@@ -6655,14 +7133,61 @@ impl GuiApplication {
                 if !self.pointer_in_viewport(camera.last_cursor) {
                     return false;
                 }
-                let step = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => *y,
-                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 48.0,
+                let (x, y, step) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (*x * 24.0, *y * 24.0, *y),
+                    MouseScrollDelta::PixelDelta(pos) => {
+                        (pos.x as f32, pos.y as f32, pos.y as f32 / 48.0)
+                    }
                 };
+                if self.state.view_input_config().style() == "TrackpadViewInConf"
+                    && config_bool(&self.state, "cuemol2.ui.mouse-multitouch-pad", false)
+                    && !self.ctrl_down
+                {
+                    camera.pan_by(x, y);
+                    return x != 0.0 || y != 0.0;
+                }
                 camera.zoom_by(step);
                 step != 0.0
             }
             _ => false,
+        }
+    }
+
+    fn camera_drag_mode(&self, button: MouseButton) -> Option<CameraDragMode> {
+        if button == MouseButton::Left
+            && self.ctrl_down
+            && config_bool(&self.state, "cuemol2.ui.mouse-emulate-rbutton", false)
+        {
+            return Some(CameraDragMode::Pan);
+        }
+        match self.state.view_input_config().style() {
+            "CootViewInConf" => match (button, self.ctrl_down, self.shift_down) {
+                (MouseButton::Left, true, _) => Some(CameraDragMode::Pan),
+                (MouseButton::Left, false, true) | (MouseButton::Right, _, _) => {
+                    Some(CameraDragMode::Zoom)
+                }
+                (MouseButton::Left, false, false) => Some(CameraDragMode::Rotate),
+                _ => None,
+            },
+            "PymolViewInConf" => match button {
+                MouseButton::Left => Some(CameraDragMode::Rotate),
+                MouseButton::Middle => Some(CameraDragMode::Pan),
+                MouseButton::Right => Some(CameraDragMode::Zoom),
+                _ => None,
+            },
+            "IphoneViewInConf" => match (button, self.shift_down) {
+                (MouseButton::Left, true) => Some(CameraDragMode::Zoom),
+                (MouseButton::Left, false) => Some(CameraDragMode::Rotate),
+                (MouseButton::Right, _) => Some(CameraDragMode::Pan),
+                _ => None,
+            },
+            _ => {
+                if button == MouseButton::Left && self.shift_down {
+                    Some(CameraDragMode::Zoom)
+                } else {
+                    CameraDragMode::from_button(button)
+                }
+            }
         }
     }
 
@@ -6794,7 +7319,7 @@ impl GuiApplication {
             let (screen, depth) = camera.project_to_viewport(center, viewport)?;
             let radius = camera
                 .projected_radius(atom.radius, depth, viewport)
-                .max(7.0);
+                .max(self.state.view_input_config().hitprec() as f32);
             let distance = screen.distance(position);
             if distance > radius {
                 continue;
@@ -6927,14 +7452,21 @@ impl CameraController {
     /// `m_curcam.m_rotQuat.mulSelf(dqrot)`. Unlike a pure incremental rotation,
     /// gestures near the viewport edge naturally introduce roll about the view
     /// axis, reproducing the original "grab and twist" feel.
-    fn trackball_move(&mut self, cur_x: f64, cur_y: f64, prev_x: f64, prev_y: f64) {
-        const TB_RAD: f64 = 0.8;
+    fn trackball_move(
+        &mut self,
+        cur_x: f64,
+        cur_y: f64,
+        prev_x: f64,
+        prev_y: f64,
+        trackball_radius: f64,
+    ) {
+        let trackball_radius = trackball_radius.clamp(0.1, 10.0);
         let x1 = 2.0 * prev_x - 1.0;
         let y1 = 1.0 - 2.0 * prev_y;
         let x2 = 2.0 * cur_x - 1.0;
         let y2 = 1.0 - 2.0 * cur_y;
-        let p1 = project_trackball(x1, y1, TB_RAD);
-        let p2 = project_trackball(x2, y2, TB_RAD);
+        let p1 = project_trackball(x1, y1, trackball_radius);
+        let p2 = project_trackball(x2, y2, trackball_radius);
         let axis = p2.cross(p1);
         let axis_len = axis.length();
         if !axis_len.is_finite() || axis_len < 1.0e-7 {
@@ -6942,7 +7474,7 @@ impl CameraController {
         }
         let axis = axis / axis_len;
         let chord = (p1 - p2).length() as f64;
-        let t = (chord / (2.0 * TB_RAD)).clamp(-1.0, 1.0);
+        let t = (chord / (2.0 * trackball_radius)).clamp(-1.0, 1.0);
         let phi = 2.0 * t.asin();
         if !phi.is_finite() || phi.abs() < 1.0e-5 {
             return;
@@ -9013,6 +9545,122 @@ fn mesh_fs(input: MeshVsOut, @builtin(front_facing) front_facing: bool) -> @loca
 }
 "#;
 
+fn nonempty_or(value: String, fallback: &str) -> String {
+    if value.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        value
+    }
+}
+
+fn config_bool(state: &DesktopAppState, key: &str, fallback: bool) -> bool {
+    match state.config_value(key).trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" => false,
+        _ => fallback,
+    }
+}
+
+fn mouse_preset_label(value: &str) -> &str {
+    MOUSE_PRESETS
+        .iter()
+        .find_map(|(preset, label)| (*preset == value).then_some(*label))
+        .unwrap_or(value)
+}
+
+fn validate_native_preferences(preferences: &NativePreferences) -> std::result::Result<(), String> {
+    if preferences.atom_label_font.trim().is_empty() {
+        return Err("an atom-label font is required".to_string());
+    }
+    if !preferences.atom_label_size.is_finite()
+        || !(4.0..=144.0).contains(&preferences.atom_label_size)
+    {
+        return Err("atom-label size must be between 4 and 144".to_string());
+    }
+    if preferences.atom_label_color.trim().is_empty() {
+        return Err("an atom-label color is required".to_string());
+    }
+    if !matches!(preferences.ui_language.as_str(), "en-US" | "ja") {
+        return Err(format!(
+            "unsupported UI language: {}",
+            preferences.ui_language
+        ));
+    }
+    if !MOUSE_PRESETS
+        .iter()
+        .any(|(preset, _)| *preset == preferences.mouse_preset)
+    {
+        return Err(format!(
+            "unknown mouse preset: {}",
+            preferences.mouse_preset
+        ));
+    }
+    if !preferences.trackball_radius.is_finite()
+        || !(0.1..=10.0).contains(&preferences.trackball_radius)
+    {
+        return Err("trackball radius must be between 0.1 and 10".to_string());
+    }
+    if !preferences.hit_precision.is_finite() || !(0.0..=100.0).contains(&preferences.hit_precision)
+    {
+        return Err("pick precision must be between 0 and 100".to_string());
+    }
+    const IDS: [&str; 2] = ["view-trans-plusx", "view-trans-minusx"];
+    const KEYS: [&str; 4] = ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"];
+    if preferences.shortcuts.len() != IDS.len()
+        || !IDS.iter().all(|id| {
+            preferences
+                .shortcuts
+                .iter()
+                .any(|shortcut| shortcut.id == *id)
+        })
+    {
+        return Err("the complete reference shortcut set is required".to_string());
+    }
+    for shortcut in &preferences.shortcuts {
+        if !KEYS.contains(&shortcut.key.as_str()) {
+            return Err(format!("unsupported shortcut key: {}", shortcut.key));
+        }
+    }
+    for (index, shortcut) in preferences.shortcuts.iter().enumerate() {
+        if preferences.shortcuts.iter().skip(index + 1).any(|other| {
+            shortcut.key == other.key
+                && shortcut.ctrl == other.ctrl
+                && shortcut.alt == other.alt
+                && shortcut.shift == other.shift
+        }) {
+            return Err(format!("duplicate shortcut: {}", shortcut.key));
+        }
+    }
+    Ok(())
+}
+
+fn default_config_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("CUEMOL2_CONFIG_FILE") {
+        return Some(PathBuf::from(path));
+    }
+    if cfg!(target_os = "windows") {
+        return std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|path| path.join("CueMol2").join("config.tsv"));
+    }
+    if cfg!(target_os = "macos") {
+        return std::env::var_os("HOME").map(PathBuf::from).map(|path| {
+            path.join("Library")
+                .join("Application Support")
+                .join("CueMol2")
+                .join("config.tsv")
+        });
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|path| path.join(".config"))
+        })
+        .map(|path| path.join("cuemol2").join("config.tsv"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9438,6 +10086,96 @@ mod tests {
     }
 
     #[test]
+    fn native_options_apply_runtime_values_and_persist_config() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-native-options-{}-{}.tsv",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let mut app = GuiApplication::new();
+        app.config_path = path.to_string_lossy().into_owned();
+        let mut preferences = NativePreferences::from_state(&app.state);
+        preferences.atom_label_font = "monospace".to_string();
+        preferences.atom_label_size = 18.0;
+        preferences.atom_label_color = "#123456".to_string();
+        preferences.atom_label_italic = true;
+        preferences.atom_label_bold = true;
+        preferences.ui_language = "ja".to_string();
+        preferences.use_hidpi = true;
+        preferences.mouse_preset = "TrackpadViewInConf".to_string();
+        preferences.trackball_radius = 1.4;
+        preferences.hit_precision = 16.0;
+        preferences.momentum_scroll = true;
+        preferences.multitouch_pad = true;
+        preferences.emulate_right_button = true;
+        preferences.shortcuts[0].key = "ArrowUp".to_string();
+        preferences.shortcuts[1].key = "ArrowDown".to_string();
+
+        app.apply_preferences(&preferences)
+            .expect("apply and save native options");
+
+        assert_eq!(
+            app.state.style_value(0, "", "DefaultLabel.font_name"),
+            "monospace"
+        );
+        assert_eq!(app.state.config_value("general.useragent.locale"), "ja");
+        assert_eq!(app.state.view_input_config().style(), "TrackpadViewInConf");
+        assert_eq!(app.state.view_input_config().tbrad(), 1.4);
+        assert_eq!(app.state.view_input_config().hitprec(), 16.0);
+        assert_eq!(
+            app.state.config_value("shortcut:view-trans-plusx:key"),
+            "ArrowUp"
+        );
+        assert_eq!(
+            app.camera_drag_mode(MouseButton::Middle),
+            Some(CameraDragMode::Pan)
+        );
+        assert_eq!(
+            app.camera_drag_mode(MouseButton::Right),
+            Some(CameraDragMode::Pan)
+        );
+
+        app.state
+            .view_input_config_mut()
+            .set_style("PymolViewInConf");
+        assert_eq!(
+            app.camera_drag_mode(MouseButton::Right),
+            Some(CameraDragMode::Zoom)
+        );
+
+        let mut restored = GuiApplication::new();
+        restored
+            .state
+            .load_config_file(&path)
+            .expect("reload saved native options");
+        restored.apply_stored_preferences();
+        let roundtrip = NativePreferences::from_state(&restored.state);
+        assert_eq!(roundtrip, preferences);
+        fs::remove_file(path).expect("remove native options config");
+    }
+
+    #[test]
+    fn native_options_validate_shortcuts_and_render_all_panes() {
+        let mut app = GuiApplication::new();
+        let mut invalid = NativePreferences::from_state(&app.state);
+        invalid.shortcuts[1] = invalid.shortcuts[0].clone();
+        invalid.shortcuts[1].id = "view-trans-minusx".to_string();
+        assert_eq!(
+            validate_native_preferences(&invalid),
+            Err("duplicate shortcut: ArrowRight".to_string())
+        );
+
+        let ctx = egui::Context::default();
+        app.open_options_dialog();
+        for pane in [OptionsPane::Misc, OptionsPane::Key, OptionsPane::Mouse] {
+            app.options_pane = pane;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| app.options_dialog(ctx));
+            assert!(app.show_options);
+            assert!(app.options_draft.is_some());
+        }
+    }
+
+    #[test]
     fn reload_scene_replaces_saved_contents_without_duplicating_objects() {
         let temp = std::env::temp_dir();
         let stem = format!("cuemol-native-reload-test-{}", std::process::id());
@@ -9542,13 +10280,13 @@ mod tests {
     fn trackball_move_accumulates_normalized_rotation() {
         let mut camera = CameraController::default();
         // Horizontal drag across the center of the viewport.
-        camera.trackball_move(0.6, 0.5, 0.4, 0.5);
+        camera.trackball_move(0.6, 0.5, 0.4, 0.5, 0.8);
         assert!(camera.orientation.is_normalized());
         assert!(!camera.orientation.abs_diff_eq(Quat::IDENTITY, 1.0e-4));
 
         // A zero-length drag must leave the orientation untouched.
         let before = camera.orientation;
-        camera.trackball_move(0.5, 0.5, 0.5, 0.5);
+        camera.trackball_move(0.5, 0.5, 0.5, 0.5, 0.8);
         assert!(camera.orientation.abs_diff_eq(before, 1.0e-6));
     }
 
@@ -10493,6 +11231,20 @@ mod tests {
                 });
             harness.run();
             save_harness(&mut harness, &out_dir.join("theme_light.png"));
+        }
+
+        // (1b3) Reference Options window with the Misc pane open.
+        {
+            let mut app = GuiApplication::new();
+            let mut camera = CameraController::default();
+            app.open_options_dialog();
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1000.0, 760.0))
+                .build(|ctx| {
+                    app.ui(ctx, &mut camera);
+                });
+            harness.run();
+            save_harness(&mut harness, &out_dir.join("options.png"));
         }
 
         // (1c) Atom labels overlaid on a small selection. The egui painter text DOES
