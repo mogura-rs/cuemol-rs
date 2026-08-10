@@ -1737,6 +1737,14 @@ impl DesktopAppState {
         Ok(())
     }
 
+    pub fn molecule_selection_text(&self, object_uid: Uid) -> Result<&str> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        Ok(object.mol().selection_text())
+    }
+
     pub fn selected_molecule_center(&self, object_uid: Uid) -> Result<Option<Vector4>> {
         let object = self
             .scene_manager()
@@ -4979,14 +4987,18 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
         };
+        let fallback_selector = parse_gui_selector(selection_text).ok().flatten();
         let mut out = Vec::new();
         for object in scene.objects() {
             let mol = object.mol();
-            let selected: std::collections::HashSet<usize> = parse_gui_selector(selection_text)
-                .ok()
-                .flatten()
-                .map(|selector| mol.select_indices(&selector).into_iter().collect())
-                .unwrap_or_default();
+            let selected: std::collections::HashSet<usize> = if mol.selection_text().is_empty() {
+                fallback_selector
+                    .as_ref()
+                    .map(|selector| mol.select_indices(selector).into_iter().collect())
+                    .unwrap_or_default()
+            } else {
+                mol.select_indices(mol.selection()).into_iter().collect()
+            };
             let residues = mol.residue_summaries();
             for chain in mol.chain_summaries() {
                 let mut chain_residues = Vec::new();
@@ -5262,12 +5274,20 @@ impl DesktopAppState {
     pub fn active_measure(&self, selection_text: &str) -> Option<String> {
         let scene_uid = self.active_scene?;
         let scene = self.scene_manager().scene(scene_uid)?;
-        let selector = parse_gui_selector(selection_text).ok().flatten()?;
+        let selector = parse_gui_selector(selection_text).ok().flatten();
         let mut points: Vec<cuemol_core::Vector4> = Vec::new();
         for object in scene.objects() {
             let mol = object.mol();
             let atoms = mol.atoms();
-            for index in mol.select_indices(&selector) {
+            let selected_indices = if mol.selection_text().is_empty() {
+                selector
+                    .as_ref()
+                    .map(|selector| mol.select_indices(selector))
+                    .unwrap_or_default()
+            } else {
+                mol.select_indices(mol.selection())
+            };
+            for index in selected_indices {
                 if let Some(atom) = atoms.get(index) {
                     points.push(atom.position);
                 }
@@ -5309,16 +5329,24 @@ impl DesktopAppState {
                             && renderer.renderer_type() != "selection"
                     }))
         }) {
-            let selected = selector
-                .as_ref()
-                .map(|selector| {
-                    object
-                        .mol()
-                        .select_indices(selector)
-                        .into_iter()
-                        .collect::<BTreeSet<_>>()
-                })
-                .unwrap_or_default();
+            let selected = if object.mol().selection_text().is_empty() {
+                selector
+                    .as_ref()
+                    .map(|selector| {
+                        object
+                            .mol()
+                            .select_indices(selector)
+                            .into_iter()
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default()
+            } else {
+                object
+                    .mol()
+                    .select_indices(object.mol().selection())
+                    .into_iter()
+                    .collect()
+            };
             atoms.extend(
                 object
                     .mol()
@@ -49668,6 +49696,10 @@ end_header
 
         app.set_molecule_selection_text(object_uid, "name C1")
             .unwrap();
+        assert_eq!(app.molecule_selection_text(object_uid).unwrap(), "name C1");
+        let picked = app.active_pick_atoms("*").unwrap();
+        assert_eq!(picked.iter().filter(|atom| atom.selected).count(), 1);
+        assert!(app.active_measure("*").is_none());
         let stored_selection = app.active_render_snapshot("").unwrap();
         assert_eq!(
             stored_selection
