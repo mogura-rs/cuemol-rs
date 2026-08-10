@@ -1620,9 +1620,9 @@ fn read_search_bytes(
     let encoding = detect_compression(path)?;
     let mut bytes = match encoding {
         CompressionEncoding::Raw => read_bytes(path, max_bytes)?,
-        CompressionEncoding::Gzip => decompress_with_command("gzip", path)?,
+        CompressionEncoding::Gzip => cuemol_core::decode_gzip_bytes(&read_bytes(path, 0)?)?,
         CompressionEncoding::Bzip2 => decompress_with_command("bzip2", path)?,
-        CompressionEncoding::Xz => decompress_with_command("xz", path)?,
+        CompressionEncoding::Xz => cuemol_core::decode_xz_bytes(&read_bytes(path, 0)?)?,
     };
     if max_bytes > 0 && bytes.len() > max_bytes as usize {
         bytes.truncate(max_bytes as usize);

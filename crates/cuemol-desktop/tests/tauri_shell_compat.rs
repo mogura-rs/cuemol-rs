@@ -239,18 +239,30 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(JS.contains(r#"invoke("get_initial_state", viewportDimensions())"#));
     assert!(JS.contains("snapshot = initial.snapshot"));
     assert!(JS.contains("applyViewport(initial.viewport, sequence)"));
-    assert!(JS.contains("scheduleRender(0)"));
+    assert!(JS.contains("if (snapshotHasRenderableContent()) void renderViewport()"));
     assert!(JS.contains(r#"invoke("get_molecule_details", {"#));
     assert!(JS.contains("scheduleMoleculeDetailsRefresh(delay = 0)"));
     assert!(JS.contains("scheduleMoleculeDetailsRefresh()"));
     assert!(JS.contains("includeSequence"));
     assert!(JS.contains("initial.startupPathsPending"));
+    assert!(JS.contains("function scheduleSecondaryPanelRender()"));
+    assert!(JS.contains("globalThis.requestIdleCallback(render, { timeout: 100 })"));
+    let render_shell = JS
+        .split("function renderShell()")
+        .nth(1)
+        .and_then(|source| source.split("function renderUndoControls").next())
+        .expect("renderShell function");
+    assert!(render_shell.contains("scheduleSecondaryPanelRender()"));
+    assert!(!render_shell.contains("renderColoring()"));
+    assert!(!render_shell.contains("renderTrajectory()"));
     assert!(JS.contains("void mutateWithViewport(\"open_initial_paths\")"));
     assert!(JS.contains("mutateWithViewport(\"open_paths\""));
     assert!(JS.contains("mutateWithViewport(\"open_pdb\""));
     assert!(JS.contains("applyViewport(update.viewport, sequence)"));
     assert!(JS.contains("if (!update.viewport.image && snapshotHasRenderableContent())"));
-    assert!(JS.contains("if (snapshotHasRenderableContent()) scheduleRender(0)"));
+    assert!(JS.contains(
+        "if (!update.viewport.image && snapshotHasRenderableContent()) void renderViewport()"
+    ));
     assert!(JS.contains("if (chainNode.dataset.loaded) return"));
     assert!(JS.contains("if (residueNode.dataset.loaded) return"));
     assert!(JS.contains("if (chainNode.open) loadResidues()"));
@@ -269,7 +281,7 @@ fn tauri_viewport_render_requests_are_coalesced() {
     assert!(JS.contains("do {"));
     assert!(JS.contains("} while (viewportRenderQueued)"));
     assert!(JS.contains("await viewportRenderRequest"));
-    assert!(JS.contains("if (refreshViewport) scheduleRender(0);"));
+    assert!(JS.contains("if (refreshViewport) void renderViewport();"));
     assert!(!JS.contains("if (refreshViewport) await renderViewport();"));
 }
 

@@ -176,6 +176,7 @@ let renderedSequenceKey = "";
 let renderedSceneTabsKey = "";
 let renderedSceneTreeKey = "";
 let renderedInspectorKey = "";
+let secondaryPanelRenderGeneration = 0;
 let selectionCandidateCache = { key: "", values: null };
 
 function loadRecentFiles() {
@@ -1015,8 +1016,8 @@ function genericPropertyEditor(info, kind) {
         draft = copyProperties(result.properties);
         centerMark = draft.centerMark === "crosshair" ? "cross" : draft.centerMark;
         applyCenterMark(centerMark);
-        renderShell();
         applyViewport(result.viewport, sequence);
+        renderShell();
       }
       for (const definition of definitions) refreshValueCell(definition);
       dirty = false;
@@ -4872,8 +4873,8 @@ async function runMoleculeSelectionAction(objectUid, selection, mode = "select")
     });
     snapshot = update.snapshot;
     syncEmptyMoleculeDetails();
-    renderShell();
     applyViewport(update.viewport, sequence);
+    renderShell();
     rememberSelection(selection);
     scheduleMoleculeDetailsRefresh();
     return true;
@@ -5603,8 +5604,8 @@ async function commitColoring(target, type, state) {
     });
     snapshot = result.snapshot;
     syncEmptyMoleculeDetails();
-    renderShell();
     applyViewport(result.viewport, sequence);
+    renderShell();
     scheduleMoleculeDetailsRefresh();
     return true;
   } catch (error) {
@@ -6424,6 +6425,25 @@ function renderProjectionControls() {
   });
 }
 
+function scheduleSecondaryPanelRender() {
+  const generation = ++secondaryPanelRenderGeneration;
+  const render = () => {
+    if (generation !== secondaryPanelRenderGeneration || !snapshot) return;
+    renderSelectionPanel();
+    renderColoring();
+    renderSymmetry();
+    renderDensity();
+    renderSequence();
+    renderTrajectory();
+    renderAnimation();
+  };
+  if (typeof globalThis.requestIdleCallback === "function") {
+    globalThis.requestIdleCallback(render, { timeout: 100 });
+  } else {
+    setTimeout(render, 0);
+  }
+}
+
 function renderShell() {
   if (!snapshot) return;
   normalizeSelection();
@@ -6446,13 +6466,7 @@ function renderShell() {
   renderSceneTree(workspaceRenderKey);
   renderInspector(workspaceRenderKey);
   renderMolStruct();
-  renderSelectionPanel();
-  renderColoring();
-  renderSymmetry();
-  renderDensity();
-  renderSequence();
-  renderTrajectory();
-  renderAnimation();
+  scheduleSecondaryPanelRender();
 }
 
 function renderUndoControls() {
@@ -6666,8 +6680,8 @@ async function mutate(command, args = {}, render = renderShell, refreshViewport 
   try {
     snapshot = await invoke(command, args);
     syncEmptyMoleculeDetails();
+    if (refreshViewport) void renderViewport();
     render();
-    if (refreshViewport) scheduleRender(0);
     scheduleMoleculeDetailsRefresh();
     return true;
   } catch (error) {
@@ -6694,9 +6708,9 @@ async function mutateWithViewport(command, args = {}, render = renderShell) {
     const update = await invoke(command, { ...args, ...size });
     snapshot = update.snapshot;
     syncEmptyMoleculeDetails();
-    render();
     applyViewport(update.viewport, sequence);
-    if (!update.viewport.image && snapshotHasRenderableContent()) scheduleRender(0);
+    if (!update.viewport.image && snapshotHasRenderableContent()) void renderViewport();
+    render();
     scheduleMoleculeDetailsRefresh();
     return true;
   } catch (error) {
@@ -7533,9 +7547,9 @@ async function start() {
     preferences = initial.preferences;
     snapshot = initial.snapshot;
     syncEmptyMoleculeDetails();
-    renderShell();
     applyViewport(initial.viewport, sequence);
-    if (snapshotHasRenderableContent()) scheduleRender(0);
+    if (snapshotHasRenderableContent()) void renderViewport();
+    renderShell();
     scheduleMoleculeDetailsRefresh();
     new ResizeObserver(() => {
       const size = viewportDimensions();

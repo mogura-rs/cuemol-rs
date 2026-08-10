@@ -281,8 +281,8 @@ macro_rules! compressed_input {
     };
 }
 
-compressed_input!(GzipInStream, decode_gzip);
-compressed_input!(XzInStream, decode_xz);
+compressed_input!(GzipInStream, decode_gzip_bytes);
+compressed_input!(XzInStream, decode_xz_bytes);
 
 #[derive(Debug, Clone, Copy)]
 enum CompressionKind {
@@ -394,7 +394,7 @@ macro_rules! compressed_output {
 compressed_output!(GzipOutStream, CompressionKind::Gzip);
 compressed_output!(XzOutStream, CompressionKind::Xz);
 
-fn decode_gzip(data: &[u8]) -> Result<Vec<u8>> {
+pub fn decode_gzip_bytes(data: &[u8]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     MultiGzDecoder::new(data)
         .read_to_end(&mut output)
@@ -406,7 +406,7 @@ fn encode_gzip(data: &[u8]) -> Result<Vec<u8>> {
     encoder.write_all(data).map_err(CueMolError::from)?;
     encoder.finish().map_err(CueMolError::from)
 }
-fn decode_xz(data: &[u8]) -> Result<Vec<u8>> {
+pub fn decode_xz_bytes(data: &[u8]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     lzma_rs::xz_decompress(&mut Cursor::new(data), &mut output)
         .map_err(|error| CueMolError::parse(error.to_string()))?;
@@ -506,5 +506,7 @@ mod tests {
     fn compressed_inputs_reject_corrupt_payloads() {
         assert!(GzipInStream::new(StrInStream::new(b"not gzip")).is_err());
         assert!(XzInStream::new(StrInStream::new(b"not xz")).is_err());
+        assert!(decode_gzip_bytes(b"not gzip").is_err());
+        assert!(decode_xz_bytes(b"not xz").is_err());
     }
 }

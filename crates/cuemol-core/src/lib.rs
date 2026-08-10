@@ -48,8 +48,8 @@ pub use event::{
     TimerListener,
 };
 pub use filter_streams::{
-    ChunkDelimitedInStream, FilterInStream, FilterOutStream, GzipInStream, GzipOutStream,
-    XzInStream, XzOutStream,
+    decode_gzip_bytes, decode_xz_bytes, ChunkDelimitedInStream, FilterInStream, FilterOutStream,
+    GzipInStream, GzipOutStream, XzInStream, XzOutStream,
 };
 pub use geometry::{Box3, IntVec3, Matrix3, Vector2};
 pub use invocation::{FuncMap, LInvokable, LVarArgs, LWrapperImpl};
