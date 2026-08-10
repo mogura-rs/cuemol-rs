@@ -885,6 +885,7 @@ struct AppModel {
 struct AppModelUndo {
     desktop: DesktopAppState,
     camera: Camera,
+    structure_revision: u64,
     selection: String,
     background: String,
     show_unit_cell: bool,
@@ -4914,6 +4915,7 @@ impl AppModel {
         AppModelUndo {
             desktop: self.desktop.clone(),
             camera: self.camera.clone(),
+            structure_revision: self.structure_revision,
             selection: self.selection.clone(),
             background: self.background.clone(),
             show_unit_cell: self.show_unit_cell,
@@ -4953,6 +4955,7 @@ impl AppModel {
     fn restore_undo(&mut self, snapshot: AppModelUndo) -> Result<(), String> {
         self.desktop = snapshot.desktop;
         self.camera = snapshot.camera;
+        self.structure_revision = snapshot.structure_revision;
         self.selection = snapshot.selection;
         self.background = snapshot.background;
         self.show_unit_cell = snapshot.show_unit_cell;
@@ -6328,7 +6331,6 @@ fn handle_model_request(
             let undo = model.capture_undo();
             model.set_object_properties(properties)?;
             model.push_undo(undo);
-            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetRendererProperties(properties) => {
@@ -6488,7 +6490,6 @@ fn handle_model_request(
             let undo = model.capture_undo();
             model.delete_workspace_item(target)?;
             model.push_undo(undo);
-            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::MoveWorkspaceObject(input) => {
@@ -6602,12 +6603,10 @@ fn handle_model_request(
         }
         ModelRequest::Undo(depth) => {
             model.undo(depth)?;
-            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::Redo(depth) => {
             model.redo(depth)?;
-            model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ClearUndo => {
@@ -12311,6 +12310,94 @@ mod tests {
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(!model.snapshot().objects[0].renderers[0].locked);
         assert_eq!(model.status, "Undo: Workspace item locked");
+    }
+
+    #[test]
+    fn workspace_edits_preserve_molecule_detail_keys_when_structure_is_unchanged() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let original_key = model.snapshot().structure_key;
+        let original_revision = model.structure_revision;
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetObjectProperties(ObjectPropertiesInput {
+                object_uid: object_uid.get(),
+                name: "molecule".to_string(),
+                visible: false,
+                locked: true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().structure_key, original_key);
+        assert_eq!(model.structure_revision, original_revision);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().structure_key, original_key);
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert_eq!(model.snapshot().structure_key, original_key);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetObjectProperties(ObjectPropertiesInput {
+                object_uid: object_uid.get(),
+                name: "renamed molecule".to_string(),
+                visible: false,
+                locked: true,
+            }),
+        )
+        .unwrap();
+        let renamed_key = model.snapshot().structure_key;
+        assert_ne!(renamed_key, original_key);
+        assert_eq!(model.structure_revision, original_revision);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().structure_key, original_key);
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert_eq!(model.snapshot().structure_key, renamed_key);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::DeleteWorkspaceItem(WorkspaceDeleteInput {
+                kind: "renderer".to_string(),
+                object_uid: object_uid.get(),
+                renderer_uid: Some(renderer_uid.get()),
+            }),
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().structure_key, renamed_key);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().structure_key, renamed_key);
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert_eq!(model.snapshot().structure_key, renamed_key);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::DeleteWorkspaceItem(WorkspaceDeleteInput {
+                kind: "object".to_string(),
+                object_uid: object_uid.get(),
+                renderer_uid: None,
+            }),
+        )
+        .unwrap();
+        let deleted_key = model.snapshot().structure_key;
+        assert_ne!(deleted_key, renamed_key);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().structure_key, renamed_key);
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert_eq!(model.snapshot().structure_key, deleted_key);
+    }
+
+    #[test]
+    fn undo_and_redo_restore_molecule_structure_revisions() {
+        let mut model = model_without_gpu();
+        let original_revision = model.structure_revision;
+        let undo = model.capture_undo();
+        model.touch_structure_details();
+        let changed_revision = model.structure_revision;
+        model.push_undo(undo);
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.structure_revision, original_revision);
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert_eq!(model.structure_revision, changed_revision);
     }
 
     #[test]
