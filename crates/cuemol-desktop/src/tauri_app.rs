@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use cuemol_core::{LDom2Node, Quat, Uid, Vector4};
 use cuemol_qsys::{Camera, CenterMark, StereoMode, View};
@@ -18,6 +18,14 @@ use crate::{
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
+
+static SHARED_SCENE_RENDERER: OnceLock<Option<Arc<SceneRenderer>>> = OnceLock::new();
+
+fn shared_scene_renderer() -> Option<Arc<SceneRenderer>> {
+    SHARED_SCENE_RENDERER
+        .get_or_init(|| SceneRenderer::new().map(Arc::new))
+        .clone()
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -636,7 +644,9 @@ struct AppModel {
     desktop: DesktopAppState,
     config_path: Option<PathBuf>,
     camera: Camera,
-    renderer: Option<SceneRenderer>,
+    renderer: Option<Arc<SceneRenderer>>,
+    renderer_warmup: Option<std::thread::JoinHandle<Option<Arc<SceneRenderer>>>>,
+    renderer_init_attempted: bool,
     mesh: Option<RenderMesh>,
     screen_lines: Vec<RenderBond>,
     mesh_refit_pending: bool,
@@ -728,6 +738,8 @@ impl AppModel {
             config_path,
             camera: Camera::new(),
             renderer: None,
+            renderer_warmup: None,
+            renderer_init_attempted: false,
             mesh: None,
             screen_lines: Vec::new(),
             mesh_refit_pending: loaded > 0,
@@ -3601,7 +3613,7 @@ impl AppModel {
                 .as_ref()
                 .is_some_and(|mesh| !mesh.indices.is_empty())
         {
-            self.renderer = SceneRenderer::new();
+            self.finish_renderer_warmup();
         }
         viewport.image =
             self.renderer
@@ -3687,6 +3699,41 @@ impl AppModel {
         }
     }
 
+    fn start_renderer_warmup(&mut self) {
+        self.start_renderer_warmup_with(shared_scene_renderer);
+    }
+
+    fn start_renderer_warmup_with(
+        &mut self,
+        initialize: impl FnOnce() -> Option<Arc<SceneRenderer>> + Send + 'static,
+    ) {
+        if self.renderer.is_some() || self.renderer_warmup.is_some() || self.renderer_init_attempted
+        {
+            return;
+        }
+        if let Ok(handle) = std::thread::Builder::new()
+            .name("cuemol-renderer-warmup".to_string())
+            .spawn(initialize)
+        {
+            self.renderer_warmup = Some(handle);
+            self.renderer_init_attempted = true;
+        }
+    }
+
+    fn finish_renderer_warmup(&mut self) {
+        if self.renderer.is_some() {
+            return;
+        }
+        if let Some(handle) = self.renderer_warmup.take() {
+            self.renderer = handle.join().ok().flatten();
+            return;
+        }
+        if !self.renderer_init_attempted {
+            self.renderer_init_attempted = true;
+            self.renderer = shared_scene_renderer();
+        }
+    }
+
     fn render_png_bytes(&self, width: u32, height: u32) -> Result<Vec<u8>, String> {
         let width = width.clamp(64, MAX_VIEW_DIM);
         let height = height.clamp(64, MAX_VIEW_DIM);
@@ -3736,9 +3783,7 @@ impl AppModel {
         let output_dir = Path::new(output_dir);
         fs::create_dir_all(output_dir).map_err(|error| error.to_string())?;
         self.prepare_mesh_if_needed()?;
-        if self.renderer.is_none() {
-            self.renderer = SceneRenderer::new();
-        }
+        self.finish_renderer_warmup();
 
         let original_desktop = self.desktop.clone();
         let original_camera = self.camera.clone();
@@ -5267,6 +5312,7 @@ fn validate_coloring_update(input: &ColoringUpdateInput) -> Result<(), String> {
 }
 
 fn apply_open_paths(model: &mut AppModel, paths: Vec<String>) -> Result<(), String> {
+    model.start_renderer_warmup();
     let undo = model.capture_undo();
     model.open_paths(paths)?;
     model.sync_active_scene_properties();
@@ -5507,6 +5553,7 @@ fn handle_model_request(
             width,
             height,
         } => {
+            model.start_renderer_warmup();
             let undo = model.capture_undo();
             let result = model
                 .desktop
@@ -7179,6 +7226,7 @@ async fn open_pdb(
     height: u32,
     state: State<'_, ManagedState>,
 ) -> Result<MolStructUpdateDto, String> {
+    let _renderer_warmup = tauri::async_runtime::spawn_blocking(shared_scene_renderer);
     let download_id = pdb_id.clone();
     let path = tauri::async_runtime::spawn_blocking(move || download_pdb_to_cache(&download_id))
         .await
@@ -8241,6 +8289,8 @@ mod tests {
             config_path: None,
             camera: Camera::new(),
             renderer: None,
+            renderer_warmup: None,
+            renderer_init_attempted: false,
             mesh: None,
             screen_lines: Vec::new(),
             mesh_refit_pending: false,
@@ -8362,12 +8412,45 @@ mod tests {
     fn startup_defers_mesh_and_gpu_initialization_until_viewport_render() {
         let mut model = AppModel::new(Vec::new());
         assert!(model.renderer.is_none());
+        assert!(model.renderer_warmup.is_none());
+        assert!(!model.renderer_init_attempted);
         assert!(model.mesh.is_none());
         model.prepare_mesh_if_needed().unwrap();
         assert!(model
             .mesh
             .as_ref()
             .is_some_and(|mesh| mesh.indices.is_empty()));
+        assert!(!model.renderer_init_attempted);
+    }
+
+    #[test]
+    fn renderer_warmup_runs_off_thread_and_is_not_repeated() {
+        let mut model = model_without_gpu();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        model.start_renderer_warmup_with(move || {
+            started_sender.send(()).expect("signal renderer warmup");
+            release_receiver.recv().expect("release renderer warmup");
+            None
+        });
+        started_receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("renderer warmup starts in the background");
+        assert!(model.renderer_init_attempted);
+        assert!(model.renderer_warmup.is_some());
+
+        let repeated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let repeated_flag = repeated.clone();
+        model.start_renderer_warmup_with(move || {
+            repeated_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            None
+        });
+        assert!(!repeated.load(std::sync::atomic::Ordering::SeqCst));
+
+        release_sender.send(()).expect("finish renderer warmup");
+        model.finish_renderer_warmup();
+        assert!(model.renderer_warmup.is_none());
+        assert!(model.renderer.is_none());
     }
 
     #[test]
