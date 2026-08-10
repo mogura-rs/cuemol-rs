@@ -3384,6 +3384,182 @@ async function rendererStyleCreateEditor(object, renderer) {
   namePrefix.focus();
 }
 
+async function showApplyRendererStyleDialog(object, renderer, styleOptions) {
+  if (referenceDialog.open) referenceDialog.close();
+  const initialStyles = (renderer.style || "")
+    .split(",")
+    .map((style) => style.trim())
+    .filter(Boolean);
+  let styles = [...initialStyles];
+  let selectedIndex = styles.length ? 0 : -1;
+  const initialNames = new Set(initialStyles);
+  const rendererType = renderer.rendererType.replace(/^\*/, "").toLowerCase();
+  const suffix = ["name_label", "namelabel"].includes(rendererType)
+    ? "label"
+    : rendererType === "gpu_mapmesh"
+      ? "contour"
+      : rendererType;
+  const available = styleOptions
+    .filter((style) => !initialNames.has(style.name))
+    .map((style) => ({
+      name: style.name,
+      label: style.description
+        ? `${style.name} (${style.description})`
+        : style.name,
+    }));
+  const typeMatch = available.filter((style) => style.name.toLowerCase().endsWith(suffix));
+  const edgeMatch = available.filter((style) => style.name.toLowerCase().startsWith("egline"));
+  const coloringMatch = available.filter((style) =>
+    /(coloring|paint)$/i.test(style.name),
+  );
+  const totalAvailable = typeMatch.length + edgeMatch.length + coloringMatch.length;
+
+  dialogTitle.textContent = "Apply Renderer Style";
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog renderer-style-list-dialog has-actions";
+
+  const rendererInfo = document.createElement("div");
+  rendererInfo.className = "renderer-style-list-info";
+  const rendererLabel = document.createElement("strong");
+  rendererLabel.textContent = "Renderer: ";
+  rendererInfo.append(
+    rendererLabel,
+    document.createTextNode(`${renderer.name} (${renderer.rendererType})`),
+  );
+  const stylesLabel = document.createElement("div");
+  stylesLabel.textContent = "Styles:";
+  const lowPriority = document.createElement("div");
+  lowPriority.className = "renderer-style-priority";
+  lowPriority.textContent = "(low priority)";
+  const list = document.createElement("div");
+  list.className = "renderer-style-list";
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", "Applied styles");
+  const highPriority = document.createElement("div");
+  highPriority.className = "renderer-style-priority";
+  highPriority.textContent = "(high priority)";
+  const controls = document.createElement("div");
+  controls.className = "renderer-style-list-controls";
+
+  let add;
+  let remove;
+  let up;
+  let down;
+  const updateControls = () => {
+    remove.disabled = selectedIndex < 0;
+    up.disabled = selectedIndex <= 0;
+    down.disabled = selectedIndex < 0 || selectedIndex >= styles.length - 1;
+  };
+  const renderList = () => {
+    list.replaceChildren();
+    if (!styles.length) {
+      const empty = document.createElement("div");
+      empty.className = "renderer-style-list-empty";
+      empty.textContent = "(no styles applied)";
+      list.append(empty);
+    } else {
+      styles.forEach((name, index) => {
+        const row = button(name, "renderer-style-list-row", () => {
+          selectedIndex = index;
+          renderList();
+        });
+        row.setAttribute("role", "option");
+        row.setAttribute("aria-selected", String(index === selectedIndex));
+        row.classList.toggle("selected", index === selectedIndex);
+        list.append(row);
+      });
+    }
+    updateControls();
+  };
+  const addStyle = (name) => {
+    if (styles.includes(name)) return;
+    const insertAt = selectedIndex + 1;
+    if (insertAt >= 0 && insertAt < styles.length) {
+      styles.splice(insertAt, 0, name);
+      selectedIndex = insertAt;
+    } else {
+      styles.push(name);
+      selectedIndex = styles.length - 1;
+    }
+    renderList();
+  };
+  add = button("＋ Add", "", (event) => {
+    const used = new Set(styles);
+    const sections = [typeMatch, edgeMatch, coloringMatch].filter((section) => section.length);
+    const items = [];
+    sections.forEach((section, sectionIndex) => {
+      if (sectionIndex) items.push(null);
+      for (const style of section) {
+        items.push({
+          label: style.label,
+          disabled: used.has(style.name),
+          action: () => addStyle(style.name),
+        });
+      }
+    });
+    if (!items.length) items.push({ label: "(no styles)", disabled: true });
+    showWorkspaceContextMenu(event, items, referenceDialog);
+  });
+  add.disabled = totalAvailable === 0;
+  remove = button("Delete", "", () => {
+    if (selectedIndex < 0) return;
+    styles.splice(selectedIndex, 1);
+    selectedIndex = styles.length ? Math.min(selectedIndex, styles.length - 1) : -1;
+    renderList();
+  });
+  up = button("Up", "", () => {
+    if (selectedIndex <= 0) return;
+    [styles[selectedIndex - 1], styles[selectedIndex]] = [
+      styles[selectedIndex],
+      styles[selectedIndex - 1],
+    ];
+    selectedIndex -= 1;
+    renderList();
+  });
+  down = button("Down", "", () => {
+    if (selectedIndex < 0 || selectedIndex >= styles.length - 1) return;
+    [styles[selectedIndex], styles[selectedIndex + 1]] = [
+      styles[selectedIndex + 1],
+      styles[selectedIndex],
+    ];
+    selectedIndex += 1;
+    renderList();
+  });
+  controls.append(add, remove, up, down);
+  dialogContent.append(
+    rendererInfo,
+    stylesLabel,
+    lowPriority,
+    list,
+    highPriority,
+    controls,
+  );
+  renderList();
+
+  const cancel = button("Cancel", "", () => {
+    closeWorkspaceContextMenu();
+    referenceDialog.close();
+  });
+  const ok = button("OK", "dialog-primary", async () => {
+    closeWorkspaceContextMenu();
+    if (JSON.stringify(styles) === JSON.stringify(initialStyles)) {
+      referenceDialog.close();
+      return;
+    }
+    const changed = await mutate("set_workspace_renderer_styles", {
+      input: {
+        objectUid: object.uid,
+        rendererUid: renderer.uid,
+        styleNames: styles,
+      },
+    });
+    if (changed) referenceDialog.close();
+  });
+  dialogActions(cancel, ok);
+  if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
+}
+
 async function showStyleProperties(style) {
   if (!style || style.localIndex === null) {
     showError("Global styles are read-only.");
@@ -6092,6 +6268,7 @@ function closeWorkspaceContextMenu() {
 }
 
 function showWorkspaceContextMenu(event, items) {
+  const host = arguments[2] || document.body;
   event.preventDefault();
   event.stopPropagation();
   closeWorkspaceContextMenu();
@@ -6141,7 +6318,7 @@ function showWorkspaceContextMenu(event, items) {
     }
   };
   appendItems(menu, items);
-  document.body.append(menu);
+  host.append(menu);
   const bounds = menu.getBoundingClientRect();
   menu.style.left = `${Math.max(4, Math.min(event.clientX, innerWidth - bounds.width - 4))}px`;
   menu.style.top = `${Math.max(4, Math.min(event.clientY, innerHeight - bounds.height - 4))}px`;
@@ -7234,7 +7411,13 @@ async function workspaceRendererContextItems(scene, object, renderer) {
         action: applyStyle(style.name, "edge"),
       });
     }
-    items.push({ label: "Edit style...", action: () => showReferenceDialog("Renderer Properties") });
+    items.push({
+      label: "Edit style...",
+      action: async () => {
+        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+        await showApplyRendererStyleDialog(object, renderer, styleOptions);
+      },
+    });
   }
   items.push({
     label: "Create style...",
@@ -11193,6 +11376,7 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 referenceDialog.addEventListener("close", () => {
+  closeWorkspaceContextMenu();
   atomPickerTarget = null;
   viewport.classList.remove("atom-picking");
 });

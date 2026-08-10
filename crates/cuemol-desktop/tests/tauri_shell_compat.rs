@@ -580,6 +580,35 @@ fn atom_interaction_context_menu_uses_the_dedicated_list_editor() {
 }
 
 #[test]
+fn renderer_edit_style_uses_the_ordered_style_list_dialog() {
+    for label in [
+        "Apply Renderer Style",
+        "Renderer: ",
+        "Styles:",
+        "(low priority)",
+        "(high priority)",
+        "(no styles applied)",
+        "＋ Add",
+        "Delete",
+        "Up",
+        "Down",
+    ] {
+        assert!(
+            JS.contains(label),
+            "missing renderer style editor label {label}"
+        );
+    }
+    assert!(JS.contains("showApplyRendererStyleDialog(object, renderer, styleOptions)"));
+    assert!(JS.contains("mutate(\"set_workspace_renderer_styles\""));
+    assert!(JS.contains("styles.splice(insertAt, 0, name)"));
+    assert!(CSS.contains(".reference-dialog.renderer-style-list-dialog"));
+    assert!(NATIVE_GUI_RS.contains("fn renderer_style_edit_dialog"));
+    assert!(NATIVE_GUI_RS.contains("open_renderer_style_edit(scene_uid, object_uid, renderer.uid)"));
+    assert!(TAURI_APP_RS.contains("ModelRequest::SetWorkspaceRendererStyles"));
+    assert!(TAURI_APP_RS.contains("fn set_workspace_renderer_styles("));
+}
+
+#[test]
 fn png_export_matches_the_reference_options_dialog() {
     for label in [
         "PNG options",

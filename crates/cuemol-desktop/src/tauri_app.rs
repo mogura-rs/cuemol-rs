@@ -1095,6 +1095,14 @@ struct WorkspaceRendererStyleInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceRendererStylesInput {
+    object_uid: u64,
+    renderer_uid: u64,
+    style_names: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceRendererColoringInput {
     object_uid: u64,
     renderer_uid: u64,
@@ -2837,6 +2845,29 @@ impl AppModel {
         } else {
             "Change style".to_string()
         };
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn set_workspace_renderer_styles(
+        &mut self,
+        input: WorkspaceRendererStylesInput,
+    ) -> Result<(), String> {
+        let styles = input
+            .style_names
+            .iter()
+            .map(|style| style.trim())
+            .filter(|style| !style.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.desktop
+            .set_renderer_styles(
+                Uid::new(input.object_uid),
+                Uid::new(input.renderer_uid),
+                &styles,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = "Change style".to_string();
         self.invalidate_mesh(false);
         Ok(())
     }
@@ -5581,6 +5612,7 @@ enum ModelRequest {
     SetWorkspaceRendererSelection(WorkspaceRendererSelectionInput),
     ChangeWorkspaceRendererType(WorkspaceRendererTypeInput),
     ApplyWorkspaceRendererStyle(WorkspaceRendererStyleInput),
+    SetWorkspaceRendererStyles(WorkspaceRendererStylesInput),
     SetWorkspaceRendererColoring(WorkspaceRendererColoringInput),
     InsertWorkspaceRendererPaint(WorkspaceRendererPaintInput),
     CopyWorkspaceRenderer(WorkspaceRendererCopyInput),
@@ -7421,6 +7453,12 @@ fn handle_model_request(
         ModelRequest::ApplyWorkspaceRendererStyle(input) => {
             let undo = model.capture_undo();
             model.apply_workspace_renderer_style(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetWorkspaceRendererStyles(input) => {
+            let undo = model.capture_undo();
+            model.set_workspace_renderer_styles(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -9988,6 +10026,17 @@ fn apply_workspace_renderer_style(
 }
 
 #[tauri::command]
+fn set_workspace_renderer_styles(
+    input: WorkspaceRendererStylesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetWorkspaceRendererStyles(input),
+    )?)
+}
+
+#[tauri::command]
 fn set_workspace_renderer_coloring(
     input: WorkspaceRendererColoringInput,
     state: State<'_, ManagedState>,
@@ -11521,6 +11570,7 @@ pub fn run() -> Result<(), tauri::Error> {
             set_workspace_renderer_selection,
             change_workspace_renderer_type,
             apply_workspace_renderer_style,
+            set_workspace_renderer_styles,
             set_workspace_renderer_coloring,
             insert_workspace_renderer_paint,
             copy_workspace_renderer,
@@ -13586,6 +13636,36 @@ mod tests {
         assert_eq!(snapshot.objects[0].renderers[0].style, "DefaultSimple");
         assert_eq!(snapshot.undo_descriptions[0], "Change style");
         assert!(model.mesh.is_none());
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceRendererStyles(WorkspaceRendererStylesInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                style_names: vec![
+                    "DefaultCPKColoring".to_string(),
+                    " ThickSimple ".to_string(),
+                ],
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(
+            snapshot.objects[0].renderers[0].style,
+            "DefaultCPKColoring,ThickSimple"
+        );
+        assert_eq!(snapshot.undo_descriptions[0], "Change style");
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .renderer_summaries(object_uid)
+                .first()
+                .and_then(|renderer| renderer.style.as_deref()),
+            Some("DefaultSimple")
+        );
 
         let response = handle_model_request(
             &mut model,

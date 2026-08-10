@@ -817,6 +817,7 @@ struct GuiApplication {
     pending_camera_visibility_clear: Option<(cuemol_core::Uid, String)>,
     style_properties_draft: Option<NativeStyleProperties>,
     renderer_style_create_draft: Option<NativeRendererStyleCreate>,
+    renderer_style_edit_draft: Option<NativeRendererStyleEdit>,
     workspace_camera_clipboard: Option<WorkspaceCameraClipboard>,
     workspace_object_clipboard: Option<WorkspaceObjectClipboard>,
     workspace_renderer_clipboard: Option<WorkspaceRendererClipboard>,
@@ -1490,6 +1491,27 @@ struct NativeRendererStyleCreate {
     style_set_index: Option<usize>,
     name_prefix: String,
     overwrite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeRendererStyleEntry {
+    name: String,
+    label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeRendererStyleEdit {
+    scene_uid: cuemol_core::Uid,
+    object_uid: cuemol_core::Uid,
+    renderer_uid: cuemol_core::Uid,
+    renderer_name: String,
+    renderer_type: String,
+    initial_styles: Vec<String>,
+    styles: Vec<String>,
+    selected_index: Option<usize>,
+    type_match: Vec<NativeRendererStyleEntry>,
+    edge_match: Vec<NativeRendererStyleEntry>,
+    coloring_match: Vec<NativeRendererStyleEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2620,6 +2642,7 @@ impl GuiApplication {
             pending_camera_visibility_clear: None,
             style_properties_draft: None,
             renderer_style_create_draft: None,
+            renderer_style_edit_draft: None,
             workspace_camera_clipboard: None,
             workspace_object_clipboard: None,
             workspace_renderer_clipboard: None,
@@ -5257,7 +5280,7 @@ impl GuiApplication {
             }
         });
         if ui.button("Edit style...").clicked() {
-            self.open_renderer_properties(object_uid, renderer.uid);
+            self.open_renderer_style_edit(scene_uid, object_uid, renderer.uid);
             ui.close();
         }
     }
@@ -10550,6 +10573,7 @@ impl GuiApplication {
         self.camera_visibility_clear_dialog(ctx);
         self.style_props_dialog(ctx);
         self.renderer_style_create_dialog(ctx);
+        self.renderer_style_edit_dialog(ctx);
         self.style_paste_confirmation_dialog(ctx);
         self.chain_dialog(ctx);
         self.residue_dialog(ctx);
@@ -14004,6 +14028,267 @@ impl GuiApplication {
             name,
             read_only: false,
         });
+    }
+
+    fn open_renderer_style_edit(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+    ) {
+        let Some((renderer_name, renderer_type, style_list)) = self
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .and_then(|scene| scene.object(object_uid))
+            .and_then(|object| object.renderer(renderer_uid))
+            .map(|renderer| {
+                (
+                    renderer.name().to_string(),
+                    renderer.renderer_type().to_string(),
+                    renderer.style().unwrap_or_default().to_string(),
+                )
+            })
+        else {
+            self.set_status("Renderer not found");
+            return;
+        };
+        let initial_styles = style_list
+            .split(',')
+            .map(str::trim)
+            .filter(|style| !style.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let normalized_type = renderer_type.trim_start_matches('*').to_ascii_lowercase();
+        let suffix = match normalized_type.as_str() {
+            "name_label" | "namelabel" => "label",
+            "gpu_mapmesh" => "contour",
+            other => other,
+        };
+        let mut type_match = Vec::new();
+        let mut edge_match = Vec::new();
+        let mut coloring_match = Vec::new();
+        for style in self.state.renderer_style_options(scene_uid, &renderer_type) {
+            if initial_styles.iter().any(|name| name == &style.name) {
+                continue;
+            }
+            let name_lower = style.name.to_ascii_lowercase();
+            let entry = NativeRendererStyleEntry {
+                label: if style.description.is_empty() {
+                    style.name.clone()
+                } else {
+                    format!("{} ({})", style.name, style.description)
+                },
+                name: style.name,
+            };
+            if name_lower.ends_with(suffix) {
+                type_match.push(entry.clone());
+            }
+            if name_lower.starts_with("egline") {
+                edge_match.push(entry.clone());
+            }
+            if name_lower.ends_with("coloring") || name_lower.ends_with("paint") {
+                coloring_match.push(entry);
+            }
+        }
+        self.renderer_style_edit_draft = Some(NativeRendererStyleEdit {
+            scene_uid,
+            object_uid,
+            renderer_uid,
+            renderer_name,
+            renderer_type,
+            selected_index: (!initial_styles.is_empty()).then_some(0),
+            styles: initial_styles.clone(),
+            initial_styles,
+            type_match,
+            edge_match,
+            coloring_match,
+        });
+    }
+
+    fn apply_renderer_style_edit(
+        &mut self,
+        draft: &NativeRendererStyleEdit,
+    ) -> std::result::Result<bool, String> {
+        if draft.styles == draft.initial_styles {
+            return Ok(false);
+        }
+        let styles = draft
+            .styles
+            .iter()
+            .map(|style| style.trim())
+            .filter(|style| !style.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
+        let undo = self.capture_undo();
+        self.state
+            .set_renderer_styles(draft.object_uid, draft.renderer_uid, &styles)
+            .map_err(|error| error.to_string())?;
+        self.push_undo_snapshot(undo);
+        self.modified_scenes.insert(draft.scene_uid);
+        self.rebuild_snapshot();
+        Ok(true)
+    }
+
+    fn renderer_style_edit_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.renderer_style_edit_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        let mut add_name = None;
+        let mut delete = false;
+        let mut move_by = 0isize;
+        egui::Window::new("Apply Renderer Style")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("Renderer:");
+                    ui.label(format!("{} ({})", draft.renderer_name, draft.renderer_type));
+                });
+                ui.add_space(4.0);
+                ui.label("Styles:");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak("(low priority)");
+                });
+                egui::Frame::new()
+                    .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .min_scrolled_height(120.0)
+                            .max_height(220.0)
+                            .show(ui, |ui| {
+                                if draft.styles.is_empty() {
+                                    ui.weak("(no styles applied)");
+                                }
+                                for (index, style) in draft.styles.iter().enumerate() {
+                                    if ui
+                                        .selectable_label(
+                                            draft.selected_index == Some(index),
+                                            style,
+                                        )
+                                        .clicked()
+                                    {
+                                        draft.selected_index = Some(index);
+                                    }
+                                }
+                            });
+                    });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak("(high priority)");
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let total_available = draft.type_match.len()
+                        + draft.edge_match.len()
+                        + draft.coloring_match.len();
+                    ui.add_enabled_ui(total_available > 0, |ui| {
+                        ui.menu_button("Add", |ui| {
+                            let mut has_previous = false;
+                            for entries in
+                                [&draft.type_match, &draft.edge_match, &draft.coloring_match]
+                            {
+                                if entries.is_empty() {
+                                    continue;
+                                }
+                                if has_previous {
+                                    ui.separator();
+                                }
+                                has_previous = true;
+                                for entry in entries {
+                                    let used = draft.styles.iter().any(|name| name == &entry.name);
+                                    if ui
+                                        .add_enabled(!used, egui::Button::new(&entry.label))
+                                        .clicked()
+                                    {
+                                        add_name = Some(entry.name.clone());
+                                        ui.close();
+                                    }
+                                }
+                            }
+                        });
+                    });
+                    if ui
+                        .add_enabled(draft.selected_index.is_some(), egui::Button::new("Delete"))
+                        .clicked()
+                    {
+                        delete = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            draft.selected_index.is_some_and(|index| index > 0),
+                            egui::Button::new("Up"),
+                        )
+                        .clicked()
+                    {
+                        move_by = -1;
+                    }
+                    if ui
+                        .add_enabled(
+                            draft
+                                .selected_index
+                                .is_some_and(|index| index + 1 < draft.styles.len()),
+                            egui::Button::new("Down"),
+                        )
+                        .clicked()
+                    {
+                        move_by = 1;
+                    }
+                });
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if let Some(name) = add_name {
+            if !draft.styles.contains(&name) {
+                let insert_at = draft
+                    .selected_index
+                    .map_or(draft.styles.len(), |index| index + 1);
+                draft.styles.insert(insert_at, name);
+                draft.selected_index = Some(insert_at);
+            }
+        }
+        if delete {
+            if let Some(index) = draft
+                .selected_index
+                .filter(|index| *index < draft.styles.len())
+            {
+                draft.styles.remove(index);
+                draft.selected_index = (!draft.styles.is_empty())
+                    .then_some(index.min(draft.styles.len().saturating_sub(1)));
+            }
+        }
+        if move_by != 0 {
+            if let Some(index) = draft.selected_index {
+                let target = index as isize + move_by;
+                if target >= 0 && (target as usize) < draft.styles.len() {
+                    draft.styles.swap(index, target as usize);
+                    draft.selected_index = Some(target as usize);
+                }
+            }
+        }
+        if accept {
+            match self.apply_renderer_style_edit(&draft) {
+                Ok(true) => self.set_status("Change style"),
+                Ok(false) => {}
+                Err(error) => {
+                    self.set_status(format!("Style error: {error}"));
+                    self.renderer_style_edit_draft = Some(draft);
+                }
+            }
+        } else if open && !cancel {
+            self.renderer_style_edit_draft = Some(draft);
+        }
     }
 
     fn open_renderer_style_create(
@@ -23954,6 +24239,56 @@ mod tests {
             .find(|child| child.tag_name() == "paint")
             .unwrap();
         assert_eq!(first_paint.str_attr("sel").as_str(), "protein");
+    }
+
+    #[test]
+    fn native_renderer_style_list_editor_preserves_order_and_is_undoable() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let renderer_uid = app
+            .state
+            .new_renderer(scene_uid, object_uid, "simple", "lines")
+            .unwrap()
+            .result_renderer;
+        app.state
+            .set_renderer_styles(object_uid, renderer_uid, "DefaultSimple,DefaultCPKColoring")
+            .unwrap();
+
+        app.open_renderer_style_edit(scene_uid, object_uid, renderer_uid);
+        let mut draft = app.renderer_style_edit_draft.take().unwrap();
+        assert_eq!(draft.renderer_name, "lines");
+        assert_eq!(draft.renderer_type, "simple");
+        assert_eq!(
+            draft.initial_styles,
+            ["DefaultSimple", "DefaultCPKColoring"]
+        );
+        assert!(draft
+            .type_match
+            .iter()
+            .any(|style| style.name == "ThickSimple"));
+        assert!(draft
+            .coloring_match
+            .iter()
+            .any(|style| style.name == "DarkCPKColoring"));
+        draft.styles = vec!["DarkCPKColoring".to_string(), "ThickSimple".to_string()];
+        assert!(app.apply_renderer_style_edit(&draft).unwrap());
+        assert_eq!(
+            app.state.renderer_summaries(object_uid)[0].style.as_deref(),
+            Some("DarkCPKColoring,ThickSimple")
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+
+        app.undo(&mut CameraController::default());
+        assert_eq!(
+            app.state.renderer_summaries(object_uid)[0].style.as_deref(),
+            Some("DefaultSimple,DefaultCPKColoring")
+        );
     }
 
     #[test]
