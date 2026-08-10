@@ -5795,6 +5795,28 @@ impl DesktopAppState {
         Ok(())
     }
 
+    pub fn close_active_view(&mut self) -> Result<Option<Uid>> {
+        let scene_uid = self
+            .active_scene
+            .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
+        let view_uid = self
+            .scene_manager()
+            .scene(scene_uid)
+            .and_then(|scene| scene.active_view_uid())
+            .ok_or_else(|| CueMolError::invalid_argument("active scene has no view"))?;
+        let view_count = self
+            .command_manager
+            .views()
+            .iter()
+            .filter(|view| view.scene_uid() == scene_uid)
+            .count();
+        if view_count > 1 {
+            self.command_manager.destroy_view_command(view_uid)?;
+            return Ok(Some(scene_uid));
+        }
+        self.close_active_scene()
+    }
+
     pub fn destroy_scene(&mut self, scene_uid: Uid) -> bool {
         let object_uids = self
             .scene_manager()
@@ -58206,6 +58228,27 @@ attribute \"dep\" string \"positions\"
         let restored = app.activate_view(first_view).unwrap();
         assert_eq!(restored.zoom(), 73.0);
         assert_eq!(restored.center(), Vector4::new3(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn desktop_app_state_closes_a_view_before_its_scene() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("scene", true).result_scene;
+        let first_view = app.active_view_summary().unwrap().uid;
+        let second_view = app.new_view(scene_uid, "1", None).unwrap();
+
+        assert_eq!(app.close_active_view().unwrap(), Some(scene_uid));
+        assert_eq!(app.scene_summaries().len(), 1);
+        assert_eq!(app.view_summaries().len(), 1);
+        assert_eq!(app.active_view_summary().unwrap().uid, first_view);
+        assert!(app
+            .view_summaries()
+            .iter()
+            .all(|view| view.uid != second_view));
+
+        assert_eq!(app.close_active_view().unwrap(), None);
+        assert!(app.scene_summaries().is_empty());
+        assert!(app.view_summaries().is_empty());
     }
 
     #[test]

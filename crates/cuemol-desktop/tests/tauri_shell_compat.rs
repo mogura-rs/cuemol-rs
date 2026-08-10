@@ -508,6 +508,27 @@ fn new_tab_dialog_matches_scene_and_inherited_view_flow() {
 }
 
 #[test]
+fn close_tab_matches_last_modified_view_confirmation_flow() {
+    for label in [
+        "Unsaved Changes",
+        "is not saved. Save changes?",
+        "Don't Save",
+        "Save",
+        "Cancel",
+    ] {
+        assert!(JS.contains(label), "missing close-tab behavior {label}");
+    }
+    assert!(JS.contains("scene.modified && viewCount === 1"));
+    assert!(JS.contains("await showConfirmCloseTabDialog"));
+    assert!(JS.contains("if (result === \"save\" && !(await saveScene()))"));
+    assert!(JS.contains("await closeActiveTab()"));
+    assert!(CSS.contains(".reference-dialog.confirm-close-dialog"));
+    assert!(NATIVE_GUI_RS.contains("fn close_tab_dialog"));
+    assert!(NATIVE_GUI_RS.contains("close_after_scene_save"));
+    assert!(TAURI_APP_RS.contains(".close_active_view()"));
+}
+
+#[test]
 fn png_export_matches_the_reference_options_dialog() {
     for label in [
         "PNG options",

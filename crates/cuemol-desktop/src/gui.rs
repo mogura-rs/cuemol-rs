@@ -696,6 +696,11 @@ struct NativeNewTabDraft {
     inherit_view_props: bool,
 }
 
+#[derive(Debug, Clone)]
+struct NativeCloseTabDraft {
+    scene_name: String,
+}
+
 #[derive(Debug)]
 enum NativeTrajectoryPanelAction {
     SetFrame {
@@ -779,6 +784,8 @@ struct GuiApplication {
     png_export_draft: Option<NativePngExportDraft>,
     scene_save_draft: Option<NativeSceneSaveDraft>,
     new_tab_draft: Option<NativeNewTabDraft>,
+    close_tab_draft: Option<NativeCloseTabDraft>,
+    close_after_scene_save: bool,
     renderer_setup_draft: Option<NativeRendererSetupDraft>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
@@ -2579,6 +2586,8 @@ impl GuiApplication {
             png_export_draft: None,
             scene_save_draft: None,
             new_tab_draft: None,
+            close_tab_draft: None,
+            close_after_scene_save: false,
             renderer_setup_draft: None,
             pdb_download_receiver: None,
             url_download_receiver: None,
@@ -8663,6 +8672,8 @@ impl GuiApplication {
                 compression: crate::GuiQscCompression::Xz,
                 base64: false,
             });
+        } else if self.close_after_scene_save {
+            self.close_after_scene_save = false;
         }
     }
 
@@ -9200,20 +9211,41 @@ impl GuiApplication {
     }
 
     fn close_current_scene(&mut self, camera: &mut CameraController) {
-        let closed_scene = self.state.active_scene();
-        let mut modified_scenes = self.modified_scenes.clone();
-        if let Some(scene_uid) = closed_scene {
-            modified_scenes.remove(&scene_uid);
+        let Some(scene) = self.state.active_scene_summary() else {
+            self.set_status("No active tab");
+            return;
+        };
+        let view_count = self
+            .state
+            .view_summaries()
+            .into_iter()
+            .filter(|view| view.scene_uid == scene.uid)
+            .count();
+        if view_count == 1 && self.modified_scenes.contains(&scene.uid) {
+            self.close_tab_draft = Some(NativeCloseTabDraft {
+                scene_name: scene.name,
+            });
+            return;
         }
+        self.close_current_tab_unchecked(camera);
+    }
+
+    fn close_current_tab_unchecked(&mut self, camera: &mut CameraController) {
+        let closed_scene = self.state.active_scene();
         let undo = self.capture_undo();
-        match self.state.close_active_scene() {
+        match self.state.close_active_view() {
             Ok(Some(_)) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes = modified_scenes;
+                if let Some(scene_uid) = closed_scene
+                    .filter(|scene_uid| self.state.scene_manager().scene(*scene_uid).is_none())
+                {
+                    self.modified_scenes.remove(&scene_uid);
+                }
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
-                self.last_loaded_path = None;
+                self.last_loaded_path =
+                    self.state.active_scene_source_path().map(Path::to_path_buf);
                 self.sync_active_scene_properties();
                 self.set_status("Current tab closed");
                 self.rebuild_snapshot();
@@ -9225,21 +9257,35 @@ impl GuiApplication {
             }
             Ok(None) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes = modified_scenes;
-                let (scene_name, _) = self.proposed_new_tab_names();
-                self.state.new_scene(scene_name, true);
+                if let Some(scene_uid) = closed_scene {
+                    self.modified_scenes.remove(&scene_uid);
+                }
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
                 self.last_loaded_path = None;
                 self.sync_active_scene_properties();
-                self.set_status("Last tab closed; new scene created");
+                self.set_status("Last tab closed");
                 self.rebuild_snapshot();
-                *camera = CameraController::from_qsys_camera(
-                    &self.state.active_view_camera().unwrap_or_default(),
-                );
+                *camera = CameraController::default();
             }
             Err(error) => self.set_error(error),
+        }
+    }
+
+    fn finish_close_after_scene_save(&mut self, camera: &mut CameraController) {
+        if !self.close_after_scene_save {
+            return;
+        }
+        let saved = self
+            .state
+            .active_scene()
+            .is_some_and(|scene_uid| !self.modified_scenes.contains(&scene_uid));
+        if saved {
+            self.close_after_scene_save = false;
+            self.close_current_tab_unchecked(camera);
+        } else if self.scene_save_draft.is_none() {
+            self.close_after_scene_save = false;
         }
     }
 
@@ -10472,6 +10518,7 @@ impl GuiApplication {
         self.png_export_dialog(ctx);
         self.scene_save_options_dialog(ctx, camera);
         self.new_tab_dialog(ctx, camera);
+        self.close_tab_dialog(ctx, camera);
         self.renderer_setup_dialog(ctx, camera);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
@@ -15920,7 +15967,51 @@ impl GuiApplication {
         }
     }
 
-    fn scene_save_options_dialog(&mut self, ctx: &egui::Context, camera: &CameraController) {
+    fn close_tab_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        let Some(draft) = self.close_tab_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut result = None;
+        let display_name = if draft.scene_name.is_empty() {
+            "(unnamed)".to_string()
+        } else {
+            format!("\"{}\"", draft.scene_name)
+        };
+        egui::Window::new("Unsaved Changes")
+            .default_width(400.0)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Scene {display_name} is not saved. Save changes?"));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        result = Some("cancel");
+                    }
+                    if ui.button("Don't Save").clicked() {
+                        result = Some("discard");
+                    }
+                    if ui.button("Save").clicked() {
+                        result = Some("save");
+                    }
+                });
+            });
+        match result {
+            Some("discard") => self.close_current_tab_unchecked(camera),
+            Some("save") => {
+                self.close_after_scene_save = true;
+                self.save_current_scene(camera);
+                self.finish_close_after_scene_save(camera);
+            }
+            Some("cancel") => {}
+            _ if open => self.close_tab_draft = Some(draft),
+            _ => {}
+        }
+    }
+
+    fn scene_save_options_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         let Some(mut draft) = self.scene_save_draft.take() else {
             return;
         };
@@ -16021,8 +16112,11 @@ impl GuiApplication {
                     base64: advanced && draft.base64,
                 }),
             );
+            self.finish_close_after_scene_save(camera);
         } else if open && !cancel {
             self.scene_save_draft = Some(draft);
+        } else if cancel || !open {
+            self.close_after_scene_save = false;
         }
     }
 
@@ -21479,10 +21573,10 @@ mod tests {
             compression: crate::GuiQscCompression::Xz,
             base64: false,
         });
-        let camera = CameraController::default();
+        let mut camera = CameraController::default();
         let ctx = egui::Context::default();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            app.scene_save_options_dialog(ctx, &camera)
+            app.scene_save_options_dialog(ctx, &mut camera)
         });
         let draft = app
             .scene_save_draft
@@ -21535,6 +21629,31 @@ mod tests {
         assert_eq!(app.state.scene_summaries().len(), 2);
         assert_eq!(app.state.view_summaries().len(), 3);
         assert_eq!(app.state.active_scene_summary().unwrap().name, "Second");
+    }
+
+    #[test]
+    fn native_close_tab_prompts_only_for_the_last_modified_view() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        app.state.new_view(scene_uid, "1", None).unwrap();
+        let mut camera = CameraController::default();
+
+        app.close_current_scene(&mut camera);
+        assert_eq!(app.state.scene_summaries().len(), 1);
+        assert_eq!(app.state.view_summaries().len(), 1);
+        assert!(app.close_tab_draft.is_none());
+
+        app.modified_scenes.insert(scene_uid);
+        app.close_current_scene(&mut camera);
+        assert_eq!(
+            app.close_tab_draft.as_ref().unwrap().scene_name,
+            "Untitled 1"
+        );
+        assert_eq!(app.state.scene_summaries().len(), 1);
+
+        app.close_current_tab_unchecked(&mut camera);
+        assert!(app.state.scene_summaries().is_empty());
+        assert!(app.state.view_summaries().is_empty());
     }
 
     #[test]

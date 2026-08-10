@@ -4238,6 +4238,46 @@ function showNewTabDialog() {
   });
 }
 
+function showConfirmCloseTabDialog(sceneName) {
+  if (referenceDialog.open) referenceDialog.close();
+  dialogTitle.textContent = "Unsaved Changes";
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog confirm-close-dialog";
+  const displayName = sceneName ? `\"${sceneName}\"` : "(unnamed)";
+  dialogContent.append(dialogParagraph(`Scene ${displayName} is not saved. Save changes?`));
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      referenceDialog.removeEventListener("close", onClose);
+      resolve(value);
+    };
+    const onClose = () => {
+      if (!referenceDialog.open) finish("cancel");
+    };
+    referenceDialog.addEventListener("close", onClose);
+    const cancel = button("Cancel", "", () => {
+      finish("cancel");
+      referenceDialog.close();
+    });
+    const discard = button("Don't Save", "dialog-danger", () => {
+      finish("discard");
+      referenceDialog.close();
+    });
+    const save = button("Save", "dialog-primary", () => {
+      finish("save");
+      referenceDialog.close();
+    });
+    dialogActions(cancel, discard, save);
+    if (!referenceDialog.open && referenceDialog.showModal) {
+      referenceDialog.showModal();
+    }
+  });
+}
+
 async function showReferenceDialog(title) {
   if (referenceDialog.open) referenceDialog.close();
   atomPickerTarget = null;
@@ -10387,19 +10427,34 @@ async function openSelectedPaths(paths) {
 async function saveScene(saveAs = false) {
   const source = snapshot?.scenes.find((scene) => scene.active)?.source || "";
   if (!saveAs && source) {
-    await mutateWithoutViewport("save_scene", { path: source });
-    return;
+    return mutateWithoutViewport("save_scene", { path: source });
   }
   const path = await dialog?.save?.({
     defaultPath: "scene.qsc",
     filters: [{ name: "CueMol scene", extensions: ["qsc"] }],
   });
-  if (!path) return;
+  if (!path) return false;
   const options = await showSceneSaveOptions();
-  if (!options) return;
-  if (await mutateWithoutViewport("save_scene", { path, options })) {
+  if (!options) return false;
+  const saved = await mutateWithoutViewport("save_scene", { path, options });
+  if (saved) {
     addRecentFile(path, "scene");
   }
+  return saved;
+}
+
+async function closeActiveTab() {
+  const activeView = (snapshot?.views || []).find((view) => view.active);
+  if (!activeView) return false;
+  const scene = snapshot.scenes.find((item) => item.uid === activeView.sceneUid);
+  if (!scene) return false;
+  const viewCount = snapshot.views.filter((view) => view.sceneUid === scene.uid).length;
+  if (scene.modified && viewCount === 1) {
+    const result = await showConfirmCloseTabDialog(scene.name || "");
+    if (result === "cancel") return false;
+    if (result === "save" && !(await saveScene())) return false;
+  }
+  return mutate("close_active_scene");
 }
 
 async function exportPng() {
@@ -10450,7 +10505,7 @@ async function handleAction(action, depth = 0) {
       }
       break;
     case "close-scene":
-      await mutate("close_active_scene");
+      await closeActiveTab();
       break;
     case "fit":
       await cameraCommand("fit");

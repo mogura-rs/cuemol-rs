@@ -7830,16 +7830,17 @@ fn handle_model_request(
             let closed_scene = model.desktop.active_scene();
             model
                 .desktop
-                .close_active_scene()
+                .close_active_view()
                 .map_err(|error| error.to_string())?;
-            model.desktop.ensure_active_scene();
             model.camera = model.desktop.active_view_camera().unwrap_or_default();
             model.selection.clear();
             model.sync_active_scene_properties();
-            model.status = "Scene closed".to_string();
+            model.status = "Tab closed".to_string();
             model.invalidate_mesh(false);
             model.push_undo(undo);
-            if let Some(scene_uid) = closed_scene {
+            if let Some(scene_uid) = closed_scene
+                .filter(|scene_uid| model.desktop.scene_manager().scene(*scene_uid).is_none())
+            {
                 model.modified_scenes.remove(&scene_uid);
             }
             model.touch_structure_details();
@@ -11861,6 +11862,29 @@ mod tests {
         assert_eq!(snapshot.scenes.len(), 2);
         assert_eq!(snapshot.views.len(), 3);
         assert!(snapshot.scenes.iter().any(|scene| scene.name == "Second"));
+    }
+
+    #[test]
+    fn close_tab_request_closes_a_view_before_its_scene() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        model.desktop.new_view(scene_uid, "1", None).unwrap();
+
+        let response = handle_model_request(&mut model, ModelRequest::CloseActiveScene).unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(snapshot.scenes.len(), 1);
+        assert_eq!(snapshot.views.len(), 1);
+        assert_eq!(model.desktop.active_scene(), Some(scene_uid));
+
+        let response = handle_model_request(&mut model, ModelRequest::CloseActiveScene).unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected snapshot");
+        };
+        assert!(snapshot.scenes.is_empty());
+        assert!(snapshot.views.is_empty());
+        assert_eq!(model.desktop.active_scene(), None);
     }
 
     #[test]

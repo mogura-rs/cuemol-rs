@@ -2050,6 +2050,10 @@ summary:focus-visible {
   width: min(360px, calc(100vw - 48px));
 }
 
+.reference-dialog.confirm-close-dialog {
+  width: min(400px, calc(100vw - 48px));
+}
+
 .new-tab-options {
   display: grid;
   gap: 7px;
@@ -2290,6 +2294,11 @@ summary:focus-visible {
 
 .dialog-primary {
   min-width: 78px;
+}
+
+.dialog-danger {
+  color: #9b1c1c;
+  border-color: #c98a8a;
 }
 
 .dialog-properties {
