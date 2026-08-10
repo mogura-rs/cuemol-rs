@@ -671,6 +671,15 @@ struct NativePngExportDraft {
     transparent: bool,
 }
 
+#[derive(Debug, Clone)]
+struct NativeSceneSaveDraft {
+    path: PathBuf,
+    embed_all: bool,
+    version: crate::GuiQscVersion,
+    compression: crate::GuiQscCompression,
+    base64: bool,
+}
+
 #[derive(Debug)]
 enum NativeTrajectoryPanelAction {
     SetFrame {
@@ -752,6 +761,7 @@ struct GuiApplication {
     merge_source_object: Option<cuemol_core::Uid>,
     merge_target_object: Option<cuemol_core::Uid>,
     png_export_draft: Option<NativePngExportDraft>,
+    scene_save_draft: Option<NativeSceneSaveDraft>,
     renderer_setup_draft: Option<NativeRendererSetupDraft>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
@@ -2550,6 +2560,7 @@ impl GuiApplication {
             merge_source_object: None,
             merge_target_object: None,
             png_export_draft: None,
+            scene_save_draft: None,
             renderer_setup_draft: None,
             pdb_download_receiver: None,
             url_download_receiver: None,
@@ -3217,7 +3228,7 @@ impl GuiApplication {
                         ui.close();
                     }
                     if ui.button("Save Scene As...").clicked() {
-                        self.choose_save_scene(camera);
+                        self.choose_save_scene();
                         ui.close();
                     }
                 });
@@ -8601,10 +8612,16 @@ impl GuiApplication {
         }
     }
 
-    fn choose_save_scene(&mut self, camera: &CameraController) {
+    fn choose_save_scene(&mut self) {
         if let Some(path) = native_file_dialog(NativeFileDialog::SaveScene, &self.save_path) {
             self.save_path = path.to_string_lossy().into_owned();
-            self.save_current_scene_to_path(camera, &path);
+            self.scene_save_draft = Some(NativeSceneSaveDraft {
+                path,
+                embed_all: false,
+                version: crate::GuiQscVersion::Qdf0,
+                compression: crate::GuiQscCompression::Xz,
+                base64: false,
+            });
         }
     }
 
@@ -9090,11 +9107,20 @@ impl GuiApplication {
             self.save_path = path.to_string_lossy().into_owned();
             self.save_current_scene_to_path(camera, &path);
         } else {
-            self.choose_save_scene(camera);
+            self.choose_save_scene();
         }
     }
 
     fn save_current_scene_to_path(&mut self, camera: &CameraController, path: &Path) {
+        self.save_current_scene_to_path_with_options(camera, path, None);
+    }
+
+    fn save_current_scene_to_path_with_options(
+        &mut self,
+        camera: &CameraController,
+        path: &Path,
+        options: Option<crate::GuiSceneSaveOptions>,
+    ) {
         if let Err(error) = self
             .state
             .set_active_scene_camera(camera.to_qsys_camera("__current"))
@@ -9102,7 +9128,11 @@ impl GuiApplication {
             self.set_error(error);
             return;
         }
-        match self.state.save_active_scene_qsc(path) {
+        let result = match options {
+            Some(options) => self.state.save_active_scene_qsc_with_options(path, options),
+            None => self.state.save_active_scene_qsc(path),
+        };
+        match result {
             Ok(()) => {
                 self.save_path = path.to_string_lossy().into_owned();
                 self.last_loaded_path = Some(path.to_path_buf());
@@ -10290,6 +10320,7 @@ impl GuiApplication {
         self.merge_molecule_dialog(ctx);
         self.md_trajectory_dialog(ctx);
         self.png_export_dialog(ctx);
+        self.scene_save_options_dialog(ctx, camera);
         self.renderer_setup_dialog(ctx, camera);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
@@ -15661,6 +15692,112 @@ impl GuiApplication {
             }
         } else if open && !cancel {
             self.png_export_draft = Some(draft);
+        }
+    }
+
+    fn scene_save_options_dialog(&mut self, ctx: &egui::Context, camera: &CameraController) {
+        let Some(mut draft) = self.scene_save_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Scene options")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                ui.checkbox(&mut draft.embed_all, "Embed possible");
+                ui.add_space(6.0);
+                ui.group(|ui| {
+                    ui.strong("Format");
+                    egui::Grid::new("scene_save_format")
+                        .num_columns(2)
+                        .spacing([12.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("Compatibility:");
+                            egui::ComboBox::from_id_salt("scene_save_version")
+                                .selected_text(match draft.version {
+                                    crate::GuiQscVersion::Qdf0 => "Ver 2.2 or later",
+                                    crate::GuiQscVersion::Qdf1 => "Ver 2.3 or later",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut draft.version,
+                                        crate::GuiQscVersion::Qdf0,
+                                        "Ver 2.2 or later",
+                                    );
+                                    ui.selectable_value(
+                                        &mut draft.version,
+                                        crate::GuiQscVersion::Qdf1,
+                                        "Ver 2.3 or later",
+                                    );
+                                });
+                            ui.end_row();
+
+                            ui.label("Compression:");
+                            ui.add_enabled_ui(draft.version == crate::GuiQscVersion::Qdf1, |ui| {
+                                egui::ComboBox::from_id_salt("scene_save_compression")
+                                    .selected_text(match draft.compression {
+                                        crate::GuiQscCompression::Xz => "xz",
+                                        crate::GuiQscCompression::Gzip => "gzip",
+                                        crate::GuiQscCompression::None => "none",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut draft.compression,
+                                            crate::GuiQscCompression::Xz,
+                                            "xz",
+                                        );
+                                        ui.selectable_value(
+                                            &mut draft.compression,
+                                            crate::GuiQscCompression::Gzip,
+                                            "gzip",
+                                        );
+                                        ui.selectable_value(
+                                            &mut draft.compression,
+                                            crate::GuiQscCompression::None,
+                                            "none",
+                                        );
+                                    });
+                            });
+                            ui.end_row();
+                        });
+                    ui.add_enabled_ui(draft.version == crate::GuiQscVersion::Qdf1, |ui| {
+                        ui.checkbox(&mut draft.base64, "Enable text encoding");
+                    });
+                });
+                ui.weak(draft.path.to_string_lossy());
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if accept {
+            let advanced = draft.version == crate::GuiQscVersion::Qdf1;
+            self.save_current_scene_to_path_with_options(
+                camera,
+                &draft.path,
+                Some(crate::GuiSceneSaveOptions {
+                    embed_all: draft.embed_all,
+                    version: draft.version,
+                    compression: if advanced {
+                        draft.compression
+                    } else {
+                        crate::GuiQscCompression::None
+                    },
+                    base64: advanced && draft.base64,
+                }),
+            );
+        } else if open && !cancel {
+            self.scene_save_draft = Some(draft);
         }
     }
 
@@ -21108,6 +21245,30 @@ mod tests {
     }
 
     #[test]
+    fn native_scene_save_options_match_reference_defaults() {
+        let mut app = GuiApplication::new();
+        app.scene_save_draft = Some(NativeSceneSaveDraft {
+            path: PathBuf::from("scene.qsc"),
+            embed_all: false,
+            version: crate::GuiQscVersion::Qdf0,
+            compression: crate::GuiQscCompression::Xz,
+            base64: false,
+        });
+        let camera = CameraController::default();
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.scene_save_options_dialog(ctx, &camera)
+        });
+        let draft = app
+            .scene_save_draft
+            .expect("scene save options remain open");
+        assert!(!draft.embed_all);
+        assert_eq!(draft.version, crate::GuiQscVersion::Qdf0);
+        assert_eq!(draft.compression, crate::GuiQscCompression::Xz);
+        assert!(!draft.base64);
+    }
+
+    #[test]
     fn animation_render_helpers_define_frame_sequence_and_output_names() {
         assert!((1..=8).contains(&default_animation_render_concurrency()));
         let objects = vec![
@@ -22680,7 +22841,8 @@ mod tests {
             std::process::id()
         ));
         app.save_current_scene_to_path(&camera, &path);
-        let qsc = fs::read_to_string(&path).unwrap();
+        let qsc_bytes = fs::read(&path).unwrap();
+        let qsc = String::from_utf8_lossy(&qsc_bytes);
         assert!(qsc.contains("name=\"edited density\""));
         assert!(qsc.contains("name=\"2 sigma contour\""));
         assert!(qsc.contains("width=\"2.5\""));

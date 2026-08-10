@@ -207,6 +207,39 @@ struct NamdCoorReaderOptionsDto {
     topology_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct QscSaveOptionsDto {
+    embed_all: bool,
+    version: String,
+    compress: String,
+    base64: bool,
+}
+
+impl TryFrom<QscSaveOptionsDto> for crate::GuiSceneSaveOptions {
+    type Error = String;
+
+    fn try_from(value: QscSaveOptionsDto) -> Result<Self, Self::Error> {
+        let version = match value.version.as_str() {
+            "QDF0" => crate::GuiQscVersion::Qdf0,
+            "QDF1" => crate::GuiQscVersion::Qdf1,
+            version => return Err(format!("unsupported QSC version: {version}")),
+        };
+        let compression = match value.compress.as_str() {
+            "none" => crate::GuiQscCompression::None,
+            "gzip" => crate::GuiQscCompression::Gzip,
+            "xzip" | "xz" => crate::GuiQscCompression::Xz,
+            compression => return Err(format!("unsupported QSC compression: {compression}")),
+        };
+        Ok(Self {
+            embed_all: value.embed_all,
+            version,
+            compression,
+            base64: value.base64,
+        })
+    }
+}
+
 impl From<crate::GuiNamdCoorReaderOptions> for NamdCoorReaderOptionsDto {
     fn from(value: crate::GuiNamdCoorReaderOptions) -> Self {
         Self {
@@ -5783,7 +5816,10 @@ enum ModelRequest {
         width: u32,
         height: u32,
     },
-    SaveScene(String),
+    SaveScene {
+        path: String,
+        options: Option<crate::GuiSceneSaveOptions>,
+    },
     SaveObject {
         object_uid: u64,
         path: String,
@@ -8722,7 +8758,7 @@ fn handle_model_request(
             model.update_camera(&action, x, y, height)?;
             Ok(ModelResponse::Viewport(model.render(width, height)))
         }
-        ModelRequest::SaveScene(path) => {
+        ModelRequest::SaveScene { path, options } => {
             model.persist_camera()?;
             let path_buf = PathBuf::from(&path);
             let save_in_place = model
@@ -8736,10 +8772,13 @@ fn handle_model_request(
                         .push(format!("WARNING: Cannot create backup file, {error}"));
                 }
             }
-            model
-                .desktop
-                .save_active_scene_qsc(&path_buf)
-                .map_err(|error| error.to_string())?;
+            match options {
+                Some(options) => model
+                    .desktop
+                    .save_active_scene_qsc_with_options(&path_buf, options),
+                None => model.desktop.save_active_scene_qsc(&path_buf),
+            }
+            .map_err(|error| error.to_string())?;
             model.undo_stack.clear();
             model.redo_stack.clear();
             if let Some(scene_uid) = model.desktop.active_scene() {
@@ -10933,8 +10972,16 @@ fn update_camera(
 }
 
 #[tauri::command]
-fn save_scene(path: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
-    snapshot_response(request_model(&state, ModelRequest::SaveScene(path))?)
+fn save_scene(
+    path: String,
+    options: Option<QscSaveOptionsDto>,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    let options = options.map(TryInto::try_into).transpose()?;
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SaveScene { path, options },
+    )?)
 }
 
 #[tauri::command]
@@ -11294,6 +11341,52 @@ pub fn run() -> Result<(), tauri::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qsc_save_options_dto_validates_reference_values() {
+        let options: crate::GuiSceneSaveOptions = QscSaveOptionsDto {
+            embed_all: true,
+            version: "QDF1".to_string(),
+            compress: "xzip".to_string(),
+            base64: true,
+        }
+        .try_into()
+        .unwrap();
+        assert_eq!(options.version, crate::GuiQscVersion::Qdf1);
+        assert_eq!(options.compression, crate::GuiQscCompression::Xz);
+        assert!(options.embed_all);
+        assert!(options.base64);
+        assert!(crate::GuiSceneSaveOptions::try_from(QscSaveOptionsDto {
+            embed_all: false,
+            version: "QDF2".to_string(),
+            compress: "none".to_string(),
+            base64: false,
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn qsc_save_request_applies_explicit_scene_options() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-qsc-options-{}.qsc", std::process::id()));
+        let mut model = model_without_gpu();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SaveScene {
+                path: path.to_string_lossy().into_owned(),
+                options: Some(crate::GuiSceneSaveOptions {
+                    embed_all: true,
+                    version: crate::GuiQscVersion::Qdf1,
+                    compression: crate::GuiQscCompression::Gzip,
+                    base64: true,
+                }),
+            },
+        )
+        .unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("base64=\"true\" compress=\"gzip\" version=\"QDF1\""));
+        fs::remove_file(path).unwrap();
+    }
 
     fn model_without_gpu() -> AppModel {
         let mut desktop = DesktopAppState::new();
@@ -13856,7 +13949,10 @@ mod tests {
         let mut model = model_without_gpu();
         handle_model_request(
             &mut model,
-            ModelRequest::SaveScene(path.to_string_lossy().into_owned()),
+            ModelRequest::SaveScene {
+                path: path.to_string_lossy().into_owned(),
+                options: None,
+            },
         )
         .unwrap();
         let first_contents = fs::read(&path).unwrap();
@@ -13872,7 +13968,10 @@ mod tests {
 
         let response = handle_model_request(
             &mut model,
-            ModelRequest::SaveScene(path.to_string_lossy().into_owned()),
+            ModelRequest::SaveScene {
+                path: path.to_string_lossy().into_owned(),
+                options: None,
+            },
         )
         .unwrap();
         let ModelResponse::Snapshot(snapshot) = response else {

@@ -698,6 +698,34 @@ pub fn encode_qdf0_bytes(input: &[u8], version: u16, encoding: &str) -> Result<V
     Ok(output)
 }
 
+/// Decode any supported versioned QDF stream back to the unencoded QDF0 form.
+pub fn decode_qdf_to_qdf0_bytes(input: &[u8]) -> Result<Vec<u8>> {
+    if input.len() < 4 {
+        return Err(CueMolError::parse("QDF input is too short"));
+    }
+    let version = parse_qdf_version(&input[..4])?;
+    if version == 0 {
+        return Ok(input.to_vec());
+    }
+    if input.len() < 6 {
+        return Err(CueMolError::parse("QDF encoded header is too short"));
+    }
+    let decoded = match input[4] {
+        b'0' => input[6..].to_vec(),
+        b'1' => Base64InStream::new(&input[6..]).into_bytes(),
+        _ => return Err(CueMolError::parse("invalid QDF base64 encoding flag")),
+    };
+    let payload = match input[5] {
+        b'0' => decoded,
+        b'1' => decode_gzip(&decoded)?,
+        b'3' => decode_xz(&decoded)?,
+        _ => return Err(CueMolError::parse("unsupported QDF compression method")),
+    };
+    let mut output = b"QDF0".to_vec();
+    output.extend_from_slice(&payload);
+    Ok(output)
+}
+
 fn decode_gzip(input: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = GzDecoder::new(input);
     let mut output = Vec::new();
@@ -813,9 +841,11 @@ mod tests {
         writer.data_def("values", 1);
         writer.record_def(&[("value", QDF_TYPE_INT32)]);
         writer.i32(42);
-        let encoded = writer.finish_with_encoding(1, encoding).unwrap();
+        let raw = writer.finish();
+        let encoded = encode_qdf0_bytes(&raw, 1, encoding).unwrap();
         assert_eq!(&encoded[..4], b"QDF1");
         assert_eq!(&encoded[4..6], encoding.as_bytes());
+        assert_eq!(decode_qdf_to_qdf0_bytes(&encoded).unwrap(), raw);
 
         let mut reader = QdfReader::from_bytes(&encoded).unwrap();
         assert_eq!(reader.version(), 1);

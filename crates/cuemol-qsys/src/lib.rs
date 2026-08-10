@@ -51,12 +51,13 @@ pub use momentum::{momentum_ease, momentum_spin_angle, momentum_translation};
 pub use mouse::{calc_velocity, DragSample, DragState, MouseEventHandler};
 pub use object::{ObjExtData, SceneObject};
 pub use qdf_stream::{
-    encode_qdf0_bytes, qdf_file_type, qdf_version_string, QdfAbsReader, QdfAbsWriter, QdfDataType,
-    QdfFieldDef, QdfInStream, QdfOutStream, QdfReader, QdfWriter, QDF_TYPE_BOOL, QDF_TYPE_FIXSTR16,
-    QDF_TYPE_FIXSTR32, QDF_TYPE_FIXSTR8, QDF_TYPE_FLOAT128, QDF_TYPE_FLOAT16, QDF_TYPE_FLOAT32,
-    QDF_TYPE_FLOAT64, QDF_TYPE_INT16, QDF_TYPE_INT32, QDF_TYPE_INT64, QDF_TYPE_INT8, QDF_TYPE_RGB,
-    QDF_TYPE_RGBA, QDF_TYPE_UID, QDF_TYPE_UINT16, QDF_TYPE_UINT32, QDF_TYPE_UINT64, QDF_TYPE_UINT8,
-    QDF_TYPE_UTF8STR, QDF_TYPE_VEC3, QDF_TYPE_VEC4,
+    decode_qdf_to_qdf0_bytes, encode_qdf0_bytes, qdf_file_type, qdf_version_string, QdfAbsReader,
+    QdfAbsWriter, QdfDataType, QdfFieldDef, QdfInStream, QdfOutStream, QdfReader, QdfWriter,
+    QDF_TYPE_BOOL, QDF_TYPE_FIXSTR16, QDF_TYPE_FIXSTR32, QDF_TYPE_FIXSTR8, QDF_TYPE_FLOAT128,
+    QDF_TYPE_FLOAT16, QDF_TYPE_FLOAT32, QDF_TYPE_FLOAT64, QDF_TYPE_INT16, QDF_TYPE_INT32,
+    QDF_TYPE_INT64, QDF_TYPE_INT8, QDF_TYPE_RGB, QDF_TYPE_RGBA, QDF_TYPE_UID, QDF_TYPE_UINT16,
+    QDF_TYPE_UINT32, QDF_TYPE_UINT64, QDF_TYPE_UINT8, QDF_TYPE_UTF8STR, QDF_TYPE_VEC3,
+    QDF_TYPE_VEC4,
 };
 pub use render_base::{DispCacheRenderer, DispListRenderer, DrawObj, ShaderObjMgr};
 pub use renderer_factory::{RendererFactory, RendererInstance};

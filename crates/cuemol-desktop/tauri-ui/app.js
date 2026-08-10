@@ -4068,6 +4068,76 @@ function showPngExportOptions(initialWidth, initialHeight) {
   });
 }
 
+function showSceneSaveOptions() {
+  if (referenceDialog.open) referenceDialog.close();
+  dialogTitle.textContent = "Scene options";
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog scene-options-dialog";
+
+  const embedAll = dialogCheckbox("Embed possible", false);
+  const format = dialogGroup("Format");
+  const version = dialogSelect(
+    "Compatibility",
+    [
+      ["QDF0", "Ver 2.2 or later"],
+      ["QDF1", "Ver 2.3 or later"],
+    ],
+    "QDF0",
+    format,
+  );
+  const compress = dialogSelect(
+    "Compression",
+    [
+      ["xzip", "xz"],
+      ["gzip", "gzip"],
+      ["none", "none"],
+    ],
+    "xzip",
+    format,
+  );
+  const base64 = dialogCheckbox("Enable text encoding", false, format);
+  const updateState = () => {
+    const advanced = version.value === "QDF1";
+    compress.disabled = !advanced;
+    base64.disabled = !advanced;
+  };
+  version.addEventListener("change", updateState);
+  updateState();
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      referenceDialog.removeEventListener("close", onClose);
+      resolve(value);
+    };
+    const onClose = () => {
+      if (!referenceDialog.open) finish(null);
+    };
+    referenceDialog.addEventListener("close", onClose);
+    const cancel = button("Cancel", "", () => {
+      finish(null);
+      referenceDialog.close();
+    });
+    const ok = button("OK", "dialog-primary", () => {
+      const advanced = version.value === "QDF1";
+      finish({
+        embedAll: embedAll.checked,
+        version: version.value,
+        compress: advanced ? compress.value : "none",
+        base64: advanced && base64.checked,
+      });
+      referenceDialog.close();
+    });
+    dialogActions(cancel, ok);
+    if (!referenceDialog.open && referenceDialog.showModal) {
+      referenceDialog.showModal();
+    }
+  });
+}
+
 async function showReferenceDialog(title) {
   if (referenceDialog.open) referenceDialog.close();
   atomPickerTarget = null;
@@ -10212,7 +10282,10 @@ async function saveScene(saveAs = false) {
     defaultPath: "scene.qsc",
     filters: [{ name: "CueMol scene", extensions: ["qsc"] }],
   });
-  if (path && (await mutateWithoutViewport("save_scene", { path }))) {
+  if (!path) return;
+  const options = await showSceneSaveOptions();
+  if (!options) return;
+  if (await mutateWithoutViewport("save_scene", { path, options })) {
     addRecentFile(path, "scene");
   }
 }

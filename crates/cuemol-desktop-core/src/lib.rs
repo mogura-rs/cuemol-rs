@@ -1100,6 +1100,78 @@ pub struct GuiPngExportOptions {
     pub transparent: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuiQscVersion {
+    Qdf0,
+    Qdf1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuiQscCompression {
+    None,
+    Gzip,
+    Xz,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuiSceneSaveOptions {
+    pub embed_all: bool,
+    pub version: GuiQscVersion,
+    pub compression: GuiQscCompression,
+    pub base64: bool,
+}
+
+impl Default for GuiSceneSaveOptions {
+    fn default() -> Self {
+        Self {
+            embed_all: false,
+            version: GuiQscVersion::Qdf0,
+            compression: GuiQscCompression::None,
+            base64: false,
+        }
+    }
+}
+
+impl GuiSceneSaveOptions {
+    fn normalized(self) -> Self {
+        if self.version == GuiQscVersion::Qdf0 {
+            Self {
+                compression: GuiQscCompression::None,
+                base64: false,
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+
+    fn version_name(self) -> &'static str {
+        match self.version {
+            GuiQscVersion::Qdf0 => "QDF0",
+            GuiQscVersion::Qdf1 => "QDF1",
+        }
+    }
+
+    fn compression_name(self) -> &'static str {
+        match self.compression {
+            GuiQscCompression::None => "none",
+            GuiQscCompression::Gzip => "gzip",
+            GuiQscCompression::Xz => "xzip",
+        }
+    }
+
+    fn qdf_encoding(self) -> &'static str {
+        match (self.base64, self.compression) {
+            (false, GuiQscCompression::None) => "00",
+            (true, GuiQscCompression::None) => "10",
+            (false, GuiQscCompression::Gzip) => "01",
+            (true, GuiQscCompression::Gzip) => "11",
+            (false, GuiQscCompression::Xz) => "03",
+            (true, GuiQscCompression::Xz) => "13",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuiDensityMapSummary {
     pub uid: Uid,
@@ -2299,6 +2371,77 @@ impl DesktopAppState {
             QSC_XML_END_MARKER,
             suffix
         ))
+    }
+
+    fn scene_qsc_with_save_options(
+        &self,
+        scene_uid: Uid,
+        options: GuiSceneSaveOptions,
+    ) -> Result<(Vec<u8>, Vec<Uid>)> {
+        let qsc = self.scene_qsc_with_named_camera_visibility(scene_uid)?;
+        let (xml, suffix) = qsc
+            .split_once(QSC_XML_END_MARKER)
+            .ok_or_else(|| CueMolError::parse("QSC XML terminator was not written"))?;
+        let mut tree = parse_ldom2_xml(xml)?;
+        clear_xml_formatting_whitespace(tree.top_mut());
+        let options_node = qsc_save_options_node(options);
+        if let Some(index) = tree
+            .top()
+            .children()
+            .iter()
+            .position(|node| !node.is_attr() && node.tag_name() == "qsc_opts")
+        {
+            tree.top_mut().children_mut()[index] = options_node;
+        } else {
+            *tree.top_mut().append_child("qsc_opts") = options_node;
+        }
+
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let mut embedded_objects = Vec::new();
+        let mut omitted_chunks = BTreeSet::new();
+        let mut used_nodes = BTreeSet::new();
+        for object in scene.objects() {
+            let embed = options.embed_all
+                || object.source().is_empty()
+                || object.source_type().is_empty()
+                || object.source().starts_with("datachunk:")
+                || object.modified();
+            if embed {
+                embedded_objects.push(object.uid());
+                continue;
+            }
+            let Some(index) = tree
+                .top()
+                .children()
+                .iter()
+                .enumerate()
+                .find(|(index, node)| {
+                    !used_nodes.contains(index)
+                        && !node.is_attr()
+                        && node.tag_name() == "object"
+                        && node.str_attr("name").as_str() == object.name()
+                        && node.str_attr("src").as_str().starts_with("datachunk:")
+                })
+                .map(|(index, _)| index)
+            else {
+                embedded_objects.push(object.uid());
+                continue;
+            };
+            used_nodes.insert(index);
+            let node = &mut tree.top_mut().children_mut()[index];
+            if let Some(chunk_id) = node.str_attr("src").as_str().strip_prefix("datachunk:") {
+                omitted_chunks.insert(chunk_id.to_string());
+            }
+            node.set_str_attr("src", object.source());
+        }
+
+        let mut document =
+            format!("{}\n\n{}", write_ldom2_xml(&tree), QSC_XML_END_MARKER).into_bytes();
+        document.extend_from_slice(&rewrite_qsc_data_chunks(suffix, &omitted_chunks, options)?);
+        Ok((document, embedded_objects))
     }
 
     pub fn camera_visibility_entries(
@@ -8398,20 +8541,41 @@ impl DesktopAppState {
     }
 
     pub fn save_active_scene_qsc(&mut self, path: impl AsRef<Path>) -> Result<()> {
+        let scene_uid = self
+            .active_scene
+            .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
+        let options = self
+            .scene_manager()
+            .scene(scene_uid)
+            .map(scene_qsc_save_options)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        self.save_active_scene_qsc_with_options(path, options)
+    }
+
+    pub fn save_active_scene_qsc_with_options(
+        &mut self,
+        path: impl AsRef<Path>,
+        options: GuiSceneSaveOptions,
+    ) -> Result<()> {
         let path = path.as_ref();
         let scene_uid = self
             .active_scene
             .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
+        let options = options.normalized();
         self.sync_morph_qsc_nodes(scene_uid)?;
         self.sync_density_map_qsc_nodes(scene_uid)?;
-        fs::write(
-            path,
-            self.scene_qsc_with_named_camera_visibility(scene_uid)?,
-        )?;
+        let (document, embedded_objects) = self.scene_qsc_with_save_options(scene_uid, options)?;
+        fs::write(path, document)?;
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        for object_uid in embedded_objects {
+            if let Some(object) = scene.object_mut(object_uid) {
+                object.force_embed();
+            }
+        }
+        scene.set_qsc_options(Some(qsc_save_options_node(options)))?;
         scene.set_name(default_object_name(path));
         scene.set_source(path.to_string_lossy());
         scene.set_source_type("qsc");
@@ -43502,6 +43666,95 @@ fn parse_qsc_vector3(value: &str) -> Option<Vector4> {
 }
 
 const QSC_XML_END_MARKER: &str = "========== End of XML ==========";
+const QSC_DATA_CHUNK_START: &str = "==========START datachunk:";
+
+fn scene_qsc_save_options(scene: &cuemol_molstr::MolScene) -> GuiSceneSaveOptions {
+    let Some(node) = scene.qsc_options() else {
+        return GuiSceneSaveOptions::default();
+    };
+    GuiSceneSaveOptions {
+        embed_all: false,
+        version: if node.str_attr("version").as_str() == "QDF1" {
+            GuiQscVersion::Qdf1
+        } else {
+            GuiQscVersion::Qdf0
+        },
+        compression: match node.str_attr("compress").as_str() {
+            "gzip" => GuiQscCompression::Gzip,
+            "xzip" | "xz" => GuiQscCompression::Xz,
+            _ => GuiQscCompression::None,
+        },
+        base64: matches!(node.str_attr("base64").as_str(), "true" | "yes" | "1"),
+    }
+    .normalized()
+}
+
+fn qsc_save_options_node(options: GuiSceneSaveOptions) -> LDom2Node {
+    let options = options.normalized();
+    let mut node = LDom2Node::new();
+    node.set_tag_name("qsc_opts");
+    node.set_str_attr("base64", options.base64.to_string());
+    node.set_str_attr("compress", options.compression_name());
+    node.set_str_attr("version", options.version_name());
+    node
+}
+
+fn rewrite_qsc_data_chunks(
+    suffix: &str,
+    omitted_chunks: &BTreeSet<String>,
+    options: GuiSceneSaveOptions,
+) -> Result<Vec<u8>> {
+    let options = options.normalized();
+    let mut output = Vec::new();
+    let mut rest = suffix;
+    loop {
+        let Some(start) = rest.find(QSC_DATA_CHUNK_START) else {
+            output.extend_from_slice(rest.as_bytes());
+            break;
+        };
+        output.extend_from_slice(&rest.as_bytes()[..start]);
+        let chunk = &rest[start..];
+        let marker_end = chunk
+            .find('\n')
+            .map(|index| index + 1)
+            .ok_or_else(|| CueMolError::parse("unterminated QSC data chunk marker"))?;
+        let marker = &chunk[..marker_end];
+        let chunk_id = marker
+            .strip_prefix(QSC_DATA_CHUNK_START)
+            .and_then(|value| value.strip_suffix("==========\n"))
+            .ok_or_else(|| CueMolError::parse("invalid QSC data chunk marker"))?;
+        let end_marker = format!("==========END datachunk:{chunk_id}==========");
+        let payload_and_tail = &chunk[marker_end..];
+        let end = payload_and_tail
+            .find(&end_marker)
+            .ok_or_else(|| CueMolError::parse("QSC data chunk end marker is missing"))?;
+        let payload = &payload_and_tail[..end];
+        let after_end = &payload_and_tail[end + end_marker.len()..];
+
+        if !omitted_chunks.contains(chunk_id) {
+            output.extend_from_slice(marker.as_bytes());
+            if payload.starts_with("QDF") {
+                let encoded_payload = payload.strip_suffix('\n').unwrap_or(payload);
+                let qdf0 = cuemol_qsys::decode_qdf_to_qdf0_bytes(encoded_payload.as_bytes())?;
+                let encoded = match options.version {
+                    GuiQscVersion::Qdf0 => qdf0,
+                    GuiQscVersion::Qdf1 => {
+                        cuemol_qsys::encode_qdf0_bytes(&qdf0, 1, options.qdf_encoding())?
+                    }
+                };
+                output.extend_from_slice(&encoded);
+                if !encoded.ends_with(b"\n") {
+                    output.push(b'\n');
+                }
+            } else {
+                output.extend_from_slice(payload.as_bytes());
+            }
+            output.extend_from_slice(end_marker.as_bytes());
+        }
+        rest = after_end;
+    }
+    Ok(output)
+}
 
 fn read_qsc_xml_prefix(path: &Path) -> Result<Option<LDom2Tree>> {
     let mut reader = BufReader::new(fs::File::open(path)?);
@@ -57142,7 +57395,8 @@ attribute \"dep\" string \"positions\"
             std::process::id()
         ));
         app.save_active_scene_qsc(&qsc_path).unwrap();
-        let qsc = std::fs::read_to_string(&qsc_path).unwrap();
+        let qsc_bytes = std::fs::read(&qsc_path).unwrap();
+        let qsc = String::from_utf8_lossy(&qsc_bytes);
         assert!(qsc.contains("name=\"camera_0\""));
         assert!(qsc.contains("<visibilities>"));
         assert!(qsc.contains("target=\"map\""));
@@ -57465,21 +57719,141 @@ attribute \"dep\" string \"positions\"
         };
         let dir = std::env::temp_dir().join(format!("cuemol-desktop-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("scene.qsc");
+        let linked_path = dir.join("linked.qsc");
+        let embedded_path = dir.join("embedded.qsc");
 
         let mut app = DesktopAppState::new();
-        app.open_path(root.join("1CRN.pdb")).unwrap();
+        let GuiLoadedPath::Object { object_uid, .. } =
+            app.open_path(root.join("1CRN.pdb")).unwrap()
+        else {
+            panic!("expected molecule");
+        };
+        app.scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .set_modified(false);
         let mut camera = cuemol_qsys::Camera::new();
         camera.set_name("__current");
         camera.set_cam_dist(123.0);
         app.set_active_scene_camera(camera).unwrap();
-        app.save_active_scene_qsc(&path).unwrap();
-        let saved = std::fs::read_to_string(&path).unwrap();
-        assert!(saved.contains("<scene>"));
-        assert!(saved.contains("name=\"__current\""));
-        assert!(saved.contains("==========START datachunk:"));
-        let _ = std::fs::remove_file(path);
+        app.save_active_scene_qsc_with_options(&linked_path, GuiSceneSaveOptions::default())
+            .unwrap();
+        let linked = std::fs::read_to_string(&linked_path).unwrap();
+        assert!(linked.contains("<scene>"));
+        assert!(linked.contains("name=\"__current\""));
+        assert!(linked.contains(root.join("1CRN.pdb").to_string_lossy().as_ref()));
+        assert!(!linked.contains("==========START datachunk:00000"));
+        assert!(linked.contains("base64=\"false\" compress=\"none\" version=\"QDF0\""));
+
+        app.save_active_scene_qsc_with_options(
+            &embedded_path,
+            GuiSceneSaveOptions {
+                embed_all: true,
+                version: GuiQscVersion::Qdf1,
+                compression: GuiQscCompression::Xz,
+                base64: true,
+            },
+        )
+        .unwrap();
+        let embedded = std::fs::read_to_string(&embedded_path).unwrap();
+        assert!(embedded.contains("==========START datachunk:00000"));
+        assert!(embedded.contains("base64=\"true\" compress=\"xzip\" version=\"QDF1\""));
+        assert_eq!(
+            app.scene_manager().object(object_uid).unwrap().source(),
+            "datachunk:"
+        );
+        let _ = std::fs::remove_file(linked_path);
+        let _ = std::fs::remove_file(embedded_path);
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn qsc_save_options_reencode_and_omit_data_chunks() {
+        let raw = cuemol_qsys::QdfWriter::new("TEST").finish();
+        let source =
+            String::from_utf8(cuemol_qsys::encode_qdf0_bytes(&raw, 1, "10").unwrap()).unwrap();
+        let suffix = format!(
+            "\n==========START datachunk:00000==========\n{source}\n==========END datachunk:00000==========\n"
+        );
+        let encoded = rewrite_qsc_data_chunks(
+            &suffix,
+            &BTreeSet::new(),
+            GuiSceneSaveOptions {
+                embed_all: true,
+                version: GuiQscVersion::Qdf1,
+                compression: GuiQscCompression::Gzip,
+                base64: true,
+            },
+        )
+        .unwrap();
+        let start = encoded
+            .windows(6)
+            .position(|window| window == b"QDF111")
+            .expect("encoded QDF1 payload");
+        let end_marker = b"\n==========END datachunk:00000==========";
+        let end = encoded[start..]
+            .windows(end_marker.len())
+            .position(|window| window == end_marker)
+            .map(|offset| start + offset)
+            .expect("data chunk end");
+        assert_eq!(
+            cuemol_qsys::decode_qdf_to_qdf0_bytes(&encoded[start..end]).unwrap(),
+            raw
+        );
+
+        let omitted = rewrite_qsc_data_chunks(
+            &suffix,
+            &BTreeSet::from(["00000".to_string()]),
+            GuiSceneSaveOptions::default(),
+        )
+        .unwrap();
+        assert!(!omitted
+            .windows(QSC_DATA_CHUNK_START.len())
+            .any(|window| window == QSC_DATA_CHUNK_START.as_bytes()));
+    }
+
+    #[test]
+    fn qdf0_scene_save_roundtrips_a_raw_binary_data_chunk() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-qdf0-scene-save-{}.qsc", std::process::id()));
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let molecule = read_pdb_str(
+            "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        app.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule_with_source_type("binary", molecule, "qdfmol");
+        app.save_active_scene_qsc_with_options(
+            &path,
+            GuiSceneSaveOptions {
+                embed_all: true,
+                ..GuiSceneSaveOptions::default()
+            },
+        )
+        .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let marker = b"==========START datachunk:00000==========\n";
+        let start = bytes
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .map(|offset| offset + marker.len())
+            .expect("QSC data chunk");
+        assert_eq!(&bytes[start..start + 4], b"QDF0");
+
+        let mut loaded = DesktopAppState::new();
+        let GuiLoadedPath::Scene { scene_uid } = loaded.open_path(&path).unwrap() else {
+            panic!("expected saved scene");
+        };
+        assert_eq!(
+            loaded.scene_manager().scene(scene_uid).unwrap().objects()[0]
+                .mol()
+                .atom_count(),
+            1
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
