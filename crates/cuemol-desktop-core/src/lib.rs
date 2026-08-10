@@ -6761,11 +6761,13 @@ impl DesktopAppState {
         let mut rows = Vec::new();
         for object in scene.objects() {
             let residues = object.mol().residue_summaries();
+            let mut residue_index = 0;
             for chain in object.mol().chain_summaries() {
                 let mut sequence = String::new();
                 let mut atom_count = 0;
                 for key in &chain.residue_keys {
-                    if let Some(residue) = residues.iter().find(|residue| &residue.key == key) {
+                    if let Some(residue) = next_ordered_residue(&residues, &mut residue_index, key)
+                    {
                         sequence.push(residue_one_letter(&residue.res_name));
                         atom_count += residue.atom_indices.len();
                     }
@@ -6799,11 +6801,13 @@ impl DesktopAppState {
             let mol = object.mol();
             let atoms = mol.atoms();
             let residues = mol.residue_summaries();
+            let mut residue_index = 0;
             let mut chains = Vec::new();
             for chain in mol.chain_summaries() {
                 let mut chain_residues = Vec::new();
                 for key in &chain.residue_keys {
-                    let Some(residue) = residues.iter().find(|residue| &residue.key == key) else {
+                    let Some(residue) = next_ordered_residue(&residues, &mut residue_index, key)
+                    else {
                         continue;
                     };
                     let mut res_atoms = Vec::new();
@@ -6862,10 +6866,12 @@ impl DesktopAppState {
                 mol.select_indices(mol.selection()).into_iter().collect()
             };
             let residues = mol.residue_summaries();
+            let mut residue_index = 0;
             for chain in mol.chain_summaries() {
                 let mut chain_residues = Vec::new();
                 for key in &chain.residue_keys {
-                    let Some(residue) = residues.iter().find(|residue| &residue.key == key) else {
+                    let Some(residue) = next_ordered_residue(&residues, &mut residue_index, key)
+                    else {
                         continue;
                     };
                     let is_selected = residue
@@ -42668,6 +42674,24 @@ fn collect_config_entries(
             collect_config_entries(&key, child, entries);
         }
     }
+}
+
+fn next_ordered_residue<'a>(
+    residues: &'a [cuemol_molstr::ResidueSummary],
+    cursor: &mut usize,
+    key: &cuemol_molstr::ResidueKey,
+) -> Option<&'a cuemol_molstr::ResidueSummary> {
+    while let Some(residue) = residues.get(*cursor) {
+        match residue.key.cmp(key) {
+            std::cmp::Ordering::Less => *cursor += 1,
+            std::cmp::Ordering::Equal => {
+                *cursor += 1;
+                return Some(residue);
+            }
+            std::cmp::Ordering::Greater => return None,
+        }
+    }
+    None
 }
 
 fn residue_one_letter(name: &str) -> char {

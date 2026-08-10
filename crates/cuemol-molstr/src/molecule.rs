@@ -632,6 +632,7 @@ impl MolCoord {
             .len()
     }
 
+    /// Returns residue summaries ordered by [`ResidueKey`].
     pub fn residue_summaries(&self) -> Vec<ResidueSummary> {
         let mut residues = BTreeMap::<ResidueKey, ResidueSummary>::new();
         for (index, atom) in self.atoms.iter().enumerate() {
