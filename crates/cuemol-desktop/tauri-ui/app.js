@@ -226,6 +226,9 @@ let renderedSequenceKey = "";
 let renderedSceneTabsKey = "";
 let renderedSceneTreeKey = "";
 let renderedInspectorKey = "";
+let renderedAnimationListKey = "";
+let renderedTrajectoryListKey = "";
+let renderedTrajectoryBlocksKey = "";
 let secondaryPanelRenderGeneration = 0;
 let selectionCandidateCache = { key: "", values: null };
 
@@ -10218,26 +10221,37 @@ function renderAnimation() {
   if (!objects.some((object) => object.index === selectedAnimationIndex)) {
     selectedAnimationIndex = null;
   }
-  animationList.replaceChildren();
-  if (objects.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "animation-empty";
-    empty.textContent = "No animation objects.";
-    animationList.append(empty);
-  }
-  for (const object of objects) {
-    const row = button("", `animation-row${object.index === selectedAnimationIndex ? " selected" : ""}`, () => {
-      selectedAnimationIndex = object.index;
-      renderAnimation();
-    });
-    const name = document.createElement("span");
-    name.textContent = object.name;
-    const start = document.createElement("span");
-    start.textContent = object.start.toFixed(1);
-    const end = document.createElement("span");
-    end.textContent = object.end.toFixed(1);
-    row.append(name, start, end);
-    animationList.append(row);
+  const listKey = JSON.stringify([
+    selectedAnimationIndex,
+    objects.map((object) => [object.index, object.name, object.start, object.end]),
+  ]);
+  if (renderedAnimationListKey !== listKey) {
+    renderedAnimationListKey = listKey;
+    animationList.replaceChildren();
+    if (objects.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "animation-empty";
+      empty.textContent = "No animation objects.";
+      animationList.append(empty);
+    }
+    for (const object of objects) {
+      const row = button(
+        "",
+        `animation-row${object.index === selectedAnimationIndex ? " selected" : ""}`,
+        () => {
+          selectedAnimationIndex = object.index;
+          renderAnimation();
+        },
+      );
+      const name = document.createElement("span");
+      name.textContent = object.name;
+      const start = document.createElement("span");
+      start.textContent = object.start.toFixed(1);
+      const end = document.createElement("span");
+      end.textContent = object.end.toFixed(1);
+      row.append(name, start, end);
+      animationList.append(row);
+    }
   }
   const total = snapshot.animationDuration;
   animationDuration.textContent = formatAnimationTime(total);
@@ -10336,20 +10350,34 @@ function renderTrajectory() {
   if (!trajectories.some((trajectory) => trajectory.objectUid === selectedTrajectoryUid)) {
     selectedTrajectoryUid = trajectories[0]?.objectUid ?? null;
   }
-  trajectoryObject.replaceChildren();
-  for (const trajectory of trajectories) {
-    const option = document.createElement("option");
-    option.value = String(trajectory.objectUid);
-    option.textContent = `${trajectory.objectName} (${trajectory.frameCount} frames)`;
-    trajectoryObject.append(option);
-  }
-  if (selectedTrajectoryUid !== null) {
-    trajectoryObject.value = String(selectedTrajectoryUid);
+  const listKey = JSON.stringify([
+    selectedTrajectoryUid,
+    trajectories.map((trajectory) => [
+      trajectory.objectUid,
+      trajectory.objectName,
+      trajectory.frameCount,
+    ]),
+  ]);
+  if (renderedTrajectoryListKey !== listKey) {
+    renderedTrajectoryListKey = listKey;
+    trajectoryObject.replaceChildren();
+    for (const trajectory of trajectories) {
+      const option = document.createElement("option");
+      option.value = String(trajectory.objectUid);
+      option.textContent = `${trajectory.objectName} (${trajectory.frameCount} frames)`;
+      trajectoryObject.append(option);
+    }
+    if (selectedTrajectoryUid !== null) {
+      trajectoryObject.value = String(selectedTrajectoryUid);
+    }
   }
 
   const trajectory = selectedTrajectory();
   const enabled = Boolean(trajectory?.frameCount);
   const blocks = trajectory?.blocks || [];
+  if (!blocks.some((block) => block.uid === selectedTrajectoryBlockUid)) {
+    selectedTrajectoryBlockUid = null;
+  }
   const last = enabled ? trajectory.frameCount - 1 : 0;
   const current = enabled
     ? Math.min(last, trajectory.currentFrame ?? trajectoryFrames.get(trajectory.objectUid) ?? 0)
@@ -10368,52 +10396,64 @@ function renderTrajectory() {
     ? "No trajectory blocks — add a trajectory file."
     : "No trajectory in this scene — use File > Open MD Trajectory…";
 
-  if (!blocks.some((block) => block.uid === selectedTrajectoryBlockUid)) {
-    selectedTrajectoryBlockUid = null;
-  }
-  trajectoryBlockStrip.replaceChildren();
-  for (const [index, block] of blocks.entries()) {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.draggable = true;
-    item.className = `trajectory-block trajectory-block-c${block.uid % 6}`;
-    item.classList.toggle("selected", block.uid === selectedTrajectoryBlockUid);
-    item.style.flex = `${Math.max(1, block.frameCount)} 1 0px`;
-    item.textContent = `${block.name} · ${block.frameCount}`;
-    item.title = `${block.source || block.name}\n${block.format} · frames ${block.startIndex}–${block.startIndex + block.frameCount - 1}`;
-    item.addEventListener("click", () => {
-      selectedTrajectoryBlockUid = block.uid;
-      renderTrajectory();
-    });
-    item.addEventListener("dragstart", (event) => {
-      draggedTrajectoryBlockUid = block.uid;
-      item.classList.add("dragging");
-      event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", String(block.uid));
-    });
-    item.addEventListener("dragover", (event) => {
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-    });
-    item.addEventListener("drop", async (event) => {
-      event.preventDefault();
-      const active = selectedTrajectory();
-      const from = active?.blocks.findIndex(
-        (candidate) => candidate.uid === draggedTrajectoryBlockUid,
-      );
-      if (active && from >= 0 && from !== index) {
-        await mutate("move_trajectory_block", {
-          objectUid: active.objectUid,
-          from,
-          to: index,
-        });
-      }
-    });
-    item.addEventListener("dragend", () => {
-      draggedTrajectoryBlockUid = null;
-      item.classList.remove("dragging");
-    });
-    trajectoryBlockStrip.append(item);
+  const blocksKey = JSON.stringify([
+    trajectory?.objectUid ?? null,
+    selectedTrajectoryBlockUid,
+    blocks.map((block) => [
+      block.uid,
+      block.name,
+      block.source,
+      block.format,
+      block.startIndex,
+      block.frameCount,
+    ]),
+  ]);
+  if (renderedTrajectoryBlocksKey !== blocksKey) {
+    renderedTrajectoryBlocksKey = blocksKey;
+    trajectoryBlockStrip.replaceChildren();
+    for (const [index, block] of blocks.entries()) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.draggable = true;
+      item.className = `trajectory-block trajectory-block-c${block.uid % 6}`;
+      item.classList.toggle("selected", block.uid === selectedTrajectoryBlockUid);
+      item.style.flex = `${Math.max(1, block.frameCount)} 1 0px`;
+      item.textContent = `${block.name} · ${block.frameCount}`;
+      item.title = `${block.source || block.name}\n${block.format} · frames ${block.startIndex}–${block.startIndex + block.frameCount - 1}`;
+      item.addEventListener("click", () => {
+        selectedTrajectoryBlockUid = block.uid;
+        renderTrajectory();
+      });
+      item.addEventListener("dragstart", (event) => {
+        draggedTrajectoryBlockUid = block.uid;
+        item.classList.add("dragging");
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", String(block.uid));
+      });
+      item.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+      });
+      item.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        const active = selectedTrajectory();
+        const from = active?.blocks.findIndex(
+          (candidate) => candidate.uid === draggedTrajectoryBlockUid,
+        );
+        if (active && from >= 0 && from !== index) {
+          await mutate("move_trajectory_block", {
+            objectUid: active.objectUid,
+            from,
+            to: index,
+          });
+        }
+      });
+      item.addEventListener("dragend", () => {
+        draggedTrajectoryBlockUid = null;
+        item.classList.remove("dragging");
+      });
+      trajectoryBlockStrip.append(item);
+    }
   }
   const playhead = enabled && last > 0 ? (current / last) * 100 : 0;
   trajectoryBlockStrip.style.setProperty("--trajectory-playhead", `${playhead}%`);

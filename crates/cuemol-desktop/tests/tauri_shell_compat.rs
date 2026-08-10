@@ -881,6 +881,29 @@ fn tauri_workspace_chrome_reuses_unchanged_dom() {
 }
 
 #[test]
+fn tauri_playback_reuses_static_animation_and_trajectory_dom() {
+    assert!(JS.contains("let renderedAnimationListKey = \"\""));
+    assert!(JS.contains("let renderedTrajectoryListKey = \"\""));
+    assert!(JS.contains("let renderedTrajectoryBlocksKey = \"\""));
+    assert!(JS.contains("if (renderedAnimationListKey !== listKey)"));
+    assert!(JS.contains("if (renderedTrajectoryListKey !== listKey)"));
+    assert!(JS.contains("if (renderedTrajectoryBlocksKey !== blocksKey)"));
+
+    let animation_key = JS
+        .split("const listKey = JSON.stringify([")
+        .nth(1)
+        .and_then(|source| source.split("if (renderedAnimationListKey").next())
+        .expect("animation list render key");
+    assert!(!animation_key.contains("animationElapsed"));
+    let trajectory_blocks_key = JS
+        .split("const blocksKey = JSON.stringify([")
+        .nth(1)
+        .and_then(|source| source.split("if (renderedTrajectoryBlocksKey").next())
+        .expect("trajectory block render key");
+    assert!(!trajectory_blocks_key.contains("currentFrame"));
+}
+
+#[test]
 fn tauri_workspace_preserves_renderer_group_hierarchy() {
     assert!(JS.contains("function groupedMoleculeRenderers(renderers)"));
     assert!(JS.contains("candidate.group === renderer.name"));
