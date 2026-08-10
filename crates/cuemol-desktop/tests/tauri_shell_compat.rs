@@ -224,6 +224,7 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(JS.contains("applyViewport(initial.viewport, sequence)"));
     assert!(JS.contains("scheduleRender(0)"));
     assert!(JS.contains(r#"invoke("get_molecule_details", {"#));
+    assert!(JS.contains("scheduleMoleculeDetailsRefresh(delay = 0)"));
     assert!(JS.contains("scheduleMoleculeDetailsRefresh()"));
     assert!(JS.contains("includeSequence"));
     assert!(JS.contains("initial.startupPathsPending"));
@@ -240,6 +241,15 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(!JS.contains("snapshot.sequence.length"));
     assert!(!JS.contains("for (const chain of snapshot.sequence)"));
     assert!(!JS.contains(r#"snapshot = await invoke("get_snapshot");\n    renderShell();"#));
+}
+
+#[test]
+fn tauri_viewport_render_requests_are_coalesced() {
+    assert!(JS.contains("if (viewportRenderRequest)"));
+    assert!(JS.contains("viewportRenderQueued = true"));
+    assert!(JS.contains("do {"));
+    assert!(JS.contains("} while (viewportRenderQueued)"));
+    assert!(JS.contains("await viewportRenderRequest"));
 }
 
 #[test]

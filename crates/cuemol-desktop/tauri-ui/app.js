@@ -138,6 +138,8 @@ let coloringPaintSelectedIndex = -1;
 let coloringGradientSelectedIndex = -1;
 let selectionHistoryEntries = loadSelectionHistory();
 let renderTimer = null;
+let viewportRenderRequest = null;
+let viewportRenderQueued = false;
 let renderedViewportSize = "";
 let wheelTimer = null;
 let wheelPending = null;
@@ -4575,7 +4577,7 @@ function moleculeDetailsAreCurrent() {
     (!sequencePanelIsActive() || moleculeSequenceIsCurrent());
 }
 
-function scheduleMoleculeDetailsRefresh(delay = 80) {
+function scheduleMoleculeDetailsRefresh(delay = 0) {
   if (!invoke || !snapshot || moleculeDetailsAreCurrent() || moleculeDetailsRequest) return;
   clearTimeout(moleculeDetailsTimer);
   moleculeDetailsTimer = setTimeout(() => {
@@ -6480,13 +6482,27 @@ async function renderViewport() {
   if (!invoke) return;
   clearTimeout(renderTimer);
   renderTimer = null;
-  const size = viewportDimensions();
-  const sequence = ++requestSequence;
+  if (viewportRenderRequest) {
+    viewportRenderQueued = true;
+    return viewportRenderRequest;
+  }
+  viewportRenderRequest = (async () => {
+    do {
+      viewportRenderQueued = false;
+      const size = viewportDimensions();
+      const sequence = ++requestSequence;
+      try {
+        const result = await invoke("render_viewport", size);
+        applyViewport(result, sequence);
+      } catch (error) {
+        showError(error);
+      }
+    } while (viewportRenderQueued);
+  })();
   try {
-    const result = await invoke("render_viewport", size);
-    applyViewport(result, sequence);
-  } catch (error) {
-    showError(error);
+    await viewportRenderRequest;
+  } finally {
+    viewportRenderRequest = null;
   }
 }
 
