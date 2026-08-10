@@ -127,6 +127,7 @@ let selectedDensityMapUid = null;
 let selectedDensityRendererUid = null;
 let selectedSurfaceUid = null;
 let selectedSurfaceRendererUid = null;
+let selectedCameraName = null;
 let workspaceSelectionKind = "object";
 let molstructObjectUid = null;
 const molstructSelectedKeys = new Set();
@@ -681,6 +682,8 @@ function scenePropertyDefinitions() {
 
 function genericPropertyEditor(info, kind) {
   const isScene = kind === "scene";
+  const isCamera = kind === "camera";
+  let originalCameraName = isCamera ? info.name : null;
   let draft = copyProperties(info);
   let dirty = false;
   let selected = null;
@@ -991,6 +994,30 @@ function genericPropertyEditor(info, kind) {
         );
         renderShell();
         await renderViewport();
+      } else if (isCamera) {
+        snapshot = await invoke("set_camera_properties", {
+          oldName: originalCameraName,
+          properties: {
+            name: draft.name,
+            zoom: draft.zoom,
+            distance: draft.distance,
+            slab: draft.slab,
+            center: draft.center,
+            rotation: draft.rotation,
+            perspective: draft.perspective,
+            transMms: draft.transMms,
+            rotMms: draft.rotMms,
+            stereoMode: draft.stereoMode,
+            stereoDist: draft.stereoDist,
+            swapStereoEyes: draft.swapStereoEyes,
+            centerMark: draft.centerMark,
+          },
+        });
+        originalCameraName = draft.name.trim();
+        draft.name = originalCameraName;
+        selectedCameraName = originalCameraName;
+        workspaceSelectionKind = "camera";
+        renderShell();
       } else {
         const size = viewportDimensions();
         const sequence = ++requestSequence;
@@ -1042,6 +1069,10 @@ function genericPropertyEditor(info, kind) {
 
 function viewPropertyEditor(info) {
   genericPropertyEditor(info, "view");
+}
+
+function cameraPropertyEditor(info) {
+  genericPropertyEditor(info, "camera");
 }
 
 function scenePropertyEditor(info) {
@@ -3095,7 +3126,9 @@ async function showReferenceDialog(title) {
     "About CueMol2",
   ].includes(title);
   const usesViewProperties = title === "View Property";
-  const usesGenericProperties = usesViewProperties || title === "Scene Properties";
+  const usesCameraProperties = title === "Camera Properties";
+  const usesGenericProperties =
+    usesViewProperties || usesCameraProperties || title === "Scene Properties";
   const usesPreferences = title === "Options";
   const usesWorkspaceProperties = ["Object Properties", "Renderer Properties"].includes(title);
   referenceDialog.classList.toggle("property-editor", usesGenericProperties);
@@ -3120,6 +3153,13 @@ async function showReferenceDialog(title) {
   if (usesViewProperties) {
     try {
       viewProperties = await invoke("get_view_properties");
+    } catch (error) {
+      showError(error);
+    }
+  }
+  if (usesCameraProperties) {
+    try {
+      viewProperties = await invoke("get_camera_properties", { name: selectedCameraName });
     } catch (error) {
       showError(error);
     }
@@ -3260,6 +3300,13 @@ async function showReferenceDialog(title) {
       viewPropertyEditor(viewProperties);
     } else {
       dialogContent.append(dialogParagraph("View properties are unavailable."));
+    }
+  } else if (title === "Camera Properties") {
+    dialogTitle.textContent = "Object properties";
+    if (viewProperties) {
+      cameraPropertyEditor(viewProperties);
+    } else {
+      dialogContent.append(dialogParagraph("Camera properties are unavailable."));
     }
   } else if (title === "Molecular superposition") {
     const objects = activeObjects();
@@ -4106,6 +4153,17 @@ function activeSurfaces() {
   );
 }
 
+function activeCameras() {
+  if (!snapshot) return [];
+  return (snapshot.cameras || []).filter(
+    (camera) => camera.sceneUid === snapshot.activeSceneUid,
+  );
+}
+
+function selectedCamera() {
+  return activeCameras().find((camera) => camera.name === selectedCameraName) || null;
+}
+
 function selectedObject() {
   return activeObjects().find((object) => object.uid === selectedObjectUid) || null;
 }
@@ -4193,6 +4251,10 @@ function selectedWorkspaceTarget() {
 }
 
 function normalizeSelection() {
+  if (workspaceSelectionKind === "camera" && !selectedCamera()) {
+    selectedCameraName = null;
+    workspaceSelectionKind = "cameraRoot";
+  }
   if (["densityMap", "densityRenderer"].includes(workspaceSelectionKind)) {
     if (!selectedDensityMap()) {
       selectedDensityMapUid = null;
@@ -4218,9 +4280,15 @@ function normalizeSelection() {
     selectedObjectUid = objects[0]?.uid ?? null;
     selectedRendererUid = null;
     if (
-      !["scene", "densityMap", "densityRenderer", "surface", "surfaceRenderer"].includes(
-        workspaceSelectionKind,
-      )
+      ![
+        "scene",
+        "cameraRoot",
+        "camera",
+        "densityMap",
+        "densityRenderer",
+        "surface",
+        "surfaceRenderer",
+      ].includes(workspaceSelectionKind)
     ) {
       const surface = activeSurfaces()[0];
       const map = snapshot.densityMaps.find(
@@ -4265,6 +4333,7 @@ function workspaceChromeRenderKey() {
       selectedDensityRendererUid,
       selectedSurfaceUid,
       selectedSurfaceRendererUid,
+      selectedCameraName,
     ],
     scenes: snapshot.scenes.map((scene) => [
       scene.uid,
@@ -4299,6 +4368,12 @@ function workspaceChromeRenderKey() {
       surface.className,
       surface.format,
       surface.renderers.map(rendererKey),
+    ]),
+    cameras: (snapshot.cameras || []).map((camera) => [
+      camera.sceneUid,
+      camera.name,
+      camera.source,
+      camera.visibilityCount,
     ]),
   });
 }
@@ -4341,6 +4416,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         selectedDensityRendererUid = null;
         selectedSurfaceUid = null;
         selectedSurfaceRendererUid = null;
+        selectedCameraName = null;
         if (!scene.active) {
           await mutate("activate_scene", { sceneUid: scene.uid });
         } else {
@@ -4507,6 +4583,55 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         sceneTree.append(rendererRow);
       }
     }
+    const sceneCameras = (snapshot.cameras || []).filter(
+      (camera) => camera.sceneUid === scene.uid,
+    );
+    const cameraRoot = button(
+      "Camera",
+      `tree-object camera-root${
+        workspaceSelectionKind === "cameraRoot" && scene.active ? " active" : ""
+      }`,
+      async () => {
+        workspaceSelectionKind = "cameraRoot";
+        selectedCameraName = null;
+        if (!scene.active) {
+          await mutate("activate_scene", { sceneUid: scene.uid });
+        } else {
+          renderShell();
+        }
+      },
+    );
+    const count = document.createElement("small");
+    count.textContent = `${sceneCameras.length} CAM`;
+    cameraRoot.append(count);
+    sceneTree.append(cameraRoot);
+    for (const camera of sceneCameras) {
+      const markers = `${camera.source ? " ↗" : ""}${camera.visibilityCount > 0 ? " ◉" : ""}`;
+      const cameraRow = button(
+        `${camera.name}${markers}`,
+        `tree-renderer camera-node${
+          workspaceSelectionKind === "camera" && camera.name === selectedCameraName
+            ? " active"
+            : ""
+        }`,
+        async () => {
+          workspaceSelectionKind = "camera";
+          selectedCameraName = camera.name;
+          if (!scene.active) {
+            await mutate("activate_scene", { sceneUid: scene.uid });
+          } else {
+            renderShell();
+          }
+        },
+      );
+      cameraRow.addEventListener("dblclick", async () => {
+        workspaceSelectionKind = "camera";
+        selectedCameraName = camera.name;
+        if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
+        await mutate("load_camera", { name: camera.name });
+      });
+      sceneTree.append(cameraRow);
+    }
   }
   workspaceProperties.disabled =
     ["renderer", "rendererGroup"].includes(workspaceSelectionKind)
@@ -4519,6 +4644,10 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           ? !selectedDensityMap()
           : workspaceSelectionKind === "surface"
             ? !selectedSurface()
+          : workspaceSelectionKind === "camera"
+            ? !selectedCamera()
+          : workspaceSelectionKind === "cameraRoot"
+            ? true
           : workspaceSelectionKind === "object"
             ? !selectedObject()
             : !snapshot.scenes.some((scene) => scene.active);
@@ -4533,10 +4662,14 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             ? !selectedDensityMap()
             : workspaceSelectionKind === "surface"
               ? !selectedSurface()
+              : workspaceSelectionKind === "camera"
+                ? !selectedCamera()
               : workspaceSelectionKind === "object"
                 ? !selectedObject()
                 : true;
-  workspaceZoom.disabled = workspaceDelete.disabled || workspaceSelectionKind === "rendererGroup";
+  workspaceZoom.disabled =
+    workspaceDelete.disabled ||
+    ["rendererGroup", "cameraRoot", "camera"].includes(workspaceSelectionKind);
 }
 
 function renderInspector(renderKey = workspaceChromeRenderKey()) {
@@ -4552,13 +4685,19 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
     !map && !surface && ["object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)
       ? selectedObject()
       : null;
-  inspectorTitle.textContent = object?.name || map?.name || surface?.name || "No object";
-  const labels = map
+  const camera = workspaceSelectionKind === "camera" ? selectedCamera() : null;
+  inspectorTitle.textContent =
+    object?.name || map?.name || surface?.name || camera?.name || "No object";
+  const labels = camera
+    ? ["Source", "Visibility", "Kind"]
+    : map
     ? ["Columns", "Rows", "Sections"]
     : surface
       ? ["Type", "Format", "Renderers"]
       : ["Atoms", "Residues", "Bonds"];
-  const values = object
+  const values = camera
+    ? [camera.source || "—", camera.visibilityCount, "Camera"]
+    : object
     ? [object.atomCount, object.residueCount, object.bondCount]
     : map
       ? map.counts
@@ -6876,6 +7015,19 @@ async function handleAction(action, depth = 0) {
       renderSelectionEditor();
       break;
     case "add-renderer": {
+      if (["cameraRoot", "camera"].includes(workspaceSelectionKind)) {
+        const used = new Set(activeCameras().map((camera) => camera.name));
+        let index = 0;
+        while (used.has(`camera_${index}`)) index += 1;
+        const name = globalThis.prompt?.("Camera name", `camera_${index}`)?.trim();
+        if (name) {
+          await mutate("save_camera", { name });
+          selectedCameraName = name;
+          workspaceSelectionKind = "camera";
+          renderShell();
+        }
+        break;
+      }
       const object = ["object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)
         ? selectedObject()
         : null;
@@ -6910,6 +7062,14 @@ async function handleAction(action, depth = 0) {
       break;
     }
     case "delete-workspace-item": {
+      if (workspaceSelectionKind === "camera" && selectedCamera()) {
+        const name = selectedCameraName;
+        await mutate("destroy_camera", { name });
+        selectedCameraName = null;
+        workspaceSelectionKind = "cameraRoot";
+        renderShell();
+        break;
+      }
       const target = selectedWorkspaceTarget();
       if (!target) {
         showError("Select an object or renderer first.");
@@ -6966,8 +7126,10 @@ document.querySelectorAll("[data-dialog]").forEach((element) => {
   });
 });
 
-workspaceProperties.addEventListener("click", () => {
-  if (["renderer", "rendererGroup"].includes(workspaceSelectionKind) && selectedRenderer()) {
+workspaceProperties.addEventListener("click", async () => {
+  if (workspaceSelectionKind === "camera" && selectedCamera()) {
+    await showReferenceDialog("Camera Properties");
+  } else if (["renderer", "rendererGroup"].includes(workspaceSelectionKind) && selectedRenderer()) {
     showReferenceDialog("Renderer Properties");
   } else if (workspaceSelectionKind === "densityRenderer" && selectedDensityRenderer()) {
     showReferenceDialog("Renderer Properties");

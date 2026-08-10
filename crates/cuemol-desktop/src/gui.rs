@@ -450,6 +450,7 @@ struct GuiApplication {
     selected_object: Option<cuemol_core::Uid>,
     selected_renderer: Option<cuemol_core::Uid>,
     workspace_aux_selection: Option<WorkspaceAuxSelection>,
+    editing_saved_camera: Option<(cuemol_core::Uid, String)>,
     /// Molecule chosen in the MolStruct panel's molecule selector (CueMol2
     /// `molstruct-panel.xul`); independent of the Workspace tree selection.
     molstruct_object: Option<cuemol_core::Uid>,
@@ -1012,6 +1013,13 @@ enum NativePropertyObject {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorkspaceAuxSelection {
+    CameraRoot {
+        scene_uid: cuemol_core::Uid,
+    },
+    Camera {
+        scene_uid: cuemol_core::Uid,
+        camera_index: usize,
+    },
     DensityMap {
         scene_uid: cuemol_core::Uid,
         map_uid: cuemol_core::Uid,
@@ -2055,6 +2063,7 @@ impl GuiApplication {
             selection_text: String::new(),
             selected_object: None,
             workspace_aux_selection: None,
+            editing_saved_camera: None,
             molstruct_object: None,
             molstruct_expand_all: false,
             selection_tab: SelectionTab::Command,
@@ -3111,6 +3120,7 @@ impl GuiApplication {
             let objects = self.state.object_summaries(scene.uid);
             let density_maps = self.state.density_map_summaries(scene.uid);
             let surfaces = self.state.surface_summaries(scene.uid);
+            let cameras = self.state.camera_summaries(scene.uid);
             let object_count = objects.len() + density_maps.len() + surfaces.len();
             let scene_label = format!("{}  [{} objects]", scene.name, object_count);
             let selected_scene = Some(scene.uid) == self.state.active_scene();
@@ -3280,6 +3290,44 @@ impl GuiApplication {
                         }
                     });
                 }
+                let root_selection = WorkspaceAuxSelection::CameraRoot {
+                    scene_uid: scene.uid,
+                };
+                let root_selected = self.selected_object.is_none()
+                    && self.workspace_aux_selection == Some(root_selection);
+                if ui.selectable_label(root_selected, "Camera").clicked() {
+                    self.activate_workspace_scene(scene.uid, camera);
+                    self.selected_object = None;
+                    self.selected_renderer = None;
+                    self.workspace_aux_selection = Some(root_selection);
+                }
+                ui.indent(format!("camera-root-{}", scene.uid.get()), |ui| {
+                    for (camera_index, summary) in cameras.iter().enumerate() {
+                        let selection = WorkspaceAuxSelection::Camera {
+                            scene_uid: scene.uid,
+                            camera_index,
+                        };
+                        let selected = self.selected_object.is_none()
+                            && self.workspace_aux_selection == Some(selection);
+                        let mut label = summary.name.clone();
+                        if !summary.source.is_empty() {
+                            label.push_str("  ↗");
+                        }
+                        if summary.visibility_count > 0 {
+                            label.push_str("  ◉");
+                        }
+                        let response = ui.selectable_label(selected, label);
+                        if response.clicked() {
+                            self.activate_workspace_scene(scene.uid, camera);
+                            self.selected_object = None;
+                            self.selected_renderer = None;
+                            self.workspace_aux_selection = Some(selection);
+                        }
+                        if response.double_clicked() {
+                            self.load_workspace_camera(selection, camera);
+                        }
+                    }
+                });
             });
         }
         ui.separator();
@@ -3297,12 +3345,32 @@ impl GuiApplication {
             {
                 self.zoom_workspace_selection(camera);
             }
-            if ui.button("Add").on_hover_text("Add renderer").clicked() {
+            let adding_camera = matches!(
+                self.workspace_aux_selection,
+                Some(
+                    WorkspaceAuxSelection::CameraRoot { .. } | WorkspaceAuxSelection::Camera { .. }
+                )
+            );
+            if ui
+                .button("Add")
+                .on_hover_text(if adding_camera {
+                    "Save current view as camera"
+                } else {
+                    "Add renderer"
+                })
+                .clicked()
+            {
                 if let Some(object_uid) = self.selected_object {
                     let group = self.selected_renderer_group_name();
                     self.open_renderer_dialog_in_group(object_uid, group);
                 } else if let Some(selection) = self.workspace_aux_selection {
-                    self.open_aux_renderer_dialog(selection);
+                    match selection {
+                        WorkspaceAuxSelection::CameraRoot { scene_uid }
+                        | WorkspaceAuxSelection::Camera { scene_uid, .. } => {
+                            self.open_new_camera_properties(scene_uid, camera);
+                        }
+                        _ => self.open_aux_renderer_dialog(selection),
+                    }
                 } else if let Some(object_uid) = self
                     .state
                     .active_object_summaries()
@@ -3331,7 +3399,13 @@ impl GuiApplication {
                 } else if let Some(object_uid) = self.selected_object {
                     self.open_object_properties(object_uid);
                 } else if let Some(selection) = self.workspace_aux_selection {
-                    self.open_aux_properties(selection);
+                    match selection {
+                        WorkspaceAuxSelection::Camera { .. } => {
+                            self.open_camera_properties(selection);
+                        }
+                        WorkspaceAuxSelection::CameraRoot { .. } => {}
+                        _ => self.open_aux_properties(selection),
+                    }
                 } else {
                     self.open_scene_properties();
                 }
@@ -3456,7 +3530,12 @@ impl GuiApplication {
                         .map_err(|error| error.to_string())?;
                     true
                 }
-                Some(WorkspaceAuxSelection::Surface { .. }) | None => false,
+                Some(
+                    WorkspaceAuxSelection::CameraRoot { .. }
+                    | WorkspaceAuxSelection::Camera { .. }
+                    | WorkspaceAuxSelection::Surface { .. },
+                )
+                | None => false,
             }
         };
         if fitted {
@@ -9831,12 +9910,98 @@ impl GuiApplication {
     }
 
     fn open_view_properties(&mut self, camera: &CameraController) {
+        self.editing_saved_camera = None;
         self.view_properties_draft = Some(NativeViewProperties::from_camera(
             camera,
             self.viewport_rect,
         ));
         self.view_property_selected = 0;
         self.show_view_props = true;
+    }
+
+    fn camera_summary_for_selection(
+        &self,
+        selection: WorkspaceAuxSelection,
+    ) -> Option<crate::GuiCameraSummary> {
+        let WorkspaceAuxSelection::Camera {
+            scene_uid,
+            camera_index,
+        } = selection
+        else {
+            return None;
+        };
+        self.state
+            .camera_summaries(scene_uid)
+            .into_iter()
+            .nth(camera_index)
+    }
+
+    fn open_new_camera_properties(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        camera: &CameraController,
+    ) {
+        let Ok(name) = self.state.suggest_camera_name(scene_uid) else {
+            self.set_status("Cannot create camera without a scene");
+            return;
+        };
+        let mut draft = NativeViewProperties::from_camera(camera, self.viewport_rect);
+        draft.name = name;
+        self.editing_saved_camera = Some((scene_uid, String::new()));
+        self.view_properties_draft = Some(draft);
+        self.view_property_selected = 0;
+        self.show_view_props = true;
+    }
+
+    fn open_camera_properties(&mut self, selection: WorkspaceAuxSelection) {
+        let Some(summary) = self.camera_summary_for_selection(selection) else {
+            self.set_status("Camera not found");
+            return;
+        };
+        let Some(saved) = self
+            .state
+            .scene_manager()
+            .scene(summary.scene_uid)
+            .and_then(|scene| scene.camera_by_name(&summary.name))
+        else {
+            self.set_status("Camera not found");
+            return;
+        };
+        let saved = CameraController::from_qsys_camera(saved);
+        self.editing_saved_camera = Some((summary.scene_uid, summary.name));
+        self.view_properties_draft = Some(NativeViewProperties::from_camera(
+            &saved,
+            self.viewport_rect,
+        ));
+        self.view_property_selected = 0;
+        self.show_view_props = true;
+    }
+
+    fn load_workspace_camera(
+        &mut self,
+        selection: WorkspaceAuxSelection,
+        camera: &mut CameraController,
+    ) {
+        let Some(summary) = self.camera_summary_for_selection(selection) else {
+            self.set_status("Camera not found");
+            return;
+        };
+        let undo = (summary.visibility_count > 0).then(|| self.capture_undo());
+        match self
+            .state
+            .load_scene_camera(summary.scene_uid, &summary.name, true)
+        {
+            Ok(saved) => {
+                *camera = CameraController::from_qsys_camera(&saved);
+                if let Some(undo) = undo {
+                    self.push_undo_snapshot(undo);
+                    self.modified_scenes.insert(summary.scene_uid);
+                    self.rebuild_snapshot();
+                }
+                self.set_status(format!("Loaded camera {}", summary.name));
+            }
+            Err(error) => self.set_status(format!("Camera load error: {error}")),
+        }
     }
 
     fn view_props_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
@@ -9879,12 +10044,85 @@ impl GuiApplication {
             });
         self.view_property_selected = selected;
         if accept || apply {
-            match Self::apply_view_properties(camera, &draft) {
+            let update_result =
+                if let Some((scene_uid, old_name)) = self.editing_saved_camera.clone() {
+                    (|| {
+                        let new_name = draft.name.trim().to_string();
+                        let duplicate = new_name != old_name
+                            && self
+                                .state
+                                .scene_manager()
+                                .scene(scene_uid)
+                                .is_some_and(|scene| scene.camera_by_name(&new_name).is_some());
+                        if new_name.is_empty() {
+                            return Err("camera name is required".to_string());
+                        }
+                        if duplicate {
+                            return Err(format!("camera already exists: {new_name}"));
+                        }
+                        let mut target = if old_name.is_empty() {
+                            camera.clone()
+                        } else {
+                            self.state
+                                .scene_manager()
+                                .scene(scene_uid)
+                                .and_then(|scene| scene.camera_by_name(&old_name))
+                                .map(CameraController::from_qsys_camera)
+                                .ok_or_else(|| format!("camera not found: {old_name}"))?
+                        };
+                        Self::apply_view_properties(&mut target, &draft)?;
+                        let mut saved = target.to_qsys_camera(&new_name);
+                        if !old_name.is_empty() {
+                            if let Some(original) = self
+                                .state
+                                .scene_manager()
+                                .scene(scene_uid)
+                                .and_then(|scene| scene.camera_by_name(&old_name))
+                            {
+                                saved.set_source(original.source());
+                                saved.set_alt_source(original.alt_source());
+                                for (uid, visible, is_object) in original.visibility_settings() {
+                                    saved.vis_append(uid, visible, is_object);
+                                }
+                            }
+                        }
+                        let undo = self.capture_undo();
+                        if !old_name.is_empty() && old_name != new_name {
+                            self.state
+                                .destroy_scene_camera(scene_uid, &old_name)
+                                .map_err(|error| error.to_string())?;
+                        }
+                        self.state
+                            .save_scene_camera(scene_uid, saved, old_name.is_empty())
+                            .map_err(|error| error.to_string())?;
+                        self.push_undo_snapshot(undo);
+                        self.modified_scenes.insert(scene_uid);
+                        let camera_index = self
+                            .state
+                            .camera_summaries(scene_uid)
+                            .iter()
+                            .position(|summary| summary.name == new_name)
+                            .unwrap_or(0);
+                        self.workspace_aux_selection = Some(WorkspaceAuxSelection::Camera {
+                            scene_uid,
+                            camera_index,
+                        });
+                        self.editing_saved_camera = Some((scene_uid, new_name.clone()));
+                        self.set_status(format!("Saved camera {new_name}"));
+                        Ok(())
+                    })()
+                } else {
+                    Self::apply_view_properties(camera, &draft)
+                };
+            match update_result {
                 Ok(()) => {
-                    self.set_status("View properties updated");
+                    if self.editing_saved_camera.is_none() {
+                        self.set_status("View properties updated");
+                    }
                     if accept {
                         self.show_view_props = false;
                         self.view_properties_draft = None;
+                        self.editing_saved_camera = None;
                     } else {
                         self.show_view_props = true;
                         self.view_properties_draft = Some(draft);
@@ -9899,6 +10137,7 @@ impl GuiApplication {
         } else if cancel || !open {
             self.show_view_props = false;
             self.view_properties_draft = None;
+            self.editing_saved_camera = None;
         } else {
             self.show_view_props = true;
             self.view_properties_draft = Some(draft);
@@ -10764,6 +11003,9 @@ impl GuiApplication {
 
     fn open_aux_renderer_dialog(&mut self, selection: WorkspaceAuxSelection) {
         match selection {
+            WorkspaceAuxSelection::CameraRoot { .. } | WorkspaceAuxSelection::Camera { .. } => {
+                return
+            }
             WorkspaceAuxSelection::DensityMap { map_uid, .. } => {
                 self.new_renderer_owner = Some(NativePropertyObject::DensityMap(map_uid));
                 self.new_renderer_group = None;
@@ -11087,6 +11329,7 @@ impl GuiApplication {
 
     fn open_aux_properties(&mut self, selection: WorkspaceAuxSelection) {
         match selection {
+            WorkspaceAuxSelection::CameraRoot { .. } | WorkspaceAuxSelection::Camera { .. } => {}
             WorkspaceAuxSelection::DensityMap {
                 map_uid,
                 renderer_uid: Some(renderer_uid),
@@ -11112,6 +11355,25 @@ impl GuiApplication {
 
     fn delete_aux_selection(&mut self, selection: WorkspaceAuxSelection) {
         match selection {
+            WorkspaceAuxSelection::CameraRoot { .. } => {}
+            WorkspaceAuxSelection::Camera { scene_uid, .. } => {
+                let Some(summary) = self.camera_summary_for_selection(selection) else {
+                    self.set_status("Camera not found");
+                    return;
+                };
+                let undo = self.capture_undo();
+                match self.state.destroy_scene_camera(scene_uid, &summary.name) {
+                    Ok(true) => {
+                        self.push_undo_snapshot(undo);
+                        self.modified_scenes.insert(scene_uid);
+                        self.workspace_aux_selection =
+                            Some(WorkspaceAuxSelection::CameraRoot { scene_uid });
+                        self.set_status(format!("Destroyed camera {}", summary.name));
+                    }
+                    Ok(false) => self.set_status("Camera was already absent"),
+                    Err(error) => self.set_error(error),
+                }
+            }
             WorkspaceAuxSelection::DensityMap {
                 map_uid,
                 renderer_uid: None,
@@ -16239,6 +16501,35 @@ mod tests {
             app.apply_renderer_properties(&surface),
             Err("surface width must be between 0.1 and 10".to_string())
         );
+    }
+
+    #[test]
+    fn native_workspace_camera_load_delete_and_undo() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let mut saved = cuemol_qsys::Camera::new();
+        saved.set_name("camera_0");
+        saved.set_zoom(80.0);
+        app.state
+            .save_scene_camera(scene_uid, saved, false)
+            .unwrap();
+        let selection = WorkspaceAuxSelection::Camera {
+            scene_uid,
+            camera_index: 0,
+        };
+        app.workspace_aux_selection = Some(selection);
+        let mut camera = CameraController::default();
+        app.load_workspace_camera(selection, &mut camera);
+        assert!((camera.to_qsys_camera("loaded").zoom() - 80.0).abs() < 1.0e-5);
+
+        app.delete_aux_selection(selection);
+        assert!(app.state.camera_summaries(scene_uid).is_empty());
+        assert_eq!(
+            app.workspace_aux_selection,
+            Some(WorkspaceAuxSelection::CameraRoot { scene_uid })
+        );
+        app.undo(&mut camera);
+        assert_eq!(app.state.camera_summaries(scene_uid)[0].name, "camera_0");
     }
 
     #[test]

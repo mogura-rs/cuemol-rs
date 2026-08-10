@@ -300,7 +300,7 @@ fn tauri_workspace_chrome_reuses_unchanged_dom() {
     assert!(JS.contains("renderSceneTabs(workspaceRenderKey)"));
     assert!(JS.contains("renderSceneTree(workspaceRenderKey)"));
     assert!(JS.contains("renderInspector(workspaceRenderKey)"));
-    assert!(!workspace_key.contains("snapshot.camera"));
+    assert!(!workspace_key.contains("snapshot.camera."));
     assert!(!workspace_key.contains("snapshot.densityLevel"));
 }
 
@@ -312,6 +312,19 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
     assert!(JS.contains("groupName:"));
     assert!(CSS.contains(".tree-renderer.renderer-group"));
     assert!(CSS.contains(".tree-renderer.group-child"));
+}
+
+#[test]
+fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
+    assert!(JS.contains("function activeCameras()"));
+    assert!(JS.contains("workspaceSelectionKind === \"cameraRoot\""));
+    assert!(JS.contains("workspaceSelectionKind === \"camera\""));
+    assert!(JS.contains("mutate(\"save_camera\""));
+    assert!(JS.contains("mutate(\"load_camera\""));
+    assert!(JS.contains("mutate(\"destroy_camera\""));
+    assert!(JS.contains("invoke(\"get_camera_properties\""));
+    assert!(JS.contains("invoke(\"set_camera_properties\""));
+    assert!(JS.contains("camera.visibilityCount > 0"));
 }
 
 #[test]

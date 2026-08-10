@@ -489,6 +489,14 @@ pub struct GuiSceneSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiCameraSummary {
+    pub scene_uid: Uid,
+    pub name: String,
+    pub source: String,
+    pub visibility_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiObjectSummary {
     pub uid: Uid,
     pub name: String,
@@ -1646,6 +1654,124 @@ impl DesktopAppState {
         self.scene_summaries()
             .into_iter()
             .find(|scene| Some(scene.uid) == self.active_scene)
+    }
+
+    pub fn camera_summaries(&self, scene_uid: Uid) -> Vec<GuiCameraSummary> {
+        self.scene_manager()
+            .scene(scene_uid)
+            .map(|scene| {
+                scene
+                    .cameras()
+                    .iter()
+                    .map(|camera| GuiCameraSummary {
+                        scene_uid,
+                        name: camera.name().to_string(),
+                        source: camera.source().to_string(),
+                        visibility_count: camera.visibility_size(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn active_camera_summaries(&self) -> Vec<GuiCameraSummary> {
+        self.active_scene
+            .map(|scene_uid| self.camera_summaries(scene_uid))
+            .unwrap_or_default()
+    }
+
+    pub fn suggest_camera_name(&self, scene_uid: Uid) -> Result<String> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        Ok((0..)
+            .map(|index| format!("camera_{index}"))
+            .find(|name| scene.camera_by_name(name).is_none())
+            .expect("the camera name space cannot be exhausted"))
+    }
+
+    pub fn save_scene_camera(
+        &mut self,
+        scene_uid: Uid,
+        mut camera: cuemol_qsys::Camera,
+        save_visibility: bool,
+    ) -> Result<()> {
+        let name = camera.name().trim().to_string();
+        if name.is_empty() {
+            return Err(CueMolError::invalid_argument("camera name is required"));
+        }
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        if let Some(existing) = scene.camera_by_name(&name) {
+            camera.set_source(existing.source());
+            camera.set_alt_source(existing.alt_source());
+        }
+        camera.set_name(name);
+        if save_visibility {
+            camera.clear_visibility_settings();
+            for object in scene.objects() {
+                camera.vis_append(object.uid().get(), object.is_visible(), true);
+                for renderer in object.renderers() {
+                    camera.vis_append(renderer.uid().get(), renderer.is_visible(), false);
+                }
+            }
+        }
+        scene.set_camera(camera);
+        Ok(())
+    }
+
+    pub fn load_scene_camera(
+        &mut self,
+        scene_uid: Uid,
+        name: &str,
+        load_visibility: bool,
+    ) -> Result<cuemol_qsys::Camera> {
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let camera = scene
+            .camera_by_name(name)
+            .cloned()
+            .ok_or_else(|| CueMolError::NotFound(format!("camera {name}")))?;
+        if load_visibility {
+            let object_uids = scene
+                .objects()
+                .iter()
+                .map(|object| object.uid())
+                .collect::<Vec<_>>();
+            for (target, visible, is_object) in camera.visibility_settings() {
+                let target = Uid::new(target);
+                if is_object {
+                    if let Some(object) = scene.object_mut(target) {
+                        object.set_visible(visible);
+                    }
+                    continue;
+                }
+                for object_uid in &object_uids {
+                    if let Some(renderer) = scene
+                        .object_mut(*object_uid)
+                        .and_then(|object| object.renderer_mut(target))
+                    {
+                        renderer.set_visible(visible);
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(camera)
+    }
+
+    pub fn destroy_scene_camera(&mut self, scene_uid: Uid, name: &str) -> Result<bool> {
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let destroyed = scene.destroy_camera(name);
+        Ok(destroyed)
     }
 
     pub fn object_summaries(&self, scene_uid: Uid) -> Vec<GuiObjectSummary> {
@@ -51539,6 +51665,58 @@ attribute \"dep\" string \"positions\"
         assert_eq!(renderer.str_attr("target").to_string(), "mol");
         assert_eq!(renderer.str_attr("showsel").to_string(), "aid 1");
         assert_eq!(renderer.str_attr("colormode").to_string(), "molecule");
+    }
+
+    #[test]
+    fn desktop_camera_workspace_api_round_trips_visibility() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("camera", true).result_scene;
+        let scene = app.scene_manager_mut().scene_mut(scene_uid).unwrap();
+        let object_uid = scene.add_molecule("mol", MolCoord::new());
+        let renderer_uid = scene
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "simple");
+        let object = scene.object_mut(object_uid).unwrap();
+        object.set_visible(false);
+        object
+            .renderer_mut(renderer_uid)
+            .unwrap()
+            .set_visible(false);
+
+        let mut camera = cuemol_qsys::Camera::new();
+        camera.set_name("camera_0");
+        camera.set_zoom(75.0);
+        app.save_scene_camera(scene_uid, camera, true).unwrap();
+        assert_eq!(app.suggest_camera_name(scene_uid).unwrap(), "camera_1");
+        assert_eq!(app.camera_summaries(scene_uid)[0].visibility_count, 2);
+
+        let object = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .object_mut(object_uid)
+            .unwrap();
+        object.set_visible(true);
+        object.renderer_mut(renderer_uid).unwrap().set_visible(true);
+        let loaded = app.load_scene_camera(scene_uid, "camera_0", true).unwrap();
+        assert_eq!(loaded.zoom(), 75.0);
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert!(!object.is_visible());
+        assert!(!object.renderer(renderer_uid).unwrap().is_visible());
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-desktop-camera-workspace-{}.qsc",
+            std::process::id()
+        ));
+        app.save_active_scene_qsc(&path).unwrap();
+        let qsc = std::fs::read_to_string(&path).unwrap();
+        assert!(qsc.contains("name=\"camera_0\""));
+        assert!(qsc.contains("<visibilities>"));
+        let _ = std::fs::remove_file(path);
+
+        assert!(app.destroy_scene_camera(scene_uid, "camera_0").unwrap());
+        assert!(app.camera_summaries(scene_uid).is_empty());
     }
 
     #[test]

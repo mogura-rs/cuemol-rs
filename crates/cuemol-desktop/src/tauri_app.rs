@@ -61,6 +61,15 @@ struct SceneDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CameraDto {
+    scene_uid: u64,
+    name: String,
+    source: String,
+    visibility_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RendererDto {
     uid: u64,
     name: String,
@@ -302,6 +311,7 @@ struct TrajectoryDto {
 #[serde(rename_all = "camelCase")]
 struct AppSnapshot {
     scenes: Vec<SceneDto>,
+    cameras: Vec<CameraDto>,
     objects: Vec<ObjectDto>,
     structure_key: String,
     sequence_key: String,
@@ -838,6 +848,16 @@ impl AppModel {
             })
             .collect::<Vec<_>>();
         let mut objects = Vec::new();
+        let cameras = scene_summaries
+            .iter()
+            .flat_map(|scene| self.desktop.camera_summaries(scene.uid))
+            .map(|camera| CameraDto {
+                scene_uid: camera.scene_uid.get(),
+                name: camera.name,
+                source: camera.source,
+                visibility_count: camera.visibility_count,
+            })
+            .collect();
         for scene in scene_summaries {
             let styles = self
                 .desktop
@@ -1222,6 +1242,7 @@ impl AppModel {
         let sequence_key = format!("{structure_key}|{}", self.selection);
         AppSnapshot {
             scenes,
+            cameras,
             objects,
             structure_key,
             sequence_key,
@@ -3386,41 +3407,48 @@ impl AppModel {
     }
 
     fn view_properties(&self) -> ViewPropertiesDto {
+        self.camera_properties(&self.camera)
+    }
+
+    fn camera_properties(&self, camera: &Camera) -> ViewPropertiesDto {
         let scene_uid = self.desktop.active_scene().unwrap_or(Uid::new(1));
         let mut view = View::new(Uid::new(1), scene_uid);
-        view.set_camera(&self.camera);
+        view.set_camera(camera);
         view.set_view_size(self.view_width, self.view_height);
         view.set_trans_mms(self.trans_mms);
         view.set_rot_mms(self.rot_mms);
         view.set_swap_stereo_eyes(self.swap_stereo_eyes);
-        let center = self.camera.center();
-        let rotation = self.camera.rotation();
+        let center = camera.center();
+        let rotation = camera.rotation();
         ViewPropertiesDto {
-            name: self.camera.name().to_string(),
+            name: camera.name().to_string(),
             uid: view.uid().get(),
             active: view.is_active(),
-            zoom: self.camera.zoom(),
-            distance: self.camera.cam_dist(),
-            slab: self.camera.slab_depth(),
+            zoom: camera.zoom(),
+            distance: camera.cam_dist(),
+            slab: camera.slab_depth(),
             center: [center.x, center.y, center.z],
             rotation: [rotation.x, rotation.y, rotation.z, rotation.w],
-            perspective: self.camera.is_perspective(),
+            perspective: camera.is_perspective(),
             width: self.view_width,
             height: self.view_height,
             trans_mms: self.trans_mms,
             rot_mms: self.rot_mms,
-            stereo_mode: stereo_mode_name(self.camera.stereo_mode()).to_string(),
+            stereo_mode: stereo_mode_name(camera.stereo_mode()).to_string(),
             has_hw_stereo: view.has_hw_stereo(),
-            stereo_dist: self.camera.stereo_distance(),
+            stereo_dist: camera.stereo_distance(),
             swap_stereo_eyes: self.swap_stereo_eyes,
             up_vec: vector3_array(view.up_vector()),
             right_vec: vector3_array(view.right_vector()),
             forward_vec: vector3_array(view.forward_vector()),
-            center_mark: center_mark_name(self.camera.center_mark()).to_string(),
+            center_mark: center_mark_name(camera.center_mark()).to_string(),
         }
     }
 
-    fn set_view_properties(&mut self, input: ViewPropertiesInput) -> Result<(), String> {
+    fn apply_camera_properties(
+        camera: &mut Camera,
+        input: &ViewPropertiesInput,
+    ) -> Result<(), String> {
         if !input.zoom.is_finite() || input.zoom <= 0.0 {
             return Err("view zoom must be a positive finite number".to_string());
         }
@@ -3448,24 +3476,79 @@ impl AppModel {
         .map_err(|error| error.to_string())?;
         let stereo_mode = parse_stereo_mode(&input.stereo_mode)?;
         let center_mark = parse_center_mark(&input.center_mark)?;
-        self.camera.set_name(input.name);
-        self.camera.set_zoom(input.zoom);
-        self.camera.set_cam_dist(input.distance);
-        self.camera.set_slab_depth(input.slab);
-        self.camera.set_center(Vector4::new3(
+        camera.set_name(input.name.trim());
+        camera.set_zoom(input.zoom);
+        camera.set_cam_dist(input.distance);
+        camera.set_slab_depth(input.slab);
+        camera.set_center(Vector4::new3(
             input.center[0],
             input.center[1],
             input.center[2],
         ));
-        self.camera.set_rotation(rotation);
-        self.camera.set_perspective(input.perspective);
-        self.camera.set_stereo_mode(stereo_mode);
-        self.camera.set_stereo_distance(input.stereo_dist);
-        self.camera.set_center_mark(center_mark);
+        camera.set_rotation(rotation);
+        camera.set_perspective(input.perspective);
+        camera.set_stereo_mode(stereo_mode);
+        camera.set_stereo_distance(input.stereo_dist);
+        camera.set_center_mark(center_mark);
+        Ok(())
+    }
+
+    fn set_view_properties(&mut self, input: ViewPropertiesInput) -> Result<(), String> {
+        Self::apply_camera_properties(&mut self.camera, &input)?;
         self.trans_mms = input.trans_mms;
         self.rot_mms = input.rot_mms;
         self.swap_stereo_eyes = input.swap_stereo_eyes;
         self.status = "View properties updated".to_string();
+        Ok(())
+    }
+
+    fn named_camera_properties(&self, name: &str) -> Result<ViewPropertiesDto, String> {
+        let scene = self
+            .desktop
+            .active_scene()
+            .and_then(|scene_uid| self.desktop.scene_manager().scene(scene_uid))
+            .ok_or_else(|| "no active scene".to_string())?;
+        let camera = scene
+            .camera_by_name(name)
+            .ok_or_else(|| format!("camera not found: {name}"))?;
+        Ok(self.camera_properties(camera))
+    }
+
+    fn set_named_camera_properties(
+        &mut self,
+        old_name: &str,
+        input: ViewPropertiesInput,
+    ) -> Result<(), String> {
+        let scene_uid = self
+            .desktop
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        let scene = self
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| "no active scene".to_string())?;
+        let mut camera = scene
+            .camera_by_name(old_name)
+            .cloned()
+            .ok_or_else(|| format!("camera not found: {old_name}"))?;
+        let new_name = input.name.trim().to_string();
+        if new_name.is_empty() {
+            return Err("camera name is required".to_string());
+        }
+        if new_name != old_name && scene.camera_by_name(&new_name).is_some() {
+            return Err(format!("camera already exists: {new_name}"));
+        }
+        Self::apply_camera_properties(&mut camera, &input)?;
+        if new_name != old_name {
+            self.desktop
+                .destroy_scene_camera(scene_uid, old_name)
+                .map_err(|error| error.to_string())?;
+        }
+        self.desktop
+            .save_scene_camera(scene_uid, camera, false)
+            .map_err(|error| error.to_string())?;
+        self.status = format!("Saved camera {new_name}");
         Ok(())
     }
 
@@ -3935,6 +4018,54 @@ impl AppModel {
             .map_err(|error| error.to_string())
     }
 
+    fn save_named_camera(&mut self, name: &str) -> Result<(), String> {
+        let scene_uid = self
+            .desktop
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("camera name is required".to_string());
+        }
+        let mut camera = self.camera.clone();
+        camera.set_name(name);
+        self.desktop
+            .save_scene_camera(scene_uid, camera, true)
+            .map_err(|error| error.to_string())?;
+        self.status = format!("Saved camera {name}");
+        Ok(())
+    }
+
+    fn load_named_camera(&mut self, name: &str) -> Result<(), String> {
+        let scene_uid = self
+            .desktop
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        self.camera = self
+            .desktop
+            .load_scene_camera(scene_uid, name, true)
+            .map_err(|error| error.to_string())?;
+        self.invalidate_mesh(false);
+        self.status = format!("Loaded camera {name}");
+        Ok(())
+    }
+
+    fn destroy_named_camera(&mut self, name: &str) -> Result<(), String> {
+        let scene_uid = self
+            .desktop
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        if !self
+            .desktop
+            .destroy_scene_camera(scene_uid, name)
+            .map_err(|error| error.to_string())?
+        {
+            return Err(format!("camera not found: {name}"));
+        }
+        self.status = format!("Destroyed camera {name}");
+        Ok(())
+    }
+
     fn pick_atom(&mut self, x: f64, y: f64, width: u32, height: u32) -> Result<(), String> {
         let atoms = self
             .desktop
@@ -4224,10 +4355,15 @@ enum ModelRequest {
     GetPreferences,
     SetPreferences(PreferencesDto),
     GetViewProperties,
+    GetCameraProperties(String),
     SetViewProperties {
         properties: ViewPropertiesInput,
         width: u32,
         height: u32,
+    },
+    SetCameraProperties {
+        old_name: String,
+        properties: ViewPropertiesInput,
     },
     SetSceneProperties(ScenePropertiesInput),
     SetObjectProperties(ObjectPropertiesInput),
@@ -4253,6 +4389,9 @@ enum ModelRequest {
     AddSurfaceRenderer {
         surface_uid: u64,
     },
+    SaveCamera(String),
+    LoadCamera(String),
+    DestroyCamera(String),
     DeleteWorkspaceItem(WorkspaceDeleteInput),
     FitWorkspaceItem {
         target: WorkspaceFitInput,
@@ -5425,6 +5564,9 @@ fn handle_model_request(
         ModelRequest::GetViewProperties => {
             Ok(ModelResponse::ViewProperties(model.view_properties()))
         }
+        ModelRequest::GetCameraProperties(name) => Ok(ModelResponse::ViewProperties(
+            model.named_camera_properties(&name)?,
+        )),
         ModelRequest::SetViewProperties {
             properties,
             width,
@@ -5441,6 +5583,15 @@ fn handle_model_request(
                     viewport,
                 },
             )))
+        }
+        ModelRequest::SetCameraProperties {
+            old_name,
+            properties,
+        } => {
+            let undo = model.capture_undo();
+            model.set_named_camera_properties(&old_name, properties)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetSceneProperties(properties) => {
             let undo = model.capture_undo();
@@ -5517,6 +5668,35 @@ fn handle_model_request(
         ModelRequest::AddSurfaceRenderer { surface_uid } => {
             let undo = model.capture_undo();
             model.add_surface_renderer(surface_uid)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SaveCamera(name) => {
+            let undo = model.capture_undo();
+            model.save_named_camera(&name)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::LoadCamera(name) => {
+            let has_visibility = model
+                .desktop
+                .active_camera_summaries()
+                .iter()
+                .find(|camera| camera.name == name)
+                .is_some_and(|camera| camera.visibility_count > 0);
+            let mut undo = has_visibility.then(|| model.capture_undo());
+            model.load_named_camera(&name)?;
+            if let Some(undo) = undo.as_mut() {
+                undo.camera = model.camera.clone();
+            }
+            if let Some(undo) = undo {
+                model.push_undo(undo);
+            }
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::DestroyCamera(name) => {
+            let undo = model.capture_undo();
+            model.destroy_named_camera(&name)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -7039,6 +7219,17 @@ fn get_view_properties(state: State<'_, ManagedState>) -> Result<ViewPropertiesD
 }
 
 #[tauri::command]
+fn get_camera_properties(
+    name: String,
+    state: State<'_, ManagedState>,
+) -> Result<ViewPropertiesDto, String> {
+    view_properties_response(request_model(
+        &state,
+        ModelRequest::GetCameraProperties(name),
+    )?)
+}
+
+#[tauri::command]
 fn set_view_properties(
     properties: ViewPropertiesInput,
     width: u32,
@@ -7051,6 +7242,21 @@ fn set_view_properties(
             properties,
             width,
             height,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn set_camera_properties(
+    old_name: String,
+    properties: ViewPropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetCameraProperties {
+            old_name,
+            properties,
         },
     )?)
 }
@@ -7190,6 +7396,21 @@ fn add_surface_renderer(
         &state,
         ModelRequest::AddSurfaceRenderer { surface_uid },
     )?)
+}
+
+#[tauri::command]
+fn save_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::SaveCamera(name))?)
+}
+
+#[tauri::command]
+fn load_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::LoadCamera(name))?)
+}
+
+#[tauri::command]
+fn destroy_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::DestroyCamera(name))?)
 }
 
 #[tauri::command]
@@ -8284,7 +8505,9 @@ pub fn run() -> Result<(), tauri::Error> {
             get_preferences,
             set_preferences,
             get_view_properties,
+            get_camera_properties,
             set_view_properties,
+            set_camera_properties,
             set_scene_properties,
             set_object_properties,
             set_renderer_properties,
@@ -8296,6 +8519,9 @@ pub fn run() -> Result<(), tauri::Error> {
             set_surface_renderer_properties,
             set_surface_renderer_visible,
             add_surface_renderer,
+            save_camera,
+            load_camera,
+            destroy_camera,
             delete_workspace_item,
             fit_workspace_item,
             set_config_value,
@@ -10410,6 +10636,74 @@ mod tests {
         assert_eq!(snapshot.surfaces[0].name, "renamed surface");
         assert!(!snapshot.surfaces[0].visible);
         assert!(snapshot.surfaces[0].locked);
+    }
+
+    #[test]
+    fn camera_workspace_commands_update_snapshot_and_support_undo() {
+        let mut model = model_without_gpu();
+        model.camera.set_zoom(63.0);
+        handle_model_request(&mut model, ModelRequest::SaveCamera("camera_0".to_string())).unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.cameras.len(), 1);
+        assert_eq!(snapshot.cameras[0].name, "camera_0");
+        assert_eq!(
+            snapshot.cameras[0].scene_uid,
+            snapshot.active_scene_uid.unwrap()
+        );
+        assert!(snapshot.can_undo);
+
+        model.camera.set_zoom(12.0);
+        handle_model_request(&mut model, ModelRequest::LoadCamera("camera_0".to_string())).unwrap();
+        assert_eq!(model.camera.zoom(), 63.0);
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::GetCameraProperties("camera_0".to_string()),
+        )
+        .unwrap();
+        let ModelResponse::ViewProperties(properties) = response else {
+            panic!("expected camera properties");
+        };
+        assert_eq!(properties.zoom, 63.0);
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetCameraProperties {
+                old_name: "camera_0".to_string(),
+                properties: ViewPropertiesInput {
+                    name: "camera_renamed".to_string(),
+                    zoom: 91.0,
+                    distance: properties.distance,
+                    slab: properties.slab,
+                    center: properties.center,
+                    rotation: properties.rotation,
+                    perspective: properties.perspective,
+                    trans_mms: properties.trans_mms,
+                    rot_mms: properties.rot_mms,
+                    stereo_mode: properties.stereo_mode,
+                    stereo_dist: properties.stereo_dist,
+                    swap_stereo_eyes: properties.swap_stereo_eyes,
+                    center_mark: properties.center_mark,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().cameras[0].name, "camera_renamed");
+        assert_eq!(
+            model
+                .named_camera_properties("camera_renamed")
+                .unwrap()
+                .zoom,
+            91.0
+        );
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::DestroyCamera("camera_renamed".to_string()),
+        )
+        .unwrap();
+        assert!(model.snapshot().cameras.is_empty());
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().cameras[0].name, "camera_renamed");
     }
 
     #[test]
