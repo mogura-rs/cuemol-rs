@@ -4016,45 +4016,38 @@ async function showReferenceDialog(title) {
     }
   } else if (title === "Mol surface cutter") {
     dialogTitle.textContent = "MolSurf cutting tool";
-    const objects = activeObjects();
-    if (objects.length === 0) {
-      dialogContent.append(dialogParagraph("No molecular object is loaded."));
+    const surfaces = snapshot.surfaces;
+    if (surfaces.length === 0) {
+      dialogContent.append(dialogParagraph("No molecular surface is loaded."));
     } else {
       dialogContent.append(
         dialogParagraph("Cut molecular surface by the current clipping plane:"),
       );
-      const objectOptions = objects.map((object) => [object.uid, object.name]);
-      const object = dialogSelect(
-        "Target molecule",
-        objectOptions,
-        selectedObjectUid ?? objects[0].uid,
+      const surface = dialogSelect(
+        "Target surface",
+        surfaces.map((item) => [item.uid, item.name]),
+        selectedSurfaceUid ?? surfaces[0].uid,
       );
-      const selection = dialogField("Selection", snapshot.selection);
-      const density = dialogField("Density (/Å)", "1.0", "number");
-      const probeRadius = dialogField("Probe radius (Å)", "1.4", "number");
-      const normalX = dialogField("Normal X", "0", "number");
-      const normalY = dialogField("Normal Y", "0", "number");
-      const normalZ = dialogField("Normal Z", "1", "number");
-      const positionX = dialogField("Position X", "0", "number");
-      const positionY = dialogField("Position Y", "0", "number");
-      const positionZ = dialogField("Position Z", "0", "number");
+      const mode = dialogSelect(
+        "Cross section type",
+        [
+          ["full", "Complete"],
+          ["separate", "Separately"],
+          ["sect", "Section only"],
+          ["body", "No section"],
+        ],
+        "full",
+      );
+      const density = dialogField("Section mesh density (/Å)", "1.0", "number");
+      density.min = "0.1";
+      density.step = "0.1";
       const cut = button("OK", "dialog-primary", async () => {
-        const path = await chooseOutputPath("cut_surface.obj", "Wavefront OBJ", ["obj"]);
-        if (!path) return;
-        await mutate("write_cut_surface", {
-          objectUid: Number(object.value),
-          selection: selection.value,
+        const changed = await mutate("cut_surface", {
+          surfaceUid: Number(surface.value),
           density: Number(density.value),
-          probeRadius: Number(probeRadius.value),
-          normal: [Number(normalX.value), Number(normalY.value), Number(normalZ.value)],
-          position: [
-            Number(positionX.value),
-            Number(positionY.value),
-            Number(positionZ.value),
-          ],
-          path,
+          mode: mode.value,
         });
-        referenceDialog.close();
+        if (changed) referenceDialog.close();
       });
       dialogActions(cut);
     }

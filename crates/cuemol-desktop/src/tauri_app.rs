@@ -5414,6 +5414,11 @@ enum ModelRequest {
         position: [f64; 3],
         path: String,
     },
+    CutSurface {
+        surface_uid: u64,
+        density: f64,
+        mode: String,
+    },
     WriteApbsFiles {
         object_uid: u64,
         selection: String,
@@ -7764,6 +7769,35 @@ fn handle_model_request(
             );
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::CutSurface {
+            surface_uid,
+            density,
+            mode,
+        } => {
+            let undo = model.capture_undo();
+            let (normal, position) = DesktopAppState::clipping_plane_from_camera(&model.camera);
+            let summary = model
+                .desktop
+                .cut_loaded_surface_by_plane(
+                    Uid::new(surface_uid),
+                    density,
+                    normal,
+                    position,
+                    &mode,
+                )
+                .map_err(|error| error.to_string())?;
+            model.status = if summary.section_uid.is_some() {
+                format!(
+                    "Surface cut: {} body / {} section triangles",
+                    summary.target_triangle_count, summary.section_triangle_count
+                )
+            } else {
+                format!("Surface cut: {} triangles", summary.target_triangle_count)
+            };
+            model.invalidate_mesh(false);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::WriteApbsFiles {
             object_uid,
             selection,
@@ -9833,6 +9867,23 @@ fn write_cut_surface(
 }
 
 #[tauri::command]
+fn cut_surface(
+    surface_uid: u64,
+    density: f64,
+    mode: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::CutSurface {
+            surface_uid,
+            density,
+            mode,
+        },
+    )?)
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn write_apbs_files(
     object_uid: u64,
@@ -10492,6 +10543,7 @@ pub fn run() -> Result<(), tauri::Error> {
             assign_secondary_structure,
             write_surface,
             write_cut_surface,
+            cut_surface,
             write_apbs_files,
             append_morph_frame,
             remove_morph_frame,
@@ -14487,6 +14539,58 @@ mod tests {
         let objects = model.desktop.active_object_summaries();
         let first = objects[0].uid.get();
         let second = objects[1].uid.get();
+
+        let molecule = model
+            .desktop
+            .scene_manager()
+            .object(Uid::new(first))
+            .unwrap()
+            .mol()
+            .clone();
+        let mut surface = cuemol_surface::MolSurfObj::new();
+        surface.create_ses_from_mol(&molecule, cuemol_molstr::Selector::All, 1.0, 1.4);
+        let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
+        let mut node = cuemol_core::LDom2Node::new();
+        node.set_tag_name("object");
+        node.set_type_name("MolSurfObj");
+        node.set_str_attr("name", "surface");
+        node.set_str_attr("src", "datachunk:");
+        node.set_str_attr("srctype", "qdfsurf");
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let surface_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(cuemol_molstr::LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "qdfsurf".to_string(),
+                data: String::from_utf8_lossy(&raw_data).into_owned(),
+                raw_data,
+                qsc_node: Some(node),
+            });
+        model.camera.set_center(Vector4::new3(0.0, 0.0, -120.0));
+        model.camera.set_slab_depth(240.0);
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CutSurface {
+                surface_uid: surface_uid.get(),
+                density: 1.0,
+                mode: "separate".to_string(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected surface-cut snapshot");
+        };
+        assert_eq!(snapshot.surfaces.len(), 2);
+        assert!(snapshot
+            .surfaces
+            .iter()
+            .any(|item| item.name == "sect1_surface"));
+        assert!(snapshot.status.starts_with("Surface cut:"));
 
         handle_model_request(
             &mut model,

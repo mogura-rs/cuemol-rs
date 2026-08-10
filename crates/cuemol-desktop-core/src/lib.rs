@@ -928,6 +928,14 @@ pub struct GuiSurfaceSummary {
     pub cut_plane_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuiSurfaceCutSummary {
+    pub target_uid: Uid,
+    pub section_uid: Option<Uid>,
+    pub target_triangle_count: usize,
+    pub section_triangle_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiApbsSummary {
     pub object_uid: Uid,
@@ -4033,6 +4041,116 @@ impl DesktopAppState {
         node.set_str_attr("orig_den", surface.orig_den().to_string());
         node.set_str_attr("orig_prad", surface.orig_prad().to_string());
         Ok(triangle_count)
+    }
+
+    pub fn clipping_plane_from_camera(camera: &cuemol_qsys::Camera) -> (Vector4, Vector4) {
+        let outward = camera
+            .rotation()
+            .conjugate()
+            .to_matrix()
+            .mulvec(Vector4::new4(0.0, 0.0, 1.0, 0.0));
+        let position = camera
+            .center()
+            .add(outward.scale(camera.slab_depth() * 0.5));
+        (outward.scale(-1.0), position)
+    }
+
+    pub fn cut_loaded_surface_by_plane(
+        &mut self,
+        surface_uid: Uid,
+        density: f64,
+        normal: Vector4,
+        position: Vector4,
+        mode: &str,
+    ) -> Result<GuiSurfaceCutSummary> {
+        if !density.is_finite() || density < 0.1 {
+            return Err(CueMolError::invalid_argument(
+                "section mesh density must be at least 0.1",
+            ));
+        }
+        if [
+            normal.x, normal.y, normal.z, position.x, position.y, position.z,
+        ]
+        .into_iter()
+        .any(|value| !value.is_finite())
+            || normal.length3d() < 1.0e-9
+        {
+            return Err(CueMolError::invalid_argument(
+                "surface cut plane is invalid",
+            ));
+        }
+        if !matches!(mode, "full" | "separate" | "sect" | "body") {
+            return Err(CueMolError::invalid_argument(format!(
+                "unsupported surface cut mode: {mode}"
+            )));
+        }
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_surface(surface_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?;
+        let source = self
+            .scene_manager()
+            .scene(scene_uid)
+            .and_then(|scene| scene.loaded_surface(surface_uid))
+            .cloned()
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?;
+        let mut target_object = loaded_surface_object(&source)
+            .ok_or_else(|| CueMolError::parse("unsupported or invalid surface data"))?;
+        let mut section = None;
+        match mode {
+            "full" => target_object.cut_by_plane2(density, normal, position, true, true),
+            "sect" => target_object.cut_by_plane2(density, normal, position, false, true),
+            "body" => target_object.cut_by_plane2(density, normal, position, true, false),
+            "separate" => {
+                let mut section_object = target_object.clone();
+                section_object.cut_by_plane2(density, normal, position, false, true);
+                target_object.cut_by_plane2(density, normal, position, true, false);
+                section = Some(section_object);
+            }
+            _ => unreachable!("surface cut mode was validated"),
+        }
+
+        let mut target = source.clone();
+        sync_loaded_surface_geometry(&mut target, &target_object);
+        let target_triangle_count = target_object.mesh().triangle_count();
+        let section_triangle_count = section
+            .as_ref()
+            .map_or(0, |object| object.mesh().triangle_count());
+        let section_surface = section.map(|section_object| {
+            let existing_names = self
+                .scene_manager()
+                .scene(scene_uid)
+                .into_iter()
+                .flat_map(|scene| scene.loaded_surfaces())
+                .map(|surface| surface.name.as_str())
+                .collect::<BTreeSet<_>>();
+            let name = (1_u64..)
+                .map(|index| format!("sect{index}_{}", source.name))
+                .find(|name| !existing_names.contains(name.as_str()))
+                .expect("the surface name space cannot be exhausted");
+            let mut surface = source.clone();
+            surface.uid = Uid::new(0);
+            surface.name = name;
+            sync_loaded_surface_geometry(&mut surface, &section_object);
+            let ui_order = self.next_workspace_ui_order(scene_uid);
+            ensure_surface_qsc_node(&mut surface).set_str_attr("ui_order", ui_order.to_string());
+            surface
+        });
+
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .expect("surface scene was checked above");
+        *scene
+            .loaded_surface_mut(surface_uid)
+            .expect("surface was checked above") = target;
+        let section_uid = section_surface.map(|surface| scene.add_loaded_surface(surface));
+        Ok(GuiSurfaceCutSummary {
+            target_uid: surface_uid,
+            section_uid,
+            target_triangle_count,
+            section_triangle_count,
+        })
     }
 
     pub fn active_object_summaries(&self) -> Vec<GuiObjectSummary> {
@@ -40094,7 +40212,6 @@ struct ScriptRend {
     multi_gradient: Option<MultiGradient>,
 }
 
-#[cfg(feature = "scripting")]
 fn loaded_surface_object(surface: &LoadedSurface) -> Option<MolSurfObj> {
     let mut object = match surface.srctype.as_str() {
         "obj" => {
@@ -40127,6 +40244,24 @@ fn loaded_surface_object(surface: &LoadedSurface) -> Option<MolSurfObj> {
         }
     }
     Some(object)
+}
+
+fn sync_loaded_surface_geometry(surface: &mut LoadedSurface, object: &MolSurfObj) {
+    let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(object);
+    surface.srctype = "qdfsurf".to_string();
+    surface.data = String::from_utf8_lossy(&raw_data).into_owned();
+    surface.raw_data = raw_data;
+    let name = surface.name.clone();
+    let node = ensure_surface_qsc_node(surface);
+    node.set_type_name("MolSurfObj");
+    node.set_str_attr("name", name);
+    node.set_str_attr("src", "datachunk:");
+    node.set_str_attr("srctype", "qdfsurf");
+    node.set_str_attr("modified", "true");
+    node.set_str_attr("orig_mol", object.orig_mol());
+    node.set_str_attr("orig_sel", object.orig_sel());
+    node.set_str_attr("orig_den", object.orig_den().to_string());
+    node.set_str_attr("orig_prad", object.orig_prad().to_string());
 }
 
 #[cfg(feature = "scripting")]
@@ -54833,6 +54968,76 @@ attribute \"dep\" string \"positions\"
             .map(|vertex| vertex.position.x)
             .fold(f64::INFINITY, f64::min);
         assert!(after_min_x - before_min_x > 9.0);
+    }
+
+    #[test]
+    fn loaded_surface_cut_matches_reference_modes_and_camera_plane() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let molecule = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let mut object = MolSurfObj::new();
+        object.create_ses_from_mol(&molecule, Selector::All, 1.0, 1.4);
+        let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&object);
+        let mut node = LDom2Node::new();
+        node.set_tag_name("object");
+        node.set_type_name("MolSurfObj");
+        node.set_str_attr("name", "surface");
+        node.set_str_attr("src", "datachunk:");
+        node.set_str_attr("srctype", "qdfsurf");
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "qdfsurf".to_string(),
+                data: String::from_utf8_lossy(&raw_data).into_owned(),
+                raw_data,
+                qsc_node: Some(node),
+            });
+
+        let mut camera = cuemol_qsys::Camera::new();
+        camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
+        camera.set_slab_depth(10.0);
+        let (normal, position) = DesktopAppState::clipping_plane_from_camera(&camera);
+        assert_eq!(normal, Vector4::new4(0.0, 0.0, -1.0, 0.0));
+        assert_eq!(position, Vector4::new3(1.0, 2.0, 8.0));
+
+        let summary = app
+            .cut_loaded_surface_by_plane(
+                surface_uid,
+                1.0,
+                Vector4::new3(0.0, 0.0, 1.0),
+                Vector4::new3(0.0, 0.0, 0.0),
+                "separate",
+            )
+            .unwrap();
+        let section_uid = summary.section_uid.expect("separate section surface");
+        assert!(summary.target_triangle_count > 0);
+        assert!(summary.section_triangle_count > 0);
+        let scene = app.scene_manager().scene(scene_uid).unwrap();
+        assert_eq!(scene.loaded_surfaces().len(), 2);
+        let target = loaded_surface_object(scene.loaded_surface(surface_uid).unwrap()).unwrap();
+        let section = loaded_surface_object(scene.loaded_surface(section_uid).unwrap()).unwrap();
+        assert!(target
+            .mesh()
+            .vertices()
+            .iter()
+            .all(|vertex| vertex.position.z >= -1.0e-9));
+        assert!(section
+            .mesh()
+            .vertices()
+            .iter()
+            .all(|vertex| vertex.position.z.abs() < 1.0e-9));
+        assert_eq!(
+            scene.loaded_surface(section_uid).unwrap().name,
+            "sect1_surface"
+        );
     }
 
     #[test]

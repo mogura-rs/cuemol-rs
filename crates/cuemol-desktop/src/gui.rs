@@ -471,11 +471,25 @@ const CRYSTAL_LATTICES: [(&str, &str); 7] = [
     ("CUBIC", "Cubic"),
 ];
 
+const SURFACE_CUT_MODES: [(&str, &str); 4] = [
+    ("full", "Complete"),
+    ("separate", "Separately"),
+    ("sect", "Section only"),
+    ("body", "No section"),
+];
+
 fn lattice_label(lattice: &str) -> &str {
     CRYSTAL_LATTICES
         .iter()
         .find(|entry| entry.0 == lattice)
         .map_or(lattice, |entry| entry.1)
+}
+
+fn surface_cut_mode_label(mode: &str) -> &str {
+    SURFACE_CUT_MODES
+        .iter()
+        .find(|entry| entry.0 == mode)
+        .map_or(mode, |entry| entry.1)
 }
 
 fn crystal_field_locks(
@@ -714,9 +728,9 @@ struct GuiApplication {
     surface_path: String,
     surface_density: f64,
     surface_probe_radius: f64,
-    cut_surface_path: String,
-    cut_normal: [f64; 3],
-    cut_position: [f64; 3],
+    cut_surface_target: Option<cuemol_core::Uid>,
+    cut_surface_mode: String,
+    cut_surface_density: f64,
     apbs_pqr_path: String,
     apbs_input_path: String,
     apbs_dx_path: String,
@@ -2451,9 +2465,9 @@ impl GuiApplication {
             surface_path: "surface.obj".to_string(),
             surface_density: 1.0,
             surface_probe_radius: 1.4,
-            cut_surface_path: "cut_surface.obj".to_string(),
-            cut_normal: [0.0, 0.0, 1.0],
-            cut_position: [0.0, 0.0, 0.0],
+            cut_surface_target: None,
+            cut_surface_mode: "full".to_string(),
+            cut_surface_density: 1.0,
             apbs_pqr_path: "apbs.pqr".to_string(),
             apbs_input_path: "apbs.in".to_string(),
             apbs_dx_path: "apbs.dx".to_string(),
@@ -8692,28 +8706,47 @@ impl GuiApplication {
         }
     }
 
-    fn generate_cut_surface_obj(&mut self) {
-        let Some(object_uid) = self.target_object_uid() else {
-            self.set_status("No object selected");
+    fn cut_surface_by_current_plane(&mut self, camera: &CameraController) {
+        let Some(surface_uid) = self.cut_surface_target else {
+            self.set_status("No surface selected");
             return;
         };
-        match self.state.write_cut_surface_obj(
-            object_uid,
-            &self.selection_text,
-            self.surface_density,
-            self.surface_probe_radius,
-            Vector4::new3(self.cut_normal[0], self.cut_normal[1], self.cut_normal[2]),
-            Vector4::new3(
-                self.cut_position[0],
-                self.cut_position[1],
-                self.cut_position[2],
-            ),
-            self.cut_surface_path.trim(),
+        let qsys_camera = camera.to_qsys_camera("__current");
+        let (normal, position) = DesktopAppState::clipping_plane_from_camera(&qsys_camera);
+        let undo = self.capture_undo();
+        match self.state.cut_loaded_surface_by_plane(
+            surface_uid,
+            self.cut_surface_density,
+            normal,
+            position,
+            &self.cut_surface_mode,
         ) {
-            Ok(summary) => self.set_status(format!(
-                "Cut surface OBJ written: {} vertices / {} triangles",
-                summary.vertex_count, summary.triangle_count
-            )),
+            Ok(summary) => {
+                self.push_undo_snapshot(undo);
+                self.rebuild_snapshot();
+                let selected_uid = summary.section_uid.unwrap_or(summary.target_uid);
+                if let Some(scene_uid) = self
+                    .state
+                    .scene_manager()
+                    .scene_uid_for_surface(selected_uid)
+                {
+                    self.selected_object = None;
+                    self.selected_renderer = None;
+                    self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
+                        scene_uid,
+                        surface_uid: selected_uid,
+                        renderer_uid: None,
+                    });
+                }
+                self.set_status(if summary.section_uid.is_some() {
+                    format!(
+                        "Surface cut: {} body / {} section triangles",
+                        summary.target_triangle_count, summary.section_triangle_count
+                    )
+                } else {
+                    format!("Surface cut: {} triangles", summary.target_triangle_count)
+                });
+            }
             Err(error) => self.set_error(error),
         }
     }
@@ -13497,7 +13530,7 @@ impl GuiApplication {
                     "Reassign secondary str" => self.secondary_structure_tool_ui(ui),
                     "Mol morphing animation" => self.morph_tool_ui(ui),
                     "Mol surface generation" => self.surface_tool_ui(ui),
-                    "Mol surface cutter" => self.surface_cutter_tool_ui(ui),
+                    "Mol surface cutter" => self.surface_cutter_tool_ui(ui, camera),
                     "APBS elepot calculation" => self.apbs_tool_ui(ui),
                     "About plugins" => self.plugin_tool_ui(ui),
                     "About config" => self.config_tool_ui(ui),
@@ -13807,25 +13840,58 @@ impl GuiApplication {
         }
     }
 
-    fn surface_cutter_tool_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_sized(
-            [ui.available_width(), 22.0],
-            egui::TextEdit::singleline(&mut self.cut_surface_path),
-        );
-        ui.label("Normal");
+    fn surface_cutter_tool_ui(&mut self, ui: &mut egui::Ui, camera: &CameraController) {
+        ui.label("Cut molecular surface by the current clipping plane:");
+        let surfaces = self.state.active_surface_summaries();
+        if !surfaces
+            .iter()
+            .any(|surface| Some(surface.uid) == self.cut_surface_target)
+        {
+            self.cut_surface_target = match self.workspace_aux_selection {
+                Some(WorkspaceAuxSelection::Surface { surface_uid, .. })
+                    if surfaces.iter().any(|surface| surface.uid == surface_uid) =>
+                {
+                    Some(surface_uid)
+                }
+                _ => surfaces.first().map(|surface| surface.uid),
+            };
+        }
+        if surfaces.is_empty() {
+            ui.weak("No molecular surface is loaded.");
+            return;
+        }
+        let selected_name = surfaces
+            .iter()
+            .find(|surface| Some(surface.uid) == self.cut_surface_target)
+            .map_or("(none)", |surface| surface.name.as_str());
+        egui::ComboBox::from_label("Target surface")
+            .selected_text(selected_name)
+            .show_ui(ui, |ui| {
+                for surface in &surfaces {
+                    ui.selectable_value(
+                        &mut self.cut_surface_target,
+                        Some(surface.uid),
+                        &surface.name,
+                    );
+                }
+            });
+        egui::ComboBox::from_label("Cross section type")
+            .selected_text(surface_cut_mode_label(&self.cut_surface_mode))
+            .show_ui(ui, |ui| {
+                for (mode, label) in SURFACE_CUT_MODES {
+                    ui.selectable_value(&mut self.cut_surface_mode, mode.to_string(), label);
+                }
+            });
         ui.horizontal(|ui| {
-            for value in &mut self.cut_normal {
-                ui.add(egui::DragValue::new(value).speed(0.1));
-            }
+            ui.label("Section mesh density (/Å)");
+            ui.add(
+                egui::DragValue::new(&mut self.cut_surface_density)
+                    .speed(0.1)
+                    .range(0.1..=100.0),
+            );
         });
-        ui.label("Position");
-        ui.horizontal(|ui| {
-            for value in &mut self.cut_position {
-                ui.add(egui::DragValue::new(value).speed(0.1));
-            }
-        });
-        if ui.button("Cut Surface OBJ").clicked() {
-            self.generate_cut_surface_obj();
+        if ui.button("OK").clicked() {
+            self.cut_surface_by_current_plane(camera);
         }
     }
 
@@ -21353,6 +21419,59 @@ mod tests {
         restrict_crystal_draft(&mut draft, "R 3");
         assert_eq!((draft.b, draft.c), (42.0, 42.0));
         assert_eq!(draft.alpha, 75.0);
+    }
+
+    #[test]
+    fn native_surface_cutter_separates_and_undoes_loaded_surface() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.ensure_active_scene();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let mut object = cuemol_surface::MolSurfObj::new();
+        object.create_ses_from_mol(&molecule, cuemol_molstr::Selector::All, 1.0, 1.4);
+        let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&object);
+        let mut node = cuemol_core::LDom2Node::new();
+        node.set_tag_name("object");
+        node.set_type_name("MolSurfObj");
+        node.set_str_attr("name", "surface");
+        node.set_str_attr("src", "datachunk:");
+        node.set_str_attr("srctype", "qdfsurf");
+        let surface_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(cuemol_molstr::LoadedSurface {
+                uid: cuemol_core::Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "qdfsurf".to_string(),
+                data: String::from_utf8_lossy(&raw_data).into_owned(),
+                raw_data,
+                qsc_node: Some(node),
+            });
+        app.cut_surface_target = Some(surface_uid);
+        app.cut_surface_mode = "separate".to_string();
+        app.cut_surface_density = 1.0;
+        let mut camera = CameraController {
+            target: Vec3::new(0.0, 0.0, -120.0),
+            slab_depth: 240.0,
+            ..CameraController::default()
+        };
+
+        app.cut_surface_by_current_plane(&camera);
+
+        assert_eq!(app.state.active_surface_summaries().len(), 2);
+        assert!(app
+            .state
+            .active_surface_summaries()
+            .iter()
+            .any(|surface| surface.name == "sect1_surface"));
+        assert!(app.status.starts_with("Surface cut:"));
+        app.undo(&mut camera);
+        assert_eq!(app.state.active_surface_summaries().len(), 1);
     }
 
     /// Exercise the whole shell + every left-panel section headlessly so a runtime

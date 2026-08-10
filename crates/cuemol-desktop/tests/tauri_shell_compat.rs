@@ -152,7 +152,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "calculate_contacts",
         "assign_secondary_structure",
         "write_surface",
-        "write_cut_surface",
+        "cut_surface",
         "write_apbs_files",
         "append_morph_frame",
         "remove_morph_frame",
@@ -369,6 +369,25 @@ fn tauri_symmetry_editor_is_lazy_and_matches_reference_fields() {
     assert!(JS.contains("spaceGroupOptionsCache.set(lattice.value, groups)"));
     assert!(JS.contains("mutate(\"change_crystal_info\""));
     assert!(JS.contains("spaceGroupNumber: Number(spaceGroup.value)"));
+}
+
+#[test]
+fn tauri_surface_cutter_matches_reference_object_modes() {
+    for label in [
+        "Cut molecular surface by the current clipping plane:",
+        "Target surface",
+        "Cross section type",
+        "Complete",
+        "Separately",
+        "Section only",
+        "No section",
+        "Section mesh density (/Å)",
+    ] {
+        assert!(JS.contains(label), "missing surface cutter field {label}");
+    }
+    assert!(JS.contains("mutate(\"cut_surface\""));
+    assert!(JS.contains("surfaceUid: Number(surface.value)"));
+    assert!(JS.contains("mode: mode.value"));
 }
 
 #[test]
