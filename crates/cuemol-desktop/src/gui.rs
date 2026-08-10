@@ -519,7 +519,6 @@ struct GuiApplication {
     residue_start_value: String,
     tool_dialog: Option<String>,
     show_get_pdb: bool,
-    show_script_dialog: bool,
     show_console: bool,
     viewport_rect: Option<egui::Rect>,
     pixels_per_point: f32,
@@ -805,6 +804,81 @@ enum InteractionMode {
     RectSelect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeFileDialog {
+    OpenObject,
+    OpenScene,
+    SaveObject,
+    SaveScene,
+    SaveView,
+    ExportScene,
+    OpenScript,
+    SaveLog,
+    MergeObject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainShortcutCommand {
+    OpenScene,
+    NewTab,
+    NewWindow,
+    OpenFile,
+    ReloadScene,
+    SaveScene,
+    Undo,
+    Redo,
+    Config,
+    Performance,
+}
+
+impl MainShortcutCommand {
+    const ALL: [Self; 10] = [
+        Self::OpenScene,
+        Self::NewTab,
+        Self::NewWindow,
+        Self::OpenFile,
+        Self::ReloadScene,
+        Self::SaveScene,
+        Self::Undo,
+        Self::Redo,
+        Self::Config,
+        Self::Performance,
+    ];
+
+    fn shortcut(self) -> egui::KeyboardShortcut {
+        let (mut modifiers, key) = match self {
+            Self::OpenScene => (egui::Modifiers::COMMAND, egui::Key::O),
+            Self::NewTab => (egui::Modifiers::COMMAND, egui::Key::T),
+            Self::NewWindow => (egui::Modifiers::COMMAND, egui::Key::N),
+            Self::OpenFile => (egui::Modifiers::COMMAND, egui::Key::O),
+            Self::ReloadScene => (egui::Modifiers::COMMAND, egui::Key::R),
+            Self::SaveScene => (egui::Modifiers::COMMAND, egui::Key::S),
+            Self::Undo => (egui::Modifiers::COMMAND, egui::Key::Z),
+            Self::Redo => (egui::Modifiers::COMMAND, egui::Key::Y),
+            Self::Config => (egui::Modifiers::COMMAND, egui::Key::K),
+            Self::Performance => (egui::Modifiers::NONE, egui::Key::F2),
+        };
+        if self == Self::OpenScene {
+            modifiers.shift = true;
+        }
+        egui::KeyboardShortcut::new(modifiers, key)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeFileFilter {
+    label: &'static str,
+    extensions: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeFileDialogSpec {
+    title: &'static str,
+    filters: &'static [NativeFileFilter],
+    default_extension: Option<&'static str>,
+    save: bool,
+}
+
 /// Measure-tab radio group (CueMol2 `measure-toolribbon.js`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MeasureMode {
@@ -945,7 +1019,6 @@ impl GuiApplication {
             residue_start_value: "1".to_string(),
             tool_dialog: None,
             show_get_pdb: false,
-            show_script_dialog: false,
             show_console: false,
             viewport_rect: None,
             pixels_per_point: 1.0,
@@ -1051,6 +1124,7 @@ impl GuiApplication {
             self.properties_window(ctx, camera);
         }
         self.dialogs(ctx, camera);
+        self.keyboard_shortcuts(ctx, camera);
         if self.pdb_download_receiver.is_some()
             || self.url_download_receiver.is_some()
             || self.animation_render_job.is_some()
@@ -1415,8 +1489,7 @@ impl GuiApplication {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New Window").clicked() {
-                        self.new_scene(camera);
-                        self.set_status("New window mapped to a new scene in this native runner");
+                        self.new_window(camera);
                         ui.close();
                     }
                     if ui.button("New Tab").clicked() {
@@ -1425,7 +1498,7 @@ impl GuiApplication {
                     }
                     ui.separator();
                     if ui.button("Open File...").clicked() {
-                        self.open_current_path(camera);
+                        self.choose_open_file(camera);
                         ui.close();
                     }
                     if ui.button("Get PDB...").clicked() {
@@ -1452,11 +1525,11 @@ impl GuiApplication {
                     });
                     ui.separator();
                     if ui.button("Save File As...").clicked() {
-                        self.save_selected_object();
+                        self.choose_save_selected_object();
                         ui.close();
                     }
                     if ui.button("Save current view...").clicked() {
-                        self.save_current_view(camera);
+                        self.choose_save_current_view(camera);
                         ui.close();
                     }
                     ui.separator();
@@ -1466,7 +1539,7 @@ impl GuiApplication {
                     }
                     ui.separator();
                     if ui.button("Open Scene...").clicked() {
-                        self.open_current_path(camera);
+                        self.choose_open_scene(camera);
                         ui.close();
                     }
                     if ui.button("Reload Scene").clicked() {
@@ -1478,7 +1551,7 @@ impl GuiApplication {
                         ui.close();
                     }
                     if ui.button("Save Scene As...").clicked() {
-                        self.save_current_scene(camera);
+                        self.choose_save_scene(camera);
                         ui.close();
                     }
                 });
@@ -1498,7 +1571,7 @@ impl GuiApplication {
                     }
                     ui.separator();
                     if ui.button("Merge molecule...").clicked() {
-                        self.merge_current_path(camera);
+                        self.choose_merge_molecule(camera);
                         ui.close();
                     }
                     if ui.button("Delete mol atoms...").clicked() {
@@ -1530,7 +1603,7 @@ impl GuiApplication {
                         ui.close();
                     }
                     if ui.button("Export scene...").clicked() {
-                        self.export_current_scene();
+                        self.choose_export_scene();
                         ui.close();
                     }
                 });
@@ -1624,7 +1697,7 @@ impl GuiApplication {
                     ] {
                         if ui.button(label).clicked() {
                             match label {
-                                "Execute script..." => self.show_script_dialog = true,
+                                "Execute script..." => self.choose_execute_script(),
                                 "Performance measure" => {
                                     self.perf_measure = !self.perf_measure;
                                     self.set_status(format!(
@@ -1715,14 +1788,14 @@ impl GuiApplication {
                 self.new_scene(camera);
             }
             if ui.button("Open").on_hover_text("Open file").clicked() {
-                self.open_current_path(camera);
+                self.choose_open_file(camera);
             }
             if ui.button("Save As").on_hover_text("Save file as").clicked() {
-                self.save_selected_object();
+                self.choose_save_selected_object();
             }
             ui.separator();
             if ui.button("Open Scene").clicked() {
-                self.open_current_path(camera);
+                self.choose_open_scene(camera);
             }
             if ui.button("Reload").on_hover_text("Reload scene").clicked() {
                 self.reload_current_path(camera);
@@ -3812,7 +3885,8 @@ impl GuiApplication {
                     egui::TextEdit::singleline(&mut self.save_path),
                 );
                 if ui.button("Save QSC").clicked() {
-                    self.save_current_scene(camera);
+                    let path = PathBuf::from(self.save_path.trim());
+                    self.save_current_scene_to_path(camera, &path);
                 }
                 ui.separator();
                 ui.label("Object Save");
@@ -3863,7 +3937,7 @@ impl GuiApplication {
                 self.clear_log();
             }
             if ui.button("Save As").clicked() {
-                self.save_log();
+                self.choose_save_log();
             }
         });
         egui::ScrollArea::vertical()
@@ -4330,6 +4404,96 @@ impl GuiApplication {
         });
     }
 
+    fn choose_open_file(&mut self, camera: &mut CameraController) {
+        if let Some(path) = native_file_dialog(NativeFileDialog::OpenObject, &self.open_path) {
+            self.open_path = path.to_string_lossy().into_owned();
+            self.open_current_path(camera);
+        }
+    }
+
+    fn choose_open_scene(&mut self, camera: &mut CameraController) {
+        if let Some(path) = native_file_dialog(NativeFileDialog::OpenScene, &self.open_path) {
+            self.open_path = path.to_string_lossy().into_owned();
+            self.open_current_path(camera);
+        }
+    }
+
+    fn choose_save_selected_object(&mut self) {
+        if self.target_object_uid().is_none() {
+            self.set_status("No object selected");
+            return;
+        }
+        if let Some(path) = native_file_dialog(NativeFileDialog::SaveObject, &self.object_save_path)
+        {
+            self.object_save_path = path.to_string_lossy().into_owned();
+            self.save_selected_object();
+        }
+    }
+
+    fn choose_save_scene(&mut self, camera: &CameraController) {
+        if let Some(path) = native_file_dialog(NativeFileDialog::SaveScene, &self.save_path) {
+            self.save_path = path.to_string_lossy().into_owned();
+            self.save_current_scene_to_path(camera, &path);
+        }
+    }
+
+    fn choose_save_current_view(&mut self, camera: &CameraController) {
+        if let Some(path) = native_file_dialog(NativeFileDialog::SaveView, &self.view_save_path) {
+            self.view_save_path = path.to_string_lossy().into_owned();
+            self.save_current_view(camera);
+        }
+    }
+
+    fn choose_export_scene(&mut self) {
+        if let Some(path) = native_file_dialog(NativeFileDialog::ExportScene, &self.export_path) {
+            self.export_path = path.to_string_lossy().into_owned();
+            self.export_current_scene();
+        }
+    }
+
+    fn choose_merge_molecule(&mut self, camera: &mut CameraController) {
+        if let Some(path) = native_file_dialog(NativeFileDialog::MergeObject, &self.open_path) {
+            self.open_path = path.to_string_lossy().into_owned();
+            self.merge_current_path(camera);
+        }
+    }
+
+    fn choose_execute_script(&mut self) {
+        if let Some(path) = native_file_dialog(NativeFileDialog::OpenScript, &self.script_path) {
+            self.script_path = path.to_string_lossy().into_owned();
+            self.load_script_into_log();
+        }
+    }
+
+    fn choose_save_log(&mut self) {
+        if let Some(path) = native_file_dialog(NativeFileDialog::SaveLog, &self.log_save_path) {
+            self.log_save_path = path.to_string_lossy().into_owned();
+            self.save_log();
+        }
+    }
+
+    fn keyboard_shortcuts(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let command = MainShortcutCommand::ALL
+            .into_iter()
+            .find(|command| ctx.input_mut(|input| input.consume_shortcut(&command.shortcut())));
+        match command {
+            Some(MainShortcutCommand::OpenScene) => self.choose_open_scene(camera),
+            Some(MainShortcutCommand::NewTab) => self.new_scene(camera),
+            Some(MainShortcutCommand::NewWindow) => self.new_window(camera),
+            Some(MainShortcutCommand::OpenFile) => self.choose_open_file(camera),
+            Some(MainShortcutCommand::ReloadScene) => self.reload_current_path(camera),
+            Some(MainShortcutCommand::SaveScene) => self.save_current_scene(camera),
+            Some(MainShortcutCommand::Undo) => self.undo(camera),
+            Some(MainShortcutCommand::Redo) => self.redo(camera),
+            Some(MainShortcutCommand::Config) => self.show_options = true,
+            Some(MainShortcutCommand::Performance) => self.perf_measure = !self.perf_measure,
+            None => {}
+        }
+    }
+
     fn open_current_path(&mut self, camera: &mut CameraController) {
         let open_path = self.open_path.trim().to_string();
         if open_path.is_empty() {
@@ -4417,12 +4581,38 @@ impl GuiApplication {
     }
 
     fn reload_current_path(&mut self, camera: &mut CameraController) {
-        let Some(path) = self.last_loaded_path.clone() else {
-            self.set_status("No loaded path to reload");
+        let Some(path) = self.state.active_scene_source_path().map(Path::to_path_buf) else {
+            self.set_status("Active scene has no source path");
             return;
         };
-        self.open_path = path.to_string_lossy().to_string();
-        self.open_current_path(camera);
+        if !path.is_file() {
+            self.set_status(format!("Scene source does not exist: {}", path.display()));
+            return;
+        }
+        let undo = self.capture_undo();
+        match self.state.reload_active_scene_qsc() {
+            Ok(scene_uid) => {
+                self.push_undo_snapshot(undo);
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.selection_text.clear();
+                self.last_loaded_path = Some(path.clone());
+                self.open_path = path.to_string_lossy().into_owned();
+                self.surface_mesh = None;
+                self.show_surface = false;
+                self.rebuild_snapshot();
+                match self.state.active_scene_saved_camera() {
+                    Some(saved) => *camera = CameraController::from_qsys_camera(&saved),
+                    None => camera.fit_snapshot(&self.snapshot),
+                }
+                self.set_status(format!(
+                    "Reloaded scene {} from {}",
+                    scene_uid.get(),
+                    path.display()
+                ));
+            }
+            Err(error) => self.set_error(error),
+        }
     }
 
     fn new_scene(&mut self, camera: &mut CameraController) {
@@ -4435,6 +4625,11 @@ impl GuiApplication {
         self.set_status("New scene created");
         self.rebuild_snapshot();
         camera.fit_snapshot(&self.snapshot);
+    }
+
+    fn new_window(&mut self, camera: &mut CameraController) {
+        self.new_scene(camera);
+        self.set_status("New window mapped to a new scene in this native runner");
     }
 
     fn close_current_scene(&mut self, camera: &mut CameraController) {
@@ -4464,6 +4659,20 @@ impl GuiApplication {
     }
 
     fn save_current_scene(&mut self, camera: &CameraController) {
+        if let Some(path) = self
+            .state
+            .active_scene_source_path()
+            .filter(|path| path.is_file())
+            .map(Path::to_path_buf)
+        {
+            self.save_path = path.to_string_lossy().into_owned();
+            self.save_current_scene_to_path(camera, &path);
+        } else {
+            self.choose_save_scene(camera);
+        }
+    }
+
+    fn save_current_scene_to_path(&mut self, camera: &CameraController, path: &Path) {
         if let Err(error) = self
             .state
             .set_active_scene_camera(camera.to_qsys_camera("__current"))
@@ -4471,8 +4680,13 @@ impl GuiApplication {
             self.set_error(error);
             return;
         }
-        match self.state.save_active_scene_qsc(self.save_path.trim()) {
-            Ok(()) => self.set_status(format!("Saved {}", self.save_path.trim())),
+        match self.state.save_active_scene_qsc(path) {
+            Ok(()) => {
+                self.save_path = path.to_string_lossy().into_owned();
+                self.last_loaded_path = Some(path.to_path_buf());
+                self.add_recent_path(path.to_path_buf());
+                self.set_status(format!("Saved {}", path.display()));
+            }
             Err(error) => self.set_error(error),
         }
     }
@@ -5425,7 +5639,6 @@ impl GuiApplication {
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx);
         self.get_pdb_dialog(ctx);
-        self.script_dialog(ctx);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
     }
@@ -6018,26 +6231,6 @@ impl GuiApplication {
                 }
             });
         self.show_get_pdb = open;
-    }
-
-    fn script_dialog(&mut self, ctx: &egui::Context) {
-        if !self.show_script_dialog {
-            return;
-        }
-        let mut open = self.show_script_dialog;
-        egui::Window::new("Execute Script")
-            .open(&mut open)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 22.0],
-                    egui::TextEdit::singleline(&mut self.script_path),
-                );
-                if ui.button("Load Script Into Scene").clicked() {
-                    self.load_script_into_log();
-                }
-            });
-        self.show_script_dialog = open;
     }
 
     fn console_dialog(&mut self, ctx: &egui::Context) {
@@ -6949,6 +7142,164 @@ perspective\t{}\n",
 
 fn tool_status_text(_title: &str) -> &'static str {
     "No additional action is available."
+}
+
+const OBJECT_OPEN_FILTERS: &[NativeFileFilter] = &[
+    NativeFileFilter {
+        label: "Molecule coordinates",
+        extensions: &[
+            "pdb", "ent", "cif", "mmcif", "sdf", "mol", "mol2", "gro", "psf", "prmtop", "parm7",
+            "top", "pse", "qdf",
+        ],
+    },
+    NativeFileFilter {
+        label: "Density maps",
+        extensions: &["mtz", "dx", "ccp4", "mrc", "cns", "brix", "omap", "map"],
+    },
+    NativeFileFilter {
+        label: "Molecular surfaces",
+        extensions: &["obj", "ply", "face", "vert"],
+    },
+];
+const SCENE_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "CueMol scene",
+    extensions: &["qsc", "qsl"],
+}];
+const OBJECT_SAVE_FILTERS: &[NativeFileFilter] = &[
+    NativeFileFilter {
+        label: "Protein Data Bank",
+        extensions: &["pdb", "ent"],
+    },
+    NativeFileFilter {
+        label: "CueMol QDF molecule",
+        extensions: &["qdf"],
+    },
+    NativeFileFilter {
+        label: "MDL structure data",
+        extensions: &["sdf", "mol"],
+    },
+];
+const SCENE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "CueMol scene",
+    extensions: &["qsc"],
+}];
+const VIEW_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "Camera setting",
+    extensions: &["cam"],
+}];
+const EXPORT_FILTERS: &[NativeFileFilter] = &[
+    NativeFileFilter {
+        label: "POV-Ray scene",
+        extensions: &["pov"],
+    },
+    NativeFileFilter {
+        label: "PNG image",
+        extensions: &["png"],
+    },
+];
+const SCRIPT_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "Internal JavaScript",
+    extensions: &["js"],
+}];
+const LOG_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "Text log",
+    extensions: &["log", "txt"],
+}];
+
+fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
+    match dialog {
+        NativeFileDialog::OpenObject => NativeFileDialogSpec {
+            title: "Select a File",
+            filters: OBJECT_OPEN_FILTERS,
+            default_extension: None,
+            save: false,
+        },
+        NativeFileDialog::OpenScene => NativeFileDialogSpec {
+            title: "Open Scene",
+            filters: SCENE_OPEN_FILTERS,
+            default_extension: None,
+            save: false,
+        },
+        NativeFileDialog::SaveObject => NativeFileDialogSpec {
+            title: "Save File As",
+            filters: OBJECT_SAVE_FILTERS,
+            default_extension: Some("pdb"),
+            save: true,
+        },
+        NativeFileDialog::SaveScene => NativeFileDialogSpec {
+            title: "Save Scene As",
+            filters: SCENE_SAVE_FILTERS,
+            default_extension: Some("qsc"),
+            save: true,
+        },
+        NativeFileDialog::SaveView => NativeFileDialogSpec {
+            title: "Save camera to file",
+            filters: VIEW_SAVE_FILTERS,
+            default_extension: Some("cam"),
+            save: true,
+        },
+        NativeFileDialog::ExportScene => NativeFileDialogSpec {
+            title: "Select a file to export",
+            filters: EXPORT_FILTERS,
+            default_extension: Some("pov"),
+            save: true,
+        },
+        NativeFileDialog::OpenScript => NativeFileDialogSpec {
+            title: "Select a File",
+            filters: SCRIPT_OPEN_FILTERS,
+            default_extension: None,
+            save: false,
+        },
+        NativeFileDialog::SaveLog => NativeFileDialogSpec {
+            title: "Save log contents",
+            filters: LOG_SAVE_FILTERS,
+            default_extension: Some("log"),
+            save: true,
+        },
+        NativeFileDialog::MergeObject => NativeFileDialogSpec {
+            title: "Select a molecule to merge",
+            filters: OBJECT_OPEN_FILTERS,
+            default_extension: None,
+            save: false,
+        },
+    }
+}
+
+fn native_file_dialog(dialog: NativeFileDialog, initial: &str) -> Option<PathBuf> {
+    let spec = native_file_dialog_spec(dialog);
+    let mut picker = rfd::FileDialog::new().set_title(spec.title);
+    let initial = initial.trim();
+    if !initial.is_empty() && !is_network_url(initial) {
+        let path = Path::new(initial);
+        if path.is_dir() {
+            picker = picker.set_directory(path);
+        } else {
+            if let Some(parent) = path.parent().filter(|parent| parent.is_dir()) {
+                picker = picker.set_directory(parent);
+            }
+            if let Some(name) = path.file_name().filter(|name| !name.is_empty()) {
+                picker = picker.set_file_name(name.to_string_lossy());
+            }
+        }
+    }
+    for filter in spec.filters {
+        picker = picker.add_filter(filter.label, filter.extensions);
+    }
+    let path = if spec.save {
+        picker.save_file()
+    } else {
+        picker.pick_file()
+    }?;
+    Some(apply_default_extension(path, spec))
+}
+
+fn apply_default_extension(mut path: PathBuf, spec: NativeFileDialogSpec) -> PathBuf {
+    if spec.save && path.extension().is_none() {
+        if let Some(extension) = spec.default_extension {
+            path.set_extension(extension);
+        }
+    }
+    path
 }
 
 fn atom_id_selection(serials: &[i32]) -> String {
@@ -9011,6 +9362,77 @@ mod tests {
         assert!(RENDERER_TYPES.contains(&"disorder"));
         assert!(!RENDERER_TYPES.contains(&"molsurf"));
         assert_eq!(renderer_type_label("cartoon"), "cartoon");
+    }
+
+    #[test]
+    fn native_dialogs_and_shortcuts_match_reference_commands() {
+        let open = native_file_dialog_spec(NativeFileDialog::OpenObject);
+        assert!(!open.save);
+        assert!(open
+            .filters
+            .iter()
+            .flat_map(|filter| filter.extensions)
+            .any(|extension| *extension == "mmcif"));
+
+        let save_scene = native_file_dialog_spec(NativeFileDialog::SaveScene);
+        assert!(save_scene.save);
+        assert_eq!(save_scene.default_extension, Some("qsc"));
+        assert_eq!(
+            apply_default_extension(PathBuf::from("scene"), save_scene),
+            PathBuf::from("scene.qsc")
+        );
+        assert_eq!(
+            apply_default_extension(PathBuf::from("scene.qsl"), save_scene),
+            PathBuf::from("scene.qsl")
+        );
+
+        assert_eq!(
+            MainShortcutCommand::OpenFile.shortcut(),
+            egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O)
+        );
+        let mut shifted_command = egui::Modifiers::COMMAND;
+        shifted_command.shift = true;
+        assert_eq!(
+            MainShortcutCommand::OpenScene.shortcut(),
+            egui::KeyboardShortcut::new(shifted_command, egui::Key::O)
+        );
+        assert_eq!(
+            MainShortcutCommand::Performance.shortcut(),
+            egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::F2)
+        );
+    }
+
+    #[test]
+    fn reload_scene_replaces_saved_contents_without_duplicating_objects() {
+        let temp = std::env::temp_dir();
+        let stem = format!("cuemol-native-reload-test-{}", std::process::id());
+        let pdb_path = temp.join(format!("{stem}.pdb"));
+        let qsc_path = temp.join(format!("{stem}.qsc"));
+        fs::write(
+            &pdb_path,
+            "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .expect("write test molecule");
+
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb_path.to_string_lossy().into_owned();
+        app.open_current_path(&mut camera);
+        assert_eq!(app.state.active_object_summaries().len(), 1);
+        app.save_current_scene_to_path(&camera, &qsc_path);
+
+        app.open_path = pdb_path.to_string_lossy().into_owned();
+        app.open_current_path(&mut camera);
+        assert_eq!(app.state.active_object_summaries().len(), 2);
+        app.reload_current_path(&mut camera);
+
+        assert_eq!(app.state.active_object_summaries().len(), 1);
+        assert_eq!(
+            app.state.active_scene_source_path(),
+            Some(qsc_path.as_path())
+        );
+        fs::remove_file(qsc_path).expect("remove test scene");
+        fs::remove_file(pdb_path).expect("remove test molecule");
     }
 
     #[test]
