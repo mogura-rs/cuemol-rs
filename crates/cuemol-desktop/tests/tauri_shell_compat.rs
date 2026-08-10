@@ -1004,7 +1004,6 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("defaultValue: `group${serial}`"));
     assert!(!JS.contains("globalThis.prompt?.(\"Name for new group\""));
     assert!(JS.contains("label: \"Read-only\""));
-    assert!(JS.contains("label: \"Rename...\""));
     assert!(JS.contains("Background color · White"));
     assert!(JS.contains("Background color · Black"));
     assert!(JS.contains("option: \"color-proof\", value"));
@@ -1149,6 +1148,43 @@ fn tauri_workspace_exposes_reference_style_nodes_and_actions() {
     assert!(JS.contains("Target Style set:"));
     assert!(JS.contains("Overwrite existing style"));
     assert!(CSS.contains(".renderer-style-name"));
+
+    let tauri_style_menu = JS
+        .split("function workspaceStyleContextItems(scene, style = null)")
+        .nth(1)
+        .and_then(|source| source.split("function workspaceObjectContextItems").next())
+        .expect("Tauri style context menu");
+    assert!(tauri_style_menu.contains("style?.name || \"Styles\""));
+    assert!(tauri_style_menu.contains("label: \"Paste Style\""));
+    assert!(tauri_style_menu.contains("label: \"Load…\""));
+    assert!(tauri_style_menu.contains("label: \"Save As…\""));
+    assert!(tauri_style_menu.contains("label: \"Edit…\""));
+    assert!(tauri_style_menu.contains("label: \"Properties…\""));
+    assert!(!tauri_style_menu.contains("label: \"Rename...\""));
+    assert!(!tauri_style_menu.contains("globalThis.prompt"));
+    let tauri_style_root = tauri_style_menu
+        .split("if (!style) {")
+        .nth(1)
+        .and_then(|source| source.split("return items;").next())
+        .expect("Tauri style-root context menu");
+    assert!(tauri_style_root.contains("children: [loadStyle]"));
+    assert!(!tauri_style_root.contains("label: \"Reload\""));
+
+    let native_style_menu = NATIVE_GUI_RS
+        .split("let root_selection = WorkspaceAuxSelection::StyleRoot")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("ui.separator();\n        ui.horizontal")
+                .next()
+        })
+        .expect("native style context menus");
+    assert!(native_style_menu.contains("ui.weak(\"Styles\")"));
+    assert!(native_style_menu.contains("ui.button(\"Paste Style\")"));
+    assert!(native_style_menu.contains("ui.button(\"Load…\")"));
+    assert!(native_style_menu.contains("ui.button(\"Edit…\")"));
+    assert!(native_style_menu.contains("ui.button(\"Properties…\")"));
+    assert!(!native_style_menu.contains("egui::Button::new(\"Rename...\")"));
 }
 
 #[test]

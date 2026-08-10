@@ -4544,29 +4544,24 @@ impl GuiApplication {
                     self.workspace_aux_selection = Some(root_selection);
                 }
                 root_response.context_menu(|ui| {
+                    ui.weak("Styles");
+                    ui.separator();
                     if ui.button("New Style…").clicked() {
                         self.open_new_style_properties(scene.uid);
                         ui.close();
                     }
-                    if ui
-                        .add_enabled(
-                            self.workspace_style_clipboard.is_some(),
-                            egui::Button::new("Paste"),
-                        )
-                        .clicked()
+                    if self.workspace_style_clipboard.is_some()
+                        && ui.button("Paste Style").clicked()
                     {
                         self.request_paste_workspace_style(scene.uid);
                         ui.close();
                     }
                     ui.separator();
                     ui.menu_button("Style file", |ui| {
-                        if ui.button("Load ...").clicked() {
+                        if ui.button("Load…").clicked() {
                             self.choose_load_workspace_style_file(scene.uid, camera);
                             ui.close();
                         }
-                        ui.add_enabled(false, egui::Button::new("Reload"));
-                        ui.add_enabled(false, egui::Button::new("Save"));
-                        ui.add_enabled(false, egui::Button::new("Save As..."));
                     });
                 });
                 ui.indent(format!("style-root-{}", scene.uid.get()), |ui| {
@@ -4595,10 +4590,13 @@ impl GuiApplication {
                             self.open_style_properties(selection);
                         }
                         response.context_menu(|ui| {
+                            ui.weak(&summary.name);
+                            ui.separator();
                             if ui.button("New Style…").clicked() {
                                 self.open_new_style_properties(scene.uid);
                                 ui.close();
                             }
+                            ui.separator();
                             if ui
                                 .add_enabled(
                                     summary.local_index.is_some(),
@@ -4612,12 +4610,8 @@ impl GuiApplication {
                                 );
                                 ui.close();
                             }
-                            if ui
-                                .add_enabled(
-                                    self.workspace_style_clipboard.is_some(),
-                                    egui::Button::new("Paste"),
-                                )
-                                .clicked()
+                            if self.workspace_style_clipboard.is_some()
+                                && ui.button("Paste Style").clicked()
                             {
                                 self.request_paste_workspace_style(scene.uid);
                                 ui.close();
@@ -4634,7 +4628,7 @@ impl GuiApplication {
                             }
                             ui.separator();
                             ui.menu_button("Style file", |ui| {
-                                if ui.button("Load ...").clicked() {
+                                if ui.button("Load…").clicked() {
                                     self.choose_load_workspace_style_file(scene.uid, camera);
                                     ui.close();
                                 }
@@ -4661,7 +4655,7 @@ impl GuiApplication {
                                 if ui
                                     .add_enabled(
                                         summary.local_index.is_some(),
-                                        egui::Button::new("Save As..."),
+                                        egui::Button::new("Save As…"),
                                     )
                                     .clicked()
                                 {
@@ -4670,6 +4664,10 @@ impl GuiApplication {
                                 }
                             });
                             ui.separator();
+                            if ui.button("Edit…").clicked() {
+                                self.open_style_properties(selection);
+                                ui.close();
+                            }
                             let mut read_only = summary.read_only;
                             if ui
                                 .add_enabled(
@@ -4682,23 +4680,8 @@ impl GuiApplication {
                                 self.set_workspace_style_read_only(selection, read_only);
                                 ui.close();
                             }
-                            if ui
-                                .add_enabled(
-                                    summary.local_index.is_some(),
-                                    egui::Button::new("Rename..."),
-                                )
-                                .clicked()
-                            {
-                                self.open_style_properties(selection);
-                                ui.close();
-                            }
-                            if ui
-                                .add_enabled(
-                                    summary.local_index.is_some(),
-                                    egui::Button::new("Edit..."),
-                                )
-                                .clicked()
-                            {
+                            ui.separator();
+                            if ui.button("Properties…").clicked() {
                                 self.open_style_properties(selection);
                                 ui.close();
                             }
