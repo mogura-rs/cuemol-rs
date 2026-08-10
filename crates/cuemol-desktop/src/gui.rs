@@ -3317,6 +3317,11 @@ impl GuiApplication {
                                 owner,
                                 &drag_source.response,
                             );
+                            drag_source.response.context_menu(|ui| {
+                                self.workspace_molecule_object_context_menu(
+                                    ui, camera, scene.uid, object.uid,
+                                );
+                            });
                             ui.indent(format!("object-{}", object.uid.get()), |ui| {
                                 let nodes = native_renderer_tree_nodes(
                                     self.state.renderer_summaries(object.uid),
@@ -3807,6 +3812,91 @@ impl GuiApplication {
         }
     }
 
+    fn workspace_molecule_object_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        camera: &mut CameraController,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+    ) {
+        let current = self
+            .state
+            .molecule_selection_text(object_uid)
+            .unwrap_or_default()
+            .to_string();
+        ui.menu_button("Selection", |ui| {
+            for (label, expression) in [
+                ("Select All", "*"),
+                ("Unselect", ""),
+                ("Protein", "protein"),
+                ("Nucleic acid", "nucleic"),
+                ("Water", "water"),
+                ("Ligand", "!protein & !nucleic & !water"),
+                ("Sugar", "sugar"),
+                ("Hydrogen", "hydrogen"),
+            ] {
+                if ui.button(label).clicked() {
+                    self.apply_molecule_selection(
+                        object_uid,
+                        expression.to_string(),
+                        "Changed molecule selection",
+                    );
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if ui.button("Invert").clicked() {
+                self.apply_molecule_selection(
+                    object_uid,
+                    invert_selection_expression(&current),
+                    "Inverted molecule selection",
+                );
+                ui.close();
+            }
+            if ui
+                .add_enabled(!current.is_empty(), egui::Button::new("Toggle Sidechain"))
+                .clicked()
+            {
+                self.apply_molecule_selection(
+                    object_uid,
+                    toggle_sidechain_expression(&current),
+                    "Toggled sidechain selection",
+                );
+                ui.close();
+            }
+            for (label, by_residue) in [("Around Byresid", true), ("Around", false)] {
+                ui.menu_button(label, |ui| {
+                    for radius in [3.0_f64, 5.0, 7.0, 10.0] {
+                        if ui
+                            .add_enabled(
+                                !current.is_empty(),
+                                egui::Button::new(format!("{radius:.0} Å")),
+                            )
+                            .clicked()
+                        {
+                            self.apply_molecule_selection(
+                                object_uid,
+                                around_selection_expression(&current, radius, by_residue),
+                                "Expanded molecule selection",
+                            );
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        });
+        ui.separator();
+        if ui.button("New Renderer...").clicked() {
+            self.activate_workspace_scene(scene_uid, camera);
+            self.open_renderer_dialog(object_uid);
+            ui.close();
+        }
+        if ui.button("Properties...").clicked() {
+            self.open_object_properties(object_uid);
+            ui.close();
+        }
+    }
+
     fn workspace_molecule_renderer_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -3866,12 +3956,28 @@ impl GuiApplication {
                     }
                     if !is_group {
                         response.context_menu(|ui| {
+                            if !matches!(
+                                renderer.renderer_type.as_str(),
+                                "*selection" | "selection" | "*namelabel" | "name_label"
+                            ) {
+                                self.workspace_renderer_selection_menu(
+                                    ui,
+                                    scene_uid,
+                                    object_uid,
+                                    renderer.uid,
+                                );
+                                ui.separator();
+                            }
                             if ui.button("Create style...").clicked() {
                                 self.open_renderer_style_create(
                                     scene_uid,
                                     object_uid,
                                     renderer.uid,
                                 );
+                                ui.close();
+                            }
+                            if ui.button("Properties...").clicked() {
+                                self.open_renderer_properties(object_uid, renderer.uid);
                                 ui.close();
                             }
                         });
@@ -3938,6 +4044,74 @@ impl GuiApplication {
             renderer.uid,
             position,
         );
+    }
+
+    fn workspace_renderer_selection_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+    ) {
+        let current = self
+            .state
+            .molecule_selection_text(object_uid)
+            .unwrap_or_default()
+            .to_string();
+        ui.menu_button("Change selection", |ui| {
+            if ui
+                .add_enabled(!current.is_empty(), egui::Button::new("Current"))
+                .clicked()
+            {
+                self.set_workspace_renderer_selection(
+                    scene_uid,
+                    object_uid,
+                    renderer_uid,
+                    &current,
+                );
+                ui.close();
+            }
+            for (label, selection) in [
+                ("All", "*"),
+                ("Protein", "protein"),
+                ("Nucleic acid", "nucleic"),
+                ("Water", "water"),
+                ("Ligand", "!protein & !nucleic & !water"),
+                ("Sugar", "sugar"),
+            ] {
+                if ui.button(label).clicked() {
+                    self.set_workspace_renderer_selection(
+                        scene_uid,
+                        object_uid,
+                        renderer_uid,
+                        selection,
+                    );
+                    ui.close();
+                }
+            }
+        });
+    }
+
+    fn set_workspace_renderer_selection(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        selection: &str,
+    ) {
+        let undo = self.capture_undo();
+        match self
+            .state
+            .set_renderer_selection_text(object_uid, renderer_uid, selection)
+        {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.rebuild_snapshot();
+                self.set_status("Change renderer selection");
+            }
+            Err(error) => self.set_status(format!("Renderer selection error: {error}")),
+        }
     }
 
     fn move_workspace_renderer(
@@ -18155,6 +18329,49 @@ mod tests {
         assert!(
             app.state.object_summaries(scene_uid)[0].ui_order
                 < app.state.density_map_summary(map_uid).unwrap().ui_order
+        );
+    }
+
+    #[test]
+    fn native_workspace_renderer_selection_preset_is_undoable() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let renderer_uid = app
+            .state
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "lines");
+
+        app.set_workspace_renderer_selection(scene_uid, object_uid, renderer_uid, "protein");
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(renderer_uid)
+                .unwrap()
+                .qsc_attr("sel"),
+            Some("protein")
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+
+        app.undo(&mut CameraController::default());
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(renderer_uid)
+                .unwrap()
+                .qsc_attr("sel"),
+            None
         );
     }
 

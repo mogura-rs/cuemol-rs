@@ -4353,6 +4353,39 @@ impl DesktopAppState {
         Ok(())
     }
 
+    pub fn set_renderer_selection_text(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        selection: &str,
+    ) -> Result<()> {
+        let selection = selection.trim();
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let renderer = object
+            .renderer_mut(renderer_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        if matches!(
+            renderer.renderer_type(),
+            "*selection" | "selection" | "*namelabel" | "name_label" | "*group"
+        ) {
+            return Err(CueMolError::invalid_argument(format!(
+                "renderer {} has a read-only selection",
+                renderer_uid.get()
+            )));
+        }
+        let selector = if selection.is_empty() || selection == "*" {
+            Selector::All
+        } else {
+            parse_selector(selection)?
+        };
+        renderer.set_selection(selector);
+        renderer.set_qsc_attr("sel", if selection.is_empty() { "*" } else { selection });
+        Ok(())
+    }
+
     pub fn set_renderer_group_visible(
         &mut self,
         object_uid: Uid,
@@ -50830,6 +50863,44 @@ end_header
             restricted > 0 && restricted < full,
             "a sel'd trace should cover fewer residues: full={full} restricted={restricted}"
         );
+    }
+
+    #[test]
+    fn renderer_selection_text_validates_and_updates_runtime_selector() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("selection", false).result_scene;
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let (renderer_uid, group_uid) = {
+            let object = app.scene_manager_mut().object_mut(object_uid).unwrap();
+            (
+                object.add_renderer("simple", "lines"),
+                object.add_renderer("*group", "group"),
+            )
+        };
+
+        app.set_renderer_selection_text(object_uid, renderer_uid, "protein")
+            .unwrap();
+        let renderer = app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        assert_eq!(
+            renderer.selection(),
+            &cuemol_molstr::parse_selector("protein").unwrap()
+        );
+        assert_eq!(renderer.qsc_attr("sel"), Some("protein"));
+        assert!(app
+            .set_renderer_selection_text(object_uid, renderer_uid, "invalid (")
+            .is_err());
+        assert!(app
+            .set_renderer_selection_text(object_uid, group_uid, "*")
+            .is_err());
     }
 
     #[test]

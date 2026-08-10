@@ -195,6 +195,7 @@ struct ObjectDto {
     name: String,
     source: String,
     source_type: String,
+    selection: String,
     visible: bool,
     locked: bool,
     atom_count: usize,
@@ -676,6 +677,14 @@ struct WorkspaceMoveObjectInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceRendererSelectionInput {
+    object_uid: u64,
+    renderer_uid: u64,
+    selection: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RendererPropertiesInput {
     object_uid: u64,
     renderer_uid: u64,
@@ -1106,6 +1115,7 @@ impl AppModel {
                     name: object.name,
                     source: object_state.source().to_string(),
                     source_type: object_state.source_type().to_string(),
+                    selection: object_state.mol().selection_text().to_string(),
                     visible: object_state.is_visible(),
                     locked: object_state.is_ui_locked(),
                     atom_count: object.atom_count,
@@ -2280,6 +2290,22 @@ impl AppModel {
             self.status = "Move object".to_string();
         }
         Ok(moved)
+    }
+
+    fn set_workspace_renderer_selection(
+        &mut self,
+        input: WorkspaceRendererSelectionInput,
+    ) -> Result<(), String> {
+        self.desktop
+            .set_renderer_selection_text(
+                Uid::new(input.object_uid),
+                Uid::new(input.renderer_uid),
+                &input.selection,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = "Change renderer selection".to_string();
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn fit_workspace_item(
@@ -4761,6 +4787,7 @@ enum ModelRequest {
     DeleteWorkspaceItem(WorkspaceDeleteInput),
     MoveWorkspaceObject(WorkspaceMoveObjectInput),
     MoveWorkspaceRenderer(WorkspaceMoveRendererInput),
+    SetWorkspaceRendererSelection(WorkspaceRendererSelectionInput),
     FitWorkspaceItem {
         target: WorkspaceFitInput,
         width: u32,
@@ -6148,6 +6175,12 @@ fn handle_model_request(
             if model.move_workspace_renderer(input)? {
                 model.push_undo(undo);
             }
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetWorkspaceRendererSelection(input) => {
+            let undo = model.capture_undo();
+            model.set_workspace_renderer_selection(input)?;
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::FitWorkspaceItem {
@@ -8024,6 +8057,17 @@ fn move_workspace_object(
 }
 
 #[tauri::command]
+fn set_workspace_renderer_selection(
+    input: WorkspaceRendererSelectionInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetWorkspaceRendererSelection(input),
+    )?)
+}
+
+#[tauri::command]
 fn fit_workspace_item(
     target: WorkspaceFitInput,
     width: u32,
@@ -9132,6 +9176,7 @@ pub fn run() -> Result<(), tauri::Error> {
             delete_workspace_item,
             move_workspace_object,
             move_workspace_renderer,
+            set_workspace_renderer_selection,
             fit_workspace_item,
             set_config_value,
             undo,
@@ -10496,6 +10541,28 @@ mod tests {
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         let snapshot = model.snapshot();
         assert!(snapshot.objects[0].ui_order < snapshot.density_maps[0].ui_order);
+    }
+
+    #[test]
+    fn workspace_renderer_selection_preset_is_undoable() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceRendererSelection(WorkspaceRendererSelectionInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                selection: "protein".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(snapshot.objects[0].renderers[0].selection, "protein");
+        assert_eq!(snapshot.undo_descriptions[0], "Change renderer selection");
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().objects[0].renderers[0].selection, "*");
     }
 
     #[test]

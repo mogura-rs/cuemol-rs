@@ -156,7 +156,22 @@ summary:focus-visible {
   box-shadow: 0 5px 14px rgba(0, 0, 0, 0.3);
 }
 
-.menu-popup button {
+.workspace-context-menu {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  min-width: 210px;
+  max-height: calc(100vh - 8px);
+  overflow: auto;
+  padding: 4px 0;
+  border: 1px solid #8b8b8b;
+  border-radius: 3px;
+  background: #f8f8f8;
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.3);
+}
+
+.menu-popup button,
+.workspace-context-menu button {
   position: relative;
   min-height: 23px;
   padding: 2px 22px;
@@ -168,7 +183,8 @@ summary:focus-visible {
   white-space: nowrap;
 }
 
-.menu-popup button:hover:not(:disabled) {
+.menu-popup button:hover:not(:disabled),
+.workspace-context-menu button:hover:not(:disabled) {
   background: var(--selection);
   color: var(--selection-text);
 }

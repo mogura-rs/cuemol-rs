@@ -4527,6 +4527,141 @@ function configureWorkspaceObjectDrag(row, sceneUid, kind, uid) {
   });
 }
 
+function closeWorkspaceContextMenu() {
+  document.querySelector(".workspace-context-menu")?.remove();
+}
+
+function showWorkspaceContextMenu(event, items) {
+  event.preventDefault();
+  event.stopPropagation();
+  closeWorkspaceContextMenu();
+  const menu = document.createElement("div");
+  menu.className = "workspace-context-menu";
+  menu.setAttribute("role", "menu");
+  for (const item of items) {
+    if (!item) {
+      const separator = document.createElement("span");
+      separator.className = "menu-separator";
+      menu.append(separator);
+      continue;
+    }
+    const entry = button(item.label, "", async () => {
+      closeWorkspaceContextMenu();
+      await item.action?.();
+    });
+    entry.disabled = Boolean(item.disabled);
+    entry.setAttribute("role", "menuitem");
+    menu.append(entry);
+  }
+  document.body.append(menu);
+  const bounds = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(event.clientX, innerWidth - bounds.width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(event.clientY, innerHeight - bounds.height - 4))}px`;
+}
+
+function invertWorkspaceSelection(selection) {
+  const current = selection.trim();
+  if (!current) return "*";
+  const inverted = current.match(/^!\((.*)\)$/s);
+  return inverted ? inverted[1] : `!(${current})`;
+}
+
+function toggleWorkspaceSidechain(selection) {
+  const current = selection.trim();
+  return current.startsWith("bysidech ") ? current.slice(9).trim() : `bysidech ${current}`;
+}
+
+function aroundWorkspaceSelection(selection, radius, byResidue) {
+  let base = selection.trim();
+  if (base.startsWith("byres ")) base = base.slice(6).trim();
+  const previous = base.match(/^\((.*)\)\s+around\s+[-+]?\d+(?:\.\d+)?$/s);
+  if (previous) base = previous[1];
+  const expression = `(${base}) around ${radius}`;
+  return byResidue ? `byres ${expression}` : expression;
+}
+
+function workspaceObjectContextItems(scene, object) {
+  const select = (selection) => () =>
+    runMoleculeSelectionAction(object.uid, selection, "select");
+  const current = object.selection || "";
+  const items = [
+    { label: "Selection · Select All", action: select("*") },
+    { label: "Selection · Unselect", action: select("") },
+    { label: "Selection · Invert", action: select(invertWorkspaceSelection(current)) },
+    {
+      label: "Selection · Toggle Sidechain",
+      disabled: !current,
+      action: select(toggleWorkspaceSidechain(current)),
+    },
+  ];
+  for (const [label, selection] of [
+    ["Protein", "protein"],
+    ["Nucleic acid", "nucleic"],
+    ["Water", "water"],
+    ["Ligand", "!protein & !nucleic & !water"],
+    ["Sugar", "sugar"],
+    ["Hydrogen", "hydrogen"],
+  ]) {
+    items.push({ label: `Selection · ${label}`, action: select(selection) });
+  }
+  for (const byResidue of [true, false]) {
+    for (const radius of [3, 5, 7, 10]) {
+      items.push({
+        label: `Selection · ${byResidue ? "Around Byresid" : "Around"} · ${radius} Å`,
+        disabled: !current,
+        action: select(aroundWorkspaceSelection(current, radius, byResidue)),
+      });
+    }
+  }
+  items.push(null, {
+    label: "Properties...",
+    action: async () => {
+      if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
+      showReferenceDialog("Object Properties");
+    },
+  });
+  return items;
+}
+
+function workspaceRendererContextItems(scene, object, renderer) {
+  const items = [];
+  const selectionReadonly = ["*selection", "selection", "*namelabel", "name_label"].includes(
+    renderer.rendererType,
+  );
+  if (!selectionReadonly) {
+    for (const [label, selection] of [
+      ["Current", object.selection || ""],
+      ["All", "*"],
+      ["Protein", "protein"],
+      ["Nucleic acid", "nucleic"],
+      ["Water", "water"],
+      ["Ligand", "!protein & !nucleic & !water"],
+      ["Sugar", "sugar"],
+    ]) {
+      items.push({
+        label: `Change selection · ${label}`,
+        disabled: label === "Current" && !selection,
+        action: () =>
+          mutate("set_workspace_renderer_selection", {
+            input: { objectUid: object.uid, rendererUid: renderer.uid, selection },
+          }),
+      });
+    }
+    items.push(null);
+  }
+  items.push(
+    {
+      label: "Create style...",
+      action: async () => {
+        if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
+        await rendererStyleCreateEditor(object, renderer);
+      },
+    },
+    { label: "Properties...", action: () => showReferenceDialog("Renderer Properties") },
+  );
+  return items;
+}
+
 function clearWorkspaceRendererDropMarkers() {
   document
     .querySelectorAll(".tree-renderer.drop-before, .tree-renderer.drop-after, .tree-renderer.drop-inside")
@@ -4720,6 +4855,7 @@ function workspaceChromeRenderKey() {
       object.uid,
       object.uiOrder,
       object.name,
+      object.selection,
       object.visible,
       object.locked,
       object.atomCount,
@@ -4835,6 +4971,16 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         },
       );
       objectRow.addEventListener("dblclick", () => showReferenceDialog("Object Properties"));
+      objectRow.addEventListener("contextmenu", (event) => {
+        selectedObjectUid = object.uid;
+        selectedRendererUid = null;
+        selectedDensityMapUid = null;
+        selectedDensityRendererUid = null;
+        selectedSurfaceUid = null;
+        selectedSurfaceRendererUid = null;
+        workspaceSelectionKind = "object";
+        showWorkspaceContextMenu(event, workspaceObjectContextItems(scene, object));
+      });
       objectRow.prepend(
         workspaceStateControls(
           { kind: "object", objectUid: object.uid },
@@ -4924,12 +5070,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         );
         if (!isGroup) {
           rendererRow.addEventListener("contextmenu", async (event) => {
-            event.preventDefault();
             selectedObjectUid = object.uid;
             selectedRendererUid = renderer.uid;
             workspaceSelectionKind = "renderer";
-            if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
-            await rendererStyleCreateEditor(object, renderer);
+            showWorkspaceContextMenu(
+              event,
+              workspaceRendererContextItems(scene, object, renderer),
+            );
           });
         }
         rendererRow.prepend(
@@ -8138,6 +8285,7 @@ document.addEventListener("pointerdown", (event) => {
   document.querySelectorAll(".menu[open]").forEach((menu) => {
     if (!menu.contains(event.target)) menu.removeAttribute("open");
   });
+  if (!event.target.closest(".workspace-context-menu")) closeWorkspaceContextMenu();
 });
 
 selectionInput.addEventListener("keydown", (event) => {
@@ -8300,6 +8448,7 @@ viewport.addEventListener(
 );
 
 window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeWorkspaceContextMenu();
   const editing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
   const shortcut = !editing && preferences?.shortcuts?.find(
     (item) =>

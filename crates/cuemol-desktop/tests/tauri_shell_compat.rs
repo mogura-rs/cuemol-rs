@@ -334,6 +334,16 @@ fn tauri_workspace_reorders_objects_across_supported_kinds() {
 }
 
 #[test]
+fn tauri_workspace_context_menu_matches_selection_presets() {
+    assert!(JS.contains("function showWorkspaceContextMenu(event, items)"));
+    assert!(JS.contains("function workspaceObjectContextItems(scene, object)"));
+    assert!(JS.contains("Around Byresid"));
+    assert!(JS.contains("function workspaceRendererContextItems(scene, object, renderer)"));
+    assert!(JS.contains("set_workspace_renderer_selection"));
+    assert!(CSS.contains(".workspace-context-menu"));
+}
+
+#[test]
 fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("function activeCameras()"));
     assert!(JS.contains("workspaceSelectionKind === \"cameraRoot\""));
@@ -447,6 +457,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "create_renderer_style",
         "move_workspace_object",
         "move_workspace_renderer",
+        "set_workspace_renderer_selection",
         "delete_workspace_item",
         "fit_workspace_item",
     ] {
