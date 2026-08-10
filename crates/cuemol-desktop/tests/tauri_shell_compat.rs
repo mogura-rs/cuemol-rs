@@ -478,6 +478,9 @@ fn desktop_startup_and_fetch_overlap_independent_initialization() {
     assert!(TAURI_APP_RS.contains("ModelRequest::StartRendererWarmup"));
     assert!(TAURI_APP_RS.contains("request_model(&state, ModelRequest::StartRendererWarmup)"));
     assert!(!TAURI_APP_RS.contains("spawn_blocking(shared_scene_renderer)"));
+    assert!(JS.contains(r#"invoke("prefetch_pdb", args)"#));
+    assert!(TAURI_APP_RS.contains("async fn prefetch_pdb("));
+    assert!(NATIVE_GUI_RS.contains("cuemol-pdb-prefetch-"));
 }
 
 #[test]

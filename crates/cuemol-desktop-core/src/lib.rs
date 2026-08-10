@@ -943,6 +943,21 @@ pub enum GuiPdbFileKind {
     FoFc,
 }
 
+#[derive(Debug)]
+enum PreparedPdbData {
+    Molecule(MolCoord),
+    DensityMap { map: DensityMap, raw_data: Vec<u8> },
+}
+
+#[derive(Debug)]
+struct PreparedPdbFile {
+    index: usize,
+    kind: GuiPdbFileKind,
+    path: PathBuf,
+    format: &'static str,
+    data: PreparedPdbData,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiRendererSetupOption {
     pub name: String,
@@ -8064,21 +8079,27 @@ impl DesktopAppState {
             ));
         }
         let object_name = pdb_id.to_ascii_lowercase();
+        let prepared = prepare_pdb_files(files, &self.stream_manager)?;
         let mut object_uid = None;
         let mut map_uids = Vec::new();
-        for (kind, path) in files {
-            match kind {
-                GuiPdbFileKind::Coordinates => {
+        for file in prepared {
+            match (file.kind, file.data) {
+                (GuiPdbFileKind::Coordinates, PreparedPdbData::Molecule(molecule)) => {
                     let setup = renderer_setup.expect("coordinate setup was checked above");
-                    let GuiLoadedPath::Object {
-                        scene_uid,
-                        object_uid: loaded_uid,
-                    } = self.open_path(path)?
-                    else {
-                        return Err(CueMolError::parse(
-                            "downloaded PDB coordinates did not produce a molecule",
-                        ));
-                    };
+                    let scene_uid = self.ensure_active_scene();
+                    let loaded_uid = self
+                        .scene_manager_mut()
+                        .scene_mut(scene_uid)
+                        .expect("the active scene was just created")
+                        .add_molecule_with_source_type(
+                            default_object_name(&file.path),
+                            molecule,
+                            file.format,
+                        );
+                    if let Some(object) = self.scene_manager_mut().object_mut(loaded_uid) {
+                        object.set_source(file.path.to_string_lossy());
+                        object.set_modified(false);
+                    }
                     self.set_object_common_properties(
                         loaded_uid,
                         setup.object_name.trim().to_string(),
@@ -8088,16 +8109,23 @@ impl DesktopAppState {
                     self.configure_molecule_renderer(scene_uid, loaded_uid, setup)?;
                     object_uid = Some(loaded_uid);
                 }
-                GuiPdbFileKind::TwoFoFc | GuiPdbFileKind::FoFc => {
-                    let (suffix, columns) = match kind {
-                        GuiPdbFileKind::TwoFoFc => ("2fofc", Some(("FWT", "PHWT"))),
-                        GuiPdbFileKind::FoFc => ("fofc", Some(("DELFWT", "PHDELWT"))),
+                (
+                    kind @ (GuiPdbFileKind::TwoFoFc | GuiPdbFileKind::FoFc),
+                    PreparedPdbData::DensityMap { map, raw_data },
+                ) => {
+                    let suffix = match kind {
+                        GuiPdbFileKind::TwoFoFc => "2fofc",
+                        GuiPdbFileKind::FoFc => "fofc",
                         GuiPdbFileKind::Coordinates => unreachable!(),
                     };
-                    let map_uid = self.open_density_map_path(
-                        path,
+                    let scene_uid = self.ensure_active_scene();
+                    let map_uid = self.store_density_map_with_raw_data(
+                        scene_uid,
+                        &file.path,
                         format!("{object_name}_{suffix}"),
-                        columns,
+                        file.format,
+                        map,
+                        raw_data,
                     )?;
                     match kind {
                         GuiPdbFileKind::TwoFoFc => {
@@ -8112,6 +8140,11 @@ impl DesktopAppState {
                         GuiPdbFileKind::Coordinates => unreachable!(),
                     }
                     map_uids.push(map_uid);
+                }
+                _ => {
+                    return Err(CueMolError::parse(
+                        "downloaded PDB file type did not match its parsed data",
+                    ))
                 }
             }
         }
@@ -8174,10 +8207,22 @@ impl DesktopAppState {
         format: &str,
         map: DensityMap,
     ) -> Result<Uid> {
+        let raw_data = cuemol_xtal::write_qdf_denmap_bytes(&map);
+        self.store_density_map_with_raw_data(scene_uid, path, map_name, format, map, raw_data)
+    }
+
+    fn store_density_map_with_raw_data(
+        &mut self,
+        scene_uid: Uid,
+        path: &Path,
+        map_name: String,
+        format: &str,
+        map: DensityMap,
+        raw_data: Vec<u8>,
+    ) -> Result<Uid> {
         if self.scene_manager().scene(scene_uid).is_none() {
             return Err(CueMolError::NotFound(format!("scene {}", scene_uid.get())));
         }
-        let raw_data = cuemol_xtal::write_qdf_denmap_bytes(&map);
         let storage_index = self
             .scene_manager()
             .scene(scene_uid)
@@ -45099,6 +45144,139 @@ fn read_density_map_bytes(bytes: &[u8], format: &str) -> Result<DensityMap> {
             "unknown density map format {other}"
         ))),
     }
+}
+
+fn prepare_pdb_files(
+    files: &[(GuiPdbFileKind, PathBuf)],
+    stream_manager: &StreamManager,
+) -> Result<Vec<PreparedPdbFile>> {
+    let mut grouped = BTreeMap::<PathBuf, Vec<(usize, GuiPdbFileKind)>>::new();
+    for (index, (kind, path)) in files.iter().enumerate() {
+        grouped
+            .entry(path.clone())
+            .or_default()
+            .push((index, *kind));
+    }
+    let mut requests = Vec::with_capacity(grouped.len());
+    for (path, entries) in grouped {
+        let format = guess_path_format(&path, stream_manager)?;
+        requests.push((path, format, entries));
+    }
+
+    let mut prepared = if requests.len() == 1 {
+        let (path, format, entries) = requests.into_iter().next().expect("one PDB file group");
+        prepare_pdb_path(path, format, entries)?
+    } else {
+        let handles = requests
+            .into_iter()
+            .enumerate()
+            .map(|(index, (path, format, entries))| {
+                std::thread::Builder::new()
+                    .name(format!("cuemol-pdb-parse-{index}"))
+                    .spawn(move || prepare_pdb_path(path, format, entries))
+                    .map_err(CueMolError::from)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut prepared = Vec::with_capacity(files.len());
+        for handle in handles {
+            prepared.extend(
+                handle
+                    .join()
+                    .map_err(|_| CueMolError::parse("PDB parse task panicked"))??,
+            );
+        }
+        prepared
+    };
+    prepared.sort_unstable_by_key(|file| file.index);
+    Ok(prepared)
+}
+
+fn prepare_pdb_path(
+    path: PathBuf,
+    format: &'static str,
+    entries: Vec<(usize, GuiPdbFileKind)>,
+) -> Result<Vec<PreparedPdbFile>> {
+    let coordinates = entries
+        .iter()
+        .all(|(_, kind)| *kind == GuiPdbFileKind::Coordinates);
+    let density_maps = entries
+        .iter()
+        .all(|(_, kind)| *kind != GuiPdbFileKind::Coordinates);
+    if coordinates {
+        if !matches!(format, "pdb" | "mmcif" | "cif") {
+            return Err(CueMolError::invalid_argument(format!(
+                "downloaded PDB coordinates have unsupported format {format}"
+            )));
+        }
+        let input = cuemol_molstr::read_text_maybe_compressed(&path)?;
+        let molecule = read_molecule_bytes(input.as_bytes(), format)?;
+        return Ok(entries
+            .into_iter()
+            .map(|(index, kind)| PreparedPdbFile {
+                index,
+                kind,
+                path: path.clone(),
+                format,
+                data: PreparedPdbData::Molecule(molecule.clone()),
+            })
+            .collect());
+    }
+    if !density_maps || !is_density_map_format(format) {
+        return Err(CueMolError::invalid_argument(format!(
+            "downloaded PDB map has unsupported format {format}"
+        )));
+    }
+
+    if format == "mtzmap" {
+        let mut reader = Mtz2MapReader::new();
+        reader.set_grid_size(0.25);
+        reader.read_bytes(&fs::read(&path)?)?;
+        return entries
+            .into_iter()
+            .map(|(index, kind)| {
+                let (column_f, column_phi) = match kind {
+                    GuiPdbFileKind::TwoFoFc => ("FWT", "PHWT"),
+                    GuiPdbFileKind::FoFc => ("DELFWT", "PHDELWT"),
+                    GuiPdbFileKind::Coordinates => unreachable!(),
+                };
+                reader.set_column_f(column_f);
+                reader.set_column_phi(column_phi);
+                reader.select_fft_columns()?;
+                let map = reader.build_density_map()?;
+                Ok(PreparedPdbFile {
+                    index,
+                    kind,
+                    path: path.clone(),
+                    format,
+                    data: PreparedPdbData::DensityMap {
+                        raw_data: cuemol_xtal::write_qdf_denmap_bytes(&map),
+                        map,
+                    },
+                })
+            })
+            .collect();
+    }
+
+    let map = if format == "mmcifmap" {
+        let input = cuemol_molstr::read_text_maybe_compressed(&path)?;
+        density_map_from_cif(&input, -1.0, 0.25)?
+    } else {
+        read_density_map(&path, format)?
+    };
+    let raw_data = cuemol_xtal::write_qdf_denmap_bytes(&map);
+    Ok(entries
+        .into_iter()
+        .map(|(index, kind)| PreparedPdbFile {
+            index,
+            kind,
+            path: path.clone(),
+            format,
+            data: PreparedPdbData::DensityMap {
+                map: map.clone(),
+                raw_data: raw_data.clone(),
+            },
+        })
+        .collect())
 }
 
 fn read_molecule_bytes(bytes: &[u8], format: &str) -> Result<MolCoord> {

@@ -10119,6 +10119,29 @@ async fn check_pdb_availability(
 }
 
 #[tauri::command]
+async fn prefetch_pdb(
+    pdb_id: String,
+    fetch_coordinates: bool,
+    coordinate_source: String,
+    fetch_two_fofc: bool,
+    fetch_fofc: bool,
+    map_source: String,
+) -> Result<(), String> {
+    let options = crate::PdbFetchOptions {
+        pdb_id,
+        fetch_coordinates,
+        coordinate_source,
+        fetch_two_fofc,
+        fetch_fofc,
+        map_source,
+    };
+    tauri::async_runtime::spawn_blocking(move || crate::download_pdb_files(options))
+        .await
+        .map_err(|error| format!("PDB prefetch task failed: {error}"))??;
+    Ok(())
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn open_pdb(
     pdb_id: String,
@@ -11273,6 +11296,7 @@ pub fn run() -> Result<(), tauri::Error> {
             open_path_with_renderer_setup,
             get_pdb_renderer_setup,
             check_pdb_availability,
+            prefetch_pdb,
             open_pdb,
             load_trajectory,
             set_trajectory_frame,

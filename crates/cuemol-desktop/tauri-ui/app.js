@@ -5399,6 +5399,9 @@ async function showReferenceDialog(title) {
       const args = availabilityArgs();
       const id = args.pdbId;
       if (!/^[0-9][0-9A-Z]{3}$/.test(id)) return;
+      if (args.fetchCoordinates) {
+        void invoke("prefetch_pdb", args).catch(() => {});
+      }
       const rendererSetup = args.fetchCoordinates
         ? await showPdbRendererSetup(id)
         : null;

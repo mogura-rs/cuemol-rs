@@ -12,7 +12,7 @@
 pub use cuemol_desktop_core::*;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 use std::path::{Path, PathBuf};
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -70,6 +70,14 @@ struct PdbDownloadSpec {
     kind: GuiPdbFileKind,
     url: String,
     path: PathBuf,
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PdbDownloadGroup {
+    url: String,
+    path: PathBuf,
+    entries: Vec<(usize, GuiPdbFileKind)>,
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -601,29 +609,71 @@ pub(crate) fn download_pdb_files(
     options: PdbFetchOptions,
 ) -> std::result::Result<Vec<PdbDownloadedFile>, String> {
     let specs = pdb_download_specs(&options)?;
-    let handles = specs
+    let file_count = specs.len();
+    let groups = group_pdb_download_specs(specs);
+    let mut downloaded = if groups.len() == 1 {
+        download_pdb_group(groups.into_iter().next().expect("one download group"))?
+    } else {
+        let handles = groups
+            .into_iter()
+            .enumerate()
+            .map(|(index, group)| {
+                std::thread::Builder::new()
+                    .name(format!("cuemol-pdb-download-{index}"))
+                    .spawn(move || download_pdb_group(group))
+                    .map_err(|error| format!("failed to start PDB download: {error}"))
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut downloaded = Vec::with_capacity(file_count);
+        for handle in handles {
+            downloaded.extend(
+                handle
+                    .join()
+                    .map_err(|_| "PDB download task panicked".to_string())??,
+            );
+        }
+        downloaded
+    };
+    downloaded.sort_unstable_by_key(|(index, _)| *index);
+    Ok(downloaded
         .into_iter()
-        .enumerate()
-        .map(|(index, spec)| {
-            std::thread::Builder::new()
-                .name(format!("cuemol-pdb-download-{index}"))
-                .spawn(move || {
-                    download_to_shared_cache(&spec.url, &spec.path).map(|path| PdbDownloadedFile {
-                        kind: spec.kind,
-                        path,
-                    })
-                })
-                .map_err(|error| format!("failed to start PDB download: {error}"))
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    handles
+        .map(|(_, file)| file)
+        .collect::<Vec<_>>())
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn group_pdb_download_specs(specs: Vec<PdbDownloadSpec>) -> Vec<PdbDownloadGroup> {
+    let mut groups = BTreeMap::<(String, PathBuf), Vec<(usize, GuiPdbFileKind)>>::new();
+    for (index, spec) in specs.into_iter().enumerate() {
+        groups
+            .entry((spec.url, spec.path))
+            .or_default()
+            .push((index, spec.kind));
+    }
+    groups
         .into_iter()
-        .map(|handle| {
-            handle
-                .join()
-                .map_err(|_| "PDB download task panicked".to_string())?
-        })
+        .map(|((url, path), entries)| PdbDownloadGroup { url, path, entries })
         .collect()
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn download_pdb_group(
+    group: PdbDownloadGroup,
+) -> std::result::Result<Vec<(usize, PdbDownloadedFile)>, String> {
+    let path = download_to_shared_cache(&group.url, &group.path)?;
+    Ok(group
+        .entries
+        .into_iter()
+        .map(|(index, kind)| {
+            (
+                index,
+                PdbDownloadedFile {
+                    kind,
+                    path: path.clone(),
+                },
+            )
+        })
+        .collect())
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -893,6 +943,27 @@ mod download_tests {
             [GuiPdbFileKind::TwoFoFc, GuiPdbFileKind::FoFc]
         );
         assert!(probes[1].url.ends_with("/1crn_map.mtz"));
+    }
+
+    #[test]
+    fn pdb_download_groups_coalesce_the_shared_ebi_map() {
+        let options = PdbFetchOptions {
+            pdb_id: "1CRN".to_string(),
+            fetch_coordinates: true,
+            coordinate_source: "RCSB_CIF".to_string(),
+            fetch_two_fofc: true,
+            fetch_fofc: true,
+            map_source: "EBI_MTZ".to_string(),
+        };
+        let groups = group_pdb_download_specs(pdb_download_specs(&options).unwrap());
+        assert_eq!(groups.len(), 2);
+        let map = groups
+            .iter()
+            .find(|group| group.path.extension().is_some_and(|ext| ext == "mtz"))
+            .unwrap();
+        assert_eq!(map.entries.len(), 2);
+        assert_eq!(map.entries[0].1, GuiPdbFileKind::TwoFoFc);
+        assert_eq!(map.entries[1].1, GuiPdbFileKind::FoFc);
     }
 
     #[test]

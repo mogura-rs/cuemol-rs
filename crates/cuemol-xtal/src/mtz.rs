@@ -233,6 +233,16 @@ impl Mtz2MapReader {
         self.mtz.as_ref()
     }
 
+    pub fn select_fft_columns(&mut self) -> Result<()> {
+        let mtz = self
+            .mtz
+            .take()
+            .ok_or_else(|| CueMolError::invalid_argument("no MTZ data loaded"))?;
+        let result = self.select_fft_columns_from(&mtz);
+        self.mtz = Some(mtz);
+        result
+    }
+
     pub fn read_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         let mtz = read_mtz_bytes(bytes)?;
         if let Some(resolution) = mtz.resolution {

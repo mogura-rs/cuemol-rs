@@ -67,6 +67,25 @@ fn mtz2_map_reader_honors_requested_columns() {
 }
 
 #[test]
+fn mtz2_map_reader_reselects_columns_without_reparsing() {
+    let mut reader = Mtz2MapReader::new();
+    reader
+        .read_bytes(&mtz_bytes_with_two_map_columns())
+        .unwrap();
+    assert_eq!(reader.selected_f(), Some(3));
+    assert_eq!(reader.selected_phi(), Some(4));
+    let column_count = reader.mtz().unwrap().columns.len();
+
+    reader.set_column_f("DELFWT");
+    reader.set_column_phi("PHDELWT");
+    reader.select_fft_columns().unwrap();
+
+    assert_eq!(reader.selected_f(), Some(5));
+    assert_eq!(reader.selected_phi(), Some(6));
+    assert_eq!(reader.mtz().unwrap().columns.len(), column_count);
+}
+
+#[test]
 fn build_density_map_synthesizes_finite_map_from_synthetic_mtz() {
     // Exercise the real public pipeline end-to-end: read_bytes -> column
     // selection (guess_fft_columns) -> build_density_map. The standalone
@@ -150,6 +169,27 @@ fn mtz_bytes_with_weight() -> Vec<u8> {
         "COL FWT F",
         "COL PHWT P",
         "COL FOM W",
+        "END",
+    ] {
+        append_record(&mut bytes, record);
+    }
+    bytes
+}
+
+fn mtz_bytes_with_two_map_columns() -> Vec<u8> {
+    let mut bytes = vec![0_u8; 80];
+    bytes[0..4].copy_from_slice(b"MTZ ");
+    bytes[4..8].copy_from_slice(&(21_i32).to_le_bytes());
+    bytes[8..12].copy_from_slice(&[0x44, 0x44, 0, 0]);
+    for record in [
+        "NCOL 7 0 0",
+        "COL H H",
+        "COL K H",
+        "COL L H",
+        "COL FWT F",
+        "COL PHWT P",
+        "COL DELFWT F",
+        "COL PHDELWT P",
         "END",
     ] {
         append_record(&mut bytes, record);

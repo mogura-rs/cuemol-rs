@@ -2535,7 +2535,7 @@ impl GuiApplication {
     fn new() -> Self {
         let mut state = DesktopAppState::new();
         state.new_scene("Untitled", true);
-        let mut app = Self {
+        Self {
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
             save_path: "scene.qsc".to_string(),
@@ -2725,9 +2725,7 @@ impl GuiApplication {
             status: "Ready".to_string(),
             log_lines: Vec::new(),
             selection_history: Vec::new(),
-        };
-        app.rebuild_snapshot();
-        app
+        }
     }
 
     fn new_persistent() -> Self {
@@ -15244,6 +15242,12 @@ impl GuiApplication {
 
     fn open_pdb_renderer_setup(&mut self) {
         let object_name = self.pdb_id.trim().to_ascii_lowercase();
+        let options = self.pdb_fetch_options();
+        let _ = std::thread::Builder::new()
+            .name(format!("cuemol-pdb-prefetch-{object_name}"))
+            .spawn(move || {
+                let _ = crate::download_pdb_files(options);
+            });
         self.open_renderer_setup(
             &object_name,
             NativeRendererSetupAction::PdbDownload,
@@ -21532,6 +21536,15 @@ mod tests {
         assert_eq!(bond_gpu.to_edge, [3.0, 4.0, 5.0, 0.07]);
         assert_eq!(bond_gpu.edge_mode, [2.0, 0.0, 0.0, 0.0]);
         assert_ne!(bond_gpu.color, bond_gpu.end_color);
+    }
+
+    #[test]
+    fn native_startup_defers_the_empty_scene_snapshot_build() {
+        let app = GuiApplication::new();
+        assert_eq!(app.snapshot_revision, 0);
+        assert!(app.snapshot.atoms.is_empty());
+        assert!(app.snapshot.bonds.is_empty());
+        assert!(app.snapshot.meshes.is_empty());
     }
 
     #[test]
