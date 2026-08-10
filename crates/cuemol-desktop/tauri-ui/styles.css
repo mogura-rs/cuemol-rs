@@ -679,6 +679,28 @@ summary:focus-visible {
   opacity: 0.42;
 }
 
+.tree-object.dragging {
+  opacity: 0.42;
+}
+
+.tree-object.drop-before::after,
+.tree-object.drop-after::after {
+  position: absolute;
+  right: 4px;
+  left: 16px;
+  height: 2px;
+  background: var(--selection);
+  content: "";
+}
+
+.tree-object.drop-before::after {
+  top: 0;
+}
+
+.tree-object.drop-after::after {
+  bottom: 0;
+}
+
 .tree-renderer.drop-before::after,
 .tree-renderer.drop-after::after {
   position: absolute;

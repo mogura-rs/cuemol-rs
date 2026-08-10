@@ -512,6 +512,7 @@ pub struct GuiStyleSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiObjectSummary {
     pub uid: Uid,
+    pub ui_order: i32,
     pub name: String,
     pub visible: bool,
     pub locked: bool,
@@ -880,6 +881,7 @@ pub struct GuiTrajectorySummary {
 pub struct GuiDensityMapSummary {
     pub uid: Uid,
     pub scene_uid: Uid,
+    pub ui_order: i32,
     pub name: String,
     pub class_name: String,
     pub format: String,
@@ -918,6 +920,7 @@ pub struct GuiDensityRendererSummary {
 pub struct GuiLoadedSurfaceSummary {
     pub uid: Uid,
     pub scene_uid: Uid,
+    pub ui_order: i32,
     pub name: String,
     pub class_name: String,
     pub format: String,
@@ -929,6 +932,13 @@ pub struct GuiLoadedSurfaceSummary {
     pub original_density: f64,
     pub original_probe_radius: f64,
     pub renderers: Vec<GuiLoadedSurfaceRendererSummary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GuiWorkspaceObjectKind {
+    Molecule,
+    DensityMap,
+    Surface,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2057,6 +2067,7 @@ impl DesktopAppState {
                     .iter()
                     .map(|object| GuiObjectSummary {
                         uid: object.uid(),
+                        ui_order: effective_workspace_order(object.ui_order(), object.uid()),
                         name: object.name().to_string(),
                         visible: object.is_visible(),
                         locked: object.is_ui_locked(),
@@ -3441,6 +3452,7 @@ impl DesktopAppState {
         map: DensityMap,
     ) -> Uid {
         let name = name.into();
+        let ui_order = self.next_workspace_ui_order(scene_uid);
         let storage_index = if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
             let index = scene.loaded_density_maps().len();
             let raw_data = cuemol_xtal::write_qdf_denmap_bytes(&map);
@@ -3472,7 +3484,7 @@ impl DesktopAppState {
                 visible: true,
                 locked: false,
                 ui_collapsed: false,
-                ui_order: 0,
+                ui_order,
                 modified: true,
                 source: String::new(),
                 alt_source: String::new(),
@@ -3482,6 +3494,32 @@ impl DesktopAppState {
             },
         );
         uid
+    }
+
+    fn next_workspace_ui_order(&self, scene_uid: Uid) -> i32 {
+        let scene_orders = self
+            .scene_manager()
+            .scene(scene_uid)
+            .into_iter()
+            .flat_map(|scene| {
+                scene
+                    .objects()
+                    .iter()
+                    .map(|object| effective_workspace_order(object.ui_order(), object.uid()))
+                    .chain(scene.loaded_surfaces().iter().map(|surface| {
+                        effective_workspace_order(surface_ui_order(surface), surface.uid)
+                    }))
+            });
+        let density_orders = self
+            .density_maps
+            .values()
+            .filter(|map| map.scene_uid == scene_uid)
+            .map(|map| effective_workspace_order(map.ui_order, map.uid));
+        scene_orders
+            .chain(density_orders)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
     }
 
     /// Store an MD trajectory (frames of atom positions, in molecule order) for an
@@ -4801,6 +4839,109 @@ impl DesktopAppState {
         Ok(object.move_renderer_relative(renderer_uid, anchor_uid, after) || group_changed)
     }
 
+    pub fn move_workspace_object(
+        &mut self,
+        scene_uid: Uid,
+        source_kind: GuiWorkspaceObjectKind,
+        source_uid: Uid,
+        target_kind: GuiWorkspaceObjectKind,
+        target_uid: Uid,
+        after: bool,
+    ) -> Result<bool> {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct Entry {
+            kind: GuiWorkspaceObjectKind,
+            uid: Uid,
+            order: i32,
+        }
+
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let mut entries = scene
+            .objects()
+            .iter()
+            .map(|object| Entry {
+                kind: GuiWorkspaceObjectKind::Molecule,
+                uid: object.uid(),
+                order: effective_workspace_order(object.ui_order(), object.uid()),
+            })
+            .chain(scene.loaded_surfaces().iter().map(|surface| Entry {
+                kind: GuiWorkspaceObjectKind::Surface,
+                uid: surface.uid,
+                order: effective_workspace_order(surface_ui_order(surface), surface.uid),
+            }))
+            .collect::<Vec<_>>();
+        entries.extend(
+            self.density_maps
+                .values()
+                .filter(|map| map.scene_uid == scene_uid)
+                .map(|map| Entry {
+                    kind: GuiWorkspaceObjectKind::DensityMap,
+                    uid: map.uid,
+                    order: effective_workspace_order(map.ui_order, map.uid),
+                }),
+        );
+        entries.sort_by_key(|entry| (entry.order, entry.kind, entry.uid));
+        let original_order = entries
+            .iter()
+            .map(|entry| (entry.kind, entry.uid))
+            .collect::<Vec<_>>();
+
+        let source_index = entries
+            .iter()
+            .position(|entry| entry.kind == source_kind && entry.uid == source_uid)
+            .ok_or_else(|| {
+                CueMolError::NotFound(format!("workspace object {}", source_uid.get()))
+            })?;
+        if source_kind == target_kind && source_uid == target_uid {
+            return Ok(false);
+        }
+        let source = entries.remove(source_index);
+        let target_index = entries
+            .iter()
+            .position(|entry| entry.kind == target_kind && entry.uid == target_uid)
+            .ok_or_else(|| {
+                CueMolError::NotFound(format!("workspace object {}", target_uid.get()))
+            })?;
+        let insertion_index = target_index + usize::from(after);
+        entries.insert(insertion_index, source);
+
+        let unchanged = entries
+            .iter()
+            .map(|entry| (entry.kind, entry.uid))
+            .eq(original_order);
+        if unchanged {
+            return Ok(false);
+        }
+        for (index, entry) in entries.into_iter().enumerate() {
+            let order = (index + 1) as i32;
+            match entry.kind {
+                GuiWorkspaceObjectKind::Molecule => self
+                    .scene_manager_mut()
+                    .object_mut(entry.uid)
+                    .expect("workspace molecule was checked above")
+                    .set_ui_order(order),
+                GuiWorkspaceObjectKind::DensityMap => {
+                    self.density_maps
+                        .get_mut(&entry.uid)
+                        .expect("workspace density map was checked above")
+                        .ui_order = order;
+                }
+                GuiWorkspaceObjectKind::Surface => {
+                    let surface = self
+                        .scene_manager_mut()
+                        .scene_mut(scene_uid)
+                        .and_then(|scene| scene.loaded_surface_mut(entry.uid))
+                        .expect("workspace surface was checked above");
+                    ensure_surface_qsc_node(surface).set_str_attr("ui_order", order.to_string());
+                }
+            }
+        }
+        Ok(true)
+    }
+
     pub fn destroy_renderer_group_in_object(
         &mut self,
         object_uid: Uid,
@@ -5000,6 +5141,7 @@ impl DesktopAppState {
                 }
                 let uid = Uid::new(self.next_density_map_uid);
                 self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
+                let default_ui_order = self.next_workspace_ui_order(scene_uid);
                 let mut renderers = density_renderer_configs(loaded.qsc_node.as_ref(), &styles);
                 for renderer in &mut renderers {
                     renderer.uid = self.next_density_renderer_uid();
@@ -5031,7 +5173,7 @@ impl DesktopAppState {
                             .qsc_node
                             .as_ref()
                             .and_then(|node| node.str_attr("ui_order").as_str().parse().ok())
-                            .unwrap_or(0),
+                            .unwrap_or(default_ui_order),
                         modified: false,
                         source: loaded
                             .qsc_node
@@ -5176,6 +5318,7 @@ impl DesktopAppState {
         }
         let uid = Uid::new(self.next_density_map_uid);
         self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
+        let ui_order = self.next_workspace_ui_order(scene_uid);
         self.density_maps.insert(
             uid,
             GuiDensityMapObject {
@@ -5192,7 +5335,7 @@ impl DesktopAppState {
                 visible: true,
                 locked: false,
                 ui_collapsed: false,
-                ui_order: 0,
+                ui_order,
                 modified: false,
                 source: path.to_string_lossy().into_owned(),
                 alt_source: String::new(),
@@ -39910,6 +40053,9 @@ fn density_map_qsc_node(
     if object.ui_collapsed {
         node.set_str_attr("ui_collapsed", "true");
     }
+    if object.ui_order != 0 {
+        node.set_str_attr("ui_order", object.ui_order.to_string());
+    }
     if object.xform != Matrix4::IDENTITY {
         node.set_str_attr("xformMat", object.xform.to_script_string());
     }
@@ -40671,6 +40817,7 @@ fn density_map_summary(
     GuiDensityMapSummary {
         uid: object.uid,
         scene_uid: object.scene_uid,
+        ui_order: effective_workspace_order(object.ui_order, object.uid),
         name: object.name.clone(),
         class_name: object.class_name.clone(),
         format: object.format.clone(),
@@ -40913,6 +41060,7 @@ fn surface_summary(
     GuiLoadedSurfaceSummary {
         uid: surface.uid,
         scene_uid,
+        ui_order: effective_workspace_order(surface_ui_order(surface), surface.uid),
         name: surface.name.clone(),
         class_name: "MolSurfObj".to_string(),
         format: surface.srctype.clone(),
@@ -40928,6 +41076,22 @@ fn surface_summary(
             .and_then(|value| value.parse().ok())
             .unwrap_or(0.0),
         renderers,
+    }
+}
+
+fn surface_ui_order(surface: &LoadedSurface) -> i32 {
+    surface
+        .qsc_node
+        .as_ref()
+        .and_then(|node| node.str_attr("ui_order").as_str().parse().ok())
+        .unwrap_or(0)
+}
+
+fn effective_workspace_order(order: i32, uid: Uid) -> i32 {
+    if order != 0 {
+        order
+    } else {
+        i32::try_from(uid.get()).unwrap_or(i32::MAX)
     }
 }
 
@@ -48685,6 +48849,78 @@ end_header
         assert!(object.renderer(first_uid).is_none());
         assert!(object.renderer(free_uid).is_none());
         assert!(object.renderer(second_uid).is_some());
+    }
+
+    #[test]
+    fn workspace_objects_move_across_kinds_and_persist_ui_order() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("order", false).result_scene;
+        let molecule_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let map_uid = app.add_density_map(scene_uid, "map", DensityMap::new());
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: String::new(),
+                raw_data: Vec::new(),
+                qsc_node: None,
+            });
+
+        assert!(app
+            .move_workspace_object(
+                scene_uid,
+                GuiWorkspaceObjectKind::Surface,
+                surface_uid,
+                GuiWorkspaceObjectKind::Molecule,
+                molecule_uid,
+                false,
+            )
+            .unwrap());
+        assert_eq!(app.surface_summary(surface_uid).unwrap().ui_order, 1);
+        assert_eq!(app.object_summaries(scene_uid)[0].ui_order, 2);
+        assert_eq!(app.density_map_summary(map_uid).unwrap().ui_order, 3);
+        assert!(!app
+            .move_workspace_object(
+                scene_uid,
+                GuiWorkspaceObjectKind::Surface,
+                surface_uid,
+                GuiWorkspaceObjectKind::Molecule,
+                molecule_uid,
+                false,
+            )
+            .unwrap());
+
+        app.sync_density_map_qsc_nodes(scene_uid).unwrap();
+        let scene = app.scene_manager().scene(scene_uid).unwrap();
+        assert_eq!(
+            scene
+                .loaded_surface(surface_uid)
+                .unwrap()
+                .qsc_node
+                .as_ref()
+                .unwrap()
+                .str_attr("ui_order")
+                .as_str(),
+            "1"
+        );
+        assert_eq!(
+            scene.loaded_density_maps()[0]
+                .qsc_node
+                .as_ref()
+                .unwrap()
+                .str_attr("ui_order")
+                .as_str(),
+            "3"
+        );
     }
 
     #[test]

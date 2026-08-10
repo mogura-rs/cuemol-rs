@@ -325,6 +325,15 @@ fn tauri_workspace_reorders_and_regroups_renderers_by_dragging() {
 }
 
 #[test]
+fn tauri_workspace_reorders_objects_across_supported_kinds() {
+    assert!(JS.contains("function configureWorkspaceObjectDrag(row, sceneUid, kind, uid)"));
+    assert!(JS.contains("application/x-cuemol-object"));
+    assert!(JS.contains("mutateWithoutViewport(\"move_workspace_object\""));
+    assert!(JS.contains("workspaceObjectBlocks.sort("));
+    assert!(CSS.contains(".tree-object.drop-before::after"));
+}
+
+#[test]
 fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("function activeCameras()"));
     assert!(JS.contains("workspaceSelectionKind === \"cameraRoot\""));
@@ -436,6 +445,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "set_workspace_locked",
         "get_renderer_style_options",
         "create_renderer_style",
+        "move_workspace_object",
         "move_workspace_renderer",
         "delete_workspace_item",
         "fit_workspace_item",

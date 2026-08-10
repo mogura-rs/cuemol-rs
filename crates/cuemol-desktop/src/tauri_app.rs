@@ -191,6 +191,7 @@ struct ColoringUpdateInput {
 struct ObjectDto {
     uid: u64,
     scene_uid: u64,
+    ui_order: i32,
     name: String,
     source: String,
     source_type: String,
@@ -278,6 +279,7 @@ struct CrystalDto {
 struct DensityMapDto {
     uid: u64,
     scene_uid: u64,
+    ui_order: i32,
     name: String,
     class_name: String,
     format: String,
@@ -297,6 +299,7 @@ struct DensityMapDto {
 struct SurfaceDto {
     uid: u64,
     scene_uid: u64,
+    ui_order: i32,
     name: String,
     class_name: String,
     format: String,
@@ -656,6 +659,17 @@ struct WorkspaceFitInput {
 struct WorkspaceMoveRendererInput {
     object_uid: u64,
     renderer_uid: u64,
+    target_uid: u64,
+    position: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceMoveObjectInput {
+    scene_uid: u64,
+    source_kind: String,
+    source_uid: u64,
+    target_kind: String,
     target_uid: u64,
     position: String,
 }
@@ -1088,6 +1102,7 @@ impl AppModel {
                 objects.push(ObjectDto {
                     uid: object.uid.get(),
                     scene_uid: scene.uid.get(),
+                    ui_order: object.ui_order,
                     name: object.name,
                     source: object_state.source().to_string(),
                     source_type: object_state.source_type().to_string(),
@@ -1184,6 +1199,7 @@ impl AppModel {
                 DensityMapDto {
                     uid: map.uid.get(),
                     scene_uid: map.scene_uid.get(),
+                    ui_order: map.ui_order,
                     name: map.name,
                     class_name: map.class_name,
                     format: map.format,
@@ -1206,6 +1222,7 @@ impl AppModel {
             .map(|surface| SurfaceDto {
                 uid: surface.uid.get(),
                 scene_uid: surface.scene_uid.get(),
+                ui_order: surface.ui_order,
                 name: surface.name,
                 class_name: surface.class_name,
                 format: surface.format,
@@ -2232,6 +2249,35 @@ impl AppModel {
             .map_err(|error| error.to_string())?;
         if moved {
             self.status = "Move renderer".to_string();
+        }
+        Ok(moved)
+    }
+
+    fn move_workspace_object(&mut self, input: WorkspaceMoveObjectInput) -> Result<bool, String> {
+        let kind = |value: &str| match value {
+            "object" => Ok(crate::GuiWorkspaceObjectKind::Molecule),
+            "densityMap" => Ok(crate::GuiWorkspaceObjectKind::DensityMap),
+            "surface" => Ok(crate::GuiWorkspaceObjectKind::Surface),
+            _ => Err(format!("unsupported Workspace object type: {value}")),
+        };
+        let after = match input.position.as_str() {
+            "before" => false,
+            "after" => true,
+            value => return Err(format!("unsupported object drop position: {value}")),
+        };
+        let moved = self
+            .desktop
+            .move_workspace_object(
+                Uid::new(input.scene_uid),
+                kind(&input.source_kind)?,
+                Uid::new(input.source_uid),
+                kind(&input.target_kind)?,
+                Uid::new(input.target_uid),
+                after,
+            )
+            .map_err(|error| error.to_string())?;
+        if moved {
+            self.status = "Move object".to_string();
         }
         Ok(moved)
     }
@@ -4713,6 +4759,7 @@ enum ModelRequest {
         locked: bool,
     },
     DeleteWorkspaceItem(WorkspaceDeleteInput),
+    MoveWorkspaceObject(WorkspaceMoveObjectInput),
     MoveWorkspaceRenderer(WorkspaceMoveRendererInput),
     FitWorkspaceItem {
         target: WorkspaceFitInput,
@@ -6087,6 +6134,13 @@ fn handle_model_request(
             model.delete_workspace_item(target)?;
             model.push_undo(undo);
             model.touch_structure_details();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::MoveWorkspaceObject(input) => {
+            let undo = model.capture_undo();
+            if model.move_workspace_object(input)? {
+                model.push_undo(undo);
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::MoveWorkspaceRenderer(input) => {
@@ -7959,6 +8013,17 @@ fn move_workspace_renderer(
 }
 
 #[tauri::command]
+fn move_workspace_object(
+    input: WorkspaceMoveObjectInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::MoveWorkspaceObject(input),
+    )?)
+}
+
+#[tauri::command]
 fn fit_workspace_item(
     target: WorkspaceFitInput,
     width: u32,
@@ -9065,6 +9130,7 @@ pub fn run() -> Result<(), tauri::Error> {
             set_workspace_visible,
             set_workspace_locked,
             delete_workspace_item,
+            move_workspace_object,
             move_workspace_renderer,
             fit_workspace_item,
             set_config_value,
@@ -10394,6 +10460,42 @@ mod tests {
             .unwrap()
             .renderer(group_uid)
             .is_some());
+    }
+
+    #[test]
+    fn workspace_object_move_is_cross_kind_undoable_and_keeps_mesh() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let map_uid =
+            model
+                .desktop
+                .add_density_map(scene_uid, "map", cuemol_xtal::DensityMap::new());
+        model.prepare_mesh_if_needed().unwrap();
+        assert!(model.mesh.is_some());
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::MoveWorkspaceObject(WorkspaceMoveObjectInput {
+                scene_uid: scene_uid.get(),
+                source_kind: "densityMap".to_string(),
+                source_uid: map_uid.get(),
+                target_kind: "object".to_string(),
+                target_uid: object_uid.get(),
+                position: "before".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(snapshot.density_maps[0].ui_order, 1);
+        assert_eq!(snapshot.objects[0].ui_order, 2);
+        assert_eq!(snapshot.undo_descriptions[0], "Move object");
+        assert!(model.mesh.is_some());
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let snapshot = model.snapshot();
+        assert!(snapshot.objects[0].ui_order < snapshot.density_maps[0].ui_order);
     }
 
     #[test]

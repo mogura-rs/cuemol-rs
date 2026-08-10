@@ -166,6 +166,7 @@ let trajectoryTimer = null;
 let trajectoryTickBusy = false;
 let selectedTrajectoryBlockUid = null;
 let draggedTrajectoryBlockUid = null;
+let draggedWorkspaceObject = null;
 let draggedWorkspaceRenderer = null;
 const trajectoryFrames = new Map();
 let recentFiles = loadRecentFiles();
@@ -4466,6 +4467,66 @@ function groupedMoleculeRenderers(renderers) {
   return nodes;
 }
 
+function clearWorkspaceObjectDropMarkers() {
+  document
+    .querySelectorAll(".tree-object.drop-before, .tree-object.drop-after")
+    .forEach((row) => row.classList.remove("drop-before", "drop-after"));
+}
+
+function configureWorkspaceObjectDrag(row, sceneUid, kind, uid) {
+  row.draggable = true;
+  row.addEventListener("dragstart", (event) => {
+    draggedWorkspaceObject = { sceneUid, kind, uid };
+    row.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(
+      "application/x-cuemol-object",
+      JSON.stringify(draggedWorkspaceObject),
+    );
+  });
+  row.addEventListener("dragover", (event) => {
+    const source = draggedWorkspaceObject;
+    if (!source || source.sceneUid !== sceneUid || (source.kind === kind && source.uid === uid)) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    clearWorkspaceObjectDropMarkers();
+    const bounds = row.getBoundingClientRect();
+    const position = event.clientY - bounds.top < bounds.height / 2 ? "before" : "after";
+    row.classList.add(`drop-${position}`);
+    row.dataset.dropPosition = position;
+  });
+  row.addEventListener("dragleave", (event) => {
+    if (!row.contains(event.relatedTarget)) row.classList.remove("drop-before", "drop-after");
+  });
+  row.addEventListener("drop", async (event) => {
+    const source = draggedWorkspaceObject;
+    const position = row.dataset.dropPosition || "before";
+    clearWorkspaceObjectDropMarkers();
+    if (!source || source.sceneUid !== sceneUid || (source.kind === kind && source.uid === uid)) {
+      return;
+    }
+    event.preventDefault();
+    draggedWorkspaceObject = null;
+    await mutateWithoutViewport("move_workspace_object", {
+      input: {
+        sceneUid,
+        sourceKind: source.kind,
+        sourceUid: source.uid,
+        targetKind: kind,
+        targetUid: uid,
+        position,
+      },
+    });
+  });
+  row.addEventListener("dragend", () => {
+    draggedWorkspaceObject = null;
+    row.classList.remove("dragging");
+    clearWorkspaceObjectDropMarkers();
+  });
+}
+
 function clearWorkspaceRendererDropMarkers() {
   document
     .querySelectorAll(".tree-renderer.drop-before, .tree-renderer.drop-after, .tree-renderer.drop-inside")
@@ -4657,6 +4718,7 @@ function workspaceChromeRenderKey() {
     objects: snapshot.objects.map((object) => [
       object.sceneUid,
       object.uid,
+      object.uiOrder,
       object.name,
       object.visible,
       object.locked,
@@ -4668,6 +4730,7 @@ function workspaceChromeRenderKey() {
     maps: snapshot.densityMaps.map((map) => [
       map.sceneUid,
       map.uid,
+      map.uiOrder,
       map.name,
       map.visible,
       map.locked,
@@ -4677,6 +4740,7 @@ function workspaceChromeRenderKey() {
     surfaces: (snapshot.surfaces || []).map((surface) => [
       surface.sceneUid,
       surface.uid,
+      surface.uiOrder,
       surface.name,
       surface.visible,
       surface.locked,
@@ -4751,7 +4815,9 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     );
     sceneRow.addEventListener("dblclick", () => showReferenceDialog("Scene Properties"));
     sceneTree.append(sceneRow);
+    const workspaceObjectBlocks = [];
     for (const object of snapshot.objects.filter((item) => item.sceneUid === scene.uid)) {
+      const objectBlock = document.createDocumentFragment();
       const objectRow = button(
         object.name,
         `tree-object${
@@ -4779,7 +4845,8 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       const count = document.createElement("small");
       count.textContent = `${object.atomCount} AT`;
       objectRow.append(count);
-      sceneTree.append(objectRow);
+      configureWorkspaceObjectDrag(objectRow, scene.uid, "object", object.uid);
+      objectBlock.append(objectRow);
       const appendMoleculeRendererRow = (renderer, isChild = false) => {
         const isGroup = renderer.rendererType === "*group";
         const selectionKind = isGroup ? "rendererGroup" : "renderer";
@@ -4877,16 +4944,23 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             !isGroup,
           ),
         );
-        sceneTree.append(rendererRow);
+        objectBlock.append(rendererRow);
       };
       for (const node of groupedMoleculeRenderers(object.renderers)) {
         appendMoleculeRendererRow(node.renderer);
         for (const child of node.children) appendMoleculeRendererRow(child, true);
       }
+      workspaceObjectBlocks.push({
+        uiOrder: object.uiOrder,
+        kindOrder: 0,
+        uid: object.uid,
+        block: objectBlock,
+      });
     }
     for (const surface of (snapshot.surfaces || []).filter(
       (item) => item.sceneUid === scene.uid,
     )) {
+      const surfaceBlock = document.createDocumentFragment();
       const surfaceRow = button(
         surface.name,
         `tree-object surface-object${
@@ -4916,7 +4990,8 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       const count = document.createElement("small");
       count.textContent = "SURF";
       surfaceRow.append(count);
-      sceneTree.append(surfaceRow);
+      configureWorkspaceObjectDrag(surfaceRow, scene.uid, "surface", surface.uid);
+      surfaceBlock.append(surfaceRow);
       for (const renderer of surface.renderers) {
         const rendererRow = button(
           `${renderer.rendererType} · ${renderer.name}`,
@@ -4951,10 +5026,17 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             renderer.locked,
           ),
         );
-        sceneTree.append(rendererRow);
+        surfaceBlock.append(rendererRow);
       }
+      workspaceObjectBlocks.push({
+        uiOrder: surface.uiOrder,
+        kindOrder: 2,
+        uid: surface.uid,
+        block: surfaceBlock,
+      });
     }
     for (const map of snapshot.densityMaps.filter((item) => item.sceneUid === scene.uid)) {
+      const mapBlock = document.createDocumentFragment();
       const mapRow = button(
         map.name,
         `tree-object density-map${
@@ -4984,7 +5066,8 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       const count = document.createElement("small");
       count.textContent = `${map.counts.join("×")} MAP`;
       mapRow.append(count);
-      sceneTree.append(mapRow);
+      configureWorkspaceObjectDrag(mapRow, scene.uid, "densityMap", map.uid);
+      mapBlock.append(mapRow);
       for (const renderer of map.renderers) {
         const rendererRow = button(
           `${renderer.rendererType} · ${renderer.name}`,
@@ -5019,9 +5102,23 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             renderer.locked,
           ),
         );
-        sceneTree.append(rendererRow);
+        mapBlock.append(rendererRow);
       }
+      workspaceObjectBlocks.push({
+        uiOrder: map.uiOrder,
+        kindOrder: 1,
+        uid: map.uid,
+        block: mapBlock,
+      });
     }
+    workspaceObjectBlocks.sort(
+      (left, right) =>
+        (left.uiOrder ?? Number.MAX_SAFE_INTEGER) -
+          (right.uiOrder ?? Number.MAX_SAFE_INTEGER) ||
+        left.kindOrder - right.kindOrder ||
+        left.uid - right.uid,
+    );
+    for (const entry of workspaceObjectBlocks) sceneTree.append(entry.block);
     const sceneCameras = (snapshot.cameras || []).filter(
       (camera) => camera.sceneUid === scene.uid,
     );
