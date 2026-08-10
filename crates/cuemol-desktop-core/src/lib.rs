@@ -5014,6 +5014,36 @@ impl DesktopAppState {
         nevery: usize,
         renderer_type: &str,
     ) -> Result<GuiTrajectorySummary> {
+        let topology_path = topology_path.as_ref();
+        let renderer_type = if renderer_type.trim().is_empty() {
+            "simple"
+        } else {
+            renderer_type.trim()
+        };
+        let setup = GuiRendererSetup {
+            object_name: default_object_name(topology_path),
+            renderer_type: renderer_type.to_string(),
+            renderer_name: renderer_type.to_string(),
+            selection: None,
+            recenter: true,
+        };
+        self.load_md_trajectory_with_renderer_setup(
+            scene_uid,
+            topology_path,
+            trajectory_paths,
+            nevery,
+            &setup,
+        )
+    }
+
+    pub fn load_md_trajectory_with_renderer_setup(
+        &mut self,
+        scene_uid: Uid,
+        topology_path: impl AsRef<Path>,
+        trajectory_paths: &[String],
+        nevery: usize,
+        setup: &GuiRendererSetup,
+    ) -> Result<GuiTrajectorySummary> {
         if nevery == 0 {
             return Err(CueMolError::invalid_argument(
                 "trajectory frame sampling must be at least one",
@@ -5026,6 +5056,24 @@ impl DesktopAppState {
         }
         if self.scene_manager().scene(scene_uid).is_none() {
             return Err(CueMolError::NotFound(format!("scene {}", scene_uid.get())));
+        }
+        if setup.object_name.trim().is_empty()
+            || setup.renderer_type.trim().is_empty()
+            || setup.renderer_name.trim().is_empty()
+        {
+            return Err(CueMolError::invalid_argument(
+                "object, renderer type, and renderer name are required",
+            ));
+        }
+        if !self
+            .molecule_renderer_setup_options(scene_uid)?
+            .iter()
+            .any(|option| option.name == setup.renderer_type.trim())
+        {
+            return Err(CueMolError::invalid_argument(format!(
+                "unsupported renderer setup type: {}",
+                setup.renderer_type.trim()
+            )));
         }
 
         let topology_path = topology_path.as_ref();
@@ -5048,12 +5096,7 @@ impl DesktopAppState {
         }
         molecule.fire_atoms_moved();
 
-        let object_name = default_object_name(topology_path);
-        let renderer_type = if renderer_type.trim().is_empty() {
-            "simple"
-        } else {
-            renderer_type.trim()
-        };
+        let object_name = setup.object_name.trim().to_string();
         let object_uid = {
             let scene = self
                 .scene_manager_mut()
@@ -5061,12 +5104,17 @@ impl DesktopAppState {
                 .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
             let object_uid =
                 scene.add_molecule_with_source_type(object_name.clone(), molecule, "gro");
-            scene
+            let object = scene
                 .object_mut(object_uid)
-                .expect("trajectory object was just inserted")
-                .add_renderer(renderer_type, renderer_type);
+                .expect("trajectory object was just inserted");
+            object.set_source(topology_path.to_string_lossy());
+            object.set_modified(false);
             object_uid
         };
+        if let Err(error) = self.configure_molecule_renderer(scene_uid, object_uid, setup) {
+            let _ = self.destroy_object(object_uid);
+            return Err(error);
+        }
         let trajectory = GuiTrajectoryData {
             blocks,
             current_frame: 0,
@@ -51571,16 +51619,44 @@ end_header
 
         let mut app = DesktopAppState::new();
         let scene_uid = app.ensure_active_scene();
+        let invalid_setup = GuiRendererSetup {
+            object_name: "trajectory".to_string(),
+            renderer_type: "missing-renderer".to_string(),
+            renderer_name: "atoms".to_string(),
+            selection: None,
+            recenter: true,
+        };
+        let error = app
+            .load_md_trajectory_with_renderer_setup(
+                scene_uid,
+                directory.join("missing.gro"),
+                &[directory.join("missing.xtc").to_string_lossy().into_owned()],
+                1,
+                &invalid_setup,
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported renderer setup type"));
+        assert!(app.active_object_summaries().is_empty());
+
+        let renderer_setup = GuiRendererSetup {
+            object_name: "trajectory".to_string(),
+            renderer_type: "ballstick".to_string(),
+            renderer_name: "atoms".to_string(),
+            selection: Some("name N".to_string()),
+            recenter: true,
+        };
         let summary = app
-            .load_md_trajectory(
+            .load_md_trajectory_with_renderer_setup(
                 scene_uid,
                 &topology_path,
                 &[trajectory_path.to_string_lossy().into_owned()],
                 1,
-                "ballstick",
+                &renderer_setup,
             )
             .unwrap();
-        assert_eq!(summary.object_name, "system");
+        assert_eq!(summary.object_name, "trajectory");
         assert_eq!(summary.frame_count, 2);
         assert_eq!(summary.current_frame, 0);
         assert_eq!(summary.blocks.len(), 1);
@@ -51589,9 +51665,16 @@ end_header
         assert_eq!(summary.blocks[0].start_index, 0);
         assert_eq!(app.active_trajectory_summaries(), vec![summary.clone()]);
         assert!(app
-            .renderer_summaries(summary.object_uid)
+            .scene_manager()
+            .object(summary.object_uid)
+            .unwrap()
+            .renderers()
             .iter()
-            .any(|renderer| renderer.renderer_type == "ballstick"));
+            .any(|renderer| {
+                renderer.renderer_type() == "ballstick"
+                    && renderer.name() == "atoms"
+                    && renderer.selection().to_string() == "name N"
+            }));
 
         app.apply_trajectory_frame(summary.object_uid, 1).unwrap();
         let atoms = app

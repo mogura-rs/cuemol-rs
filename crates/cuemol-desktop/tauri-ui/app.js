@@ -5042,32 +5042,37 @@ async function showReferenceDialog(title) {
     nevery.min = "1";
     nevery.max = "9999";
     nevery.step = "1";
-    const rendererType = dialogSelect(
-      "Initial renderer",
-      [
-        ["simple", "Simple"],
-        ["ballstick", "Ball & stick"],
-        ["cpk", "CPK"],
-        ["ribbon", "Ribbon"],
-        ["cartoon", "Cartoon"],
-        ["trace", "Trace"],
-      ],
-      "simple",
-    );
     const open = button("Open", "dialog-primary", async () => {
-      await mutate("load_trajectory", {
-        topologyPath: topologyPath.value.trim(),
-        trajectoryPaths,
+      const chosenTopology = topologyPath.value.trim();
+      const chosenTrajectories = [...trajectoryPaths];
+      open.disabled = true;
+      let defaults;
+      try {
+        defaults = await invoke("get_file_renderer_setup", { path: chosenTopology });
+      } catch (error) {
+        showError(error);
+        updateOpenState();
+        return;
+      }
+      if (!defaults) {
+        showError("No compatible renderer is available for this topology.");
+        updateOpenState();
+        return;
+      }
+      const setup = await showRendererSetup(defaults);
+      if (!setup) return;
+      if (!(await mutate("load_trajectory", {
+        topologyPath: chosenTopology,
+        trajectoryPaths: chosenTrajectories,
         nevery: Math.max(1, Number(nevery.value) || 1),
-        rendererType: rendererType.value,
-      });
+        rendererSetup: setup.rendererSetup,
+      }))) return;
       const loaded = snapshot?.trajectories?.at(-1);
       if (loaded) {
         selectedTrajectoryUid = loaded.objectUid;
         trajectoryFrames.set(loaded.objectUid, 0);
       }
       showBottomPanel("trajectory");
-      referenceDialog.close();
     });
     function updateOpenState() {
       open.disabled = topologyPath.value.trim().length === 0 || trajectoryPaths.length === 0;

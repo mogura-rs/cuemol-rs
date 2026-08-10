@@ -225,6 +225,30 @@ fn tauri_open_recent_matches_the_reference_mru_contract() {
 }
 
 #[test]
+fn tauri_md_trajectory_open_defers_io_until_renderer_setup() {
+    let start = JS
+        .find("} else if (title === \"Open MD Trajectory\")")
+        .unwrap();
+    let end = JS[start + 1..]
+        .find("} else if (title === \"Open PDB\")")
+        .map(|offset| start + 1 + offset)
+        .unwrap();
+    let dialog = &JS[start..end];
+
+    assert!(dialog.contains("multiple: true"));
+    assert!(dialog.contains("const chosenTrajectories = [...trajectoryPaths]"));
+    assert!(dialog.contains("await invoke(\"get_file_renderer_setup\""));
+    assert!(dialog.contains("const setup = await showRendererSetup(defaults)"));
+    assert!(dialog.contains("rendererSetup: setup.rendererSetup"));
+    assert!(dialog.contains("await mutate(\"load_trajectory\""));
+    assert!(!dialog.contains("Initial renderer"));
+    assert!(
+        dialog.find("showRendererSetup(defaults)").unwrap()
+            < dialog.find("mutate(\"load_trajectory\"").unwrap()
+    );
+}
+
+#[test]
 fn tauri_file_open_matches_reference_molecule_reader_options() {
     for label in [
         "PDB options",

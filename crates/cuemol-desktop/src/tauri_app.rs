@@ -5546,7 +5546,7 @@ enum ModelRequest {
         topology_path: String,
         trajectory_paths: Vec<String>,
         nevery: usize,
-        renderer_type: String,
+        renderer_setup: crate::GuiRendererSetup,
     },
     SetTrajectoryFrame {
         object_uid: u64,
@@ -7570,18 +7570,18 @@ fn handle_model_request(
             topology_path,
             trajectory_paths,
             nevery,
-            renderer_type,
+            renderer_setup,
         } => {
             let undo = model.capture_undo();
             let scene_uid = model.desktop.ensure_active_scene();
             let summary = model
                 .desktop
-                .load_md_trajectory(
+                .load_md_trajectory_with_renderer_setup(
                     scene_uid,
                     &topology_path,
                     &trajectory_paths,
                     nevery,
-                    &renderer_type,
+                    &renderer_setup,
                 )
                 .map_err(|error| error.to_string())?;
             model.selection.clear();
@@ -7589,7 +7589,7 @@ fn handle_model_request(
                 "Loaded trajectory {}: {} frame(s)",
                 summary.object_name, summary.frame_count
             );
-            model.invalidate_mesh(true);
+            model.invalidate_mesh(renderer_setup.recenter);
             model.push_undo(undo);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -10119,7 +10119,7 @@ fn load_trajectory(
     topology_path: String,
     trajectory_paths: Vec<String>,
     nevery: usize,
-    renderer_type: String,
+    renderer_setup: RendererSetupInput,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
@@ -10128,7 +10128,7 @@ fn load_trajectory(
             topology_path,
             trajectory_paths,
             nevery,
-            renderer_type,
+            renderer_setup: renderer_setup.into(),
         },
     )?)
 }

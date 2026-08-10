@@ -568,6 +568,33 @@ type PdbProbeMessage = (
 enum NativeRendererSetupAction {
     PdbDownload,
     OpenPath(PathBuf),
+    OpenTrajectory(NativeTrajectoryLoadRequest),
+}
+
+#[derive(Debug, Clone)]
+struct NativeTrajectoryLoadRequest {
+    topology_path: String,
+    trajectory_paths: Vec<String>,
+    nevery: usize,
+}
+
+#[derive(Debug, Clone)]
+struct NativeMdTrajectoryDraft {
+    topology_path: String,
+    trajectory_paths: Vec<String>,
+    selected_path: Option<usize>,
+    nevery: usize,
+}
+
+impl Default for NativeMdTrajectoryDraft {
+    fn default() -> Self {
+        Self {
+            topology_path: String::new(),
+            trajectory_paths: Vec::new(),
+            selected_path: None,
+            nevery: 1,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -627,6 +654,7 @@ struct GuiApplication {
     pdb_probe_deadline: Option<Instant>,
     pdb_probe_receiver: Option<mpsc::Receiver<PdbProbeMessage>>,
     pdb_probe_result: Option<std::result::Result<Vec<crate::GuiPdbFileKind>, String>>,
+    md_trajectory_draft: Option<NativeMdTrajectoryDraft>,
     renderer_setup_draft: Option<NativeRendererSetupDraft>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
@@ -1086,6 +1114,8 @@ enum InteractionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeFileDialog {
     OpenObject,
+    OpenTrajectoryTopology,
+    OpenTrajectoryBlock,
     OpenPsf,
     OpenMsmsVertex,
     OpenScene,
@@ -2411,6 +2441,7 @@ impl GuiApplication {
             pdb_probe_deadline: None,
             pdb_probe_receiver: None,
             pdb_probe_result: None,
+            md_trajectory_draft: None,
             renderer_setup_draft: None,
             pdb_download_receiver: None,
             url_download_receiver: None,
@@ -3009,6 +3040,10 @@ impl GuiApplication {
                     ui.separator();
                     if ui.button("Open File...").clicked() {
                         self.choose_open_file(camera);
+                        ui.close();
+                    }
+                    if ui.button("Open MD Trajectory...").clicked() {
+                        self.md_trajectory_draft = Some(NativeMdTrajectoryDraft::default());
                         ui.close();
                     }
                     if ui.button("Get PDB...").clicked() {
@@ -9664,6 +9699,7 @@ impl GuiApplication {
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx);
         self.get_pdb_dialog(ctx);
+        self.md_trajectory_dialog(ctx);
         self.renderer_setup_dialog(ctx, camera);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
@@ -14595,6 +14631,166 @@ impl GuiApplication {
         );
     }
 
+    fn md_trajectory_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.md_trajectory_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Open MD Trajectory")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                egui::Grid::new("md_trajectory_paths")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Topology file (.gro):");
+                        ui.horizontal(|ui| {
+                            ui.add_sized(
+                                [320.0, 22.0],
+                                egui::TextEdit::singleline(&mut draft.topology_path),
+                            );
+                            if ui.button("Browse...").clicked() {
+                                if let Some(path) = native_file_dialog(
+                                    NativeFileDialog::OpenTrajectoryTopology,
+                                    &draft.topology_path,
+                                ) {
+                                    draft.topology_path = path.to_string_lossy().into_owned();
+                                }
+                            }
+                        });
+                        ui.end_row();
+
+                        ui.label("Load every N-th frame:");
+                        ui.add(egui::DragValue::new(&mut draft.nevery).range(1..=9999));
+                        ui.end_row();
+                    });
+                ui.separator();
+                ui.strong("Trajectory files");
+                egui::ScrollArea::vertical()
+                    .id_salt("md_trajectory_file_list")
+                    .max_height(150.0)
+                    .show(ui, |ui| {
+                        if draft.trajectory_paths.is_empty() {
+                            ui.weak("No trajectory files selected.");
+                        }
+                        for (index, path) in draft.trajectory_paths.iter().enumerate() {
+                            let file_name = Path::new(path)
+                                .file_name()
+                                .map(|name| name.to_string_lossy())
+                                .unwrap_or_else(|| path.into());
+                            let format = Path::new(path)
+                                .extension()
+                                .map(|extension| extension.to_string_lossy().to_ascii_uppercase())
+                                .unwrap_or_else(|| "TRAJ".to_string());
+                            if ui
+                                .selectable_label(
+                                    draft.selected_path == Some(index),
+                                    format!("{file_name}  [{format}]"),
+                                )
+                                .on_hover_text(path)
+                                .clicked()
+                            {
+                                draft.selected_path = Some(index);
+                            }
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    if ui.button("Add...").clicked() {
+                        let initial = draft
+                            .trajectory_paths
+                            .last()
+                            .map(String::as_str)
+                            .unwrap_or_default();
+                        if let Some(paths) =
+                            native_multi_file_dialog(NativeFileDialog::OpenTrajectoryBlock, initial)
+                        {
+                            let first_added = draft.trajectory_paths.len();
+                            draft.trajectory_paths.extend(
+                                paths
+                                    .into_iter()
+                                    .map(|path| path.to_string_lossy().into_owned()),
+                            );
+                            draft.selected_path = Some(first_added);
+                        }
+                    }
+                    let selected = draft.selected_path;
+                    if ui
+                        .add_enabled(selected.is_some(), egui::Button::new("Remove"))
+                        .clicked()
+                    {
+                        if let Some(index) = selected {
+                            draft.trajectory_paths.remove(index);
+                            draft.selected_path = if draft.trajectory_paths.is_empty() {
+                                None
+                            } else {
+                                Some(index.min(draft.trajectory_paths.len() - 1))
+                            };
+                        }
+                    }
+                    if ui
+                        .add_enabled(
+                            selected.is_some_and(|index| index > 0),
+                            egui::Button::new("Up"),
+                        )
+                        .clicked()
+                    {
+                        let index = selected.expect("enabled only with a selected path");
+                        draft.trajectory_paths.swap(index, index - 1);
+                        draft.selected_path = Some(index - 1);
+                    }
+                    if ui
+                        .add_enabled(
+                            selected.is_some_and(|index| index + 1 < draft.trajectory_paths.len()),
+                            egui::Button::new("Down"),
+                        )
+                        .clicked()
+                    {
+                        let index = selected.expect("enabled only with a selected path");
+                        draft.trajectory_paths.swap(index, index + 1);
+                        draft.selected_path = Some(index + 1);
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let valid = !draft.topology_path.trim().is_empty()
+                        && !draft.trajectory_paths.is_empty()
+                        && draft.nevery > 0;
+                    if ui.add_enabled(valid, egui::Button::new("Open")).clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if accept {
+            let request = NativeTrajectoryLoadRequest {
+                topology_path: draft.topology_path.trim().to_string(),
+                trajectory_paths: draft.trajectory_paths,
+                nevery: draft.nevery.max(1),
+            };
+            let base_name = Path::new(&request.topology_path)
+                .file_stem()
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "trajectory".to_string());
+            self.open_renderer_setup(
+                &base_name,
+                NativeRendererSetupAction::OpenTrajectory(request),
+                crate::GuiFileRendererTarget::Molecule,
+                NativeRendererReaderOptions::default(),
+            );
+        } else if open && !cancel {
+            self.md_trajectory_draft = Some(draft);
+        }
+    }
+
     fn open_renderer_setup(
         &mut self,
         base_object_name: &str,
@@ -15036,9 +15232,48 @@ impl GuiApplication {
                         camera,
                     );
                 }
+                NativeRendererSetupAction::OpenTrajectory(request) => {
+                    self.load_md_trajectory_with_renderer_setup(request, setup, camera);
+                }
             }
         } else if open && !cancel {
             self.renderer_setup_draft = Some(draft);
+        }
+    }
+
+    fn load_md_trajectory_with_renderer_setup(
+        &mut self,
+        request: NativeTrajectoryLoadRequest,
+        setup: crate::GuiRendererSetup,
+        camera: &mut CameraController,
+    ) {
+        let undo = self.capture_undo();
+        let scene_uid = self.state.ensure_active_scene();
+        match self.state.load_md_trajectory_with_renderer_setup(
+            scene_uid,
+            &request.topology_path,
+            &request.trajectory_paths,
+            request.nevery,
+            &setup,
+        ) {
+            Ok(summary) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.selected_object = Some(summary.object_uid);
+                self.selected_renderer = None;
+                self.workspace_aux_selection = None;
+                self.molstruct_object = Some(summary.object_uid);
+                self.sync_active_scene_properties();
+                self.rebuild_snapshot();
+                if setup.recenter {
+                    camera.fit_snapshot(&self.snapshot);
+                }
+                self.set_status(format!(
+                    "Loaded trajectory {}: {} frame(s)",
+                    summary.object_name, summary.frame_count
+                ));
+            }
+            Err(error) => self.set_error(error),
         }
     }
 
@@ -17811,6 +18046,14 @@ const PSF_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "PSF file",
     extensions: &["psf"],
 }];
+const TRAJECTORY_TOPOLOGY_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "GROMACS topology",
+    extensions: &["gro"],
+}];
+const TRAJECTORY_BLOCK_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "MD trajectory",
+    extensions: &["dcd", "xtc", "trr", "nc"],
+}];
 const MSMS_VERTEX_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "MSMS vertex file",
     extensions: &["vert"],
@@ -17865,6 +18108,18 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
         NativeFileDialog::OpenObject => NativeFileDialogSpec {
             title: "Select a File",
             filters: OBJECT_OPEN_FILTERS,
+            default_extension: None,
+            save: false,
+        },
+        NativeFileDialog::OpenTrajectoryTopology => NativeFileDialogSpec {
+            title: "Select GROMACS topology",
+            filters: TRAJECTORY_TOPOLOGY_OPEN_FILTERS,
+            default_extension: None,
+            save: false,
+        },
+        NativeFileDialog::OpenTrajectoryBlock => NativeFileDialogSpec {
+            title: "Select trajectory files",
+            filters: TRAJECTORY_BLOCK_OPEN_FILTERS,
             default_extension: None,
             save: false,
         },
@@ -17957,6 +18212,24 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
 
 fn native_file_dialog(dialog: NativeFileDialog, initial: &str) -> Option<PathBuf> {
     let spec = native_file_dialog_spec(dialog);
+    let picker = native_file_picker(spec, initial);
+    let path = if spec.save {
+        picker.save_file()
+    } else {
+        picker.pick_file()
+    }?;
+    Some(apply_default_extension(path, spec))
+}
+
+fn native_multi_file_dialog(dialog: NativeFileDialog, initial: &str) -> Option<Vec<PathBuf>> {
+    let spec = native_file_dialog_spec(dialog);
+    if spec.save {
+        return None;
+    }
+    native_file_picker(spec, initial).pick_files()
+}
+
+fn native_file_picker(spec: NativeFileDialogSpec, initial: &str) -> rfd::FileDialog {
     let mut picker = rfd::FileDialog::new().set_title(spec.title);
     let initial = initial.trim();
     if !initial.is_empty() && !is_network_url(initial) {
@@ -17975,12 +18248,7 @@ fn native_file_dialog(dialog: NativeFileDialog, initial: &str) -> Option<PathBuf
     for filter in spec.filters {
         picker = picker.add_filter(filter.label, filter.extensions);
     }
-    let path = if spec.save {
-        picker.save_file()
-    } else {
-        picker.pick_file()
-    }?;
-    Some(apply_default_extension(path, spec))
+    picker
 }
 
 fn apply_default_extension(mut path: PathBuf, spec: NativeFileDialogSpec) -> PathBuf {
@@ -22195,6 +22463,34 @@ mod tests {
         assert!(!setup.recenter);
         assert!(setup.reader_options.is_none());
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn native_gui_md_trajectory_defers_loading_until_renderer_setup() {
+        let mut app = GuiApplication::new();
+        let request = NativeTrajectoryLoadRequest {
+            topology_path: "/missing/system.gro".to_string(),
+            trajectory_paths: vec!["/missing/motion.xtc".to_string()],
+            nevery: 2,
+        };
+        app.open_renderer_setup(
+            "system",
+            NativeRendererSetupAction::OpenTrajectory(request.clone()),
+            crate::GuiFileRendererTarget::Molecule,
+            NativeRendererReaderOptions::default(),
+        );
+
+        assert!(app.state.active_object_summaries().is_empty());
+        let setup = app.renderer_setup_draft.as_ref().unwrap();
+        assert_eq!(setup.target, crate::GuiFileRendererTarget::Molecule);
+        assert!(matches!(
+            &setup.action,
+            NativeRendererSetupAction::OpenTrajectory(value)
+                if value.topology_path == request.topology_path
+                    && value.trajectory_paths == request.trajectory_paths
+                    && value.nevery == request.nevery
+        ));
+        assert_eq!(setup.object_name, "system");
     }
 
     #[test]
