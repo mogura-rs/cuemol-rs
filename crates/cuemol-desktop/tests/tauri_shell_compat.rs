@@ -330,6 +330,28 @@ fn tauri_camera_updates_coalesce_pending_input() {
 }
 
 #[test]
+fn tauri_interaction_dialog_matches_reference_modes() {
+    for label in [
+        "Selection 1",
+        "Mol 2:",
+        "Molecule 2",
+        "Sel 2:",
+        "Selection 2",
+        "Min distance (Å)",
+        "Max distance (Å)",
+        "Max labels",
+        "Hydrogen bond (N, O) only",
+        "Renderer",
+    ] {
+        assert!(JS.contains(label), "missing Interaction field {label}");
+    }
+    assert!(JS.contains("object2Uid: useObject2.checked"));
+    assert!(JS.contains("selection2: useSelection2.checked"));
+    assert!(JS.contains("rendererName: renderer.value"));
+    assert!(JS.contains("item.rendererType === \"atomintr\""));
+}
+
+#[test]
 fn tauri_workspace_chrome_reuses_unchanged_dom() {
     assert!(JS.contains("function workspaceChromeRenderKey()"));
     let workspace_key = JS

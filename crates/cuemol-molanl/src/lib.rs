@@ -467,7 +467,7 @@ impl MolAnlManager {
         hbond: bool,
         max_count: usize,
     ) -> String {
-        contact_json_same_molecule(
+        bond_pairs_json(self.calc_atom_contact_pairs(
             molecule,
             selector,
             &Selector::All,
@@ -475,6 +475,22 @@ impl MolAnlManager {
             r_max,
             hbond,
             max_count,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn calc_atom_contact_pairs(
+        &self,
+        molecule: &MolCoord,
+        selector1: &Selector,
+        selector2: &Selector,
+        r_min: f64,
+        r_max: f64,
+        hbond: bool,
+        max_count: usize,
+    ) -> Vec<(i32, i32)> {
+        contact_pairs_same_molecule(
+            molecule, selector1, selector2, r_min, r_max, hbond, max_count,
         )
     }
 
@@ -489,9 +505,9 @@ impl MolAnlManager {
         hbond: bool,
         max_count: usize,
     ) -> String {
-        contact_json_same_molecule(
+        bond_pairs_json(self.calc_atom_contact_pairs(
             molecule, selector1, selector2, r_min, r_max, hbond, max_count,
-        )
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -522,12 +538,29 @@ impl MolAnlManager {
         hbond: bool,
         max_count: usize,
     ) -> String {
+        bond_pairs_json(self.calc_atom_contact3_pairs(
+            molecule1, selector1, molecule2, selector2, r_min, r_max, hbond, max_count,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn calc_atom_contact3_pairs(
+        &self,
+        molecule1: &MolCoord,
+        selector1: &Selector,
+        molecule2: &MolCoord,
+        selector2: &Selector,
+        r_min: f64,
+        r_max: f64,
+        hbond: bool,
+        max_count: usize,
+    ) -> Vec<(i32, i32)> {
         if std::ptr::eq(molecule1, molecule2) {
-            contact_json_same_molecule(
+            contact_pairs_same_molecule(
                 molecule1, selector1, selector2, r_min, r_max, hbond, max_count,
             )
         } else {
-            contact_json_two_molecules(
+            contact_pairs_two_molecules(
                 molecule1, selector1, molecule2, selector2, r_min, r_max, hbond, max_count,
             )
         }
@@ -835,7 +868,7 @@ pub(crate) fn rmsd_for_pairs(pairs: &[(Vector4, Vector4)], matrix: Matrix4) -> f
     (sum / pairs.len() as f64).sqrt()
 }
 
-fn contact_json_same_molecule(
+fn contact_pairs_same_molecule(
     molecule: &MolCoord,
     selector1: &Selector,
     selector2: &Selector,
@@ -843,7 +876,7 @@ fn contact_json_same_molecule(
     r_max: f64,
     hbond: bool,
     max_count: usize,
-) -> String {
+) -> Vec<(i32, i32)> {
     let bonded = molecule
         .bonds()
         .iter()
@@ -881,11 +914,11 @@ fn contact_json_same_molecule(
         }
         checked[index1] = true;
     }
-    bond_pairs_json(hits.into_iter().take(max_count))
+    hits.into_iter().take(max_count).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
-fn contact_json_two_molecules(
+fn contact_pairs_two_molecules(
     molecule1: &MolCoord,
     selector1: &Selector,
     molecule2: &MolCoord,
@@ -894,7 +927,7 @@ fn contact_json_two_molecules(
     r_max: f64,
     hbond: bool,
     max_count: usize,
-) -> String {
+) -> Vec<(i32, i32)> {
     let mut hits = BTreeSet::new();
     for atom1 in molecule1.atoms() {
         if !selector1.matches(atom1) || excluded_contact_atom(atom1, hbond) {
@@ -910,7 +943,7 @@ fn contact_json_two_molecules(
             }
         }
     }
-    bond_pairs_json(hits.into_iter().take(max_count))
+    hits.into_iter().take(max_count).collect()
 }
 
 fn excluded_contact_atom(atom: &Atom, hbond: bool) -> bool {
@@ -930,8 +963,9 @@ fn sorted_pair(aid1: i32, aid2: i32) -> (i32, i32) {
     }
 }
 
-fn bond_pairs_json(pairs: impl Iterator<Item = (i32, i32)>) -> String {
+fn bond_pairs_json(pairs: impl IntoIterator<Item = (i32, i32)>) -> String {
     let entries = pairs
+        .into_iter()
         .map(|(aid1, aid2)| format!("[{aid1},{aid2}]"))
         .collect::<Vec<_>>();
     if entries.is_empty() {
@@ -1224,6 +1258,18 @@ mod tests {
         assert_eq!(
             manager.calc_atom_contact_json(&molecule, &Selector::All, 1.0, 3.0, false, 10),
             "[[1,2],[2,3]]"
+        );
+        assert_eq!(
+            manager.calc_atom_contact_pairs(
+                &molecule,
+                &Selector::All,
+                &Selector::All,
+                1.0,
+                3.0,
+                false,
+                10,
+            ),
+            vec![(1, 2), (2, 3)]
         );
         assert_eq!(
             manager.calc_atom_contact_json(&molecule, &Selector::All, 1.0, 3.0, true, 10),

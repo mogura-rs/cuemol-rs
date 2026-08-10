@@ -5369,11 +5369,14 @@ enum ModelRequest {
     },
     CalculateContacts {
         object_uid: u64,
-        selection: String,
+        selection1: String,
+        object2_uid: Option<u64>,
+        selection2: Option<String>,
         r_min: f64,
         r_max: f64,
         hbond: bool,
         max_count: usize,
+        renderer_name: String,
     },
     AssignSecondaryStructure {
         object_uid: u64,
@@ -7577,27 +7580,45 @@ fn handle_model_request(
         }
         ModelRequest::CalculateContacts {
             object_uid,
-            selection,
+            selection1,
+            object2_uid,
+            selection2,
             r_min,
             r_max,
             hbond,
             max_count,
+            renderer_name,
         } => {
-            if !r_min.is_finite() || !r_max.is_finite() || r_min < 0.0 || r_max < r_min {
-                return Err("contact distance range is invalid".to_string());
-            }
-            let contacts = model
+            let renderer_name = if renderer_name.trim().is_empty() {
+                "measure".to_string()
+            } else {
+                renderer_name.trim().to_string()
+            };
+            let undo = model.capture_undo();
+            let summary = model
                 .desktop
-                .calc_atom_contacts_in_object(
+                .define_atom_contacts(
                     Uid::new(object_uid),
-                    &selection,
+                    &selection1,
+                    object2_uid.map(Uid::new),
+                    selection2.as_deref(),
                     r_min,
                     r_max,
                     hbond,
                     max_count.clamp(1, 10_000),
+                    &renderer_name,
                 )
                 .map_err(|error| error.to_string())?;
-            model.status = format!("Contacts: {contacts}");
+            if summary.count == 0 {
+                model.status = "No interaction was found".to_string();
+            } else {
+                model.status = format!(
+                    "Defined {} interaction(s) in {}",
+                    summary.count, renderer_name
+                );
+                model.invalidate_mesh(false);
+                model.push_undo(undo);
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::AssignSecondaryStructure {
@@ -9635,24 +9656,31 @@ fn remove_nonstandard_bonds(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn calculate_contacts(
     object_uid: u64,
-    selection: String,
+    selection1: String,
+    object2_uid: Option<u64>,
+    selection2: Option<String>,
     r_min: f64,
     r_max: f64,
     hbond: bool,
     max_count: usize,
+    renderer_name: String,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
         &state,
         ModelRequest::CalculateContacts {
             object_uid,
-            selection,
+            selection1,
+            object2_uid,
+            selection2,
             r_min,
             r_max,
             hbond,
             max_count,
+            renderer_name,
         },
     )?)
 }
@@ -14273,18 +14301,32 @@ mod tests {
             &mut model,
             ModelRequest::CalculateContacts {
                 object_uid: first,
-                selection: "name CA".to_string(),
-                r_min: 1.0,
-                r_max: 8.0,
+                selection1: "name CA".to_string(),
+                object2_uid: Some(second),
+                selection2: Some("name CA".to_string()),
+                r_min: 0.0,
+                r_max: 0.1,
                 hbond: false,
-                max_count: 4,
+                max_count: 2,
+                renderer_name: "measure".to_string(),
             },
         )
         .unwrap();
         let ModelResponse::Snapshot(snapshot) = response else {
             panic!("expected a snapshot");
         };
-        assert!(snapshot.status.starts_with("Contacts: ["));
+        assert_eq!(snapshot.status, "Defined 2 interaction(s) in measure");
+        let renderer = model
+            .desktop
+            .scene_manager()
+            .object(Uid::new(first))
+            .unwrap()
+            .renderers()
+            .iter()
+            .find(|renderer| renderer.renderer_type() == "atomintr")
+            .expect("interaction renderer");
+        assert_eq!(renderer.atom_intr_lines().len(), 2);
+        assert_eq!(renderer.atom_intr_lines()[0].positions().len(), 2);
         let response = handle_model_request(
             &mut model,
             ModelRequest::AssignSecondaryStructure {

@@ -13,16 +13,16 @@ use cuemol_core::{
 use cuemol_importers::{PseFileReader, PseMeasurementKind, PseRepresentation};
 use cuemol_mdtools::{read_amber_prmtop_file, read_gro_file, read_psf_file};
 use cuemol_molanl::MolAnlManager;
+#[cfg(feature = "scripting")]
+use cuemol_molstr::write_pdb_string_with_selection;
 use cuemol_molstr::{
     parse_selector, read_mmcif_str, read_mol2_file, read_mol2_str, read_pdb_str,
     read_qdf_mol_bytes, read_sdf_str, write_pdb_string, write_qdf_mol_bytes, write_sdf_string,
-    AtomIntrKind, LoadObjectResult, LoadedDensityMap, LoadedLWObject, LoadedLWRenderer,
-    LoadedStyle, LoadedSurface, MolCommandManager, MolCoord, MolObject, MolRenderer,
-    MolSceneManager, NewRendererResult, NewSceneResult, QdfMolFileReader, QdfMolFileWriter,
-    QscLoadStatus, Selector, StreamManager,
+    AtomIntrKind, AtomIntrLine, LoadObjectResult, LoadedDensityMap, LoadedLWObject,
+    LoadedLWRenderer, LoadedStyle, LoadedSurface, MolCommandManager, MolCoord, MolObject,
+    MolRenderer, MolSceneManager, NewRendererResult, NewSceneResult, QdfMolFileReader,
+    QdfMolFileWriter, QscLoadStatus, Selector, StreamManager,
 };
-#[cfg(feature = "scripting")]
-use cuemol_molstr::{write_pdb_string_with_selection, AtomIntrLine};
 use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
     apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot_with_style,
@@ -624,6 +624,12 @@ pub struct GuiBondAtomSummary {
 pub struct GuiNonstandardBondSummary {
     pub atom1: GuiBondAtomSummary,
     pub atom2: GuiBondAtomSummary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuiContactDefinitionSummary {
+    pub count: usize,
+    pub renderer_uid: Uid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8587,6 +8593,187 @@ impl DesktopAppState {
             hbond,
             max_count,
         ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn define_atom_contacts(
+        &mut self,
+        object_uid: Uid,
+        selection1: &str,
+        object2_uid: Option<Uid>,
+        selection2: Option<&str>,
+        r_min: f64,
+        r_max: f64,
+        hbond: bool,
+        max_count: usize,
+        renderer_name: &str,
+    ) -> Result<GuiContactDefinitionSummary> {
+        if !r_min.is_finite()
+            || !r_max.is_finite()
+            || r_min < 0.0
+            || r_max < r_min
+            || max_count == 0
+        {
+            return Err(CueMolError::invalid_argument(
+                "contact distance range or maximum count is invalid",
+            ));
+        }
+        let selector1 = parse_gui_selector(selection1)?.unwrap_or(Selector::All);
+        let selector2 =
+            parse_gui_selector(selection2.unwrap_or_default())?.unwrap_or(Selector::All);
+        let object2_uid = object2_uid.unwrap_or(object_uid);
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        if self.scene_manager().scene_uid_for_object(object2_uid) != Some(scene_uid) {
+            return Err(CueMolError::invalid_argument(
+                "interaction molecules must belong to the same scene",
+            ));
+        }
+
+        let lines = {
+            let object1 = self
+                .scene_manager()
+                .object(object_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+            let object2 = self
+                .scene_manager()
+                .object(object2_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object2_uid.get())))?;
+            let manager = MolAnlManager::new();
+            let pairs = if object_uid == object2_uid {
+                manager.calc_atom_contact_pairs(
+                    object1.mol(),
+                    &selector1,
+                    if selection2.is_some() {
+                        &selector2
+                    } else {
+                        &Selector::All
+                    },
+                    r_min,
+                    r_max,
+                    hbond,
+                    max_count,
+                )
+            } else {
+                let mut molecule1 = object1.mol().clone();
+                let mut molecule2 = object2.mol().clone();
+                for atom in molecule1.atoms_mut() {
+                    let position = object1.xform_matrix().mulvec(Vector4::new4(
+                        atom.position.x,
+                        atom.position.y,
+                        atom.position.z,
+                        1.0,
+                    ));
+                    atom.position = Vector4::new3(position.x, position.y, position.z);
+                }
+                for atom in molecule2.atoms_mut() {
+                    let position = object2.xform_matrix().mulvec(Vector4::new4(
+                        atom.position.x,
+                        atom.position.y,
+                        atom.position.z,
+                        1.0,
+                    ));
+                    atom.position = Vector4::new3(position.x, position.y, position.z);
+                }
+                manager.calc_atom_contact3_pairs(
+                    &molecule1, &selector1, &molecule2, &selector2, r_min, r_max, hbond, max_count,
+                )
+            };
+            let owner_inverse = object1.xform_matrix().invert()?;
+            pairs
+                .into_iter()
+                .filter_map(|(aid1, aid2)| {
+                    let atom1 = object1.mol().get_atom_by_id(aid1)?;
+                    let atom2 = object2.mol().get_atom_by_id(aid2)?;
+                    let label = |atom: &cuemol_molstr::Atom| {
+                        let insertion = atom
+                            .ins_code
+                            .map_or_else(String::new, |value| value.to_string());
+                        format!(
+                            "{} {} {}{} {}",
+                            atom.chain_id,
+                            atom.res_name,
+                            atom.res_id,
+                            insertion,
+                            atom.name.trim()
+                        )
+                    };
+                    if object_uid == object2_uid {
+                        let aids = vec![
+                            object1.mol().to_str_aid(aid1),
+                            object1.mol().to_str_aid(aid2),
+                        ];
+                        return (!aids.iter().any(String::is_empty)).then(|| {
+                            AtomIntrLine::from_atom_references(
+                                AtomIntrKind::Distance,
+                                aids,
+                                vec![label(atom1), label(atom2)],
+                            )
+                        });
+                    }
+                    let local_positions = [(object1, atom1.position), (object2, atom2.position)]
+                        .into_iter()
+                        .map(|(object, position)| {
+                            let world = object
+                                .xform_matrix()
+                                .mulvec(Vector4::new4(position.x, position.y, position.z, 1.0));
+                            owner_inverse.mulvec(world)
+                        })
+                        .collect();
+                    Some(AtomIntrLine::from_positions_with_labels(
+                        AtomIntrKind::Distance,
+                        local_positions,
+                        vec![label(atom1), label(atom2)],
+                    ))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if lines.is_empty() {
+            return Ok(GuiContactDefinitionSummary {
+                count: 0,
+                renderer_uid: Uid::new(0),
+            });
+        }
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let requested_name = renderer_name.trim();
+        let requested_name = if requested_name.is_empty() {
+            "measure"
+        } else {
+            requested_name
+        };
+        let existing = object
+            .renderers()
+            .iter()
+            .find(|renderer| {
+                renderer.renderer_type() == "atomintr" && renderer.name() == requested_name
+            })
+            .map(MolRenderer::uid);
+        let renderer_uid = if let Some(uid) = existing {
+            uid
+        } else {
+            let uid = object.add_atom_intr_renderer_defs(requested_name, &[])?;
+            object
+                .renderer_mut(uid)
+                .expect("new interaction renderer")
+                .set_qsc_attr("style", "DefaultLabel,DefaultAtomIntr");
+            uid
+        };
+        let renderer = object
+            .renderer_mut(renderer_uid)
+            .expect("interaction renderer exists");
+        for line in &lines {
+            renderer.append_atom_intr_line(line.clone())?;
+        }
+        Ok(GuiContactDefinitionSummary {
+            count: lines.len(),
+            renderer_uid,
+        })
     }
 
     pub fn superpose_objects(
@@ -55387,6 +55574,37 @@ attribute \"dep\" string \"positions\"
             .calc_atom_contacts_in_object(first, "name CA", 1.0, 8.0, false, 4)
             .unwrap();
         assert!(contacts.starts_with('['));
+        let defined = app
+            .define_atom_contacts(first, "name CA", None, None, 1.0, 8.0, false, 4, "measure")
+            .unwrap();
+        assert_eq!(defined.count, 4);
+        let cross = app
+            .define_atom_contacts(
+                first,
+                "name CA",
+                Some(second),
+                Some("name CA"),
+                0.0,
+                0.1,
+                false,
+                2,
+                "measure",
+            )
+            .unwrap();
+        assert_eq!(cross.count, 2);
+        assert_eq!(cross.renderer_uid, defined.renderer_uid);
+        let renderer = app
+            .scene_manager()
+            .object(first)
+            .unwrap()
+            .renderer(defined.renderer_uid)
+            .unwrap();
+        assert_eq!(renderer.atom_intr_lines().len(), 6);
+        assert_eq!(
+            renderer.qsc_attr("style"),
+            Some("DefaultLabel,DefaultAtomIntr")
+        );
+        assert!(renderer.atom_intr_lines()[4].positions().len() == 2);
         assert_eq!(
             app.assign_secondary_structure_in_object(first, false, 60.0)
                 .unwrap(),

@@ -3727,7 +3727,23 @@ async function showReferenceDialog(title) {
         objectOptions,
         selectedObjectUid ?? objects[0].uid,
       );
-      const selection = dialogField("Selection 1", snapshot.selection);
+      const selection1 = dialogField("Selection 1", snapshot.selection || "");
+      const useObject2 = dialogCheckbox("Mol 2:", false);
+      const object2 = dialogSelect(
+        "Molecule 2",
+        objectOptions,
+        objects.find((candidate) => candidate.uid !== Number(object.value))?.uid ?? objects[0].uid,
+      );
+      object2.disabled = true;
+      useObject2.addEventListener("change", () => {
+        object2.disabled = !useObject2.checked;
+      });
+      const useSelection2 = dialogCheckbox("Sel 2:", false);
+      const selection2 = dialogField("Selection 2", "");
+      selection2.disabled = true;
+      useSelection2.addEventListener("change", () => {
+        selection2.disabled = !useSelection2.checked;
+      });
       const rMin = dialogField("Min distance (Å)", "1.5", "number");
       rMin.step = "0.1";
       rMin.min = "0";
@@ -3737,17 +3753,42 @@ async function showReferenceDialog(title) {
       const maxCount = dialogField("Max labels", "100", "number");
       maxCount.min = "1";
       const hbond = dialogCheckbox("Hydrogen bond (N, O) only", true);
+      const renderer = dialogField("Renderer", "measure");
+      const rendererNames = [
+        ...new Set(
+          objects.flatMap((candidate) =>
+            candidate.renderers
+              .filter((item) => item.rendererType === "atomintr")
+              .map((item) => item.name),
+          ),
+        ),
+      ];
+      if (rendererNames.length) {
+        const rendererList = document.createElement("datalist");
+        rendererList.id = "interaction-renderer-names";
+        for (const name of rendererNames) {
+          const option = document.createElement("option");
+          option.value = name;
+          rendererList.append(option);
+        }
+        renderer.setAttribute("list", rendererList.id);
+        dialogContent.append(rendererList);
+      }
       const calculate = button("OK", "dialog-primary", async () => {
-        await mutate("calculate_contacts", {
+        const changed = await mutate("calculate_contacts", {
           objectUid: Number(object.value),
-          selection: selection.value,
+          selection1: selection1.value,
+          object2Uid: useObject2.checked ? Number(object2.value) : null,
+          selection2: useSelection2.checked ? selection2.value : null,
           rMin: Number(rMin.value),
           rMax: Number(rMax.value),
           hbond: hbond.checked,
           maxCount: Number(maxCount.value),
+          rendererName: renderer.value,
         });
-        showBottomPanel("output");
-        referenceDialog.close();
+        if (changed && snapshot.status !== "No interaction was found") {
+          referenceDialog.close();
+        }
       });
       dialogActions(calculate);
     }
