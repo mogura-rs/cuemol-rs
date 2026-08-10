@@ -573,7 +573,9 @@ enum NativeRendererSetupAction {
 #[derive(Debug, Clone)]
 struct NativeRendererSetupDraft {
     action: NativeRendererSetupAction,
+    target: crate::GuiFileRendererTarget,
     reader_options: Option<crate::GuiMoleculeReaderOptions>,
+    ccp4_map_options: Option<crate::GuiCcp4MapReaderOptions>,
     object_name: String,
     renderer_type: String,
     renderer_name: String,
@@ -8086,7 +8088,7 @@ impl GuiApplication {
             self.open_current_path(camera);
             return;
         }
-        match self.state.molecule_file_setup_for_path(&path) {
+        match self.state.file_renderer_setup_for_path(&path) {
             Ok(Some(file_setup)) => {
                 let object_name = path
                     .file_name()
@@ -8096,7 +8098,9 @@ impl GuiApplication {
                 self.open_renderer_setup(
                     &object_name,
                     NativeRendererSetupAction::OpenPath(path),
-                    file_setup.reader_options,
+                    file_setup.target,
+                    file_setup.molecule_reader_options,
+                    file_setup.ccp4_map_reader_options,
                 );
             }
             Ok(None) => self.open_current_path(camera),
@@ -8209,16 +8213,35 @@ impl GuiApplication {
     fn open_path_with_renderer_setup(
         &mut self,
         path: PathBuf,
+        target: crate::GuiFileRendererTarget,
         reader_options: Option<&crate::GuiMoleculeReaderOptions>,
+        ccp4_map_options: Option<&crate::GuiCcp4MapReaderOptions>,
         setup: crate::GuiRendererSetup,
         camera: &mut CameraController,
     ) {
         let recenter = setup.recenter;
         let undo = self.capture_undo();
-        match self
-            .state
-            .open_path_with_reader_and_renderer_setup(&path, reader_options, &setup)
-        {
+        let map_renderer_center = (!recenter).then(|| {
+            Vector4::new3(
+                camera.target.x as f64,
+                camera.target.y as f64,
+                camera.target.z as f64,
+            )
+        });
+        let result = match target {
+            crate::GuiFileRendererTarget::Molecule => self
+                .state
+                .open_path_with_reader_and_renderer_setup(&path, reader_options, &setup),
+            crate::GuiFileRendererTarget::DensityMap => {
+                self.state.open_density_map_path_with_renderer_setup(
+                    &path,
+                    ccp4_map_options,
+                    map_renderer_center,
+                    &setup,
+                )
+            }
+        };
+        match result {
             Ok(GuiLoadedPath::Object {
                 scene_uid,
                 object_uid,
@@ -8237,9 +8260,28 @@ impl GuiApplication {
                 }
                 self.set_status(format!("File: [{}] is loaded.", path.display()));
             }
+            Ok(GuiLoadedPath::Map { scene_uid, map_uid }) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
+                    scene_uid,
+                    map_uid,
+                    renderer_uid: None,
+                });
+                self.last_loaded_path = Some(path.clone());
+                self.add_recent_path(path.clone());
+                self.sync_active_scene_properties();
+                self.rebuild_snapshot();
+                if recenter {
+                    camera.fit_snapshot(&self.snapshot);
+                }
+                self.set_status(format!("File: [{}] is loaded.", path.display()));
+            }
             Ok(_) => {
                 self.restore_undo_snapshot(undo, camera);
-                self.set_status("File did not create a molecule object");
+                self.set_status("File did not create a supported object");
             }
             Err(error) => {
                 self.restore_undo_snapshot(undo, camera);
@@ -14489,20 +14531,36 @@ impl GuiApplication {
 
     fn open_pdb_renderer_setup(&mut self) {
         let object_name = self.pdb_id.trim().to_ascii_lowercase();
-        self.open_renderer_setup(&object_name, NativeRendererSetupAction::PdbDownload, None);
+        self.open_renderer_setup(
+            &object_name,
+            NativeRendererSetupAction::PdbDownload,
+            crate::GuiFileRendererTarget::Molecule,
+            None,
+            None,
+        );
     }
 
     fn open_renderer_setup(
         &mut self,
         base_object_name: &str,
         action: NativeRendererSetupAction,
+        target: crate::GuiFileRendererTarget,
         reader_options: Option<crate::GuiMoleculeReaderOptions>,
+        ccp4_map_options: Option<crate::GuiCcp4MapReaderOptions>,
     ) {
         let scene_uid = self.state.ensure_active_scene();
-        let options = match self.state.molecule_renderer_setup_options(scene_uid) {
+        let available_options = match target {
+            crate::GuiFileRendererTarget::Molecule => {
+                self.state.molecule_renderer_setup_options(scene_uid)
+            }
+            crate::GuiFileRendererTarget::DensityMap => {
+                Ok(self.state.density_map_renderer_setup_options())
+            }
+        };
+        let options = match available_options {
             Ok(options) if !options.is_empty() => options,
             Ok(_) => {
-                self.set_status("No compatible molecular renderers are available");
+                self.set_status("No compatible renderers are available");
                 return;
             }
             Err(error) => {
@@ -14525,14 +14583,16 @@ impl GuiApplication {
             .unwrap_or_else(|_| format!("{renderer_type}1"));
         self.renderer_setup_draft = Some(NativeRendererSetupDraft {
             action,
+            target,
             reader_options,
+            ccp4_map_options,
             object_name,
             renderer_type,
             renderer_name,
             renderer_name_default: true,
             selection_enabled: false,
             selection: String::new(),
-            recenter: preferences.recenter,
+            recenter: target == crate::GuiFileRendererTarget::Molecule && preferences.recenter,
             options,
         });
     }
@@ -14611,8 +14671,12 @@ impl GuiApplication {
                         }
                         ui.end_row();
 
-                        ui.checkbox(&mut draft.selection_enabled, "Selection:");
-                        ui.add_enabled_ui(draft.selection_enabled, |ui| {
+                        let molecule_target =
+                            draft.target == crate::GuiFileRendererTarget::Molecule;
+                        ui.add_enabled_ui(molecule_target, |ui| {
+                            ui.checkbox(&mut draft.selection_enabled, "Selection:");
+                        });
+                        ui.add_enabled_ui(molecule_target && draft.selection_enabled, |ui| {
                             ui.horizontal(|ui| {
                                 ui.add_sized(
                                     [166.0, 22.0],
@@ -14632,7 +14696,15 @@ impl GuiApplication {
                         });
                         ui.end_row();
                     });
-                ui.checkbox(&mut draft.recenter, "Recenter view");
+                match draft.target {
+                    crate::GuiFileRendererTarget::Molecule => {
+                        ui.checkbox(&mut draft.recenter, "Recenter view");
+                    }
+                    crate::GuiFileRendererTarget::DensityMap => {
+                        ui.radio_value(&mut draft.recenter, false, "Set map center");
+                        ui.radio_value(&mut draft.recenter, true, "Move view center");
+                    }
+                }
                 if let Some(options) = draft.reader_options.as_mut() {
                     ui.separator();
                     ui.strong(match options.kind {
@@ -14660,12 +14732,38 @@ impl GuiApplication {
                         "Auto-generate non-standard topology",
                     );
                 }
+                if let Some(options) = draft.ccp4_map_options.as_mut() {
+                    ui.separator();
+                    ui.strong("CCP4Map options");
+                    ui.checkbox(&mut options.normalize, "Normalize by mean and stdev");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut options.truncate_min, "Truncate density lower than:");
+                        ui.add_enabled(
+                            options.truncate_min,
+                            egui::DragValue::new(&mut options.min).speed(0.1),
+                        );
+                        ui.label("σ");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut options.truncate_max, "Truncate density higher than:");
+                        ui.add_enabled(
+                            options.truncate_max,
+                            egui::DragValue::new(&mut options.max).speed(0.1),
+                        );
+                        ui.label("σ");
+                    });
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
                     let valid = !draft.object_name.trim().is_empty()
                         && !draft.renderer_type.trim().is_empty()
                         && !draft.renderer_name.trim().is_empty()
-                        && (!draft.selection_enabled || !draft.selection.trim().is_empty());
+                        && (draft.target == crate::GuiFileRendererTarget::DensityMap
+                            || !draft.selection_enabled
+                            || !draft.selection.trim().is_empty())
+                        && draft.ccp4_map_options.as_ref().is_none_or(|options| {
+                            options.min.is_finite() && options.max.is_finite()
+                        });
                     if ui.add_enabled(valid, egui::Button::new("OK")).clicked() {
                         accept = true;
                     }
@@ -14679,13 +14777,17 @@ impl GuiApplication {
                 object_name: draft.object_name.trim().to_string(),
                 renderer_type: draft.renderer_type.trim().to_string(),
                 renderer_name: draft.renderer_name.trim().to_string(),
-                selection: draft
-                    .selection_enabled
+                selection: (draft.target == crate::GuiFileRendererTarget::Molecule
+                    && draft.selection_enabled)
                     .then(|| draft.selection.trim().to_string()),
                 recenter: draft.recenter,
             };
             if let Some(selection) = setup.selection.as_deref() {
                 self.remember_selection_history(selection);
+            }
+            if let Some(options) = draft.ccp4_map_options.as_mut() {
+                options.min = options.min.trunc();
+                options.max = options.max.trunc();
             }
             let _ = crate::save_renderer_setup_preferences(&setup.renderer_type, setup.recenter);
             match draft.action {
@@ -14695,7 +14797,9 @@ impl GuiApplication {
                 NativeRendererSetupAction::OpenPath(path) => {
                     self.open_path_with_renderer_setup(
                         path,
+                        draft.target,
                         draft.reader_options.as_ref(),
+                        draft.ccp4_map_options.as_ref(),
                         setup,
                         camera,
                     );
@@ -21789,6 +21893,7 @@ mod tests {
         app.open_renderer_setup(
             "sample.pdb",
             NativeRendererSetupAction::OpenPath(path.clone()),
+            crate::GuiFileRendererTarget::Molecule,
             Some(crate::GuiMoleculeReaderOptions {
                 kind: crate::GuiMoleculeReaderKind::Pdb,
                 ignore_multiple_models: true,
@@ -21798,6 +21903,7 @@ mod tests {
                 calculate_secondary_structure: true,
                 auto_generate_topology: true,
             }),
+            None,
         );
         let setup = app.renderer_setup_draft.as_ref().unwrap();
         assert_eq!(setup.object_name, "sample.pdb");
@@ -21809,6 +21915,29 @@ mod tests {
             setup.reader_options.as_ref().map(|options| options.kind),
             Some(crate::GuiMoleculeReaderKind::Pdb)
         );
+    }
+
+    #[test]
+    fn native_gui_density_map_open_uses_renderer_setup() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-native-map-setup-{}.map",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "\n       1\n REMARKS generated by desktop test\n       2       0       1       1       0       0       1       0       0\n 2.00000E+00 1.00000E+00 1.00000E+00 9.00000E+01 9.00000E+01 9.00000E+01\nZYX\n0\n 1.00000E+00 2.00000E+00\n",
+        )
+        .unwrap();
+        let mut app = GuiApplication::new();
+        app.open_path = path.to_string_lossy().into_owned();
+        let mut camera = CameraController::default();
+        app.request_open_current_path(&mut camera);
+        let setup = app.renderer_setup_draft.as_ref().unwrap();
+        assert_eq!(setup.target, crate::GuiFileRendererTarget::DensityMap);
+        assert_eq!(setup.renderer_type, "contour");
+        assert!(!setup.recenter);
+        assert!(setup.reader_options.is_none());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

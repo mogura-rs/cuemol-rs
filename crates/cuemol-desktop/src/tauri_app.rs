@@ -137,12 +137,14 @@ struct RendererSetupOptionDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RendererSetupDto {
+    target_kind: String,
     object_name: String,
     renderer_type: String,
     renderer_name: String,
     recenter: bool,
     options: Vec<RendererSetupOptionDto>,
     reader_options: Option<MoleculeReaderOptionsDto>,
+    ccp4_map_options: Option<Ccp4MapReaderOptionsDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,6 +198,40 @@ impl TryFrom<MoleculeReaderOptionsDto> for crate::GuiMoleculeReaderOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct Ccp4MapReaderOptionsDto {
+    normalize: bool,
+    truncate_min: bool,
+    min: f64,
+    truncate_max: bool,
+    max: f64,
+}
+
+impl From<crate::GuiCcp4MapReaderOptions> for Ccp4MapReaderOptionsDto {
+    fn from(value: crate::GuiCcp4MapReaderOptions) -> Self {
+        Self {
+            normalize: value.normalize,
+            truncate_min: value.truncate_min,
+            min: value.min,
+            truncate_max: value.truncate_max,
+            max: value.max,
+        }
+    }
+}
+
+impl From<Ccp4MapReaderOptionsDto> for crate::GuiCcp4MapReaderOptions {
+    fn from(value: Ccp4MapReaderOptionsDto) -> Self {
+        Self {
+            normalize: value.normalize,
+            truncate_min: value.truncate_min,
+            min: value.min,
+            truncate_max: value.truncate_max,
+            max: value.max,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RendererSetupInput {
@@ -204,6 +240,15 @@ struct RendererSetupInput {
     renderer_name: String,
     selection: Option<String>,
     recenter: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileRendererSetupInput {
+    target_kind: String,
+    reader_options: Option<MoleculeReaderOptionsDto>,
+    ccp4_map_options: Option<Ccp4MapReaderOptionsDto>,
+    renderer_setup: RendererSetupInput,
 }
 
 impl From<RendererSetupInput> for crate::GuiRendererSetup {
@@ -5358,7 +5403,9 @@ enum ModelRequest {
     },
     OpenPathWithRendererSetup {
         path: String,
+        target: crate::GuiFileRendererTarget,
         reader_options: Option<crate::GuiMoleculeReaderOptions>,
+        ccp4_map_options: Option<crate::GuiCcp4MapReaderOptions>,
         renderer_setup: crate::GuiRendererSetup,
         width: u32,
         height: u32,
@@ -6546,11 +6593,53 @@ fn renderer_setup_defaults(
         .suggest_renderer_name(scene_uid, &renderer_type)
         .map_err(|error| error.to_string())?;
     Ok(RendererSetupDto {
+        target_kind: "molecule".to_string(),
         object_name,
         renderer_type,
         renderer_name,
         recenter: preferences.recenter,
         reader_options: reader_options.map(MoleculeReaderOptionsDto::from),
+        ccp4_map_options: None,
+        options: options
+            .into_iter()
+            .map(|option| RendererSetupOptionDto {
+                name: option.name,
+                description: option.description,
+                preset: option.preset,
+            })
+            .collect(),
+    })
+}
+
+fn density_map_renderer_setup_defaults(
+    model: &mut AppModel,
+    base_object_name: &str,
+    reader_options: Option<crate::GuiCcp4MapReaderOptions>,
+) -> Result<RendererSetupDto, String> {
+    let scene_uid = model.desktop.ensure_active_scene();
+    let options = model.desktop.density_map_renderer_setup_options();
+    let preferences = crate::load_renderer_setup_preferences();
+    let renderer_type = preferences
+        .renderer_type
+        .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type))
+        .or_else(|| options.first().map(|option| option.name.clone()))
+        .ok_or_else(|| "no compatible density-map renderers are available".to_string())?;
+    let object_name = model
+        .desktop
+        .suggest_object_name(scene_uid, base_object_name)
+        .map_err(|error| error.to_string())?;
+    let renderer_name = model
+        .desktop
+        .suggest_renderer_name(scene_uid, &renderer_type)
+        .map_err(|error| error.to_string())?;
+    Ok(RendererSetupDto {
+        target_kind: "densityMap".to_string(),
+        object_name,
+        renderer_type,
+        renderer_name,
+        recenter: false,
+        reader_options: None,
+        ccp4_map_options: reader_options.map(Ccp4MapReaderOptionsDto::from),
         options: options
             .into_iter()
             .map(|option| RendererSetupOptionDto {
@@ -7111,7 +7200,7 @@ fn handle_model_request(
             let path = Path::new(&path);
             let Some(file_setup) = model
                 .desktop
-                .molecule_file_setup_for_path(path)
+                .file_renderer_setup_for_path(path)
                 .map_err(|error| error.to_string())?
             else {
                 return Ok(ModelResponse::FileRendererSetup(None));
@@ -7121,13 +7210,25 @@ fn handle_model_request(
                 .and_then(|name| name.to_str())
                 .filter(|name| !name.trim().is_empty())
                 .ok_or_else(|| "the file name is invalid".to_string())?;
-            Ok(ModelResponse::FileRendererSetup(Some(
-                renderer_setup_defaults(model, object_name, file_setup.reader_options.as_ref())?,
-            )))
+            let setup = match file_setup.target {
+                crate::GuiFileRendererTarget::Molecule => renderer_setup_defaults(
+                    model,
+                    object_name,
+                    file_setup.molecule_reader_options.as_ref(),
+                )?,
+                crate::GuiFileRendererTarget::DensityMap => density_map_renderer_setup_defaults(
+                    model,
+                    object_name,
+                    file_setup.ccp4_map_reader_options,
+                )?,
+            };
+            Ok(ModelResponse::FileRendererSetup(Some(setup)))
         }
         ModelRequest::OpenPathWithRendererSetup {
             path,
+            target,
             reader_options,
+            ccp4_map_options,
             renderer_setup,
             width,
             height,
@@ -7135,11 +7236,35 @@ fn handle_model_request(
             model.start_renderer_warmup();
             let undo = model.capture_undo();
             let recenter = renderer_setup.recenter;
-            if let Err(error) = model.desktop.open_path_with_reader_and_renderer_setup(
-                &path,
-                reader_options.as_ref(),
-                &renderer_setup,
-            ) {
+            let map_renderer_center = (!recenter).then(|| model.camera.center());
+            let result = match target {
+                crate::GuiFileRendererTarget::Molecule if ccp4_map_options.is_some() => {
+                    Err(cuemol_core::CueMolError::invalid_argument(
+                        "CCP4 reader options require a density-map target",
+                    ))
+                }
+                crate::GuiFileRendererTarget::Molecule => {
+                    model.desktop.open_path_with_reader_and_renderer_setup(
+                        &path,
+                        reader_options.as_ref(),
+                        &renderer_setup,
+                    )
+                }
+                crate::GuiFileRendererTarget::DensityMap if reader_options.is_some() => {
+                    Err(cuemol_core::CueMolError::invalid_argument(
+                        "molecule reader options require a molecule target",
+                    ))
+                }
+                crate::GuiFileRendererTarget::DensityMap => {
+                    model.desktop.open_density_map_path_with_renderer_setup(
+                        &path,
+                        ccp4_map_options.as_ref(),
+                        map_renderer_center,
+                        &renderer_setup,
+                    )
+                }
+            };
+            if let Err(error) = result {
                 model.restore_undo(undo)?;
                 return Err(error.to_string());
             }
@@ -9629,16 +9754,24 @@ fn get_file_renderer_setup(
 #[tauri::command]
 fn open_path_with_renderer_setup(
     path: String,
-    reader_options: Option<MoleculeReaderOptionsDto>,
-    renderer_setup: RendererSetupInput,
+    file_setup: FileRendererSetupInput,
     width: u32,
     height: u32,
     state: State<'_, ManagedState>,
 ) -> Result<MolStructUpdateDto, String> {
-    let reader_options = reader_options
+    let target = match file_setup.target_kind.as_str() {
+        "molecule" => crate::GuiFileRendererTarget::Molecule,
+        "densityMap" => crate::GuiFileRendererTarget::DensityMap,
+        target => return Err(format!("unsupported renderer setup target: {target}")),
+    };
+    let reader_options = file_setup
+        .reader_options
         .map(crate::GuiMoleculeReaderOptions::try_from)
         .transpose()?;
-    let renderer_setup = crate::GuiRendererSetup::from(renderer_setup);
+    let ccp4_map_options = file_setup
+        .ccp4_map_options
+        .map(crate::GuiCcp4MapReaderOptions::from);
+    let renderer_setup = crate::GuiRendererSetup::from(file_setup.renderer_setup);
     let _ = crate::save_renderer_setup_preferences(
         &renderer_setup.renderer_type,
         renderer_setup.recenter,
@@ -9647,7 +9780,9 @@ fn open_path_with_renderer_setup(
         &state,
         ModelRequest::OpenPathWithRendererSetup {
             path,
+            target,
             reader_options,
+            ccp4_map_options,
             renderer_setup,
             width,
             height,
@@ -11248,6 +11383,7 @@ mod tests {
             defaults.object_name,
             path.file_name().unwrap().to_string_lossy()
         );
+        assert_eq!(defaults.target_kind, "molecule");
         assert!(!defaults.options.is_empty());
         assert_eq!(
             defaults.reader_options.as_ref().map(|options| (
@@ -11262,12 +11398,14 @@ mod tests {
             &mut model,
             ModelRequest::OpenPathWithRendererSetup {
                 path: path_text.clone(),
+                target: crate::GuiFileRendererTarget::Molecule,
                 reader_options: defaults
                     .reader_options
                     .clone()
                     .map(crate::GuiMoleculeReaderOptions::try_from)
                     .transpose()
                     .unwrap(),
+                ccp4_map_options: None,
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "opened.pdb".to_string(),
                     renderer_type: "invalid".to_string(),
@@ -11289,12 +11427,14 @@ mod tests {
             &mut model,
             ModelRequest::OpenPathWithRendererSetup {
                 path: path_text.clone(),
+                target: crate::GuiFileRendererTarget::Molecule,
                 reader_options: defaults
                     .reader_options
                     .clone()
                     .map(crate::GuiMoleculeReaderOptions::try_from)
                     .transpose()
                     .unwrap(),
+                ccp4_map_options: None,
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "opened.pdb".to_string(),
                     renderer_type: "ballstick".to_string(),
@@ -11316,6 +11456,75 @@ mod tests {
             .iter()
             .any(|renderer| renderer.name == "atoms" && renderer.renderer_type == "ballstick"));
         assert!(update.snapshot.can_undo);
+        assert!(!model.mesh_refit_pending);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn file_open_renderer_setup_loads_density_map_with_selected_renderer() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-renderer-setup-open-{}.map",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "\n       1\n REMARKS generated by desktop test\n       2       0       1       1       0       0       1       0       0\n 2.00000E+00 1.00000E+00 1.00000E+00 9.00000E+01 9.00000E+01 9.00000E+01\nZYX\n0\n 1.00000E+00 2.00000E+00\n",
+        )
+        .unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+        let mut model = model_without_gpu();
+        model.camera.set_center(Vector4::new3(4.0, 5.0, 6.0));
+        let setup_response = handle_model_request(
+            &mut model,
+            ModelRequest::GetFileRendererSetup {
+                path: path_text.clone(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::FileRendererSetup(Some(defaults)) = setup_response else {
+            panic!("expected density-map renderer setup");
+        };
+        assert_eq!(defaults.target_kind, "densityMap");
+        assert_eq!(defaults.renderer_type, "contour");
+        assert!(!defaults.recenter);
+        assert!(defaults.reader_options.is_none());
+        assert!(defaults.ccp4_map_options.is_none());
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::OpenPathWithRendererSetup {
+                path: path_text,
+                target: crate::GuiFileRendererTarget::DensityMap,
+                reader_options: None,
+                ccp4_map_options: None,
+                renderer_setup: crate::GuiRendererSetup {
+                    object_name: "density".to_string(),
+                    renderer_type: "contour".to_string(),
+                    renderer_name: "contour1".to_string(),
+                    selection: None,
+                    recenter: false,
+                },
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        let ModelResponse::MolStructUpdate(update) = response else {
+            panic!("expected density-map update");
+        };
+        assert_eq!(update.snapshot.density_maps.len(), 1);
+        assert_eq!(update.snapshot.density_maps[0].name, "density");
+        assert_eq!(update.snapshot.density_maps[0].renderers.len(), 1);
+        assert_eq!(
+            update.snapshot.density_maps[0].renderers[0].name,
+            "contour1"
+        );
+        assert_eq!(
+            update.snapshot.density_maps[0].renderers[0]
+                .specific
+                .get("center"),
+            Some(&Vector4::new3(4.0, 5.0, 6.0).to_string())
+        );
         assert!(!model.mesh_refit_pending);
         fs::remove_file(path).unwrap();
     }

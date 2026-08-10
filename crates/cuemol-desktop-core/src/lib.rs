@@ -981,6 +981,28 @@ pub struct GuiMoleculeFileSetup {
     pub reader_options: Option<GuiMoleculeReaderOptions>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GuiCcp4MapReaderOptions {
+    pub normalize: bool,
+    pub truncate_min: bool,
+    pub min: f64,
+    pub truncate_max: bool,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuiFileRendererTarget {
+    Molecule,
+    DensityMap,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuiFileRendererSetup {
+    pub target: GuiFileRendererTarget,
+    pub molecule_reader_options: Option<GuiMoleculeReaderOptions>,
+    pub ccp4_map_reader_options: Option<GuiCcp4MapReaderOptions>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiPdbLoadSummary {
     pub object_uid: Option<Uid>,
@@ -5503,20 +5525,22 @@ impl DesktopAppState {
             .scene_manager()
             .scene(target_scene)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", target_scene.get())))?;
-        if !scene
-            .objects()
-            .iter()
-            .any(|object| object.name() == base_name)
-        {
+        let name_exists = |candidate: &str| {
+            scene
+                .objects()
+                .iter()
+                .any(|object| object.name() == candidate)
+                || self
+                    .density_maps
+                    .values()
+                    .any(|map| map.scene_uid == target_scene && map.name == candidate)
+        };
+        if !name_exists(base_name) {
             return Ok(base_name.to_string());
         }
         for index in 1_u64.. {
             let candidate = format!("{base_name}({index})");
-            if !scene
-                .objects()
-                .iter()
-                .any(|object| object.name() == candidate)
-            {
+            if !name_exists(&candidate) {
                 return Ok(candidate);
             }
         }
@@ -5580,6 +5604,12 @@ impl DesktopAppState {
                     .renderers()
                     .iter()
                     .any(|renderer| renderer.name() == candidate)
+            }) || self.density_maps.values().any(|map| {
+                map.scene_uid == target_scene
+                    && map
+                        .renderers
+                        .iter()
+                        .any(|renderer| renderer.name == candidate)
             });
             if !exists {
                 return Ok(candidate);
@@ -7300,13 +7330,44 @@ impl DesktopAppState {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<Option<GuiMoleculeFileSetup>> {
+        Ok(match self.file_renderer_setup_for_path(path)? {
+            Some(GuiFileRendererSetup {
+                target: GuiFileRendererTarget::Molecule,
+                molecule_reader_options,
+                ..
+            }) => Some(GuiMoleculeFileSetup {
+                reader_options: molecule_reader_options,
+            }),
+            _ => None,
+        })
+    }
+
+    pub fn file_renderer_setup_for_path(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<Option<GuiFileRendererSetup>> {
         let format = guess_path_format(path.as_ref(), &self.stream_manager)?;
-        if !format_supports_molecule_renderer_setup(format) {
-            return Ok(None);
+        if format_supports_molecule_renderer_setup(format) {
+            return Ok(Some(GuiFileRendererSetup {
+                target: GuiFileRendererTarget::Molecule,
+                molecule_reader_options: molecule_reader_options_for_format(format),
+                ccp4_map_reader_options: None,
+            }));
         }
-        Ok(Some(GuiMoleculeFileSetup {
-            reader_options: molecule_reader_options_for_format(format),
-        }))
+        if is_density_map_format(format) {
+            return Ok(Some(GuiFileRendererSetup {
+                target: GuiFileRendererTarget::DensityMap,
+                molecule_reader_options: None,
+                ccp4_map_reader_options: (format == "ccp4map").then_some(GuiCcp4MapReaderOptions {
+                    normalize: false,
+                    truncate_min: false,
+                    min: 0.0,
+                    truncate_max: false,
+                    max: 5.0,
+                }),
+            }));
+        }
+        Ok(None)
     }
 
     pub fn molecule_reader_options_for_path(
@@ -7497,6 +7558,84 @@ impl DesktopAppState {
             }
         }
         Ok(())
+    }
+
+    pub fn density_map_renderer_setup_options(&self) -> Vec<GuiRendererSetupOption> {
+        ["contour", "isosurf", "gpu_mapvol"]
+            .into_iter()
+            .map(|renderer_type| GuiRendererSetupOption {
+                name: renderer_type.to_string(),
+                description: renderer_type.to_string(),
+                preset: false,
+            })
+            .collect()
+    }
+
+    pub fn open_density_map_path_with_renderer_setup(
+        &mut self,
+        path: impl AsRef<Path>,
+        reader_options: Option<&GuiCcp4MapReaderOptions>,
+        renderer_center: Option<Vector4>,
+        setup: &GuiRendererSetup,
+    ) -> Result<GuiLoadedPath> {
+        let path = path.as_ref();
+        let format = guess_path_format(path, &self.stream_manager)?;
+        if !is_density_map_format(format) {
+            return Err(CueMolError::invalid_argument(
+                "the file does not support density-map renderer setup",
+            ));
+        }
+        let object_name = setup.object_name.trim();
+        let renderer_type = setup.renderer_type.trim();
+        let renderer_name = setup.renderer_name.trim();
+        if object_name.is_empty() || renderer_type.is_empty() || renderer_name.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "object, renderer type, and renderer name are required",
+            ));
+        }
+        if !matches!(renderer_type, "contour" | "isosurf" | "gpu_mapvol") {
+            return Err(CueMolError::invalid_argument(format!(
+                "unsupported density renderer setup type: {renderer_type}"
+            )));
+        }
+        let map = if let Some(options) = reader_options {
+            if format != "ccp4map" {
+                return Err(CueMolError::invalid_argument(
+                    "CCP4 reader options do not match the density-map file format",
+                ));
+            }
+            if !options.min.is_finite() || !options.max.is_finite() {
+                return Err(CueMolError::invalid_argument(
+                    "CCP4 truncation limits must be finite",
+                ));
+            }
+            let mut reader = Ccp4MapReader::new();
+            reader.set_normalize(options.normalize);
+            reader.set_truncate_min(options.truncate_min);
+            reader.set_min(options.min.trunc());
+            reader.set_truncate_max(options.truncate_max);
+            reader.set_max(options.max.trunc());
+            reader.read_density_map_file(path)?
+        } else {
+            read_density_map(path, format)?
+        };
+        let scene_uid = self.ensure_active_scene();
+        let map_uid =
+            self.store_density_map(scene_uid, path, object_name.to_string(), format, map)?;
+        let renderer_uid = self.add_density_renderer(map_uid, renderer_type)?;
+        let map = self
+            .density_maps
+            .get_mut(&map_uid)
+            .expect("density map and renderer were just added");
+        let volume_center = map.map.fit_view_center_and_radius().0;
+        let renderer = map
+            .renderers
+            .iter_mut()
+            .find(|renderer| renderer.uid == renderer_uid)
+            .expect("density renderer was just added");
+        renderer.name = renderer_name.to_string();
+        renderer.center = renderer_center.unwrap_or(volume_center);
+        Ok(GuiLoadedPath::Map { scene_uid, map_uid })
     }
 
     pub fn open_pdb_files(
@@ -55294,6 +55433,103 @@ attribute \"dep\" string \"positions\"
         let _ = std::fs::remove_file(xplor_path);
         let _ = std::fs::remove_file(cif_path);
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn density_map_file_setup_applies_ccp4_reader_and_renderer_options() {
+        fn write_i32_word(bytes: &mut [u8], word: usize, value: i32) {
+            bytes[word * 4..word * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        fn write_f32_word(bytes: &mut [u8], word: usize, value: f32) {
+            bytes[word * 4..word * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-map-renderer-setup-{}.ccp4",
+            std::process::id()
+        ));
+        let values = [-5.0_f32, 1.0, 7.0];
+        let mut bytes = vec![0_u8; 1024];
+        write_i32_word(&mut bytes, 0, values.len() as i32);
+        write_i32_word(&mut bytes, 1, 1);
+        write_i32_word(&mut bytes, 2, 1);
+        write_i32_word(&mut bytes, 3, 2);
+        write_i32_word(&mut bytes, 7, values.len() as i32);
+        write_i32_word(&mut bytes, 8, 1);
+        write_i32_word(&mut bytes, 9, 1);
+        write_f32_word(&mut bytes, 10, values.len() as f32);
+        write_f32_word(&mut bytes, 11, 1.0);
+        write_f32_word(&mut bytes, 12, 1.0);
+        write_f32_word(&mut bytes, 13, 90.0);
+        write_f32_word(&mut bytes, 14, 90.0);
+        write_f32_word(&mut bytes, 15, 90.0);
+        write_i32_word(&mut bytes, 16, 1);
+        write_i32_word(&mut bytes, 17, 2);
+        write_i32_word(&mut bytes, 18, 3);
+        write_f32_word(&mut bytes, 19, -5.0);
+        write_f32_word(&mut bytes, 20, 7.0);
+        write_f32_word(&mut bytes, 21, 1.0);
+        write_i32_word(&mut bytes, 22, 1);
+        bytes[208..212].copy_from_slice(b"MAP ");
+        write_f32_word(&mut bytes, 54, 2.0);
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        fs::write(&path, bytes).unwrap();
+
+        let mut app = DesktopAppState::new();
+        let defaults = app
+            .file_renderer_setup_for_path(&path)
+            .unwrap()
+            .expect("density-map setup");
+        assert_eq!(defaults.target, GuiFileRendererTarget::DensityMap);
+        assert_eq!(
+            defaults.ccp4_map_reader_options,
+            Some(GuiCcp4MapReaderOptions {
+                normalize: false,
+                truncate_min: false,
+                min: 0.0,
+                truncate_max: false,
+                max: 5.0,
+            })
+        );
+        let options = GuiCcp4MapReaderOptions {
+            normalize: true,
+            truncate_min: true,
+            min: 0.0,
+            truncate_max: true,
+            max: 2.0,
+        };
+        let setup = GuiRendererSetup {
+            object_name: "density".to_string(),
+            renderer_type: "isosurf".to_string(),
+            renderer_name: "surface1".to_string(),
+            selection: None,
+            recenter: false,
+        };
+        let GuiLoadedPath::Map { map_uid, .. } = app
+            .open_density_map_path_with_renderer_setup(
+                &path,
+                Some(&options),
+                Some(Vector4::new3(4.0, 5.0, 6.0)),
+                &setup,
+            )
+            .unwrap()
+        else {
+            panic!("expected density-map load");
+        };
+        let summary = app.density_map_summary(map_uid).unwrap();
+        assert_eq!(summary.name, "density");
+        assert!((summary.min_density + 0.5).abs() < 1e-6);
+        assert!((summary.max_density - 1.5).abs() < 1e-6);
+        assert_eq!(summary.renderers.len(), 1);
+        assert_eq!(summary.renderers[0].name, "surface1");
+        assert_eq!(summary.renderers[0].renderer_type, "isosurf");
+        assert_eq!(
+            summary.renderers[0].specific.get("center"),
+            Some(&Vector4::new3(4.0, 5.0, 6.0).to_string())
+        );
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

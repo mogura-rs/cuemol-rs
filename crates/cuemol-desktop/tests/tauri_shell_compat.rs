@@ -253,6 +253,30 @@ fn tauri_file_open_matches_reference_molecule_reader_options() {
 }
 
 #[test]
+fn tauri_file_open_matches_reference_ccp4_map_options() {
+    for label in [
+        "CCP4Map options",
+        "Set map center",
+        "Move view center",
+        "Normalize by mean and stdev",
+        "Truncate density lower than:",
+        "Truncate density higher than:",
+    ] {
+        assert!(JS.contains(label), "missing CCP4 map option {label}");
+    }
+    for binding in [
+        "setup.targetKind === \"densityMap\"",
+        "targetKind: setup.targetKind",
+        "ccp4MapOptions: setup.ccp4MapOptions",
+        "normalize: ccp4Controls.normalize.checked",
+        "truncateMin: ccp4Controls.truncateMin.enabled.checked",
+        "truncateMax: ccp4Controls.truncateMax.enabled.checked",
+    ] {
+        assert!(JS.contains(binding), "missing CCP4 map binding {binding}");
+    }
+}
+
+#[test]
 fn tauri_reload_scene_uses_the_active_scene_source() {
     assert!(HTML.contains("data-local-action=\"reload-scene\""));
     assert!(JS.contains("scene?.modified"));

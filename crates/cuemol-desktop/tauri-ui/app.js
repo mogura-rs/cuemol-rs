@@ -3509,10 +3509,18 @@ function showRendererSetup(setup) {
   dialogFooter.hidden = false;
   referenceDialog.className = "reference-dialog";
   const readerDefaults = setup.readerOptions || null;
-  const pages = readerDefaults
+  const ccp4Defaults = setup.ccp4MapOptions || null;
+  const readerTab = readerDefaults
+    ? readerDefaults.kind === "mmcif"
+      ? "mmCIF options"
+      : "PDB options"
+    : ccp4Defaults
+      ? "CCP4Map options"
+      : null;
+  const pages = readerTab
     ? workspacePropertyPage([
         "Renderer",
-        readerDefaults.kind === "mmcif" ? "mmCIF options" : "PDB options",
+        readerTab,
       ])
     : null;
   const rendererPage = pages?.panes[0] || dialogContent;
@@ -3533,7 +3541,37 @@ function showRendererSetup(setup) {
   }
   const rendererName = dialogField("Renderer name:", setup.rendererName, "text", rendererPage);
   const selection = dialogOptionalField("Selection:", "", selectionHistoryEntries, rendererPage);
-  const recenter = dialogCheckbox("Recenter view", setup.recenter, rendererPage);
+  const densityMapTarget = setup.targetKind === "densityMap";
+  if (densityMapTarget) {
+    selection.enabled.disabled = true;
+    selection.input.disabled = true;
+  }
+  const recenter = densityMapTarget
+    ? null
+    : dialogCheckbox("Recenter view", setup.recenter, rendererPage);
+  let moveViewCenter = null;
+  if (densityMapTarget) {
+    const centerOptions = document.createElement("div");
+    centerOptions.setAttribute("role", "radiogroup");
+    centerOptions.setAttribute("aria-label", "Map center mode");
+    const addCenterOption = (label, value, checked) => {
+      const wrapper = document.createElement("label");
+      wrapper.className = "dialog-check";
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "map-center-mode";
+      input.value = value;
+      input.checked = checked;
+      const caption = document.createElement("span");
+      caption.textContent = label;
+      wrapper.append(input, caption);
+      centerOptions.append(wrapper);
+      return input;
+    };
+    addCenterOption("Set map center", "map", !setup.recenter);
+    moveViewCenter = addCenterOption("Move view center", "view", setup.recenter);
+    rendererPage.append(centerOptions);
+  }
   let readerControls = null;
   if (readerDefaults) {
     const readerPage = pages.panes[1];
@@ -3573,6 +3611,40 @@ function showRendererSetup(setup) {
       ),
     };
   }
+  let ccp4Controls = null;
+  if (ccp4Defaults) {
+    const readerPage = pages.panes[1];
+    const truncateMin = dialogOptionalField(
+      "Truncate density lower than:",
+      String(ccp4Defaults.min),
+      [],
+      readerPage,
+    );
+    truncateMin.input.type = "number";
+    truncateMin.input.step = "0.1";
+    truncateMin.enabled.checked = ccp4Defaults.truncateMin;
+    truncateMin.input.disabled = !truncateMin.enabled.checked;
+    const truncateMax = dialogOptionalField(
+      "Truncate density higher than:",
+      String(ccp4Defaults.max),
+      [],
+      readerPage,
+    );
+    truncateMax.input.type = "number";
+    truncateMax.input.step = "0.1";
+    truncateMax.enabled.checked = ccp4Defaults.truncateMax;
+    truncateMax.input.disabled = !truncateMax.enabled.checked;
+    ccp4Controls = {
+      normalize: dialogCheckbox(
+        "Normalize by mean and stdev",
+        ccp4Defaults.normalize,
+        readerPage,
+      ),
+      truncateMin,
+      truncateMax,
+    };
+    readerPage.prepend(ccp4Controls.normalize.closest("label"));
+  }
   let rendererNameDefault = true;
   rendererType.addEventListener("change", () => {
     if (rendererNameDefault) {
@@ -3603,7 +3675,13 @@ function showRendererSetup(setup) {
         !objectName.value.trim() ||
         !rendererType.value ||
         !rendererName.value.trim() ||
-        (selection.enabled.checked && !selection.input.value.trim());
+        (!densityMapTarget && selection.enabled.checked && !selection.input.value.trim()) ||
+        (ccp4Controls?.truncateMin.enabled.checked &&
+          (!ccp4Controls.truncateMin.input.value.trim() ||
+            !Number.isFinite(Number(ccp4Controls.truncateMin.input.value)))) ||
+        (ccp4Controls?.truncateMax.enabled.checked &&
+          (!ccp4Controls.truncateMax.input.value.trim() ||
+            !Number.isFinite(Number(ccp4Controls.truncateMax.input.value))));
     };
     const cancel = button("Cancel", "", () => {
       finish(null);
@@ -3613,16 +3691,20 @@ function showRendererSetup(setup) {
       updateState();
       if (ok.disabled) return;
       ok.disabled = true;
-      if (selection.enabled.checked) {
+      if (!densityMapTarget && selection.enabled.checked) {
         rememberSelection(selection.input.value);
       }
       finish({
+        targetKind: setup.targetKind || "molecule",
         rendererSetup: {
           objectName: objectName.value.trim(),
           rendererType: rendererType.value,
           rendererName: rendererName.value.trim(),
-          selection: selection.enabled.checked ? selection.input.value.trim() : null,
-          recenter: recenter.checked,
+          selection:
+            !densityMapTarget && selection.enabled.checked
+              ? selection.input.value.trim()
+              : null,
+          recenter: densityMapTarget ? moveViewCenter.checked : recenter.checked,
         },
         readerOptions: readerControls
           ? {
@@ -3636,6 +3718,15 @@ function showRendererSetup(setup) {
               autoGenerateTopology: readerControls.autoGenerateTopology.checked,
             }
           : null,
+        ccp4MapOptions: ccp4Controls
+          ? {
+              normalize: ccp4Controls.normalize.checked,
+              truncateMin: ccp4Controls.truncateMin.enabled.checked,
+              min: Math.trunc(Number(ccp4Controls.truncateMin.input.value)),
+              truncateMax: ccp4Controls.truncateMax.enabled.checked,
+              max: Math.trunc(Number(ccp4Controls.truncateMax.input.value)),
+            }
+          : null,
       });
       referenceDialog.close();
     });
@@ -3645,6 +3736,15 @@ function showRendererSetup(setup) {
       rendererName,
       selection.enabled,
       selection.input,
+      ...(ccp4Controls
+        ? [
+            ccp4Controls.normalize,
+            ccp4Controls.truncateMin.enabled,
+            ccp4Controls.truncateMin.input,
+            ccp4Controls.truncateMax.enabled,
+            ccp4Controls.truncateMax.input,
+          ]
+        : []),
     ]) {
       input.addEventListener("input", updateState);
       input.addEventListener("change", updateState);
@@ -9715,8 +9815,12 @@ async function openSelectedPaths(paths) {
     if (
       await mutateWithViewport("open_path_with_renderer_setup", {
         path,
-        rendererSetup: setup.rendererSetup,
-        readerOptions: setup.readerOptions,
+        fileSetup: {
+          targetKind: setup.targetKind,
+          rendererSetup: setup.rendererSetup,
+          readerOptions: setup.readerOptions,
+          ccp4MapOptions: setup.ccp4MapOptions,
+        },
       })
     ) {
       addRecentFile(path);
