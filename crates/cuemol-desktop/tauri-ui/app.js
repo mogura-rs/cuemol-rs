@@ -7306,35 +7306,48 @@ function workspaceObjectContextItems(scene, object) {
   const select = (selection) => () =>
     runMoleculeSelectionAction(object.uid, selection, "select");
   const current = object.selection || "";
+  const around = (byResidue) =>
+    [3, 5, 7, ...(byResidue ? [] : [10])].map((radius) => ({
+      label: `${radius} Å`,
+      action: select(aroundWorkspaceSelection(current, radius, byResidue)),
+    }));
   const items = [
-    { label: "Selection · Select All", action: select("*") },
-    { label: "Selection · Unselect", action: select("") },
-    { label: "Selection · Invert", action: select(invertWorkspaceSelection(current)) },
     {
-      label: "Selection · Toggle Sidechain",
-      disabled: !current,
-      action: select(toggleWorkspaceSidechain(current)),
+      label: object.name,
+      disabled: true,
+    },
+    null,
+    {
+      label: object.visible ? "Hide" : "Show",
+      action: () =>
+        mutate("set_workspace_visible", {
+          target: { kind: "object", objectUid: object.uid, rendererUid: null },
+          visible: !object.visible,
+        }),
+    },
+    {
+      label: "Selection",
+      children: [
+        { label: "All", action: select("*") },
+        { label: "Unselect", action: select("") },
+        { label: "Invert", action: select(invertWorkspaceSelection(current)) },
+        null,
+        { label: "Protein", action: select("protein") },
+        { label: "Nucleic", action: select("nucleic") },
+        { label: "Water", action: select("water") },
+        { label: "Sugar", action: select("sugar") },
+        { label: "Hydrogen", action: select("hydrogen") },
+        null,
+        {
+          label: "Toggle Sidechain",
+          action: select(toggleWorkspaceSidechain(current)),
+        },
+        null,
+        { label: "Around", children: around(false) },
+        { label: "Around (byres)", children: around(true) },
+      ],
     },
   ];
-  for (const [label, selection] of [
-    ["Protein", "protein"],
-    ["Nucleic acid", "nucleic"],
-    ["Water", "water"],
-    ["Ligand", "!protein & !nucleic & !water"],
-    ["Sugar", "sugar"],
-    ["Hydrogen", "hydrogen"],
-  ]) {
-    items.push({ label: `Selection · ${label}`, action: select(selection) });
-  }
-  for (const byResidue of [true, false]) {
-    for (const radius of [3, 5, 7, 10]) {
-      items.push({
-        label: `Selection · ${byResidue ? "Around Byresid" : "Around"} · ${radius} Å`,
-        disabled: !current,
-        action: select(aroundWorkspaceSelection(current, radius, byResidue)),
-      });
-    }
-  }
   items.push(
     null,
     {
@@ -7342,17 +7355,19 @@ function workspaceObjectContextItems(scene, object) {
       action: () => beginWorkspaceInlineRename("object", object.uid),
     },
     {
-      label: "Copy Object",
+      label: "Copy",
       action: () => copyWorkspaceObject(object.uid),
     },
-    {
+  );
+  if (workspaceRendererClipboardAvailable) {
+    items.push({
       label: "Paste Renderer",
-      disabled: !workspaceRendererClipboardAvailable,
       action: () => pasteWorkspaceRenderers(object.uid),
-    },
-    null,
+    });
+  }
+  items.push(
     {
-      label: "New Renderer...",
+      label: "New Renderer…",
       action: async () => {
         if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
         await mutate("add_renderer", {
@@ -7386,7 +7401,7 @@ function workspaceObjectContextItems(scene, object) {
       },
     },
     {
-      label: "Save As ...",
+      label: "Save As…",
       action: async () => {
         if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
         selectedObjectUid = object.uid;
@@ -7395,7 +7410,7 @@ function workspaceObjectContextItems(scene, object) {
       },
     },
     {
-      label: "Delete Object",
+      label: "Delete",
       action: () =>
         mutate("delete_workspace_item", {
           target: { kind: "object", objectUid: object.uid, rendererUid: null },
@@ -7403,7 +7418,7 @@ function workspaceObjectContextItems(scene, object) {
     },
     null,
     {
-      label: "Properties...",
+      label: "Properties…",
       action: async () => {
         if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
         showReferenceDialog("Object Properties");

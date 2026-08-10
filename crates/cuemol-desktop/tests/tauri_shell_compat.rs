@@ -967,7 +967,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("function workspaceObjectContextItems(scene, object)"));
     assert!(JS.contains("function workspaceAuxObjectContextItems(scene, kind, object)"));
     assert!(JS.contains("function workspaceAuxRendererContextItems(scene, kind, object, renderer)"));
-    assert!(JS.contains("Around Byresid"));
+    assert!(JS.contains("Around (byres)"));
     assert!(JS.contains("function workspaceRendererContextItems(scene, object, renderer)"));
     assert!(JS.contains("set_workspace_renderer_selection"));
     assert!(JS.contains("change_workspace_renderer_type"));
@@ -1024,7 +1024,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("workspaceRendererClipboardAvailable"));
     assert!(JS.contains("Paste Renderer"));
     assert!(JS.contains("Paste Object"));
-    assert!(JS.contains("label: \"Save As ...\""));
+    assert!(JS.contains("label: \"Save As…\""));
     assert!(JS.contains("label: \"Delete Object\""));
     assert!(JS.contains("label: \"Generate surface obj\""));
     assert!(JS.contains("generate_density_surface"));
@@ -1053,6 +1053,34 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("event.key === \"Enter\""));
     assert!(JS.contains("event.key === \"Escape\""));
     assert!(CSS.contains(".workspace-inline-rename"));
+    let tauri_object_menu = JS
+        .split("function workspaceObjectContextItems(scene, object)")
+        .nth(1)
+        .and_then(|source| source.split("function selectWorkspaceAuxItem").next())
+        .expect("Tauri object context menu");
+    for item in [
+        "label: object.name",
+        "object.visible ? \"Hide\" : \"Show\"",
+        "label: \"Selection\"",
+        "label: \"Around\"",
+        "label: \"Around (byres)\"",
+        "label: \"Rename…\"",
+        "label: \"Copy\"",
+        "label: \"New Renderer…\"",
+        "label: \"New Group…\"",
+        "label: \"Save As…\"",
+        "label: \"Delete\"",
+        "label: \"Properties…\"",
+    ] {
+        assert!(
+            tauri_object_menu.contains(item),
+            "missing object menu item {item}"
+        );
+    }
+    assert!(!tauri_object_menu.contains("Selection ·"));
+    assert!(!tauri_object_menu.contains("Copy Object"));
+    assert!(!tauri_object_menu.contains("Save As ..."));
+    assert!(!tauri_object_menu.contains("Delete Object"));
     let tauri_renderer_group_menu = JS
         .split("async function workspaceRendererContextItems(scene, object, renderer)")
         .nth(1)
