@@ -775,6 +775,12 @@ struct NativeNewTabDraft {
 }
 
 #[derive(Debug, Clone)]
+struct NativeNewCameraDraft {
+    scene_uid: cuemol_core::Uid,
+    name: String,
+}
+
+#[derive(Debug, Clone)]
 struct NativeCloseTabDraft {
     scene_name: String,
 }
@@ -877,6 +883,7 @@ struct GuiApplication {
     png_export_draft: Option<NativePngExportDraft>,
     scene_save_draft: Option<NativeSceneSaveDraft>,
     new_tab_draft: Option<NativeNewTabDraft>,
+    new_camera_draft: Option<NativeNewCameraDraft>,
     close_tab_draft: Option<NativeCloseTabDraft>,
     close_after_scene_save: bool,
     reload_scene_draft: Option<NativeReloadSceneDraft>,
@@ -2863,6 +2870,7 @@ impl GuiApplication {
             png_export_draft: None,
             scene_save_draft: None,
             new_tab_draft: None,
+            new_camera_draft: None,
             close_tab_draft: None,
             close_after_scene_save: false,
             reload_scene_draft: None,
@@ -4389,7 +4397,7 @@ impl GuiApplication {
                     ui.weak("Cameras");
                     ui.separator();
                     if ui.button("New Camera…").clicked() {
-                        self.open_new_camera_properties(scene.uid, camera);
+                        self.open_new_camera_dialog(scene.uid, camera);
                         ui.close();
                     }
                     if self.workspace_camera_clipboard.is_some()
@@ -4435,7 +4443,7 @@ impl GuiApplication {
                             ui.weak(&summary.name);
                             ui.separator();
                             if ui.button("New Camera…").clicked() {
-                                self.open_new_camera_properties(scene.uid, camera);
+                                self.open_new_camera_dialog(scene.uid, camera);
                                 ui.close();
                             }
                             ui.separator();
@@ -4742,7 +4750,7 @@ impl GuiApplication {
                     match selection {
                         WorkspaceAuxSelection::CameraRoot { scene_uid }
                         | WorkspaceAuxSelection::Camera { scene_uid, .. } => {
-                            self.open_new_camera_properties(scene_uid, camera);
+                            self.open_new_camera_dialog(scene_uid, camera);
                         }
                         WorkspaceAuxSelection::StyleRoot { scene_uid }
                         | WorkspaceAuxSelection::Style { scene_uid, .. } => {
@@ -10834,6 +10842,7 @@ impl GuiApplication {
         self.png_export_dialog(ctx);
         self.scene_save_options_dialog(ctx, camera);
         self.new_tab_dialog(ctx, camera);
+        self.new_camera_dialog(ctx, camera);
         self.close_tab_dialog(ctx, camera);
         self.reload_scene_dialog(ctx, camera);
         self.atom_intr_edit_dialog(ctx);
@@ -13799,21 +13808,58 @@ impl GuiApplication {
             .nth(camera_index)
     }
 
-    fn open_new_camera_properties(
+    fn open_new_camera_dialog(
         &mut self,
         scene_uid: cuemol_core::Uid,
-        camera: &CameraController,
+        camera: &mut CameraController,
     ) {
-        let Ok(name) = self.state.suggest_camera_name(scene_uid) else {
-            self.set_status("Cannot create camera without a scene");
-            return;
-        };
-        let mut draft = NativeViewProperties::from_camera(camera, self.viewport_rect);
-        draft.name = name;
-        self.editing_saved_camera = Some((scene_uid, String::new()));
-        self.view_properties_draft = Some(draft);
-        self.view_property_selected = 0;
-        self.show_view_props = true;
+        if self.state.active_scene() != Some(scene_uid) {
+            self.activate_workspace_scene(scene_uid, camera);
+        }
+        match self.state.suggest_camera_name(scene_uid) {
+            Ok(name) => {
+                self.new_camera_draft = Some(NativeNewCameraDraft { scene_uid, name });
+            }
+            Err(_) => self.set_status("Cannot create camera without a scene"),
+        }
+    }
+
+    fn create_workspace_camera(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        name: &str,
+        camera: &CameraController,
+    ) -> std::result::Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("camera name is required".to_string());
+        }
+        if self
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .is_some_and(|scene| scene.camera_by_name(name).is_some())
+        {
+            return Err(format!("camera already exists: {name}"));
+        }
+        let undo = self.capture_undo();
+        self.state
+            .save_scene_camera(scene_uid, camera.to_qsys_camera(name), false)
+            .map_err(|error| error.to_string())?;
+        self.push_undo_snapshot(undo);
+        self.modified_scenes.insert(scene_uid);
+        let camera_index = self
+            .state
+            .camera_summaries(scene_uid)
+            .iter()
+            .position(|summary| summary.name == name)
+            .unwrap_or(0);
+        self.workspace_aux_selection = Some(WorkspaceAuxSelection::Camera {
+            scene_uid,
+            camera_index,
+        });
+        self.set_status(format!("Saved camera {name}"));
+        Ok(())
     }
 
     fn open_camera_properties(&mut self, selection: WorkspaceAuxSelection) {
@@ -16897,6 +16943,54 @@ impl GuiApplication {
             self.apply_new_tab_draft(draft, camera);
         } else if open && !cancel {
             self.new_tab_draft = Some(draft);
+        }
+    }
+
+    fn new_camera_dialog(&mut self, ctx: &egui::Context, camera: &CameraController) {
+        let Some(mut draft) = self.new_camera_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("New Camera")
+            .default_width(360.0)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Name for new camera:");
+                let input = ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .desired_width(f32::INFINITY)
+                        .id_source("new-camera-name"),
+                );
+                if input.lost_focus()
+                    && ui.input(|state| state.key_pressed(egui::Key::Enter))
+                    && !draft.name.trim().is_empty()
+                {
+                    accept = true;
+                }
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(!draft.name.trim().is_empty(), egui::Button::new("Create"))
+                        .clicked()
+                    {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+                input.request_focus();
+            });
+        if accept {
+            if let Err(error) = self.create_workspace_camera(draft.scene_uid, &draft.name, camera) {
+                self.set_status(format!("Camera create error: {error}"));
+            }
+        } else if open && !cancel {
+            self.new_camera_draft = Some(draft);
         }
     }
 
@@ -24016,6 +24110,44 @@ mod tests {
         );
         app.undo(&mut camera);
         assert_eq!(app.state.camera_summaries(scene_uid)[0].name, "camera_0");
+    }
+
+    #[test]
+    fn native_new_camera_uses_the_reference_name_prompt_flow() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let mut camera = CameraController::default();
+        app.open_new_camera_dialog(scene_uid, &mut camera);
+        let draft = app.new_camera_draft.take().unwrap();
+        assert_eq!(draft.name, "camera_0");
+        assert!(!app.show_view_props);
+        assert!(app.view_properties_draft.is_none());
+
+        let mut saved = CameraController::default().to_qsys_camera("current");
+        saved.set_zoom(73.0);
+        camera = CameraController::from_qsys_camera(&saved);
+        app.create_workspace_camera(scene_uid, &draft.name, &camera)
+            .unwrap();
+        let created = app
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .camera_by_name("camera_0")
+            .unwrap();
+        assert_eq!(created.zoom(), 73.0);
+        assert_eq!(created.visibility_size(), 0);
+        assert_eq!(
+            app.workspace_aux_selection,
+            Some(WorkspaceAuxSelection::Camera {
+                scene_uid,
+                camera_index: 0,
+            })
+        );
+        assert_eq!(
+            app.create_workspace_camera(scene_uid, "camera_0", &camera),
+            Err("camera already exists: camera_0".to_string())
+        );
     }
 
     #[test]

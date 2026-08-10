@@ -5538,6 +5538,7 @@ enum ModelRequest {
     RegenerateSurface {
         surface_uid: u64,
     },
+    CreateCamera(String),
     SaveCamera(String),
     LoadCamera(String),
     SaveCameraView(String),
@@ -7151,6 +7152,24 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.status = format!("Regenerated surface: {triangle_count} triangle(s)");
             model.invalidate_mesh(false);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::CreateCamera(name) => {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("camera name is required".to_string());
+            }
+            let scene = model
+                .desktop
+                .active_scene()
+                .and_then(|scene_uid| model.desktop.scene_manager().scene(scene_uid))
+                .ok_or_else(|| "no active scene".to_string())?;
+            if scene.camera_by_name(name).is_some() {
+                return Err(format!("camera already exists: {name}"));
+            }
+            let undo = model.capture_undo();
+            model.save_named_camera(name, false)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -9702,6 +9721,11 @@ fn regenerate_surface(
 }
 
 #[tauri::command]
+fn create_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::CreateCamera(name))?)
+}
+
+#[tauri::command]
 fn save_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::SaveCamera(name))?)
 }
@@ -11598,6 +11622,7 @@ pub fn run() -> Result<(), tauri::Error> {
             set_surface_renderer_visible,
             add_surface_renderer,
             regenerate_surface,
+            create_camera,
             save_camera,
             load_camera,
             save_camera_view,
@@ -15014,7 +15039,7 @@ mod tests {
         model.camera.set_zoom(63.0);
         handle_model_request(
             &mut model,
-            ModelRequest::SaveCameraView("camera_0".to_string()),
+            ModelRequest::CreateCamera("camera_0".to_string()),
         )
         .unwrap();
         let snapshot = model.snapshot();
@@ -15025,6 +15050,14 @@ mod tests {
             snapshot.active_scene_uid.unwrap()
         );
         assert!(snapshot.can_undo);
+        let duplicate = handle_model_request(
+            &mut model,
+            ModelRequest::CreateCamera("camera_0".to_string()),
+        );
+        assert_eq!(
+            duplicate.err().as_deref(),
+            Some("camera already exists: camera_0")
+        );
 
         model.camera.set_zoom(12.0);
         handle_model_request(&mut model, ModelRequest::LoadCamera("camera_0".to_string())).unwrap();

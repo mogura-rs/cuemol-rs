@@ -1027,7 +1027,7 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("workspaceSelectionKind === \"camera\""));
     assert!(JS.contains("mutate(\"save_camera\""));
     assert!(JS.contains("mutate(\"load_camera\""));
-    assert!(JS.contains("mutate(\"save_camera_view\""));
+    assert!(JS.contains("mutateWithoutViewport(\"save_camera_view\""));
     assert!(JS.contains("mutate(\"load_camera_view\""));
     assert!(JS.contains("mutate(\"destroy_camera\""));
     assert!(JS.contains("invoke(\"get_camera_properties\""));
@@ -1044,6 +1044,22 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("camera.visibilityCount > 0"));
     assert!(CSS.contains(".visibility-flag-editor"));
     assert!(CSS.contains("width: min(420px, calc(100vw - 48px))"));
+    assert!(JS.contains("function showTextPromptDialog({"));
+    assert!(JS.contains("async function openNewCameraFlow()"));
+    assert!(JS.contains("title: \"New Camera\""));
+    assert!(JS.contains("label: \"Name for new camera:\""));
+    assert!(JS.contains("defaultValue: `camera_${index}`"));
+    assert!(JS.contains("confirmLabel: \"Create\""));
+    assert!(JS.contains("mutateWithoutViewport(\"create_camera\", { name }, () => {})"));
+    assert!(!JS.contains("globalThis.prompt?.(\"Camera name\""));
+    assert!(CSS.contains(".reference-dialog.text-prompt-dialog"));
+    assert!(TAURI_APP_RS.contains("ModelRequest::CreateCamera(name)"));
+    assert!(TAURI_APP_RS.contains("fn create_camera(name: String"));
+    assert!(NATIVE_GUI_RS.contains("struct NativeNewCameraDraft"));
+    assert!(NATIVE_GUI_RS.contains("fn new_camera_dialog("));
+    assert!(NATIVE_GUI_RS.contains("ui.label(\"Name for new camera:\")"));
+    assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Create\")"));
+    assert!(!NATIVE_GUI_RS.contains("open_new_camera_properties"));
 
     let tauri_editor = JS
         .split("async function showCameraVisibilityEditor(scene, camera)")

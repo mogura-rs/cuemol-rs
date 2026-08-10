@@ -4512,6 +4512,60 @@ function showSceneSaveOptions() {
   });
 }
 
+function showTextPromptDialog({ title, label, defaultValue = "", confirmLabel = "OK" }) {
+  if (referenceDialog.open) referenceDialog.close();
+  dialogTitle.textContent = title;
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog text-prompt-dialog";
+
+  const input = dialogField(label, defaultValue);
+  input.autocomplete = "off";
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      referenceDialog.removeEventListener("close", onClose);
+      resolve(value);
+    };
+    const onClose = () => {
+      if (!referenceDialog.open) finish(null);
+    };
+    referenceDialog.addEventListener("close", onClose);
+    const cancel = button("Cancel", "", () => {
+      finish(null);
+      referenceDialog.close();
+    });
+    const submit = () => {
+      const value = input.value.trim();
+      if (!value) return;
+      finish(value);
+      referenceDialog.close();
+    };
+    const confirm = button(confirmLabel, "dialog-primary", submit);
+    const updateState = () => {
+      confirm.disabled = !input.value.trim();
+    };
+    input.addEventListener("input", updateState);
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || confirm.disabled) return;
+      event.preventDefault();
+      submit();
+    });
+    updateState();
+    dialogActions(cancel, confirm);
+    if (!referenceDialog.open && referenceDialog.showModal) {
+      referenceDialog.showModal();
+    }
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 0);
+  });
+}
+
 function showNewTabDialog() {
   if (referenceDialog.open) referenceDialog.close();
   dialogTitle.textContent = "New Tab/Window";
@@ -6828,6 +6882,25 @@ async function showCameraVisibilityEditor(scene, camera) {
   if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
 }
 
+async function openNewCameraFlow() {
+  const used = new Set(activeCameras().map((camera) => camera.name));
+  let index = 0;
+  while (used.has(`camera_${index}`)) index += 1;
+  const name = await showTextPromptDialog({
+    title: "New Camera",
+    label: "Name for new camera:",
+    defaultValue: `camera_${index}`,
+    confirmLabel: "Create",
+  });
+  if (name === null) return false;
+  const changed = await mutateWithoutViewport("create_camera", { name }, () => {});
+  if (!changed) return false;
+  selectedCameraName = name;
+  workspaceSelectionKind = "camera";
+  renderShell();
+  return true;
+}
+
 function workspaceCameraContextItems(scene, camera = null) {
   const activate = async () => {
     if (snapshot.activeSceneUid === scene.uid) return true;
@@ -6837,11 +6910,7 @@ function workspaceCameraContextItems(scene, camera = null) {
     label: "New Camera…",
     action: async () => {
       if (!(await activate())) return;
-      const used = new Set(activeCameras().map((candidate) => candidate.name));
-      let index = 0;
-      while (used.has(`camera_${index}`)) index += 1;
-      const name = globalThis.prompt?.("Camera name", `camera_${index}`)?.trim();
-      if (name) await mutate("save_camera_view", { name });
+      await openNewCameraFlow();
     },
   };
   const loadCamera = {
@@ -11126,16 +11195,7 @@ async function handleAction(action, depth = 0) {
         break;
       }
       if (["cameraRoot", "camera"].includes(workspaceSelectionKind)) {
-        const used = new Set(activeCameras().map((camera) => camera.name));
-        let index = 0;
-        while (used.has(`camera_${index}`)) index += 1;
-        const name = globalThis.prompt?.("Camera name", `camera_${index}`)?.trim();
-        if (name) {
-          await mutate("save_camera", { name });
-          selectedCameraName = name;
-          workspaceSelectionKind = "camera";
-          renderShell();
-        }
+        await openNewCameraFlow();
         break;
       }
       const object = ["object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)
