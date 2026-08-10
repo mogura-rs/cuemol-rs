@@ -575,6 +575,7 @@ struct NativeRendererSetupDraft {
     action: NativeRendererSetupAction,
     target: crate::GuiFileRendererTarget,
     reader_options: Option<crate::GuiMoleculeReaderOptions>,
+    namd_coor_options: Option<crate::GuiNamdCoorReaderOptions>,
     density_map_options: Option<crate::GuiDensityMapReaderOptions>,
     object_name: String,
     renderer_type: String,
@@ -584,6 +585,13 @@ struct NativeRendererSetupDraft {
     selection: String,
     recenter: bool,
     options: Vec<crate::GuiRendererSetupOption>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeFileReaderOptions<'a> {
+    molecule: Option<&'a crate::GuiMoleculeReaderOptions>,
+    namd_coor: Option<&'a crate::GuiNamdCoorReaderOptions>,
+    density_map: Option<&'a crate::GuiDensityMapReaderOptions>,
 }
 
 #[derive(Debug)]
@@ -1068,6 +1076,7 @@ enum InteractionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeFileDialog {
     OpenObject,
+    OpenPsf,
     OpenScene,
     OpenCamera,
     OpenStyle,
@@ -8100,6 +8109,7 @@ impl GuiApplication {
                     NativeRendererSetupAction::OpenPath(path),
                     file_setup.target,
                     file_setup.molecule_reader_options,
+                    file_setup.namd_coor_reader_options,
                     file_setup.density_map_reader_options,
                 );
             }
@@ -8214,8 +8224,7 @@ impl GuiApplication {
         &mut self,
         path: PathBuf,
         target: crate::GuiFileRendererTarget,
-        reader_options: Option<&crate::GuiMoleculeReaderOptions>,
-        density_map_options: Option<&crate::GuiDensityMapReaderOptions>,
+        reader_options: NativeFileReaderOptions<'_>,
         setup: crate::GuiRendererSetup,
         camera: &mut CameraController,
     ) {
@@ -8229,13 +8238,18 @@ impl GuiApplication {
             )
         });
         let result = match target {
-            crate::GuiFileRendererTarget::Molecule => self
-                .state
-                .open_path_with_reader_and_renderer_setup(&path, reader_options, &setup),
+            crate::GuiFileRendererTarget::Molecule => {
+                self.state.open_path_with_file_reader_and_renderer_setup(
+                    &path,
+                    reader_options.molecule,
+                    reader_options.namd_coor,
+                    &setup,
+                )
+            }
             crate::GuiFileRendererTarget::DensityMap => {
                 self.state.open_density_map_path_with_renderer_setup(
                     &path,
-                    density_map_options,
+                    reader_options.density_map,
                     map_renderer_center,
                     &setup,
                 )
@@ -14537,6 +14551,7 @@ impl GuiApplication {
             crate::GuiFileRendererTarget::Molecule,
             None,
             None,
+            None,
         );
     }
 
@@ -14546,6 +14561,7 @@ impl GuiApplication {
         action: NativeRendererSetupAction,
         target: crate::GuiFileRendererTarget,
         reader_options: Option<crate::GuiMoleculeReaderOptions>,
+        namd_coor_options: Option<crate::GuiNamdCoorReaderOptions>,
         density_map_options: Option<crate::GuiDensityMapReaderOptions>,
     ) {
         let scene_uid = self.state.ensure_active_scene();
@@ -14585,6 +14601,7 @@ impl GuiApplication {
             action,
             target,
             reader_options,
+            namd_coor_options,
             density_map_options,
             object_name,
             renderer_type,
@@ -14732,6 +14749,25 @@ impl GuiApplication {
                         "Auto-generate non-standard topology",
                     );
                 }
+                if let Some(options) = draft.namd_coor_options.as_mut() {
+                    ui.separator();
+                    ui.strong("NAMD Coor file options");
+                    ui.horizontal(|ui| {
+                        ui.label("PSF file:");
+                        ui.add_sized(
+                            [240.0, 22.0],
+                            egui::TextEdit::singleline(&mut options.topology_path),
+                        );
+                        if ui.button("Change ...").clicked() {
+                            if let Some(path) = native_file_dialog(
+                                NativeFileDialog::OpenPsf,
+                                &options.topology_path,
+                            ) {
+                                options.topology_path = path.to_string_lossy().into_owned();
+                            }
+                        }
+                    });
+                }
                 if let Some(options) = draft.density_map_options.as_mut() {
                     ui.separator();
                     match options {
@@ -14866,6 +14902,10 @@ impl GuiApplication {
                             || !draft.selection_enabled
                             || !draft.selection.trim().is_empty())
                         && draft
+                            .namd_coor_options
+                            .as_ref()
+                            .is_none_or(|options| !options.topology_path.trim().is_empty())
+                        && draft
                             .density_map_options
                             .as_ref()
                             .is_none_or(|options| match options {
@@ -14918,8 +14958,11 @@ impl GuiApplication {
                     self.open_path_with_renderer_setup(
                         path,
                         draft.target,
-                        draft.reader_options.as_ref(),
-                        draft.density_map_options.as_ref(),
+                        NativeFileReaderOptions {
+                            molecule: draft.reader_options.as_ref(),
+                            namd_coor: draft.namd_coor_options.as_ref(),
+                            density_map: draft.density_map_options.as_ref(),
+                        },
                         setup,
                         camera,
                     );
@@ -17679,7 +17722,7 @@ const OBJECT_OPEN_FILTERS: &[NativeFileFilter] = &[
         label: "Molecule coordinates",
         extensions: &[
             "pdb", "ent", "cif", "mmcif", "sdf", "mol", "mol2", "gro", "psf", "prmtop", "parm7",
-            "top", "pse", "qdf",
+            "top", "coor", "pse", "qdf",
         ],
     },
     NativeFileFilter {
@@ -17694,6 +17737,10 @@ const OBJECT_OPEN_FILTERS: &[NativeFileFilter] = &[
 const SCENE_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "CueMol scene",
     extensions: &["qsc", "qsl"],
+}];
+const PSF_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "PSF file",
+    extensions: &["psf"],
 }];
 const OBJECT_SAVE_FILTERS: &[NativeFileFilter] = &[
     NativeFileFilter {
@@ -17745,6 +17792,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
         NativeFileDialog::OpenObject => NativeFileDialogSpec {
             title: "Select a File",
             filters: OBJECT_OPEN_FILTERS,
+            default_extension: None,
+            save: false,
+        },
+        NativeFileDialog::OpenPsf => NativeFileDialogSpec {
+            title: "Select PSF file",
+            filters: PSF_OPEN_FILTERS,
             default_extension: None,
             save: false,
         },
@@ -22023,6 +22076,7 @@ mod tests {
                 calculate_secondary_structure: true,
                 auto_generate_topology: true,
             }),
+            None,
             None,
         );
         let setup = app.renderer_setup_draft.as_ref().unwrap();

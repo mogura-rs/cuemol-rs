@@ -979,6 +979,12 @@ pub struct GuiMoleculeReaderOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiMoleculeFileSetup {
     pub reader_options: Option<GuiMoleculeReaderOptions>,
+    pub namd_coor_reader_options: Option<GuiNamdCoorReaderOptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiNamdCoorReaderOptions {
+    pub topology_path: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1026,6 +1032,7 @@ pub enum GuiFileRendererTarget {
 pub struct GuiFileRendererSetup {
     pub target: GuiFileRendererTarget,
     pub molecule_reader_options: Option<GuiMoleculeReaderOptions>,
+    pub namd_coor_reader_options: Option<GuiNamdCoorReaderOptions>,
     pub density_map_reader_options: Option<GuiDensityMapReaderOptions>,
 }
 
@@ -7329,7 +7336,10 @@ impl DesktopAppState {
             self.load_lw_object(scene_uid, path, object_name)?;
             return Ok(GuiLoadedPath::Scene { scene_uid });
         }
-        let object_uid = if is_desktop_extension_format(format) {
+        let object_uid = if format == "namdcoor" {
+            let options = self.namd_coor_reader_options_for_path(path);
+            self.load_namd_coor_object(scene_uid, path, object_name, &options.topology_path)?
+        } else if is_desktop_extension_format(format) {
             self.load_extension_object(scene_uid, path, object_name, format)?
         } else {
             self.load_object(scene_uid, path, object_name, format)?
@@ -7360,9 +7370,11 @@ impl DesktopAppState {
             Some(GuiFileRendererSetup {
                 target: GuiFileRendererTarget::Molecule,
                 molecule_reader_options,
+                namd_coor_reader_options,
                 ..
             }) => Some(GuiMoleculeFileSetup {
                 reader_options: molecule_reader_options,
+                namd_coor_reader_options,
             }),
             _ => None,
         })
@@ -7374,9 +7386,12 @@ impl DesktopAppState {
     ) -> Result<Option<GuiFileRendererSetup>> {
         let format = guess_path_format(path.as_ref(), &self.stream_manager)?;
         if format_supports_molecule_renderer_setup(format) {
+            let namd_coor_reader_options = (format == "namdcoor")
+                .then(|| self.namd_coor_reader_options_for_path(path.as_ref()));
             return Ok(Some(GuiFileRendererSetup {
                 target: GuiFileRendererTarget::Molecule,
                 molecule_reader_options: molecule_reader_options_for_format(format),
+                namd_coor_reader_options,
                 density_map_reader_options: None,
             }));
         }
@@ -7397,6 +7412,7 @@ impl DesktopAppState {
             return Ok(Some(GuiFileRendererSetup {
                 target: GuiFileRendererTarget::DensityMap,
                 molecule_reader_options: None,
+                namd_coor_reader_options: None,
                 density_map_reader_options,
             }));
         }
@@ -7426,11 +7442,26 @@ impl DesktopAppState {
         reader_options: Option<&GuiMoleculeReaderOptions>,
         setup: &GuiRendererSetup,
     ) -> Result<GuiLoadedPath> {
+        self.open_path_with_file_reader_and_renderer_setup(path, reader_options, None, setup)
+    }
+
+    pub fn open_path_with_file_reader_and_renderer_setup(
+        &mut self,
+        path: impl AsRef<Path>,
+        reader_options: Option<&GuiMoleculeReaderOptions>,
+        namd_coor_reader_options: Option<&GuiNamdCoorReaderOptions>,
+        setup: &GuiRendererSetup,
+    ) -> Result<GuiLoadedPath> {
         let path = path.as_ref();
         let format = guess_path_format(path, &self.stream_manager)?;
         if !format_supports_molecule_renderer_setup(format) {
             return Err(CueMolError::invalid_argument(
                 "the file does not support molecular renderer setup",
+            ));
+        }
+        if reader_options.is_some() && namd_coor_reader_options.is_some() {
+            return Err(CueMolError::invalid_argument(
+                "only one molecule reader option set is allowed",
             ));
         }
         let (scene_uid, object_uid) = if let Some(options) = reader_options {
@@ -7479,6 +7510,20 @@ impl DesktopAppState {
                 object.set_source(path.to_string_lossy());
                 object.set_modified(false);
             }
+            (scene_uid, object_uid)
+        } else if let Some(options) = namd_coor_reader_options {
+            if format != "namdcoor" || options.topology_path.trim().is_empty() {
+                return Err(CueMolError::invalid_argument(
+                    "NAMD Coor reader options require a PSF topology file",
+                ));
+            }
+            let scene_uid = self.ensure_active_scene();
+            let object_uid = self.load_namd_coor_object(
+                scene_uid,
+                path,
+                setup.object_name.trim(),
+                options.topology_path.trim(),
+            )?;
             (scene_uid, object_uid)
         } else {
             let loaded = self.open_path_with_format(path, format)?;
@@ -8004,6 +8049,41 @@ impl DesktopAppState {
                     scene.add_molecule(object_name, mol)
                 }
             })
+    }
+
+    fn namd_coor_reader_options_for_path(&self, path: &Path) -> GuiNamdCoorReaderOptions {
+        let configured = self.config_value("cuemol2.ui.histories.namdcoor.psfpath");
+        GuiNamdCoorReaderOptions {
+            topology_path: if configured.trim().is_empty() {
+                related_path_with_extension(path, "psf")
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                configured
+            },
+        }
+    }
+
+    fn load_namd_coor_object(
+        &mut self,
+        scene_uid: Uid,
+        coor_path: &Path,
+        object_name: impl Into<String>,
+        topology_path: &str,
+    ) -> Result<Uid> {
+        let molecule =
+            cuemol_mdtools::read_namd_coor_with_psf_files(coor_path, topology_path)?.molecule;
+        let object_uid = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?
+            .add_molecule_with_source_type(object_name, molecule, "namdcoor");
+        if let Some(object) = self.scene_manager_mut().object_mut(object_uid) {
+            object.set_source(coor_path.to_string_lossy());
+            object.set_modified(false);
+        }
+        self.put_config_value("cuemol2.ui.histories.namdcoor.psfpath", topology_path);
+        Ok(object_uid)
     }
 
     fn load_pse_objects(
@@ -44235,6 +44315,7 @@ fn guess_path_format(path: &Path, stream_manager: &StreamManager) -> Result<&'st
         "gro" => Ok("gro"),
         "psf" => Ok("psf"),
         "prmtop" | "parm7" | "top" => Ok("amberprm"),
+        "coor" => Ok("namdcoor"),
         "pse" => Ok("pse"),
         "qdf" => guess_qdf_format(path, stream_manager),
         "mtz" => Ok("mtzmap"),
@@ -44313,6 +44394,22 @@ fn effective_extension(path: &Path) -> String {
             .to_ascii_lowercase();
     }
     ext
+}
+
+fn related_path_with_extension(path: &Path, extension: &str) -> PathBuf {
+    let actual_extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(actual_extension.as_str(), "gz" | "bz2" | "xz") {
+        return path
+            .file_stem()
+            .map(Path::new)
+            .map(|stem| path.with_file_name(stem.with_extension(extension)))
+            .unwrap_or_else(|| path.with_extension(extension));
+    }
+    path.with_extension(extension)
 }
 
 fn is_scene_format(format: &str) -> bool {
@@ -55287,6 +55384,99 @@ end_header
         assert_eq!(molecule.atoms()[0].int_prop("anisou_u11"), None);
         fs::remove_file(path).unwrap();
         fs::remove_file(cif_path).unwrap();
+    }
+
+    #[test]
+    fn namd_coor_file_setup_uses_psf_default_history_and_coordinates() {
+        const PSF: &str = "PSF\n\n       1 !NTITLE\n REMARKS two atom topology\n\n       2 !NATOM\n       1 A        1        ALA      CA     CT1     0.100000       12.0110           0\n       2 A        1        ALA      CB     CT1    -0.100000       12.0110           0\n\n       1 !NBOND: bonds\n       1       2\n";
+        let dir =
+            std::env::temp_dir().join(format!("cuemol-namd-coor-setup-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let coor_path = dir.join("system.coor");
+        let sibling_psf_path = dir.join("system.psf");
+        let history_psf_path = dir.join("previous.psf");
+        assert_eq!(
+            related_path_with_extension(&dir.join("system.coor.gz"), "psf"),
+            sibling_psf_path
+        );
+        let mut coor = Vec::new();
+        coor.extend_from_slice(&2_i32.to_le_bytes());
+        for value in [1.0_f64, 2.0, 3.0, -1.0, -2.0, -3.0] {
+            coor.extend_from_slice(&value.to_le_bytes());
+        }
+        fs::write(&coor_path, coor).unwrap();
+        fs::write(&sibling_psf_path, PSF).unwrap();
+        fs::write(&history_psf_path, PSF).unwrap();
+
+        let mut app = DesktopAppState::new();
+        let defaults = app
+            .file_renderer_setup_for_path(&coor_path)
+            .unwrap()
+            .expect("NAMD setup");
+        assert_eq!(defaults.target, GuiFileRendererTarget::Molecule);
+        assert!(defaults.molecule_reader_options.is_none());
+        assert_eq!(
+            defaults
+                .namd_coor_reader_options
+                .as_ref()
+                .map(|options| options.topology_path.as_str()),
+            sibling_psf_path.to_str()
+        );
+
+        let mut direct_app = DesktopAppState::new();
+        let GuiLoadedPath::Object {
+            object_uid: direct_uid,
+            ..
+        } = direct_app.open_path(&coor_path).unwrap()
+        else {
+            panic!("expected direct NAMD molecule load");
+        };
+        assert_eq!(
+            direct_app
+                .scene_manager()
+                .object(direct_uid)
+                .unwrap()
+                .mol()
+                .atom_count(),
+            2
+        );
+
+        app.put_config_value(
+            "cuemol2.ui.histories.namdcoor.psfpath",
+            history_psf_path.to_string_lossy(),
+        );
+        let options = app
+            .file_renderer_setup_for_path(&coor_path)
+            .unwrap()
+            .and_then(|setup| setup.namd_coor_reader_options)
+            .expect("NAMD history options");
+        assert_eq!(options.topology_path, history_psf_path.to_string_lossy());
+        let setup = GuiRendererSetup {
+            object_name: "system".to_string(),
+            renderer_type: "ballstick".to_string(),
+            renderer_name: "atoms".to_string(),
+            selection: None,
+            recenter: true,
+        };
+        let GuiLoadedPath::Object { object_uid, .. } = app
+            .open_path_with_file_reader_and_renderer_setup(&coor_path, None, Some(&options), &setup)
+            .unwrap()
+        else {
+            panic!("expected NAMD molecule load");
+        };
+        let molecule = app.scene_manager().object(object_uid).unwrap().mol();
+        assert_eq!(molecule.atom_count(), 2);
+        assert_eq!(molecule.bond_count(), 1);
+        assert_eq!(molecule.atoms()[0].position, Vector4::new3(1.0, 2.0, 3.0));
+        assert_eq!(
+            molecule.atoms()[1].position,
+            Vector4::new3(-1.0, -2.0, -3.0)
+        );
+        assert_eq!(
+            app.config_value("cuemol2.ui.histories.namdcoor.psfpath"),
+            history_psf_path.to_string_lossy()
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

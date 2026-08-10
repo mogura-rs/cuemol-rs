@@ -253,6 +253,26 @@ fn tauri_file_open_matches_reference_molecule_reader_options() {
 }
 
 #[test]
+fn tauri_file_open_matches_reference_namd_coor_options() {
+    for label in [
+        "NAMD Coor file options",
+        "PSF file:",
+        "Change ...",
+        "PSF file",
+    ] {
+        assert!(JS.contains(label), "missing NAMD Coor option {label}");
+    }
+    for binding in [
+        "const namdDefaults = setup.namdCoorOptions || null",
+        "namdCoorOptions: setup.namdCoorOptions",
+        "topologyPath: namdControls.topologyPath.value.trim()",
+        "extensions: [\"psf\"]",
+    ] {
+        assert!(JS.contains(binding), "missing NAMD Coor binding {binding}");
+    }
+}
+
+#[test]
 fn tauri_file_open_matches_reference_ccp4_map_options() {
     for label in [
         "CCP4Map options",

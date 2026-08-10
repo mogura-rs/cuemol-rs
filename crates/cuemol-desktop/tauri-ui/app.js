@@ -3509,12 +3509,15 @@ function showRendererSetup(setup) {
   dialogFooter.hidden = false;
   referenceDialog.className = "reference-dialog";
   const readerDefaults = setup.readerOptions || null;
+  const namdDefaults = setup.namdCoorOptions || null;
   const ccp4Defaults = setup.ccp4MapOptions || null;
   const mtzDefaults = setup.mtzMapOptions || null;
   const readerTab = readerDefaults
     ? readerDefaults.kind === "mmcif"
       ? "mmCIF options"
       : "PDB options"
+    : namdDefaults
+      ? "NAMD Coor file options"
     : ccp4Defaults
       ? "CCP4Map options"
       : mtzDefaults
@@ -3648,6 +3651,34 @@ function showRendererSetup(setup) {
     };
     readerPage.prepend(ccp4Controls.normalize.closest("label"));
   }
+  let namdControls = null;
+  if (namdDefaults) {
+    const readerPage = pages.panes[1];
+    const topologyPath = dialogField(
+      "PSF file:",
+      namdDefaults.topologyPath || "",
+      "text",
+      readerPage,
+    );
+    const changeTopology = button("Change ...", "", async () => {
+      if (!dialog?.open) {
+        showError("The Tauri dialog plugin is unavailable.");
+        return;
+      }
+      const path = await dialog.open({
+        multiple: false,
+        directory: false,
+        defaultPath: topologyPath.value || undefined,
+        filters: [{ name: "PSF file", extensions: ["psf"] }],
+      });
+      if (path) {
+        topologyPath.value = path;
+        topologyPath.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
+    topologyPath.closest("label").append(changeTopology);
+    namdControls = { topologyPath };
+  }
   let mtzControls = null;
   if (mtzDefaults) {
     const readerPage = pages.panes[1];
@@ -3739,6 +3770,7 @@ function showRendererSetup(setup) {
         !rendererType.value ||
         !rendererName.value.trim() ||
         (!densityMapTarget && selection.enabled.checked && !selection.input.value.trim()) ||
+        (namdControls && !namdControls.topologyPath.value.trim()) ||
         (ccp4Controls?.truncateMin.enabled.checked &&
           (!ccp4Controls.truncateMin.input.value.trim() ||
             !Number.isFinite(Number(ccp4Controls.truncateMin.input.value)))) ||
@@ -3790,6 +3822,9 @@ function showRendererSetup(setup) {
               autoGenerateTopology: readerControls.autoGenerateTopology.checked,
             }
           : null,
+        namdCoorOptions: namdControls
+          ? { topologyPath: namdControls.topologyPath.value.trim() }
+          : null,
         ccp4MapOptions: ccp4Controls
           ? {
               normalize: ccp4Controls.normalize.checked,
@@ -3822,6 +3857,7 @@ function showRendererSetup(setup) {
       rendererName,
       selection.enabled,
       selection.input,
+      ...(namdControls ? [namdControls.topologyPath] : []),
       ...(ccp4Controls
         ? [
             ccp4Controls.normalize,
@@ -9881,7 +9917,7 @@ async function openFiles() {
     filters: [
       {
         name: "CueMol structures and scenes",
-        extensions: ["pdb", "ent", "cif", "mmcif", "qsc", "qdfpdb", "pse", "sdf", "mol2", "gro", "dx", "map", "mrc", "ccp4", "obj", "ply", "view", "cam"],
+        extensions: ["pdb", "ent", "cif", "mmcif", "qsc", "qdfpdb", "pse", "sdf", "mol2", "gro", "coor", "dx", "map", "mrc", "ccp4", "obj", "ply", "view", "cam"],
       },
     ],
   });
@@ -9916,6 +9952,7 @@ async function openSelectedPaths(paths) {
           targetKind: setup.targetKind,
           rendererSetup: setup.rendererSetup,
           readerOptions: setup.readerOptions,
+          namdCoorOptions: setup.namdCoorOptions,
           ccp4MapOptions: setup.ccp4MapOptions,
           mtzMapOptions: setup.mtzMapOptions,
         },

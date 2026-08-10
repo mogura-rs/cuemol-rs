@@ -144,6 +144,7 @@ struct RendererSetupDto {
     recenter: bool,
     options: Vec<RendererSetupOptionDto>,
     reader_options: Option<MoleculeReaderOptionsDto>,
+    namd_coor_options: Option<NamdCoorReaderOptionsDto>,
     ccp4_map_options: Option<Ccp4MapReaderOptionsDto>,
     mtz_map_options: Option<MtzMapReaderOptionsDto>,
 }
@@ -196,6 +197,28 @@ impl TryFrom<MoleculeReaderOptionsDto> for crate::GuiMoleculeReaderOptions {
             calculate_secondary_structure: value.calculate_secondary_structure,
             auto_generate_topology: value.auto_generate_topology,
         })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct NamdCoorReaderOptionsDto {
+    topology_path: String,
+}
+
+impl From<crate::GuiNamdCoorReaderOptions> for NamdCoorReaderOptionsDto {
+    fn from(value: crate::GuiNamdCoorReaderOptions) -> Self {
+        Self {
+            topology_path: value.topology_path,
+        }
+    }
+}
+
+impl From<NamdCoorReaderOptionsDto> for crate::GuiNamdCoorReaderOptions {
+    fn from(value: NamdCoorReaderOptionsDto) -> Self {
+        Self {
+            topology_path: value.topology_path,
+        }
     }
 }
 
@@ -318,6 +341,7 @@ struct RendererSetupInput {
 struct FileRendererSetupInput {
     target_kind: String,
     reader_options: Option<MoleculeReaderOptionsDto>,
+    namd_coor_options: Option<NamdCoorReaderOptionsDto>,
     ccp4_map_options: Option<Ccp4MapReaderOptionsDto>,
     mtz_map_options: Option<MtzMapReaderOptionsDto>,
     renderer_setup: RendererSetupInput,
@@ -5477,6 +5501,7 @@ enum ModelRequest {
         path: String,
         target: crate::GuiFileRendererTarget,
         reader_options: Option<crate::GuiMoleculeReaderOptions>,
+        namd_coor_options: Option<crate::GuiNamdCoorReaderOptions>,
         density_map_options: Option<crate::GuiDensityMapReaderOptions>,
         renderer_setup: crate::GuiRendererSetup,
         width: u32,
@@ -6644,6 +6669,7 @@ fn renderer_setup_defaults(
     model: &mut AppModel,
     base_object_name: &str,
     reader_options: Option<&crate::GuiMoleculeReaderOptions>,
+    namd_coor_options: Option<crate::GuiNamdCoorReaderOptions>,
 ) -> Result<RendererSetupDto, String> {
     let scene_uid = model.desktop.ensure_active_scene();
     let options = model
@@ -6671,6 +6697,7 @@ fn renderer_setup_defaults(
         renderer_name,
         recenter: preferences.recenter,
         reader_options: reader_options.map(MoleculeReaderOptionsDto::from),
+        namd_coor_options: namd_coor_options.map(NamdCoorReaderOptionsDto::from),
         ccp4_map_options: None,
         mtz_map_options: None,
         options: options
@@ -6721,6 +6748,7 @@ fn density_map_renderer_setup_defaults(
         renderer_name,
         recenter: false,
         reader_options: None,
+        namd_coor_options: None,
         ccp4_map_options,
         mtz_map_options,
         options: options
@@ -7298,6 +7326,7 @@ fn handle_model_request(
                     model,
                     object_name,
                     file_setup.molecule_reader_options.as_ref(),
+                    file_setup.namd_coor_reader_options,
                 )?,
                 crate::GuiFileRendererTarget::DensityMap => density_map_renderer_setup_defaults(
                     model,
@@ -7311,6 +7340,7 @@ fn handle_model_request(
             path,
             target,
             reader_options,
+            namd_coor_options,
             density_map_options,
             renderer_setup,
             width,
@@ -7327,13 +7357,16 @@ fn handle_model_request(
                     ))
                 }
                 crate::GuiFileRendererTarget::Molecule => {
-                    model.desktop.open_path_with_reader_and_renderer_setup(
+                    model.desktop.open_path_with_file_reader_and_renderer_setup(
                         &path,
                         reader_options.as_ref(),
+                        namd_coor_options.as_ref(),
                         &renderer_setup,
                     )
                 }
-                crate::GuiFileRendererTarget::DensityMap if reader_options.is_some() => {
+                crate::GuiFileRendererTarget::DensityMap
+                    if reader_options.is_some() || namd_coor_options.is_some() =>
+                {
                     Err(cuemol_core::CueMolError::invalid_argument(
                         "molecule reader options require a molecule target",
                     ))
@@ -7393,7 +7426,7 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::GetPdbRendererSetup { pdb_id } => Ok(ModelResponse::PdbRendererSetup(
-            renderer_setup_defaults(model, &pdb_id.to_ascii_lowercase(), None)?,
+            renderer_setup_defaults(model, &pdb_id.to_ascii_lowercase(), None, None)?,
         )),
         ModelRequest::OpenPdb {
             pdb_id,
@@ -9851,6 +9884,9 @@ fn open_path_with_renderer_setup(
         .reader_options
         .map(crate::GuiMoleculeReaderOptions::try_from)
         .transpose()?;
+    let namd_coor_options = file_setup
+        .namd_coor_options
+        .map(crate::GuiNamdCoorReaderOptions::from);
     let density_map_options = match (file_setup.ccp4_map_options, file_setup.mtz_map_options) {
         (Some(_), Some(_)) => {
             return Err("only one density-map reader option set is allowed".to_string())
@@ -9874,6 +9910,7 @@ fn open_path_with_renderer_setup(
             path,
             target,
             reader_options,
+            namd_coor_options,
             density_map_options,
             renderer_setup,
             width,
@@ -11497,6 +11534,7 @@ mod tests {
                     .map(crate::GuiMoleculeReaderOptions::try_from)
                     .transpose()
                     .unwrap(),
+                namd_coor_options: None,
                 density_map_options: None,
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "opened.pdb".to_string(),
@@ -11526,6 +11564,7 @@ mod tests {
                     .map(crate::GuiMoleculeReaderOptions::try_from)
                     .transpose()
                     .unwrap(),
+                namd_coor_options: None,
                 density_map_options: None,
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "opened.pdb".to_string(),
@@ -11589,6 +11628,7 @@ mod tests {
                 path: path_text,
                 target: crate::GuiFileRendererTarget::DensityMap,
                 reader_options: None,
+                namd_coor_options: None,
                 density_map_options: None,
                 renderer_setup: crate::GuiRendererSetup {
                     object_name: "density".to_string(),
@@ -11659,6 +11699,25 @@ mod tests {
             .mtz_map_options
             .map(crate::GuiMtzMapReaderOptions::from)
             .expect("MTZ options");
+        assert_eq!(roundtrip, options);
+    }
+
+    #[test]
+    fn namd_renderer_setup_dto_roundtrips_psf_path() {
+        let options = crate::GuiNamdCoorReaderOptions {
+            topology_path: "/tmp/system.psf".to_string(),
+        };
+        let mut model = model_without_gpu();
+        let defaults =
+            renderer_setup_defaults(&mut model, "system.coor", None, Some(options.clone()))
+                .unwrap();
+
+        assert_eq!(defaults.target_kind, "molecule");
+        assert!(defaults.reader_options.is_none());
+        let roundtrip = defaults
+            .namd_coor_options
+            .map(crate::GuiNamdCoorReaderOptions::from)
+            .expect("NAMD options");
         assert_eq!(roundtrip, options);
     }
 
