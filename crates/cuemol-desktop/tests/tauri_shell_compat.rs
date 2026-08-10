@@ -366,7 +366,12 @@ fn tauri_file_open_matches_reference_mtz_map_options() {
 fn tauri_reload_scene_uses_the_active_scene_source() {
     assert!(HTML.contains("data-local-action=\"reload-scene\""));
     assert!(JS.contains("scene?.modified"));
-    assert!(JS.contains("window.confirm(`Do you want to reload the scene:"));
+    assert!(JS.contains("await showConfirmReloadSceneDialog"));
+    assert!(JS.contains("has unsaved changes. Reload from disk and discard changes?"));
+    assert!(JS.contains("dialogTitle.textContent = \"Reload Scene\""));
+    assert!(CSS.contains(".reference-dialog.confirm-reload-dialog"));
+    assert!(NATIVE_GUI_RS.contains("fn reload_scene_dialog"));
+    assert!(NATIVE_GUI_RS.contains("fn reload_current_path_unchecked"));
     assert!(JS.contains("await mutate(\"reload_scene\")"));
     assert!(!JS.contains("lastOpenedPaths"));
 }

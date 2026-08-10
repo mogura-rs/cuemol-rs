@@ -2050,7 +2050,8 @@ summary:focus-visible {
   width: min(360px, calc(100vw - 48px));
 }
 
-.reference-dialog.confirm-close-dialog {
+.reference-dialog.confirm-close-dialog,
+.reference-dialog.confirm-reload-dialog {
   width: min(400px, calc(100vw - 48px));
 }
 

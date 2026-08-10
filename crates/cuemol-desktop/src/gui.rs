@@ -701,6 +701,11 @@ struct NativeCloseTabDraft {
     scene_name: String,
 }
 
+#[derive(Debug, Clone)]
+struct NativeReloadSceneDraft {
+    scene_name: String,
+}
+
 #[derive(Debug)]
 enum NativeTrajectoryPanelAction {
     SetFrame {
@@ -786,6 +791,7 @@ struct GuiApplication {
     new_tab_draft: Option<NativeNewTabDraft>,
     close_tab_draft: Option<NativeCloseTabDraft>,
     close_after_scene_save: bool,
+    reload_scene_draft: Option<NativeReloadSceneDraft>,
     renderer_setup_draft: Option<NativeRendererSetupDraft>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
@@ -2588,6 +2594,7 @@ impl GuiApplication {
             new_tab_draft: None,
             close_tab_draft: None,
             close_after_scene_save: false,
+            reload_scene_draft: None,
             renderer_setup_draft: None,
             pdb_download_receiver: None,
             url_download_receiver: None,
@@ -9068,6 +9075,24 @@ impl GuiApplication {
             self.set_status(format!("Scene source does not exist: {}", path.display()));
             return;
         }
+        let scene = self.state.active_scene_summary();
+        if scene
+            .as_ref()
+            .is_some_and(|scene| self.modified_scenes.contains(&scene.uid))
+        {
+            self.reload_scene_draft = scene.map(|scene| NativeReloadSceneDraft {
+                scene_name: scene.name,
+            });
+            return;
+        }
+        self.reload_current_path_unchecked(camera);
+    }
+
+    fn reload_current_path_unchecked(&mut self, camera: &mut CameraController) {
+        let Some(path) = self.state.active_scene_source_path().map(Path::to_path_buf) else {
+            self.set_status("Active scene has no source path");
+            return;
+        };
         let undo = self.capture_undo();
         match self.state.reload_active_scene_qsc() {
             Ok(scene_uid) => {
@@ -10519,6 +10544,7 @@ impl GuiApplication {
         self.scene_save_options_dialog(ctx, camera);
         self.new_tab_dialog(ctx, camera);
         self.close_tab_dialog(ctx, camera);
+        self.reload_scene_dialog(ctx, camera);
         self.renderer_setup_dialog(ctx, camera);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
@@ -16008,6 +16034,44 @@ impl GuiApplication {
             Some("cancel") => {}
             _ if open => self.close_tab_draft = Some(draft),
             _ => {}
+        }
+    }
+
+    fn reload_scene_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        let Some(draft) = self.reload_scene_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut reload = false;
+        let mut cancel = false;
+        let display_name = if draft.scene_name.is_empty() {
+            "(unnamed)".to_string()
+        } else {
+            format!("\"{}\"", draft.scene_name)
+        };
+        egui::Window::new("Reload Scene")
+            .default_width(400.0)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Scene {display_name} has unsaved changes. Reload from disk and discard changes?"
+                ));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("Reload").clicked() {
+                        reload = true;
+                    }
+                });
+            });
+        if reload {
+            self.reload_current_path_unchecked(camera);
+        } else if open && !cancel {
+            self.reload_scene_draft = Some(draft);
         }
     }
 
@@ -22213,6 +22277,12 @@ mod tests {
         app.open_current_path(&mut camera);
         assert_eq!(app.state.active_object_summaries().len(), 2);
         app.reload_current_path(&mut camera);
+        assert_eq!(
+            app.reload_scene_draft.as_ref().unwrap().scene_name,
+            app.state.active_scene_summary().unwrap().name
+        );
+        app.reload_scene_draft = None;
+        app.reload_current_path_unchecked(&mut camera);
 
         assert_eq!(app.state.active_object_summaries().len(), 1);
         assert_eq!(

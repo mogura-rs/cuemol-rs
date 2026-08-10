@@ -4244,7 +4244,7 @@ function showConfirmCloseTabDialog(sceneName) {
   dialogContent.replaceChildren();
   dialogFooter.hidden = false;
   referenceDialog.className = "reference-dialog confirm-close-dialog";
-  const displayName = sceneName ? `\"${sceneName}\"` : "(unnamed)";
+  const displayName = sceneName ? `"${sceneName}"` : "(unnamed)";
   dialogContent.append(dialogParagraph(`Scene ${displayName} is not saved. Save changes?`));
 
   return new Promise((resolve) => {
@@ -4272,6 +4272,46 @@ function showConfirmCloseTabDialog(sceneName) {
       referenceDialog.close();
     });
     dialogActions(cancel, discard, save);
+    if (!referenceDialog.open && referenceDialog.showModal) {
+      referenceDialog.showModal();
+    }
+  });
+}
+
+function showConfirmReloadSceneDialog(sceneName) {
+  if (referenceDialog.open) referenceDialog.close();
+  dialogTitle.textContent = "Reload Scene";
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog confirm-reload-dialog";
+  const displayName = sceneName ? `"${sceneName}"` : "(unnamed)";
+  dialogContent.append(
+    dialogParagraph(
+      `Scene ${displayName} has unsaved changes. Reload from disk and discard changes?`,
+    ),
+  );
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      referenceDialog.removeEventListener("close", onClose);
+      resolve(value);
+    };
+    const onClose = () => {
+      if (!referenceDialog.open) finish(false);
+    };
+    referenceDialog.addEventListener("close", onClose);
+    const cancel = button("Cancel", "", () => {
+      finish(false);
+      referenceDialog.close();
+    });
+    const reload = button("Reload", "dialog-danger", () => {
+      finish(true);
+      referenceDialog.close();
+    });
+    dialogActions(cancel, reload);
     if (!referenceDialog.open && referenceDialog.showModal) {
       referenceDialog.showModal();
     }
@@ -5757,10 +5797,7 @@ async function handleLocalAction(action) {
     }
     case "reload-scene": {
       const scene = snapshot?.scenes.find((item) => item.active);
-      if (
-        scene?.modified &&
-        !window.confirm(`Do you want to reload the scene: ${scene.name || ""}?`)
-      ) {
+      if (scene?.modified && !(await showConfirmReloadSceneDialog(scene.name || ""))) {
         break;
       }
       await mutate("reload_scene");
