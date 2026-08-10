@@ -3886,6 +3886,11 @@ impl GuiApplication {
             }
         });
         ui.separator();
+        if ui.button("New Group...").clicked() {
+            self.activate_workspace_scene(scene_uid, camera);
+            self.open_renderer_group_dialog(object_uid);
+            ui.close();
+        }
         if ui.button("New Renderer...").clicked() {
             self.activate_workspace_scene(scene_uid, camera);
             self.open_renderer_dialog(object_uid);
@@ -3954,8 +3959,24 @@ impl GuiApplication {
                         self.selected_renderer = Some(renderer.uid);
                         self.workspace_aux_selection = None;
                     }
-                    if !is_group {
-                        response.context_menu(|ui| {
+                    response.context_menu(|ui| {
+                        if is_group {
+                            if ui.button("Change Name...").clicked() {
+                                self.open_renderer_properties(object_uid, renderer.uid);
+                                ui.close();
+                            }
+                            if ui.button("New Renderer...").clicked() {
+                                self.open_renderer_dialog_in_group(
+                                    object_uid,
+                                    Some(renderer.name.clone()),
+                                );
+                                ui.close();
+                            }
+                            if ui.button("Delete").clicked() {
+                                self.delete_renderer(object_uid, renderer.uid);
+                                ui.close();
+                            }
+                        } else {
                             if !matches!(
                                 renderer.renderer_type.as_str(),
                                 "*selection" | "selection" | "*namelabel" | "name_label"
@@ -3980,8 +4001,8 @@ impl GuiApplication {
                                 self.open_renderer_properties(object_uid, renderer.uid);
                                 ui.close();
                             }
-                        });
-                    }
+                        }
+                    });
                 });
             },
         );
@@ -11512,17 +11533,21 @@ impl GuiApplication {
                     Some(NativePropertyObject::Surface(_)) => SURFACE_RENDERER_TYPES,
                     Some(NativePropertyObject::Molecule(_)) | None => RENDERER_TYPES,
                 };
-                egui::ComboBox::from_label("Type")
-                    .selected_text(renderer_type_label(&self.new_renderer_type))
-                    .show_ui(ui, |ui| {
-                        for renderer_type in renderer_types {
-                            ui.selectable_value(
-                                &mut self.new_renderer_type,
-                                (*renderer_type).to_string(),
-                                *renderer_type,
-                            );
-                        }
-                    });
+                if self.new_renderer_type == "*group" {
+                    ui.label("Type: Renderer group");
+                } else {
+                    egui::ComboBox::from_label("Type")
+                        .selected_text(renderer_type_label(&self.new_renderer_type))
+                        .show_ui(ui, |ui| {
+                            for renderer_type in renderer_types {
+                                ui.selectable_value(
+                                    &mut self.new_renderer_type,
+                                    (*renderer_type).to_string(),
+                                    *renderer_type,
+                                );
+                            }
+                        });
+                }
                 ui.add_sized(
                     [ui.available_width(), 22.0],
                     egui::TextEdit::singleline(&mut self.new_renderer_name),
@@ -12067,6 +12092,25 @@ impl GuiApplication {
         self.open_renderer_dialog_in_group(object_uid, None);
     }
 
+    fn open_renderer_group_dialog(&mut self, object_uid: cuemol_core::Uid) {
+        let used = self
+            .state
+            .renderer_summaries(object_uid)
+            .into_iter()
+            .filter(|renderer| renderer.renderer_type == "*group")
+            .map(|renderer| renderer.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut serial = 1;
+        while used.contains(&format!("group{serial}")) {
+            serial += 1;
+        }
+        self.new_renderer_owner = Some(NativePropertyObject::Molecule(object_uid));
+        self.new_renderer_group = None;
+        self.new_renderer_type = "*group".to_string();
+        self.new_renderer_name = format!("group{serial}");
+        self.show_renderer_dialog = true;
+    }
+
     fn open_renderer_dialog_in_group(
         &mut self,
         object_uid: cuemol_core::Uid,
@@ -12139,10 +12183,14 @@ impl GuiApplication {
         let renderer_group = self.new_renderer_group.clone();
         let created = match owner {
             NativePropertyObject::Molecule(object_uid) => (|| {
-                let renderer_uid = self
-                    .state
-                    .new_renderer_in_active_scene(object_uid, renderer_type, renderer_name)?
-                    .result_renderer;
+                let renderer_uid = if renderer_type == "*group" {
+                    self.state
+                        .create_renderer_group(object_uid, renderer_name)?
+                } else {
+                    self.state
+                        .new_renderer_in_active_scene(object_uid, renderer_type, renderer_name)?
+                        .result_renderer
+                };
                 if let Some(group) = renderer_group.as_deref() {
                     self.state
                         .set_renderer_property(object_uid, renderer_uid, "group", group)?;
@@ -18373,6 +18421,32 @@ mod tests {
                 .qsc_attr("sel"),
             None
         );
+    }
+
+    #[test]
+    fn native_workspace_creates_renderer_group_with_undo() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+
+        app.open_renderer_group_dialog(object_uid);
+        assert_eq!(app.new_renderer_type, "*group");
+        assert_eq!(app.new_renderer_name, "group1");
+        app.create_renderer_from_dialog();
+        assert!(app
+            .state
+            .renderer_summaries(object_uid)
+            .iter()
+            .any(|renderer| renderer.renderer_type == "*group" && renderer.name == "group1"));
+        assert_eq!(app.undo_stack.len(), 1);
+
+        app.undo(&mut CameraController::default());
+        assert!(app.state.renderer_summaries(object_uid).is_empty());
     }
 
     #[test]

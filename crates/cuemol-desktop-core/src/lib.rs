@@ -4434,6 +4434,74 @@ impl DesktopAppState {
         edge_color: impl AsRef<str>,
     ) -> Result<()> {
         let name = name.into();
+        self.rename_renderer_group(object_uid, group_uid, &name)?;
+        self.set_renderer_common_properties(
+            object_uid, group_uid, &name, "*", visible, locked, material, alpha, edge_type,
+            edge_width, edge_color,
+        )?;
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .expect("renderer group object was checked above");
+        let members = object
+            .renderers()
+            .iter()
+            .filter(|renderer| {
+                renderer.uid() != group_uid && renderer.group().is_some_and(|group| group == name)
+            })
+            .map(|renderer| renderer.uid())
+            .collect::<Vec<_>>();
+        for renderer_uid in members {
+            let renderer = object
+                .renderer_mut(renderer_uid)
+                .expect("renderer group member was collected above");
+            renderer.set_qsc_attr("group", &name);
+            renderer.set_visible(visible);
+        }
+        Ok(())
+    }
+
+    pub fn create_renderer_group(
+        &mut self,
+        object_uid: Uid,
+        name: impl Into<String>,
+    ) -> Result<Uid> {
+        let name = name.into();
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "renderer group name cannot be empty",
+            ));
+        }
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        if object
+            .renderers()
+            .iter()
+            .any(|renderer| renderer.renderer_type() == "*group" && renderer.name() == name)
+        {
+            return Err(CueMolError::invalid_argument(format!(
+                "renderer group name already exists: {name}"
+            )));
+        }
+        Ok(object.add_renderer("*group", name))
+    }
+
+    pub fn rename_renderer_group(
+        &mut self,
+        object_uid: Uid,
+        group_uid: Uid,
+        name: impl Into<String>,
+    ) -> Result<()> {
+        let name = name.into();
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "renderer group name cannot be empty",
+            ));
+        }
         let (old_name, duplicate) = {
             let object = self
                 .scene_manager()
@@ -4457,10 +4525,9 @@ impl DesktopAppState {
                 "renderer group name already exists: {name}"
             )));
         }
-        self.set_renderer_common_properties(
-            object_uid, group_uid, &name, "*", visible, locked, material, alpha, edge_type,
-            edge_width, edge_color,
-        )?;
+        if old_name == name {
+            return Ok(());
+        }
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -4468,18 +4535,18 @@ impl DesktopAppState {
         let members = object
             .renderers()
             .iter()
-            .filter(|renderer| {
-                renderer.uid() != group_uid
-                    && renderer.group().is_some_and(|group| group == old_name)
-            })
+            .filter(|renderer| renderer.group().is_some_and(|group| group == old_name))
             .map(|renderer| renderer.uid())
             .collect::<Vec<_>>();
+        object
+            .renderer_mut(group_uid)
+            .expect("renderer group was checked above")
+            .set_name(name);
         for renderer_uid in members {
-            let renderer = object
+            object
                 .renderer_mut(renderer_uid)
-                .expect("renderer group member was collected above");
-            renderer.set_qsc_attr("group", &name);
-            renderer.set_visible(visible);
+                .expect("renderer group member was collected above")
+                .set_qsc_attr("group", name);
         }
         Ok(())
     }
@@ -48882,6 +48949,23 @@ end_header
         assert!(object.renderer(first_uid).is_none());
         assert!(object.renderer(free_uid).is_none());
         assert!(object.renderer(second_uid).is_some());
+
+        let group_uid = app.create_renderer_group(object_uid, "group1").unwrap();
+        assert!(app.create_renderer_group(object_uid, "group1").is_err());
+        app.rename_renderer_group(object_uid, group_uid, "renamed1")
+            .unwrap();
+        assert_eq!(
+            app.scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .renderer(group_uid)
+                .unwrap()
+                .name(),
+            "renamed1"
+        );
+        assert!(app
+            .rename_renderer_group(object_uid, group_uid, "")
+            .is_err());
     }
 
     #[test]

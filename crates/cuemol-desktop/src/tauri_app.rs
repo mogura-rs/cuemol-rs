@@ -685,6 +685,15 @@ struct WorkspaceRendererSelectionInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceRendererGroupInput {
+    object_uid: u64,
+    #[serde(default)]
+    group_uid: Option<u64>,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RendererPropertiesInput {
     object_uid: u64,
     renderer_uid: u64,
@@ -2305,6 +2314,31 @@ impl AppModel {
             .map_err(|error| error.to_string())?;
         self.status = "Change renderer selection".to_string();
         self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn create_workspace_renderer_group(
+        &mut self,
+        input: WorkspaceRendererGroupInput,
+    ) -> Result<(), String> {
+        self.desktop
+            .create_renderer_group(Uid::new(input.object_uid), input.name)
+            .map_err(|error| error.to_string())?;
+        self.status = "Create renderer group".to_string();
+        Ok(())
+    }
+
+    fn rename_workspace_renderer_group(
+        &mut self,
+        input: WorkspaceRendererGroupInput,
+    ) -> Result<(), String> {
+        let group_uid = input
+            .group_uid
+            .ok_or_else(|| "renderer group UID is required".to_string())?;
+        self.desktop
+            .rename_renderer_group(Uid::new(input.object_uid), Uid::new(group_uid), input.name)
+            .map_err(|error| error.to_string())?;
+        self.status = "Rename renderer group".to_string();
         Ok(())
     }
 
@@ -4788,6 +4822,8 @@ enum ModelRequest {
     MoveWorkspaceObject(WorkspaceMoveObjectInput),
     MoveWorkspaceRenderer(WorkspaceMoveRendererInput),
     SetWorkspaceRendererSelection(WorkspaceRendererSelectionInput),
+    CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
+    RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     FitWorkspaceItem {
         target: WorkspaceFitInput,
         width: u32,
@@ -6180,6 +6216,18 @@ fn handle_model_request(
         ModelRequest::SetWorkspaceRendererSelection(input) => {
             let undo = model.capture_undo();
             model.set_workspace_renderer_selection(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::CreateWorkspaceRendererGroup(input) => {
+            let undo = model.capture_undo();
+            model.create_workspace_renderer_group(input)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::RenameWorkspaceRendererGroup(input) => {
+            let undo = model.capture_undo();
+            model.rename_workspace_renderer_group(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -8068,6 +8116,28 @@ fn set_workspace_renderer_selection(
 }
 
 #[tauri::command]
+fn create_workspace_renderer_group(
+    input: WorkspaceRendererGroupInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::CreateWorkspaceRendererGroup(input),
+    )?)
+}
+
+#[tauri::command]
+fn rename_workspace_renderer_group(
+    input: WorkspaceRendererGroupInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::RenameWorkspaceRendererGroup(input),
+    )?)
+}
+
+#[tauri::command]
 fn fit_workspace_item(
     target: WorkspaceFitInput,
     width: u32,
@@ -9177,6 +9247,8 @@ pub fn run() -> Result<(), tauri::Error> {
             move_workspace_object,
             move_workspace_renderer,
             set_workspace_renderer_selection,
+            create_workspace_renderer_group,
+            rename_workspace_renderer_group,
             fit_workspace_item,
             set_config_value,
             undo,
@@ -10563,6 +10635,54 @@ mod tests {
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().objects[0].renderers[0].selection, "*");
+    }
+
+    #[test]
+    fn workspace_renderer_group_create_and_rename_are_undoable() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput {
+                object_uid: object_uid.get(),
+                group_uid: None,
+                name: "group1".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let group_uid = snapshot.objects[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.renderer_type == "*group")
+            .unwrap()
+            .uid;
+        assert_eq!(snapshot.undo_descriptions[0], "Create renderer group");
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput {
+                object_uid: object_uid.get(),
+                group_uid: Some(group_uid),
+                name: "renamed".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert!(snapshot.objects[0]
+            .renderers
+            .iter()
+            .any(|renderer| renderer.uid == group_uid && renderer.name == "renamed"));
+        assert_eq!(snapshot.undo_descriptions[0], "Rename renderer group");
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model.snapshot().objects[0]
+            .renderers
+            .iter()
+            .any(|renderer| renderer.uid == group_uid && renderer.name == "group1"));
     }
 
     #[test]

@@ -4613,18 +4613,73 @@ function workspaceObjectContextItems(scene, object) {
       });
     }
   }
-  items.push(null, {
-    label: "Properties...",
-    action: async () => {
-      if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
-      showReferenceDialog("Object Properties");
+  items.push(
+    null,
+    {
+      label: "New Group...",
+      action: async () => {
+        const used = new Set(
+          object.renderers
+            .filter((renderer) => renderer.rendererType === "*group")
+            .map((renderer) => renderer.name),
+        );
+        let serial = 1;
+        while (used.has(`group${serial}`)) serial += 1;
+        const name = globalThis.prompt?.("Name for new group", `group${serial}`)?.trim();
+        if (!name) return;
+        await mutateWithoutViewport("create_workspace_renderer_group", {
+          input: { objectUid: object.uid, name },
+        });
+      },
     },
-  });
+    {
+      label: "Properties...",
+      action: async () => {
+        if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
+        showReferenceDialog("Object Properties");
+      },
+    },
+  );
   return items;
 }
 
 function workspaceRendererContextItems(scene, object, renderer) {
   const items = [];
+  if (renderer.rendererType === "*group") {
+    items.push(
+      {
+        label: "Change Name...",
+        action: async () => {
+          const name = globalThis.prompt?.("Change renderer group name", renderer.name)?.trim();
+          if (!name || name === renderer.name) return;
+          await mutateWithoutViewport("rename_workspace_renderer_group", {
+            input: { objectUid: object.uid, groupUid: renderer.uid, name },
+          });
+        },
+      },
+      {
+        label: "New Renderer...",
+        action: () =>
+          mutate("add_renderer", {
+            objectUid: object.uid,
+            rendererType: rendererType.value,
+            groupName: renderer.name,
+          }),
+      },
+      {
+        label: "Delete",
+        action: () =>
+          mutate("delete_workspace_item", {
+            target: {
+              kind: "rendererGroup",
+              objectUid: object.uid,
+              rendererUid: renderer.uid,
+            },
+          }),
+      },
+    );
+    return items;
+  }
   const selectionReadonly = ["*selection", "selection", "*namelabel", "name_label"].includes(
     renderer.rendererType,
   );
@@ -5068,17 +5123,15 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         rendererRow.addEventListener("dblclick", () =>
           showReferenceDialog("Renderer Properties"),
         );
-        if (!isGroup) {
-          rendererRow.addEventListener("contextmenu", async (event) => {
-            selectedObjectUid = object.uid;
-            selectedRendererUid = renderer.uid;
-            workspaceSelectionKind = "renderer";
-            showWorkspaceContextMenu(
-              event,
-              workspaceRendererContextItems(scene, object, renderer),
-            );
-          });
-        }
+        rendererRow.addEventListener("contextmenu", (event) => {
+          selectedObjectUid = object.uid;
+          selectedRendererUid = renderer.uid;
+          workspaceSelectionKind = isGroup ? "rendererGroup" : "renderer";
+          showWorkspaceContextMenu(
+            event,
+            workspaceRendererContextItems(scene, object, renderer),
+          );
+        });
         rendererRow.prepend(
           workspaceStateControls(
             {
