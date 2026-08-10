@@ -184,6 +184,7 @@ let viewportRenderQueued = false;
 let cameraRequest = null;
 const cameraQueue = [];
 let renderedViewportSize = "";
+let renderedEmptyViewportOverlayKey = "";
 let cachedViewportDimensions = null;
 let cachedViewportPixelRatio = null;
 let wheelTimer = null;
@@ -10608,108 +10609,116 @@ function applyViewport(result, sequence) {
   );
   viewportImage.hidden = !result.image;
   if (result.image) viewportImage.src = result.image;
-  viewportLines.replaceChildren();
-  viewportLines.setAttribute("viewBox", `0 0 ${result.width} ${result.height}`);
-  const lineDefs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-  viewportLines.append(lineDefs);
-  const solidLineGroups = new Map();
-  const solidPointGroups = new Map();
-  for (const [index, line] of (result.lines || []).entries()) {
-    const x1 = Number(line.x1) || 0;
-    const y1 = Number(line.y1) || 0;
-    const x2 = Number(line.x2) || 0;
-    const y2 = Number(line.y2) || 0;
-    const startColor = line.color || "#ffff00";
-    const width = Math.max(0.1, Number(line.width) || 1);
-    if (line.point) {
-      const key = `${startColor}|${width}`;
-      const group = solidPointGroups.get(key) || {
-        color: startColor,
-        width,
-        commands: [],
-      };
-      const half = width / 2;
-      group.commands.push(
-        `M ${x1 - half} ${y1 - half} h ${width} v ${width} h ${-width} Z`,
-      );
-      solidPointGroups.set(key, group);
-      continue;
-    }
-    if (!line.endColor || line.endColor === startColor) {
-      const key = `${startColor}|${width}|${Boolean(line.stipple)}`;
-      const group = solidLineGroups.get(key) || {
-        color: startColor,
-        width,
-        stipple: Boolean(line.stipple),
-        commands: [],
-      };
-      group.commands.push(`M ${x1} ${y1} L ${x2} ${y2}`);
-      solidLineGroups.set(key, group);
-      continue;
-    }
-
-    const element = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    element.setAttribute("x1", String(x1));
-    element.setAttribute("y1", String(y1));
-    element.setAttribute("x2", String(x2));
-    element.setAttribute("y2", String(y2));
-    if (line.endColor && line.endColor !== startColor) {
-      const gradientId = `viewport-line-gradient-${index}`;
-      const gradient = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "linearGradient",
-      );
-      gradient.id = gradientId;
-      gradient.setAttribute("gradientUnits", "userSpaceOnUse");
-      gradient.setAttribute("x1", String(x1));
-      gradient.setAttribute("y1", String(y1));
-      gradient.setAttribute("x2", String(x2));
-      gradient.setAttribute("y2", String(y2));
-      for (const [offset, color] of [["0", startColor], ["1", line.endColor]]) {
-        const stop = document.createElementNS("http://www.w3.org/2000/svg", "stop");
-        stop.setAttribute("offset", offset);
-        stop.setAttribute("stop-color", color);
-        gradient.append(stop);
+  const lines = result.lines || [];
+  const labels = result.labels || [];
+  const emptyOverlayKey = lines.length === 0 && labels.length === 0
+    ? `${result.width}x${result.height}`
+    : "";
+  if (!emptyOverlayKey || renderedEmptyViewportOverlayKey !== emptyOverlayKey) {
+    renderedEmptyViewportOverlayKey = emptyOverlayKey;
+    viewportLines.replaceChildren();
+    viewportLines.setAttribute("viewBox", `0 0 ${result.width} ${result.height}`);
+    const lineDefs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    viewportLines.append(lineDefs);
+    const solidLineGroups = new Map();
+    const solidPointGroups = new Map();
+    for (const [index, line] of lines.entries()) {
+      const x1 = Number(line.x1) || 0;
+      const y1 = Number(line.y1) || 0;
+      const x2 = Number(line.x2) || 0;
+      const y2 = Number(line.y2) || 0;
+      const startColor = line.color || "#ffff00";
+      const width = Math.max(0.1, Number(line.width) || 1);
+      if (line.point) {
+        const key = `${startColor}|${width}`;
+        const group = solidPointGroups.get(key) || {
+          color: startColor,
+          width,
+          commands: [],
+        };
+        const half = width / 2;
+        group.commands.push(
+          `M ${x1 - half} ${y1 - half} h ${width} v ${width} h ${-width} Z`,
+        );
+        solidPointGroups.set(key, group);
+        continue;
       }
-      lineDefs.append(gradient);
-      element.setAttribute("stroke", `url(#${gradientId})`);
+      if (!line.endColor || line.endColor === startColor) {
+        const key = `${startColor}|${width}|${Boolean(line.stipple)}`;
+        const group = solidLineGroups.get(key) || {
+          color: startColor,
+          width,
+          stipple: Boolean(line.stipple),
+          commands: [],
+        };
+        group.commands.push(`M ${x1} ${y1} L ${x2} ${y2}`);
+        solidLineGroups.set(key, group);
+        continue;
+      }
+
+      const element = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      element.setAttribute("x1", String(x1));
+      element.setAttribute("y1", String(y1));
+      element.setAttribute("x2", String(x2));
+      element.setAttribute("y2", String(y2));
+      if (line.endColor && line.endColor !== startColor) {
+        const gradientId = `viewport-line-gradient-${index}`;
+        const gradient = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "linearGradient",
+        );
+        gradient.id = gradientId;
+        gradient.setAttribute("gradientUnits", "userSpaceOnUse");
+        gradient.setAttribute("x1", String(x1));
+        gradient.setAttribute("y1", String(y1));
+        gradient.setAttribute("x2", String(x2));
+        gradient.setAttribute("y2", String(y2));
+        for (const [offset, color] of [["0", startColor], ["1", line.endColor]]) {
+          const stop = document.createElementNS("http://www.w3.org/2000/svg", "stop");
+          stop.setAttribute("offset", offset);
+          stop.setAttribute("stop-color", color);
+          gradient.append(stop);
+        }
+        lineDefs.append(gradient);
+        element.setAttribute("stroke", `url(#${gradientId})`);
+      }
+      element.setAttribute("stroke-width", String(width));
+      element.setAttribute("stroke-linecap", "butt");
+      element.setAttribute("vector-effect", "non-scaling-stroke");
+      if (line.stipple) element.setAttribute("stroke-dasharray", "8 8");
+      viewportLines.append(element);
     }
-    element.setAttribute("stroke-width", String(width));
-    element.setAttribute("stroke-linecap", "butt");
-    element.setAttribute("vector-effect", "non-scaling-stroke");
-    if (line.stipple) element.setAttribute("stroke-dasharray", "8 8");
-    viewportLines.append(element);
-  }
-  for (const group of solidLineGroups.values()) {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", group.commands.join(" "));
-    path.setAttribute("fill", "none");
-    path.setAttribute("stroke", group.color);
-    path.setAttribute("stroke-width", String(group.width));
-    path.setAttribute("stroke-linecap", "butt");
-    path.setAttribute("vector-effect", "non-scaling-stroke");
-    if (group.stipple) path.setAttribute("stroke-dasharray", "8 8");
-    viewportLines.append(path);
-  }
-  for (const group of solidPointGroups.values()) {
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", group.commands.join(" "));
-    path.setAttribute("fill", group.color);
-    viewportLines.append(path);
-  }
-  viewportLabels.replaceChildren();
-  for (const label of result.labels || []) {
-    const element = document.createElement("span");
-    element.className = "viewport-label";
-    element.textContent = label.text;
-    element.style.left = `${(Number(label.x) / Math.max(1, result.width)) * 100}%`;
-    element.style.top = `${(Number(label.y) / Math.max(1, result.height)) * 100}%`;
-    element.style.color = label.color || "#ffff00";
-    element.style.fontSize = `${Number(label.fontSize) || 12}px`;
-    element.style.fontFamily = label.fontName || "sans-serif";
-    element.style.fontStyle = label.fontStyle || "normal";
-    element.style.fontWeight = label.fontWeight || "normal";
-    viewportLabels.append(element);
+    for (const group of solidLineGroups.values()) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", group.commands.join(" "));
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", group.color);
+      path.setAttribute("stroke-width", String(group.width));
+      path.setAttribute("stroke-linecap", "butt");
+      path.setAttribute("vector-effect", "non-scaling-stroke");
+      if (group.stipple) path.setAttribute("stroke-dasharray", "8 8");
+      viewportLines.append(path);
+    }
+    for (const group of solidPointGroups.values()) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", group.commands.join(" "));
+      path.setAttribute("fill", group.color);
+      viewportLines.append(path);
+    }
+    viewportLabels.replaceChildren();
+    for (const label of labels) {
+      const element = document.createElement("span");
+      element.className = "viewport-label";
+      element.textContent = label.text;
+      element.style.left = `${(Number(label.x) / Math.max(1, result.width)) * 100}%`;
+      element.style.top = `${(Number(label.y) / Math.max(1, result.height)) * 100}%`;
+      element.style.color = label.color || "#ffff00";
+      element.style.fontSize = `${Number(label.fontSize) || 12}px`;
+      element.style.fontFamily = label.fontName || "sans-serif";
+      element.style.fontStyle = label.fontStyle || "normal";
+      element.style.fontWeight = label.fontWeight || "normal";
+      viewportLabels.append(element);
+    }
   }
   renderSize.textContent = `${result.width} × ${result.height}`;
   if (
