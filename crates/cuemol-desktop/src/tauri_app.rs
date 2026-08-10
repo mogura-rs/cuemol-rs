@@ -616,6 +616,15 @@ struct WorkspaceDeleteInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceToggleInput {
+    kind: String,
+    object_uid: u64,
+    #[serde(default)]
+    renderer_uid: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceFitInput {
     kind: String,
     object_uid: u64,
@@ -1931,6 +1940,88 @@ impl AppModel {
             .map_err(|error| error.to_string())?;
         self.status = "Added molsurf renderer".to_string();
         self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn set_workspace_visible(
+        &mut self,
+        target: WorkspaceToggleInput,
+        visible: bool,
+    ) -> Result<(), String> {
+        let object_uid = Uid::new(target.object_uid);
+        let renderer_uid = || {
+            target
+                .renderer_uid
+                .map(Uid::new)
+                .ok_or_else(|| "renderer UID is required".to_string())
+        };
+        match target.kind.as_str() {
+            "object" => self.desktop.set_object_visible(object_uid, visible),
+            "renderer" => self
+                .desktop
+                .set_renderer_visible(object_uid, renderer_uid()?, visible),
+            "rendererGroup" => {
+                self.desktop
+                    .set_renderer_group_visible(object_uid, renderer_uid()?, visible)
+            }
+            "densityMap" => self.desktop.set_density_map_visible(object_uid, visible),
+            "densityRenderer" => {
+                self.desktop
+                    .set_density_renderer_visible(object_uid, renderer_uid()?, visible)
+            }
+            "surface" => self.desktop.set_surface_visible(object_uid, visible),
+            "surfaceRenderer" => {
+                self.desktop
+                    .set_surface_renderer_visible(object_uid, renderer_uid()?, visible)
+            }
+            kind => return Err(format!("unsupported Workspace item type: {kind}")),
+        }
+        .map_err(|error| error.to_string())?;
+        self.status = if visible {
+            "Workspace item shown".to_string()
+        } else {
+            "Workspace item hidden".to_string()
+        };
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn set_workspace_locked(
+        &mut self,
+        target: WorkspaceToggleInput,
+        locked: bool,
+    ) -> Result<(), String> {
+        let object_uid = Uid::new(target.object_uid);
+        let renderer_uid = || {
+            target
+                .renderer_uid
+                .map(Uid::new)
+                .ok_or_else(|| "renderer UID is required".to_string())
+        };
+        match target.kind.as_str() {
+            "object" => self.desktop.set_object_locked(object_uid, locked),
+            "renderer" => self
+                .desktop
+                .set_renderer_locked(object_uid, renderer_uid()?, locked),
+            "densityMap" => self.desktop.set_density_map_locked(object_uid, locked),
+            "densityRenderer" => {
+                self.desktop
+                    .set_density_renderer_locked(object_uid, renderer_uid()?, locked)
+            }
+            "surface" => self.desktop.set_surface_locked(object_uid, locked),
+            "surfaceRenderer" => {
+                self.desktop
+                    .set_surface_renderer_locked(object_uid, renderer_uid()?, locked)
+            }
+            "rendererGroup" => return Err("renderer group locking is not supported".to_string()),
+            kind => return Err(format!("unsupported Workspace item type: {kind}")),
+        }
+        .map_err(|error| error.to_string())?;
+        self.status = if locked {
+            "Workspace item locked".to_string()
+        } else {
+            "Workspace item unlocked".to_string()
+        };
         Ok(())
     }
 
@@ -4519,6 +4610,14 @@ enum ModelRequest {
         scene_uid: u64,
         local_index: usize,
     },
+    SetWorkspaceVisible {
+        target: WorkspaceToggleInput,
+        visible: bool,
+    },
+    SetWorkspaceLocked {
+        target: WorkspaceToggleInput,
+        locked: bool,
+    },
     DeleteWorkspaceItem(WorkspaceDeleteInput),
     FitWorkspaceItem {
         target: WorkspaceFitInput,
@@ -5852,6 +5951,18 @@ fn handle_model_request(
         } => {
             let undo = model.capture_undo();
             model.destroy_style(scene_uid, local_index)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetWorkspaceVisible { target, visible } => {
+            let undo = model.capture_undo();
+            model.set_workspace_visible(target, visible)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetWorkspaceLocked { target, locked } => {
+            let undo = model.capture_undo();
+            model.set_workspace_locked(target, locked)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -7629,6 +7740,30 @@ fn destroy_style(
 }
 
 #[tauri::command]
+fn set_workspace_visible(
+    target: WorkspaceToggleInput,
+    visible: bool,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetWorkspaceVisible { target, visible },
+    )?)
+}
+
+#[tauri::command]
+fn set_workspace_locked(
+    target: WorkspaceToggleInput,
+    locked: bool,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetWorkspaceLocked { target, locked },
+    )?)
+}
+
+#[tauri::command]
 fn delete_workspace_item(
     target: WorkspaceDeleteInput,
     state: State<'_, ManagedState>,
@@ -8741,6 +8876,8 @@ pub fn run() -> Result<(), tauri::Error> {
             get_style_properties,
             set_style_properties,
             destroy_style,
+            set_workspace_visible,
+            set_workspace_locked,
             delete_workspace_item,
             fit_workspace_item,
             set_config_value,
@@ -10855,6 +10992,68 @@ mod tests {
         assert_eq!(snapshot.surfaces[0].name, "renamed surface");
         assert!(!snapshot.surfaces[0].visible);
         assert!(snapshot.surfaces[0].locked);
+    }
+
+    #[test]
+    fn workspace_state_commands_toggle_and_undo_object_and_renderer() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceVisible {
+                target: WorkspaceToggleInput {
+                    kind: "object".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: None,
+                },
+                visible: false,
+            },
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceLocked {
+                target: WorkspaceToggleInput {
+                    kind: "object".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: None,
+                },
+                locked: true,
+            },
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceVisible {
+                target: WorkspaceToggleInput {
+                    kind: "renderer".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: Some(renderer_uid.get()),
+                },
+                visible: false,
+            },
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceLocked {
+                target: WorkspaceToggleInput {
+                    kind: "renderer".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: Some(renderer_uid.get()),
+                },
+                locked: true,
+            },
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        assert!(!snapshot.objects[0].visible);
+        assert!(snapshot.objects[0].locked);
+        assert!(!snapshot.objects[0].renderers[0].visible);
+        assert!(snapshot.objects[0].renderers[0].locked);
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(!model.snapshot().objects[0].renderers[0].locked);
+        assert_eq!(model.status, "Undo: Workspace item locked");
     }
 
     #[test]

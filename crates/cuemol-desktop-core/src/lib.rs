@@ -513,6 +513,8 @@ pub struct GuiStyleSummary {
 pub struct GuiObjectSummary {
     pub uid: Uid,
     pub name: String,
+    pub visible: bool,
+    pub locked: bool,
     pub atom_count: usize,
     pub residue_count: usize,
     pub bond_count: usize,
@@ -525,6 +527,7 @@ pub struct GuiRendererSummary {
     pub name: String,
     pub renderer_type: String,
     pub visible: bool,
+    pub locked: bool,
     pub group: Option<String>,
     pub style: Option<String>,
 }
@@ -1952,6 +1955,8 @@ impl DesktopAppState {
                     .map(|object| GuiObjectSummary {
                         uid: object.uid(),
                         name: object.name().to_string(),
+                        visible: object.is_visible(),
+                        locked: object.is_ui_locked(),
                         atom_count: object.mol().atom_count(),
                         residue_count: object.mol().residue_count(),
                         bond_count: object.mol().bond_count(),
@@ -2135,6 +2140,54 @@ impl DesktopAppState {
             .expect("surface was checked above");
         let node = ensure_surface_renderer_node(surface, scene_uid, renderer_uid)?;
         set_qsc_bool_attr(node, "visible", visible, true);
+        Ok(())
+    }
+
+    pub fn set_surface_locked(&mut self, surface_uid: Uid, locked: bool) -> Result<()> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_surface(surface_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?;
+        let surface = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_surface_mut(surface_uid))
+            .expect("surface was checked above");
+        set_qsc_bool_attr(ensure_surface_qsc_node(surface), "locked", locked, false);
+        Ok(())
+    }
+
+    pub fn set_surface_visible(&mut self, surface_uid: Uid, visible: bool) -> Result<()> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_surface(surface_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?;
+        let surface = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_surface_mut(surface_uid))
+            .expect("surface was checked above");
+        set_qsc_bool_attr(ensure_surface_qsc_node(surface), "visible", visible, true);
+        Ok(())
+    }
+
+    pub fn set_surface_renderer_locked(
+        &mut self,
+        surface_uid: Uid,
+        renderer_uid: Uid,
+        locked: bool,
+    ) -> Result<()> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_surface(surface_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?;
+        let surface = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_surface_mut(surface_uid))
+            .expect("surface was checked above");
+        let node = ensure_surface_renderer_node(surface, scene_uid, renderer_uid)?;
+        set_qsc_bool_attr(node, "locked", locked, false);
         Ok(())
     }
 
@@ -2377,6 +2430,50 @@ impl DesktopAppState {
                 CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
             })?;
         renderer.visible = visible;
+        map.modified = true;
+        Ok(())
+    }
+
+    pub fn set_density_map_locked(&mut self, map_uid: Uid, locked: bool) -> Result<()> {
+        let map = self
+            .density_maps
+            .get_mut(&map_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+        map.locked = locked;
+        map.modified = true;
+        Ok(())
+    }
+
+    pub fn set_density_map_visible(&mut self, map_uid: Uid, visible: bool) -> Result<()> {
+        let map = self
+            .density_maps
+            .get_mut(&map_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+        map.visible = visible;
+        map.modified = true;
+        Ok(())
+    }
+
+    pub fn set_density_renderer_locked(
+        &mut self,
+        map_uid: Uid,
+        renderer_uid: Uid,
+        locked: bool,
+    ) -> Result<()> {
+        let map = self
+            .density_maps
+            .get_mut(&map_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+        let renderer = map
+            .renderers
+            .iter_mut()
+            .find(|renderer| renderer.uid == renderer_uid)
+            .ok_or_else(|| {
+                CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
+            })?;
+        renderer
+            .attributes
+            .insert("locked".to_string(), locked.to_string());
         map.modified = true;
         Ok(())
     }
@@ -2665,6 +2762,7 @@ impl DesktopAppState {
                         name: renderer.name().to_string(),
                         renderer_type: renderer.renderer_type().to_string(),
                         visible: renderer.is_visible(),
+                        locked: renderer.qsc_attr("locked").is_some_and(qsc_bool),
                         group: renderer.group().map(str::to_string),
                         style: renderer.style().map(str::to_string),
                     })
@@ -3915,6 +4013,45 @@ impl DesktopAppState {
             .renderer_mut(renderer_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
         renderer.set_visible(visible);
+        Ok(())
+    }
+
+    pub fn set_object_visible(&mut self, object_uid: Uid, visible: bool) -> Result<()> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        object.set_visible(visible);
+        Ok(())
+    }
+
+    pub fn set_object_locked(&mut self, object_uid: Uid, locked: bool) -> Result<()> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        object.set_ui_locked(locked);
+        Ok(())
+    }
+
+    pub fn set_renderer_locked(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        locked: bool,
+    ) -> Result<()> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let renderer = object
+            .renderer_mut(renderer_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        if locked {
+            renderer.set_qsc_attr("locked", "true");
+        } else {
+            renderer.remove_qsc_attr("locked");
+        }
         Ok(())
     }
 
@@ -51885,6 +52022,41 @@ attribute \"dep\" string \"positions\"
 
         assert!(app.destroy_scene_camera(scene_uid, "camera_0").unwrap());
         assert!(app.camera_summaries(scene_uid).is_empty());
+    }
+
+    #[test]
+    fn desktop_workspace_state_toggles_are_exposed_and_persisted() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("workspace", true).result_scene;
+        let scene = app.scene_manager_mut().scene_mut(scene_uid).unwrap();
+        let object_uid = scene.add_molecule("mol", MolCoord::new());
+        let renderer_uid = scene
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "simple");
+
+        app.set_object_visible(object_uid, false).unwrap();
+        app.set_object_locked(object_uid, true).unwrap();
+        app.set_renderer_visible(object_uid, renderer_uid, false)
+            .unwrap();
+        app.set_renderer_locked(object_uid, renderer_uid, true)
+            .unwrap();
+        let object = &app.object_summaries(scene_uid)[0];
+        assert!(!object.visible);
+        assert!(object.locked);
+        let renderer = &app.renderer_summaries(object_uid)[0];
+        assert!(!renderer.visible);
+        assert!(renderer.locked);
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-desktop-workspace-state-{}.qsc",
+            std::process::id()
+        ));
+        app.save_active_scene_qsc(&path).unwrap();
+        let qsc = std::fs::read_to_string(&path).unwrap();
+        assert!(qsc.contains("visible=\"false\""));
+        assert!(qsc.contains("locked=\"true\""));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

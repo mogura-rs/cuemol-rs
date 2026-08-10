@@ -339,6 +339,16 @@ fn tauri_workspace_exposes_reference_style_nodes_and_actions() {
 }
 
 #[test]
+fn tauri_workspace_exposes_reference_visibility_and_lock_columns() {
+    assert!(JS.contains("function workspaceStateControls("));
+    assert!(JS.contains("mutate(\"set_workspace_visible\""));
+    assert!(JS.contains("mutateWithoutViewport(\"set_workspace_locked\""));
+    assert!(JS.contains("aria-checked"));
+    assert!(CSS.contains(".workspace-state-controls"));
+    assert!(CSS.contains(".workspace-state-toggle"));
+}
+
+#[test]
 fn tauri_projection_toggle_uses_the_compact_viewport_response() {
     assert!(JS.contains("snapshot.perspective = result.perspective"));
     assert!(JS.contains("renderProjectionControls()"));
@@ -406,6 +416,8 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "set_surface_renderer_properties",
         "set_surface_renderer_visible",
         "add_surface_renderer",
+        "set_workspace_visible",
+        "set_workspace_locked",
         "delete_workspace_item",
         "fit_workspace_item",
     ] {

@@ -703,6 +703,40 @@ summary:focus-visible {
   color: #655779;
 }
 
+.workspace-state-controls {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  margin-right: 4px;
+}
+
+.workspace-state-toggle {
+  display: inline-flex;
+  width: 15px;
+  height: 17px;
+  align-items: center;
+  justify-content: center;
+  color: #444;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.workspace-state-toggle.lock {
+  font-size: 9px;
+}
+
+.workspace-state-toggle.disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.tree-scene.active .workspace-state-toggle,
+.tree-object.active .workspace-state-toggle,
+.tree-renderer.active .workspace-state-toggle {
+  color: inherit;
+}
+
 .workspace-tools {
   display: flex;
   align-items: center;

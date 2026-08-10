@@ -4212,6 +4212,39 @@ function button(label, className, onClick) {
   return element;
 }
 
+function workspaceStateControls(target, visible, locked, lockEnabled = true) {
+  const controls = document.createElement("span");
+  controls.className = "workspace-state-controls";
+
+  const visibility = document.createElement("span");
+  visibility.className = "workspace-state-toggle";
+  visibility.textContent = visible ? "◉" : "○";
+  visibility.title = visible ? "Hide" : "Show";
+  visibility.setAttribute("role", "checkbox");
+  visibility.setAttribute("aria-checked", String(visible));
+  visibility.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    await mutate("set_workspace_visible", { target, visible: !visible });
+  });
+
+  const lock = document.createElement("span");
+  lock.className = `workspace-state-toggle lock${lockEnabled ? "" : " disabled"}`;
+  lock.textContent = locked ? "🔒" : "🔓";
+  lock.title = lockEnabled ? (locked ? "Unlock" : "Lock") : "Group locking is unavailable";
+  lock.setAttribute("aria-disabled", String(!lockEnabled));
+  if (lockEnabled) {
+    lock.setAttribute("role", "checkbox");
+    lock.setAttribute("aria-checked", String(locked));
+    lock.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await mutateWithoutViewport("set_workspace_locked", { target, locked: !locked });
+    });
+  }
+
+  controls.append(visibility, lock);
+  return controls;
+}
+
 function activeObjects() {
   if (!snapshot) return [];
   return snapshot.objects.filter((object) => object.sceneUid === snapshot.activeSceneUid);
@@ -4436,6 +4469,7 @@ function workspaceChromeRenderKey() {
       object.uid,
       object.name,
       object.visible,
+      object.locked,
       object.atomCount,
       object.residueCount,
       object.bondCount,
@@ -4446,6 +4480,7 @@ function workspaceChromeRenderKey() {
       map.uid,
       map.name,
       map.visible,
+      map.locked,
       map.counts,
       map.renderers.map(rendererKey),
     ]),
@@ -4454,6 +4489,7 @@ function workspaceChromeRenderKey() {
       surface.uid,
       surface.name,
       surface.visible,
+      surface.locked,
       surface.className,
       surface.format,
       surface.renderers.map(rendererKey),
@@ -4543,6 +4579,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         },
       );
       objectRow.addEventListener("dblclick", () => showReferenceDialog("Object Properties"));
+      objectRow.prepend(
+        workspaceStateControls(
+          { kind: "object", objectUid: object.uid },
+          object.visible,
+          object.locked,
+        ),
+      );
       const count = document.createElement("small");
       count.textContent = `${object.atomCount} AT`;
       objectRow.append(count);
@@ -4573,6 +4616,18 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         rendererRow.addEventListener("dblclick", () =>
           showReferenceDialog("Renderer Properties"),
         );
+        rendererRow.prepend(
+          workspaceStateControls(
+            {
+              kind: selectionKind,
+              objectUid: object.uid,
+              rendererUid: renderer.uid,
+            },
+            renderer.visible,
+            renderer.locked,
+            !isGroup,
+          ),
+        );
         sceneTree.append(rendererRow);
       };
       for (const node of groupedMoleculeRenderers(object.renderers)) {
@@ -4602,6 +4657,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         },
       );
       surfaceRow.addEventListener("dblclick", () => showReferenceDialog("Object Properties"));
+      surfaceRow.prepend(
+        workspaceStateControls(
+          { kind: "surface", objectUid: surface.uid },
+          surface.visible,
+          surface.locked,
+        ),
+      );
       const count = document.createElement("small");
       count.textContent = "SURF";
       surfaceRow.append(count);
@@ -4629,6 +4691,17 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         rendererRow.addEventListener("dblclick", () =>
           showReferenceDialog("Renderer Properties"),
         );
+        rendererRow.prepend(
+          workspaceStateControls(
+            {
+              kind: "surfaceRenderer",
+              objectUid: surface.uid,
+              rendererUid: renderer.uid,
+            },
+            renderer.visible,
+            renderer.locked,
+          ),
+        );
         sceneTree.append(rendererRow);
       }
     }
@@ -4652,6 +4725,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         },
       );
       mapRow.addEventListener("dblclick", () => showReferenceDialog("Object Properties"));
+      mapRow.prepend(
+        workspaceStateControls(
+          { kind: "densityMap", objectUid: map.uid },
+          map.visible,
+          map.locked,
+        ),
+      );
       const count = document.createElement("small");
       count.textContent = `${map.counts.join("×")} MAP`;
       mapRow.append(count);
@@ -4678,6 +4758,17 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         );
         rendererRow.addEventListener("dblclick", () =>
           showReferenceDialog("Renderer Properties"),
+        );
+        rendererRow.prepend(
+          workspaceStateControls(
+            {
+              kind: "densityRenderer",
+              objectUid: map.uid,
+              rendererUid: renderer.uid,
+            },
+            renderer.visible,
+            renderer.locked,
+          ),
         );
         sceneTree.append(rendererRow);
       }

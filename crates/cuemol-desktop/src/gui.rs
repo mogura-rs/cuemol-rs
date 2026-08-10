@@ -1401,6 +1401,14 @@ fn workspace_linked_text(source: &str, source_type: &str) -> String {
     }
 }
 
+fn workspace_lock_toggle(ui: &mut egui::Ui, locked: bool, enabled: bool) -> Option<bool> {
+    let label = if locked { "🔒" } else { "🔓" };
+    ui.add_enabled(enabled, egui::Button::new(label).frame(false))
+        .on_hover_text(if locked { "Unlock" } else { "Lock" })
+        .clicked()
+        .then_some(!locked)
+}
+
 fn strip_native_renderer_common_specific(
     specific: &mut std::collections::BTreeMap<String, String>,
 ) {
@@ -3157,12 +3165,31 @@ impl GuiApplication {
                         "{}  [{} atoms, {} bonds]",
                         object.name, object.atom_count, object.bond_count
                     );
-                    if ui.selectable_label(selected, label).clicked() {
-                        self.activate_workspace_scene(scene.uid, camera);
-                        self.selected_object = Some(object.uid);
-                        self.selected_renderer = None;
-                        self.workspace_aux_selection = None;
-                    }
+                    let mut visible = object.visible;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .checkbox(&mut visible, "")
+                            .on_hover_text("Visible")
+                            .changed()
+                        {
+                            self.set_workspace_object_visibility(
+                                NativePropertyObject::Molecule(object.uid),
+                                visible,
+                            );
+                        }
+                        if let Some(locked) = workspace_lock_toggle(ui, object.locked, true) {
+                            self.set_workspace_object_locked(
+                                NativePropertyObject::Molecule(object.uid),
+                                locked,
+                            );
+                        }
+                        if ui.selectable_label(selected, label).clicked() {
+                            self.activate_workspace_scene(scene.uid, camera);
+                            self.selected_object = Some(object.uid);
+                            self.selected_renderer = None;
+                            self.workspace_aux_selection = None;
+                        }
+                    });
                     ui.indent(format!("object-{}", object.uid.get()), |ui| {
                         let nodes =
                             native_renderer_tree_nodes(self.state.renderer_summaries(object.uid));
@@ -3208,6 +3235,12 @@ impl GuiApplication {
                         {
                             self.set_density_map_visibility(map.uid, visible);
                         }
+                        if let Some(locked) = workspace_lock_toggle(ui, map.locked, true) {
+                            self.set_workspace_object_locked(
+                                NativePropertyObject::DensityMap(map.uid),
+                                locked,
+                            );
+                        }
                         let label = format!("{} ({})", map.name, map.class_name);
                         if ui.selectable_label(selected, label).clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
@@ -3236,6 +3269,15 @@ impl GuiApplication {
                                         map.uid,
                                         renderer.uid,
                                         visible,
+                                    );
+                                }
+                                if let Some(locked) =
+                                    workspace_lock_toggle(ui, renderer.locked, true)
+                                {
+                                    self.set_workspace_renderer_locked(
+                                        NativePropertyObject::DensityMap(map.uid),
+                                        renderer.uid,
+                                        locked,
                                     );
                                 }
                                 let label =
@@ -3267,6 +3309,12 @@ impl GuiApplication {
                         {
                             self.set_surface_visibility(surface.uid, visible);
                         }
+                        if let Some(locked) = workspace_lock_toggle(ui, surface.locked, true) {
+                            self.set_workspace_object_locked(
+                                NativePropertyObject::Surface(surface.uid),
+                                locked,
+                            );
+                        }
                         let label = format!("{} ({})", surface.name, surface.class_name);
                         if ui.selectable_label(selected, label).clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
@@ -3295,6 +3343,15 @@ impl GuiApplication {
                                         surface.uid,
                                         renderer.uid,
                                         visible,
+                                    );
+                                }
+                                if let Some(locked) =
+                                    workspace_lock_toggle(ui, renderer.locked, true)
+                                {
+                                    self.set_workspace_renderer_locked(
+                                        NativePropertyObject::Surface(surface.uid),
+                                        renderer.uid,
+                                        locked,
                                     );
                                 }
                                 let label =
@@ -3545,6 +3602,13 @@ impl GuiApplication {
                 } else {
                     self.set_renderer_visibility(object_uid, renderer.uid, visible);
                 }
+            }
+            if let Some(locked) = workspace_lock_toggle(ui, renderer.locked, !is_group) {
+                self.set_workspace_renderer_locked(
+                    NativePropertyObject::Molecule(object_uid),
+                    renderer.uid,
+                    locked,
+                );
             }
             let label = if is_group {
                 format!("{} (group)", renderer.name)
@@ -11450,6 +11514,7 @@ impl GuiApplication {
         renderer_uid: cuemol_core::Uid,
         visible: bool,
     ) {
+        let scene_uid = self.state.scene_manager().scene_uid_for_object(object_uid);
         let undo = self.capture_undo();
         match self
             .state
@@ -11457,11 +11522,134 @@ impl GuiApplication {
         {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
+                if let Some(scene_uid) = scene_uid {
+                    self.modified_scenes.insert(scene_uid);
+                }
                 self.rebuild_snapshot();
                 self.set_status(format!("Renderer visibility: {visible}"));
             }
             Err(error) => self.set_error(error),
         }
+    }
+
+    fn workspace_owner_scene_uid(&self, owner: NativePropertyObject) -> Option<cuemol_core::Uid> {
+        match owner {
+            NativePropertyObject::Molecule(object_uid) => {
+                self.state.scene_manager().scene_uid_for_object(object_uid)
+            }
+            NativePropertyObject::DensityMap(map_uid) => self
+                .state
+                .density_map_summary(map_uid)
+                .map(|map| map.scene_uid),
+            NativePropertyObject::Surface(surface_uid) => self
+                .state
+                .surface_summary(surface_uid)
+                .map(|surface| surface.scene_uid),
+        }
+    }
+
+    fn finish_workspace_toggle(
+        &mut self,
+        undo: GuiUndoSnapshot,
+        scene_uid: Option<cuemol_core::Uid>,
+        result: Result<()>,
+        status: String,
+    ) {
+        match result {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                if let Some(scene_uid) = scene_uid {
+                    self.modified_scenes.insert(scene_uid);
+                }
+                self.rebuild_snapshot();
+                self.set_status(status);
+            }
+            Err(error) => {
+                self.state = undo.state;
+                self.set_error(error);
+            }
+        }
+    }
+
+    fn set_workspace_object_visibility(&mut self, owner: NativePropertyObject, visible: bool) {
+        let scene_uid = self.workspace_owner_scene_uid(owner);
+        let undo = self.capture_undo();
+        let result = match owner {
+            NativePropertyObject::Molecule(object_uid) => {
+                self.state.set_object_visible(object_uid, visible)
+            }
+            NativePropertyObject::DensityMap(map_uid) => {
+                self.state.set_density_map_visible(map_uid, visible)
+            }
+            NativePropertyObject::Surface(surface_uid) => {
+                self.state.set_surface_visible(surface_uid, visible)
+            }
+        };
+        self.finish_workspace_toggle(
+            undo,
+            scene_uid,
+            result,
+            format!("Object visibility: {visible}"),
+        );
+    }
+
+    fn set_workspace_object_locked(&mut self, owner: NativePropertyObject, locked: bool) {
+        let scene_uid = self.workspace_owner_scene_uid(owner);
+        let undo = self.capture_undo();
+        let result = match owner {
+            NativePropertyObject::Molecule(object_uid) => {
+                self.state.set_object_locked(object_uid, locked)
+            }
+            NativePropertyObject::DensityMap(map_uid) => {
+                self.state.set_density_map_locked(map_uid, locked)
+            }
+            NativePropertyObject::Surface(surface_uid) => {
+                self.state.set_surface_locked(surface_uid, locked)
+            }
+        };
+        self.finish_workspace_toggle(
+            undo,
+            scene_uid,
+            result,
+            if locked {
+                "Object locked".to_string()
+            } else {
+                "Object unlocked".to_string()
+            },
+        );
+    }
+
+    fn set_workspace_renderer_locked(
+        &mut self,
+        owner: NativePropertyObject,
+        renderer_uid: cuemol_core::Uid,
+        locked: bool,
+    ) {
+        let scene_uid = self.workspace_owner_scene_uid(owner);
+        let undo = self.capture_undo();
+        let result =
+            match owner {
+                NativePropertyObject::Molecule(object_uid) => {
+                    self.state
+                        .set_renderer_locked(object_uid, renderer_uid, locked)
+                }
+                NativePropertyObject::DensityMap(map_uid) => self
+                    .state
+                    .set_density_renderer_locked(map_uid, renderer_uid, locked),
+                NativePropertyObject::Surface(surface_uid) => self
+                    .state
+                    .set_surface_renderer_locked(surface_uid, renderer_uid, locked),
+            };
+        self.finish_workspace_toggle(
+            undo,
+            scene_uid,
+            result,
+            if locked {
+                "Renderer locked".to_string()
+            } else {
+                "Renderer unlocked".to_string()
+            },
+        );
     }
 
     fn set_renderer_group_visibility(
@@ -16814,6 +17002,38 @@ mod tests {
         );
         app.undo(&mut camera);
         assert_eq!(app.state.camera_summaries(scene_uid)[0].name, "camera_0");
+    }
+
+    #[test]
+    fn native_workspace_state_toggles_are_undoable() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let scene = app.state.scene_manager_mut().scene_mut(scene_uid).unwrap();
+        let object_uid = scene.add_molecule("mol", cuemol_molstr::MolCoord::new());
+        let renderer_uid = scene
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "simple");
+
+        app.set_workspace_object_visibility(NativePropertyObject::Molecule(object_uid), false);
+        app.set_workspace_object_locked(NativePropertyObject::Molecule(object_uid), true);
+        app.set_renderer_visibility(object_uid, renderer_uid, false);
+        app.set_workspace_renderer_locked(
+            NativePropertyObject::Molecule(object_uid),
+            renderer_uid,
+            true,
+        );
+        let object = &app.state.object_summaries(scene_uid)[0];
+        assert!(!object.visible);
+        assert!(object.locked);
+        let renderer = &app.state.renderer_summaries(object_uid)[0];
+        assert!(!renderer.visible);
+        assert!(renderer.locked);
+
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert!(!app.state.renderer_summaries(object_uid)[0].locked);
+        assert!(app.modified_scenes.contains(&scene_uid));
     }
 
     #[test]
