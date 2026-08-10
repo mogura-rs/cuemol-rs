@@ -1037,13 +1037,37 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("\"set_camera_visibility\""));
     assert!(JS.contains("\"clear_camera_visibility\""));
     assert!(JS.contains("Edit visibility flags"));
-    assert!(JS.contains("[\"Inc\", \"Obj/Rend\", \"Vis\"]"));
     assert!(JS.contains("label: \"Edit vis flags...\""));
     assert!(JS.contains("label: \"Clear vis flags\""));
     assert!(JS.contains("label: \"Save from view\""));
     assert!(JS.contains("label: \"Apply to view\""));
     assert!(JS.contains("camera.visibilityCount > 0"));
     assert!(CSS.contains(".visibility-flag-editor"));
+    assert!(CSS.contains("width: min(420px, calc(100vw - 48px))"));
+
+    let tauri_editor = JS
+        .split("async function showCameraVisibilityEditor(scene, camera)")
+        .nth(1)
+        .and_then(|source| source.split("function workspaceCameraContextItems").next())
+        .expect("Tauri camera visibility editor");
+    assert!(tauri_editor.contains("Edit visibility flags: ${camera.name}"));
+    assert!(tauri_editor.contains(r#"["Inc", "Object / Renderer", "Vis"]"#));
+    assert!(tauri_editor.contains("(no scene elements)"));
+    assert!(tauri_editor.contains("entry.isObject ? \"\" : \"(renderer)\""));
+    assert!(!tauri_editor.contains("button(\"Apply\""));
+    assert!(!tauri_editor.contains("entry.visible = false"));
+
+    let native_editor = NATIVE_GUI_RS
+        .split("fn camera_visibility_dialog(&mut self, ctx: &egui::Context)")
+        .nth(1)
+        .and_then(|source| source.split("fn camera_visibility_clear_dialog").next())
+        .expect("native camera visibility editor");
+    assert!(native_editor.contains("Edit visibility flags: {}"));
+    assert!(native_editor.contains("Object / Renderer"));
+    assert!(native_editor.contains("ui.weak(\"(renderer)\")"));
+    assert!(native_editor.contains("ui.weak(\"(no scene elements)\")"));
+    assert!(!native_editor.contains("ui.button(\"Apply\")"));
+    assert!(!native_editor.contains("entry.visible = false"));
 }
 
 #[test]

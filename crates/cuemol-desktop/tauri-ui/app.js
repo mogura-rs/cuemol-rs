@@ -6751,15 +6751,15 @@ async function showCameraVisibilityEditor(scene, camera) {
   }
 
   const draft = entries.map((entry) => ({ ...entry }));
-  dialogTitle.textContent = "Edit visibility flags";
+  dialogTitle.textContent = `Edit visibility flags: ${camera.name}`;
   dialogContent.replaceChildren();
   dialogFooter.hidden = false;
-  referenceDialog.className = "reference-dialog wide has-actions visibility-flag-dialog";
+  referenceDialog.className = "reference-dialog has-actions visibility-flag-dialog";
   const editor = document.createElement("div");
   editor.className = "visibility-flag-editor";
   const header = document.createElement("div");
   header.className = "visibility-flag-row visibility-flag-header";
-  for (const label of ["Inc", "Obj/Rend", "Vis"]) {
+  for (const label of ["Inc", "Object / Renderer", "Vis"]) {
     const cell = document.createElement("span");
     cell.textContent = label;
     header.append(cell);
@@ -6778,19 +6778,15 @@ async function showCameraVisibilityEditor(scene, camera) {
     const name = document.createElement("span");
     name.textContent = entry.name || entry.typeName;
     const type = document.createElement("small");
-    type.textContent = entry.typeName;
+    type.textContent = entry.isObject ? "" : "(renderer)";
     target.append(name, type);
     const visible = document.createElement("input");
     visible.type = "checkbox";
-    visible.checked = entry.included && entry.visible;
+    visible.checked = entry.visible;
     visible.disabled = !entry.included;
     visible.setAttribute("aria-label", `Visible ${entry.name}`);
     included.addEventListener("change", () => {
       entry.included = included.checked;
-      if (!entry.included) {
-        entry.visible = false;
-        visible.checked = false;
-      }
       visible.disabled = !entry.included;
     });
     visible.addEventListener("change", () => {
@@ -6799,10 +6795,10 @@ async function showCameraVisibilityEditor(scene, camera) {
     row.append(included, target, visible);
     editor.append(row);
   }
-  if (draft.length === 0) editor.append(dialogParagraph("No objects or renderers."));
+  if (draft.length === 0) editor.append(dialogParagraph("(no scene elements)"));
   dialogContent.append(editor);
 
-  const submit = async (closeAfter) => {
+  const submit = async () => {
     const changed = await mutateWithoutViewport(
       "set_camera_visibility",
       {
@@ -6824,12 +6820,11 @@ async function showCameraVisibilityEditor(scene, camera) {
     selectedCameraName = camera.name;
     workspaceSelectionKind = "camera";
     renderShell();
-    if (closeAfter) referenceDialog.close();
+    referenceDialog.close();
   };
   const cancel = button("Cancel", "", () => referenceDialog.close());
-  const apply = button("Apply", "", () => submit(false));
-  const ok = button("OK", "dialog-primary", () => submit(true));
-  dialogActions(cancel, apply, ok);
+  const ok = button("OK", "dialog-primary", submit);
+  dialogActions(cancel, ok);
   if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
 }
 

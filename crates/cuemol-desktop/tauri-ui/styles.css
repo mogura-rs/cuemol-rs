@@ -2312,12 +2312,12 @@ summary:focus-visible {
   margin-top: 12px;
 }
 
-.reference-dialog.visibility-flag-dialog .dialog-content {
-  min-height: 280px;
+.reference-dialog.visibility-flag-dialog {
+  width: min(420px, calc(100vw - 48px));
 }
 
 .visibility-flag-editor {
-  max-height: min(52vh, 460px);
+  max-height: min(52vh, 320px);
   overflow: auto;
   border: 1px solid #8f8f8f;
   background: #fff;

@@ -10880,14 +10880,13 @@ impl GuiApplication {
             return;
         };
         let mut open = true;
-        let mut apply = false;
         let mut accept = false;
         let mut cancel = false;
-        egui::Window::new("Edit visibility flags")
+        egui::Window::new(format!("Edit visibility flags: {}", draft.camera_name))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(520.0)
+            .default_width(420.0)
             .default_height(360.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
@@ -10899,21 +10898,19 @@ impl GuiApplication {
                             .spacing([12.0, 5.0])
                             .show(ui, |ui| {
                                 ui.strong("Inc");
-                                ui.strong("Obj/Rend");
+                                ui.strong("Object / Renderer");
                                 ui.strong("Vis");
                                 ui.end_row();
                                 for entry in &mut draft.entries {
-                                    let was_included = entry.included;
                                     ui.checkbox(&mut entry.included, "");
-                                    if was_included && !entry.included {
-                                        entry.visible = false;
-                                    }
                                     ui.horizontal(|ui| {
                                         if !entry.is_object {
                                             ui.add_space(18.0);
                                         }
                                         ui.label(&entry.name);
-                                        ui.weak(format!("({})", entry.type_name));
+                                        if !entry.is_object {
+                                            ui.weak("(renderer)");
+                                        }
                                     });
                                     ui.add_enabled_ui(entry.included, |ui| {
                                         ui.checkbox(&mut entry.visible, "");
@@ -10921,21 +10918,21 @@ impl GuiApplication {
                                     ui.end_row();
                                 }
                             });
+                        if draft.entries.is_empty() {
+                            ui.weak("(no scene elements)");
+                        }
                     });
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("OK").clicked() {
                         accept = true;
                     }
-                    if ui.button("Apply").clicked() {
-                        apply = true;
-                    }
                     if ui.button("Cancel").clicked() {
                         cancel = true;
                     }
                 });
             });
-        if accept || apply {
+        if accept {
             let undo = self.capture_undo();
             let settings = draft
                 .entries
@@ -10955,9 +10952,6 @@ impl GuiApplication {
                         "Change visflags of {}: {count} item(s)",
                         draft.camera_name
                     ));
-                    if !accept {
-                        self.camera_visibility_draft = Some(draft);
-                    }
                 }
                 Err(error) => {
                     self.set_status(format!("Camera visibility error: {error}"));
