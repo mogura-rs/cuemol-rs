@@ -1663,7 +1663,8 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Object properties updated".to_string();
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn set_density_map_properties(
@@ -1683,7 +1684,8 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Density map properties updated".to_string();
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn set_density_renderer_visible(
@@ -1696,7 +1698,8 @@ impl AppModel {
             .set_density_renderer_visible(Uid::new(map_uid), Uid::new(renderer_uid), visible)
             .map_err(|error| error.to_string())?;
         self.status = "Density renderer visibility updated".to_string();
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn add_density_renderer(&mut self, map_uid: u64, renderer_type: &str) -> Result<(), String> {
@@ -1704,7 +1707,8 @@ impl AppModel {
             .add_density_renderer(Uid::new(map_uid), renderer_type)
             .map_err(|error| error.to_string())?;
         self.status = format!("Added {renderer_type} renderer");
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn set_density_renderer_properties(
@@ -1809,7 +1813,8 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Density renderer properties updated".to_string();
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn set_surface_properties(&mut self, properties: ObjectPropertiesInput) -> Result<(), String> {
@@ -1826,7 +1831,8 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Surface properties updated".to_string();
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn set_surface_renderer_visible(
@@ -1839,7 +1845,8 @@ impl AppModel {
             .set_surface_renderer_visible(Uid::new(surface_uid), Uid::new(renderer_uid), visible)
             .map_err(|error| error.to_string())?;
         self.status = "Surface renderer visibility updated".to_string();
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn add_surface_renderer(&mut self, surface_uid: u64) -> Result<(), String> {
@@ -1847,7 +1854,8 @@ impl AppModel {
             .add_surface_renderer(Uid::new(surface_uid))
             .map_err(|error| error.to_string())?;
         self.status = "Added molsurf renderer".to_string();
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn delete_workspace_item(&mut self, target: WorkspaceDeleteInput) -> Result<(), String> {
@@ -1991,7 +1999,8 @@ impl AppModel {
             }
             kind => return Err(format!("unsupported Workspace item type: {kind}")),
         }
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn fit_workspace_item(
@@ -2087,7 +2096,8 @@ impl AppModel {
         }
 
         self.status = "Change mol selection".to_string();
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn set_surface_renderer_properties(
@@ -2181,7 +2191,8 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Surface renderer properties updated".to_string();
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn set_renderer_properties(
@@ -3192,7 +3203,8 @@ impl AppModel {
             set_property(&key, value, is_default)?;
         }
         self.status = "Renderer properties updated".to_string();
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn apply_stored_preferences(&mut self) {
@@ -3340,7 +3352,8 @@ impl AppModel {
             self.sync_active_scene_properties();
         }
         self.status = "Scene properties updated".to_string();
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn view_properties(&self) -> ViewPropertiesDto {
@@ -3480,6 +3493,12 @@ impl AppModel {
         Ok(())
     }
 
+    fn invalidate_mesh(&mut self, refit: bool) {
+        self.mesh = None;
+        self.screen_lines.clear();
+        self.mesh_refit_pending |= refit;
+    }
+
     fn prepare_mesh_if_needed(&mut self) -> Result<(), String> {
         if self.mesh.is_none() {
             self.rebuild_mesh(self.mesh_refit_pending)?;
@@ -3504,9 +3523,7 @@ impl AppModel {
         } else {
             format!("Loaded {loaded}; failed: {}", failures.join("; "))
         };
-        if let Err(error) = self.rebuild_mesh(true) {
-            self.status = format!("{}; render state failed: {error}", self.status);
-        }
+        self.invalidate_mesh(true);
         if loaded == 0 {
             return Err(self.status.clone());
         }
@@ -3518,7 +3535,8 @@ impl AppModel {
             .apply_trajectory_frame(Uid::new(object_uid), frame)
             .map_err(|error| error.to_string())?;
         self.status = format!("Trajectory frame: {frame}");
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn render_mesh_rgba(
@@ -3916,7 +3934,8 @@ impl AppModel {
             "Selected atom {} {}{}:{}",
             atom.serial, atom.residue_name, atom.residue_id, atom.name
         );
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn select_screen_rect(
@@ -3965,7 +3984,8 @@ impl AppModel {
             )
         };
         self.status = format!("Rectangle selected {} atom(s)", serials.len());
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn animation_duration(&self) -> f64 {
@@ -4039,7 +4059,7 @@ impl AppModel {
             }
         }
         if rebuild {
-            self.rebuild_mesh(false)?;
+            self.invalidate_mesh(false);
         }
         if reaches_end {
             self.animation_playing = false;
@@ -4107,7 +4127,8 @@ impl AppModel {
         self.modified_scenes = snapshot.modified_scenes;
         self.animation_playing = false;
         self.animation_start_camera = None;
-        self.rebuild_mesh(false)
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn undo(&mut self, depth: usize) -> Result<(), String> {
@@ -5513,7 +5534,7 @@ fn handle_model_request(
             height,
         } => {
             apply_open_paths(model, paths)?;
-            let viewport = model.render(width, height);
+            let viewport = model.viewport_metadata(width, height);
             Ok(ModelResponse::MolStructUpdate(Box::new(
                 MolStructUpdateDto {
                     snapshot: model.snapshot(),
@@ -5541,7 +5562,7 @@ fn handle_model_request(
                 model.modified_scenes.remove(&scene_uid);
             }
             model.sync_active_scene_properties();
-            model.rebuild_mesh(true)?;
+            model.invalidate_mesh(true);
             model.status = format!("Scene file: [{}] is reloaded.", path.display());
             model.log_lines.push(model.status.clone());
             model.touch_structure_details();
@@ -5565,10 +5586,10 @@ fn handle_model_request(
             result?;
             model.selection.clear();
             model.status = format!("Opened PDB {}", pdb_id.trim().to_ascii_uppercase());
-            model.rebuild_mesh(true)?;
+            model.invalidate_mesh(true);
             model.push_undo(undo);
             model.touch_structure_details();
-            let viewport = model.render(width, height);
+            let viewport = model.viewport_metadata(width, height);
             Ok(ModelResponse::MolStructUpdate(Box::new(
                 MolStructUpdateDto {
                     snapshot: model.snapshot(),
@@ -5599,7 +5620,7 @@ fn handle_model_request(
                 "Loaded trajectory {}: {} frame(s)",
                 summary.object_name, summary.frame_count
             );
-            model.rebuild_mesh(true)?;
+            model.invalidate_mesh(true);
             model.push_undo(undo);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -5639,7 +5660,7 @@ fn handle_model_request(
                 summary.frame_count,
                 summary.blocks.len()
             );
-            model.rebuild_mesh(false)?;
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -5653,7 +5674,7 @@ fn handle_model_request(
                 "Removed trajectory block: {} block(s) remaining",
                 summary.blocks.len()
             );
-            model.rebuild_mesh(false)?;
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -5668,7 +5689,7 @@ fn handle_model_request(
                 .move_trajectory_block(Uid::new(object_uid), from, to)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Moved trajectory block: {} → {}", from + 1, to + 1);
-            model.rebuild_mesh(false)?;
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -5681,7 +5702,7 @@ fn handle_model_request(
             model.selection.clear();
             model.sync_active_scene_properties();
             model.status = "New scene".to_string();
-            model.rebuild_mesh(true)?;
+            model.invalidate_mesh(true);
             model.push_undo(undo);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -5693,7 +5714,7 @@ fn handle_model_request(
             model.selection.clear();
             model.sync_active_scene_properties();
             model.status = format!("Activated scene {scene_uid}");
-            model.rebuild_mesh(true)?;
+            model.invalidate_mesh(true);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -5707,7 +5728,7 @@ fn handle_model_request(
             model.selection.clear();
             model.sync_active_scene_properties();
             model.status = "Scene closed".to_string();
-            model.rebuild_mesh(true)?;
+            model.invalidate_mesh(true);
             model.push_undo(undo);
             if let Some(scene_uid) = model.desktop.active_scene() {
                 model.modified_scenes.remove(&scene_uid);
@@ -5716,12 +5737,12 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetSelection(selection) => {
-            let previous = std::mem::replace(&mut model.selection, selection.trim().to_string());
-            if let Err(error) = model.rebuild_mesh(false) {
-                model.selection = previous;
-                model.rebuild_mesh(false)?;
-                return Err(error);
+            let selection = selection.trim();
+            if !selection.is_empty() {
+                cuemol_molstr::parse_selector(selection).map_err(|error| error.to_string())?;
             }
+            model.selection = selection.to_string();
+            model.invalidate_mesh(false);
             model.status = if model.selection.is_empty() {
                 "Selection cleared".to_string()
             } else {
@@ -5762,7 +5783,7 @@ fn handle_model_request(
             } else {
                 "Renderer hidden".to_string()
             };
-            model.rebuild_mesh(false)?;
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -5787,7 +5808,7 @@ fn handle_model_request(
                 )
                 .map_err(|error| error.to_string())?;
             model.status = format!("Added {renderer_type} renderer");
-            model.rebuild_mesh(false)?;
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -5818,7 +5839,7 @@ fn handle_model_request(
                 .set_object_coloring(Uid::new(object_uid), coloring_type, attrs)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Applied {coloring} coloring");
-            model.rebuild_mesh(false)?;
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -5953,7 +5974,7 @@ fn handle_model_request(
             model.status = format!("Deleted {count} atom(s)");
             if count > 0 {
                 model.selection.clear();
-                model.rebuild_mesh(true)?;
+                model.invalidate_mesh(true);
                 model.push_undo(undo);
                 model.touch_structure_details();
             }
@@ -5975,7 +5996,7 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.status = format!("Changed chain ID for {count} atom(s)");
             if count > 0 {
-                model.rebuild_mesh(false)?;
+                model.invalidate_mesh(false);
                 model.push_undo(undo);
                 model.touch_structure_details();
             }
@@ -5997,7 +6018,7 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.status = format!("Renumbered residues for {count} atom(s)");
             if count > 0 {
-                model.rebuild_mesh(false)?;
+                model.invalidate_mesh(false);
                 model.push_undo(undo);
                 model.touch_structure_details();
             }
@@ -6023,7 +6044,7 @@ fn handle_model_request(
                 "{} {count} atom(s) into the target molecule",
                 if copy { "Copied" } else { "Moved" }
             );
-            model.rebuild_mesh(true)?;
+            model.invalidate_mesh(true);
             model.push_undo(undo);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -6053,7 +6074,7 @@ fn handle_model_request(
                 )
                 .map_err(|error| error.to_string())?;
             model.status = "Molecular superposition applied".to_string();
-            model.rebuild_mesh(auto_recenter)?;
+            model.invalidate_mesh(auto_recenter);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -6088,7 +6109,7 @@ fn handle_model_request(
             }
             .to_string();
             if changed {
-                model.rebuild_mesh(false)?;
+                model.invalidate_mesh(false);
                 model.push_undo(undo);
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -6132,7 +6153,7 @@ fn handle_model_request(
                 .assign_secondary_structure_in_object(Uid::new(object_uid), ignore_bulge, angle)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Secondary structure assigned for {count} atom(s)");
-            model.rebuild_mesh(false)?;
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -6284,7 +6305,7 @@ fn handle_model_request(
                 "Morph frame {:.2} applied to {} atom(s)",
                 frame, summary.atom_count
             );
-            model.rebuild_mesh(false)?;
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -6307,7 +6328,7 @@ fn handle_model_request(
                 _ => return Err(format!("unsupported display option: {option}")),
             }
             model.status = format!("{option}: {}", if value { "shown" } else { "hidden" });
-            model.rebuild_mesh(false)?;
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -6318,7 +6339,7 @@ fn handle_model_request(
             let undo = model.capture_undo();
             model.density_level = level.clamp(0.1, 10.0);
             model.status = format!("Density level: {:.2} σ", model.density_level);
-            model.rebuild_mesh(false)?;
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -6504,7 +6525,7 @@ fn handle_model_request(
             if let Some(selection) = selection {
                 model.selection = selection;
             }
-            model.rebuild_mesh(false)?;
+            model.invalidate_mesh(false);
             model.status = "Script executed".to_string();
             model.push_undo(undo);
             model.touch_structure_details();
@@ -8519,6 +8540,37 @@ mod tests {
     }
 
     #[test]
+    fn open_paths_returns_before_gpu_frame_encoding() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-deferred-open-{}.pdb", std::process::id()));
+        fs::write(
+            &path,
+            b"ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let mut model = model_without_gpu();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::OpenPathsViewport {
+                paths: vec![path.to_string_lossy().into_owned()],
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        let ModelResponse::MolStructUpdate(update) = response else {
+            panic!("expected molecule update");
+        };
+        assert_eq!(update.snapshot.objects.len(), 1);
+        assert!(update.viewport.image.is_none());
+        assert!(model.mesh.is_none());
+        assert!(model.mesh_refit_pending);
+        assert_eq!(update.viewport.width, 800);
+        assert_eq!(update.viewport.height, 600);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn selection_refresh_reuses_the_cached_molecule_hierarchy() {
         let mut model = model_without_gpu();
         let before = model.snapshot();
@@ -8692,6 +8744,8 @@ mod tests {
     #[test]
     fn workspace_object_and_renderer_properties_are_undoable_and_persisted() {
         let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        model.prepare_mesh_if_needed().unwrap();
+        assert!(model.mesh.is_some());
         handle_model_request(
             &mut model,
             ModelRequest::SetObjectProperties(ObjectPropertiesInput {
@@ -8706,6 +8760,8 @@ mod tests {
         assert_eq!(object.name(), "renamed molecule");
         assert!(!object.is_visible());
         assert!(object.is_ui_locked());
+        assert!(model.mesh.is_none());
+        model.prepare_mesh_if_needed().unwrap();
 
         let response = handle_model_request(
             &mut model,
@@ -8746,6 +8802,7 @@ mod tests {
         assert_eq!(renderer.edge_color, "#123456");
         assert_eq!(renderer.line_width, 2.4);
         assert_eq!(snapshot.undo_descriptions.len(), 2);
+        assert!(model.mesh.is_none());
 
         model.undo(0).unwrap();
         let renderer = model

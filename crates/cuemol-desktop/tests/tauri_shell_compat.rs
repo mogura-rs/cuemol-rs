@@ -249,6 +249,8 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(JS.contains("mutateWithViewport(\"open_paths\""));
     assert!(JS.contains("mutateWithViewport(\"open_pdb\""));
     assert!(JS.contains("applyViewport(update.viewport, sequence)"));
+    assert!(JS.contains("if (!update.viewport.image && snapshotHasRenderableContent())"));
+    assert!(JS.contains("if (snapshotHasRenderableContent()) scheduleRender(0)"));
     assert!(JS.contains("if (chainNode.dataset.loaded) return"));
     assert!(JS.contains("if (residueNode.dataset.loaded) return"));
     assert!(JS.contains("if (chainNode.open) loadResidues()"));
@@ -267,6 +269,8 @@ fn tauri_viewport_render_requests_are_coalesced() {
     assert!(JS.contains("do {"));
     assert!(JS.contains("} while (viewportRenderQueued)"));
     assert!(JS.contains("await viewportRenderRequest"));
+    assert!(JS.contains("if (refreshViewport) scheduleRender(0);"));
+    assert!(!JS.contains("if (refreshViewport) await renderViewport();"));
 }
 
 #[test]

@@ -6560,7 +6560,7 @@ async function mutate(command, args = {}, render = renderShell, refreshViewport 
     snapshot = await invoke(command, args);
     syncEmptyMoleculeDetails();
     render();
-    if (refreshViewport) await renderViewport();
+    if (refreshViewport) scheduleRender(0);
     scheduleMoleculeDetailsRefresh();
     return true;
   } catch (error) {
@@ -6589,6 +6589,7 @@ async function mutateWithViewport(command, args = {}, render = renderShell) {
     syncEmptyMoleculeDetails();
     render();
     applyViewport(update.viewport, sequence);
+    if (!update.viewport.image && snapshotHasRenderableContent()) scheduleRender(0);
     scheduleMoleculeDetailsRefresh();
     return true;
   } catch (error) {
@@ -6597,6 +6598,13 @@ async function mutateWithViewport(command, args = {}, render = renderShell) {
   } finally {
     setBusy(false);
   }
+}
+
+function snapshotHasRenderableContent() {
+  return Boolean(
+    snapshot &&
+      (snapshot.objects.length || snapshot.densityMaps.length || snapshot.surfaces.length),
+  );
 }
 
 async function cameraCommand(action, x = 0, y = 0) {
@@ -7418,13 +7426,7 @@ async function start() {
     syncEmptyMoleculeDetails();
     renderShell();
     applyViewport(initial.viewport, sequence);
-    if (
-      initial.snapshot.objects.length ||
-      initial.snapshot.densityMaps.length ||
-      initial.snapshot.surfaces.length
-    ) {
-      scheduleRender(0);
-    }
+    if (snapshotHasRenderableContent()) scheduleRender(0);
     scheduleMoleculeDetailsRefresh();
     new ResizeObserver(() => {
       const size = viewportDimensions();
