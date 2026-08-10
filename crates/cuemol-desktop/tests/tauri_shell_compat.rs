@@ -641,6 +641,24 @@ fn style_set_editor_uses_live_structured_tabs() {
 }
 
 #[test]
+fn error_alert_requires_explicit_acknowledgement() {
+    for id in [
+        "id=\"error-alert-dialog\"",
+        "id=\"error-alert-title\"",
+        "id=\"error-alert-message\"",
+    ] {
+        assert!(HTML.contains(id), "missing error alert element {id}");
+    }
+    assert!(HTML.contains("<button type=\"submit\" autofocus>OK</button>"));
+    assert!(JS.contains("errorAlertDialog.showModal()"));
+    assert!(JS.contains("errorAlertMessage.textContent = message"));
+    assert!(!JS.contains("toastTimer"));
+    assert!(CSS.contains(".reference-dialog.error-alert-dialog"));
+    assert!(NATIVE_GUI_RS.contains("fn error_alert_dialog"));
+    assert!(NATIVE_GUI_RS.contains("self.error_alert = Some(message.clone())"));
+}
+
+#[test]
 fn png_export_matches_the_reference_options_dialog() {
     for label in [
         "PNG options",

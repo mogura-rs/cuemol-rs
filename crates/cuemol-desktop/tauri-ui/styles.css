@@ -1990,31 +1990,6 @@ summary:focus-visible {
   font-size: 9px;
 }
 
-.toast {
-  position: fixed;
-  right: 14px;
-  bottom: 35px;
-  z-index: 100;
-  max-width: min(460px, calc(100vw - 28px));
-  padding: 8px 11px;
-  border: 1px solid #8c3b3b;
-  border-radius: 3px;
-  background: #fff2f2;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
-  color: #8b1111;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(8px);
-  transition:
-    opacity 120ms ease,
-    transform 120ms ease;
-}
-
-.toast.show {
-  opacity: 1;
-  transform: translateY(0);
-}
-
 .reference-dialog {
   width: min(520px, calc(100vw - 48px));
   min-height: 180px;
@@ -2065,6 +2040,14 @@ summary:focus-visible {
 
 .reference-dialog.style-set-editor-dialog {
   width: min(500px, calc(100vw - 48px));
+}
+
+.reference-dialog.error-alert-dialog {
+  width: min(420px, calc(100vw - 48px));
+}
+
+.error-alert-dialog .dialog-content {
+  white-space: pre-wrap;
 }
 
 .style-set-editor-tabs {

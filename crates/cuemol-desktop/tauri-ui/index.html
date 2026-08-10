@@ -568,7 +568,16 @@
         <span id="scene-metrics">0 scenes / 0 objects</span>
       </footer>
     </div>
-    <div id="toast" class="toast" role="alert"></div>
+    <dialog id="error-alert-dialog" class="reference-dialog error-alert-dialog">
+      <form method="dialog">
+        <header>
+          <strong id="error-alert-title">Error</strong>
+          <button type="submit" aria-label="Close">×</button>
+        </header>
+        <div id="error-alert-message" class="dialog-content" role="alert"></div>
+        <footer><button type="submit" autofocus>OK</button></footer>
+      </form>
+    </dialog>
     <dialog id="reference-dialog" class="reference-dialog">
       <form method="dialog">
         <header>

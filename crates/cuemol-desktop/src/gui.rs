@@ -804,6 +804,7 @@ struct GuiApplication {
     reload_scene_draft: Option<NativeReloadSceneDraft>,
     atom_intr_edit_draft: Option<NativeAtomIntrEditDraft>,
     renderer_setup_draft: Option<NativeRendererSetupDraft>,
+    error_alert: Option<String>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
@@ -2788,6 +2789,7 @@ impl GuiApplication {
             reload_scene_draft: None,
             atom_intr_edit_draft: None,
             renderer_setup_draft: None,
+            error_alert: None,
             pdb_download_receiver: None,
             url_download_receiver: None,
             script_path: "script.js".to_string(),
@@ -10748,6 +10750,30 @@ impl GuiApplication {
         self.renderer_setup_dialog(ctx, camera);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
+        self.error_alert_dialog(ctx);
+    }
+
+    fn error_alert_dialog(&mut self, ctx: &egui::Context) {
+        let Some(message) = self.error_alert.as_ref() else {
+            return;
+        };
+        let mut close = false;
+        egui::Window::new("Error")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.label(message);
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("OK").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if close {
+            self.error_alert = None;
+        }
     }
 
     fn camera_visibility_dialog(&mut self, ctx: &egui::Context) {
@@ -18895,7 +18921,9 @@ impl GuiApplication {
     }
 
     fn set_error(&mut self, error: CueMolError) {
-        self.set_status(format!("Error: {error}"));
+        let message = error.to_string();
+        self.error_alert = Some(message.clone());
+        self.set_status(format!("Error: {message}"));
     }
 }
 
@@ -22977,6 +23005,17 @@ mod tests {
         assert!(app.left_panel_visible.iter().all(|visible| *visible));
         assert!(app.reset_left_panel_layout);
         assert!(!app.show_inspector);
+    }
+
+    #[test]
+    fn native_errors_remain_visible_until_acknowledged() {
+        let mut app = GuiApplication::new();
+        app.set_error(CueMolError::invalid_argument("invalid selection"));
+        assert_eq!(
+            app.error_alert.as_deref(),
+            Some("invalid argument: invalid selection")
+        );
+        assert_eq!(app.status, "Error: invalid argument: invalid selection");
     }
 
     #[test]

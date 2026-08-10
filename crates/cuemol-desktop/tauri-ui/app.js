@@ -31,7 +31,9 @@ const inspectorTitle = document.getElementById("inspector-title");
 const objectStats = document.getElementById("object-stats");
 const renderSize = document.getElementById("render-size");
 const dragReadout = document.getElementById("drag-readout");
-const toast = document.getElementById("toast");
+const errorAlertDialog = document.getElementById("error-alert-dialog");
+const errorAlertTitle = document.getElementById("error-alert-title");
+const errorAlertMessage = document.getElementById("error-alert-message");
 const measureReadout = document.getElementById("measure-readout");
 const molstructObject = document.getElementById("molstruct-object");
 const molstructTree = document.getElementById("molstruct-tree");
@@ -180,7 +182,6 @@ const cameraQueue = [];
 let renderedViewportSize = "";
 let wheelTimer = null;
 let wheelPending = null;
-let toastTimer = null;
 let requestSequence = 0;
 let drag = null;
 let statusTrail = [];
@@ -432,12 +433,13 @@ function setBusy(value) {
   appShell.classList.toggle("busy", value);
 }
 
-function showError(error) {
+function showError(error, title = "Error") {
   const message = typeof error === "string" ? error : error?.message || String(error);
-  toast.textContent = message;
-  toast.classList.add("show");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.remove("show"), 4200);
+  errorAlertTitle.textContent = title;
+  errorAlertMessage.textContent = message;
+  if (!errorAlertDialog.open && errorAlertDialog.showModal) {
+    errorAlertDialog.showModal();
+  }
 }
 
 function recordStatus(message) {
