@@ -896,9 +896,11 @@ enum InteractionMode {
 enum NativeFileDialog {
     OpenObject,
     OpenScene,
+    OpenCamera,
     SaveObject,
     SaveScene,
     SaveView,
+    SaveCamera,
     ExportScene,
     OpenScript,
     SaveLog,
@@ -3691,6 +3693,16 @@ impl GuiApplication {
                         self.paste_workspace_camera_clipboard(scene.uid);
                         ui.close();
                     }
+                    ui.separator();
+                    ui.menu_button("Camera file", |ui| {
+                        if ui.button("Load ...").clicked() {
+                            self.choose_load_workspace_camera_file(scene.uid, camera);
+                            ui.close();
+                        }
+                        ui.add_enabled(false, egui::Button::new("Reload"));
+                        ui.add_enabled(false, egui::Button::new("Save"));
+                        ui.add_enabled(false, egui::Button::new("Save as..."));
+                    });
                 });
                 ui.indent(format!("camera-root-{}", scene.uid.get()), |ui| {
                     for (camera_index, summary) in cameras.iter().enumerate() {
@@ -3740,6 +3752,31 @@ impl GuiApplication {
                                 self.paste_workspace_camera_clipboard(scene.uid);
                                 ui.close();
                             }
+                            ui.separator();
+                            ui.menu_button("Camera file", |ui| {
+                                if ui.button("Load ...").clicked() {
+                                    self.choose_load_workspace_camera_file(scene.uid, camera);
+                                    ui.close();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        !summary.source.is_empty(),
+                                        egui::Button::new("Reload"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.reload_workspace_camera_file(selection);
+                                    ui.close();
+                                }
+                                if ui.button("Save").clicked() {
+                                    self.choose_save_workspace_camera_file(selection, false);
+                                    ui.close();
+                                }
+                                if ui.button("Save as...").clicked() {
+                                    self.choose_save_workspace_camera_file(selection, true);
+                                    ui.close();
+                                }
+                            });
                             ui.separator();
                             if ui.button("Save from view").clicked() {
                                 self.save_workspace_camera_from_view(selection, camera);
@@ -11863,6 +11900,106 @@ impl GuiApplication {
         }
     }
 
+    fn choose_load_workspace_camera_file(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        camera: &mut CameraController,
+    ) {
+        if self.state.active_scene() != Some(scene_uid) {
+            self.activate_workspace_scene(scene_uid, camera);
+        }
+        if let Some(path) = native_file_dialog(NativeFileDialog::OpenCamera, "") {
+            self.load_workspace_camera_file(scene_uid, &path, camera);
+        }
+    }
+
+    fn load_workspace_camera_file(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        path: &Path,
+        camera: &mut CameraController,
+    ) {
+        let undo = self.capture_undo();
+        match self.state.load_scene_camera_file(scene_uid, path) {
+            Ok(name) => match self.state.load_scene_camera(scene_uid, &name, true) {
+                Ok(saved) => {
+                    *camera = CameraController::from_qsys_camera(&saved);
+                    self.push_undo_snapshot(undo);
+                    self.modified_scenes.insert(scene_uid);
+                    self.rebuild_snapshot();
+                    let camera_index = self
+                        .state
+                        .camera_summaries(scene_uid)
+                        .iter()
+                        .position(|summary| summary.name == name)
+                        .expect("the loaded camera was just inserted");
+                    self.selected_object = None;
+                    self.selected_renderer = None;
+                    self.workspace_aux_selection = Some(WorkspaceAuxSelection::Camera {
+                        scene_uid,
+                        camera_index,
+                    });
+                    self.set_status(format!("Load camera file {name}"));
+                }
+                Err(error) => self.set_status(format!("Camera load error: {error}")),
+            },
+            Err(error) => self.set_status(format!("Camera file error: {error}")),
+        }
+    }
+
+    fn reload_workspace_camera_file(&mut self, selection: WorkspaceAuxSelection) {
+        let Some(summary) = self.camera_summary_for_selection(selection) else {
+            self.set_status("Camera not found");
+            return;
+        };
+        let undo = self.capture_undo();
+        match self
+            .state
+            .reload_scene_camera_file(summary.scene_uid, &summary.name)
+        {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(summary.scene_uid);
+                self.set_status(format!("Reload camera file {}", summary.name));
+            }
+            Err(error) => self.set_status(format!("Camera file error: {error}")),
+        }
+    }
+
+    fn choose_save_workspace_camera_file(
+        &mut self,
+        selection: WorkspaceAuxSelection,
+        save_as: bool,
+    ) {
+        let Some(summary) = self.camera_summary_for_selection(selection) else {
+            self.set_status("Camera not found");
+            return;
+        };
+        let path = if !save_as && !summary.source.is_empty() {
+            Some(PathBuf::from(&summary.source))
+        } else {
+            native_file_dialog(
+                NativeFileDialog::SaveCamera,
+                &format!("{}.cam", summary.name),
+            )
+        };
+        let Some(path) = path else {
+            return;
+        };
+        let undo = self.capture_undo();
+        match self
+            .state
+            .save_scene_camera_file(summary.scene_uid, &summary.name, &path)
+        {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(summary.scene_uid);
+                self.set_status(format!("Save camera file {}", summary.name));
+            }
+            Err(error) => self.set_status(format!("Camera file error: {error}")),
+        }
+    }
+
     fn copy_workspace_camera_to_clipboard(&mut self, scene_uid: cuemol_core::Uid, name: &str) {
         match self.state.copy_workspace_camera(scene_uid, name) {
             Ok(clipboard) => {
@@ -15991,6 +16128,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             default_extension: None,
             save: false,
         },
+        NativeFileDialog::OpenCamera => NativeFileDialogSpec {
+            title: "Load camera from file",
+            filters: VIEW_SAVE_FILTERS,
+            default_extension: None,
+            save: false,
+        },
         NativeFileDialog::SaveObject => NativeFileDialogSpec {
             title: "Save File As",
             filters: OBJECT_SAVE_FILTERS,
@@ -16004,6 +16147,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             save: true,
         },
         NativeFileDialog::SaveView => NativeFileDialogSpec {
+            title: "Save camera to file",
+            filters: VIEW_SAVE_FILTERS,
+            default_extension: Some("cam"),
+            save: true,
+        },
+        NativeFileDialog::SaveCamera => NativeFileDialogSpec {
             title: "Save camera to file",
             filters: VIEW_SAVE_FILTERS,
             default_extension: Some("cam"),
@@ -18291,6 +18440,12 @@ mod tests {
             apply_default_extension(PathBuf::from("scene.qsl"), save_scene),
             PathBuf::from("scene.qsl")
         );
+        let open_camera = native_file_dialog_spec(NativeFileDialog::OpenCamera);
+        assert!(!open_camera.save);
+        assert_eq!(open_camera.filters[0].extensions, &["cam"]);
+        let save_camera = native_file_dialog_spec(NativeFileDialog::SaveCamera);
+        assert!(save_camera.save);
+        assert_eq!(save_camera.default_extension, Some("cam"));
 
         assert_eq!(
             MainShortcutCommand::OpenFile.shortcut(),

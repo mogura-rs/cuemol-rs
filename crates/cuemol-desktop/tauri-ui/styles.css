@@ -170,6 +170,10 @@ summary:focus-visible {
   box-shadow: 0 5px 14px rgba(0, 0, 0, 0.3);
 }
 
+.workspace-context-menu.has-submenu {
+  overflow: visible;
+}
+
 .menu-popup button,
 .workspace-context-menu button {
   position: relative;

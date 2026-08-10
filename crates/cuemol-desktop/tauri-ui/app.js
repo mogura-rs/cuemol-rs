@@ -4567,31 +4567,97 @@ function showWorkspaceContextMenu(event, items) {
   const menu = document.createElement("div");
   menu.className = "workspace-context-menu";
   menu.setAttribute("role", "menu");
-  for (const item of items) {
-    if (!item) {
-      const separator = document.createElement("span");
-      separator.className = "menu-separator";
-      menu.append(separator);
-      continue;
+  const appendItems = (container, menuItems) => {
+    for (const item of menuItems) {
+      if (!item) {
+        const separator = document.createElement("span");
+        separator.className = "menu-separator";
+        container.append(separator);
+        continue;
+      }
+      if (item.children) {
+        menu.classList.add("has-submenu");
+        const submenu = document.createElement("span");
+        submenu.className = "menu-submenu";
+        const trigger = button(item.label, "menu-submenu-trigger", () => {});
+        trigger.disabled = Boolean(item.disabled);
+        trigger.setAttribute("aria-haspopup", "menu");
+        const arrow = document.createElement("span");
+        arrow.className = "menu-arrow";
+        arrow.textContent = "›";
+        trigger.append(arrow);
+        const nested = document.createElement("div");
+        nested.className = "menu-popup nested-menu";
+        nested.setAttribute("role", "menu");
+        appendItems(nested, item.children);
+        submenu.append(trigger, nested);
+        container.append(submenu);
+        continue;
+      }
+      const entry = button(item.label, "", async () => {
+        closeWorkspaceContextMenu();
+        await item.action?.();
+      });
+      entry.disabled = Boolean(item.disabled);
+      if (typeof item.checked === "boolean") {
+        entry.classList.toggle("checked", item.checked);
+        entry.setAttribute("role", "menuitemcheckbox");
+        entry.setAttribute("aria-checked", String(item.checked));
+      } else {
+        entry.setAttribute("role", "menuitem");
+      }
+      container.append(entry);
     }
-    const entry = button(item.label, "", async () => {
-      closeWorkspaceContextMenu();
-      await item.action?.();
-    });
-    entry.disabled = Boolean(item.disabled);
-    if (typeof item.checked === "boolean") {
-      entry.classList.toggle("checked", item.checked);
-      entry.setAttribute("role", "menuitemcheckbox");
-      entry.setAttribute("aria-checked", String(item.checked));
-    } else {
-      entry.setAttribute("role", "menuitem");
-    }
-    menu.append(entry);
-  }
+  };
+  appendItems(menu, items);
   document.body.append(menu);
   const bounds = menu.getBoundingClientRect();
   menu.style.left = `${Math.max(4, Math.min(event.clientX, innerWidth - bounds.width - 4))}px`;
   menu.style.top = `${Math.max(4, Math.min(event.clientY, innerHeight - bounds.height - 4))}px`;
+}
+
+async function loadWorkspaceCameraFile(scene) {
+  if (!dialog?.open) {
+    showError("The Tauri dialog plugin is unavailable.");
+    return;
+  }
+  const path = await dialog.open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Camera setting", extensions: ["cam"] }],
+  });
+  if (!path) return;
+  const previous = new Set(
+    (snapshot.cameras || [])
+      .filter((camera) => camera.sceneUid === scene.uid)
+      .map((camera) => camera.name),
+  );
+  if (!(await mutate("load_camera_file", { sceneUid: scene.uid, path }))) return;
+  const loaded = (snapshot.cameras || []).find(
+    (camera) => camera.sceneUid === scene.uid && !previous.has(camera.name),
+  );
+  selectedCameraName = loaded?.name ?? null;
+  workspaceSelectionKind = loaded ? "camera" : "cameraRoot";
+  renderShell();
+}
+
+async function saveWorkspaceCameraFile(scene, camera, saveAs) {
+  let path = !saveAs ? camera.source : "";
+  if (!path) {
+    path = await chooseOutputPath(`${camera.name}.cam`, "Camera setting", ["cam"]);
+  }
+  if (!path) return;
+  if (
+    await mutateWithoutViewport("save_camera_file", {
+      sceneUid: scene.uid,
+      name: camera.name,
+      path,
+    })
+  ) {
+    selectedCameraName = camera.name;
+    workspaceSelectionKind = "camera";
+    renderShell();
+  }
 }
 
 function invertWorkspaceSelection(selection) {
@@ -4891,6 +4957,46 @@ function workspaceCameraContextItems(scene, camera = null) {
     action: () => pasteWorkspaceCamera(scene),
   });
   items.push(
+    null,
+    {
+      label: "Camera file",
+      children: [
+        {
+          label: "Load ...",
+          action: async () => {
+            if (!(await activate())) return;
+            await loadWorkspaceCameraFile(scene);
+          },
+        },
+        {
+          label: "Reload",
+          disabled: !camera?.source,
+          action: async () => {
+            if (!(await activate())) return;
+            await mutateWithoutViewport("reload_camera_file", {
+              sceneUid: scene.uid,
+              name: camera.name,
+            });
+          },
+        },
+        {
+          label: "Save",
+          disabled: !camera,
+          action: async () => {
+            if (!(await activate())) return;
+            await saveWorkspaceCameraFile(scene, camera, false);
+          },
+        },
+        {
+          label: "Save as...",
+          disabled: !camera,
+          action: async () => {
+            if (!(await activate())) return;
+            await saveWorkspaceCameraFile(scene, camera, true);
+          },
+        },
+      ],
+    },
     null,
     {
       label: "Save from view",

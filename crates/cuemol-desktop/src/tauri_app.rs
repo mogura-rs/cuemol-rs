@@ -5133,6 +5133,19 @@ enum ModelRequest {
     LoadCamera(String),
     SaveCameraView(String),
     LoadCameraView(String),
+    LoadCameraFile {
+        scene_uid: u64,
+        path: String,
+    },
+    ReloadCameraFile {
+        scene_uid: u64,
+        name: String,
+    },
+    SaveCameraFile {
+        scene_uid: u64,
+        name: String,
+        path: String,
+    },
     DestroyCamera(String),
     GetCameraVisibility {
         scene_uid: u64,
@@ -6529,6 +6542,52 @@ fn handle_model_request(
         }
         ModelRequest::LoadCameraView(name) => {
             model.load_named_camera(&name, false)?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::LoadCameraFile { scene_uid, path } => {
+            let scene_uid = Uid::new(scene_uid);
+            if model.desktop.active_scene() != Some(scene_uid) {
+                return Err("camera file target scene is not active".to_string());
+            }
+            let mut undo = model.capture_undo();
+            let name = model
+                .desktop
+                .load_scene_camera_file(scene_uid, &path)
+                .map_err(|error| error.to_string())?;
+            model.camera = model
+                .desktop
+                .load_scene_camera(scene_uid, &name, true)
+                .map_err(|error| error.to_string())?;
+            undo.camera = model.camera.clone();
+            model.invalidate_mesh(false);
+            model.status = format!("Load camera file {name}");
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ReloadCameraFile { scene_uid, name } => {
+            let scene_uid = Uid::new(scene_uid);
+            let undo = model.capture_undo();
+            model
+                .desktop
+                .reload_scene_camera_file(scene_uid, &name)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Reload camera file {name}");
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SaveCameraFile {
+            scene_uid,
+            name,
+            path,
+        } => {
+            let scene_uid = Uid::new(scene_uid);
+            let undo = model.capture_undo();
+            model
+                .desktop
+                .save_scene_camera_file(scene_uid, &name, &path)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Save camera file {name}");
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::DestroyCamera(name) => {
@@ -8539,6 +8598,47 @@ fn load_camera_view(name: String, state: State<'_, ManagedState>) -> Result<AppS
 }
 
 #[tauri::command]
+fn load_camera_file(
+    scene_uid: u64,
+    path: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::LoadCameraFile { scene_uid, path },
+    )?)
+}
+
+#[tauri::command]
+fn reload_camera_file(
+    scene_uid: u64,
+    name: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ReloadCameraFile { scene_uid, name },
+    )?)
+}
+
+#[tauri::command]
+fn save_camera_file(
+    scene_uid: u64,
+    name: String,
+    path: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SaveCameraFile {
+            scene_uid,
+            name,
+            path,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn destroy_camera(name: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::DestroyCamera(name))?)
 }
@@ -9973,6 +10073,9 @@ pub fn run() -> Result<(), tauri::Error> {
             load_camera,
             save_camera_view,
             load_camera_view,
+            load_camera_file,
+            reload_camera_file,
+            save_camera_file,
             destroy_camera,
             get_camera_visibility,
             set_camera_visibility,
@@ -12835,6 +12938,75 @@ mod tests {
         assert!(model.snapshot().cameras.is_empty());
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().cameras[0].name, "camera_renamed");
+    }
+
+    #[test]
+    fn camera_file_commands_load_reload_save_and_undo() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-tauri-camera-file-{}.cam",
+            std::process::id()
+        ));
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        model.camera.set_zoom(63.0);
+        handle_model_request(
+            &mut model,
+            ModelRequest::SaveCameraView("camera_0".to_string()),
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SaveCameraFile {
+                scene_uid: scene_uid.get(),
+                name: "camera_0".to_string(),
+                path: path.to_string_lossy().into_owned(),
+            },
+        )
+        .unwrap();
+        assert!(path.is_file());
+        assert_eq!(model.snapshot().cameras[0].source, path.to_string_lossy());
+
+        model.camera.set_zoom(91.0);
+        handle_model_request(
+            &mut model,
+            ModelRequest::SaveCameraView("camera_0".to_string()),
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::ReloadCameraFile {
+                scene_uid: scene_uid.get(),
+                name: "camera_0".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            model.named_camera_properties("camera_0").unwrap().zoom,
+            63.0
+        );
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::LoadCameraFile {
+                scene_uid: scene_uid.get(),
+                path: path.to_string_lossy().into_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(model.camera.zoom(), 63.0);
+        assert!(model
+            .snapshot()
+            .cameras
+            .iter()
+            .any(|camera| camera.name == "copy1_camera_0"));
+        assert_eq!(
+            model.undo_stack.last().unwrap().description,
+            "Load camera file copy1_camera_0"
+        );
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().cameras.len(), 1);
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

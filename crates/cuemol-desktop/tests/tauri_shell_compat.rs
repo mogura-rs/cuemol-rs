@@ -362,6 +362,12 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("workspaceSceneContextItems"));
     assert!(JS.contains("workspaceCameraContextItems"));
     assert!(JS.contains("label: \"New Camera...\""));
+    assert!(JS.contains("label: \"Camera file\""));
+    assert!(JS.contains("function loadWorkspaceCameraFile(scene)"));
+    assert!(JS.contains("function saveWorkspaceCameraFile(scene, camera, saveAs)"));
+    assert!(JS.contains("mutate(\"load_camera_file\""));
+    assert!(JS.contains("mutateWithoutViewport(\"reload_camera_file\""));
+    assert!(JS.contains("mutateWithoutViewport(\"save_camera_file\""));
     assert!(JS.contains("Save from scene (with vis flags)"));
     assert!(JS.contains("Apply to scene (with vis flags)"));
     assert!(JS.contains("workspaceStyleContextItems"));
@@ -383,6 +389,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("generate_density_surface"));
     assert!(JS.contains("label: \"Regenerate surface...\""));
     assert!(JS.contains("regenerate_surface"));
+    assert!(CSS.contains(".workspace-context-menu.has-submenu"));
     assert!(JS.contains("WORKSPACE_PAINT_MONOCHROME"));
     assert!(JS.contains("Paint · ${group} · ${label}"));
     assert!(JS.contains("[\"B-factor\", \"bfactor\"]"));

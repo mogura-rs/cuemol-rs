@@ -51,9 +51,8 @@ use cuemol_xtal::{
 pub use cuemol_xtal::{DensityMap, GridMap};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
-#[cfg(feature = "scripting")]
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 // Offscreen wgpu mesh renderer (verifiable headless; the wgpu 3D component every
@@ -1847,6 +1846,301 @@ impl DesktopAppState {
             self.apply_scene_visibility_settings(scene_uid, camera.visibility_settings())?;
         }
         Ok(camera)
+    }
+
+    pub fn save_scene_camera_file(
+        &mut self,
+        scene_uid: Uid,
+        name: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<()> {
+        let path = path.as_ref();
+        let xml = self.scene_camera_xml(scene_uid, name)?;
+        let output_path = self.resolve_scene_path(scene_uid, path)?;
+        fs::write(&output_path, xml)?;
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let mut camera = scene
+            .camera_by_name(name)
+            .cloned()
+            .ok_or_else(|| CueMolError::NotFound(format!("camera {name}")))?;
+        camera.set_source(path.to_string_lossy());
+        scene.set_camera(camera);
+        Ok(())
+    }
+
+    pub fn load_scene_camera_file(
+        &mut self,
+        scene_uid: Uid,
+        path: impl AsRef<Path>,
+    ) -> Result<String> {
+        let path = path.as_ref();
+        let resolved_path = self.resolve_scene_path(scene_uid, path)?;
+        let xml = fs::read_to_string(&resolved_path)?;
+        let mut camera = self.parse_scene_camera_xml(scene_uid, &xml)?;
+        camera.set_source(resolved_path.to_string_lossy());
+        let source_name = if camera.name().trim().is_empty() {
+            default_object_name(&resolved_path)
+        } else {
+            camera.name().to_string()
+        };
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let name = if scene.camera_by_name(&source_name).is_none() {
+            source_name
+        } else {
+            (1_u64..)
+                .map(|index| format!("copy{index}_{source_name}"))
+                .find(|candidate| scene.camera_by_name(candidate).is_none())
+                .expect("the camera name suffix space is inexhaustible")
+        };
+        camera.set_name(&name);
+        scene.set_camera(camera);
+        Ok(name)
+    }
+
+    pub fn reload_scene_camera_file(&mut self, scene_uid: Uid, name: &str) -> Result<()> {
+        let source = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?
+            .camera_by_name(name)
+            .ok_or_else(|| CueMolError::NotFound(format!("camera {name}")))?
+            .source()
+            .to_string();
+        if source.trim().is_empty() {
+            return Err(CueMolError::invalid_argument(format!(
+                "camera {name} has no source path"
+            )));
+        }
+        let resolved_path = self.resolve_scene_path(scene_uid, Path::new(&source))?;
+        let xml = fs::read_to_string(&resolved_path)?;
+        let mut camera = self.parse_scene_camera_xml(scene_uid, &xml)?;
+        camera.set_name(name);
+        camera.set_source(resolved_path.to_string_lossy());
+        self.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .expect("camera scene was checked above")
+            .set_camera(camera);
+        Ok(())
+    }
+
+    fn resolve_scene_path(&self, scene_uid: Uid, path: &Path) -> Result<PathBuf> {
+        if path.is_absolute() {
+            return Ok(path.to_path_buf());
+        }
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        Ok(if scene.base_path().is_empty() {
+            path.to_path_buf()
+        } else {
+            Path::new(scene.base_path()).join(path)
+        })
+    }
+
+    fn scene_camera_xml(&self, scene_uid: Uid, name: &str) -> Result<String> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let camera = scene
+            .camera_by_name(name)
+            .ok_or_else(|| CueMolError::NotFound(format!("camera {name}")))?;
+        let mut tree = parse_ldom2_xml(&camera.to_xml_string())?;
+        clear_xml_formatting_whitespace(tree.top_mut());
+        if !camera.alt_source().is_empty() {
+            tree.top_mut().set_str_attr("alt_src", camera.alt_source());
+        }
+        let entries = self.camera_visibility_entries(scene_uid, name)?;
+        set_named_camera_visibility_nodes(tree.top_mut(), &entries);
+        Ok(write_ldom2_xml(&tree))
+    }
+
+    fn parse_scene_camera_xml(&self, scene_uid: Uid, xml: &str) -> Result<cuemol_qsys::Camera> {
+        let mut camera = cuemol_qsys::Camera::from_xml_string(xml)?;
+        let tree = parse_ldom2_xml(xml)?;
+        let alt_source = tree.top().str_attr("alt_src").to_string();
+        if !alt_source.is_empty() {
+            camera.set_alt_source(alt_source);
+        }
+        if let Some(settings) = self.named_camera_visibility_settings(scene_uid, tree.top()) {
+            camera.clear_visibility_settings();
+            for (uid, visible, is_object) in settings {
+                camera.vis_append(uid.get(), visible, is_object);
+            }
+        }
+        Ok(camera)
+    }
+
+    fn named_camera_visibility_settings(
+        &self,
+        scene_uid: Uid,
+        camera_node: &LDom2Node,
+    ) -> Option<Vec<(Uid, bool, bool)>> {
+        let visibilities = camera_node.find_child("visibilities")?;
+        Some(
+            visibilities
+                .children()
+                .iter()
+                .filter(|node| !node.is_attr())
+                .filter_map(|node| {
+                    let is_object = match node.tag_name() {
+                        "object" => true,
+                        "renderer" => false,
+                        _ => return None,
+                    };
+                    let target = node.str_attr("target").to_string();
+                    let client = node.str_attr("client").to_string();
+                    let type_name = node.str_attr("type").to_string();
+                    let visible_value = if node.value().trim().is_empty() {
+                        node.contents().trim()
+                    } else {
+                        node.value().trim()
+                    };
+                    self.resolve_camera_visibility_target(
+                        scene_uid, &target, &client, &type_name, is_object,
+                    )
+                    .map(|uid| (uid, qsc_bool(visible_value), is_object))
+                })
+                .collect(),
+        )
+    }
+
+    fn resolve_camera_visibility_target(
+        &self,
+        scene_uid: Uid,
+        target: &str,
+        client: &str,
+        type_name: &str,
+        is_object: bool,
+    ) -> Option<Uid> {
+        let scene = self.scene_manager().scene(scene_uid)?;
+        if is_object {
+            return scene
+                .object_by_name(target)
+                .map(MolObject::uid)
+                .or_else(|| {
+                    self.density_map_summaries(scene_uid)
+                        .into_iter()
+                        .find(|map| map.name == target)
+                        .map(|map| map.uid)
+                })
+                .or_else(|| {
+                    self.surface_summaries(scene_uid)
+                        .into_iter()
+                        .find(|surface| surface.name == target)
+                        .map(|surface| surface.uid)
+                });
+        }
+        if let Some(renderer) = scene.object_by_name(client).and_then(|object| {
+            object
+                .renderer_by_name(target)
+                .filter(|renderer| type_name.is_empty() || renderer.renderer_type() == type_name)
+        }) {
+            return Some(renderer.uid());
+        }
+        self.density_map_summaries(scene_uid)
+            .into_iter()
+            .find(|map| map.name == client)
+            .and_then(|map| {
+                map.renderers
+                    .into_iter()
+                    .find(|renderer| {
+                        renderer.name == target
+                            && (type_name.is_empty() || renderer.renderer_type == type_name)
+                    })
+                    .map(|renderer| renderer.uid)
+            })
+            .or_else(|| {
+                self.surface_summaries(scene_uid)
+                    .into_iter()
+                    .find(|surface| surface.name == client)
+                    .and_then(|surface| {
+                        surface
+                            .renderers
+                            .into_iter()
+                            .find(|renderer| {
+                                renderer.name == target
+                                    && (type_name.is_empty() || renderer.renderer_type == type_name)
+                            })
+                            .map(|renderer| renderer.uid)
+                    })
+            })
+    }
+
+    fn restore_named_qsc_camera_visibility(
+        &mut self,
+        scene_uid: Uid,
+        root: &LDom2Node,
+    ) -> Result<()> {
+        let settings = root
+            .children()
+            .iter()
+            .filter(|node| !node.is_attr() && node.tag_name() == "camera")
+            .filter_map(|node| {
+                self.named_camera_visibility_settings(scene_uid, node)
+                    .map(|settings| (node.str_attr("name").to_string(), settings))
+            })
+            .collect::<Vec<_>>();
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        for (name, settings) in settings {
+            let Some(mut camera) = scene.camera_by_name(&name).cloned() else {
+                continue;
+            };
+            camera.clear_visibility_settings();
+            for (uid, visible, is_object) in settings {
+                camera.vis_append(uid.get(), visible, is_object);
+            }
+            scene.set_camera(camera);
+        }
+        Ok(())
+    }
+
+    fn scene_qsc_with_named_camera_visibility(&self, scene_uid: Uid) -> Result<String> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let qsc = scene.write_qsc_string();
+        let (xml, suffix) = qsc
+            .split_once(QSC_XML_END_MARKER)
+            .ok_or_else(|| CueMolError::parse("QSC XML terminator was not written"))?;
+        let mut tree = parse_ldom2_xml(xml)?;
+        clear_xml_formatting_whitespace(tree.top_mut());
+        let entries = self
+            .camera_summaries(scene_uid)
+            .into_iter()
+            .map(|camera| {
+                self.camera_visibility_entries(scene_uid, &camera.name)
+                    .map(|entries| (camera.name, entries))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        for camera_node in tree
+            .top_mut()
+            .children_mut()
+            .iter_mut()
+            .filter(|node| !node.is_attr() && node.tag_name() == "camera")
+        {
+            let name = camera_node.str_attr("name").to_string();
+            if let Some(entries) = entries.get(&name) {
+                set_named_camera_visibility_nodes(camera_node, entries);
+            }
+        }
+        Ok(format!(
+            "{}\n\n{}{}",
+            write_ldom2_xml(&tree),
+            QSC_XML_END_MARKER,
+            suffix
+        ))
     }
 
     pub fn camera_visibility_entries(
@@ -6316,6 +6610,7 @@ impl DesktopAppState {
         path: &Path,
         target_scene: Option<Uid>,
     ) -> Result<Option<Uid>> {
+        let qsc_xml = read_qsc_xml_prefix(path)?;
         let replaced_object_uids = target_scene
             .and_then(|scene_uid| self.scene_manager().scene(scene_uid))
             .map(|scene| {
@@ -6438,6 +6733,9 @@ impl DesktopAppState {
             for object in morph_objects {
                 self.morphs
                     .insert(object.uid(), morph_from_qsc_object(&object)?);
+            }
+            if let Some(tree) = &qsc_xml {
+                self.restore_named_qsc_camera_visibility(scene_uid, tree.top())?;
             }
         }
         Ok(result.result_scene)
@@ -6854,7 +7152,10 @@ impl DesktopAppState {
             .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
         self.sync_morph_qsc_nodes(scene_uid)?;
         self.sync_density_map_qsc_nodes(scene_uid)?;
-        self.scene_manager().write_qsc_file(scene_uid, path)?;
+        fs::write(
+            path,
+            self.scene_qsc_with_named_camera_visibility(scene_uid)?,
+        )?;
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
@@ -41677,6 +41978,70 @@ fn parse_qsc_vector3(value: &str) -> Option<Vector4> {
     (values.len() == 3).then(|| Vector4::new3(values[0], values[1], values[2]))
 }
 
+const QSC_XML_END_MARKER: &str = "========== End of XML ==========";
+
+fn read_qsc_xml_prefix(path: &Path) -> Result<Option<LDom2Tree>> {
+    let mut reader = BufReader::new(fs::File::open(path)?);
+    let mut xml = String::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        if line.trim() == QSC_XML_END_MARKER {
+            return parse_ldom2_xml(&xml).map(Some);
+        }
+        xml.push_str(&line);
+    }
+}
+
+fn set_named_camera_visibility_nodes(
+    camera_node: &mut LDom2Node,
+    entries: &[GuiCameraVisibilityEntry],
+) {
+    camera_node.remove_child("visibilities");
+    let included = entries
+        .iter()
+        .filter(|entry| entry.included)
+        .collect::<Vec<_>>();
+    if included.is_empty() {
+        return;
+    }
+    let object_names = entries
+        .iter()
+        .filter(|entry| entry.is_object)
+        .map(|entry| (entry.target_uid, entry.name.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let visibilities = camera_node.append_child("visibilities");
+    for entry in included {
+        let node = visibilities.append_child(if entry.is_object {
+            "object"
+        } else {
+            "renderer"
+        });
+        node.set_value(entry.visible.to_string());
+        node.set_str_attr("target", &entry.name);
+        if !entry.is_object {
+            node.set_str_attr("type", &entry.type_name);
+            if let Some(parent_name) = entry
+                .parent_uid
+                .and_then(|parent_uid| object_names.get(&parent_uid))
+            {
+                node.set_str_attr("client", *parent_name);
+            }
+        }
+    }
+}
+
+fn clear_xml_formatting_whitespace(node: &mut LDom2Node) {
+    if node.contents().trim().is_empty() {
+        node.clear_contents();
+    }
+    for child in node.children_mut() {
+        clear_xml_formatting_whitespace(child);
+    }
+}
+
 fn qsc_bool(value: &str) -> bool {
     !matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -54234,7 +54599,13 @@ attribute \"dep\" string \"positions\"
         let mut app = DesktopAppState::new();
         let scene_uid = app.new_scene("camera", true).result_scene;
         let scene = app.scene_manager_mut().scene_mut(scene_uid).unwrap();
-        let object_uid = scene.add_molecule("mol", MolCoord::new());
+        let object_uid = scene.add_molecule(
+            "mol",
+            read_pdb_str(
+                "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+            )
+            .unwrap(),
+        );
         let renderer_uid = scene
             .object_mut(object_uid)
             .unwrap()
@@ -54318,15 +54689,63 @@ attribute \"dep\" string \"positions\"
         assert_eq!(pasted.zoom(), 76.0);
         assert_eq!(pasted.visibility_size(), 6);
 
-        let path = std::env::temp_dir().join(format!(
+        let camera_path = std::env::temp_dir().join(format!(
+            "cuemol-desktop-camera-workspace-{}.cam",
+            std::process::id()
+        ));
+        app.save_scene_camera_file(scene_uid, "camera_0", &camera_path)
+            .unwrap();
+        let camera_xml = std::fs::read_to_string(&camera_path).unwrap();
+        assert!(camera_xml.contains("target=\"map\""));
+        assert!(camera_xml.contains("client=\"surface\""));
+        assert!(!camera_xml.contains("<![CDATA["));
+        assert_eq!(
+            app.camera_summaries(scene_uid)[0].source,
+            camera_path.to_string_lossy()
+        );
+        let loaded_name = app.load_scene_camera_file(scene_uid, &camera_path).unwrap();
+        assert_eq!(loaded_name, "copy2_camera_0");
+        assert!(app
+            .camera_visibility_entries(scene_uid, &loaded_name)
+            .unwrap()
+            .iter()
+            .all(|entry| entry.included && !entry.visible));
+        let mut changed = cuemol_qsys::Camera::new();
+        changed.set_name("camera_0");
+        changed.set_zoom(91.0);
+        app.save_scene_camera(scene_uid, changed, false).unwrap();
+        app.reload_scene_camera_file(scene_uid, "camera_0").unwrap();
+        assert_eq!(
+            app.scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .camera_by_name("camera_0")
+                .unwrap()
+                .zoom(),
+            76.0
+        );
+
+        let qsc_path = std::env::temp_dir().join(format!(
             "cuemol-desktop-camera-workspace-{}.qsc",
             std::process::id()
         ));
-        app.save_active_scene_qsc(&path).unwrap();
-        let qsc = std::fs::read_to_string(&path).unwrap();
+        app.save_active_scene_qsc(&qsc_path).unwrap();
+        let qsc = std::fs::read_to_string(&qsc_path).unwrap();
         assert!(qsc.contains("name=\"camera_0\""));
         assert!(qsc.contains("<visibilities>"));
-        let _ = std::fs::remove_file(path);
+        assert!(qsc.contains("target=\"map\""));
+        assert!(qsc.contains("client=\"surface\""));
+        let mut reloaded = DesktopAppState::new();
+        let reloaded_scene_uid = reloaded.load_qsc_file(&qsc_path).unwrap().unwrap();
+        let reloaded_entries = reloaded
+            .camera_visibility_entries(reloaded_scene_uid, "camera_0")
+            .unwrap();
+        assert_eq!(reloaded_entries.len(), 6);
+        assert!(reloaded_entries
+            .iter()
+            .all(|entry| entry.included && !entry.visible));
+        let _ = std::fs::remove_file(camera_path);
+        let _ = std::fs::remove_file(qsc_path);
 
         let entries = app
             .camera_visibility_entries(scene_uid, "camera_0")
@@ -54360,7 +54779,7 @@ attribute \"dep\" string \"positions\"
             .all(|entry| !entry.included && !entry.visible));
 
         assert!(app.destroy_scene_camera(scene_uid, "camera_0").unwrap());
-        assert_eq!(app.camera_summaries(scene_uid).len(), 1);
+        assert_eq!(app.camera_summaries(scene_uid).len(), 2);
         assert_eq!(
             app.paste_workspace_camera(scene_uid, &clipboard).unwrap(),
             "camera_0"
