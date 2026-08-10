@@ -7172,6 +7172,31 @@ async function saveWorkspaceStyleFile(scene, style, saveAs) {
   }
 }
 
+async function openNewStyleFlow() {
+  const used = new Set(
+    activeStyles()
+      .filter((style) => style.localIndex !== null)
+      .map((style) => style.name),
+  );
+  let index = 0;
+  while (used.has(`style_${index}`)) index += 1;
+  const name = await showTextPromptDialog({
+    title: "New Style",
+    label: "Name for new style:",
+    defaultValue: `style_${index}`,
+    confirmLabel: "Create",
+  });
+  if (name === null) return false;
+  const changed = await mutateWithoutViewport("create_style", { name }, () => {});
+  if (!changed) return false;
+  selectedStyleIndex = activeStyles().findIndex(
+    (style) => style.localIndex !== null && style.name === name,
+  );
+  workspaceSelectionKind = "style";
+  renderShell();
+  return true;
+}
+
 function workspaceStyleContextItems(scene, style = null) {
   const activate = async () => {
     if (scene.active) return true;
@@ -7179,18 +7204,10 @@ function workspaceStyleContextItems(scene, style = null) {
   };
   return [
     {
-      label: "New Style...",
+      label: "New Style…",
       action: async () => {
         if (!(await activate())) return;
-        const used = new Set(
-          activeStyles()
-            .filter((candidate) => candidate.localIndex !== null)
-            .map((candidate) => candidate.name),
-        );
-        let index = 0;
-        while (used.has(`style_${index}`)) index += 1;
-        const name = globalThis.prompt?.("Style name", `style_${index}`)?.trim();
-        if (name) await mutateWithoutViewport("create_style", { name });
+        await openNewStyleFlow();
       },
     },
     {
@@ -7330,17 +7347,23 @@ function workspaceObjectContextItems(scene, object) {
       },
     },
     {
-      label: "New Group...",
+      label: "New Group…",
       action: async () => {
+        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
         const used = new Set(
-          object.renderers
-            .filter((renderer) => renderer.rendererType === "*group")
+          activeObjects()
+            .flatMap((candidate) => candidate.renderers || [])
             .map((renderer) => renderer.name),
         );
         let serial = 1;
         while (used.has(`group${serial}`)) serial += 1;
-        const name = globalThis.prompt?.("Name for new group", `group${serial}`)?.trim();
-        if (!name) return;
+        const name = await showTextPromptDialog({
+          title: "New Renderer Group",
+          label: "Name for new group:",
+          defaultValue: `group${serial}`,
+          confirmLabel: "Create",
+        });
+        if (name === null) return;
         await mutateWithoutViewport("create_workspace_renderer_group", {
           input: { objectUid: object.uid, name },
         });
@@ -11176,22 +11199,7 @@ async function handleAction(action, depth = 0) {
       break;
     case "add-renderer": {
       if (["styleRoot", "style"].includes(workspaceSelectionKind)) {
-        const used = new Set(
-          activeStyles()
-            .filter((style) => style.localIndex !== null)
-            .map((style) => style.name),
-        );
-        let index = 0;
-        while (used.has(`style_${index}`)) index += 1;
-        const name = globalThis.prompt?.("Style name", `style_${index}`)?.trim();
-        if (name) {
-          await mutate("create_style", { name });
-          selectedStyleIndex = activeStyles().findIndex(
-            (style) => style.localIndex !== null && style.name === name,
-          );
-          workspaceSelectionKind = "style";
-          renderShell();
-        }
+        await openNewStyleFlow();
         break;
       }
       if (["cameraRoot", "camera"].includes(workspaceSelectionKind)) {

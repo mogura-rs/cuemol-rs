@@ -4544,7 +4544,7 @@ impl GuiApplication {
                     self.workspace_aux_selection = Some(root_selection);
                 }
                 root_response.context_menu(|ui| {
-                    if ui.button("New Style...").clicked() {
+                    if ui.button("New Style…").clicked() {
                         self.open_new_style_properties(scene.uid);
                         ui.close();
                     }
@@ -4595,7 +4595,7 @@ impl GuiApplication {
                             self.open_style_properties(selection);
                         }
                         response.context_menu(|ui| {
-                            if ui.button("New Style...").clicked() {
+                            if ui.button("New Style…").clicked() {
                                 self.open_new_style_properties(scene.uid);
                                 ui.close();
                             }
@@ -14934,7 +14934,7 @@ impl GuiApplication {
             egui::Window::new("New Style")
                 .collapsible(false)
                 .resizable(false)
-                .default_width(420.0)
+                .default_width(360.0)
                 .show(ctx, |ui| {
                     ui.label("Name for new style:");
                     let response = ui.text_edit_singleline(&mut draft.name);
