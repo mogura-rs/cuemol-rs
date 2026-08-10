@@ -19,6 +19,7 @@ use crate::{
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
+const MIN_INTERACTIVE_RENDER_SCALE: f64 = 0.5;
 
 static SHARED_SCENE_RENDERER: OnceLock<Option<Arc<SceneRenderer>>> = OnceLock::new();
 
@@ -26,6 +27,19 @@ fn shared_scene_renderer() -> Option<Arc<SceneRenderer>> {
     SHARED_SCENE_RENDERER
         .get_or_init(|| SceneRenderer::new().map(Arc::new))
         .clone()
+}
+
+fn scaled_viewport_dimensions(width: u32, height: u32, scale: f64) -> (u32, u32) {
+    let scale = if scale.is_finite() {
+        scale.clamp(MIN_INTERACTIVE_RENDER_SCALE, 1.0)
+    } else {
+        1.0
+    };
+    let scaled = |value: u32| {
+        let value = value.clamp(64, MAX_VIEW_DIM);
+        ((f64::from(value) * scale).round() as u32).clamp(64, MAX_VIEW_DIM)
+    };
+    (scaled(width), scaled(height))
 }
 
 #[derive(Serialize)]
@@ -5866,6 +5880,7 @@ enum ModelRequest {
         y: f64,
         width: u32,
         height: u32,
+        render_scale: f64,
     },
     SaveScene {
         path: String,
@@ -8907,9 +8922,14 @@ fn handle_model_request(
             y,
             width,
             height,
+            render_scale,
         } => {
             model.update_camera(&action, x, y, height)?;
-            Ok(ModelResponse::Viewport(model.render(width, height)))
+            let (render_width, render_height) =
+                scaled_viewport_dimensions(width, height, render_scale);
+            Ok(ModelResponse::Viewport(
+                model.render(render_width, render_height),
+            ))
         }
         ModelRequest::SaveScene { path, options } => {
             model.persist_camera()?;
@@ -10182,6 +10202,7 @@ fn open_initial_paths(
             _ => Err("unexpected initial-path response".to_string()),
         };
     }
+    let _ = request_model(&state, ModelRequest::StartRendererWarmup)?;
     molecule_selection_update_response(request_model(
         &state,
         ModelRequest::OpenPathsViewport {
@@ -11205,6 +11226,7 @@ fn update_camera(
     y: f64,
     width: u32,
     height: u32,
+    render_scale: Option<f64>,
     state: State<'_, ManagedState>,
 ) -> Result<ViewportDto, String> {
     viewport_response(request_model(
@@ -11215,6 +11237,7 @@ fn update_camera(
             y,
             width,
             height,
+            render_scale: render_scale.unwrap_or(1.0),
         },
     )?)
 }
@@ -11770,6 +11793,39 @@ mod tests {
     fn base64_encoder_uses_standard_padding() {
         assert_eq!(base64_encode(b"CueMol"), "Q3VlTW9s");
         assert_eq!(base64_encode(b"rs"), "cnM=");
+    }
+
+    #[test]
+    fn interactive_viewport_dimensions_reduce_pixels_and_preserve_full_renders() {
+        assert_eq!(scaled_viewport_dimensions(1_000, 800, 0.625), (625, 500));
+        assert_eq!(
+            scaled_viewport_dimensions(3_200, 2_400, 0.625),
+            (1_000, 1_000)
+        );
+        assert_eq!(scaled_viewport_dimensions(80, 80, 0.1), (64, 64));
+        assert_eq!(scaled_viewport_dimensions(1_000, 800, 2.0), (1_000, 800));
+        assert_eq!(
+            scaled_viewport_dimensions(1_000, 800, f64::NAN),
+            (1_000, 800)
+        );
+
+        let mut model = model_without_gpu();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::UpdateCamera {
+                action: "pan".to_string(),
+                x: 1.0,
+                y: 0.0,
+                width: 1_000,
+                height: 800,
+                render_scale: 0.625,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Viewport(viewport) = response else {
+            panic!("expected interactive viewport response");
+        };
+        assert_eq!((viewport.width, viewport.height), (625, 500));
     }
 
     #[test]

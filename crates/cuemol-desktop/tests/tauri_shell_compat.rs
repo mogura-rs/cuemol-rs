@@ -486,6 +486,27 @@ fn desktop_startup_and_fetch_overlap_independent_initialization() {
     assert!(JS.contains(r#"invoke("prefetch_pdb", args)"#));
     assert!(TAURI_APP_RS.contains("async fn prefetch_pdb("));
     assert!(NATIVE_GUI_RS.contains("cuemol-pdb-prefetch-"));
+
+    let initial_paths = TAURI_APP_RS
+        .split("fn open_initial_paths(")
+        .nth(1)
+        .and_then(|source| source.split("fn reload_scene(").next())
+        .expect("open_initial_paths command");
+    let warmup = initial_paths
+        .find("ModelRequest::StartRendererWarmup")
+        .expect("startup renderer warmup");
+    let load = initial_paths
+        .find("ModelRequest::OpenPathsViewport")
+        .expect("startup path load");
+    assert!(warmup < load);
+}
+
+#[test]
+fn tauri_camera_interaction_uses_reduced_preview_pixels() {
+    assert!(JS.contains("const CAMERA_PREVIEW_SCALE = 0.625"));
+    assert!(JS.contains("renderScale: CAMERA_PREVIEW_SCALE"));
+    assert!(JS.contains("scheduleRender(CAMERA_SETTLE_RENDER_DELAY)"));
+    assert!(TAURI_APP_RS.contains("scaled_viewport_dimensions(width, height, render_scale)"));
 }
 
 #[test]

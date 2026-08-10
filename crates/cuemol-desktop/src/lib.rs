@@ -468,20 +468,16 @@ fn pdb_probe_specs(options: &PdbFetchOptions) -> std::result::Result<Vec<PdbProb
 pub(crate) fn probe_pdb_files(
     options: PdbFetchOptions,
 ) -> std::result::Result<Vec<GuiPdbFileKind>, String> {
-    let handles = pdb_probe_specs(&options)?
+    let mut probes = pdb_probe_specs(&options)?;
+    if probes.len() == 1 {
+        return probe_pdb_spec(probes.pop().expect("one PDB probe"));
+    }
+    let handles = probes
         .into_iter()
         .map(|probe| {
             std::thread::Builder::new()
                 .name("cuemol-pdb-probe".to_string())
-                .spawn(
-                    move || -> std::result::Result<Vec<GuiPdbFileKind>, String> {
-                        if nonempty_file(&probe.path) || probe_url_available(&probe.url)? {
-                            Ok(Vec::new())
-                        } else {
-                            Ok(probe.kinds)
-                        }
-                    },
-                )
+                .spawn(move || probe_pdb_spec(probe))
                 .map_err(|error| format!("failed to start PDB availability check: {error}"))
         })
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -494,6 +490,15 @@ pub(crate) fn probe_pdb_files(
         );
     }
     Ok(unavailable)
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn probe_pdb_spec(probe: PdbProbeSpec) -> std::result::Result<Vec<GuiPdbFileKind>, String> {
+    if nonempty_file(&probe.path) || probe_url_available(&probe.url)? {
+        Ok(Vec::new())
+    } else {
+        Ok(probe.kinds)
+    }
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]

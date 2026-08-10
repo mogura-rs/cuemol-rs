@@ -103,6 +103,8 @@ const RECENT_STORAGE_KEY = "cuemol2.recentFiles.v1";
 const SELECTION_HISTORY_STORAGE_KEY = "cuemol2.selectionHistory.v1";
 const MAX_RECENT_FILES = 10;
 const MAX_SELECTION_HISTORY = 20;
+const CAMERA_PREVIEW_SCALE = 0.625;
+const CAMERA_SETTLE_RENDER_DELAY = 72;
 const MOLECULE_RENDERER_TYPES = [
   "anisou",
   "atomintr",
@@ -10447,7 +10449,11 @@ async function flushCameraCommands() {
       const size = viewportDimensions();
       const sequence = ++requestSequence;
       try {
-        const result = await invoke("update_camera", { ...command, ...size });
+        const result = await invoke("update_camera", {
+          ...command,
+          ...size,
+          renderScale: CAMERA_PREVIEW_SCALE,
+        });
         applyViewport(result, sequence);
       } catch (error) {
         showError(error);
@@ -10455,6 +10461,7 @@ async function flushCameraCommands() {
     }
   } finally {
     cameraRequest = null;
+    if (snapshotHasRenderableContent()) scheduleRender(CAMERA_SETTLE_RENDER_DELAY);
   }
 }
 
