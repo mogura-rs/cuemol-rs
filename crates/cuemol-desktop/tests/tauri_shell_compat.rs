@@ -1048,6 +1048,8 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     );
     assert!(JS.contains("}, 500);"));
     assert!(JS.contains("workspaceSelectionKind === kind"));
+    assert!(JS.contains("`Scene: ${scene.name || \"Untitled\"}`"));
+    assert!(JS.contains("beginWorkspaceInlineRename(\"scene\", snapshot.activeSceneUid)"));
     assert!(JS.contains("beginWorkspaceInlineRename(\"object\", object.uid)"));
     assert!(JS.contains("beginWorkspaceInlineRename(\"renderer\", object.uid, renderer.uid)"));
     assert!(JS.contains("input.addEventListener(\"blur\", () => void finish(true))"));

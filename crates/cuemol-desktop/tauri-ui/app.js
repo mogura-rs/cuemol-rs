@@ -7483,9 +7483,11 @@ function scheduleWorkspaceInlineRename(kind, objectUid, rendererUid = null) {
         ? workspaceSelectionKind === kind &&
           snapshot.activeSceneUid === objectUid &&
           selectedCameraName === rendererUid
-        : workspaceSelectionKind === kind &&
-          selectedObjectUid === objectUid &&
-          selectedRendererUid === rendererUid;
+        : kind === "scene"
+          ? workspaceSelectionKind === kind && snapshot.activeSceneUid === objectUid
+          : workspaceSelectionKind === kind &&
+            selectedObjectUid === objectUid &&
+            selectedRendererUid === rendererUid;
     if (isSelected) {
       beginWorkspaceInlineRename(kind, objectUid, rendererUid);
     }
@@ -8266,11 +8268,15 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     return;
   }
   for (const scene of snapshot.scenes) {
+    const sceneIsRenaming =
+      workspaceInlineRename?.kind === "scene" && workspaceInlineRename.objectUid === scene.uid;
     const sceneRow = button(
-      scene.name || `Scene ${scene.uid}`,
+      sceneIsRenaming ? "" : `Scene: ${scene.name || "Untitled"}`,
       `tree-scene${workspaceSelectionKind === "scene" && scene.active ? " active" : ""}`,
       async () => {
+        const alreadySelected = workspaceSelectionKind === "scene" && scene.active;
         workspaceSelectionKind = "scene";
+        selectedObjectUid = null;
         selectedRendererUid = null;
         selectedDensityMapUid = null;
         selectedDensityRendererUid = null;
@@ -8280,12 +8286,19 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         selectedStyleIndex = null;
         if (!scene.active) {
           await mutate("activate_scene", { sceneUid: scene.uid });
+        } else if (alreadySelected && !sceneIsRenaming) {
+          scheduleWorkspaceInlineRename("scene", scene.uid);
         } else {
+          clearWorkspaceRenameTimer();
           renderShell();
         }
       },
     );
-    sceneRow.addEventListener("dblclick", () => showReferenceDialog("Scene Properties"));
+    sceneRow.dataset.workspaceRenameTarget = workspaceRenameTarget("scene", scene.uid);
+    sceneRow.addEventListener("dblclick", () => {
+      clearWorkspaceRenameTimer();
+      showReferenceDialog("Scene Properties");
+    });
     sceneRow.addEventListener("contextmenu", (event) => {
       workspaceSelectionKind = "scene";
       selectedObjectUid = null;
@@ -8298,6 +8311,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       selectedStyleIndex = null;
       showWorkspaceContextMenu(event, workspaceSceneContextItems(scene));
     });
+    if (sceneIsRenaming) sceneRow.append(workspaceInlineRenameInput("scene", scene));
     sceneTree.append(sceneRow);
     const workspaceObjectBlocks = [];
     for (const object of snapshot.objects.filter((item) => item.sceneUid === scene.uid)) {
@@ -12222,7 +12236,9 @@ document.addEventListener("pointerdown", (event) => {
   const selectedTarget =
     workspaceSelectionKind === "camera"
       ? workspaceRenameTarget("camera", snapshot.activeSceneUid, selectedCameraName)
-      : workspaceRenameTarget(workspaceSelectionKind, selectedObjectUid, selectedRendererUid);
+      : workspaceSelectionKind === "scene"
+        ? workspaceRenameTarget("scene", snapshot.activeSceneUid)
+        : workspaceRenameTarget(workspaceSelectionKind, selectedObjectUid, selectedRendererUid);
   const row = event.target.closest("[data-workspace-rename-target]");
   if (row?.dataset.workspaceRenameTarget !== selectedTarget) clearWorkspaceRenameTimer();
 });
@@ -12237,7 +12253,15 @@ sceneTree.addEventListener("keydown", (event) => {
     beginWorkspaceInlineRename("camera", snapshot.activeSceneUid, selectedCameraName);
     return;
   }
-  if (!["object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)) return;
+  if (!["scene", "object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)) {
+    return;
+  }
+  if (workspaceSelectionKind === "scene") {
+    if (snapshot.activeSceneUid === null) return;
+    event.preventDefault();
+    beginWorkspaceInlineRename("scene", snapshot.activeSceneUid);
+    return;
+  }
   const object = selectedObject();
   if (!object) return;
   const renderer = workspaceSelectionKind === "object" ? null : selectedRenderer();

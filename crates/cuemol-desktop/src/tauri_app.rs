@@ -3154,6 +3154,15 @@ impl AppModel {
         }
         let object_uid = Uid::new(input.object_uid);
         match input.kind.as_str() {
+            "scene" => {
+                let scene = self
+                    .desktop
+                    .scene_manager_mut()
+                    .scene_mut(object_uid)
+                    .ok_or_else(|| format!("scene {} not found", input.object_uid))?;
+                scene.set_name(name);
+                self.status = format!("Rename to {name}");
+            }
             "object" => {
                 let object = self
                     .desktop
@@ -14212,6 +14221,23 @@ mod tests {
     #[test]
     fn workspace_object_and_renderer_inline_renames_are_undoable() {
         let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::RenameWorkspaceNode(WorkspaceRenameInput {
+                kind: "scene".to_string(),
+                object_uid: scene_uid.get(),
+                renderer_uid: None,
+                name: "renamed scene".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(snapshot.scenes[0].name, "renamed scene");
+        assert_eq!(snapshot.undo_descriptions[0], "Rename to renamed scene");
+
         let response = handle_model_request(
             &mut model,
             ModelRequest::RenameWorkspaceNode(WorkspaceRenameInput {
@@ -14248,6 +14274,8 @@ mod tests {
         assert_eq!(model.snapshot().objects[0].renderers[0].name, "simple 1");
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().objects[0].name, "molecule");
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().scenes[0].name, "Untitled 1");
     }
 
     #[test]
