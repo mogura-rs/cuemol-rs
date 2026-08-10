@@ -499,6 +499,13 @@ pub struct GuiViewSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiAtomIntrDefSummary {
+    pub id: usize,
+    pub mode: u8,
+    pub atoms: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiCameraSummary {
     pub scene_uid: Uid,
     pub name: String,
@@ -6142,6 +6149,75 @@ impl DesktopAppState {
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
         renderer.set_visible(visible);
         Ok(())
+    }
+
+    pub fn atom_intr_def_summaries(
+        &self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+    ) -> Result<Vec<GuiAtomIntrDefSummary>> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let renderer = object
+            .renderer(renderer_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        if renderer.renderer_type() != "atomintr" {
+            return Err(CueMolError::invalid_argument(
+                "renderer is not an atom interaction renderer",
+            ));
+        }
+        Ok(renderer
+            .atom_intr_lines()
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.is_active())
+            .map(|(id, line)| GuiAtomIntrDefSummary {
+                id,
+                mode: match line.kind() {
+                    AtomIntrKind::Distance => 1,
+                    AtomIntrKind::Angle => 2,
+                    AtomIntrKind::Torsion => 3,
+                },
+                atoms: [&line.a0, &line.a1]
+                    .into_iter()
+                    .map(Some)
+                    .chain([line.a2.as_ref(), line.a3.as_ref()])
+                    .take(match line.kind() {
+                        AtomIntrKind::Distance => 2,
+                        AtomIntrKind::Angle => 3,
+                        AtomIntrKind::Torsion => 4,
+                    })
+                    .flatten()
+                    .cloned()
+                    .collect(),
+            })
+            .collect())
+    }
+
+    pub fn remove_atom_intr_defs(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        ids: &[usize],
+    ) -> Result<usize> {
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let renderer = object
+            .renderer_mut(renderer_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        if renderer.renderer_type() != "atomintr" {
+            return Err(CueMolError::invalid_argument(
+                "renderer is not an atom interaction renderer",
+            ));
+        }
+        Ok(ids
+            .iter()
+            .filter(|id| renderer.remove_atom_intr(**id))
+            .count())
     }
 
     pub fn set_object_visible(&mut self, object_uid: Uid, visible: bool) -> Result<()> {
@@ -58396,6 +58472,25 @@ attribute \"dep\" string \"positions\"
             Some("DefaultLabel,DefaultAtomIntr")
         );
         assert!(renderer.atom_intr_lines()[4].positions().len() == 2);
+        let entries = app
+            .atom_intr_def_summaries(first, defined.renderer_uid)
+            .unwrap();
+        assert_eq!(entries.len(), 6);
+        assert_eq!(entries[0].mode, 1);
+        assert_eq!(entries[0].atoms.len(), 2);
+        assert_eq!(
+            app.remove_atom_intr_defs(first, defined.renderer_uid, &[2, 0])
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            app.atom_intr_def_summaries(first, defined.renderer_uid)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![1, 3, 4, 5]
+        );
         assert_eq!(
             app.assign_secondary_structure_in_object(first, false, 60.0)
                 .unwrap(),

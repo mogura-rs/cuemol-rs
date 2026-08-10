@@ -706,6 +706,16 @@ struct NativeReloadSceneDraft {
     scene_name: String,
 }
 
+#[derive(Debug, Clone)]
+struct NativeAtomIntrEditDraft {
+    scene_uid: cuemol_core::Uid,
+    object_uid: cuemol_core::Uid,
+    renderer_uid: cuemol_core::Uid,
+    renderer_name: String,
+    original_ids: Vec<usize>,
+    rows: Vec<crate::GuiAtomIntrDefSummary>,
+}
+
 #[derive(Debug)]
 enum NativeTrajectoryPanelAction {
     SetFrame {
@@ -792,6 +802,7 @@ struct GuiApplication {
     close_tab_draft: Option<NativeCloseTabDraft>,
     close_after_scene_save: bool,
     reload_scene_draft: Option<NativeReloadSceneDraft>,
+    atom_intr_edit_draft: Option<NativeAtomIntrEditDraft>,
     renderer_setup_draft: Option<NativeRendererSetupDraft>,
     pdb_download_receiver: Option<mpsc::Receiver<PdbDownloadMessage>>,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
@@ -2595,6 +2606,7 @@ impl GuiApplication {
             close_tab_draft: None,
             close_after_scene_save: false,
             reload_scene_draft: None,
+            atom_intr_edit_draft: None,
             renderer_setup_draft: None,
             pdb_download_receiver: None,
             url_download_receiver: None,
@@ -4960,7 +4972,12 @@ impl GuiApplication {
                             ui.separator();
                             if renderer.renderer_type == "atomintr" {
                                 if ui.button("Edit interaction list...").clicked() {
-                                    self.open_renderer_properties(object_uid, renderer.uid);
+                                    self.open_atom_intr_edit(
+                                        scene_uid,
+                                        object_uid,
+                                        renderer.uid,
+                                        &renderer.name,
+                                    );
                                     ui.close();
                                 }
                                 ui.separator();
@@ -10545,6 +10562,7 @@ impl GuiApplication {
         self.new_tab_dialog(ctx, camera);
         self.close_tab_dialog(ctx, camera);
         self.reload_scene_dialog(ctx, camera);
+        self.atom_intr_edit_dialog(ctx);
         self.renderer_setup_dialog(ctx, camera);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
@@ -11277,6 +11295,28 @@ impl GuiApplication {
             return;
         };
         self.renderer_properties_draft = Some(properties);
+    }
+
+    fn open_atom_intr_edit(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        renderer_name: &str,
+    ) {
+        match self.state.atom_intr_def_summaries(object_uid, renderer_uid) {
+            Ok(rows) => {
+                self.atom_intr_edit_draft = Some(NativeAtomIntrEditDraft {
+                    scene_uid,
+                    object_uid,
+                    renderer_uid,
+                    renderer_name: renderer_name.to_string(),
+                    original_ids: rows.iter().map(|row| row.id).collect(),
+                    rows,
+                });
+            }
+            Err(error) => self.set_error(error),
+        }
     }
 
     fn open_density_renderer_properties(
@@ -16072,6 +16112,87 @@ impl GuiApplication {
             self.reload_current_path_unchecked(camera);
         } else if open && !cancel {
             self.reload_scene_draft = Some(draft);
+        }
+    }
+
+    fn atom_intr_edit_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.atom_intr_edit_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        let mut remove_id = None;
+        egui::Window::new(format!("Edit interaction list: {}", draft.renderer_name))
+            .default_width(460.0)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        if draft.rows.is_empty() {
+                            ui.weak("(no interactions)");
+                        }
+                        for row in &draft.rows {
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    [64.0, 20.0],
+                                    egui::Label::new(match row.mode {
+                                        1 => "Distance",
+                                        2 => "Angle",
+                                        3 => "Torsion",
+                                        _ => "?",
+                                    }),
+                                );
+                                ui.monospace(row.atoms.join("  -  "));
+                                if ui.small_button("×").clicked() {
+                                    remove_id = Some(row.id);
+                                }
+                            });
+                        }
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                });
+            });
+        if let Some(id) = remove_id {
+            draft.rows.retain(|row| row.id != id);
+        }
+        if accept {
+            let removed_ids = draft
+                .original_ids
+                .iter()
+                .copied()
+                .filter(|id| draft.rows.iter().all(|row| row.id != *id))
+                .collect::<Vec<_>>();
+            if removed_ids.is_empty() {
+                return;
+            }
+            let undo = self.capture_undo();
+            match self.state.remove_atom_intr_defs(
+                draft.object_uid,
+                draft.renderer_uid,
+                &removed_ids,
+            ) {
+                Ok(removed) if removed > 0 => {
+                    self.push_undo_snapshot(undo);
+                    self.modified_scenes.insert(draft.scene_uid);
+                    self.rebuild_snapshot();
+                    self.set_status(format!("Removed {removed} interaction(s)"));
+                }
+                Ok(_) => {}
+                Err(error) => self.set_error(error),
+            }
+        } else if open && !cancel {
+            self.atom_intr_edit_draft = Some(draft);
         }
     }
 

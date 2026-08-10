@@ -534,6 +534,31 @@ fn close_tab_matches_last_modified_view_confirmation_flow() {
 }
 
 #[test]
+fn atom_interaction_context_menu_uses_the_dedicated_list_editor() {
+    for label in [
+        "Edit interaction list:",
+        "Interaction definitions",
+        "(no interactions)",
+        "Distance",
+        "Angle",
+        "Torsion",
+    ] {
+        assert!(
+            JS.contains(label),
+            "missing interaction-list behavior {label}"
+        );
+    }
+    assert!(JS.contains("showEditInteractionListDialog(object, renderer)"));
+    assert!(JS.contains("get_atom_intr_defs"));
+    assert!(JS.contains("remove_atom_intr_defs"));
+    assert!(CSS.contains(".reference-dialog.interaction-list-dialog"));
+    assert!(NATIVE_GUI_RS.contains("fn atom_intr_edit_dialog"));
+    assert!(NATIVE_GUI_RS.contains("remove_atom_intr_defs"));
+    assert!(TAURI_APP_RS.contains("ModelRequest::GetAtomIntrDefs"));
+    assert!(TAURI_APP_RS.contains("ModelRequest::RemoveAtomIntrDefs"));
+}
+
+#[test]
 fn png_export_matches_the_reference_options_dialog() {
     for label in [
         "PNG options",

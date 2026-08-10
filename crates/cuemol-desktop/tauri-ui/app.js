@@ -4318,6 +4318,95 @@ function showConfirmReloadSceneDialog(sceneName) {
   });
 }
 
+async function showEditInteractionListDialog(object, renderer) {
+  let entries;
+  try {
+    entries = await invoke("get_atom_intr_defs", {
+      objectUid: object.uid,
+      rendererUid: renderer.uid,
+    });
+  } catch (error) {
+    showError(error);
+    return false;
+  }
+  if (referenceDialog.open) referenceDialog.close();
+  dialogTitle.textContent = `Edit interaction list: ${renderer.name}`;
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog interaction-list-dialog";
+  const original = Array.isArray(entries) ? entries : [];
+  let rows = original.map((entry) => ({ ...entry, atoms: [...entry.atoms] }));
+  const table = document.createElement("div");
+  table.className = "interaction-def-table";
+  table.setAttribute("role", "table");
+  table.setAttribute("aria-label", "Interaction definitions");
+  dialogContent.append(table);
+
+  const modeLabel = (mode) => ({ 1: "Distance", 2: "Angle", 3: "Torsion" })[mode] || "?";
+  const renderRows = () => {
+    table.replaceChildren();
+    if (!rows.length) {
+      const empty = document.createElement("div");
+      empty.className = "interaction-def-empty";
+      empty.textContent = "(no interactions)";
+      table.append(empty);
+      return;
+    }
+    for (const entry of rows) {
+      const row = document.createElement("div");
+      row.className = "interaction-def-row";
+      row.setAttribute("role", "row");
+      const mode = document.createElement("span");
+      mode.className = "interaction-def-mode";
+      mode.textContent = modeLabel(entry.mode);
+      const atoms = document.createElement("span");
+      atoms.className = "interaction-def-atoms";
+      atoms.textContent = entry.atoms.join("  -  ");
+      const remove = button("×", "interaction-def-remove", () => {
+        rows = rows.filter((candidate) => candidate.id !== entry.id);
+        renderRows();
+      });
+      remove.setAttribute("aria-label", `Delete interaction ${entry.id}`);
+      row.append(mode, atoms, remove);
+      table.append(row);
+    }
+  };
+  renderRows();
+
+  const removeIds = await new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      referenceDialog.removeEventListener("close", onClose);
+      resolve(value);
+    };
+    const onClose = () => {
+      if (!referenceDialog.open) finish(null);
+    };
+    referenceDialog.addEventListener("close", onClose);
+    const cancel = button("Cancel", "", () => {
+      finish(null);
+      referenceDialog.close();
+    });
+    const ok = button("OK", "dialog-primary", () => {
+      const remaining = new Set(rows.map((entry) => entry.id));
+      finish(original.filter((entry) => !remaining.has(entry.id)).map((entry) => entry.id));
+      referenceDialog.close();
+    });
+    dialogActions(cancel, ok);
+    if (!referenceDialog.open && referenceDialog.showModal) {
+      referenceDialog.showModal();
+    }
+  });
+  if (!removeIds?.length) return false;
+  return mutate("remove_atom_intr_defs", {
+    objectUid: object.uid,
+    rendererUid: renderer.uid,
+    ids: removeIds,
+  });
+}
+
 async function showReferenceDialog(title) {
   if (referenceDialog.open) referenceDialog.close();
   atomPickerTarget = null;
@@ -7155,7 +7244,7 @@ async function workspaceRendererContextItems(scene, object, renderer) {
   if (renderer.rendererType === "atomintr") {
     items.push(null, {
       label: "Edit interaction list...",
-      action: () => showReferenceDialog("Renderer Properties"),
+      action: () => showEditInteractionListDialog(object, renderer),
     });
   }
   items.push(

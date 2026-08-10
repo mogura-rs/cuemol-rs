@@ -69,6 +69,14 @@ struct ViewDto {
     active: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AtomIntrDefDto {
+    id: usize,
+    mode: u8,
+    atoms: Vec<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CameraDto {
@@ -5531,6 +5539,15 @@ enum ModelRequest {
         scene_uid: u64,
         renderer_type: String,
     },
+    GetAtomIntrDefs {
+        object_uid: u64,
+        renderer_uid: u64,
+    },
+    RemoveAtomIntrDefs {
+        object_uid: u64,
+        renderer_uid: u64,
+        ids: Vec<usize>,
+    },
     SetStyleProperties(StylePropertiesInput),
     DestroyStyle {
         scene_uid: u64,
@@ -5884,6 +5901,7 @@ enum ModelResponse {
     ViewPropertiesUpdate(Box<ViewPropertiesUpdateDto>),
     StyleProperties(StylePropertiesDto),
     RendererStyleOptions(Vec<RendererStyleOptionDto>),
+    AtomIntrDefs(Vec<AtomIntrDefDto>),
     FileRendererSetup(Option<RendererSetupDto>),
     PdbRendererSetup(RendererSetupDto),
     CameraVisibility(Vec<CameraVisibilityEntryDto>),
@@ -7287,6 +7305,45 @@ fn handle_model_request(
                 })
                 .collect(),
         )),
+        ModelRequest::GetAtomIntrDefs {
+            object_uid,
+            renderer_uid,
+        } => Ok(ModelResponse::AtomIntrDefs(
+            model
+                .desktop
+                .atom_intr_def_summaries(Uid::new(object_uid), Uid::new(renderer_uid))
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|entry| AtomIntrDefDto {
+                    id: entry.id,
+                    mode: entry.mode,
+                    atoms: entry.atoms,
+                })
+                .collect(),
+        )),
+        ModelRequest::RemoveAtomIntrDefs {
+            object_uid,
+            renderer_uid,
+            ids,
+        } => {
+            let scene_uid = model
+                .desktop
+                .scene_manager()
+                .scene_uid_for_object(Uid::new(object_uid))
+                .ok_or_else(|| format!("object {object_uid} was not found"))?;
+            let undo = model.capture_undo();
+            let removed = model
+                .desktop
+                .remove_atom_intr_defs(Uid::new(object_uid), Uid::new(renderer_uid), &ids)
+                .map_err(|error| error.to_string())?;
+            if removed > 0 {
+                model.modified_scenes.insert(scene_uid);
+                model.status = format!("Removed {removed} interaction(s)");
+                model.invalidate_mesh(false);
+                model.push_undo(undo);
+            }
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::SetStyleProperties(properties) => {
             let undo = model.capture_undo();
             model.set_style_properties(properties)?;
@@ -8989,6 +9046,7 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
@@ -9013,6 +9071,7 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
@@ -9037,6 +9096,7 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
@@ -9061,6 +9121,7 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
@@ -9085,6 +9146,7 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
@@ -9109,6 +9171,7 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
@@ -9133,6 +9196,7 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
@@ -9157,6 +9221,7 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
@@ -9183,6 +9248,7 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
@@ -9216,6 +9282,7 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::ViewPropertiesUpdate(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
@@ -9237,6 +9304,13 @@ fn renderer_style_options_response(
     match response {
         ModelResponse::RendererStyleOptions(options) => Ok(options),
         _ => Err("unexpected non-renderer-style-options response".to_string()),
+    }
+}
+
+fn atom_intr_defs_response(response: ModelResponse) -> Result<Vec<AtomIntrDefDto>, String> {
+    match response {
+        ModelResponse::AtomIntrDefs(entries) => Ok(entries),
+        _ => Err("unexpected non-atom-interaction-definitions response".to_string()),
     }
 }
 
@@ -9274,6 +9348,7 @@ fn view_properties_update_response(
         | ModelResponse::ViewProperties(_)
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
+        | ModelResponse::AtomIntrDefs(_)
         | ModelResponse::FileRendererSetup(_)
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
@@ -9740,6 +9815,38 @@ fn get_renderer_style_options(
         ModelRequest::GetRendererStyleOptions {
             scene_uid,
             renderer_type,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn get_atom_intr_defs(
+    object_uid: u64,
+    renderer_uid: u64,
+    state: State<'_, ManagedState>,
+) -> Result<Vec<AtomIntrDefDto>, String> {
+    atom_intr_defs_response(request_model(
+        &state,
+        ModelRequest::GetAtomIntrDefs {
+            object_uid,
+            renderer_uid,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn remove_atom_intr_defs(
+    object_uid: u64,
+    renderer_uid: u64,
+    ids: Vec<usize>,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::RemoveAtomIntrDefs {
+            object_uid,
+            renderer_uid,
+            ids,
         },
     )?)
 }
@@ -11379,6 +11486,8 @@ pub fn run() -> Result<(), tauri::Error> {
             create_renderer_style,
             get_style_properties,
             get_renderer_style_options,
+            get_atom_intr_defs,
+            remove_atom_intr_defs,
             set_style_properties,
             destroy_style,
             set_workspace_visible,
@@ -12977,6 +13086,90 @@ mod tests {
         ] {
             assert_eq!(renderer.qsc_attr(key), None, "{key} restored");
         }
+    }
+
+    #[test]
+    fn atom_intr_definition_list_and_removal_are_undoable() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let lines = vec![
+            cuemol_molstr::AtomIntrLine::from_positions(
+                cuemol_molstr::AtomIntrKind::Distance,
+                vec![Vector4::new3(0.0, 0.0, 0.0), Vector4::new3(1.0, 0.0, 0.0)],
+            ),
+            cuemol_molstr::AtomIntrLine::from_positions(
+                cuemol_molstr::AtomIntrKind::Angle,
+                vec![
+                    Vector4::new3(0.0, 0.0, 0.0),
+                    Vector4::new3(1.0, 0.0, 0.0),
+                    Vector4::new3(1.0, 1.0, 0.0),
+                ],
+            ),
+        ];
+        let renderer_uid = model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_atom_intr_renderer_defs("measure", &[])
+            .unwrap();
+        let renderer = model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap();
+        for line in lines {
+            renderer.append_atom_intr_line(line).unwrap();
+        }
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::GetAtomIntrDefs {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::AtomIntrDefs(entries) = response else {
+            panic!("expected atom interaction definitions");
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].mode, 1);
+        assert_eq!(entries[1].mode, 2);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::RemoveAtomIntrDefs {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                ids: vec![0],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .atom_intr_def_summaries(object_uid, renderer_uid)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert!(model
+            .modified_scenes
+            .contains(&model.desktop.active_scene().unwrap()));
+
+        model.undo(0).unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .atom_intr_def_summaries(object_uid, renderer_uid)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

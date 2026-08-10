@@ -2055,6 +2055,47 @@ summary:focus-visible {
   width: min(400px, calc(100vw - 48px));
 }
 
+.reference-dialog.interaction-list-dialog {
+  width: min(460px, calc(100vw - 48px));
+}
+
+.interaction-def-table {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid #aaa;
+  border-radius: 3px;
+  background: #fff;
+}
+
+.interaction-def-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 2px 8px;
+}
+
+.interaction-def-mode {
+  width: 64px;
+  color: #666;
+}
+
+.interaction-def-atoms {
+  flex: 1;
+  font-family: var(--font-mono);
+}
+
+.interaction-def-remove {
+  min-width: 24px;
+  padding: 0 6px;
+}
+
+.interaction-def-empty {
+  padding: 8px;
+  color: #666;
+  font-style: italic;
+}
+
 .new-tab-options {
   display: grid;
   gap: 7px;
