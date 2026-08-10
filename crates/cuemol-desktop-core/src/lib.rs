@@ -911,6 +911,13 @@ pub struct GuiCrystalSummary {
     pub gamma: f64,
     pub space_group_name: String,
     pub space_group_number: Option<i32>,
+    pub lattice: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiSpaceGroupSummary {
+    pub id: i32,
+    pub canonical_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4080,6 +4087,19 @@ impl DesktopAppState {
     pub fn crystal_summary(&self, object_uid: Uid) -> Option<GuiCrystalSummary> {
         let object = self.scene_manager().object(object_uid)?;
         let cell = object.mol().cell_params()?;
+        let symmetry = cuemol_symm::SymmOpManager::new();
+        let space_group_number = cell.space_group_number.or_else(|| {
+            let mut id = symmetry.get_sg_id_by_cname(&cell.space_group_name);
+            if id < 0 {
+                id = symmetry.get_sg_id_by_name(&cell.space_group_name);
+            }
+            (id >= 0).then_some(id)
+        });
+        let lattice = space_group_number
+            .and_then(|id| symmetry.lattice_for_space_group(id))
+            .unwrap_or(cuemol_symm::LatticeSystem::Triclinic)
+            .name()
+            .to_string();
         Some(GuiCrystalSummary {
             object_uid,
             object_name: object.name().to_string(),
@@ -4090,8 +4110,70 @@ impl DesktopAppState {
             beta: cell.beta,
             gamma: cell.gamma,
             space_group_name: cell.space_group_name.clone(),
-            space_group_number: cell.space_group_number,
+            space_group_number,
+            lattice,
         })
+    }
+
+    pub fn space_group_summaries(&self, lattice: &str) -> Vec<GuiSpaceGroupSummary> {
+        let Some(lattice) = cuemol_symm::LatticeSystem::from_name(lattice) else {
+            return Vec::new();
+        };
+        cuemol_symm::SymmOpManager::new()
+            .space_groups_for_lattice(lattice)
+            .into_iter()
+            .map(|group| GuiSpaceGroupSummary {
+                id: group.id,
+                canonical_name: group.canonical_name.clone(),
+            })
+            .collect()
+    }
+
+    pub fn space_group_summaries_json(&self, lattice: &str) -> String {
+        cuemol_symm::SymmOpManager::new().get_sg_names_json(lattice)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn change_crystal_info(
+        &mut self,
+        object_uid: Uid,
+        a: f64,
+        b: f64,
+        c: f64,
+        alpha: f64,
+        beta: f64,
+        gamma: f64,
+        space_group_number: i32,
+    ) -> Result<()> {
+        if ![a, b, c, alpha, beta, gamma]
+            .into_iter()
+            .all(f64::is_finite)
+            || a <= 0.0
+            || b <= 0.0
+            || c <= 0.0
+            || !(0.0..180.0).contains(&alpha)
+            || !(0.0..180.0).contains(&beta)
+            || !(0.0..180.0).contains(&gamma)
+        {
+            return Err(CueMolError::invalid_argument(
+                "crystal cell dimensions or angles are invalid",
+            ));
+        }
+        let symmetry = cuemol_symm::SymmOpManager::new();
+        let space_group_name = symmetry
+            .get_cname(space_group_number)
+            .ok_or_else(|| CueMolError::invalid_argument("space group is invalid"))?
+            .to_string();
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let mut cell = cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma);
+        cell.space_group_name = space_group_name;
+        cell.space_group_number = Some(space_group_number);
+        object.mol_mut().set_cell_params(cell);
+        object.set_modified(true);
+        Ok(())
     }
 
     /// Crystal summaries for every molecule object in the active scene that has a cell.
@@ -54174,8 +54256,20 @@ end_header
         assert!((cell.beta - 90.77).abs() < 1e-2, "beta = {}", cell.beta);
         assert!((cell.gamma - 90.0).abs() < 1e-2);
         assert_eq!(cell.space_group_name.trim(), "P 1 21 1");
+        assert_eq!(cell.lattice, "MONOCLINIC");
         // The active-scene aggregate finds the same crystal.
         assert_eq!(app.active_crystal_summaries().len(), 1);
+        let cubic = app.space_group_summaries("CUBIC");
+        assert!(cubic.iter().any(|group| group.id == 195));
+        app.change_crystal_info(object_uid, 10.0, 10.0, 10.0, 90.0, 90.0, 90.0, 195)
+            .unwrap();
+        let changed = app.crystal_summary(object_uid).unwrap();
+        assert_eq!(changed.space_group_number, Some(195));
+        assert_eq!(changed.space_group_name, "P 2 3");
+        assert_eq!(changed.lattice, "CUBIC");
+        assert!(app
+            .change_crystal_info(object_uid, 0.0, 10.0, 10.0, 90.0, 90.0, 90.0, 195)
+            .is_err());
     }
 
     #[test]

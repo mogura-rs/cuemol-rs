@@ -447,6 +447,96 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct NativeCrystalDraft {
+    object_uid: cuemol_core::Uid,
+    lattice: String,
+    space_group_number: i32,
+    restrict_by_symmetry: bool,
+    a: f64,
+    b: f64,
+    c: f64,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+}
+
+const CRYSTAL_LATTICES: [(&str, &str); 7] = [
+    ("TRICLINIC", "Triclinic"),
+    ("MONOCLINIC", "Monoclinic"),
+    ("ORTHORHOMBIC", "Orthorhombic"),
+    ("TRIGONAL", "Trigonal"),
+    ("TETRAGONAL", "Tetragonal"),
+    ("HEXAGONAL", "Hexagonal"),
+    ("CUBIC", "Cubic"),
+];
+
+fn lattice_label(lattice: &str) -> &str {
+    CRYSTAL_LATTICES
+        .iter()
+        .find(|entry| entry.0 == lattice)
+        .map_or(lattice, |entry| entry.1)
+}
+
+fn crystal_field_locks(
+    draft: &NativeCrystalDraft,
+    space_group_name: &str,
+) -> (bool, bool, bool, bool, bool) {
+    if !draft.restrict_by_symmetry {
+        return (false, false, false, false, false);
+    }
+    match draft.lattice.as_str() {
+        "MONOCLINIC" => (false, false, true, false, true),
+        "ORTHORHOMBIC" => (false, false, true, true, true),
+        "TETRAGONAL" => (true, false, true, true, true),
+        "CUBIC" => (true, true, true, true, true),
+        "TRIGONAL" if space_group_name.starts_with('R') => (true, true, false, false, false),
+        "TRIGONAL" | "HEXAGONAL" => (true, false, true, true, true),
+        _ => (false, false, false, false, false),
+    }
+}
+
+fn restrict_crystal_draft(draft: &mut NativeCrystalDraft, space_group_name: &str) {
+    if !draft.restrict_by_symmetry {
+        return;
+    }
+    match draft.lattice.as_str() {
+        "MONOCLINIC" => {
+            draft.alpha = 90.0;
+            draft.gamma = 90.0;
+        }
+        "ORTHORHOMBIC" => {
+            draft.alpha = 90.0;
+            draft.beta = 90.0;
+            draft.gamma = 90.0;
+        }
+        "TETRAGONAL" => {
+            draft.b = draft.a;
+            draft.alpha = 90.0;
+            draft.beta = 90.0;
+            draft.gamma = 90.0;
+        }
+        "CUBIC" => {
+            draft.b = draft.a;
+            draft.c = draft.a;
+            draft.alpha = 90.0;
+            draft.beta = 90.0;
+            draft.gamma = 90.0;
+        }
+        "TRIGONAL" if space_group_name.starts_with('R') => {
+            draft.b = draft.a;
+            draft.c = draft.a;
+        }
+        "TRIGONAL" | "HEXAGONAL" => {
+            draft.b = draft.a;
+            draft.alpha = 90.0;
+            draft.beta = 90.0;
+            draft.gamma = 120.0;
+        }
+        _ => {}
+    }
+}
+
 #[derive(Debug)]
 struct GuiApplication {
     state: DesktopAppState,
@@ -495,6 +585,7 @@ struct GuiApplication {
     show_unit_cell: bool,
     /// Whether the home-cell symmetry-mate copies are drawn (Symmetry panel "Symm mol").
     show_symm_mates: bool,
+    crystal_draft: Option<NativeCrystalDraft>,
     /// Density-map "chickenwire" contour display + its sigma contour level
     /// (CueMol2 Density map panel level slider).
     show_density_contour: bool,
@@ -2252,6 +2343,7 @@ impl GuiApplication {
             selection_tab: SelectionTab::Command,
             show_unit_cell: false,
             show_symm_mates: false,
+            crystal_draft: None,
             show_density_contour: false,
             density_level: 1.5,
             show_density_solid: false,
@@ -5927,14 +6019,154 @@ impl GuiApplication {
         self.set_status("Applied coloring");
     }
 
+    fn open_crystal_editor(&mut self, object_uid: cuemol_core::Uid) {
+        let draft = self
+            .state
+            .crystal_summary(object_uid)
+            .map(|crystal| NativeCrystalDraft {
+                object_uid,
+                lattice: crystal.lattice,
+                space_group_number: crystal.space_group_number.unwrap_or(1),
+                restrict_by_symmetry: false,
+                a: crystal.a,
+                b: crystal.b,
+                c: crystal.c,
+                alpha: crystal.alpha,
+                beta: crystal.beta,
+                gamma: crystal.gamma,
+            })
+            .unwrap_or(NativeCrystalDraft {
+                object_uid,
+                lattice: "TRICLINIC".to_string(),
+                space_group_number: 1,
+                restrict_by_symmetry: false,
+                a: 100.0,
+                b: 100.0,
+                c: 100.0,
+                alpha: 90.0,
+                beta: 90.0,
+                gamma: 90.0,
+            });
+        self.crystal_draft = Some(draft);
+        self.tool_dialog = Some("Change symmetry".to_string());
+    }
+
+    fn crystal_tool_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(mut draft) = self.crystal_draft.clone() else {
+            ui.label("Select a molecule first.");
+            return;
+        };
+        let object_name = self
+            .state
+            .active_object_summaries()
+            .into_iter()
+            .find(|object| object.uid == draft.object_uid)
+            .map_or_else(
+                || format!("object {}", draft.object_uid.get()),
+                |object| object.name,
+            );
+        ui.label(egui::RichText::new(object_name).strong());
+        ui.separator();
+
+        egui::ComboBox::from_label("Crystal system")
+            .selected_text(lattice_label(&draft.lattice))
+            .show_ui(ui, |ui| {
+                for lattice in CRYSTAL_LATTICES {
+                    ui.selectable_value(&mut draft.lattice, lattice.0.to_string(), lattice.1);
+                }
+            });
+        let space_groups = self.state.space_group_summaries(&draft.lattice);
+        if !space_groups
+            .iter()
+            .any(|group| group.id == draft.space_group_number)
+        {
+            draft.space_group_number = space_groups.first().map_or(1, |group| group.id);
+        }
+        let selected_space_group = space_groups
+            .iter()
+            .find(|group| group.id == draft.space_group_number)
+            .map_or("(unknown)", |group| group.canonical_name.as_str());
+        egui::ComboBox::from_label("Space Group")
+            .selected_text(selected_space_group)
+            .show_ui(ui, |ui| {
+                for group in &space_groups {
+                    ui.selectable_value(
+                        &mut draft.space_group_number,
+                        group.id,
+                        &group.canonical_name,
+                    );
+                }
+            });
+        ui.label(format!("Space Group Number: {}", draft.space_group_number));
+        ui.checkbox(&mut draft.restrict_by_symmetry, "Restrict by symmetry");
+
+        let selected_space_group = space_groups
+            .iter()
+            .find(|group| group.id == draft.space_group_number)
+            .map_or("", |group| group.canonical_name.as_str());
+        restrict_crystal_draft(&mut draft, selected_space_group);
+        let (lock_b, lock_c, lock_alpha, lock_beta, lock_gamma) =
+            crystal_field_locks(&draft, selected_space_group);
+        egui::Grid::new("native-crystal-cell-grid")
+            .num_columns(4)
+            .show(ui, |ui| {
+                ui.label("a=");
+                ui.add(egui::DragValue::new(&mut draft.a).speed(0.1));
+                ui.label("α=");
+                ui.add_enabled(
+                    !lock_alpha,
+                    egui::DragValue::new(&mut draft.alpha).speed(0.1),
+                );
+                ui.end_row();
+                ui.label("b=");
+                ui.add_enabled(!lock_b, egui::DragValue::new(&mut draft.b).speed(0.1));
+                ui.label("β=");
+                ui.add_enabled(!lock_beta, egui::DragValue::new(&mut draft.beta).speed(0.1));
+                ui.end_row();
+                ui.label("c=");
+                ui.add_enabled(!lock_c, egui::DragValue::new(&mut draft.c).speed(0.1));
+                ui.label("γ=");
+                ui.add_enabled(
+                    !lock_gamma,
+                    egui::DragValue::new(&mut draft.gamma).speed(0.1),
+                );
+                ui.end_row();
+            });
+        restrict_crystal_draft(&mut draft, selected_space_group);
+
+        let mut applied = false;
+        if ui.button("OK").clicked() {
+            let undo = self.capture_undo();
+            match self.state.change_crystal_info(
+                draft.object_uid,
+                draft.a,
+                draft.b,
+                draft.c,
+                draft.alpha,
+                draft.beta,
+                draft.gamma,
+                draft.space_group_number,
+            ) {
+                Ok(()) => {
+                    self.push_undo_snapshot(undo);
+                    self.rebuild_snapshot();
+                    self.set_status("Changed symmetry information");
+                    self.tool_dialog = None;
+                    applied = true;
+                }
+                Err(error) => self.set_error(error),
+            }
+        }
+        self.crystal_draft = (!applied).then_some(draft);
+    }
+
     /// Symmetry section — crystal cell / space group table (CueMol2 `symmetry-panel.xul`).
     fn symmetry_section(&mut self, ui: &mut egui::Ui) {
         let crystals = self.state.active_crystal_summaries();
         if crystals.is_empty() {
             ui.weak("No crystal cell (non-crystallographic).");
-            return;
         }
-        for cell in crystals {
+        for cell in &crystals {
             ui.label(egui::RichText::new(&cell.object_name).strong());
             egui::Grid::new(("symm-grid", cell.object_uid.get()))
                 .num_columns(2)
@@ -5955,14 +6187,28 @@ impl GuiApplication {
                     ui.end_row();
                 });
         }
+        let objects = self.state.active_object_summaries();
+        let target = self
+            .selected_object
+            .filter(|uid| objects.iter().any(|object| object.uid == *uid))
+            .or_else(|| objects.first().map(|object| object.uid));
+        if ui
+            .add_enabled(target.is_some(), egui::Button::new("Change symmetry…"))
+            .clicked()
+        {
+            self.open_crystal_editor(target.expect("enabled symmetry target"));
+        }
         ui.separator();
         // CueMol2 Symmetry panel "Unit cell" / "Symm mol" toggles: draw the cell box
         // and the home-cell symmetry-mate copies.
-        let mut changed = ui.checkbox(&mut self.show_unit_cell, "Unit cell").changed();
-        changed |= ui
-            .checkbox(&mut self.show_symm_mates, "Symm mol")
-            .on_hover_text("Show symmetry-related molecules in the unit cell")
-            .changed();
+        let mut changed = false;
+        ui.add_enabled_ui(!crystals.is_empty(), |ui| {
+            changed |= ui.checkbox(&mut self.show_unit_cell, "Unit cell").changed();
+            changed |= ui
+                .checkbox(&mut self.show_symm_mates, "Symm mol")
+                .on_hover_text("Show symmetry-related molecules in the unit cell")
+                .changed();
+        });
         if changed {
             self.rebuild_snapshot();
         }
@@ -13247,6 +13493,7 @@ impl GuiApplication {
                     "Molecular superposition" => self.superpose_tool_ui(ui, camera),
                     "Mol bond editor" => self.bond_editor_tool_ui(ui),
                     "Interaction" => self.interaction_tool_ui(ui),
+                    "Change symmetry" => self.crystal_tool_ui(ui),
                     "Reassign secondary str" => self.secondary_structure_tool_ui(ui),
                     "Mol morphing animation" => self.morph_tool_ui(ui),
                     "Mol surface generation" => self.surface_tool_ui(ui),
@@ -21075,6 +21322,37 @@ mod tests {
             .unwrap()
             .renderer(renderer_uid)
             .is_none());
+    }
+
+    #[test]
+    fn native_crystal_restrictions_match_reference_lattices() {
+        let mut draft = NativeCrystalDraft {
+            object_uid: cuemol_core::Uid::new(1),
+            lattice: "CUBIC".to_string(),
+            space_group_number: 195,
+            restrict_by_symmetry: true,
+            a: 42.0,
+            b: 20.0,
+            c: 30.0,
+            alpha: 70.0,
+            beta: 80.0,
+            gamma: 100.0,
+        };
+        restrict_crystal_draft(&mut draft, "P 2 3");
+        assert_eq!((draft.a, draft.b, draft.c), (42.0, 42.0, 42.0));
+        assert_eq!((draft.alpha, draft.beta, draft.gamma), (90.0, 90.0, 90.0));
+        assert_eq!(
+            crystal_field_locks(&draft, "P 2 3"),
+            (true, true, true, true, true)
+        );
+
+        draft.lattice = "TRIGONAL".to_string();
+        draft.b = 10.0;
+        draft.c = 20.0;
+        draft.alpha = 75.0;
+        restrict_crystal_draft(&mut draft, "R 3");
+        assert_eq!((draft.b, draft.c), (42.0, 42.0));
+        assert_eq!(draft.alpha, 75.0);
     }
 
     /// Exercise the whole shell + every left-panel section headlessly so a runtime

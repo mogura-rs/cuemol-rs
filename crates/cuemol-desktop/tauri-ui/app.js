@@ -140,6 +140,7 @@ let snapshot = null;
 let selectedObjectUid = null;
 let selectedRendererUid = null;
 const workspaceRendererStyleCache = new Map();
+const spaceGroupOptionsCache = new Map();
 let workspaceCameraClipboardAvailable = false;
 let workspaceObjectClipboardAvailable = false;
 let workspaceRendererClipboardAvailable = false;
@@ -3791,6 +3792,154 @@ async function showReferenceDialog(title) {
         }
       });
       dialogActions(calculate);
+    }
+  } else if (title === "Change symmetry") {
+    dialogTitle.textContent = "Change symmetry";
+    const objects = activeObjects();
+    if (objects.length === 0) {
+      dialogContent.append(dialogParagraph("No molecular object is loaded."));
+    } else {
+      const object =
+        objects.find((candidate) => candidate.uid === selectedObjectUid) || objects[0];
+      const crystal = snapshot.crystals.find((item) => item.objectUid === object.uid);
+      dialogContent.append(dialogParagraph(`Molecule: ${object.name}`));
+      const lattice = dialogSelect(
+        "Crystal system",
+        [
+          ["TRICLINIC", "Triclinic"],
+          ["MONOCLINIC", "Monoclinic"],
+          ["ORTHORHOMBIC", "Orthorhombic"],
+          ["TRIGONAL", "Trigonal"],
+          ["TETRAGONAL", "Tetragonal"],
+          ["HEXAGONAL", "Hexagonal"],
+          ["CUBIC", "Cubic"],
+        ],
+        crystal?.lattice || "TRICLINIC",
+      );
+      const spaceGroup = dialogSelect("Space Group", [], "");
+      const spaceGroupNumber = dialogField(
+        "Space Group Number",
+        String(crystal?.spaceGroupNumber || 1),
+        "number",
+      );
+      spaceGroupNumber.disabled = true;
+      const restrict = dialogCheckbox("Restrict by symmetry", false);
+      const cellA = dialogField("a (Å)", String(crystal?.a || 100), "number");
+      const cellB = dialogField("b (Å)", String(crystal?.b || 100), "number");
+      const cellC = dialogField("c (Å)", String(crystal?.c || 100), "number");
+      const alpha = dialogField("α (°)", String(crystal?.alpha || 90), "number");
+      const beta = dialogField("β (°)", String(crystal?.beta || 90), "number");
+      const gamma = dialogField("γ (°)", String(crystal?.gamma || 90), "number");
+      for (const input of [cellA, cellB, cellC, alpha, beta, gamma]) {
+        input.step = "0.1";
+      }
+
+      const applyRestrictions = () => {
+        for (const input of [cellA, cellB, cellC, alpha, beta, gamma]) {
+          input.disabled = false;
+        }
+        if (!restrict.checked) return;
+        const setRightAngles = () => {
+          alpha.value = "90";
+          beta.value = "90";
+          gamma.value = "90";
+          alpha.disabled = true;
+          beta.disabled = true;
+          gamma.disabled = true;
+        };
+        switch (lattice.value) {
+          case "MONOCLINIC":
+            alpha.value = "90";
+            gamma.value = "90";
+            alpha.disabled = true;
+            gamma.disabled = true;
+            break;
+          case "ORTHORHOMBIC":
+            setRightAngles();
+            break;
+          case "TETRAGONAL":
+            setRightAngles();
+            cellB.value = cellA.value;
+            cellB.disabled = true;
+            break;
+          case "CUBIC":
+            setRightAngles();
+            cellB.value = cellA.value;
+            cellC.value = cellA.value;
+            cellB.disabled = true;
+            cellC.disabled = true;
+            break;
+          case "TRIGONAL":
+            if (spaceGroup.selectedOptions[0]?.textContent.startsWith("R")) {
+              cellB.value = cellA.value;
+              cellC.value = cellA.value;
+              cellB.disabled = true;
+              cellC.disabled = true;
+              break;
+            }
+            setRightAngles();
+            gamma.value = "120";
+            cellB.value = cellA.value;
+            cellB.disabled = true;
+            break;
+          case "HEXAGONAL":
+            setRightAngles();
+            gamma.value = "120";
+            cellB.value = cellA.value;
+            cellB.disabled = true;
+            break;
+        }
+      };
+      const loadSpaceGroups = async (preferredId = null) => {
+        try {
+          let groups = spaceGroupOptionsCache.get(lattice.value);
+          if (!groups) {
+            groups = JSON.parse(
+              await invoke("get_space_groups", { lattice: lattice.value }),
+            );
+            spaceGroupOptionsCache.set(lattice.value, groups);
+          }
+          spaceGroup.replaceChildren();
+          for (const group of groups) {
+            const option = document.createElement("option");
+            option.value = String(group.id);
+            option.textContent = group.cname;
+            spaceGroup.append(option);
+          }
+          const preferred = String(preferredId ?? groups[0]?.id ?? 1);
+          spaceGroup.value = groups.some((group) => String(group.id) === preferred)
+            ? preferred
+            : String(groups[0]?.id ?? 1);
+          spaceGroupNumber.value = spaceGroup.value;
+          applyRestrictions();
+        } catch (error) {
+          showError(error);
+        }
+      };
+      lattice.addEventListener("change", () => void loadSpaceGroups());
+      spaceGroup.addEventListener("change", () => {
+        spaceGroupNumber.value = spaceGroup.value;
+        applyRestrictions();
+      });
+      restrict.addEventListener("change", applyRestrictions);
+      cellA.addEventListener("input", applyRestrictions);
+      await loadSpaceGroups(crystal?.spaceGroupNumber || 1);
+
+      const apply = button("OK", "dialog-primary", async () => {
+        applyRestrictions();
+        const changed = await mutate("change_crystal_info", {
+          objectUid: object.uid,
+          a: Number(cellA.value),
+          b: Number(cellB.value),
+          c: Number(cellC.value),
+          alpha: Number(alpha.value),
+          beta: Number(beta.value),
+          gamma: Number(gamma.value),
+          spaceGroupNumber: Number(spaceGroup.value),
+        });
+        if (changed) referenceDialog.close();
+      });
+      dialogActions(apply);
     }
   } else if (title === "Reassign secondary str") {
     dialogTitle.textContent = "Protein secondary str tool";
@@ -8331,6 +8480,11 @@ function renderSymmetry() {
     }
     symmetryContent.append(card);
   }
+  const changeSymmetry = button("Change symmetry…", "", () =>
+    showReferenceDialog("Change symmetry"),
+  );
+  changeSymmetry.disabled = activeObjects().length === 0;
+  symmetryContent.append(changeSymmetry);
   showUnitCell.checked = snapshot.showUnitCell;
   showSymmetryMates.checked = snapshot.showSymmetryMates;
   showUnitCell.disabled = snapshot.crystals.length === 0;

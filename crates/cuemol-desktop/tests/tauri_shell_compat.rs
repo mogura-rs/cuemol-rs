@@ -352,6 +352,26 @@ fn tauri_interaction_dialog_matches_reference_modes() {
 }
 
 #[test]
+fn tauri_symmetry_editor_is_lazy_and_matches_reference_fields() {
+    for label in [
+        "Change symmetry…",
+        "Crystal system",
+        "Space Group",
+        "Space Group Number",
+        "Restrict by symmetry",
+        "a (Å)",
+        "α (°)",
+    ] {
+        assert!(JS.contains(label), "missing symmetry editor field {label}");
+    }
+    assert!(JS.contains("const spaceGroupOptionsCache = new Map()"));
+    assert!(JS.contains("await invoke(\"get_space_groups\""));
+    assert!(JS.contains("spaceGroupOptionsCache.set(lattice.value, groups)"));
+    assert!(JS.contains("mutate(\"change_crystal_info\""));
+    assert!(JS.contains("spaceGroupNumber: Number(spaceGroup.value)"));
+}
+
+#[test]
 fn tauri_workspace_chrome_reuses_unchanged_dom() {
     assert!(JS.contains("function workspaceChromeRenderKey()"));
     let workspace_key = JS

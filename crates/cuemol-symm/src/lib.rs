@@ -3,7 +3,7 @@ use cuemol_gfx::RawHitData;
 use cuemol_gfx::SolidColor;
 use cuemol_qsys::{DispListRenderer, ObjExtData, ObjectEvent, SceneObject};
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LatticeSystem {
@@ -319,7 +319,7 @@ pub struct SpaceGroup {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymmOpManager {
-    groups: BTreeMap<i32, SpaceGroup>,
+    groups: Arc<BTreeMap<i32, SpaceGroup>>,
 }
 
 impl Default for SymmOpManager {
@@ -330,11 +330,9 @@ impl Default for SymmOpManager {
 
 impl SymmOpManager {
     pub fn new() -> Self {
-        let mut manager = Self {
-            groups: BTreeMap::new(),
-        };
-        manager.register_builtin_groups();
-        manager
+        Self {
+            groups: Arc::clone(builtin_symop_table()),
+        }
     }
 
     /// Parse a symmetry-operator database in the `symop.dat` format (the same
@@ -345,7 +343,7 @@ impl SymmOpManager {
     /// `readSymOp`); the symbolic label is kept as the operator name.
     pub fn from_symop_dat(input: &str) -> Self {
         Self {
-            groups: parse_symop_dat(input),
+            groups: Arc::new(parse_symop_dat(input)),
         }
     }
 
@@ -367,6 +365,13 @@ impl SymmOpManager {
             .collect::<Vec<_>>()
             .join(",");
         format!("[{body}]")
+    }
+
+    pub fn space_groups_for_lattice(&self, lattice: LatticeSystem) -> Vec<&SpaceGroup> {
+        self.groups
+            .values()
+            .filter(|group| group.lattice == lattice)
+            .collect()
     }
 
     pub fn get_cname(&self, nsg: i32) -> Option<&str> {
@@ -482,14 +487,6 @@ impl SymmOpManager {
         self.change_xi_impl(object, Some(&new_crystal));
         object.set_modified(true);
         SymmEditInfo::new(object.uid(), old_crystal, Some(new_crystal))
-    }
-
-    /// Load the full built-in space-group table (all 230 groups plus alternate
-    /// settings) from the vendored `symop.dat`. Replaces the former hand-coded
-    /// P1/P-1-only stub, so crystallographic operations on non-triclinic cells
-    /// now get their real symmetry operators instead of falling back to P1.
-    fn register_builtin_groups(&mut self) {
-        self.groups = builtin_symop_table().clone();
     }
 }
 
@@ -1257,9 +1254,9 @@ pub fn space_group_number_by_name(name: &str) -> Option<i32> {
         .min()
 }
 
-fn builtin_symop_table() -> &'static BTreeMap<i32, SpaceGroup> {
-    static TABLE: OnceLock<BTreeMap<i32, SpaceGroup>> = OnceLock::new();
-    TABLE.get_or_init(|| parse_symop_dat(include_str!("../data/symop.dat")))
+fn builtin_symop_table() -> &'static Arc<BTreeMap<i32, SpaceGroup>> {
+    static TABLE: OnceLock<Arc<BTreeMap<i32, SpaceGroup>>> = OnceLock::new();
+    TABLE.get_or_init(|| Arc::new(parse_symop_dat(include_str!("../data/symop.dat"))))
 }
 
 /// Parse the whole `symop.dat` body into a space-group table. Port of C++
@@ -1471,6 +1468,8 @@ mod tests {
     #[test]
     fn symop_manager_builtin_and_parser_cover_reference_shape() {
         let manager = SymmOpManager::new();
+        let second_manager = SymmOpManager::new();
+        assert!(Arc::ptr_eq(&manager.groups, &second_manager.groups));
         assert_eq!(manager.get_cname(1), Some("P 1"));
         assert_eq!(manager.get_name(2), Some("P-1"));
         assert_eq!(manager.get_asym_num(19), 4);
@@ -1481,6 +1480,10 @@ mod tests {
         assert_eq!(manager.get_sg_id_by_name("P212121"), 19);
         assert_eq!(manager.get_sg_id_by_name("not a group"), -1);
         assert!(manager.get_sg_names_json("TRICLINIC").contains("\"id\":1"));
+        assert!(manager
+            .space_groups_for_lattice(LatticeSystem::Cubic)
+            .iter()
+            .any(|group| group.id == 195));
         assert_eq!(manager.symmetry_operators(1).unwrap().len(), 1);
         assert_eq!(manager.symmetry_operators(2).unwrap().len(), 2);
 

@@ -335,6 +335,7 @@ struct CrystalDto {
     gamma: f64,
     space_group_name: String,
     space_group_number: Option<i32>,
+    lattice: String,
 }
 
 #[derive(Serialize)]
@@ -1326,6 +1327,7 @@ impl AppModel {
                 gamma: crystal.gamma,
                 space_group_name: crystal.space_group_name,
                 space_group_number: crystal.space_group_number,
+                lattice: crystal.lattice,
             })
             .collect();
         let density_maps = self
@@ -5378,6 +5380,19 @@ enum ModelRequest {
         max_count: usize,
         renderer_name: String,
     },
+    GetSpaceGroups {
+        lattice: String,
+    },
+    ChangeCrystalInfo {
+        object_uid: u64,
+        a: f64,
+        b: f64,
+        c: f64,
+        alpha: f64,
+        beta: f64,
+        gamma: f64,
+        space_group_number: i32,
+    },
     AssignSecondaryStructure {
         object_uid: u64,
         ignore_bulge: bool,
@@ -7621,6 +7636,38 @@ fn handle_model_request(
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::GetSpaceGroups { lattice } => Ok(ModelResponse::Message(
+            model.desktop.space_group_summaries_json(&lattice),
+        )),
+        ModelRequest::ChangeCrystalInfo {
+            object_uid,
+            a,
+            b,
+            c,
+            alpha,
+            beta,
+            gamma,
+            space_group_number,
+        } => {
+            let undo = model.capture_undo();
+            model
+                .desktop
+                .change_crystal_info(
+                    Uid::new(object_uid),
+                    a,
+                    b,
+                    c,
+                    alpha,
+                    beta,
+                    gamma,
+                    space_group_number,
+                )
+                .map_err(|error| error.to_string())?;
+            model.status = "Changed symmetry information".to_string();
+            model.invalidate_mesh(false);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::AssignSecondaryStructure {
             object_uid,
             ignore_bulge,
@@ -9686,6 +9733,42 @@ fn calculate_contacts(
 }
 
 #[tauri::command]
+fn get_space_groups(lattice: String, state: State<'_, ManagedState>) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::GetSpaceGroups { lattice },
+    )?)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn change_crystal_info(
+    object_uid: u64,
+    a: f64,
+    b: f64,
+    c: f64,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    space_group_number: i32,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ChangeCrystalInfo {
+            object_uid,
+            a,
+            b,
+            c,
+            alpha,
+            beta,
+            gamma,
+            space_group_number,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn assign_secondary_structure(
     object_uid: u64,
     ignore_bulge: bool,
@@ -10404,6 +10487,8 @@ pub fn run() -> Result<(), tauri::Error> {
             get_nonstandard_bonds,
             remove_nonstandard_bonds,
             calculate_contacts,
+            get_space_groups,
+            change_crystal_info,
             assign_secondary_structure,
             write_surface,
             write_cut_surface,
@@ -14327,6 +14412,37 @@ mod tests {
             .expect("interaction renderer");
         assert_eq!(renderer.atom_intr_lines().len(), 2);
         assert_eq!(renderer.atom_intr_lines()[0].positions().len(), 2);
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::GetSpaceGroups {
+                lattice: "CUBIC".to_string(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::Message(space_groups) = response else {
+            panic!("expected space-group JSON");
+        };
+        assert!(space_groups.contains("\"id\":195"));
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::ChangeCrystalInfo {
+                object_uid: first,
+                a: 20.0,
+                b: 20.0,
+                c: 20.0,
+                alpha: 90.0,
+                beta: 90.0,
+                gamma: 90.0,
+                space_group_number: 195,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.status, "Changed symmetry information");
+        assert_eq!(snapshot.crystals[0].space_group_number, Some(195));
+        assert_eq!(snapshot.crystals[0].lattice, "CUBIC");
         let response = handle_model_request(
             &mut model,
             ModelRequest::AssignSecondaryStructure {
