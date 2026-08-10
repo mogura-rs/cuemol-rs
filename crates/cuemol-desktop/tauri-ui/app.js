@@ -176,6 +176,7 @@ let statusTrail = [];
 let centerMark = "cross";
 let performanceMeasure = false;
 let interactionMode = "rotate";
+let atomPickerTarget = null;
 let selectedAnimationIndex = null;
 let selectedMorphFrameIndex = null;
 let lastModelLogCount = 0;
@@ -3371,6 +3372,9 @@ async function showStyleProperties(style) {
 }
 
 async function showReferenceDialog(title) {
+  if (referenceDialog.open) referenceDialog.close();
+  atomPickerTarget = null;
+  viewport.classList.remove("atom-picking");
   dialogTitle.textContent = title;
   dialogContent.replaceChildren();
   dialogFooter.hidden = false;
@@ -3387,9 +3391,11 @@ async function showReferenceDialog(title) {
     usesViewProperties || usesCameraProperties || title === "Scene Properties";
   const usesPreferences = title === "Options";
   const usesWorkspaceProperties = ["Object Properties", "Renderer Properties"].includes(title);
+  const usesBondPicker = title === "Mol bond editor";
   referenceDialog.classList.toggle("property-editor", usesGenericProperties);
   referenceDialog.classList.toggle("options-dialog", usesPreferences);
   referenceDialog.classList.toggle("workspace-property-dialog", usesWorkspaceProperties);
+  referenceDialog.classList.toggle("bond-picker-dialog", usesBondPicker);
   referenceDialog.classList.toggle(
     "wide",
     usesGenericProperties ||
@@ -3675,10 +3681,20 @@ async function showReferenceDialog(title) {
           showError(error);
         }
       };
-      object.addEventListener("change", refreshBonds);
+      object.addEventListener("change", () => {
+        atomPickerTarget = null;
+        viewport.classList.remove("atom-picking");
+        void refreshBonds();
+      });
       dialogContent.append(bondList);
       const aid1 = dialogField("Atom1", "", "number");
       const aid2 = dialogField("Atom2", "", "number");
+      const activateAtomPicker = (input) => {
+        atomPickerTarget = { input, object };
+        viewport.classList.add("atom-picking");
+      };
+      aid1.addEventListener("focus", () => activateAtomPicker(aid1));
+      aid2.addEventListener("focus", () => activateAtomPicker(aid2));
       const make = button("Add", "dialog-primary", async () => {
         const changed = await mutate("edit_bond", {
           objectUid: Number(object.value),
@@ -3689,6 +3705,8 @@ async function showReferenceDialog(title) {
         if (changed) {
           aid1.value = "";
           aid2.value = "";
+          atomPickerTarget = null;
+          viewport.classList.remove("atom-picking");
           await refreshBonds();
         }
       });
@@ -4329,7 +4347,10 @@ async function showReferenceDialog(title) {
   } else {
     dialogContent.append(dialogParagraph(`${title} dialog`));
   }
-  if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
+  if (!referenceDialog.open) {
+    if (usesBondPicker && referenceDialog.show) referenceDialog.show();
+    else if (referenceDialog.showModal) referenceDialog.showModal();
+  }
 }
 
 function applyCenterMark(value) {
@@ -9643,6 +9664,11 @@ document.addEventListener("pointerdown", (event) => {
   if (!event.target.closest(".workspace-context-menu")) closeWorkspaceContextMenu();
 });
 
+referenceDialog.addEventListener("close", () => {
+  atomPickerTarget = null;
+  viewport.classList.remove("atom-picking");
+});
+
 selectionInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
     event.preventDefault();
@@ -9711,6 +9737,32 @@ viewport.addEventListener("pointermove", (event) => {
   }
 });
 
+async function fillAtomPicker(x, y) {
+  const target = atomPickerTarget;
+  if (!target) return;
+  try {
+    const atom = await invoke("pick_atom_identifier", {
+      x,
+      y,
+      ...viewportDimensions(),
+    });
+    if (atomPickerTarget !== target) return;
+    if (!atom) {
+      statusText.textContent = "No atom at cursor";
+      return;
+    }
+    if (Number(target.object.value) !== Number(atom.objectUid)) {
+      statusText.textContent = "Pick an atom from the selected molecule";
+      return;
+    }
+    target.input.value = String(atom.aid);
+    target.input.focus();
+    statusText.textContent = `Picked atom ${atom.aid} for bond editor`;
+  } catch (error) {
+    showError(error);
+  }
+}
+
 function finishDrag(event) {
   if (!drag || drag.pointerId !== event.pointerId) return;
   const completed = drag;
@@ -9723,6 +9775,10 @@ function finishDrag(event) {
   const startY = completed.y - bounds.top;
   if (Math.abs(completed.dx) + Math.abs(completed.dy) < 2) {
     if (completed.action === "rotate" || completed.action === "rect-select") {
+      if (atomPickerTarget) {
+        void fillAtomPicker(startX, startY);
+        return;
+      }
       mutate("pick_atom", {
         x: startX,
         y: startY,

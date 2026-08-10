@@ -1480,6 +1480,11 @@ summary:focus-visible {
   cursor: crosshair;
 }
 
+.viewport.atom-picking,
+.viewport.atom-picking.dragging {
+  cursor: crosshair;
+}
+
 #viewport-image {
   position: absolute;
   inset: 0;
@@ -2023,6 +2028,14 @@ summary:focus-visible {
 
 .reference-dialog::backdrop {
   background: rgba(0, 0, 0, 0.28);
+}
+
+.reference-dialog.bond-picker-dialog {
+  position: fixed;
+  top: 76px;
+  right: 24px;
+  left: auto;
+  margin: 0;
 }
 
 .reference-dialog form {

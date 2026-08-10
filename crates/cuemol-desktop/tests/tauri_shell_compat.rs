@@ -139,6 +139,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "change_chain",
         "renumber_residues",
         "pick_atom",
+        "pick_atom_identifier",
         "select_screen_rect",
         "add_animation_object",
         "animation_control",
@@ -179,7 +180,10 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     assert!(JS.contains("bondList.className = \"bond-list\""));
     assert!(JS.contains("button(\"Delete selected\""));
     assert!(JS.contains("JSON.parse(json)"));
+    assert!(JS.contains("atomPickerTarget = { input, object }"));
+    assert!(JS.contains("referenceDialog.show()"));
     assert!(CSS.contains(".bond-list-row"));
+    assert!(CSS.contains(".viewport.atom-picking"));
 }
 
 #[test]

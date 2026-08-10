@@ -515,6 +515,13 @@ struct ViewportDto {
     status: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PickedAtomDto {
+    object_uid: u64,
+    aid: i32,
+}
+
 fn project_viewport_point(
     mvp: [[f32; 4]; 4],
     point: Vector4,
@@ -4795,10 +4802,17 @@ impl AppModel {
         Ok(())
     }
 
-    fn pick_atom(&mut self, x: f64, y: f64, width: u32, height: u32) -> Result<(), String> {
+    fn atom_at_screen(
+        &self,
+        selection: &str,
+        x: f64,
+        y: f64,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<crate::GuiAtomSummary>, String> {
         let atoms = self
             .desktop
-            .active_pick_atoms(&self.selection)
+            .active_pick_atoms(selection)
             .map_err(|error| error.to_string())?;
         let mvp = camera_mvp(
             &self.camera,
@@ -4811,13 +4825,19 @@ impl AppModel {
             (f64::from(width), f64::from(height)),
             self.desktop.view_input_config().hitprec(),
         ) else {
+            return Ok(None);
+        };
+        self.desktop
+            .atom_summary(Uid::new(object_uid), atom_index)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    fn pick_atom(&mut self, x: f64, y: f64, width: u32, height: u32) -> Result<(), String> {
+        let Some(atom) = self.atom_at_screen(&self.selection, x, y, width, height)? else {
             self.status = "No atom at cursor".to_string();
             return Ok(());
         };
-        let atom = self
-            .desktop
-            .atom_summary(Uid::new(object_uid), atom_index)
-            .map_err(|error| error.to_string())?;
         self.selection = atom.selection_text;
         self.status = format!(
             "Selected atom {} {}{}:{}",
@@ -4825,6 +4845,21 @@ impl AppModel {
         );
         self.invalidate_mesh(false);
         Ok(())
+    }
+
+    fn pick_atom_identifier(
+        &self,
+        x: f64,
+        y: f64,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<PickedAtomDto>, String> {
+        Ok(self
+            .atom_at_screen("", x, y, width, height)?
+            .map(|atom| PickedAtomDto {
+                object_uid: atom.object_uid.get(),
+                aid: atom.serial,
+            }))
     }
 
     fn select_screen_rect(
@@ -5393,6 +5428,12 @@ enum ModelRequest {
         width: u32,
         height: u32,
     },
+    PickAtomIdentifier {
+        x: f64,
+        y: f64,
+        width: u32,
+        height: u32,
+    },
     SelectScreenRect {
         x1: f64,
         y1: f64,
@@ -5473,6 +5514,7 @@ enum ModelResponse {
     StyleProperties(StylePropertiesDto),
     RendererStyleOptions(Vec<RendererStyleOptionDto>),
     CameraVisibility(Vec<CameraVisibilityEntryDto>),
+    PickedAtom(Option<PickedAtomDto>),
     Message(String),
 }
 
@@ -7786,6 +7828,14 @@ fn handle_model_request(
             model.pick_atom(x, y, width, height)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::PickAtomIdentifier {
+            x,
+            y,
+            width,
+            height,
+        } => Ok(ModelResponse::PickedAtom(
+            model.pick_atom_identifier(x, y, width, height)?,
+        )),
         ModelRequest::SelectScreenRect {
             x1,
             y1,
@@ -8123,6 +8173,7 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
         | ModelResponse::CameraVisibility(_)
+        | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-snapshot response".to_string()),
     }
 }
@@ -8144,6 +8195,7 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
         | ModelResponse::CameraVisibility(_)
+        | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-molecule-details response".to_string()),
     }
 }
@@ -8165,6 +8217,7 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
         | ModelResponse::CameraVisibility(_)
+        | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-viewport response".to_string()),
     }
 }
@@ -8186,6 +8239,7 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
         | ModelResponse::CameraVisibility(_)
+        | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected animation frame response".to_string()),
     }
 }
@@ -8207,6 +8261,7 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
         | ModelResponse::CameraVisibility(_)
+        | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected trajectory frame response".to_string()),
     }
 }
@@ -8228,6 +8283,7 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
         | ModelResponse::CameraVisibility(_)
+        | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected application info response".to_string()),
     }
 }
@@ -8249,6 +8305,7 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
         | ModelResponse::CameraVisibility(_)
+        | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-preferences response".to_string()),
     }
 }
@@ -8270,6 +8327,7 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
         | ModelResponse::CameraVisibility(_)
+        | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => {
             Err("unexpected non-preferences-update response".to_string())
         }
@@ -8293,6 +8351,7 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
         | ModelResponse::CameraVisibility(_)
+        | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-initial-state response".to_string()),
     }
 }
@@ -8323,6 +8382,7 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
         | ModelResponse::CameraVisibility(_)
+        | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => Err("unexpected non-view-properties response".to_string()),
     }
 }
@@ -8352,6 +8412,13 @@ fn camera_visibility_response(
     }
 }
 
+fn picked_atom_response(response: ModelResponse) -> Result<Option<PickedAtomDto>, String> {
+    match response {
+        ModelResponse::PickedAtom(atom) => Ok(atom),
+        _ => Err("unexpected non-picked-atom response".to_string()),
+    }
+}
+
 fn view_properties_update_response(
     response: ModelResponse,
 ) -> Result<ViewPropertiesUpdateDto, String> {
@@ -8371,6 +8438,7 @@ fn view_properties_update_response(
         | ModelResponse::StyleProperties(_)
         | ModelResponse::RendererStyleOptions(_)
         | ModelResponse::CameraVisibility(_)
+        | ModelResponse::PickedAtom(_)
         | ModelResponse::Message(_) => {
             Err("unexpected non-view-properties-update response".to_string())
         }
@@ -9752,6 +9820,25 @@ fn pick_atom(
 }
 
 #[tauri::command]
+fn pick_atom_identifier(
+    x: f64,
+    y: f64,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<Option<PickedAtomDto>, String> {
+    picked_atom_response(request_model(
+        &state,
+        ModelRequest::PickAtomIdentifier {
+            x,
+            y,
+            width,
+            height,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn select_screen_rect(
     x1: f64,
     y1: f64,
@@ -10288,6 +10375,7 @@ pub fn run() -> Result<(), tauri::Error> {
             set_density_level,
             set_background,
             pick_atom,
+            pick_atom_identifier,
             select_screen_rect,
             add_animation_object,
             delete_animation_object,
@@ -13930,6 +14018,7 @@ mod tests {
         let mut model = model_without_gpu();
         model.desktop.open_path(&pdb).unwrap();
         model.rebuild_mesh(true).unwrap();
+        let object_uid = model.desktop.active_object_summaries()[0].uid;
         model.selection = "aid 1".to_string();
         let mvp = camera_mvp(&model.camera, 800.0 / 600.0);
         let labels = model
@@ -13938,6 +14027,22 @@ mod tests {
         assert_eq!(labels.len(), 1);
         model.selection.clear();
         model.rebuild_mesh(false).unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::PickAtomIdentifier {
+                x: f64::from(labels[0].x),
+                y: f64::from(labels[0].y),
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        let ModelResponse::PickedAtom(Some(atom)) = response else {
+            panic!("expected a lightweight picked-atom response");
+        };
+        assert_eq!(atom.object_uid, object_uid.get());
+        assert_eq!(atom.aid, 1);
+        assert!(model.selection.is_empty());
         handle_model_request(
             &mut model,
             ModelRequest::PickAtom {

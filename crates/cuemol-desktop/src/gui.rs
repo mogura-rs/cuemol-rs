@@ -602,6 +602,7 @@ struct GuiApplication {
     superpose_auto_recenter: bool,
     superpose_use_property: bool,
     bond_object: Option<cuemol_core::Uid>,
+    bond_picker_target: Option<usize>,
     selected_nonstandard_bonds: std::collections::BTreeSet<(i32, i32)>,
     bond_aid1: String,
     bond_aid2: String,
@@ -2330,6 +2331,7 @@ impl GuiApplication {
             superpose_auto_recenter: true,
             superpose_use_property: false,
             bond_object: None,
+            bond_picker_target: None,
             selected_nonstandard_bonds: std::collections::BTreeSet::new(),
             bond_aid1: String::new(),
             bond_aid2: String::new(),
@@ -8292,6 +8294,7 @@ impl GuiApplication {
                 if make {
                     self.bond_aid1.clear();
                     self.bond_aid2.clear();
+                    self.bond_picker_target = None;
                     self.set_status("Bond created");
                 } else {
                     self.set_status("Bond removed");
@@ -13221,6 +13224,9 @@ impl GuiApplication {
                 }
             });
         if !open || close {
+            if title == "Mol bond editor" {
+                self.bond_picker_target = None;
+            }
             self.tool_dialog = None;
         }
     }
@@ -13374,15 +13380,22 @@ impl GuiApplication {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Atom serials");
-            ui.add_sized(
+            let atom1 = ui.add_sized(
                 [80.0, 22.0],
                 egui::TextEdit::singleline(&mut self.bond_aid1),
             );
-            ui.add_sized(
+            if atom1.gained_focus() {
+                self.bond_picker_target = Some(0);
+            }
+            let atom2 = ui.add_sized(
                 [80.0, 22.0],
                 egui::TextEdit::singleline(&mut self.bond_aid2),
             );
+            if atom2.gained_focus() {
+                self.bond_picker_target = Some(1);
+            }
         });
+        ui.weak("Focus a field, then click an atom in the viewport.");
         ui.horizontal(|ui| {
             if ui.button("Add").clicked() {
                 self.edit_bond(true);
@@ -14900,12 +14913,32 @@ impl GuiApplication {
     }
 
     fn pick_atom_at(&mut self, camera: &CameraController, position: egui::Pos2) -> bool {
-        let Some(hit) = self.pick_hit(camera, position) else {
+        let picker_target = self
+            .bond_picker_target
+            .filter(|_| self.tool_dialog.as_deref() == Some("Mol bond editor"));
+        let hit = if picker_target.is_some() {
+            self.pick_hit_with_object(camera, position, self.bond_target_object_uid())
+        } else {
+            self.pick_hit(camera, position)
+        };
+        let Some(hit) = hit else {
             return false;
         };
         let object_uid = cuemol_core::Uid::new(hit.object_uid);
         match self.state.atom_summary(object_uid, hit.atom_index) {
             Ok(atom) => {
+                if let Some(target) = picker_target {
+                    if Some(atom.object_uid) != self.bond_target_object_uid() {
+                        return false;
+                    }
+                    if target == 0 {
+                        self.bond_aid1 = atom.serial.to_string();
+                    } else {
+                        self.bond_aid2 = atom.serial.to_string();
+                    }
+                    self.set_status(format!("Picked atom {} for bond editor", atom.serial));
+                    return true;
+                }
                 let status = format!(
                     "Selected atom {} {}{}:{}",
                     atom.serial, atom.residue_name, atom.residue_id, atom.name
@@ -14929,16 +14962,33 @@ impl GuiApplication {
     }
 
     fn pick_hit(&self, camera: &CameraController, position: egui::Pos2) -> Option<PickHit> {
+        self.pick_hit_with_object(camera, position, None)
+    }
+
+    fn pick_hit_with_object(
+        &self,
+        camera: &CameraController,
+        position: egui::Pos2,
+        object_filter: Option<cuemol_core::Uid>,
+    ) -> Option<PickHit> {
         let viewport = self.viewport_rect?;
         let mut best: Option<(f32, PickHit)> = None;
+        let selection = if object_filter.is_some() {
+            ""
+        } else {
+            &self.selection_text
+        };
         let atoms = self
             .state
-            .active_pick_atoms(&self.selection_text)
+            .active_pick_atoms(selection)
             .ok()
             .filter(|atoms| !atoms.is_empty())
             .unwrap_or_else(|| self.snapshot.atoms.clone());
         for atom in &atoms {
             let object_uid = atom.object_uid?;
+            if object_filter.is_some_and(|filter| filter.get() != object_uid) {
+                continue;
+            }
             let atom_index = atom.atom_index?;
             let center = vec3_from_vector(atom.center);
             let (screen, depth) = camera.project_to_viewport(center, viewport)?;
@@ -20824,11 +20874,26 @@ mod tests {
         app.bond_object = Some(object_uid);
         let before = app.state.nonstandard_bond_summaries(object_uid).unwrap();
 
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        app.viewport_rect = Some(viewport);
+        camera.fit_snapshot(&app.snapshot);
+        let atom = app.state.active_pick_atoms("").unwrap()[0].clone();
+        let (screen, _) = camera
+            .project_to_viewport(vec3_from_vector(atom.center), viewport)
+            .expect("project bond picker atom");
+        let selection_before = app.selection_text.clone();
+        app.tool_dialog = Some("Mol bond editor".to_string());
+        app.bond_picker_target = Some(0);
+        assert!(app.pick_atom_at(&camera, screen));
+        assert!(app.bond_aid1.parse::<i32>().is_ok());
+        assert_eq!(app.selection_text, selection_before);
+
         app.bond_aid1 = "1".to_string();
         app.bond_aid2 = "327".to_string();
         app.edit_bond(true);
         assert_eq!(app.status, "Bond created");
         assert!(app.bond_aid1.is_empty());
+        assert!(app.bond_picker_target.is_none());
         let added = app
             .state
             .nonstandard_bond_summaries(object_uid)
