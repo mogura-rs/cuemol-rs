@@ -1086,6 +1086,12 @@ struct WorkspaceDeleteInput {
     object_uid: u64,
     #[serde(default)]
     renderer_uid: Option<u64>,
+    #[serde(default)]
+    scene_uid: Option<u64>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    local_index: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -2886,6 +2892,7 @@ impl AppModel {
                 self.desktop
                     .set_lw_renderer_visible(object_uid, renderer_uid()?, visible)
             }
+            "camera" | "style" => Ok(()),
             kind => return Err(format!("unsupported Workspace item type: {kind}")),
         }
         .map_err(|error| error.to_string())?;
@@ -3186,17 +3193,69 @@ impl AppModel {
                 }
                 self.status = format!("Delete renderer: {}/{renderer_name}", object.name);
             }
+            "camera" => {
+                let scene_uid = Uid::new(
+                    target
+                        .scene_uid
+                        .ok_or_else(|| "scene UID is required".to_string())?,
+                );
+                let name = target
+                    .name
+                    .as_deref()
+                    .ok_or_else(|| "camera name is required".to_string())?;
+                if !self
+                    .desktop
+                    .destroy_scene_camera(scene_uid, name)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!("camera not found: {name}"));
+                }
+                self.status = format!("Destroyed camera {name}");
+            }
+            "style" => {
+                let scene_uid = Uid::new(
+                    target
+                        .scene_uid
+                        .ok_or_else(|| "scene UID is required".to_string())?,
+                );
+                let local_index = target
+                    .local_index
+                    .ok_or_else(|| "local style index is required".to_string())?;
+                if !self
+                    .desktop
+                    .destroy_scene_style(scene_uid, local_index)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!("style {local_index} not found"));
+                }
+                self.status = "Destroyed style".to_string();
+                self.invalidate_mesh(false);
+            }
             kind => return Err(format!("unsupported Workspace item type: {kind}")),
         }
         self.invalidate_mesh(false);
         Ok(())
     }
 
-    fn delete_workspace_items(&mut self, targets: Vec<WorkspaceDeleteInput>) -> Result<(), String> {
+    fn delete_workspace_items(
+        &mut self,
+        mut targets: Vec<WorkspaceDeleteInput>,
+    ) -> Result<(), String> {
         if targets.is_empty() {
             return Err("at least one Workspace item is required".to_string());
         }
         let count = targets.len();
+        targets.sort_by(
+            |left, right| match (left.kind == "style", right.kind == "style") {
+                (true, true) => left
+                    .scene_uid
+                    .cmp(&right.scene_uid)
+                    .then_with(|| right.local_index.cmp(&left.local_index)),
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (false, false) => std::cmp::Ordering::Equal,
+            },
+        );
         for target in targets {
             self.delete_workspace_item(target)?;
         }
@@ -14955,6 +15014,9 @@ mod tests {
                 kind: "rendererGroup".to_string(),
                 object_uid: object_uid.get(),
                 renderer_uid: Some(group_uid.get()),
+                scene_uid: None,
+                name: None,
+                local_index: None,
             }),
         )
         .unwrap();
@@ -15349,6 +15411,9 @@ mod tests {
                 kind: target.kind,
                 object_uid: target.object_uid,
                 renderer_uid: target.renderer_uid,
+                scene_uid: None,
+                name: None,
+                local_index: None,
             })
             .collect();
         let response = handle_model_request(
@@ -15365,6 +15430,108 @@ mod tests {
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().objects[0].renderers.len(), 2);
+    }
+
+    #[test]
+    fn workspace_multiple_camera_and_style_delete_is_undoable() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        model.save_named_camera("camera_0", false).unwrap();
+        model.create_named_style("first").unwrap();
+        model.create_named_style("second").unwrap();
+        model.undo_stack.clear();
+        model.redo_stack.clear();
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::DeleteWorkspaceItems(vec![
+                WorkspaceDeleteInput {
+                    kind: "style".to_string(),
+                    object_uid: 0,
+                    renderer_uid: None,
+                    scene_uid: Some(scene_uid.get()),
+                    name: None,
+                    local_index: Some(0),
+                },
+                WorkspaceDeleteInput {
+                    kind: "camera".to_string(),
+                    object_uid: 0,
+                    renderer_uid: None,
+                    scene_uid: Some(scene_uid.get()),
+                    name: Some("camera_0".to_string()),
+                    local_index: None,
+                },
+                WorkspaceDeleteInput {
+                    kind: "style".to_string(),
+                    object_uid: 0,
+                    renderer_uid: None,
+                    scene_uid: Some(scene_uid.get()),
+                    name: None,
+                    local_index: Some(1),
+                },
+            ]),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert!(snapshot
+            .cameras
+            .iter()
+            .all(|camera| camera.name != "camera_0"));
+        assert!(snapshot
+            .styles
+            .iter()
+            .filter(|style| style.owner_scene_uid == scene_uid.get())
+            .all(|style| style.local_index.is_none()));
+        assert_eq!(snapshot.undo_descriptions[0], "Destroy 3 Workspace items");
+        assert_eq!(model.undo_stack.len(), 1);
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let snapshot = model.snapshot();
+        assert!(snapshot
+            .cameras
+            .iter()
+            .any(|camera| camera.name == "camera_0"));
+        assert_eq!(
+            snapshot
+                .styles
+                .iter()
+                .filter(|style| {
+                    style.owner_scene_uid == scene_uid.get() && style.local_index.is_some()
+                })
+                .map(|style| style.name.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+
+        model.undo_stack.clear();
+        model.redo_stack.clear();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceItemsVisible {
+                targets: vec![
+                    WorkspaceToggleInput {
+                        kind: "camera".to_string(),
+                        object_uid: 0,
+                        renderer_uid: None,
+                    },
+                    WorkspaceToggleInput {
+                        kind: "style".to_string(),
+                        object_uid: 0,
+                        renderer_uid: None,
+                    },
+                ],
+                visible: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(model.undo_stack.len(), 1);
+        assert!(model
+            .snapshot()
+            .cameras
+            .iter()
+            .any(|camera| camera.name == "camera_0"));
     }
 
     #[test]
@@ -16819,6 +16986,9 @@ mod tests {
                 kind: "rendererGroup".to_string(),
                 object_uid: map_uid.get(),
                 renderer_uid: Some(pasted_group_uid),
+                scene_uid: None,
+                name: None,
+                local_index: None,
             }),
         )
         .unwrap();
@@ -16829,6 +16999,9 @@ mod tests {
                 kind: "densityRenderer".to_string(),
                 object_uid: map_uid.get(),
                 renderer_uid: Some(group_uid),
+                scene_uid: None,
+                name: None,
+                local_index: None,
             }),
         )
         .unwrap();
@@ -17064,6 +17237,9 @@ mod tests {
                 kind: "renderer".to_string(),
                 object_uid: object_uid.get(),
                 renderer_uid: Some(renderer_uid.get()),
+                scene_uid: None,
+                name: None,
+                local_index: None,
             }),
         )
         .unwrap();
@@ -17079,6 +17255,9 @@ mod tests {
                 kind: "object".to_string(),
                 object_uid: object_uid.get(),
                 renderer_uid: None,
+                scene_uid: None,
+                name: None,
+                local_index: None,
             }),
         )
         .unwrap();
@@ -17686,6 +17865,9 @@ mod tests {
                 kind: "renderer".to_string(),
                 object_uid: object_uid.get(),
                 renderer_uid: Some(renderer_uid.get()),
+                scene_uid: None,
+                name: None,
+                local_index: None,
             }),
         )
         .unwrap();
@@ -17698,6 +17880,9 @@ mod tests {
                 kind: "object".to_string(),
                 object_uid: object_uid.get(),
                 renderer_uid: None,
+                scene_uid: None,
+                name: None,
+                local_index: None,
             }),
         )
         .unwrap();
@@ -17723,6 +17908,9 @@ mod tests {
                 kind: "densityRenderer".to_string(),
                 object_uid: map_uid.get(),
                 renderer_uid: Some(density_renderer_uid.get()),
+                scene_uid: None,
+                name: None,
+                local_index: None,
             }),
         )
         .unwrap();
@@ -17737,6 +17925,9 @@ mod tests {
                 kind: "densityMap".to_string(),
                 object_uid: map_uid.get(),
                 renderer_uid: None,
+                scene_uid: None,
+                name: None,
+                local_index: None,
             }),
         )
         .unwrap();
@@ -17768,6 +17959,9 @@ mod tests {
                 kind: "surfaceRenderer".to_string(),
                 object_uid: surface_uid.get(),
                 renderer_uid: Some(surface_renderer_uid),
+                scene_uid: None,
+                name: None,
+                local_index: None,
             }),
         )
         .unwrap();
@@ -17780,6 +17974,9 @@ mod tests {
                 kind: "surface".to_string(),
                 object_uid: surface_uid.get(),
                 renderer_uid: None,
+                scene_uid: None,
+                name: None,
+                local_index: None,
             }),
         )
         .unwrap();

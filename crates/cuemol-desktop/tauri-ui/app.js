@@ -8626,6 +8626,24 @@ function workspaceTargetKey(target) {
 }
 
 function workspaceCommandTarget(target) {
+  if (target.kind === "camera") {
+    return {
+      kind: "camera",
+      objectUid: 0,
+      rendererUid: null,
+      sceneUid: target.objectUid,
+      name: target.rendererUid,
+    };
+  }
+  if (target.kind === "style") {
+    return {
+      kind: "style",
+      objectUid: 0,
+      rendererUid: null,
+      sceneUid: target.objectUid,
+      localIndex: target.rendererUid,
+    };
+  }
   return {
     kind: target.kind,
     objectUid: target.objectUid,
@@ -8634,6 +8652,18 @@ function workspaceCommandTarget(target) {
 }
 
 function currentWorkspaceSelectionTarget() {
+  if (workspaceSelectionKind === "camera") {
+    const camera = selectedCamera();
+    return camera
+      ? workspaceSelectionTarget("camera", camera.sceneUid, camera.name)
+      : null;
+  }
+  if (workspaceSelectionKind === "style") {
+    const style = selectedStyle();
+    return style?.localIndex !== null
+      ? workspaceSelectionTarget("style", style.ownerSceneUid, style.localIndex)
+      : null;
+  }
   const target = selectedWorkspaceTarget();
   if (!target) return null;
   let kind = target.kind;
@@ -8694,6 +8724,17 @@ function applyWorkspaceSelectionTarget(target) {
       selectedLwObjectUid = target.objectUid;
       selectedLwRendererUid = target.rendererUid;
       break;
+    case "camera":
+      selectedCameraName = target.rendererUid;
+      break;
+    case "style": {
+      const index = activeStyles().findIndex(
+        (style) =>
+          style.ownerSceneUid === target.objectUid && style.localIndex === target.rendererUid,
+      );
+      selectedStyleIndex = index >= 0 ? index : null;
+      break;
+    }
   }
 }
 
@@ -8743,6 +8784,17 @@ function selectWorkspaceTreeTarget(event, target) {
 }
 
 function workspaceTargetExists(target) {
+  if (target.kind === "camera") {
+    return (snapshot?.cameras || []).some(
+      (camera) => camera.sceneUid === target.objectUid && camera.name === target.rendererUid,
+    );
+  }
+  if (target.kind === "style") {
+    return (snapshot?.styles || []).some(
+      (style) =>
+        style.ownerSceneUid === target.objectUid && style.localIndex === target.rendererUid,
+    );
+  }
   const objects = [
     ...(snapshot?.objects || []),
     ...(snapshot?.densityMaps || []),
@@ -9775,6 +9827,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         workspaceSelectionKind === "cameraRoot" && scene.active ? " active" : ""
       }`,
       async () => {
+        clearWorkspaceMultipleSelection();
         workspaceSelectionKind = "cameraRoot";
         selectedCameraName = null;
         if (!scene.active) {
@@ -9788,12 +9841,14 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     count.textContent = `${sceneCameras.length} CAM`;
     cameraRoot.append(count);
     cameraRoot.addEventListener("contextmenu", (event) => {
+      clearWorkspaceMultipleSelection();
       workspaceSelectionKind = "cameraRoot";
       selectedCameraName = null;
       showWorkspaceContextMenu(event, workspaceCameraContextItems(scene));
     });
     sceneTree.append(cameraRoot);
     for (const camera of sceneCameras) {
+      const cameraTarget = workspaceSelectionTarget("camera", scene.uid, camera.name);
       const markers = `${camera.source ? " ↗" : ""}${camera.visibilityCount > 0 ? " ◉" : ""}`;
       const cameraIsRenaming =
         workspaceInlineRename?.kind === "camera" &&
@@ -9802,11 +9857,17 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       const cameraRow = button(
         cameraIsRenaming ? "" : `${camera.name}${markers}`,
         `tree-renderer camera-node${
-          workspaceSelectionKind === "camera" && camera.name === selectedCameraName
+          workspaceTargetIsSelected(
+            cameraTarget,
+            scene.active &&
+              workspaceSelectionKind === "camera" &&
+              camera.name === selectedCameraName,
+          )
             ? " active"
             : ""
         }`,
-        async () => {
+        async (event) => {
+          if (selectWorkspaceTreeTarget(event, cameraTarget)) return;
           const alreadySelected =
             workspaceSelectionKind === "camera" && camera.name === selectedCameraName;
           workspaceSelectionKind = "camera";
@@ -9834,6 +9895,8 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         await mutate("load_camera", { name: camera.name });
       });
       cameraRow.addEventListener("contextmenu", (event) => {
+        if (showWorkspaceMultipleContextMenu(event, cameraTarget)) return;
+        clearWorkspaceMultipleSelection();
         workspaceSelectionKind = "camera";
         selectedCameraName = camera.name;
         showWorkspaceContextMenu(event, workspaceCameraContextItems(scene, camera));
@@ -9857,6 +9920,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         workspaceSelectionKind === "styleRoot" && scene.active ? " active" : ""
       }`,
       async () => {
+        clearWorkspaceMultipleSelection();
         workspaceSelectionKind = "styleRoot";
         selectedStyleIndex = null;
         if (!scene.active) {
@@ -9870,23 +9934,39 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     styleCount.textContent = `${sceneStyles.length} STYLE`;
     styleRoot.append(styleCount);
     styleRoot.addEventListener("contextmenu", (event) => {
+      clearWorkspaceMultipleSelection();
       workspaceSelectionKind = "styleRoot";
       selectedStyleIndex = null;
       showWorkspaceContextMenu(event, workspaceStyleContextItems(scene));
     });
     sceneTree.append(styleRoot);
     sceneStyles.forEach((style, styleIndex) => {
+      const styleTarget =
+        style.localIndex === null
+          ? null
+          : workspaceSelectionTarget("style", scene.uid, style.localIndex);
       const markers = `${style.readOnly || style.sceneUid === 0 ? " 🔒" : ""}${
         style.source ? " ↗" : ""
       }`;
       const styleRow = button(
         `${style.name}${markers}`,
         `tree-renderer style-node${
-          workspaceSelectionKind === "style" && styleIndex === selectedStyleIndex
+          (styleTarget
+            ? workspaceTargetIsSelected(
+                styleTarget,
+                scene.active &&
+                  workspaceSelectionKind === "style" &&
+                  styleIndex === selectedStyleIndex,
+              )
+            : scene.active &&
+              workspaceSelectionKind === "style" &&
+              styleIndex === selectedStyleIndex)
             ? " active"
             : ""
         }`,
-        async () => {
+        async (event) => {
+          if (styleTarget && selectWorkspaceTreeTarget(event, styleTarget)) return;
+          clearWorkspaceMultipleSelection();
           workspaceSelectionKind = "style";
           selectedStyleIndex = styleIndex;
           if (!scene.active) {
@@ -9900,6 +9980,8 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         styleRow.addEventListener("dblclick", () => showStyleProperties(style));
       }
       styleRow.addEventListener("contextmenu", (event) => {
+        if (styleTarget && showWorkspaceMultipleContextMenu(event, styleTarget)) return;
+        clearWorkspaceMultipleSelection();
         workspaceSelectionKind = "style";
         selectedStyleIndex = styleIndex;
         showWorkspaceContextMenu(event, workspaceStyleContextItems(scene, style));
