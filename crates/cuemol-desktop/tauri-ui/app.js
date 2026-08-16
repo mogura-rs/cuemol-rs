@@ -164,6 +164,7 @@ let selectedLwRendererUid = null;
 let selectedCameraName = null;
 let selectedStyleIndex = null;
 let workspaceSelectionKind = "object";
+let workspaceMultipleSelection = [];
 let workspaceInlineRename = null;
 let workspaceRenameTimer = null;
 let molstructObjectUid = null;
@@ -6771,6 +6772,29 @@ async function copyWorkspaceRenderer(objectUid, rendererUid, kind = "object") {
   }
 }
 
+async function copyWorkspaceRenderers(targets) {
+  if (!invoke) return false;
+  setBusy(true);
+  try {
+    const status = await invoke("copy_workspace_renderers", {
+      inputs: targets.map((target) => ({
+        objectUid: target.objectUid,
+        rendererUid: target.rendererUid,
+      })),
+    });
+    workspaceRendererClipboardAvailable = true;
+    workspaceRendererClipboardKind = "object";
+    snapshot.status = status;
+    renderStatusAndLog();
+    return true;
+  } catch (error) {
+    showError(error);
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
 function pasteWorkspaceRenderers(objectUid, destinationGroupUid = null) {
   return mutate("paste_workspace_renderers", {
     input: { objectUid, destinationGroupUid },
@@ -8583,7 +8607,204 @@ function selectedWorkspaceTarget() {
   return null;
 }
 
+function workspaceSelectionTarget(selectionKind, objectUid, rendererUid = null, kind = selectionKind) {
+  return { kind, selectionKind, objectUid, rendererUid };
+}
+
+function workspaceTargetKey(target) {
+  return `${target.kind}:${target.objectUid}:${target.rendererUid ?? ""}`;
+}
+
+function workspaceCommandTarget(target) {
+  return {
+    kind: target.kind,
+    objectUid: target.objectUid,
+    rendererUid: target.rendererUid,
+  };
+}
+
+function currentWorkspaceSelectionTarget() {
+  const target = selectedWorkspaceTarget();
+  if (!target) return null;
+  let kind = target.kind;
+  if (
+    [selectedRenderer(), selectedDensityRenderer(), selectedSurfaceRenderer(), selectedLwRenderer()]
+      .filter(Boolean)
+      .some((renderer) => renderer.uid === target.rendererUid && renderer.rendererType === "*group")
+  ) {
+    kind = "rendererGroup";
+  }
+  return workspaceSelectionTarget(
+    workspaceSelectionKind,
+    target.objectUid,
+    target.rendererUid,
+    kind,
+  );
+}
+
+function applyWorkspaceSelectionTarget(target) {
+  selectedObjectUid = null;
+  selectedRendererUid = null;
+  selectedDensityMapUid = null;
+  selectedDensityRendererUid = null;
+  selectedSurfaceUid = null;
+  selectedSurfaceRendererUid = null;
+  selectedLwObjectUid = null;
+  selectedLwRendererUid = null;
+  selectedCameraName = null;
+  selectedStyleIndex = null;
+  workspaceSelectionKind = target.selectionKind;
+  switch (target.selectionKind) {
+    case "object":
+      selectedObjectUid = target.objectUid;
+      break;
+    case "renderer":
+    case "rendererGroup":
+      selectedObjectUid = target.objectUid;
+      selectedRendererUid = target.rendererUid;
+      break;
+    case "densityMap":
+      selectedDensityMapUid = target.objectUid;
+      break;
+    case "densityRenderer":
+      selectedDensityMapUid = target.objectUid;
+      selectedDensityRendererUid = target.rendererUid;
+      break;
+    case "surface":
+      selectedSurfaceUid = target.objectUid;
+      break;
+    case "surfaceRenderer":
+      selectedSurfaceUid = target.objectUid;
+      selectedSurfaceRendererUid = target.rendererUid;
+      break;
+    case "lwObject":
+      selectedLwObjectUid = target.objectUid;
+      break;
+    case "lwRenderer":
+      selectedLwObjectUid = target.objectUid;
+      selectedLwRendererUid = target.rendererUid;
+      break;
+  }
+}
+
+function clearWorkspaceMultipleSelection() {
+  workspaceMultipleSelection = [];
+}
+
+function workspaceTargetIsSelected(target, singleSelected = false) {
+  if (workspaceSelectionKind !== "multiple") return singleSelected;
+  const key = workspaceTargetKey(target);
+  return workspaceMultipleSelection.some((candidate) => workspaceTargetKey(candidate) === key);
+}
+
+function selectWorkspaceTreeTarget(event, target) {
+  if (!event.ctrlKey && !event.metaKey) {
+    clearWorkspaceMultipleSelection();
+    return false;
+  }
+  let targets =
+    workspaceSelectionKind === "multiple"
+      ? [...workspaceMultipleSelection]
+      : [currentWorkspaceSelectionTarget()].filter(Boolean);
+  const targetKey = workspaceTargetKey(target);
+  const index = targets.findIndex((candidate) => workspaceTargetKey(candidate) === targetKey);
+  if (index >= 0) {
+    if (targets.length === 1) return true;
+    targets.splice(index, 1);
+  } else {
+    const targetIsObject = target.rendererUid === null;
+    targets = targets.filter((candidate) => {
+      if (candidate.objectUid !== target.objectUid) return true;
+      if (targetIsObject || candidate.rendererUid === null) return false;
+      return target.kind !== "rendererGroup" && candidate.kind !== "rendererGroup";
+    });
+    targets.push(target);
+  }
+  clearWorkspaceRenameTimer();
+  if (targets.length === 1) {
+    clearWorkspaceMultipleSelection();
+    applyWorkspaceSelectionTarget(targets[0]);
+  } else {
+    workspaceMultipleSelection = targets;
+    workspaceSelectionKind = "multiple";
+  }
+  renderShell();
+  return true;
+}
+
+function workspaceTargetExists(target) {
+  const objects = [
+    ...(snapshot?.objects || []),
+    ...(snapshot?.densityMaps || []),
+    ...(snapshot?.surfaces || []),
+    ...(snapshot?.lwObjects || []),
+  ];
+  const object = objects.find((candidate) => candidate.uid === target.objectUid);
+  if (!object) return false;
+  return (
+    target.rendererUid === null ||
+    (object.renderers || []).some((renderer) => renderer.uid === target.rendererUid)
+  );
+}
+
+function workspaceMultipleContextItems() {
+  const targets = [...workspaceMultipleSelection];
+  const copyEnabled = targets.every(
+    (target) => target.kind === "renderer" && target.selectionKind === "renderer",
+  );
+  const setVisible = (visible) => () =>
+    mutate("set_workspace_items_visible", {
+      targets: targets.map(workspaceCommandTarget),
+      visible,
+    });
+  return [
+    { label: `${targets.length} items`, disabled: true },
+    null,
+    {
+      label: "Copy",
+      disabled: !copyEnabled,
+      action: () => copyWorkspaceRenderers(targets),
+    },
+    {
+      label: "Delete",
+      action: async () => {
+        clearWorkspaceMultipleSelection();
+        workspaceSelectionKind = "scene";
+        await mutate("delete_workspace_items", {
+          targets: targets.map(workspaceCommandTarget),
+        });
+      },
+    },
+    { label: "Show", action: setVisible(true) },
+    { label: "Hide", action: setVisible(false) },
+  ];
+}
+
+function showWorkspaceMultipleContextMenu(event, target) {
+  if (
+    workspaceSelectionKind !== "multiple" ||
+    workspaceMultipleSelection.length < 2 ||
+    !workspaceTargetIsSelected(target)
+  ) {
+    clearWorkspaceMultipleSelection();
+    return false;
+  }
+  showWorkspaceContextMenu(event, workspaceMultipleContextItems());
+  return true;
+}
+
 function normalizeSelection() {
+  if (workspaceSelectionKind === "multiple") {
+    workspaceMultipleSelection = workspaceMultipleSelection.filter(workspaceTargetExists);
+    if (workspaceMultipleSelection.length >= 2) return;
+    if (workspaceMultipleSelection.length === 1) {
+      const target = workspaceMultipleSelection[0];
+      clearWorkspaceMultipleSelection();
+      applyWorkspaceSelectionTarget(target);
+    } else {
+      workspaceSelectionKind = "scene";
+    }
+  }
   if (workspaceSelectionKind === "camera" && !selectedCamera()) {
     selectedCameraName = null;
     workspaceSelectionKind = "cameraRoot";
@@ -8682,6 +8903,7 @@ function workspaceChromeRenderKey() {
   return JSON.stringify({
     selection: [
       workspaceSelectionKind,
+      workspaceMultipleSelection.map(workspaceTargetKey),
       selectedObjectUid,
       selectedRendererUid,
       selectedDensityMapUid,
@@ -8849,15 +9071,22 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     const workspaceObjectBlocks = [];
     for (const object of snapshot.objects.filter((item) => item.sceneUid === scene.uid)) {
       const objectBlock = document.createDocumentFragment();
+      const objectTarget = workspaceSelectionTarget("object", object.uid);
       const objectIsRenaming =
         workspaceInlineRename?.kind === "object" &&
         workspaceInlineRename.objectUid === object.uid;
       const objectRow = button(
         objectIsRenaming ? "" : object.name,
         `tree-object${
-          workspaceSelectionKind === "object" && object.uid === selectedObjectUid ? " active" : ""
+          workspaceTargetIsSelected(
+            objectTarget,
+            workspaceSelectionKind === "object" && object.uid === selectedObjectUid,
+          )
+            ? " active"
+            : ""
         }${object.visible ? "" : " hidden"}`,
-        () => {
+        (event) => {
+          if (selectWorkspaceTreeTarget(event, objectTarget)) return;
           const alreadySelected =
             workspaceSelectionKind === "object" && selectedObjectUid === object.uid;
           selectedObjectUid = object.uid;
@@ -8881,6 +9110,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         showReferenceDialog("Object Properties");
       });
       objectRow.addEventListener("contextmenu", (event) => {
+        if (showWorkspaceMultipleContextMenu(event, objectTarget)) return;
         selectedObjectUid = object.uid;
         selectedRendererUid = null;
         selectedDensityMapUid = null;
@@ -8910,6 +9140,11 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       const appendMoleculeRendererRow = (renderer, isChild = false) => {
         const isGroup = renderer.rendererType === "*group";
         const selectionKind = isGroup ? "rendererGroup" : "renderer";
+        const rendererTarget = workspaceSelectionTarget(
+          selectionKind,
+          object.uid,
+          renderer.uid,
+        );
         const isRenaming =
           workspaceInlineRename?.kind === selectionKind &&
           workspaceInlineRename.objectUid === object.uid &&
@@ -8921,13 +9156,17 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
               ? `${renderer.name} (group)`
               : `${renderer.rendererType} · ${renderer.name}`,
           `tree-renderer${
-            workspaceSelectionKind === selectionKind && renderer.uid === selectedRendererUid
+            workspaceTargetIsSelected(
+              rendererTarget,
+              workspaceSelectionKind === selectionKind && renderer.uid === selectedRendererUid,
+            )
               ? " active"
               : ""
           }${isGroup ? " renderer-group" : ""}${isChild ? " group-child" : ""}${
             renderer.visible ? "" : " hidden"
           }`,
-          () => {
+          (event) => {
+            if (selectWorkspaceTreeTarget(event, rendererTarget)) return;
             const alreadySelected =
               workspaceSelectionKind === selectionKind &&
               selectedObjectUid === object.uid &&
@@ -9007,6 +9246,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         });
         rendererRow.addEventListener("contextmenu", async (event) => {
           event.preventDefault();
+          if (showWorkspaceMultipleContextMenu(event, rendererTarget)) return;
           selectedObjectUid = object.uid;
           selectedRendererUid = renderer.uid;
           workspaceSelectionKind = isGroup ? "rendererGroup" : "renderer";
@@ -9047,17 +9287,22 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       (item) => item.sceneUid === scene.uid,
     )) {
       const surfaceBlock = document.createDocumentFragment();
+      const surfaceTarget = workspaceSelectionTarget("surface", surface.uid);
       const surfaceIsRenaming =
         workspaceInlineRename?.kind === "surface" &&
         workspaceInlineRename.objectUid === surface.uid;
       const surfaceRow = button(
         surfaceIsRenaming ? "" : surface.name,
         `tree-object surface-object${
-          workspaceSelectionKind === "surface" && surface.uid === selectedSurfaceUid
+          workspaceTargetIsSelected(
+            surfaceTarget,
+            workspaceSelectionKind === "surface" && surface.uid === selectedSurfaceUid,
+          )
             ? " active"
             : ""
         }${surface.visible ? "" : " hidden"}`,
-        () => {
+        (event) => {
+          if (selectWorkspaceTreeTarget(event, surfaceTarget)) return;
           const alreadySelected =
             workspaceSelectionKind === "surface" && selectedSurfaceUid === surface.uid;
           selectWorkspaceAuxItem("surface", surface.uid);
@@ -9075,6 +9320,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         showReferenceDialog("Object Properties");
       });
       surfaceRow.addEventListener("contextmenu", (event) => {
+        if (showWorkspaceMultipleContextMenu(event, surfaceTarget)) return;
         selectWorkspaceAuxItem("surface", surface.uid);
         showWorkspaceContextMenu(
           event,
@@ -9100,6 +9346,12 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       surfaceBlock.append(surfaceRow);
       for (const { renderer, isChild } of visibleWorkspaceRendererRows(surface)) {
         const isGroup = renderer.rendererType === "*group";
+        const rendererTarget = workspaceSelectionTarget(
+          "surfaceRenderer",
+          surface.uid,
+          renderer.uid,
+          isGroup ? "rendererGroup" : "surfaceRenderer",
+        );
         const rendererIsRenaming =
           workspaceInlineRename?.kind === "surfaceRenderer" &&
           workspaceInlineRename.objectUid === surface.uid &&
@@ -9111,14 +9363,18 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
               ? `${renderer.name} (group)`
               : `${renderer.rendererType} · ${renderer.name}`,
           `tree-renderer surface-renderer${
-            workspaceSelectionKind === "surfaceRenderer" &&
-            renderer.uid === selectedSurfaceRendererUid
+            workspaceTargetIsSelected(
+              rendererTarget,
+              workspaceSelectionKind === "surfaceRenderer" &&
+                renderer.uid === selectedSurfaceRendererUid,
+            )
               ? " active"
               : ""
           }${isGroup ? " renderer-group" : ""}${isChild ? " group-child" : ""}${
             renderer.visible ? "" : " hidden"
           }`,
-          () => {
+          (event) => {
+            if (selectWorkspaceTreeTarget(event, rendererTarget)) return;
             const alreadySelected =
               workspaceSelectionKind === "surfaceRenderer" &&
               selectedSurfaceUid === surface.uid &&
@@ -9149,6 +9405,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         });
         rendererRow.addEventListener("contextmenu", async (event) => {
           event.preventDefault();
+          if (showWorkspaceMultipleContextMenu(event, rendererTarget)) return;
           selectWorkspaceAuxItem("surfaceRenderer", surface.uid, renderer.uid);
           showWorkspaceContextMenu(
             event,
@@ -9189,17 +9446,22 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     }
     for (const map of snapshot.densityMaps.filter((item) => item.sceneUid === scene.uid)) {
       const mapBlock = document.createDocumentFragment();
+      const mapTarget = workspaceSelectionTarget("densityMap", map.uid);
       const mapIsRenaming =
         workspaceInlineRename?.kind === "densityMap" &&
         workspaceInlineRename.objectUid === map.uid;
       const mapRow = button(
         mapIsRenaming ? "" : map.name,
         `tree-object density-map${
-          workspaceSelectionKind === "densityMap" && map.uid === selectedDensityMapUid
+          workspaceTargetIsSelected(
+            mapTarget,
+            workspaceSelectionKind === "densityMap" && map.uid === selectedDensityMapUid,
+          )
             ? " active"
             : ""
         }${map.visible ? "" : " hidden"}`,
-        () => {
+        (event) => {
+          if (selectWorkspaceTreeTarget(event, mapTarget)) return;
           const alreadySelected =
             workspaceSelectionKind === "densityMap" && selectedDensityMapUid === map.uid;
           selectWorkspaceAuxItem("densityMap", map.uid);
@@ -9217,6 +9479,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         showReferenceDialog("Object Properties");
       });
       mapRow.addEventListener("contextmenu", (event) => {
+        if (showWorkspaceMultipleContextMenu(event, mapTarget)) return;
         selectWorkspaceAuxItem("densityMap", map.uid);
         showWorkspaceContextMenu(
           event,
@@ -9240,6 +9503,12 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       mapBlock.append(mapRow);
       for (const { renderer, isChild } of visibleWorkspaceRendererRows(map)) {
         const isGroup = renderer.rendererType === "*group";
+        const rendererTarget = workspaceSelectionTarget(
+          "densityRenderer",
+          map.uid,
+          renderer.uid,
+          isGroup ? "rendererGroup" : "densityRenderer",
+        );
         const rendererIsRenaming =
           workspaceInlineRename?.kind === "densityRenderer" &&
           workspaceInlineRename.objectUid === map.uid &&
@@ -9251,14 +9520,18 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
               ? `${renderer.name} (group)`
               : `${renderer.rendererType} · ${renderer.name}`,
           `tree-renderer density-renderer${
-            workspaceSelectionKind === "densityRenderer" &&
-            renderer.uid === selectedDensityRendererUid
+            workspaceTargetIsSelected(
+              rendererTarget,
+              workspaceSelectionKind === "densityRenderer" &&
+                renderer.uid === selectedDensityRendererUid,
+            )
               ? " active"
               : ""
           }${isGroup ? " renderer-group" : ""}${isChild ? " group-child" : ""}${
             renderer.visible ? "" : " hidden"
           }`,
-          () => {
+          (event) => {
+            if (selectWorkspaceTreeTarget(event, rendererTarget)) return;
             const alreadySelected =
               workspaceSelectionKind === "densityRenderer" &&
               selectedDensityMapUid === map.uid &&
@@ -9284,6 +9557,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         });
         rendererRow.addEventListener("contextmenu", async (event) => {
           event.preventDefault();
+          if (showWorkspaceMultipleContextMenu(event, rendererTarget)) return;
           selectWorkspaceAuxItem("densityRenderer", map.uid, renderer.uid);
           showWorkspaceContextMenu(
             event,
@@ -9324,17 +9598,22 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       (item) => item.sceneUid === scene.uid,
     )) {
       const objectBlock = document.createDocumentFragment();
+      const objectTarget = workspaceSelectionTarget("lwObject", object.uid);
       const objectIsRenaming =
         workspaceInlineRename?.kind === "lwObject" &&
         workspaceInlineRename.objectUid === object.uid;
       const objectRow = button(
         objectIsRenaming ? "" : object.name,
         `tree-object lightweight-object${
-          workspaceSelectionKind === "lwObject" && object.uid === selectedLwObjectUid
+          workspaceTargetIsSelected(
+            objectTarget,
+            workspaceSelectionKind === "lwObject" && object.uid === selectedLwObjectUid,
+          )
             ? " active"
             : ""
         }${object.visible ? "" : " hidden"}`,
-        () => {
+        (event) => {
+          if (selectWorkspaceTreeTarget(event, objectTarget)) return;
           const alreadySelected =
             workspaceSelectionKind === "lwObject" && selectedLwObjectUid === object.uid;
           selectWorkspaceAuxItem("lwObject", object.uid);
@@ -9352,6 +9631,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         showReferenceDialog("Object Properties");
       });
       objectRow.addEventListener("contextmenu", (event) => {
+        if (showWorkspaceMultipleContextMenu(event, objectTarget)) return;
         selectWorkspaceAuxItem("lwObject", object.uid);
         showWorkspaceContextMenu(
           event,
@@ -9377,6 +9657,12 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       objectBlock.append(objectRow);
       for (const { renderer, isChild } of visibleWorkspaceRendererRows(object)) {
         const isGroup = renderer.rendererType === "*group";
+        const rendererTarget = workspaceSelectionTarget(
+          "lwRenderer",
+          object.uid,
+          renderer.uid,
+          isGroup ? "rendererGroup" : "lwRenderer",
+        );
         const rendererIsRenaming =
           workspaceInlineRename?.kind === "lwRenderer" &&
           workspaceInlineRename.objectUid === object.uid &&
@@ -9388,14 +9674,18 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
               ? `${renderer.name} (group)`
               : `${renderer.rendererType} · ${renderer.name}`,
           `tree-renderer lightweight-renderer${
-            workspaceSelectionKind === "lwRenderer" &&
-            renderer.uid === selectedLwRendererUid
+            workspaceTargetIsSelected(
+              rendererTarget,
+              workspaceSelectionKind === "lwRenderer" &&
+                renderer.uid === selectedLwRendererUid,
+            )
               ? " active"
               : ""
           }${isGroup ? " renderer-group" : ""}${isChild ? " group-child" : ""}${
             renderer.visible ? "" : " hidden"
           }`,
-          () => {
+          (event) => {
+            if (selectWorkspaceTreeTarget(event, rendererTarget)) return;
             const alreadySelected =
               workspaceSelectionKind === "lwRenderer" &&
               selectedLwObjectUid === object.uid &&
@@ -9421,6 +9711,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         });
         rendererRow.addEventListener("contextmenu", async (event) => {
           event.preventDefault();
+          if (showWorkspaceMultipleContextMenu(event, rendererTarget)) return;
           selectWorkspaceAuxItem("lwRenderer", object.uid, renderer.uid);
           showWorkspaceContextMenu(
             event,
@@ -9602,7 +9893,9 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     });
   }
   workspaceProperties.disabled =
-    ["renderer", "rendererGroup"].includes(workspaceSelectionKind)
+    workspaceSelectionKind === "multiple"
+      ? true
+      : ["renderer", "rendererGroup"].includes(workspaceSelectionKind)
       ? !selectedRenderer()
       : workspaceSelectionKind === "densityRenderer"
         ? !selectedDensityRenderer()
@@ -9628,7 +9921,9 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             ? !selectedObject()
             : !snapshot.scenes.some((scene) => scene.active);
   workspaceDelete.disabled =
-    ["renderer", "rendererGroup"].includes(workspaceSelectionKind)
+    workspaceSelectionKind === "multiple"
+      ? workspaceMultipleSelection.length < 2
+      : ["renderer", "rendererGroup"].includes(workspaceSelectionKind)
       ? !selectedRenderer()
       : workspaceSelectionKind === "densityRenderer"
         ? !selectedDensityRenderer()
@@ -9651,7 +9946,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
                 : true;
   workspaceZoom.disabled =
     workspaceDelete.disabled ||
-    ["rendererGroup", "lwObject", "lwRenderer", "cameraRoot", "camera", "styleRoot", "style"].includes(
+    ["multiple", "rendererGroup", "lwObject", "lwRenderer", "cameraRoot", "camera", "styleRoot", "style"].includes(
       workspaceSelectionKind,
     );
 }
@@ -12420,6 +12715,13 @@ async function handleAction(action, depth = 0) {
       break;
     }
     case "delete-workspace-item": {
+      if (workspaceSelectionKind === "multiple" && workspaceMultipleSelection.length > 1) {
+        const targets = workspaceMultipleSelection.map(workspaceCommandTarget);
+        clearWorkspaceMultipleSelection();
+        workspaceSelectionKind = "scene";
+        await mutate("delete_workspace_items", { targets });
+        break;
+      }
       if (
         workspaceSelectionKind === "style" &&
         selectedStyle() &&

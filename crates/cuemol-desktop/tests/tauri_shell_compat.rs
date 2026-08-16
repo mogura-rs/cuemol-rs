@@ -1437,6 +1437,21 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
 }
 
 #[test]
+fn tauri_workspace_multiple_selection_matches_reference_actions() {
+    assert!(JS.contains("let workspaceMultipleSelection = [];"));
+    assert!(JS.contains("function selectWorkspaceTreeTarget(event, target)"));
+    assert!(JS.contains("!event.ctrlKey && !event.metaKey"));
+    assert!(JS.contains("function workspaceMultipleContextItems()"));
+    assert!(JS.contains("function showWorkspaceMultipleContextMenu(event, target)"));
+    assert!(JS.contains("invoke(\"copy_workspace_renderers\""));
+    assert!(JS.contains("mutate(\"set_workspace_items_visible\""));
+    assert!(JS.contains("mutate(\"delete_workspace_items\""));
+    for label in ["Copy", "Delete", "Show", "Hide"] {
+        assert!(JS.contains(&format!("label: \"{label}\"")));
+    }
+}
+
+#[test]
 fn tauri_workspace_exposes_reference_style_nodes_and_actions() {
     assert!(JS.contains("function activeStyles()"));
     assert!(JS.contains("workspaceSelectionKind === \"styleRoot\""));
@@ -1569,6 +1584,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "set_surface_renderer_visible",
         "add_surface_renderer",
         "set_workspace_visible",
+        "set_workspace_items_visible",
         "set_workspace_locked",
         "get_renderer_style_options",
         "create_renderer_style",
@@ -1581,6 +1597,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "insert_workspace_renderer_paint",
         "insert_workspace_object_paint",
         "copy_workspace_renderer",
+        "copy_workspace_renderers",
         "paste_workspace_renderers",
         "copy_workspace_object",
         "paste_workspace_object",
@@ -1591,6 +1608,7 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "create_workspace_renderer_group",
         "rename_workspace_node",
         "delete_workspace_item",
+        "delete_workspace_items",
         "fit_workspace_item",
     ] {
         assert!(
