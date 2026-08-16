@@ -7460,7 +7460,7 @@ function workspaceObjectContextItems(scene, object) {
       ],
     },
   ];
-  if (current) {
+  if (current && object.coloringType === "PaintColoring") {
     items.push({
       label: "Paint",
       children: workspacePaintMenuChildren((color) => () =>

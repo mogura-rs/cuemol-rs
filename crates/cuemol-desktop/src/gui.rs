@@ -2305,6 +2305,58 @@ fn workspace_collapse_toggle(
         .then_some(!collapsed)
 }
 
+fn workspace_paint_menu(ui: &mut egui::Ui, enabled: bool, mut insert: impl FnMut(&str)) {
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.menu_button("Paint", |ui| {
+            ui.menu_button("Monochrome", |ui| {
+                for &(label, color) in WORKSPACE_PAINT_MONOCHROME {
+                    if ui.button(label).clicked() {
+                        insert(color);
+                        ui.close();
+                    }
+                }
+            });
+            for &(hue_name, hue) in WORKSPACE_PAINT_HUES {
+                ui.menu_button(hue_name, |ui| {
+                    let variants = [
+                        (hue_name.to_string(), format!("hsb({hue}, 1.0, 1.0)")),
+                        (
+                            format!("{hue_name}, sat 25%"),
+                            format!("hsb({hue}, 0.25, 1.0)"),
+                        ),
+                        (
+                            format!("{hue_name}, sat 50%"),
+                            format!("hsb({hue}, 0.5, 1.0)"),
+                        ),
+                        (
+                            format!("{hue_name}, sat 75%"),
+                            format!("hsb({hue}, 0.75, 1.0)"),
+                        ),
+                        (
+                            format!("{hue_name}, bri 75%"),
+                            format!("hsb({hue}, 1.0, 0.75)"),
+                        ),
+                        (
+                            format!("{hue_name}, bri 50%"),
+                            format!("hsb({hue}, 1.0, 0.50)"),
+                        ),
+                        (
+                            format!("{hue_name}, bri 25%"),
+                            format!("hsb({hue}, 1.0, 0.25)"),
+                        ),
+                    ];
+                    for (label, color) in variants {
+                        if ui.button(label).clicked() {
+                            insert(&color);
+                            ui.close();
+                        }
+                    }
+                });
+            }
+        });
+    });
+}
+
 fn ctx_pointer_vertical_fraction(ctx: &egui::Context, rect: egui::Rect) -> f32 {
     let y = ctx
         .input(|input| input.pointer.latest_pos())
@@ -5271,6 +5323,14 @@ impl GuiApplication {
                 });
             }
         });
+        let paint_enabled = !current.is_empty()
+            && self
+                .state
+                .object_coloring_type(object_uid)
+                .is_some_and(|coloring| coloring == "PaintColoring");
+        workspace_paint_menu(ui, paint_enabled, |color| {
+            self.insert_workspace_object_paint(scene_uid, object_uid, color);
+        });
         ui.separator();
         if ui.button("Copy Object").clicked() {
             self.copy_workspace_object_to_clipboard(object_uid);
@@ -6147,64 +6207,8 @@ impl GuiApplication {
             .state
             .renderer_coloring_type(object_uid, renderer.uid)
             .is_some_and(|coloring| coloring == "PaintColoring");
-        ui.add_enabled_ui(paint_enabled, |ui| {
-            ui.menu_button("Paint", |ui| {
-                ui.menu_button("Monochrome", |ui| {
-                    for &(label, color) in WORKSPACE_PAINT_MONOCHROME {
-                        if ui.button(label).clicked() {
-                            self.insert_workspace_renderer_paint(
-                                scene_uid,
-                                object_uid,
-                                renderer.uid,
-                                color,
-                            );
-                            ui.close();
-                        }
-                    }
-                });
-                for &(hue_name, hue) in WORKSPACE_PAINT_HUES {
-                    ui.menu_button(hue_name, |ui| {
-                        let variants = [
-                            (hue_name.to_string(), format!("hsb({hue}, 1.0, 1.0)")),
-                            (
-                                format!("{hue_name}, sat 25%"),
-                                format!("hsb({hue}, 0.25, 1.0)"),
-                            ),
-                            (
-                                format!("{hue_name}, sat 50%"),
-                                format!("hsb({hue}, 0.5, 1.0)"),
-                            ),
-                            (
-                                format!("{hue_name}, sat 75%"),
-                                format!("hsb({hue}, 0.75, 1.0)"),
-                            ),
-                            (
-                                format!("{hue_name}, bri 75%"),
-                                format!("hsb({hue}, 1.0, 0.75)"),
-                            ),
-                            (
-                                format!("{hue_name}, bri 50%"),
-                                format!("hsb({hue}, 1.0, 0.50)"),
-                            ),
-                            (
-                                format!("{hue_name}, bri 25%"),
-                                format!("hsb({hue}, 1.0, 0.25)"),
-                            ),
-                        ];
-                        for (label, color) in variants {
-                            if ui.button(label).clicked() {
-                                self.insert_workspace_renderer_paint(
-                                    scene_uid,
-                                    object_uid,
-                                    renderer.uid,
-                                    &color,
-                                );
-                                ui.close();
-                            }
-                        }
-                    });
-                }
-            });
+        workspace_paint_menu(ui, paint_enabled, |color| {
+            self.insert_workspace_renderer_paint(scene_uid, object_uid, renderer.uid, color);
         });
         ui.menu_button("Style", |ui| {
             for style in &shape {
@@ -6321,6 +6325,24 @@ impl GuiApplication {
                 self.set_status("Insert paint entry");
             }
             Err(error) => self.set_status(format!("Paint error: {error}")),
+        }
+    }
+
+    fn insert_workspace_object_paint(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        color: &str,
+    ) {
+        let undo = self.capture_undo();
+        match self.state.insert_object_paint_entry(object_uid, color) {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.rebuild_snapshot();
+                self.set_status("Insert object paint entry");
+            }
+            Err(error) => self.set_status(format!("Object paint error: {error}")),
         }
     }
 
@@ -26082,6 +26104,52 @@ mod tests {
         app.undo(&mut camera);
         assert!(!app.state.renderer_summaries(object_uid)[0].locked);
         assert!(app.modified_scenes.contains(&scene_uid));
+    }
+
+    #[test]
+    fn native_workspace_object_paint_is_undoable() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", cuemol_molstr::MolCoord::new());
+        app.state
+            .set_object_coloring_details(
+                object_uid,
+                Some("PaintColoring".to_string()),
+                std::collections::BTreeMap::new(),
+                vec![("*".to_string(), "white".to_string())],
+                None,
+            )
+            .unwrap();
+        app.state
+            .set_molecule_selection_text(object_uid, "protein")
+            .unwrap();
+
+        app.insert_workspace_object_paint(scene_uid, object_uid, "hsb(120, 1.0, 1.0)");
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .paint_coloring()[0],
+            ("protein".to_string(), "hsb(120, 1.0, 1.0)".to_string())
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .paint_coloring(),
+            &[("*".to_string(), "white".to_string())]
+        );
     }
 
     #[test]

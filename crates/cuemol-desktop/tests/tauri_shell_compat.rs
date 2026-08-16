@@ -1250,6 +1250,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
         "label: object.name",
         "object.visible ? \"Hide\" : \"Show\"",
         "label: \"Selection\"",
+        "object.coloringType === \"PaintColoring\"",
         "label: \"Around\"",
         "label: \"Around Byresid\"",
         "label: \"Ligand\"",
@@ -1270,7 +1271,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(!tauri_object_menu.contains("Copy Object"));
     assert!(!tauri_object_menu.contains("Save As ..."));
     assert!(!tauri_object_menu.contains("Delete Object"));
-    assert!(tauri_object_menu.contains("if (current)"));
+    assert!(tauri_object_menu.contains("if (current && object.coloringType === \"PaintColoring\")"));
     assert!(tauri_object_menu.contains("label: \"Paint\""));
     let tauri_renderer_group_menu = JS
         .split("async function workspaceRendererContextItems(scene, object, renderer)")
