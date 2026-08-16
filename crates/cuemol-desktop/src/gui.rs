@@ -1569,13 +1569,6 @@ impl NativeWorkspaceTarget {
         }
     }
 
-    fn owner(self) -> Option<NativePropertyObject> {
-        match self {
-            Self::Object { owner, .. } | Self::Renderer { owner, .. } => Some(owner),
-            Self::Camera { .. } | Self::Style { .. } => None,
-        }
-    }
-
     fn renderer_uid(self) -> Option<cuemol_core::Uid> {
         match self {
             Self::Object { .. } => None,
@@ -1598,10 +1591,6 @@ impl NativeWorkspaceTarget {
             Self::Renderer { is_group: true, .. } => 3,
             Self::Object { .. } => 4,
         }
-    }
-
-    fn workspace_kind(self) -> Option<crate::GuiWorkspaceObjectKind> {
-        self.owner().map(NativePropertyObject::workspace_kind)
     }
 }
 
@@ -5882,19 +5871,7 @@ impl GuiApplication {
         let count = self.workspace_multiple_selection.len();
         ui.weak(format!("{count} items"));
         ui.separator();
-        let copy_enabled = self
-            .workspace_multiple_selection
-            .iter()
-            .copied()
-            .all(NativeWorkspaceTarget::is_copyable_renderer)
-            && self
-                .workspace_multiple_selection
-                .first()
-                .is_some_and(|first| {
-                    self.workspace_multiple_selection
-                        .iter()
-                        .all(|target| target.workspace_kind() == first.workspace_kind())
-                });
+        let copy_enabled = self.workspace_multiple_copy_enabled();
         if ui
             .add_enabled(copy_enabled, egui::Button::new("Copy"))
             .clicked()
@@ -5914,6 +5891,15 @@ impl GuiApplication {
             self.set_workspace_targets_visible(false);
             ui.close();
         }
+    }
+
+    fn workspace_multiple_copy_enabled(&self) -> bool {
+        self.workspace_multiple_selection.len() > 1
+            && self
+                .workspace_multiple_selection
+                .iter()
+                .copied()
+                .all(NativeWorkspaceTarget::is_copyable_renderer)
     }
 
     fn workspace_molecule_object_context_menu(
@@ -27200,6 +27186,7 @@ mod tests {
                 is_group: false,
             },
         ];
+        assert!(app.workspace_multiple_copy_enabled());
         app.copy_workspace_target_renderers();
         let clipboard = app.workspace_renderer_clipboard.as_ref().unwrap();
         assert!(clipboard.is_mixed_kind());
@@ -27310,6 +27297,7 @@ mod tests {
         app.workspace_selection_order = app.workspace_targets_in_tree_order();
         assert!(app.select_workspace_target_with_modifiers(child, false, true));
         assert_eq!(app.workspace_multiple_selection, [object, group, child]);
+        assert!(!app.workspace_multiple_copy_enabled());
 
         app.delete_workspace_targets();
         assert!(app.state.scene_manager().object(object_uid).is_none());
