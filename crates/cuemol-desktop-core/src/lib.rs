@@ -7724,6 +7724,30 @@ impl DesktopAppState {
         result
     }
 
+    /// Return whether a scene still has the untouched, empty state that the
+    /// desktop `Open Scene` command may replace in place.
+    pub fn scene_is_just_created(&self, scene_uid: Uid) -> bool {
+        let Some(scene) = self.scene_manager().scene(scene_uid) else {
+            return false;
+        };
+        scene.source().is_empty()
+            && scene.objects().is_empty()
+            && scene.cameras().is_empty()
+            && scene.loaded_surfaces().is_empty()
+            && scene.loaded_density_maps().is_empty()
+            && scene.loaded_lw_objects().is_empty()
+            && scene.loaded_qsc_objects().is_empty()
+            && scene.loaded_styles().is_empty()
+            && scene.scene_attributes().is_empty()
+            && scene.scene_extension_nodes().is_empty()
+            && scene.animation_node().is_none()
+    }
+
+    pub fn active_scene_is_just_created(&self) -> bool {
+        self.active_scene
+            .is_some_and(|scene_uid| self.scene_is_just_created(scene_uid))
+    }
+
     fn load_qsc_file_into(
         &mut self,
         path: &Path,

@@ -4857,24 +4857,11 @@ impl AppModel {
     }
 
     fn active_scene_is_just_created(&self) -> bool {
-        let Some(scene) = self
-            .desktop
-            .active_scene()
-            .and_then(|scene_uid| self.desktop.scene_manager().scene(scene_uid))
-        else {
-            return false;
-        };
-        scene.source().is_empty()
-            && scene.objects().is_empty()
-            && scene.cameras().is_empty()
-            && scene.loaded_surfaces().is_empty()
-            && scene.loaded_density_maps().is_empty()
-            && scene.loaded_lw_objects().is_empty()
-            && scene.loaded_qsc_objects().is_empty()
-            && scene.loaded_styles().is_empty()
-            && scene.scene_attributes().is_empty()
-            && scene.scene_extension_nodes().is_empty()
-            && scene.animation_node().is_none()
+        self.desktop.active_scene_is_just_created()
+            && self
+                .desktop
+                .active_scene()
+                .is_some_and(|scene_uid| !self.modified_scenes.contains(&scene_uid))
     }
 
     fn open_scene(&mut self, path: String) -> Result<(), String> {

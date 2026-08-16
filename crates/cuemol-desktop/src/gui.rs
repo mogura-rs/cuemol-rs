@@ -3516,7 +3516,7 @@ impl GuiApplication {
                             let label = path.to_string_lossy();
                             if ui.button(label.as_ref()).clicked() {
                                 self.open_path = label.to_string();
-                                self.request_open_current_path(camera);
+                                self.request_open_recent_path(camera);
                                 ui.close();
                             }
                         }
@@ -8933,7 +8933,7 @@ impl GuiApplication {
     fn choose_open_scene(&mut self, camera: &mut CameraController) {
         if let Some(path) = native_file_dialog(NativeFileDialog::OpenScene, &self.open_path) {
             self.open_path = path.to_string_lossy().into_owned();
-            self.open_current_path(camera);
+            self.open_scene_current_path(camera);
         }
     }
 
@@ -9131,6 +9131,80 @@ impl GuiApplication {
             Err(error) => {
                 self.set_error(error);
             }
+        }
+    }
+
+    fn request_open_recent_path(&mut self, camera: &mut CameraController) {
+        let path = PathBuf::from(self.open_path.trim());
+        if is_scene_file(&path) {
+            self.open_scene_current_path(camera);
+        } else {
+            self.request_open_current_path(camera);
+        }
+    }
+
+    fn active_scene_is_just_created(&self) -> bool {
+        self.state.active_scene_is_just_created()
+            && self
+                .state
+                .active_scene()
+                .is_some_and(|scene_uid| !self.modified_scenes.contains(&scene_uid))
+    }
+
+    fn open_scene_current_path(&mut self, camera: &mut CameraController) {
+        let open_path = self.open_path.trim().to_string();
+        if open_path.is_empty() {
+            self.set_status("Open path is empty");
+            return;
+        }
+        let path = PathBuf::from(&open_path);
+        let undo = self.capture_undo();
+        let reusable_scene = self
+            .active_scene_is_just_created()
+            .then(|| self.state.active_scene())
+            .flatten();
+        if reusable_scene.is_none() && self.state.active_view_summary().is_some() {
+            let current = camera.to_qsys_camera("__current");
+            if let Err(error) = self.state.set_active_view_camera(&current) {
+                self.set_error(error);
+                return;
+            }
+        }
+        match self.state.open_scene_file(&path, reusable_scene) {
+            Ok(scene_uid) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.remove(&scene_uid);
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.workspace_aux_selection = None;
+                self.last_loaded_path = Some(path.clone());
+                self.add_recent_path(path.clone());
+                self.surface_mesh = None;
+                self.show_surface = false;
+                self.sync_active_scene_properties();
+                self.rebuild_snapshot();
+                let saved_camera = self.state.active_scene_saved_camera();
+                match saved_camera {
+                    Some(saved) => *camera = CameraController::from_qsys_camera(&saved),
+                    None => camera.fit_snapshot(&self.snapshot),
+                }
+                let skipped = self.state.active_scene_skipped_objects();
+                if skipped.is_empty() {
+                    self.set_status(format!("Scene file: [{}] is loaded.", path.display()));
+                } else {
+                    self.set_status(format!(
+                        "Scene file: [{}] is loaded ({} object(s) skipped: {}).",
+                        path.display(),
+                        skipped.len(),
+                        skipped
+                            .iter()
+                            .map(|(name, ty)| format!("{name} [{ty}]"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+            Err(error) => self.set_error(error),
         }
     }
 
@@ -20550,7 +20624,7 @@ const OBJECT_OPEN_FILTERS: &[NativeFileFilter] = &[
         label: "Molecule coordinates",
         extensions: &[
             "pdb", "ent", "cif", "mmcif", "sdf", "mol", "mol2", "gro", "psf", "prmtop", "parm7",
-            "top", "coor", "pse", "qdf",
+            "top", "coor", "qdf",
         ],
     },
     NativeFileFilter {
@@ -20564,7 +20638,7 @@ const OBJECT_OPEN_FILTERS: &[NativeFileFilter] = &[
 ];
 const SCENE_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "CueMol scene",
-    extensions: &["qsc", "qsl"],
+    extensions: &["qsc", "qsl", "pse"],
 }];
 const PSF_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "PSF file",
@@ -22127,6 +22201,12 @@ fn is_view_file(path: &Path) -> bool {
         .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "cam" | "view"))
 }
 
+fn is_scene_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "qsc" | "qsl" | "pse"))
+}
+
 fn download_url_to_cache(url: &str) -> Result<PathBuf> {
     let path = url_cache_path(url);
     download_to_cache(url, &path)
@@ -23222,6 +23302,15 @@ mod tests {
             .iter()
             .flat_map(|filter| filter.extensions)
             .any(|extension| *extension == "mmcif"));
+        assert!(!open
+            .filters
+            .iter()
+            .flat_map(|filter| filter.extensions)
+            .any(|extension| *extension == "pse"));
+        let open_scene = native_file_dialog_spec(NativeFileDialog::OpenScene);
+        assert_eq!(open_scene.filters[0].extensions, &["qsc", "qsl", "pse"]);
+        assert!(is_scene_file(Path::new("session.PSE")));
+        assert!(!is_scene_file(Path::new("molecule.pdb")));
         let open_msms_vertex = native_file_dialog_spec(NativeFileDialog::OpenMsmsVertex);
         assert_eq!(open_msms_vertex.title, "Select MSMS vertex file");
         assert_eq!(open_msms_vertex.filters[0].extensions, &["vert"]);
@@ -23264,6 +23353,68 @@ mod tests {
             MainShortcutCommand::Performance.shortcut(),
             egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::F2)
         );
+    }
+
+    #[test]
+    fn native_open_scene_reuses_an_empty_tab_then_creates_a_new_tab() {
+        let first_path = std::env::temp_dir().join(format!(
+            "cuemol-native-open-scene-first-{}.qsc",
+            std::process::id()
+        ));
+        let second_path = std::env::temp_dir().join(format!(
+            "cuemol-native-open-scene-second-{}.qsc",
+            std::process::id()
+        ));
+        fs::write(&first_path, "<scene name=\"first\"/>").unwrap();
+        fs::write(&second_path, "<scene name=\"second\"/>").unwrap();
+
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        let empty_scene_uid = app.state.active_scene().unwrap();
+        assert!(app.active_scene_is_just_created());
+
+        app.open_path = first_path.to_string_lossy().into_owned();
+        app.open_scene_current_path(&mut camera);
+        assert_eq!(app.state.scene_summaries().len(), 1);
+        assert_eq!(app.state.active_scene(), Some(empty_scene_uid));
+        assert_eq!(app.last_loaded_path.as_deref(), Some(first_path.as_path()));
+        assert!(!app.modified_scenes.contains(&empty_scene_uid));
+
+        app.open_path = second_path.to_string_lossy().into_owned();
+        app.request_open_recent_path(&mut camera);
+        assert_eq!(app.state.scene_summaries().len(), 2);
+        assert_ne!(app.state.active_scene(), Some(empty_scene_uid));
+        assert_eq!(app.last_loaded_path.as_deref(), Some(second_path.as_path()));
+
+        fs::remove_file(first_path).unwrap();
+        fs::remove_file(second_path).unwrap();
+    }
+
+    #[test]
+    fn native_open_scene_restores_a_saved_camera_in_the_reused_view() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-native-open-scene-camera-{}.qsc",
+            std::process::id()
+        ));
+        let mut source = DesktopAppState::new();
+        source.new_scene("camera", true);
+        let mut saved = cuemol_qsys::Camera::new();
+        saved.set_name("__current");
+        saved.set_zoom(73.0);
+        source.set_active_scene_camera(saved).unwrap();
+        source.save_active_scene_qsc(&path).unwrap();
+
+        let mut app = GuiApplication::new();
+        let empty_scene_uid = app.state.active_scene().unwrap();
+        let mut camera = CameraController::default();
+        app.open_path = path.to_string_lossy().into_owned();
+        app.open_scene_current_path(&mut camera);
+
+        assert_eq!(app.state.active_scene(), Some(empty_scene_uid));
+        assert_eq!(camera.to_qsys_camera("loaded").zoom(), 73.0);
+        assert_eq!(app.state.active_view_camera().unwrap().zoom(), 73.0);
+
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
