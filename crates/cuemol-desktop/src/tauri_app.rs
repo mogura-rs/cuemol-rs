@@ -2898,6 +2898,26 @@ impl AppModel {
         Ok(())
     }
 
+    fn set_workspace_items_visible(
+        &mut self,
+        targets: Vec<WorkspaceToggleInput>,
+        visible: bool,
+    ) -> Result<(), String> {
+        if targets.is_empty() {
+            return Err("at least one Workspace item is required".to_string());
+        }
+        let count = targets.len();
+        for target in targets {
+            self.set_workspace_visible(target, visible)?;
+        }
+        self.status = if visible {
+            format!("Show {count} Workspace items")
+        } else {
+            format!("Hide {count} Workspace items")
+        };
+        Ok(())
+    }
+
     fn set_workspace_locked(
         &mut self,
         target: WorkspaceToggleInput,
@@ -3172,6 +3192,18 @@ impl AppModel {
         Ok(())
     }
 
+    fn delete_workspace_items(&mut self, targets: Vec<WorkspaceDeleteInput>) -> Result<(), String> {
+        if targets.is_empty() {
+            return Err("at least one Workspace item is required".to_string());
+        }
+        let count = targets.len();
+        for target in targets {
+            self.delete_workspace_item(target)?;
+        }
+        self.status = format!("Destroy {count} Workspace items");
+        Ok(())
+    }
+
     fn move_workspace_renderer(
         &mut self,
         input: WorkspaceMoveRendererInput,
@@ -3419,6 +3451,24 @@ impl AppModel {
         let clipboard = self
             .desktop
             .copy_workspace_renderer(Uid::new(input.object_uid), Uid::new(input.renderer_uid))
+            .map_err(|error| error.to_string())?;
+        let count = clipboard.renderer_count();
+        self.workspace_renderer_clipboard = Some(clipboard);
+        self.status = format!("Copied {count} renderer(s)");
+        Ok(self.status.clone())
+    }
+
+    fn copy_workspace_renderers(
+        &mut self,
+        inputs: Vec<WorkspaceRendererCopyInput>,
+    ) -> Result<String, String> {
+        let targets = inputs
+            .into_iter()
+            .map(|input| (Uid::new(input.object_uid), Uid::new(input.renderer_uid)))
+            .collect::<Vec<_>>();
+        let clipboard = self
+            .desktop
+            .copy_workspace_renderers(&targets)
             .map_err(|error| error.to_string())?;
         let count = clipboard.renderer_count();
         self.workspace_renderer_clipboard = Some(clipboard);
@@ -6404,11 +6454,16 @@ enum ModelRequest {
         target: WorkspaceToggleInput,
         visible: bool,
     },
+    SetWorkspaceItemsVisible {
+        targets: Vec<WorkspaceToggleInput>,
+        visible: bool,
+    },
     SetWorkspaceLocked {
         target: WorkspaceToggleInput,
         locked: bool,
     },
     DeleteWorkspaceItem(WorkspaceDeleteInput),
+    DeleteWorkspaceItems(Vec<WorkspaceDeleteInput>),
     MoveWorkspaceObject(WorkspaceMoveObjectInput),
     MoveWorkspaceRenderer(WorkspaceMoveRendererInput),
     SetWorkspaceObjectCollapsed(WorkspaceObjectCollapsedInput),
@@ -6421,6 +6476,7 @@ enum ModelRequest {
     InsertWorkspaceRendererPaint(WorkspaceRendererPaintInput),
     InsertWorkspaceObjectPaint(WorkspaceObjectPaintInput),
     CopyWorkspaceRenderer(WorkspaceRendererCopyInput),
+    CopyWorkspaceRenderers(Vec<WorkspaceRendererCopyInput>),
     PasteWorkspaceRenderers(WorkspaceRendererPasteInput),
     CopyWorkspaceObject(WorkspaceObjectCopyInput),
     PasteWorkspaceObject(WorkspaceObjectPasteInput),
@@ -8332,6 +8388,17 @@ fn handle_model_request(
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::SetWorkspaceItemsVisible { targets, visible } => {
+            let undo = model.capture_undo();
+            match model.set_workspace_items_visible(targets, visible) {
+                Ok(()) => model.push_undo(undo),
+                Err(error) => {
+                    model.restore_undo(undo)?;
+                    return Err(error);
+                }
+            }
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::SetWorkspaceLocked { target, locked } => {
             let undo = model.capture_undo();
             model.set_workspace_locked(target, locked)?;
@@ -8342,6 +8409,17 @@ fn handle_model_request(
             let undo = model.capture_undo();
             model.delete_workspace_item(target)?;
             model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::DeleteWorkspaceItems(targets) => {
+            let undo = model.capture_undo();
+            match model.delete_workspace_items(targets) {
+                Ok(()) => model.push_undo(undo),
+                Err(error) => {
+                    model.restore_undo(undo)?;
+                    return Err(error);
+                }
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::MoveWorkspaceObject(input) => {
@@ -8411,6 +8489,9 @@ fn handle_model_request(
         }
         ModelRequest::CopyWorkspaceRenderer(input) => Ok(ModelResponse::Message(
             model.copy_workspace_renderer(input)?,
+        )),
+        ModelRequest::CopyWorkspaceRenderers(inputs) => Ok(ModelResponse::Message(
+            model.copy_workspace_renderers(inputs)?,
         )),
         ModelRequest::PasteWorkspaceRenderers(input) => {
             let undo = model.capture_undo();
@@ -10969,6 +11050,18 @@ fn set_workspace_visible(
 }
 
 #[tauri::command]
+fn set_workspace_items_visible(
+    targets: Vec<WorkspaceToggleInput>,
+    visible: bool,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetWorkspaceItemsVisible { targets, visible },
+    )?)
+}
+
+#[tauri::command]
 fn set_workspace_locked(
     target: WorkspaceToggleInput,
     locked: bool,
@@ -10988,6 +11081,17 @@ fn delete_workspace_item(
     snapshot_response(request_model(
         &state,
         ModelRequest::DeleteWorkspaceItem(target),
+    )?)
+}
+
+#[tauri::command]
+fn delete_workspace_items(
+    targets: Vec<WorkspaceDeleteInput>,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::DeleteWorkspaceItems(targets),
     )?)
 }
 
@@ -11120,6 +11224,17 @@ fn copy_workspace_renderer(
     message_response(request_model(
         &state,
         ModelRequest::CopyWorkspaceRenderer(input),
+    )?)
+}
+
+#[tauri::command]
+fn copy_workspace_renderers(
+    inputs: Vec<WorkspaceRendererCopyInput>,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::CopyWorkspaceRenderers(inputs),
     )?)
 }
 
@@ -12722,8 +12837,10 @@ pub fn run() -> Result<(), tauri::Error> {
             set_style_properties,
             destroy_style,
             set_workspace_visible,
+            set_workspace_items_visible,
             set_workspace_locked,
             delete_workspace_item,
+            delete_workspace_items,
             move_workspace_object,
             move_workspace_renderer,
             set_workspace_object_collapsed,
@@ -12736,6 +12853,7 @@ pub fn run() -> Result<(), tauri::Error> {
             insert_workspace_renderer_paint,
             insert_workspace_object_paint,
             copy_workspace_renderer,
+            copy_workspace_renderers,
             paste_workspace_renderers,
             copy_workspace_object,
             paste_workspace_object,
@@ -15155,6 +15273,127 @@ mod tests {
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(model.snapshot().objects[0].renderers.is_empty());
         assert!(model.workspace_renderer_clipboard.is_some());
+    }
+
+    #[test]
+    fn workspace_multiple_commands_use_one_undo_transaction() {
+        let (mut model, object_uid, first_uid) = model_with_renderer();
+        let second_uid = model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("cpk", "atoms");
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CopyWorkspaceRenderers(vec![
+                WorkspaceRendererCopyInput {
+                    object_uid: object_uid.get(),
+                    renderer_uid: first_uid.get(),
+                },
+                WorkspaceRendererCopyInput {
+                    object_uid: object_uid.get(),
+                    renderer_uid: second_uid.get(),
+                },
+            ]),
+        )
+        .unwrap();
+        let ModelResponse::Message(message) = response else {
+            panic!("expected copy status message");
+        };
+        assert_eq!(message, "Copied 2 renderer(s)");
+        assert!(model.undo_stack.is_empty());
+
+        let targets = || {
+            vec![
+                WorkspaceToggleInput {
+                    kind: "renderer".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: Some(first_uid.get()),
+                },
+                WorkspaceToggleInput {
+                    kind: "renderer".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: Some(second_uid.get()),
+                },
+            ]
+        };
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceItemsVisible {
+                targets: targets(),
+                visible: false,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert!(snapshot.objects[0]
+            .renderers
+            .iter()
+            .all(|renderer| !renderer.visible));
+        assert_eq!(snapshot.undo_descriptions[0], "Hide 2 Workspace items");
+        assert_eq!(model.undo_stack.len(), 1);
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model.snapshot().objects[0]
+            .renderers
+            .iter()
+            .all(|renderer| renderer.visible));
+
+        let delete_targets = targets()
+            .into_iter()
+            .map(|target| WorkspaceDeleteInput {
+                kind: target.kind,
+                object_uid: target.object_uid,
+                renderer_uid: target.renderer_uid,
+            })
+            .collect();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::DeleteWorkspaceItems(delete_targets),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert!(snapshot.objects[0].renderers.is_empty());
+        assert_eq!(snapshot.undo_descriptions[0], "Destroy 2 Workspace items");
+        assert_eq!(model.undo_stack.len(), 1);
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().objects[0].renderers.len(), 2);
+    }
+
+    #[test]
+    fn workspace_multiple_command_rolls_back_on_error() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let result = handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceItemsVisible {
+                targets: vec![
+                    WorkspaceToggleInput {
+                        kind: "renderer".to_string(),
+                        object_uid: object_uid.get(),
+                        renderer_uid: Some(renderer_uid.get()),
+                    },
+                    WorkspaceToggleInput {
+                        kind: "renderer".to_string(),
+                        object_uid: u64::MAX,
+                        renderer_uid: Some(renderer_uid.get()),
+                    },
+                ],
+                visible: false,
+            },
+        );
+        let Err(error) = result else {
+            panic!("expected multiple visibility command to fail");
+        };
+        assert!(error.contains("object"));
+        assert!(model.snapshot().objects[0].renderers[0].visible);
+        assert!(model.undo_stack.is_empty());
     }
 
     #[test]

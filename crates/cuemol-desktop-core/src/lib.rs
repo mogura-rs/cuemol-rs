@@ -8028,6 +8028,41 @@ impl DesktopAppState {
         )))
     }
 
+    pub fn copy_workspace_renderers(
+        &self,
+        targets: &[(Uid, Uid)],
+    ) -> Result<WorkspaceRendererClipboard> {
+        if targets.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "at least one renderer is required",
+            ));
+        }
+        let renderers = targets
+            .iter()
+            .map(|(object_uid, renderer_uid)| {
+                let object = self
+                    .scene_manager()
+                    .object(*object_uid)
+                    .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+                let renderer = object.renderer(*renderer_uid).ok_or_else(|| {
+                    CueMolError::NotFound(format!("renderer {}", renderer_uid.get()))
+                })?;
+                if renderer.renderer_type() == "*group" {
+                    return Err(CueMolError::invalid_argument(
+                        "renderer groups cannot be included in a multiple copy",
+                    ));
+                }
+                Ok(renderer.clone())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(WorkspaceRendererClipboard {
+            renderer: WorkspaceRendererClipboardData::Molecule {
+                group_name: None,
+                renderers,
+            },
+        })
+    }
+
     pub fn paste_workspace_renderers(
         &mut self,
         object_uid: Uid,
@@ -56151,11 +56186,12 @@ end_header
     fn workspace_renderer_clipboard_copies_single_renderers_and_groups() {
         let mut app = DesktopAppState::new();
         let scene_uid = app.new_scene("clipboard", false).result_scene;
-        let (source_uid, target_uid) = {
+        let (source_uid, target_uid, multi_target_uid) = {
             let scene = app.scene_manager_mut().scene_mut(scene_uid).unwrap();
             (
                 scene.add_molecule("source", cuemol_molstr::MolCoord::new()),
                 scene.add_molecule("target", cuemol_molstr::MolCoord::new()),
+                scene.add_molecule("multi target", cuemol_molstr::MolCoord::new()),
             )
         };
         let (group_uid, first_uid, second_uid) = {
@@ -56177,6 +56213,30 @@ end_header
                 .set_qsc_attr("style", "DefaultSimple");
             (group_uid, first_uid, second_uid)
         };
+
+        let multi_clipboard = app
+            .copy_workspace_renderers(&[(source_uid, first_uid), (source_uid, second_uid)])
+            .unwrap();
+        assert_eq!(multi_clipboard.renderer_count(), 2);
+        assert!(!multi_clipboard.is_group());
+        let multi_paste = app
+            .paste_workspace_renderers(multi_target_uid, None, &multi_clipboard)
+            .unwrap();
+        assert_eq!(multi_paste.renderer_uids.len(), 2);
+        let multi_target = app.scene_manager().object(multi_target_uid).unwrap();
+        assert_eq!(
+            multi_paste
+                .renderer_uids
+                .iter()
+                .map(|uid| multi_target.renderer(*uid).unwrap().name())
+                .collect::<Vec<_>>(),
+            ["main", "atoms"]
+        );
+        assert!(multi_paste.renderer_uids.iter().all(|uid| multi_target
+            .renderer(*uid)
+            .unwrap()
+            .group()
+            .is_none()));
 
         let renderer_clipboard = app.copy_workspace_renderer(source_uid, first_uid).unwrap();
         assert_eq!(renderer_clipboard.renderer_count(), 1);
