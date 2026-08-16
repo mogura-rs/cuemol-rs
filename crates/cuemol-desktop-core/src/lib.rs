@@ -3667,6 +3667,47 @@ impl DesktopAppState {
         })
     }
 
+    pub fn add_lw_renderer(&mut self, object_uid: Uid) -> Result<Uid> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_lw_object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("LWObject {}", object_uid.get())))?;
+        let object = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+            .expect("LWObject was checked above");
+        let renderer_index = object.renderers.len();
+        let mut serial = 1usize;
+        while object
+            .renderers
+            .iter()
+            .any(|renderer| renderer.name == format!("lwrend {serial}"))
+        {
+            serial += 1;
+        }
+        object.renderers.push(LoadedLWRenderer {
+            name: format!("lwrend {serial}"),
+            data_id: 0,
+            visible: true,
+            xform: Matrix4::IDENTITY,
+        });
+        ensure_lw_qsc_node(object);
+        Ok(lw_renderer_uid(scene_uid, object_uid, renderer_index))
+    }
+
+    pub fn set_lw_renderer_data_id(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        data_id: i32,
+    ) -> Result<()> {
+        self.update_lw_renderer(object_uid, renderer_uid, |renderer, node| {
+            renderer.data_id = data_id;
+            node.set_str_attr("data_id", data_id.to_string());
+        })
+    }
+
     pub fn rename_lw_renderer(
         &mut self,
         object_uid: Uid,
@@ -58680,13 +58721,26 @@ attribute \"dep\" string \"positions\"
             .unwrap();
         app.rename_lw_renderer(lw_uid, lw_renderer_uid, "saved-lwrend")
             .unwrap();
+        app.set_lw_renderer_data_id(lw_uid, lw_renderer_uid, 9)
+            .unwrap();
+        let added_lw_renderer_uid = app.add_lw_renderer(lw_uid).unwrap();
+        app.rename_lw_renderer(lw_uid, added_lw_renderer_uid, "alternate")
+            .unwrap();
+        app.set_lw_renderer_data_id(lw_uid, added_lw_renderer_uid, 42)
+            .unwrap();
+        app.set_lw_renderer_visible(lw_uid, added_lw_renderer_uid, false)
+            .unwrap();
         let lw_summary = app.lw_object_summary(lw_uid).unwrap();
         assert_eq!(lw_summary.name, "saved-lw");
         assert!(!lw_summary.visible);
         assert!(lw_summary.locked);
         assert_eq!(lw_summary.renderers[0].name, "saved-lwrend");
+        assert_eq!(lw_summary.renderers[0].data_id, 9);
         assert!(!lw_summary.renderers[0].visible);
         assert!(lw_summary.renderers[0].locked);
+        assert_eq!(lw_summary.renderers[1].name, "alternate");
+        assert_eq!(lw_summary.renderers[1].data_id, 42);
+        assert!(!lw_summary.renderers[1].visible);
         app.set_lw_object_visible(lw_uid, true).unwrap();
         app.set_lw_renderer_visible(lw_uid, lw_renderer_uid, true)
             .unwrap();
@@ -58711,7 +58765,7 @@ attribute \"dep\" string \"positions\"
             .scene(reloaded.active_scene().unwrap())
             .unwrap();
         assert_eq!(reloaded_scene.loaded_lw_objects().len(), 1);
-        assert_eq!(reloaded_scene.loaded_lw_objects()[0].renderers.len(), 1);
+        assert_eq!(reloaded_scene.loaded_lw_objects()[0].renderers.len(), 2);
         assert_eq!(
             reloaded_scene.loaded_lw_objects()[0]
                 .qsc_node
@@ -58725,7 +58779,11 @@ attribute \"dep\" string \"positions\"
         assert_eq!(reloaded_lw.name, "saved-lw");
         assert!(reloaded_lw.locked);
         assert_eq!(reloaded_lw.renderers[0].name, "saved-lwrend");
+        assert_eq!(reloaded_lw.renderers[0].data_id, 9);
         assert!(reloaded_lw.renderers[0].locked);
+        assert_eq!(reloaded_lw.renderers[1].name, "alternate");
+        assert_eq!(reloaded_lw.renderers[1].data_id, 42);
+        assert!(!reloaded_lw.renderers[1].visible);
         assert_eq!(
             reloaded
                 .active_render_snapshot("")

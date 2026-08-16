@@ -1056,6 +1056,7 @@ struct LwRendererPropertiesInput {
     name: String,
     visible: bool,
     locked: bool,
+    data_id: i32,
 }
 
 #[derive(Deserialize)]
@@ -2665,6 +2666,13 @@ impl AppModel {
                 properties.locked,
             )
             .map_err(|error| error.to_string())?;
+        self.desktop
+            .set_lw_renderer_data_id(
+                Uid::new(properties.object_uid),
+                Uid::new(properties.renderer_uid),
+                properties.data_id,
+            )
+            .map_err(|error| error.to_string())?;
         self.status = "Lightweight renderer properties updated".to_string();
         self.invalidate_mesh(false);
         Ok(())
@@ -2689,6 +2697,15 @@ impl AppModel {
             .add_surface_renderer(Uid::new(surface_uid))
             .map_err(|error| error.to_string())?;
         self.status = "Added molsurf renderer".to_string();
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn add_lw_renderer(&mut self, object_uid: u64) -> Result<(), String> {
+        self.desktop
+            .add_lw_renderer(Uid::new(object_uid))
+            .map_err(|error| error.to_string())?;
+        self.status = "Added lightweight renderer".to_string();
         self.invalidate_mesh(false);
         Ok(())
     }
@@ -5963,6 +5980,9 @@ enum ModelRequest {
     SetSurfaceRendererProperties(RendererPropertiesInput),
     SetLwObjectProperties(ObjectPropertiesInput),
     SetLwRendererProperties(LwRendererPropertiesInput),
+    AddLwRenderer {
+        object_uid: u64,
+    },
     SetSurfaceRendererVisible {
         surface_uid: u64,
         renderer_uid: u64,
@@ -7582,6 +7602,12 @@ fn handle_model_request(
         ModelRequest::SetLwRendererProperties(properties) => {
             let undo = model.capture_undo();
             model.set_lw_renderer_properties(properties)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::AddLwRenderer { object_uid } => {
+            let undo = model.capture_undo();
+            model.add_lw_renderer(object_uid)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10206,6 +10232,14 @@ fn set_lw_renderer_properties(
 }
 
 #[tauri::command]
+fn add_lw_renderer(object_uid: u64, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::AddLwRenderer { object_uid },
+    )?)
+}
+
+#[tauri::command]
 fn set_surface_renderer_visible(
     surface_uid: u64,
     renderer_uid: u64,
@@ -12200,6 +12234,7 @@ pub fn run() -> Result<(), tauri::Error> {
             set_surface_renderer_properties,
             set_lw_object_properties,
             set_lw_renderer_properties,
+            add_lw_renderer,
             set_surface_renderer_visible,
             add_surface_renderer,
             regenerate_surface,

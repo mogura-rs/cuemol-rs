@@ -1726,7 +1726,9 @@ function rendererPropertiesEditor(object, renderer, styleOptions = []) {
   } else if (surfaceLike) {
     dialogTitle.textContent = "MolSurf Rend Properties";
   }
-  const tabNames = simpleLike
+  const tabNames = lightweightObject
+    ? ["Lightweight"]
+    : simpleLike
     ? [renderer.rendererType === "trace" ? "Trace" : "Simple"]
     : splineLike
       ? ["Common", "Spline"]
@@ -3202,6 +3204,24 @@ function rendererPropertiesEditor(object, renderer, styleOptions = []) {
     syncNuclState();
   }
 
+  if (lightweightObject) {
+    const lightweightGroup = document.createElement("fieldset");
+    lightweightGroup.className = "property-common-group renderer-specific-group";
+    const lightweightLegend = document.createElement("legend");
+    lightweightLegend.textContent = "Lightweight";
+    lightweightGroup.append(lightweightLegend);
+    addSpecificNumber(
+      lightweightGroup,
+      "data_id",
+      "Data ID:",
+      -2147483648,
+      2147483647,
+      1,
+      String(renderer.dataId ?? 0),
+    );
+    page.append(lightweightGroup);
+  }
+
   let dirty = false;
   let apply;
   const markDirty = () => {
@@ -3288,6 +3308,7 @@ function rendererPropertiesEditor(object, renderer, styleOptions = []) {
               : selection.value,
           visible: visible.checked,
           locked: locked.checked,
+          dataId: Number(specificInputs.get("data_id")?.value ?? renderer.dataId ?? 0),
           material: material.value,
           alpha: Number(alpha.value),
           edgeType: edgeType.value,
@@ -7723,11 +7744,10 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
     null,
     {
       label: "New Renderer…",
-      disabled: isLightweight,
       action: async () => {
         if (!(await activate())) return;
         if (isLightweight) {
-          return;
+          await mutate("add_lw_renderer", { objectUid: object.uid });
         } else if (isDensityMap) {
           await mutate("add_density_renderer", {
             mapUid: object.uid,
@@ -7755,6 +7775,14 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
       },
     },
     {
+      label: "Save As…",
+      action: async () => {
+        if (!(await activate())) return;
+        selectWorkspaceAuxItem(kind, object.uid);
+        showReferenceDialog("Save File As");
+      },
+    },
+    {
       label: "Delete",
       action: () =>
         mutate("delete_workspace_item", {
@@ -7777,16 +7805,6 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
       action: async () => {
         if (!(await activate())) return;
         await mutate("regenerate_surface", { surfaceUid: object.uid });
-      },
-    });
-  }
-  if (isLightweight) {
-    items.splice(5, 0, {
-      label: "Save As…",
-      action: async () => {
-        if (!(await activate())) return;
-        selectWorkspaceAuxItem(kind, object.uid);
-        showReferenceDialog("Save File As");
       },
     });
   }
@@ -9349,10 +9367,10 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
     : surface
       ? [["molsurf", "Molecular surface"]]
     : lwObject
-      ? []
+      ? [["lwrend", "Lightweight"]]
       : MOLECULE_RENDERER_TYPES.map((rendererType) => [rendererType, rendererType]);
   document.querySelectorAll('[data-action="add-renderer"]').forEach((control) => {
-    control.disabled = Boolean(lwObject);
+    control.disabled = false;
   });
   rendererType.replaceChildren();
   for (const [value, label] of rendererChoices) {
@@ -12026,7 +12044,7 @@ async function handleAction(action, depth = 0) {
         ? selectedLwObject()
         : null;
       if (lwObject) {
-        showError("Lightweight renderers are defined by the object file.");
+        await mutate("add_lw_renderer", { objectUid: lwObject.uid });
         break;
       }
       if (!object && !map && !surface) {

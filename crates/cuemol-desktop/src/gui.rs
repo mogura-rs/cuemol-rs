@@ -87,6 +87,7 @@ const WORKSPACE_PAINT_HUES: &[(&str, i32)] = &[
 ];
 const DENSITY_RENDERER_TYPES: &[&str] = &["contour", "isosurf", "gpu_mapvol"];
 const SURFACE_RENDERER_TYPES: &[&str] = &["molsurf"];
+const LIGHTWEIGHT_RENDERER_TYPES: &[&str] = &["lwrend"];
 const LEGACY_MENU_SURFACES: &[&str] = &[
     "About CueMol2",
     "Preferences...",
@@ -2023,6 +2024,10 @@ impl NativeRendererProperties {
             .renderers
             .into_iter()
             .find(|renderer| renderer.uid == renderer_uid)?;
+        let specific = std::collections::BTreeMap::from([(
+            "data_id".to_string(),
+            renderer.data_id.to_string(),
+        )]);
         Some(Self::from_workspace_summary(
             NativePropertyObject::Lightweight(object_uid),
             renderer.uid,
@@ -2037,7 +2042,7 @@ impl NativeRendererProperties {
             "none".to_string(),
             0.01,
             "#000000".to_string(),
-            std::collections::BTreeMap::new(),
+            specific,
         ))
     }
 
@@ -2121,6 +2126,7 @@ impl NativeRendererProperties {
             "surface" | "molsurf" | "dsurface" | "directsurf" | "dsurf2" => {
                 "MolSurf Rend Properties"
             }
+            "lwrend" => "Lightweight renderer properties",
             _ => "Renderer properties",
         }
     }
@@ -2144,6 +2150,7 @@ impl NativeRendererProperties {
             "cartoon" => &["Common", "Cartoon", "Helix", "Sheet", "Coil"],
             "contour" | "gpu_mapmesh" | "isosurf" | "gpu_mapvol" => &["Common", "Map"],
             "surface" | "molsurf" | "dsurface" | "directsurf" | "dsurf2" => &["Common", "MolSurf"],
+            "lwrend" => &["Lightweight"],
             _ => &["Common"],
         }
     }
@@ -4887,18 +4894,12 @@ impl GuiApplication {
                 self.workspace_aux_selection,
                 Some(WorkspaceAuxSelection::StyleRoot { .. } | WorkspaceAuxSelection::Style { .. })
             );
-            let adding_lightweight = matches!(
-                self.workspace_aux_selection,
-                Some(WorkspaceAuxSelection::Lightweight { .. })
-            );
             if ui
-                .add_enabled(!adding_lightweight, egui::Button::new("Add"))
+                .button("Add")
                 .on_hover_text(if adding_camera {
                     "Save current view as camera"
                 } else if adding_style {
                     "Create scene style"
-                } else if adding_lightweight {
-                    "Lightweight renderers are fixed by the source file"
                 } else {
                     "Add renderer"
                 })
@@ -5186,9 +5187,7 @@ impl GuiApplication {
         selection: WorkspaceAuxSelection,
         owner: NativePropertyObject,
     ) {
-        if !matches!(owner, NativePropertyObject::Lightweight(_))
-            && ui.button("New Renderer...").clicked()
-        {
+        if ui.button("New Renderer...").clicked() {
             self.activate_workspace_scene(scene_uid, camera);
             self.open_aux_renderer_dialog(selection);
             ui.close();
@@ -12869,6 +12868,19 @@ impl GuiApplication {
             ("surface" | "molsurf" | "dsurface" | "directsurf" | "dsurf2", "MolSurf") => {
                 Self::renderer_surface_properties_ui(ui, draft);
             }
+            ("lwrend", "Lightweight") => {
+                Self::renderer_specific_group(ui, "Lightweight", |ui| {
+                    Self::renderer_specific_i32(
+                        ui,
+                        draft,
+                        "data_id",
+                        "Data ID:",
+                        0,
+                        i32::MIN,
+                        i32::MAX,
+                    );
+                });
+            }
             _ => {
                 ui.weak("Properties on this page are inherited from the current style.");
             }
@@ -13549,6 +13561,11 @@ impl GuiApplication {
             }
             NativePropertyObject::Lightweight(object_uid) => {
                 validate_native_renderer_properties(draft)?;
+                let data_id = draft
+                    .specific_value("data_id", "0")
+                    .trim()
+                    .parse::<i32>()
+                    .map_err(|_| "data ID must be an integer".to_string())?;
                 let scene_uid = self
                     .state
                     .lw_object_summary(object_uid)
@@ -13570,6 +13587,10 @@ impl GuiApplication {
                             draft.renderer_uid,
                             draft.locked,
                         )
+                    })
+                    .and_then(|()| {
+                        self.state
+                            .set_lw_renderer_data_id(object_uid, draft.renderer_uid, data_id)
                     })
                     .map_err(|error| error.to_string())?;
                 self.push_undo_snapshot(undo);
@@ -16094,7 +16115,7 @@ impl GuiApplication {
                 let renderer_types = match self.new_renderer_owner {
                     Some(NativePropertyObject::DensityMap(_)) => DENSITY_RENDERER_TYPES,
                     Some(NativePropertyObject::Surface(_)) => SURFACE_RENDERER_TYPES,
-                    Some(NativePropertyObject::Lightweight(_)) => &[],
+                    Some(NativePropertyObject::Lightweight(_)) => LIGHTWEIGHT_RENDERER_TYPES,
                     Some(NativePropertyObject::Molecule(_)) | None => RENDERER_TYPES,
                 };
                 if self.new_renderer_type == "*group" {
@@ -18395,7 +18416,17 @@ impl GuiApplication {
                     .unwrap_or(1);
                 self.new_renderer_name = format!("molsurf {serial}");
             }
-            WorkspaceAuxSelection::Lightweight { .. } => return,
+            WorkspaceAuxSelection::Lightweight { object_uid, .. } => {
+                self.new_renderer_owner = Some(NativePropertyObject::Lightweight(object_uid));
+                self.new_renderer_group = None;
+                self.new_renderer_type = "lwrend".to_string();
+                let serial = self
+                    .state
+                    .lw_object_summary(object_uid)
+                    .map(|object| object.renderers.len() + 1)
+                    .unwrap_or(1);
+                self.new_renderer_name = format!("lwrend {serial}");
+            }
         }
         self.show_renderer_dialog = true;
     }
@@ -18501,9 +18532,17 @@ impl GuiApplication {
                 )?;
                 Ok(renderer_uid)
             })(),
-            NativePropertyObject::Lightweight(_) => Err(CueMolError::invalid_argument(
-                "LWObject renderers are fixed by the source file",
-            )),
+            NativePropertyObject::Lightweight(object_uid) => (|| {
+                if renderer_type != "lwrend" {
+                    return Err(CueMolError::invalid_argument(format!(
+                        "unsupported lightweight renderer: {renderer_type}"
+                    )));
+                }
+                let renderer_uid = self.state.add_lw_renderer(object_uid)?;
+                self.state
+                    .rename_lw_renderer(object_uid, renderer_uid, renderer_name)?;
+                Ok(renderer_uid)
+            })(),
         };
         match created {
             Ok(renderer_uid) => {
@@ -20308,6 +20347,7 @@ fn native_renderer_specific_defaults(
             ("showsel", "*"),
             ("colormode", "molecule"),
         ],
+        "lwrend" => &[("data_id", "0")],
         _ => &[],
     }
 }
@@ -20688,6 +20728,9 @@ fn validate_native_renderer_properties(
                 validate_renderer_choice(draft, "surftype", "ses", &["vdw", "sas", "ses"])?;
                 validate_renderer_integer(draft, "detail", "6", "surface detail", 1, 21)?;
             }
+        }
+        "lwrend" => {
+            validate_renderer_integer(draft, "data_id", "0", "data ID", i32::MIN, i32::MAX)?;
         }
         _ => {}
     }
@@ -25442,6 +25485,73 @@ mod tests {
         assert!(qsc.contains("name=\"2 sigma contour\""));
         assert!(qsc.contains("width=\"2.5\""));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn native_workspace_lightweight_renderer_adds_edits_and_undoes() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_lw_object(cuemol_molstr::LoadedLWObject {
+                uid: cuemol_core::Uid::new(0),
+                name: "lightweight".to_string(),
+                srctype: "qdflwobj".to_string(),
+                raw_data: Vec::new(),
+                visible: true,
+                xform: cuemol_core::Matrix4::IDENTITY,
+                renderers: Vec::new(),
+                qsc_node: None,
+            });
+        let selection = WorkspaceAuxSelection::Lightweight {
+            scene_uid,
+            object_uid,
+            renderer_uid: None,
+        };
+        app.workspace_aux_selection = Some(selection);
+        app.open_aux_renderer_dialog(selection);
+        assert_eq!(app.new_renderer_type, "lwrend");
+        app.new_renderer_name = "overlay".to_string();
+        app.create_renderer_from_dialog();
+        let renderer_uid = match app.workspace_aux_selection.unwrap() {
+            WorkspaceAuxSelection::Lightweight {
+                renderer_uid: Some(renderer_uid),
+                ..
+            } => renderer_uid,
+            _ => panic!("new lightweight renderer must be selected"),
+        };
+        let mut properties =
+            NativeRendererProperties::from_lw_state(&app.state, object_uid, renderer_uid).unwrap();
+        assert_eq!(properties.tabs(), &["Lightweight"]);
+        properties
+            .specific
+            .insert("data_id".to_string(), "17".to_string());
+        properties.locked = true;
+        app.apply_renderer_properties(&properties).unwrap();
+        let renderer = &app.state.lw_object_summary(object_uid).unwrap().renderers[0];
+        assert_eq!(renderer.name, "overlay");
+        assert_eq!(renderer.data_id, 17);
+        assert!(renderer.locked);
+
+        app.delete_aux_selection(WorkspaceAuxSelection::Lightweight {
+            scene_uid,
+            object_uid,
+            renderer_uid: Some(renderer_uid),
+        });
+        assert!(app
+            .state
+            .lw_object_summary(object_uid)
+            .unwrap()
+            .renderers
+            .is_empty());
+        app.undo(&mut CameraController::default());
+        assert_eq!(
+            app.state.lw_object_summary(object_uid).unwrap().renderers[0].data_id,
+            17
+        );
     }
 
     #[test]

@@ -328,6 +328,8 @@ fn tauri_workspace_exposes_lightweight_objects_and_renderers() {
         "selectedLwRenderer",
         "set_lw_object_properties",
         "set_lw_renderer_properties",
+        "add_lw_renderer",
+        "dataId",
     ] {
         assert!(
             JS.contains(binding),
@@ -338,6 +340,8 @@ fn tauri_workspace_exposes_lightweight_objects_and_renderers() {
         "lw_objects: Vec<LwObjectDto>",
         "SetLwObjectProperties",
         "SetLwRendererProperties",
+        "AddLwRenderer",
+        "set_lw_renderer_data_id",
         "destroy_lw_object",
         "destroy_lw_renderer",
     ] {
