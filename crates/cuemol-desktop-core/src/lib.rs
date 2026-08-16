@@ -639,13 +639,24 @@ impl WorkspaceRendererClipboard {
 
 fn workspace_renderer_clipboard_count(renderer: &WorkspaceRendererClipboardData) -> usize {
     match renderer {
-        WorkspaceRendererClipboardData::Molecule { renderers, .. } => renderers.len(),
+        WorkspaceRendererClipboardData::Molecule {
+            group_name,
+            renderers,
+        } => {
+            if group_name.is_some() {
+                renderers.len().max(1)
+            } else {
+                renderers.len()
+            }
+        }
         WorkspaceRendererClipboardData::DensityMapList(renderers) => renderers.len(),
-        WorkspaceRendererClipboardData::DensityMapGroup { renderers, .. } => renderers.len(),
+        WorkspaceRendererClipboardData::DensityMapGroup { renderers, .. } => renderers.len().max(1),
         WorkspaceRendererClipboardData::SurfaceList(renderers) => renderers.len(),
-        WorkspaceRendererClipboardData::SurfaceGroup { renderers, .. } => renderers.len(),
+        WorkspaceRendererClipboardData::SurfaceGroup { renderers, .. } => renderers.len().max(1),
         WorkspaceRendererClipboardData::LightweightList(renderers) => renderers.len(),
-        WorkspaceRendererClipboardData::LightweightGroup { renderers, .. } => renderers.len(),
+        WorkspaceRendererClipboardData::LightweightGroup { renderers, .. } => {
+            renderers.len().max(1)
+        }
         WorkspaceRendererClipboardData::Multiple { items, .. } => {
             items.iter().map(workspace_renderer_clipboard_count).sum()
         }
@@ -8069,7 +8080,26 @@ impl DesktopAppState {
         let clipboards = targets
             .iter()
             .map(|(object_uid, renderer_uid)| {
-                self.copy_workspace_renderer(*object_uid, *renderer_uid)
+                let mut clipboard = self.copy_workspace_renderer(*object_uid, *renderer_uid)?;
+                match &mut clipboard.renderer {
+                    WorkspaceRendererClipboardData::Molecule {
+                        group_name: Some(_),
+                        renderers,
+                    } => {
+                        renderers.clear();
+                    }
+                    WorkspaceRendererClipboardData::DensityMapGroup { renderers, .. } => {
+                        renderers.clear();
+                    }
+                    WorkspaceRendererClipboardData::SurfaceGroup { renderers, .. } => {
+                        renderers.clear();
+                    }
+                    WorkspaceRendererClipboardData::LightweightGroup { renderers, .. } => {
+                        renderers.clear();
+                    }
+                    _ => {}
+                }
+                Ok(clipboard)
             })
             .collect::<Result<Vec<_>>>()?;
         let kind = clipboards[0].kind();
@@ -56350,13 +56380,20 @@ end_header
     fn workspace_renderer_clipboard_copies_single_renderers_and_groups() {
         let mut app = DesktopAppState::new();
         let scene_uid = app.new_scene("clipboard", false).result_scene;
-        let (source_uid, target_uid, multi_target_uid, group_multi_target_uid) = {
+        let (
+            source_uid,
+            target_uid,
+            multi_target_uid,
+            group_multi_target_uid,
+            group_child_target_uid,
+        ) = {
             let scene = app.scene_manager_mut().scene_mut(scene_uid).unwrap();
             (
                 scene.add_molecule("source", cuemol_molstr::MolCoord::new()),
                 scene.add_molecule("target", cuemol_molstr::MolCoord::new()),
                 scene.add_molecule("multi target", cuemol_molstr::MolCoord::new()),
                 scene.add_molecule("group multi target", cuemol_molstr::MolCoord::new()),
+                scene.add_molecule("group child target", cuemol_molstr::MolCoord::new()),
             )
         };
         let (group_uid, first_uid, second_uid, free_uid) = {
@@ -56407,33 +56444,46 @@ end_header
         let group_multi_clipboard = app
             .copy_workspace_renderers(&[(source_uid, group_uid), (source_uid, free_uid)])
             .unwrap();
-        assert_eq!(group_multi_clipboard.renderer_count(), 3);
+        assert_eq!(group_multi_clipboard.renderer_count(), 2);
         assert!(!group_multi_clipboard.is_group());
         let group_multi_paste = app
             .paste_workspace_renderers(group_multi_target_uid, None, &group_multi_clipboard)
             .unwrap();
-        assert_eq!(group_multi_paste.renderer_uids.len(), 3);
+        assert_eq!(group_multi_paste.renderer_uids.len(), 1);
         assert_eq!(group_multi_paste.group_uid, None);
         let group_multi_target = app.scene_manager().object(group_multi_target_uid).unwrap();
         assert!(group_multi_target.renderers().iter().any(|renderer| {
             renderer.renderer_type() == "*group" && renderer.name() == "representations"
         }));
-        for name in ["main", "atoms"] {
-            assert_eq!(
-                group_multi_target
-                    .renderers()
-                    .iter()
-                    .find(|renderer| renderer.name() == name)
-                    .unwrap()
-                    .group(),
-                Some("representations")
-            );
-        }
+        assert!(group_multi_target
+            .renderers()
+            .iter()
+            .all(|renderer| !matches!(renderer.name(), "main" | "atoms")));
         assert_eq!(
             group_multi_target
                 .renderers()
                 .iter()
                 .find(|renderer| renderer.name() == "free")
+                .unwrap()
+                .group(),
+            None
+        );
+
+        let group_child_clipboard = app
+            .copy_workspace_renderers(&[(source_uid, group_uid), (source_uid, first_uid)])
+            .unwrap();
+        assert_eq!(group_child_clipboard.renderer_count(), 2);
+        let group_child_paste = app
+            .paste_workspace_renderers(group_child_target_uid, None, &group_child_clipboard)
+            .unwrap();
+        assert_eq!(group_child_paste.renderer_uids.len(), 1);
+        let group_child_target = app.scene_manager().object(group_child_target_uid).unwrap();
+        assert_eq!(group_child_target.renderers().len(), 2);
+        assert_eq!(
+            group_child_target
+                .renderers()
+                .iter()
+                .find(|renderer| renderer.name() == "main")
                 .unwrap()
                 .group(),
             None

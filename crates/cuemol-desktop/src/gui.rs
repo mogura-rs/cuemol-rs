@@ -1583,12 +1583,20 @@ impl NativeWorkspaceTarget {
         }
     }
 
-    fn is_group(self) -> bool {
-        matches!(self, Self::Renderer { is_group: true, .. })
-    }
-
     fn is_copyable_renderer(self) -> bool {
         matches!(self, Self::Renderer { .. })
+    }
+
+    fn delete_rank(self) -> u8 {
+        match self {
+            Self::Style { .. } => 0,
+            Self::Camera { .. } => 1,
+            Self::Renderer {
+                is_group: false, ..
+            } => 2,
+            Self::Renderer { is_group: true, .. } => 3,
+            Self::Object { .. } => 4,
+        }
     }
 
     fn workspace_kind(self) -> Option<crate::GuiWorkspaceObjectKind> {
@@ -4499,20 +4507,6 @@ impl GuiApplication {
             }
             targets.remove(index);
         } else {
-            targets.retain(|candidate| {
-                let (Some(candidate_owner), Some(target_owner)) =
-                    (candidate.owner(), target.owner())
-                else {
-                    return true;
-                };
-                if candidate_owner != target_owner {
-                    return true;
-                }
-                if candidate.renderer_uid().is_none() || target.renderer_uid().is_none() {
-                    return false;
-                }
-                !candidate.is_group() && !target.is_group()
-            });
             targets.push(target);
         }
         if targets.len() == 1 {
@@ -7028,9 +7022,7 @@ impl GuiApplication {
             ) => left_scene
                 .cmp(right_scene)
                 .then_with(|| right_index.cmp(left_index)),
-            (NativeWorkspaceTarget::Camera { .. }, _) => std::cmp::Ordering::Less,
-            (_, NativeWorkspaceTarget::Camera { .. }) => std::cmp::Ordering::Greater,
-            _ => std::cmp::Ordering::Equal,
+            _ => left.delete_rank().cmp(&right.delete_rank()),
         });
         let undo = self.capture_undo();
         let result = targets
@@ -26963,6 +26955,62 @@ mod tests {
             .unwrap()
             .renderer(child_uid)
             .is_some());
+    }
+
+    #[test]
+    fn native_workspace_parent_child_selection_deletes_children_first() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("grouped", cuemol_molstr::MolCoord::new());
+        let (group_uid, child_uid) = {
+            let object = app
+                .state
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .unwrap();
+            let group_uid = object.add_renderer("*group", "group");
+            let child_uid = object.add_renderer("simple", "child");
+            object
+                .renderer_mut(child_uid)
+                .unwrap()
+                .set_qsc_attr("group", "group");
+            (group_uid, child_uid)
+        };
+        let owner = NativePropertyObject::Molecule(object_uid);
+        let object = NativeWorkspaceTarget::Object { scene_uid, owner };
+        let group = NativeWorkspaceTarget::Renderer {
+            scene_uid,
+            owner,
+            renderer_uid: group_uid,
+            is_group: true,
+        };
+        let child = NativeWorkspaceTarget::Renderer {
+            scene_uid,
+            owner,
+            renderer_uid: child_uid,
+            is_group: false,
+        };
+
+        app.apply_workspace_target(object);
+        assert!(app.select_workspace_target(group, true));
+        assert!(app.select_workspace_target(child, true));
+        assert_eq!(app.workspace_multiple_selection, [object, group, child]);
+
+        app.delete_workspace_targets();
+        assert!(app.state.scene_manager().object(object_uid).is_none());
+        assert_eq!(app.undo_stack.len(), 1);
+
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        let restored = app.state.scene_manager().object(object_uid).unwrap();
+        assert!(restored.renderer(group_uid).is_some());
+        assert!(restored.renderer(child_uid).is_some());
+        assert_eq!(app.workspace_multiple_selection, [object, group, child]);
     }
 
     #[test]

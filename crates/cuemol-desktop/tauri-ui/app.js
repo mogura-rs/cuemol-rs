@@ -8763,12 +8763,6 @@ function selectWorkspaceTreeTarget(event, target) {
     if (targets.length === 1) return true;
     targets.splice(index, 1);
   } else {
-    const targetIsObject = target.rendererUid === null;
-    targets = targets.filter((candidate) => {
-      if (candidate.objectUid !== target.objectUid) return true;
-      if (targetIsObject || candidate.rendererUid === null) return false;
-      return target.kind !== "rendererGroup" && candidate.kind !== "rendererGroup";
-    });
     targets.push(target);
   }
   clearWorkspaceRenameTimer();

@@ -3245,17 +3245,27 @@ impl AppModel {
             return Err("at least one Workspace item is required".to_string());
         }
         let count = targets.len();
-        targets.sort_by(
-            |left, right| match (left.kind == "style", right.kind == "style") {
-                (true, true) => left
+        let delete_rank = |target: &WorkspaceDeleteInput| match target.kind.as_str() {
+            "style" => 0,
+            "camera" => 1,
+            "renderer" | "densityRenderer" | "surfaceRenderer" | "lwRenderer" => 2,
+            "rendererGroup" => 3,
+            "object" | "densityMap" | "surface" | "lwObject" => 4,
+            _ => 5,
+        };
+        targets.sort_by(|left, right| {
+            let rank = delete_rank(left).cmp(&delete_rank(right));
+            if rank != std::cmp::Ordering::Equal {
+                return rank;
+            }
+            match left.kind.as_str() {
+                "style" => left
                     .scene_uid
                     .cmp(&right.scene_uid)
                     .then_with(|| right.local_index.cmp(&left.local_index)),
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                (false, false) => std::cmp::Ordering::Equal,
-            },
-        );
+                _ => std::cmp::Ordering::Equal,
+            }
+        });
         for target in targets {
             self.delete_workspace_item(target)?;
         }
@@ -15430,6 +15440,67 @@ mod tests {
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().objects[0].renderers.len(), 2);
+    }
+
+    #[test]
+    fn workspace_parent_child_delete_orders_children_first() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        let (group_uid, child_uid) = {
+            let object = model
+                .desktop
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .unwrap();
+            let group_uid = object.add_renderer("*group", "group");
+            let child_uid = object.add_renderer("cpk", "child");
+            object
+                .renderer_mut(child_uid)
+                .unwrap()
+                .set_qsc_attr("group", "group");
+            (group_uid, child_uid)
+        };
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::DeleteWorkspaceItems(vec![
+                WorkspaceDeleteInput {
+                    kind: "object".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: None,
+                    scene_uid: None,
+                    name: None,
+                    local_index: None,
+                },
+                WorkspaceDeleteInput {
+                    kind: "rendererGroup".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: Some(group_uid.get()),
+                    scene_uid: None,
+                    name: None,
+                    local_index: None,
+                },
+                WorkspaceDeleteInput {
+                    kind: "renderer".to_string(),
+                    object_uid: object_uid.get(),
+                    renderer_uid: Some(child_uid.get()),
+                    scene_uid: None,
+                    name: None,
+                    local_index: None,
+                },
+            ]),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert!(snapshot.objects.is_empty());
+        assert_eq!(snapshot.undo_descriptions[0], "Destroy 3 Workspace items");
+        assert_eq!(model.undo_stack.len(), 1);
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let restored = model.desktop.scene_manager().object(object_uid).unwrap();
+        assert!(restored.renderer(group_uid).is_some());
+        assert!(restored.renderer(child_uid).is_some());
     }
 
     #[test]
