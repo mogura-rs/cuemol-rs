@@ -568,10 +568,22 @@ enum WorkspaceRendererClipboardData {
         renderers: Vec<MolRenderer>,
     },
     DensityMap(GuiDensityRenderer),
+    DensityMapGroup {
+        group: LDom2Node,
+        renderers: Vec<GuiDensityRenderer>,
+    },
     Surface(LDom2Node),
+    SurfaceGroup {
+        group: LDom2Node,
+        renderers: Vec<LDom2Node>,
+    },
     Lightweight {
         renderer: LoadedLWRenderer,
         node: LDom2Node,
+    },
+    LightweightGroup {
+        group: LDom2Node,
+        renderers: Vec<(LoadedLWRenderer, LDom2Node)>,
     },
 }
 
@@ -579,6 +591,9 @@ impl WorkspaceRendererClipboard {
     pub fn renderer_count(&self) -> usize {
         match &self.renderer {
             WorkspaceRendererClipboardData::Molecule { renderers, .. } => renderers.len(),
+            WorkspaceRendererClipboardData::DensityMapGroup { renderers, .. } => renderers.len(),
+            WorkspaceRendererClipboardData::SurfaceGroup { renderers, .. } => renderers.len(),
+            WorkspaceRendererClipboardData::LightweightGroup { renderers, .. } => renderers.len(),
             WorkspaceRendererClipboardData::DensityMap(_)
             | WorkspaceRendererClipboardData::Surface(_)
             | WorkspaceRendererClipboardData::Lightweight { .. } => 1,
@@ -591,16 +606,25 @@ impl WorkspaceRendererClipboard {
             WorkspaceRendererClipboardData::Molecule {
                 group_name: Some(_),
                 ..
-            }
+            } | WorkspaceRendererClipboardData::DensityMapGroup { .. }
+                | WorkspaceRendererClipboardData::SurfaceGroup { .. }
+                | WorkspaceRendererClipboardData::LightweightGroup { .. }
         )
     }
 
     pub fn kind(&self) -> GuiWorkspaceObjectKind {
         match self.renderer {
             WorkspaceRendererClipboardData::Molecule { .. } => GuiWorkspaceObjectKind::Molecule,
-            WorkspaceRendererClipboardData::DensityMap(_) => GuiWorkspaceObjectKind::DensityMap,
-            WorkspaceRendererClipboardData::Surface(_) => GuiWorkspaceObjectKind::Surface,
-            WorkspaceRendererClipboardData::Lightweight { .. } => {
+            WorkspaceRendererClipboardData::DensityMap(_)
+            | WorkspaceRendererClipboardData::DensityMapGroup { .. } => {
+                GuiWorkspaceObjectKind::DensityMap
+            }
+            WorkspaceRendererClipboardData::Surface(_)
+            | WorkspaceRendererClipboardData::SurfaceGroup { .. } => {
+                GuiWorkspaceObjectKind::Surface
+            }
+            WorkspaceRendererClipboardData::Lightweight { .. }
+            | WorkspaceRendererClipboardData::LightweightGroup { .. } => {
                 GuiWorkspaceObjectKind::Lightweight
             }
         }
@@ -3333,6 +3357,13 @@ impl DesktopAppState {
             }
             WorkspaceRendererClipboardData::Surface(node)
             | WorkspaceRendererClipboardData::Lightweight { node, .. } => node,
+            WorkspaceRendererClipboardData::DensityMapGroup { .. }
+            | WorkspaceRendererClipboardData::SurfaceGroup { .. }
+            | WorkspaceRendererClipboardData::LightweightGroup { .. } => {
+                return Err(CueMolError::invalid_argument(
+                    "renderer groups cannot be saved as styles",
+                ));
+            }
         };
         let style_name = format!("{name_prefix}{renderer_type}");
         let mut style_node = LDom2Node::new();
@@ -7678,6 +7709,30 @@ impl DesktopAppState {
             });
         }
         if let Some(map) = self.density_maps.get(&object_uid) {
+            if let Some(group_index) = aux_renderer_group_index(object_uid, renderer_uid) {
+                let group = map
+                    .renderer_groups
+                    .get(group_index)
+                    .cloned()
+                    .ok_or_else(|| {
+                        CueMolError::NotFound(format!("renderer group {}", renderer_uid.get()))
+                    })?;
+                let group_name = group.str_attr("name").to_string();
+                let renderers = map
+                    .renderers
+                    .iter()
+                    .filter(|renderer| {
+                        renderer
+                            .attributes
+                            .get("group")
+                            .is_some_and(|name| name == &group_name)
+                    })
+                    .cloned()
+                    .collect();
+                return Ok(WorkspaceRendererClipboard {
+                    renderer: WorkspaceRendererClipboardData::DensityMapGroup { group, renderers },
+                });
+            }
             let renderer = map
                 .renderers
                 .iter()
@@ -7697,17 +7752,65 @@ impl DesktopAppState {
                 .and_then(|scene| scene.loaded_surface(object_uid))
                 .cloned()
                 .expect("surface scene was checked above");
+            if let Some(group_index) = aux_renderer_group_index(object_uid, renderer_uid) {
+                let object_node = ensure_surface_qsc_node(&mut surface);
+                let group = aux_renderer_group_nodes(object_node)
+                    .nth(group_index)
+                    .cloned()
+                    .ok_or_else(|| {
+                        CueMolError::NotFound(format!("renderer group {}", renderer_uid.get()))
+                    })?;
+                let group_name = group.str_attr("name").to_string();
+                let renderers = surface_renderer_nodes(object_node)
+                    .filter(|renderer| renderer.str_attr("group").as_str() == group_name)
+                    .cloned()
+                    .collect();
+                return Ok(WorkspaceRendererClipboard {
+                    renderer: WorkspaceRendererClipboardData::SurfaceGroup { group, renderers },
+                });
+            }
             let node = ensure_surface_renderer_node(&mut surface, scene_uid, renderer_uid)?.clone();
             return Ok(WorkspaceRendererClipboard {
                 renderer: WorkspaceRendererClipboardData::Surface(node),
             });
         }
         if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
-            let object = self
+            let mut object = self
                 .scene_manager()
                 .scene(scene_uid)
                 .and_then(|scene| scene.loaded_lw_object(object_uid))
+                .cloned()
                 .expect("LWObject scene was checked above");
+            if let Some(group_index) = aux_renderer_group_index(object_uid, renderer_uid) {
+                let object_node = ensure_lw_qsc_node(&mut object);
+                let group = aux_renderer_group_nodes(object_node)
+                    .nth(group_index)
+                    .cloned()
+                    .ok_or_else(|| {
+                        CueMolError::NotFound(format!("renderer group {}", renderer_uid.get()))
+                    })?;
+                let group_name = group.str_attr("name").to_string();
+                let renderer_nodes = object_node
+                    .children()
+                    .iter()
+                    .filter(|node| {
+                        !node.is_attr()
+                            && node.tag_name() == "renderer"
+                            && node.type_name() == "lwrend"
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let renderers = object
+                    .renderers
+                    .iter()
+                    .cloned()
+                    .zip(renderer_nodes)
+                    .filter(|(_, node)| node.str_attr("group").as_str() == group_name)
+                    .collect();
+                return Ok(WorkspaceRendererClipboard {
+                    renderer: WorkspaceRendererClipboardData::LightweightGroup { group, renderers },
+                });
+            }
             let renderer_index = lw_renderer_index(scene_uid, object_uid, renderer_uid)
                 .filter(|index| *index < object.renderers.len())
                 .ok_or_else(|| {
@@ -7756,11 +7859,6 @@ impl DesktopAppState {
                 renderers,
             ),
             WorkspaceRendererClipboardData::DensityMap(renderer) => {
-                if destination_group_uid.is_some() {
-                    return Err(CueMolError::invalid_argument(
-                        "density renderers cannot be pasted into a renderer group",
-                    ));
-                }
                 if !self.density_maps.contains_key(&object_uid) {
                     return Err(CueMolError::invalid_argument(
                         "renderer clipboard is only compatible with a density map",
@@ -7773,6 +7871,22 @@ impl DesktopAppState {
                     .expect("density map was checked above");
                 let mut renderer = renderer.clone();
                 renderer.uid = uid;
+                if let Some(group_uid) = destination_group_uid {
+                    let group_index =
+                        aux_renderer_group_index(object_uid, group_uid).ok_or_else(|| {
+                            CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+                        })?;
+                    let group_name = map
+                        .renderer_groups
+                        .get(group_index)
+                        .map(|group| group.str_attr("name").to_string())
+                        .ok_or_else(|| {
+                            CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+                        })?;
+                    renderer.attributes.insert("group".to_string(), group_name);
+                } else {
+                    renderer.attributes.remove("group");
+                }
                 renderer.name = unique_workspace_renderer_name(
                     &renderer.name,
                     map.renderers.iter().map(|renderer| renderer.name.as_str()),
@@ -7784,12 +7898,64 @@ impl DesktopAppState {
                     renderer_uids: vec![uid],
                 })
             }
-            WorkspaceRendererClipboardData::Surface(renderer_node) => {
-                if destination_group_uid.is_some() {
-                    return Err(CueMolError::invalid_argument(
-                        "surface renderers cannot be pasted into a renderer group",
-                    ));
+            WorkspaceRendererClipboardData::DensityMapGroup { group, renderers } => {
+                let renderer_uids = (0..renderers.len())
+                    .map(|_| self.next_density_renderer_uid())
+                    .collect::<Vec<_>>();
+                let map = self.density_maps.get_mut(&object_uid).ok_or_else(|| {
+                    CueMolError::invalid_argument(
+                        "renderer clipboard is only compatible with a density map",
+                    )
+                })?;
+                let (group_uid, group_name) = if let Some(group_uid) = destination_group_uid {
+                    let group_index =
+                        aux_renderer_group_index(object_uid, group_uid).ok_or_else(|| {
+                            CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+                        })?;
+                    let group_name = map
+                        .renderer_groups
+                        .get(group_index)
+                        .map(|group| group.str_attr("name").to_string())
+                        .ok_or_else(|| {
+                            CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+                        })?;
+                    (group_uid, group_name)
+                } else {
+                    let source_name = group.str_attr("name").to_string();
+                    let existing_group_names = map
+                        .renderer_groups
+                        .iter()
+                        .map(|group| group.str_attr("name").to_string())
+                        .collect::<Vec<_>>();
+                    let group_name = unique_workspace_renderer_name(
+                        &source_name,
+                        existing_group_names.iter().map(String::as_str),
+                    );
+                    let group_uid = aux_renderer_group_uid(object_uid, map.renderer_groups.len());
+                    let mut group = group.clone();
+                    group.set_str_attr("name", &group_name);
+                    map.renderer_groups.push(group);
+                    (group_uid, group_name)
+                };
+                for (source, uid) in renderers.iter().zip(renderer_uids.iter().copied()) {
+                    let mut renderer = source.clone();
+                    renderer.uid = uid;
+                    renderer.name = unique_workspace_renderer_name(
+                        &renderer.name,
+                        map.renderers.iter().map(|renderer| renderer.name.as_str()),
+                    );
+                    renderer
+                        .attributes
+                        .insert("group".to_string(), group_name.clone());
+                    map.renderers.push(renderer);
                 }
+                map.modified = true;
+                Ok(WorkspaceRendererPasteResult {
+                    group_uid: Some(group_uid),
+                    renderer_uids,
+                })
+            }
+            WorkspaceRendererClipboardData::Surface(renderer_node) => {
                 let scene_uid = self
                     .scene_manager()
                     .scene_uid_for_surface(object_uid)
@@ -7808,6 +7974,12 @@ impl DesktopAppState {
                 let renderer_index = surface_renderer_nodes(object_node).count();
                 let uid = surface_renderer_uid(scene_uid, object_uid, renderer_index);
                 let mut renderer_node = renderer_node.clone();
+                if let Some(group_uid) = destination_group_uid {
+                    let group_name = renderer_group_name(object_node, object_uid, group_uid)?;
+                    renderer_node.set_str_attr("group", group_name);
+                } else {
+                    renderer_node.remove_child("group");
+                }
                 let existing_names = surface_renderer_nodes(object_node)
                     .map(|renderer| renderer.str_attr("name").to_string())
                     .collect::<Vec<_>>();
@@ -7822,12 +7994,68 @@ impl DesktopAppState {
                     renderer_uids: vec![uid],
                 })
             }
-            WorkspaceRendererClipboardData::Lightweight { renderer, node } => {
-                if destination_group_uid.is_some() {
-                    return Err(CueMolError::invalid_argument(
-                        "lightweight renderers cannot be pasted into a renderer group",
-                    ));
+            WorkspaceRendererClipboardData::SurfaceGroup { group, renderers } => {
+                let scene_uid = self
+                    .scene_manager()
+                    .scene_uid_for_surface(object_uid)
+                    .ok_or_else(|| {
+                        CueMolError::invalid_argument(
+                            "renderer clipboard is only compatible with a surface",
+                        )
+                    })?;
+                let surface = self
+                    .scene_manager_mut()
+                    .scene_mut(scene_uid)
+                    .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                    .expect("surface scene was checked above");
+                let object_node = ensure_surface_qsc_node(surface);
+                materialize_implicit_surface_renderer(object_node);
+                let (group_uid, group_name) = if let Some(group_uid) = destination_group_uid {
+                    (
+                        group_uid,
+                        renderer_group_name(object_node, object_uid, group_uid)?,
+                    )
+                } else {
+                    let source_name = group.str_attr("name").to_string();
+                    let existing_group_names = aux_renderer_group_nodes(object_node)
+                        .map(|group| group.str_attr("name").to_string())
+                        .collect::<Vec<_>>();
+                    let group_name = unique_workspace_renderer_name(
+                        &source_name,
+                        existing_group_names.iter().map(String::as_str),
+                    );
+                    let group_uid = aux_renderer_group_uid(
+                        object_uid,
+                        aux_renderer_group_nodes(object_node).count(),
+                    );
+                    let mut group = group.clone();
+                    group.set_str_attr("name", &group_name);
+                    object_node.append_child_node(group);
+                    (group_uid, group_name)
+                };
+                let mut renderer_uids = Vec::with_capacity(renderers.len());
+                for source in renderers {
+                    let renderer_index = surface_renderer_nodes(object_node).count();
+                    let uid = surface_renderer_uid(scene_uid, object_uid, renderer_index);
+                    let existing_names = surface_renderer_nodes(object_node)
+                        .map(|renderer| renderer.str_attr("name").to_string())
+                        .collect::<Vec<_>>();
+                    let mut renderer = source.clone();
+                    let name = unique_workspace_renderer_name(
+                        renderer.str_attr("name").as_str(),
+                        existing_names.iter().map(String::as_str),
+                    );
+                    renderer.set_str_attr("name", name);
+                    renderer.set_str_attr("group", &group_name);
+                    object_node.append_child_node(renderer);
+                    renderer_uids.push(uid);
                 }
+                Ok(WorkspaceRendererPasteResult {
+                    group_uid: Some(group_uid),
+                    renderer_uids,
+                })
+            }
+            WorkspaceRendererClipboardData::Lightweight { renderer, node } => {
                 let scene_uid = self
                     .scene_manager()
                     .scene_uid_for_lw_object(object_uid)
@@ -7856,6 +8084,13 @@ impl DesktopAppState {
                 object.renderers.push(renderer);
                 let mut node = node.clone();
                 node.set_str_attr("name", name);
+                if let Some(group_uid) = destination_group_uid {
+                    let object_node = object.qsc_node.as_ref().expect("LWObject node was ensured");
+                    let group_name = renderer_group_name(object_node, object_uid, group_uid)?;
+                    node.set_str_attr("group", group_name);
+                } else {
+                    node.remove_child("group");
+                }
                 object
                     .qsc_node
                     .as_mut()
@@ -7864,6 +8099,76 @@ impl DesktopAppState {
                 Ok(WorkspaceRendererPasteResult {
                     group_uid: None,
                     renderer_uids: vec![uid],
+                })
+            }
+            WorkspaceRendererClipboardData::LightweightGroup { group, renderers } => {
+                let scene_uid = self
+                    .scene_manager()
+                    .scene_uid_for_lw_object(object_uid)
+                    .ok_or_else(|| {
+                        CueMolError::invalid_argument(
+                            "renderer clipboard is only compatible with a lightweight object",
+                        )
+                    })?;
+                let object = self
+                    .scene_manager_mut()
+                    .scene_mut(scene_uid)
+                    .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+                    .expect("LWObject scene was checked above");
+                ensure_lw_qsc_node(object);
+                let (group_uid, group_name) = {
+                    let object_node = object.qsc_node.as_mut().expect("LWObject node was ensured");
+                    if let Some(group_uid) = destination_group_uid {
+                        (
+                            group_uid,
+                            renderer_group_name(object_node, object_uid, group_uid)?,
+                        )
+                    } else {
+                        let source_name = group.str_attr("name").to_string();
+                        let existing_group_names = aux_renderer_group_nodes(object_node)
+                            .map(|group| group.str_attr("name").to_string())
+                            .collect::<Vec<_>>();
+                        let group_name = unique_workspace_renderer_name(
+                            &source_name,
+                            existing_group_names.iter().map(String::as_str),
+                        );
+                        let group_uid = aux_renderer_group_uid(
+                            object_uid,
+                            aux_renderer_group_nodes(object_node).count(),
+                        );
+                        let mut group = group.clone();
+                        group.set_str_attr("name", &group_name);
+                        object_node.append_child_node(group);
+                        (group_uid, group_name)
+                    }
+                };
+                let mut renderer_uids = Vec::with_capacity(renderers.len());
+                for (source_renderer, source_node) in renderers {
+                    let renderer_index = object.renderers.len();
+                    let uid = lw_renderer_uid(scene_uid, object_uid, renderer_index);
+                    let name = unique_workspace_renderer_name(
+                        &source_renderer.name,
+                        object
+                            .renderers
+                            .iter()
+                            .map(|renderer| renderer.name.as_str()),
+                    );
+                    let mut renderer = source_renderer.clone();
+                    renderer.name = name.clone();
+                    object.renderers.push(renderer);
+                    let mut node = source_node.clone();
+                    node.set_str_attr("name", name);
+                    node.set_str_attr("group", &group_name);
+                    object
+                        .qsc_node
+                        .as_mut()
+                        .expect("LWObject node was ensured")
+                        .append_child_node(node);
+                    renderer_uids.push(uid);
+                }
+                Ok(WorkspaceRendererPasteResult {
+                    group_uid: Some(group_uid),
+                    renderer_uids,
                 })
             }
         }
@@ -8702,6 +9007,14 @@ impl DesktopAppState {
         if renderer_uid == target_uid {
             return Ok(false);
         }
+        if self.scene_manager().object(object_uid).is_none() {
+            return self.move_aux_renderer_in_object(
+                object_uid,
+                renderer_uid,
+                target_uid,
+                position,
+            );
+        }
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -8759,6 +9072,109 @@ impl DesktopAppState {
             source.remove_qsc_attr("group");
         }
         Ok(object.move_renderer_relative(renderer_uid, anchor_uid, after) || group_changed)
+    }
+
+    fn move_aux_renderer_in_object(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        target_uid: Uid,
+        position: &str,
+    ) -> Result<bool> {
+        let (_, _, source_type, _) =
+            self.workspace_renderer_style_state(object_uid, renderer_uid)?;
+        let (_, target_name, target_type, _) =
+            self.workspace_renderer_style_state(object_uid, target_uid)?;
+        let source_is_group = source_type == "*group";
+        let target_is_group = target_type == "*group";
+        if source_is_group {
+            if position == "inside" {
+                return Err(CueMolError::invalid_argument(
+                    "renderer groups cannot be moved into another group",
+                ));
+            }
+            if !matches!(position, "before" | "after") {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unsupported renderer drop position: {position}"
+                )));
+            }
+            if !target_is_group
+                && self
+                    .aux_renderer_group_membership(object_uid, target_uid)?
+                    .is_some()
+            {
+                return Err(CueMolError::invalid_argument(
+                    "renderer groups cannot be moved into another group",
+                ));
+            }
+            return Ok(false);
+        }
+        let source_group = self.aux_renderer_group_membership(object_uid, renderer_uid)?;
+        let destination_group = match position {
+            "inside" if target_is_group => Some(target_name),
+            "inside" => {
+                return Err(CueMolError::invalid_argument(
+                    "renderers can only be moved inside renderer groups",
+                ));
+            }
+            "before" | "after" if target_is_group => None,
+            "before" | "after" => self.aux_renderer_group_membership(object_uid, target_uid)?,
+            _ => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unsupported renderer drop position: {position}"
+                )));
+            }
+        };
+        if source_group == destination_group {
+            return Ok(false);
+        }
+        self.set_workspace_renderer_group_name(
+            object_uid,
+            renderer_uid,
+            destination_group.as_deref(),
+        )?;
+        Ok(true)
+    }
+
+    fn aux_renderer_group_membership(
+        &self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+    ) -> Result<Option<String>> {
+        if let Some(map) = self.density_map_summary(object_uid) {
+            return map
+                .renderers
+                .into_iter()
+                .find(|renderer| renderer.uid == renderer_uid)
+                .map(|renderer| renderer.group)
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
+                });
+        }
+        if let Some(surface) = self.surface_summary(object_uid) {
+            return surface
+                .renderers
+                .into_iter()
+                .find(|renderer| renderer.uid == renderer_uid)
+                .map(|renderer| renderer.group)
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("surface renderer {}", renderer_uid.get()))
+                });
+        }
+        if let Some(object) = self.lw_object_summary(object_uid) {
+            return object
+                .renderers
+                .into_iter()
+                .find(|renderer| renderer.uid == renderer_uid)
+                .map(|renderer| renderer.group)
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("LWRenderer {}", renderer_uid.get()))
+                });
+        }
+        Err(CueMolError::NotFound(format!(
+            "object {}",
+            object_uid.get()
+        )))
     }
 
     pub fn move_workspace_object(
@@ -55308,6 +55724,159 @@ end_header
     }
 
     #[test]
+    fn workspace_renderer_clipboard_copies_auxiliary_groups() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("clipboard", false).result_scene;
+
+        let map_uid = app.add_density_map(scene_uid, "map", DensityMap::new());
+        let map_group_uid = app.create_renderer_group(map_uid, "maps").unwrap();
+        let map_renderer_uid = app.add_density_renderer(map_uid, "contour").unwrap();
+        app.set_workspace_renderer_group_name(map_uid, map_renderer_uid, Some("maps"))
+            .unwrap();
+        app.set_renderer_group_common_properties(
+            map_uid,
+            map_group_uid,
+            "maps",
+            true,
+            false,
+            "glass",
+            0.5,
+            "edges",
+            0.2,
+            "#123456",
+        )
+        .unwrap();
+        let map_group_clipboard = app.copy_workspace_renderer(map_uid, map_group_uid).unwrap();
+        assert!(map_group_clipboard.is_group());
+        assert_eq!(map_group_clipboard.renderer_count(), 1);
+        let pasted = app
+            .paste_workspace_renderers(map_uid, None, &map_group_clipboard)
+            .unwrap();
+        let map = app.density_map_summary(map_uid).unwrap();
+        let pasted_group = map
+            .renderer_groups
+            .iter()
+            .find(|group| Some(group.uid) == pasted.group_uid)
+            .unwrap();
+        assert_eq!(pasted_group.name, "maps(1)");
+        assert_eq!(pasted_group.material, "glass");
+        assert_eq!(pasted_group.alpha, 0.5);
+        assert_eq!(
+            map.renderers
+                .iter()
+                .find(|renderer| renderer.uid == pasted.renderer_uids[0])
+                .unwrap()
+                .group
+                .as_deref(),
+            Some("maps(1)")
+        );
+        let destination_group_uid = app.create_renderer_group(map_uid, "destination").unwrap();
+        let pasted = app
+            .paste_workspace_renderers(map_uid, Some(destination_group_uid), &map_group_clipboard)
+            .unwrap();
+        assert_eq!(pasted.group_uid, Some(destination_group_uid));
+        assert_eq!(
+            app.density_map_summary(map_uid)
+                .unwrap()
+                .renderers
+                .iter()
+                .find(|renderer| renderer.uid == pasted.renderer_uids[0])
+                .unwrap()
+                .group
+                .as_deref(),
+            Some("destination")
+        );
+
+        let data = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: data.to_string(),
+                raw_data: data.as_bytes().to_vec(),
+                qsc_node: None,
+            });
+        let surface_group_uid = app.create_renderer_group(surface_uid, "surfaces").unwrap();
+        let surface_renderer_uid = app.surface_summary(surface_uid).unwrap().renderers[0].uid;
+        app.set_workspace_renderer_group_name(surface_uid, surface_renderer_uid, Some("surfaces"))
+            .unwrap();
+        let surface_clipboard = app
+            .copy_workspace_renderer(surface_uid, surface_group_uid)
+            .unwrap();
+        assert!(surface_clipboard.is_group());
+        let pasted = app
+            .paste_workspace_renderers(surface_uid, None, &surface_clipboard)
+            .unwrap();
+        let surface = app.surface_summary(surface_uid).unwrap();
+        assert_eq!(
+            surface
+                .renderer_groups
+                .iter()
+                .find(|group| Some(group.uid) == pasted.group_uid)
+                .unwrap()
+                .name,
+            "surfaces(1)"
+        );
+        assert_eq!(
+            surface
+                .renderers
+                .iter()
+                .find(|renderer| renderer.uid == pasted.renderer_uids[0])
+                .unwrap()
+                .group
+                .as_deref(),
+            Some("surfaces(1)")
+        );
+
+        let lw_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_lw_object(LoadedLWObject {
+                uid: Uid::new(0),
+                name: "lightweight".to_string(),
+                srctype: "qdflwobj".to_string(),
+                raw_data: Vec::new(),
+                visible: true,
+                xform: Matrix4::IDENTITY,
+                renderers: Vec::new(),
+                qsc_node: None,
+            });
+        let lw_group_uid = app.create_renderer_group(lw_uid, "overlays").unwrap();
+        let lw_renderer_uid = app.add_lw_renderer(lw_uid).unwrap();
+        app.set_workspace_renderer_group_name(lw_uid, lw_renderer_uid, Some("overlays"))
+            .unwrap();
+        let lw_clipboard = app.copy_workspace_renderer(lw_uid, lw_group_uid).unwrap();
+        assert!(lw_clipboard.is_group());
+        let pasted = app
+            .paste_workspace_renderers(lw_uid, None, &lw_clipboard)
+            .unwrap();
+        let lw = app.lw_object_summary(lw_uid).unwrap();
+        assert_eq!(
+            lw.renderer_groups
+                .iter()
+                .find(|group| Some(group.uid) == pasted.group_uid)
+                .unwrap()
+                .name,
+            "overlays(1)"
+        );
+        assert_eq!(
+            lw.renderers
+                .iter()
+                .find(|renderer| renderer.uid == pasted.renderer_uids[0])
+                .unwrap()
+                .group
+                .as_deref(),
+            Some("overlays(1)")
+        );
+    }
+
+    #[test]
     fn workspace_object_clipboard_reassigns_runtime_uids_and_names() {
         let mut app = DesktopAppState::new();
         let scene_uid = app.new_scene("clipboard", false).result_scene;
@@ -57988,6 +58557,57 @@ end_header
         assert_eq!(lw.renderer_groups[0].name, "representations");
         assert_eq!(lw.renderers[0].group.as_deref(), Some("representations"));
         assert!(!lw.renderers[0].visible);
+
+        let map_free_uid = app.add_density_renderer(map_uid, "isosurf").unwrap();
+        let map_group_uid = app.density_map_summary(map_uid).unwrap().renderer_groups[0].uid;
+        assert!(app
+            .move_renderer_in_object(map_uid, map_free_uid, map_group_uid, "inside")
+            .unwrap());
+        assert_eq!(
+            app.density_map_summary(map_uid)
+                .unwrap()
+                .renderers
+                .iter()
+                .find(|renderer| renderer.uid == map_free_uid)
+                .unwrap()
+                .group
+                .as_deref(),
+            Some("representations")
+        );
+        assert!(app
+            .move_renderer_in_object(map_uid, map_free_uid, map_group_uid, "before")
+            .unwrap());
+        assert!(app
+            .density_map_summary(map_uid)
+            .unwrap()
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == map_free_uid)
+            .unwrap()
+            .group
+            .is_none());
+
+        let surface_free_uid = app.add_surface_renderer(surface_uid).unwrap();
+        let surface_group_uid = app.surface_summary(surface_uid).unwrap().renderer_groups[0].uid;
+        assert!(app
+            .move_renderer_in_object(surface_uid, surface_free_uid, surface_group_uid, "inside",)
+            .unwrap());
+        assert!(app
+            .move_renderer_in_object(surface_uid, surface_free_uid, surface_group_uid, "after",)
+            .unwrap());
+
+        let lw_free_uid = app.add_lw_renderer(lw_uid).unwrap();
+        let lw_group_uid = app.lw_object_summary(lw_uid).unwrap().renderer_groups[0].uid;
+        assert!(app
+            .move_renderer_in_object(lw_uid, lw_free_uid, lw_group_uid, "inside")
+            .unwrap());
+        assert!(app
+            .move_renderer_in_object(lw_uid, lw_free_uid, lw_group_uid, "before")
+            .unwrap());
+        app.destroy_density_renderer(map_uid, map_free_uid).unwrap();
+        app.destroy_surface_renderer(surface_uid, surface_free_uid)
+            .unwrap();
+        app.destroy_lw_renderer(lw_uid, lw_free_uid).unwrap();
 
         let path = std::env::temp_dir().join(format!(
             "cuemol-desktop-aux-renderer-groups-{}.qsc",

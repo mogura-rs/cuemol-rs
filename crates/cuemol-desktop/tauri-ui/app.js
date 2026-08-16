@@ -7884,6 +7884,25 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
         },
       },
       {
+        label: "Copy",
+        action: async () => {
+          if (!(await activate())) return;
+          await copyWorkspaceRenderer(object.uid, renderer.uid, objectKind);
+        },
+      },
+      ...(workspaceRendererClipboardAvailable &&
+      workspaceRendererClipboardKind === objectKind
+        ? [
+            {
+              label: "Paste Renderer",
+              action: async () => {
+                if (!(await activate())) return;
+                await pasteWorkspaceRenderers(object.uid, renderer.uid);
+              },
+            },
+          ]
+        : []),
+      {
         label: "New Renderer…",
         action: async () => {
           if (!(await activate())) return;
@@ -8373,6 +8392,60 @@ function canDropWorkspaceRenderer(object, renderer, position) {
   if (position === "inside") return !source.isGroup && renderer.rendererType === "*group";
   if (source.isGroup && renderer.group) return false;
   return true;
+}
+
+function configureWorkspaceRendererDrag(row, object, renderer, disabled = false) {
+  row.draggable = !disabled;
+  if (disabled) return;
+  const isGroup = renderer.rendererType === "*group";
+  row.addEventListener("dragstart", (event) => {
+    draggedWorkspaceRenderer = {
+      objectUid: object.uid,
+      rendererUid: renderer.uid,
+      isGroup,
+    };
+    row.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(
+      "application/x-cuemol-renderer",
+      JSON.stringify(draggedWorkspaceRenderer),
+    );
+  });
+  row.addEventListener("dragover", (event) => {
+    const position = workspaceRendererDropPosition(event, renderer);
+    if (!canDropWorkspaceRenderer(object, renderer, position)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    clearWorkspaceRendererDropMarkers();
+    row.classList.add(`drop-${position}`);
+    row.dataset.dropPosition = position;
+  });
+  row.addEventListener("dragleave", (event) => {
+    if (!row.contains(event.relatedTarget)) {
+      row.classList.remove("drop-before", "drop-after", "drop-inside");
+    }
+  });
+  row.addEventListener("drop", async (event) => {
+    const source = draggedWorkspaceRenderer;
+    const position = row.dataset.dropPosition || "before";
+    clearWorkspaceRendererDropMarkers();
+    if (!source || !canDropWorkspaceRenderer(object, renderer, position)) return;
+    event.preventDefault();
+    draggedWorkspaceRenderer = null;
+    await mutateWithoutViewport("move_workspace_renderer", {
+      input: {
+        objectUid: object.uid,
+        rendererUid: source.rendererUid,
+        targetUid: renderer.uid,
+        position,
+      },
+    });
+  });
+  row.addEventListener("dragend", () => {
+    draggedWorkspaceRenderer = null;
+    row.classList.remove("dragging");
+    clearWorkspaceRendererDropMarkers();
+  });
 }
 
 function selectedDensityMap() {
@@ -9011,6 +9084,12 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           surface.uid,
           renderer.uid,
         );
+        configureWorkspaceRendererDrag(
+          rendererRow,
+          surface,
+          renderer,
+          rendererIsRenaming,
+        );
         rendererRow.addEventListener("dblclick", () => {
           clearWorkspaceRenameTimer();
           showReferenceDialog("Renderer Properties");
@@ -9148,6 +9227,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           map.uid,
           renderer.uid,
         );
+        configureWorkspaceRendererDrag(rendererRow, map, renderer, rendererIsRenaming);
         rendererRow.addEventListener("dblclick", () => {
           clearWorkspaceRenameTimer();
           showReferenceDialog("Renderer Properties");
@@ -9287,6 +9367,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           object.uid,
           renderer.uid,
         );
+        configureWorkspaceRendererDrag(rendererRow, object, renderer, rendererIsRenaming);
         rendererRow.addEventListener("dblclick", () => {
           clearWorkspaceRenameTimer();
           showReferenceDialog("Renderer Properties");

@@ -5331,6 +5331,25 @@ impl GuiApplication {
                 self.open_aux_properties(selection);
                 ui.close();
             }
+            if ui.button("Copy").clicked() {
+                self.copy_workspace_renderer_to_clipboard(owner.uid(), group.uid);
+                ui.close();
+            }
+            if self
+                .workspace_renderer_clipboard
+                .as_ref()
+                .is_some_and(|clipboard| clipboard.kind() == owner.workspace_kind())
+                && ui.button("Paste Renderer").clicked()
+            {
+                if let Some(scene_uid) = self.workspace_owner_scene_uid(owner) {
+                    self.paste_workspace_renderer_clipboard(
+                        scene_uid,
+                        owner.uid(),
+                        Some(group.uid),
+                    );
+                }
+                ui.close();
+            }
             if ui.button("New Renderer…").clicked() {
                 self.open_aux_renderer_dialog(selection);
                 self.new_renderer_group = Some(group.name);
@@ -5557,44 +5576,112 @@ impl GuiApplication {
         let selected =
             self.selected_object.is_none() && self.workspace_aux_selection == Some(selection);
         let is_group = renderer.renderer_type == "*group";
-        let mut visible = renderer.visible;
-        let response = ui
-            .horizontal(|ui| {
-                if ui
-                    .checkbox(&mut visible, "")
-                    .on_hover_text(if is_group {
-                        "Toggle all renderers in this group"
+        let payload = NativeRendererDragPayload {
+            object_uid: owner.uid(),
+            renderer_uid: renderer.uid,
+            is_group,
+        };
+        let drag_source = ui.dnd_drag_source(
+            egui::Id::new(("workspace-aux-renderer-drag", renderer.uid.get())),
+            payload,
+            |ui| {
+                let mut visible = renderer.visible;
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut visible, "")
+                        .on_hover_text(if is_group {
+                            "Toggle all renderers in this group"
+                        } else {
+                            "Visible"
+                        })
+                        .changed()
+                    {
+                        self.set_workspace_aux_renderer_visibility(
+                            owner,
+                            renderer.uid,
+                            is_group,
+                            visible,
+                        );
+                    }
+                    if let Some(locked) = workspace_lock_toggle(ui, renderer.locked, !is_group) {
+                        self.set_workspace_renderer_locked(owner, renderer.uid, locked);
+                    }
+                    let label = if is_group {
+                        format!("{} (group)", renderer.name)
                     } else {
-                        "Visible"
-                    })
-                    .changed()
-                {
-                    self.set_workspace_aux_renderer_visibility(
-                        owner,
-                        renderer.uid,
-                        is_group,
-                        visible,
-                    );
-                }
-                if let Some(locked) = workspace_lock_toggle(ui, renderer.locked, !is_group) {
-                    self.set_workspace_renderer_locked(owner, renderer.uid, locked);
-                }
-                let label = if is_group {
-                    format!("{} (group)", renderer.name)
-                } else {
-                    format!("{} ({})", renderer.name, renderer.renderer_type)
-                };
-                if ui.selectable_label(selected, label).clicked() {
-                    self.activate_workspace_scene(scene_uid, camera);
-                    self.selected_object = None;
-                    self.selected_renderer = None;
-                    self.workspace_aux_selection = Some(selection);
-                }
-            })
-            .response;
-        response.context_menu(|ui| {
+                        format!("{} ({})", renderer.name, renderer.renderer_type)
+                    };
+                    if ui.selectable_label(selected, label).clicked() {
+                        self.activate_workspace_scene(scene_uid, camera);
+                        self.selected_object = None;
+                        self.selected_renderer = None;
+                        self.workspace_aux_selection = Some(selection);
+                    }
+                });
+            },
+        );
+        drag_source.response.context_menu(|ui| {
             self.workspace_aux_renderer_context_menu(ui, selection);
         });
+        let drop_rect = drag_source.response.rect;
+        if let Some(source) = drag_source
+            .response
+            .dnd_hover_payload::<NativeRendererDragPayload>()
+        {
+            if source.object_uid == owner.uid()
+                && source.renderer_uid != renderer.uid
+                && (!source.is_group || renderer.group.is_none())
+            {
+                let fraction = ctx_pointer_vertical_fraction(ui.ctx(), drop_rect);
+                let inside = is_group && !source.is_group && (0.25..=0.75).contains(&fraction);
+                let stroke = egui::Stroke::new(2.0, ui.visuals().selection.bg_fill);
+                if inside {
+                    ui.painter()
+                        .rect_stroke(drop_rect, 0.0, stroke, egui::StrokeKind::Inside);
+                } else {
+                    let y = if fraction < 0.5 {
+                        drop_rect.top()
+                    } else {
+                        drop_rect.bottom()
+                    };
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(drop_rect.left(), y),
+                            egui::pos2(drop_rect.right(), y),
+                        ],
+                        stroke,
+                    );
+                }
+            }
+        }
+        let Some(source) = drag_source
+            .response
+            .dnd_release_payload::<NativeRendererDragPayload>()
+        else {
+            return;
+        };
+        if source.object_uid != owner.uid() || source.renderer_uid == renderer.uid {
+            return;
+        }
+        if source.is_group && renderer.group.is_some() {
+            self.set_status("Renderer groups cannot be moved into another group");
+            return;
+        }
+        let fraction = ctx_pointer_vertical_fraction(ui.ctx(), drop_rect);
+        let position = if is_group && !source.is_group && (0.25..=0.75).contains(&fraction) {
+            "inside"
+        } else if fraction < 0.5 {
+            "before"
+        } else {
+            "after"
+        };
+        self.move_workspace_renderer(
+            scene_uid,
+            owner.uid(),
+            source.renderer_uid,
+            renderer.uid,
+            position,
+        );
     }
 
     fn workspace_molecule_renderer_row(
@@ -26342,6 +26429,19 @@ mod tests {
         assert_eq!(tree[0].renderer.uid, group_uid);
         assert_eq!(tree[0].children.len(), 1);
         assert_eq!(tree[0].children[0].group.as_deref(), Some("maps"));
+        let member_uid = tree[0].children[0].uid;
+        app.move_workspace_renderer(scene_uid, map_uid, member_uid, group_uid, "before");
+        assert!(app.state.density_map_summary(map_uid).unwrap().renderers[0]
+            .group
+            .is_none());
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state.density_map_summary(map_uid).unwrap().renderers[0]
+                .group
+                .as_deref(),
+            Some("maps")
+        );
 
         let mut properties =
             NativeRendererProperties::from_density_state(&app.state, map_uid, group_uid).unwrap();
@@ -26366,7 +26466,6 @@ mod tests {
             .unwrap()
             .renderers
             .is_empty());
-        let mut camera = CameraController::default();
         app.undo(&mut camera);
         assert_eq!(
             app.state

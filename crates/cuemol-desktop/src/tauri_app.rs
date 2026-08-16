@@ -16312,6 +16312,72 @@ mod tests {
             .unwrap();
         assert_eq!(group.name, "renamed maps");
         assert!(!group.visible);
+        let renderer_uid = snapshot.density_maps[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.renderer_type == "contour")
+            .unwrap()
+            .uid;
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::MoveWorkspaceRenderer(WorkspaceMoveRendererInput {
+                object_uid: map_uid.get(),
+                renderer_uid,
+                target_uid: group_uid,
+                position: "before".to_string(),
+            }),
+        )
+        .unwrap();
+        assert!(model.snapshot().density_maps[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.uid == renderer_uid)
+            .unwrap()
+            .group
+            .is_none());
+        handle_model_request(
+            &mut model,
+            ModelRequest::MoveWorkspaceRenderer(WorkspaceMoveRendererInput {
+                object_uid: map_uid.get(),
+                renderer_uid,
+                target_uid: group_uid,
+                position: "inside".to_string(),
+            }),
+        )
+        .unwrap();
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::CopyWorkspaceRenderer(WorkspaceRendererCopyInput {
+                object_uid: map_uid.get(),
+                renderer_uid: group_uid,
+            }),
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::PasteWorkspaceRenderers(WorkspaceRendererPasteInput {
+                object_uid: map_uid.get(),
+                destination_group_uid: None,
+            }),
+        )
+        .unwrap();
+        let pasted_group_uid = model.snapshot().density_maps[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.name == "renamed maps(1)")
+            .unwrap()
+            .uid;
+        handle_model_request(
+            &mut model,
+            ModelRequest::DeleteWorkspaceItem(WorkspaceDeleteInput {
+                kind: "rendererGroup".to_string(),
+                object_uid: map_uid.get(),
+                renderer_uid: Some(pasted_group_uid),
+            }),
+        )
+        .unwrap();
 
         handle_model_request(
             &mut model,
