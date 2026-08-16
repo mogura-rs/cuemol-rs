@@ -721,7 +721,14 @@ struct LwRendererDto {
     renderer_type: String,
     visible: bool,
     locked: bool,
+    style: String,
+    material: String,
+    alpha: f64,
+    edge_type: String,
+    edge_width: f64,
+    edge_color: String,
     data_id: i32,
+    specific: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -1056,7 +1063,13 @@ struct LwRendererPropertiesInput {
     name: String,
     visible: bool,
     locked: bool,
+    material: String,
+    alpha: f64,
+    edge_type: String,
+    edge_width: f64,
+    edge_color: String,
     data_id: i32,
+    specific: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -1927,7 +1940,17 @@ impl AppModel {
                         renderer_type: renderer.renderer_type,
                         visible: renderer.visible,
                         locked: renderer.locked,
+                        style: renderer.style.clone(),
+                        material: renderer.material,
+                        alpha: renderer.alpha,
+                        edge_type: renderer.edge_type,
+                        edge_width: renderer.edge_width,
+                        edge_color: renderer.edge_color,
                         data_id: renderer.data_id,
+                        specific: BTreeMap::from([
+                            ("data_id".to_string(), renderer.data_id.to_string()),
+                            ("style".to_string(), renderer.style),
+                        ]),
                     })
                     .collect(),
             })
@@ -2645,31 +2668,24 @@ impl AppModel {
                 "lightweight renderer name must be non-empty and cannot contain ':'".to_string(),
             );
         }
+        let styles = properties
+            .specific
+            .get("style")
+            .map(String::as_str)
+            .unwrap_or_default();
         self.desktop
-            .rename_lw_renderer(
+            .set_lw_renderer_properties(
                 Uid::new(properties.object_uid),
                 Uid::new(properties.renderer_uid),
                 name,
-            )
-            .map_err(|error| error.to_string())?;
-        self.desktop
-            .set_lw_renderer_visible(
-                Uid::new(properties.object_uid),
-                Uid::new(properties.renderer_uid),
                 properties.visible,
-            )
-            .map_err(|error| error.to_string())?;
-        self.desktop
-            .set_lw_renderer_locked(
-                Uid::new(properties.object_uid),
-                Uid::new(properties.renderer_uid),
                 properties.locked,
-            )
-            .map_err(|error| error.to_string())?;
-        self.desktop
-            .set_lw_renderer_data_id(
-                Uid::new(properties.object_uid),
-                Uid::new(properties.renderer_uid),
+                styles,
+                properties.material,
+                properties.alpha,
+                properties.edge_type,
+                properties.edge_width,
+                properties.edge_color,
                 properties.data_id,
             )
             .map_err(|error| error.to_string())?;
@@ -14772,6 +14788,76 @@ mod tests {
             .renderers
             .is_empty());
         assert!(model.workspace_renderer_clipboard.is_some());
+    }
+
+    #[test]
+    fn workspace_lightweight_renderer_common_properties_are_undoable() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let object_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_lw_object(cuemol_molstr::LoadedLWObject {
+                uid: Uid::new(0),
+                name: "lightweight".to_string(),
+                srctype: "qdflwobj".to_string(),
+                raw_data: Vec::new(),
+                visible: true,
+                xform: cuemol_core::Matrix4::IDENTITY,
+                renderers: vec![cuemol_molstr::LoadedLWRenderer {
+                    name: "draw".to_string(),
+                    data_id: 1,
+                    visible: true,
+                    xform: cuemol_core::Matrix4::IDENTITY,
+                }],
+                qsc_node: None,
+            });
+        let renderer_uid = model
+            .desktop
+            .lw_object_summary(object_uid)
+            .unwrap()
+            .renderers[0]
+            .uid;
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetLwRendererProperties(LwRendererPropertiesInput {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                name: "overlay".to_string(),
+                visible: true,
+                locked: true,
+                material: "matte".to_string(),
+                alpha: 0.4,
+                edge_type: "silhouette".to_string(),
+                edge_width: 0.2,
+                edge_color: "#123456".to_string(),
+                data_id: 7,
+                specific: BTreeMap::from([("style".to_string(), "CustomLw".to_string())]),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected properties snapshot");
+        };
+        let renderer = &snapshot.lw_objects[0].renderers[0];
+        assert_eq!(renderer.name, "overlay");
+        assert!(renderer.locked);
+        assert_eq!(renderer.style, "CustomLw");
+        assert_eq!(renderer.material, "matte");
+        assert_eq!(renderer.alpha, 0.4);
+        assert_eq!(renderer.edge_type, "silhouette");
+        assert_eq!(renderer.edge_width, 0.2);
+        assert_eq!(renderer.edge_color, "#123456");
+        assert_eq!(renderer.data_id, 7);
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let snapshot = model.snapshot();
+        let renderer = &snapshot.lw_objects[0].renderers[0];
+        assert_eq!(renderer.name, "draw");
+        assert_eq!(renderer.alpha, 1.0);
+        assert_eq!(renderer.data_id, 1);
     }
 
     #[test]

@@ -2036,12 +2036,12 @@ impl NativeRendererProperties {
             String::new(),
             renderer.visible,
             renderer.locked,
-            String::new(),
-            String::new(),
-            1.0,
-            "none".to_string(),
-            0.01,
-            "#000000".to_string(),
+            renderer.style,
+            renderer.material,
+            renderer.alpha,
+            renderer.edge_type,
+            renderer.edge_width,
+            renderer.edge_color,
             specific,
         ))
     }
@@ -2099,6 +2099,10 @@ impl NativeRendererProperties {
         matches!(self.owner, NativePropertyObject::DensityMap(_))
     }
 
+    fn is_lightweight_renderer(&self) -> bool {
+        matches!(self.owner, NativePropertyObject::Lightweight(_))
+    }
+
     fn is_renderer_group(&self) -> bool {
         self.renderer_type == "*group"
     }
@@ -2150,7 +2154,7 @@ impl NativeRendererProperties {
             "cartoon" => &["Common", "Cartoon", "Helix", "Sheet", "Coil"],
             "contour" | "gpu_mapmesh" | "isosurf" | "gpu_mapvol" => &["Common", "Map"],
             "surface" | "molsurf" | "dsurface" | "directsurf" | "dsurf2" => &["Common", "MolSurf"],
-            "lwrend" => &["Lightweight"],
+            "lwrend" => &["Common", "Lightweight"],
             _ => &["Common"],
         }
     }
@@ -12227,6 +12231,7 @@ impl GuiApplication {
 
                         ui.label("Selection:");
                         let selection_readonly = draft.is_density_renderer()
+                            || draft.is_lightweight_renderer()
                             || draft.is_renderer_group()
                             || matches!(
                                 draft.renderer_type.as_str(),
@@ -12234,6 +12239,7 @@ impl GuiApplication {
                             );
                         if selection_readonly {
                             let text = if draft.is_density_renderer()
+                                || draft.is_lightweight_renderer()
                                 || draft.is_renderer_group()
                                 || matches!(
                                     draft.renderer_type.as_str(),
@@ -13647,25 +13653,20 @@ impl GuiApplication {
                     .ok_or_else(|| format!("LWObject {} was not found", object_uid.get()))?;
                 let undo = self.capture_undo();
                 self.state
-                    .rename_lw_renderer(object_uid, draft.renderer_uid, draft.name.trim())
-                    .and_then(|()| {
-                        self.state.set_lw_renderer_visible(
-                            object_uid,
-                            draft.renderer_uid,
-                            draft.visible,
-                        )
-                    })
-                    .and_then(|()| {
-                        self.state.set_lw_renderer_locked(
-                            object_uid,
-                            draft.renderer_uid,
-                            draft.locked,
-                        )
-                    })
-                    .and_then(|()| {
-                        self.state
-                            .set_lw_renderer_data_id(object_uid, draft.renderer_uid, data_id)
-                    })
+                    .set_lw_renderer_properties(
+                        object_uid,
+                        draft.renderer_uid,
+                        draft.name.trim(),
+                        draft.visible,
+                        draft.locked,
+                        draft.style.trim(),
+                        draft.material.trim(),
+                        draft.alpha,
+                        draft.edge_type.trim(),
+                        draft.edge_width,
+                        draft.edge_color.trim(),
+                        data_id,
+                    )
                     .map_err(|error| error.to_string())?;
                 self.push_undo_snapshot(undo);
                 self.modified_scenes.insert(scene_uid);
@@ -25599,16 +25600,28 @@ mod tests {
         };
         let mut properties =
             NativeRendererProperties::from_lw_state(&app.state, object_uid, renderer_uid).unwrap();
-        assert_eq!(properties.tabs(), &["Lightweight"]);
+        assert_eq!(properties.tabs(), &["Common", "Lightweight"]);
         properties
             .specific
             .insert("data_id".to_string(), "17".to_string());
         properties.locked = true;
+        properties.style = "CustomLw".to_string();
+        properties.material = "matte".to_string();
+        properties.alpha = 0.4;
+        properties.edge_type = "edges".to_string();
+        properties.edge_width = 0.2;
+        properties.edge_color = "#123456".to_string();
         app.apply_renderer_properties(&properties).unwrap();
         let renderer = &app.state.lw_object_summary(object_uid).unwrap().renderers[0];
         assert_eq!(renderer.name, "overlay");
         assert_eq!(renderer.data_id, 17);
         assert!(renderer.locked);
+        assert_eq!(renderer.style, "CustomLw");
+        assert_eq!(renderer.material, "matte");
+        assert_eq!(renderer.alpha, 0.4);
+        assert_eq!(renderer.edge_type, "edges");
+        assert_eq!(renderer.edge_width, 0.2);
+        assert_eq!(renderer.edge_color, "#123456");
 
         app.copy_workspace_renderer_to_clipboard(object_uid, renderer_uid);
         assert_eq!(

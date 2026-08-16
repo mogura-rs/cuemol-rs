@@ -1726,9 +1726,11 @@ function rendererPropertiesEditor(object, renderer, styleOptions = []) {
     dialogTitle.textContent = "Volume renderer properties";
   } else if (surfaceLike) {
     dialogTitle.textContent = "MolSurf Rend Properties";
+  } else if (lightweightObject) {
+    dialogTitle.textContent = "Lightweight renderer properties";
   }
   const tabNames = lightweightObject
-    ? ["Lightweight"]
+    ? ["Common", "Lightweight"]
     : simpleLike
     ? [renderer.rendererType === "trace" ? "Trace" : "Simple"]
     : splineLike
@@ -1933,8 +1935,12 @@ function rendererPropertiesEditor(object, renderer, styleOptions = []) {
   name.value = renderer.name;
   propertyField(basic, "Name:", name);
   const selection = document.createElement("input");
-  selection.value = densityMap || rendererGroup || nameLabelLike ? "(not available)" : renderer.selection || "*";
-  selection.disabled = densityMap || rendererGroup || selectionLike || nameLabelLike;
+  selection.value =
+    densityMap || lightweightObject || rendererGroup || nameLabelLike
+      ? "(not available)"
+      : renderer.selection || "*";
+  selection.disabled =
+    densityMap || lightweightObject || rendererGroup || selectionLike || nameLabelLike;
   selection.spellcheck = false;
   propertyField(basic, "Selection:", selection);
   const checks = document.createElement("div");
@@ -3220,7 +3226,7 @@ function rendererPropertiesEditor(object, renderer, styleOptions = []) {
       1,
       String(renderer.dataId ?? 0),
     );
-    page.append(lightweightGroup);
+    panes[1].append(lightweightGroup);
   }
 
   let dirty = false;

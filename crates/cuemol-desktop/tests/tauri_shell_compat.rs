@@ -333,6 +333,8 @@ fn tauri_workspace_exposes_lightweight_objects_and_renderers() {
         "workspaceRendererClipboardKind",
         "copyWorkspaceRenderer(object.uid, renderer.uid, objectKind)",
         "pasteWorkspaceRenderers(object.uid)",
+        "Lightweight renderer properties",
+        "[\"Common\", \"Lightweight\"]",
     ] {
         assert!(
             JS.contains(binding),
@@ -344,7 +346,7 @@ fn tauri_workspace_exposes_lightweight_objects_and_renderers() {
         "SetLwObjectProperties",
         "SetLwRendererProperties",
         "AddLwRenderer",
-        "set_lw_renderer_data_id",
+        "set_lw_renderer_properties",
         "destroy_lw_object",
         "destroy_lw_renderer",
     ] {

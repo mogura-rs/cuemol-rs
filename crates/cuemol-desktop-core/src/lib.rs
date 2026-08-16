@@ -1343,7 +1343,7 @@ pub struct GuiLoadedSurfaceRendererSummary {
     pub specific: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuiLoadedLwObjectSummary {
     pub uid: Uid,
     pub scene_uid: Uid,
@@ -1357,7 +1357,7 @@ pub struct GuiLoadedLwObjectSummary {
     pub renderers: Vec<GuiLoadedLwRendererSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuiLoadedLwRendererSummary {
     pub object_uid: Uid,
     pub uid: Uid,
@@ -1365,6 +1365,12 @@ pub struct GuiLoadedLwRendererSummary {
     pub renderer_type: String,
     pub visible: bool,
     pub locked: bool,
+    pub style: String,
+    pub material: String,
+    pub alpha: f64,
+    pub edge_type: String,
+    pub edge_width: f64,
+    pub edge_color: String,
     pub data_id: i32,
 }
 
@@ -3607,20 +3613,22 @@ impl DesktopAppState {
 
     pub fn lw_object_summary(&self, object_uid: Uid) -> Option<GuiLoadedLwObjectSummary> {
         let scene_uid = self.scene_manager().scene_uid_for_lw_object(object_uid)?;
-        self.scene_manager()
-            .scene(scene_uid)?
+        let scene = self.scene_manager().scene(scene_uid)?;
+        let styles = scene_style_manager(scene);
+        scene
             .loaded_lw_object(object_uid)
-            .map(|object| lw_object_summary(scene_uid, object))
+            .map(|object| lw_object_summary(scene_uid, object, &styles))
     }
 
     pub fn lw_object_summaries(&self, scene_uid: Uid) -> Vec<GuiLoadedLwObjectSummary> {
         self.scene_manager()
             .scene(scene_uid)
             .map(|scene| {
+                let styles = scene_style_manager(scene);
                 scene
                     .loaded_lw_objects()
                     .iter()
-                    .map(|object| lw_object_summary(scene_uid, object))
+                    .map(|object| lw_object_summary(scene_uid, object, &styles))
                     .collect()
             })
             .unwrap_or_default()
@@ -3739,6 +3747,59 @@ impl DesktopAppState {
     ) -> Result<()> {
         self.update_lw_renderer(object_uid, renderer_uid, |renderer, node| {
             renderer.data_id = data_id;
+            node.set_str_attr("data_id", data_id.to_string());
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_lw_renderer_properties(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        name: impl Into<String>,
+        visible: bool,
+        locked: bool,
+        styles: &str,
+        material: impl Into<String>,
+        alpha: f64,
+        edge_type: impl Into<String>,
+        edge_width: f64,
+        edge_color: impl Into<String>,
+        data_id: i32,
+    ) -> Result<()> {
+        if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
+            return Err(CueMolError::invalid_argument(
+                "lightweight renderer alpha must be between 0 and 1",
+            ));
+        }
+        if !edge_width.is_finite() || edge_width < 0.0 {
+            return Err(CueMolError::invalid_argument(
+                "lightweight renderer edge width must be non-negative",
+            ));
+        }
+        let edge_type = edge_type.into();
+        if !matches!(edge_type.as_str(), "none" | "edges" | "silhouette") {
+            return Err(CueMolError::invalid_argument(format!(
+                "unsupported lightweight renderer edge type: {edge_type}"
+            )));
+        }
+        let name = name.into();
+        let styles = styles.trim().to_string();
+        let material = material.into();
+        let edge_color = edge_color.into();
+        self.update_lw_renderer(object_uid, renderer_uid, |renderer, node| {
+            renderer.name = name.clone();
+            renderer.visible = visible;
+            renderer.data_id = data_id;
+            node.set_str_attr("name", &name);
+            set_qsc_bool_attr(node, "visible", visible, true);
+            set_qsc_bool_attr(node, "locked", locked, false);
+            set_qsc_string_attr(node, "style", &styles, "");
+            set_qsc_string_attr(node, "material", &material, "");
+            set_qsc_f64_attr(node, "alpha", alpha, 1.0);
+            set_qsc_string_attr(node, "egtype", &edge_type, "none");
+            set_qsc_f64_attr(node, "eglinew", edge_width, 0.01);
+            set_qsc_string_attr(node, "egcolor", &edge_color, "#000000");
             node.set_str_attr("data_id", data_id.to_string());
         })
     }
@@ -10810,7 +10871,7 @@ impl DesktopAppState {
             .iter()
             .filter(|object| object.visible)
         {
-            append_lw_object_snapshot(&mut snapshot, object)?;
+            append_lw_object_snapshot(&mut snapshot, object, &styles)?;
         }
         self.append_saved_surface_geometry(&mut snapshot, scene_uid);
         self.append_saved_density_geometry(&mut snapshot, scene_uid);
@@ -44114,16 +44175,55 @@ fn direct_surface_snapshot(
 fn append_lw_object_snapshot(
     target: &mut RenderSceneSnapshot,
     loaded: &cuemol_molstr::LoadedLWObject,
+    styles: &StyleManager,
 ) -> Result<()> {
     let object = cuemol_lwview::read_qdf_lwobj_bytes(&loaded.raw_data)?;
-    for renderer in loaded
-        .renderers
+    let renderer_nodes = loaded
+        .qsc_node
         .iter()
-        .filter(|renderer| renderer.visible && renderer.data_id != 0)
-    {
+        .flat_map(|node| node.children())
+        .filter(|node| {
+            !node.is_attr() && node.tag_name() == "renderer" && node.type_name() == "lwrend"
+        })
+        .collect::<Vec<_>>();
+    for (index, renderer) in loaded.renderers.iter().enumerate() {
+        if !renderer.visible {
+            continue;
+        }
+        let node = renderer_nodes.get(index).copied();
+        let style = node
+            .map(|node| node.str_attr("style").to_string())
+            .unwrap_or_default();
+        let resolved = |name: &str| {
+            node.map(|node| node.str_attr(name).to_string())
+                .filter(|value| !value.is_empty())
+                .or_else(|| styles.resolve_style_attr(DEFAULT_STYLE_SCOPE, &style, name))
+        };
+        let data_id = resolved("data_id")
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(renderer.data_id);
+        if data_id == 0 {
+            continue;
+        }
         let mut snapshot = RenderSceneSnapshot::empty();
-        for element in object.draw_elements_for(renderer.data_id) {
+        for element in object.draw_elements_for(data_id) {
             append_lw_draw_element(&mut snapshot, element);
+        }
+        if let Some(edge_style) = renderer_edge_style(
+            resolved("egtype").as_deref(),
+            resolved("eglinew").as_deref(),
+            resolved("egcolor").as_deref(),
+            styles,
+        ) {
+            append_mesh_edge_outlines(&mut snapshot, edge_style);
+            apply_primitive_edge_style(&mut snapshot, edge_style);
+        }
+        let alpha = resolved("alpha")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        if alpha < 1.0 {
+            apply_renderer_alpha(&mut snapshot, alpha);
         }
         let xform = renderer.xform.mul_mat(loaded.xform);
         if xform != Matrix4::IDENTITY {
@@ -45687,6 +45787,22 @@ fn set_qsc_bool_attr(node: &mut LDom2Node, name: &str, value: bool, default: boo
     }
 }
 
+fn set_qsc_string_attr(node: &mut LDom2Node, name: &str, value: &str, default: &str) {
+    if value == default {
+        node.remove_child(name);
+    } else {
+        node.set_str_attr(name, value);
+    }
+}
+
+fn set_qsc_f64_attr(node: &mut LDom2Node, name: &str, value: f64, default: f64) {
+    if (value - default).abs() < f64::EPSILON {
+        node.remove_child(name);
+    } else {
+        node.set_str_attr(name, value.to_string());
+    }
+}
+
 fn surface_summary(
     scene_uid: Uid,
     surface: &LoadedSurface,
@@ -45794,7 +45910,11 @@ fn lw_object_ui_order(object: &LoadedLWObject) -> i32 {
         .unwrap_or(0)
 }
 
-fn lw_object_summary(scene_uid: Uid, object: &LoadedLWObject) -> GuiLoadedLwObjectSummary {
+fn lw_object_summary(
+    scene_uid: Uid,
+    object: &LoadedLWObject,
+    styles: &StyleManager,
+) -> GuiLoadedLwObjectSummary {
     let node = object.qsc_node.as_ref();
     let renderer_nodes = node
         .into_iter()
@@ -45819,16 +45939,34 @@ fn lw_object_summary(scene_uid: Uid, object: &LoadedLWObject) -> GuiLoadedLwObje
             .renderers
             .iter()
             .enumerate()
-            .map(|(index, renderer)| GuiLoadedLwRendererSummary {
-                object_uid: object.uid,
-                uid: lw_renderer_uid(scene_uid, object.uid, index),
-                name: renderer.name.clone(),
-                renderer_type: "lwrend".to_string(),
-                visible: renderer.visible,
-                locked: renderer_nodes
-                    .get(index)
-                    .is_some_and(|node| qsc_bool(node.str_attr("locked").as_str())),
-                data_id: renderer.data_id,
+            .map(|(index, renderer)| {
+                let node = renderer_nodes.get(index).copied();
+                let style = node
+                    .map(|node| node.str_attr("style").to_string())
+                    .unwrap_or_default();
+                let attr = |name: &str, fallback: &str| {
+                    node.map(|node| node.str_attr(name).to_string())
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| styles.resolve_style_attr(DEFAULT_STYLE_SCOPE, &style, name))
+                        .unwrap_or_else(|| fallback.to_string())
+                };
+                GuiLoadedLwRendererSummary {
+                    object_uid: object.uid,
+                    uid: lw_renderer_uid(scene_uid, object.uid, index),
+                    name: renderer.name.clone(),
+                    renderer_type: "lwrend".to_string(),
+                    visible: renderer.visible,
+                    locked: node.is_some_and(|node| qsc_bool(node.str_attr("locked").as_str())),
+                    style: style.clone(),
+                    material: attr("material", ""),
+                    alpha: attr("alpha", "1").parse().unwrap_or(1.0),
+                    edge_type: attr("egtype", "none"),
+                    edge_width: attr("eglinew", "0.01").parse().unwrap_or(0.01),
+                    edge_color: attr("egcolor", "#000000"),
+                    data_id: attr("data_id", &renderer.data_id.to_string())
+                        .parse()
+                        .unwrap_or(renderer.data_id),
+                }
             })
             .collect(),
     }
@@ -59048,8 +59186,21 @@ attribute \"dep\" string \"positions\"
             .unwrap();
         app.rename_lw_renderer(lw_uid, lw_renderer_uid, "saved-lwrend")
             .unwrap();
-        app.set_lw_renderer_data_id(lw_uid, lw_renderer_uid, 9)
-            .unwrap();
+        app.set_lw_renderer_properties(
+            lw_uid,
+            lw_renderer_uid,
+            "saved-lwrend",
+            false,
+            true,
+            "CustomLw",
+            "matte",
+            0.5,
+            "edges",
+            0.2,
+            "#123456",
+            9,
+        )
+        .unwrap();
         let added_lw_renderer_uid = app.add_lw_renderer(lw_uid).unwrap();
         app.rename_lw_renderer(lw_uid, added_lw_renderer_uid, "alternate")
             .unwrap();
@@ -59063,6 +59214,12 @@ attribute \"dep\" string \"positions\"
         assert!(lw_summary.locked);
         assert_eq!(lw_summary.renderers[0].name, "saved-lwrend");
         assert_eq!(lw_summary.renderers[0].data_id, 9);
+        assert_eq!(lw_summary.renderers[0].style, "CustomLw");
+        assert_eq!(lw_summary.renderers[0].material, "matte");
+        assert_eq!(lw_summary.renderers[0].alpha, 0.5);
+        assert_eq!(lw_summary.renderers[0].edge_type, "edges");
+        assert_eq!(lw_summary.renderers[0].edge_width, 0.2);
+        assert_eq!(lw_summary.renderers[0].edge_color, "#123456");
         assert!(!lw_summary.renderers[0].visible);
         assert!(lw_summary.renderers[0].locked);
         assert_eq!(lw_summary.renderers[1].name, "alternate");
@@ -59107,17 +59264,23 @@ attribute \"dep\" string \"positions\"
         assert!(reloaded_lw.locked);
         assert_eq!(reloaded_lw.renderers[0].name, "saved-lwrend");
         assert_eq!(reloaded_lw.renderers[0].data_id, 9);
+        assert_eq!(reloaded_lw.renderers[0].style, "CustomLw");
+        assert_eq!(reloaded_lw.renderers[0].material, "matte");
+        assert_eq!(reloaded_lw.renderers[0].alpha, 0.5);
+        assert_eq!(reloaded_lw.renderers[0].edge_type, "edges");
+        assert_eq!(reloaded_lw.renderers[0].edge_width, 0.2);
+        assert_eq!(reloaded_lw.renderers[0].edge_color, "#123456");
         assert!(reloaded_lw.renderers[0].locked);
         assert_eq!(reloaded_lw.renderers[1].name, "alternate");
         assert_eq!(reloaded_lw.renderers[1].data_id, 42);
         assert!(!reloaded_lw.renderers[1].visible);
-        assert_eq!(
-            reloaded
-                .active_render_snapshot("")
-                .unwrap()
-                .mesh_triangle_count(),
-            4
-        );
+        let rendered = reloaded.active_render_snapshot("").unwrap();
+        assert_eq!(rendered.mesh_triangle_count(), 5);
+        assert!(rendered.meshes.iter().any(|mesh| {
+            mesh.vertices
+                .iter()
+                .any(|vertex| (vertex.color[3] - 0.5).abs() < f32::EPSILON)
+        }));
 
         for path in [
             ply_path,
