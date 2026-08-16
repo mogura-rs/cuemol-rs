@@ -4889,7 +4889,11 @@ impl AppModel {
         self.status = format!("Scene file: [{path}] is loaded.");
         self.undo_stack.clear();
         self.redo_stack.clear();
-        self.modified_scenes.remove(&scene_uid);
+        if self.desktop.active_scene_source_path().is_some() {
+            self.modified_scenes.remove(&scene_uid);
+        } else {
+            self.modified_scenes.insert(scene_uid);
+        }
         self.touch_structure_details();
         self.invalidate_mesh(saved_camera.is_none());
         Ok(())
@@ -12579,6 +12583,14 @@ mod tests {
         assert_eq!(update.snapshot.opened_paths, [first_path.to_string_lossy()]);
         assert!(!update.snapshot.can_undo);
         assert!(!update.snapshot.scenes[0].modified);
+        assert_eq!(
+            update.snapshot.scenes[0].name,
+            first_path.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            update.snapshot.scenes[0].source,
+            first_path.to_string_lossy()
+        );
         assert_eq!(update.snapshot.scenes[0].source_type, "qsc_xml");
         assert!(model.mesh_refit_pending);
 
@@ -12664,10 +12676,12 @@ mod tests {
             .scene_manager()
             .scene(empty_scene_uid)
             .unwrap();
-        assert_eq!(scene.source_type(), "psefile");
-        assert_eq!(scene.source(), path.to_string_lossy());
+        assert_eq!(scene.name(), path.file_name().unwrap().to_string_lossy());
+        assert!(scene.source().is_empty());
+        assert!(scene.source_type().is_empty());
+        assert!(scene.base_path().is_empty());
         assert!(!snapshot.can_undo);
-        assert!(!snapshot.scenes[0].modified);
+        assert!(snapshot.scenes[0].modified);
     }
 
     #[test]

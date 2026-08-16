@@ -11,7 +11,7 @@ use cuemol_gfx::{RawHitData, SolidColor};
 use cuemol_qsys::{Camera, CenterMark, StereoMode, StyleManager, View};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const OBJECT_UID_BASE: u64 = 1_000_000_000;
 const RENDERER_UID_BASE: u64 = 2_000_000_000;
@@ -3367,8 +3367,8 @@ impl MolCommandManager {
         file_path: impl AsRef<Path>,
         target_scene: Option<Uid>,
     ) -> Result<LoadSceneResult> {
-        let file_path = file_path.as_ref();
-        let input = fs::read(file_path)?;
+        let file_path = absolute_scene_path(file_path.as_ref())?;
+        let input = fs::read(&file_path)?;
         if let Ok(text) = std::str::from_utf8(&input) {
             if let Some((oid, size)) = parse_git_lfs_pointer(text) {
                 return Ok(LoadSceneResult {
@@ -3379,8 +3379,7 @@ impl MolCommandManager {
         }
 
         let scene_name = file_path
-            .file_stem()
-            .or_else(|| file_path.file_name())
+            .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "loaded scene".to_string());
@@ -3449,6 +3448,14 @@ impl MolCommandManager {
         Ok(NewRendererResult {
             result_renderer: renderer_uid,
         })
+    }
+}
+
+fn absolute_scene_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
     }
 }
 
@@ -5092,5 +5099,32 @@ opaque payload
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn scene_command_uses_absolute_source_and_leaf_name() {
+        let relative_dir = PathBuf::from("target")
+            .join(format!("cuemol-scene-source-test-{}", std::process::id()));
+        fs::create_dir_all(&relative_dir).unwrap();
+        let relative_path = relative_dir.join("named.qsc");
+        fs::write(&relative_path, "<scene/>").unwrap();
+        let expected_path = std::env::current_dir().unwrap().join(&relative_path);
+
+        let mut manager = MolCommandManager::new();
+        let scene_uid = manager
+            .load_scene_command(&relative_path, None)
+            .unwrap()
+            .result_scene
+            .unwrap();
+        let scene = manager.scene_manager().scene(scene_uid).unwrap();
+        assert_eq!(scene.name(), "named.qsc");
+        assert_eq!(scene.source(), expected_path.to_string_lossy());
+        assert_eq!(scene.source_type(), "qsc_xml");
+        assert_eq!(
+            scene.base_path(),
+            expected_path.parent().unwrap().to_string_lossy()
+        );
+
+        fs::remove_dir_all(relative_dir).unwrap();
     }
 }

@@ -7684,8 +7684,7 @@ impl DesktopAppState {
             }
 
             let scene_name = path
-                .file_stem()
-                .or_else(|| path.file_name())
+                .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| "loaded scene".to_string());
@@ -7705,13 +7704,9 @@ impl DesktopAppState {
                 .scene_manager_mut()
                 .scene_mut(scene_uid)
                 .expect("the PSE target scene must remain live");
-            scene.set_source(path.to_string_lossy());
-            scene.set_source_type("psefile");
-            scene.set_base_path(
-                path.parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .to_string_lossy(),
-            );
+            scene.set_source("");
+            scene.set_source_type("");
+            scene.set_base_path("");
             self.active_scene = Some(scene_uid);
             if let Some(camera) = self.active_scene_saved_camera() {
                 self.set_active_view_camera(&camera)?;
@@ -9005,6 +9000,7 @@ impl DesktopAppState {
         options: GuiSceneSaveOptions,
     ) -> Result<()> {
         let path = path.as_ref();
+        let source_path = absolute_scene_path(path)?;
         let scene_uid = self
             .active_scene
             .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
@@ -9023,11 +9019,17 @@ impl DesktopAppState {
             }
         }
         scene.set_qsc_options(Some(qsc_save_options_node(options)))?;
-        scene.set_name(default_object_name(path));
-        scene.set_source(path.to_string_lossy());
+        scene.set_name(
+            source_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "scene.qsc".to_string()),
+        );
+        scene.set_source(source_path.to_string_lossy());
         scene.set_source_type("qsc_xml");
         scene.set_base_path(
-            path.parent()
+            source_path
+                .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .to_string_lossy(),
         );
@@ -45759,6 +45761,14 @@ fn read_extension_molecule(path: &Path, format: &str) -> Result<MolCoord> {
     }
 }
 
+fn absolute_scene_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
 fn default_object_name(path: &Path) -> String {
     let stem = path
         .file_stem()
@@ -55955,6 +55965,10 @@ end_header
                 .source_type(),
             "qsc_xml"
         );
+        assert_eq!(
+            app.active_scene_summary().unwrap().name,
+            fixture.file_name().unwrap().to_string_lossy()
+        );
         let camera = app
             .active_scene_saved_camera()
             .expect("the .qsc's saved camera must be restored");
@@ -58410,6 +58424,11 @@ attribute \"dep\" string \"positions\"
                 .source_type(),
             "qsc_xml"
         );
+        assert_eq!(
+            app.active_scene_summary().unwrap().name,
+            linked_path.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(app.active_scene_source_path(), Some(linked_path.as_path()));
         let linked = std::fs::read_to_string(&linked_path).unwrap();
         assert!(linked.contains("<scene>"));
         assert!(linked.contains("name=\"__current\""));

@@ -9173,7 +9173,11 @@ impl GuiApplication {
         match self.state.open_scene_file(&path, reusable_scene) {
             Ok(scene_uid) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.remove(&scene_uid);
+                if self.state.active_scene_source_path().is_some() {
+                    self.modified_scenes.remove(&scene_uid);
+                } else {
+                    self.modified_scenes.insert(scene_uid);
+                }
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
@@ -23424,6 +23428,25 @@ mod tests {
         assert_eq!(app.state.active_view_camera().unwrap().zoom(), 73.0);
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn native_open_pse_remains_an_unsaved_modified_scene() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../cuemol-importers/tests/fixtures/mol3.pse");
+        let mut app = GuiApplication::new();
+        let empty_scene_uid = app.state.active_scene().unwrap();
+        let mut camera = CameraController::default();
+        app.open_path = path.to_string_lossy().into_owned();
+        app.open_scene_current_path(&mut camera);
+
+        let scene = app.state.scene_manager().scene(empty_scene_uid).unwrap();
+        assert_eq!(scene.name(), path.file_name().unwrap().to_string_lossy());
+        assert!(scene.source().is_empty());
+        assert!(scene.source_type().is_empty());
+        assert!(scene.base_path().is_empty());
+        assert!(app.modified_scenes.contains(&empty_scene_uid));
+        assert!(!app.state.active_object_summaries().is_empty());
     }
 
     #[test]
