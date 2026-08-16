@@ -1578,7 +1578,6 @@ impl NativeWorkspaceTarget {
         matches!(
             self,
             Self::Renderer {
-                owner: NativePropertyObject::Molecule(_),
                 is_group: false,
                 ..
             }
@@ -5538,7 +5537,15 @@ impl GuiApplication {
             .workspace_multiple_selection
             .iter()
             .copied()
-            .all(NativeWorkspaceTarget::is_copyable_renderer);
+            .all(NativeWorkspaceTarget::is_copyable_renderer)
+            && self
+                .workspace_multiple_selection
+                .first()
+                .is_some_and(|first| {
+                    self.workspace_multiple_selection.iter().all(|target| {
+                        target.owner().workspace_kind() == first.owner().workspace_kind()
+                    })
+                });
         if ui
             .add_enabled(copy_enabled, egui::Button::new("Copy"))
             .clicked()
@@ -6707,16 +6714,16 @@ impl GuiApplication {
             .iter()
             .filter_map(|target| match target {
                 NativeWorkspaceTarget::Renderer {
-                    owner: NativePropertyObject::Molecule(object_uid),
+                    owner,
                     renderer_uid,
                     is_group: false,
                     ..
-                } => Some((*object_uid, *renderer_uid)),
+                } => Some((owner.uid(), *renderer_uid)),
                 _ => None,
             })
             .collect::<Vec<_>>();
         if targets.len() != self.workspace_multiple_selection.len() || targets.is_empty() {
-            self.set_status("Multiple copy requires molecule renderers");
+            self.set_status("Multiple copy requires regular renderers");
             return;
         }
         match self.state.copy_workspace_renderers(&targets) {
@@ -26734,6 +26741,31 @@ mod tests {
             .iter()
             .all(|renderer| renderer.visible));
         assert!(app.undo_stack.is_empty());
+
+        let map_uid = app
+            .state
+            .add_density_map(scene_uid, "map", cuemol_xtal::DensityMap::new());
+        let first_map_uid = app.state.add_density_renderer(map_uid, "contour").unwrap();
+        let second_map_uid = app.state.add_density_renderer(map_uid, "isosurf").unwrap();
+        let map_owner = NativePropertyObject::DensityMap(map_uid);
+        app.workspace_multiple_selection = vec![
+            NativeWorkspaceTarget::Renderer {
+                scene_uid,
+                owner: map_owner,
+                renderer_uid: first_map_uid,
+                is_group: false,
+            },
+            NativeWorkspaceTarget::Renderer {
+                scene_uid,
+                owner: map_owner,
+                renderer_uid: second_map_uid,
+                is_group: false,
+            },
+        ];
+        app.copy_workspace_target_renderers();
+        let clipboard = app.workspace_renderer_clipboard.as_ref().unwrap();
+        assert_eq!(clipboard.kind(), crate::GuiWorkspaceObjectKind::DensityMap);
+        assert_eq!(clipboard.renderer_count(), 2);
     }
 
     #[test]

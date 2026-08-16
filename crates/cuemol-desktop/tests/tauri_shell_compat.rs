@@ -1443,6 +1443,10 @@ fn tauri_workspace_multiple_selection_matches_reference_actions() {
     assert!(JS.contains("!event.ctrlKey && !event.metaKey"));
     assert!(JS.contains("function workspaceMultipleContextItems()"));
     assert!(JS.contains("function showWorkspaceMultipleContextMenu(event, target)"));
+    assert!(JS.contains("function workspaceRendererTargetClipboardKind(target)"));
+    for kind in ["densityRenderer", "surfaceRenderer", "lwRenderer"] {
+        assert!(JS.contains(&format!("{kind}:")));
+    }
     assert!(JS.contains("invoke(\"copy_workspace_renderers\""));
     assert!(JS.contains("mutate(\"set_workspace_items_visible\""));
     assert!(JS.contains("mutate(\"delete_workspace_items\""));
@@ -1453,6 +1457,7 @@ fn tauri_workspace_multiple_selection_matches_reference_actions() {
     assert!(NATIVE_GUI_RS.contains("input.modifiers.command"));
     assert!(NATIVE_GUI_RS.contains("fn workspace_multiple_context_menu"));
     assert!(NATIVE_GUI_RS.contains("fn copy_workspace_target_renderers"));
+    assert!(NATIVE_GUI_RS.contains("Some((owner.uid(), *renderer_uid))"));
     assert!(NATIVE_GUI_RS.contains("fn set_workspace_targets_visible"));
     assert!(NATIVE_GUI_RS.contains("fn delete_workspace_targets"));
 }

@@ -6772,6 +6772,15 @@ async function copyWorkspaceRenderer(objectUid, rendererUid, kind = "object") {
   }
 }
 
+function workspaceRendererTargetClipboardKind(target) {
+  return {
+    renderer: "object",
+    densityRenderer: "densityMap",
+    surfaceRenderer: "surface",
+    lwRenderer: "lwObject",
+  }[target?.selectionKind] || null;
+}
+
 async function copyWorkspaceRenderers(targets) {
   if (!invoke) return false;
   setBusy(true);
@@ -6783,7 +6792,7 @@ async function copyWorkspaceRenderers(targets) {
       })),
     });
     workspaceRendererClipboardAvailable = true;
-    workspaceRendererClipboardKind = "object";
+    workspaceRendererClipboardKind = workspaceRendererTargetClipboardKind(targets[0]);
     snapshot.status = status;
     renderStatusAndLog();
     return true;
@@ -8749,9 +8758,15 @@ function workspaceTargetExists(target) {
 
 function workspaceMultipleContextItems() {
   const targets = [...workspaceMultipleSelection];
-  const copyEnabled = targets.every(
-    (target) => target.kind === "renderer" && target.selectionKind === "renderer",
-  );
+  const clipboardKind = workspaceRendererTargetClipboardKind(targets[0]);
+  const copyEnabled =
+    Boolean(clipboardKind) &&
+    targets.every(
+      (target) =>
+        target.kind !== "rendererGroup" &&
+        target.rendererUid !== null &&
+        workspaceRendererTargetClipboardKind(target) === clipboardKind,
+    );
   const setVisible = (visible) => () =>
     mutate("set_workspace_items_visible", {
       targets: targets.map(workspaceCommandTarget),

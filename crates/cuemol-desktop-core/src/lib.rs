@@ -571,11 +571,13 @@ enum WorkspaceRendererClipboardData {
         renderers: Vec<MolRenderer>,
     },
     DensityMap(GuiDensityRenderer),
+    DensityMapList(Vec<GuiDensityRenderer>),
     DensityMapGroup {
         group: LDom2Node,
         renderers: Vec<GuiDensityRenderer>,
     },
     Surface(LDom2Node),
+    SurfaceList(Vec<LDom2Node>),
     SurfaceGroup {
         group: LDom2Node,
         renderers: Vec<LDom2Node>,
@@ -584,6 +586,7 @@ enum WorkspaceRendererClipboardData {
         renderer: LoadedLWRenderer,
         node: LDom2Node,
     },
+    LightweightList(Vec<(LoadedLWRenderer, LDom2Node)>),
     LightweightGroup {
         group: LDom2Node,
         renderers: Vec<(LoadedLWRenderer, LDom2Node)>,
@@ -594,8 +597,11 @@ impl WorkspaceRendererClipboard {
     pub fn renderer_count(&self) -> usize {
         match &self.renderer {
             WorkspaceRendererClipboardData::Molecule { renderers, .. } => renderers.len(),
+            WorkspaceRendererClipboardData::DensityMapList(renderers) => renderers.len(),
             WorkspaceRendererClipboardData::DensityMapGroup { renderers, .. } => renderers.len(),
+            WorkspaceRendererClipboardData::SurfaceList(renderers) => renderers.len(),
             WorkspaceRendererClipboardData::SurfaceGroup { renderers, .. } => renderers.len(),
+            WorkspaceRendererClipboardData::LightweightList(renderers) => renderers.len(),
             WorkspaceRendererClipboardData::LightweightGroup { renderers, .. } => renderers.len(),
             WorkspaceRendererClipboardData::DensityMap(_)
             | WorkspaceRendererClipboardData::Surface(_)
@@ -619,14 +625,17 @@ impl WorkspaceRendererClipboard {
         match self.renderer {
             WorkspaceRendererClipboardData::Molecule { .. } => GuiWorkspaceObjectKind::Molecule,
             WorkspaceRendererClipboardData::DensityMap(_)
+            | WorkspaceRendererClipboardData::DensityMapList(_)
             | WorkspaceRendererClipboardData::DensityMapGroup { .. } => {
                 GuiWorkspaceObjectKind::DensityMap
             }
             WorkspaceRendererClipboardData::Surface(_)
+            | WorkspaceRendererClipboardData::SurfaceList(_)
             | WorkspaceRendererClipboardData::SurfaceGroup { .. } => {
                 GuiWorkspaceObjectKind::Surface
             }
             WorkspaceRendererClipboardData::Lightweight { .. }
+            | WorkspaceRendererClipboardData::LightweightList(_)
             | WorkspaceRendererClipboardData::LightweightGroup { .. } => {
                 GuiWorkspaceObjectKind::Lightweight
             }
@@ -3380,6 +3389,13 @@ impl DesktopAppState {
             | WorkspaceRendererClipboardData::LightweightGroup { .. } => {
                 return Err(CueMolError::invalid_argument(
                     "renderer groups cannot be saved as styles",
+                ));
+            }
+            WorkspaceRendererClipboardData::DensityMapList(_)
+            | WorkspaceRendererClipboardData::SurfaceList(_)
+            | WorkspaceRendererClipboardData::LightweightList(_) => {
+                return Err(CueMolError::invalid_argument(
+                    "multiple renderers cannot be saved as one style",
                 ));
             }
         };
@@ -8037,30 +8053,84 @@ impl DesktopAppState {
                 "at least one renderer is required",
             ));
         }
-        let renderers = targets
+        let clipboards = targets
             .iter()
             .map(|(object_uid, renderer_uid)| {
-                let object = self
-                    .scene_manager()
-                    .object(*object_uid)
-                    .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-                let renderer = object.renderer(*renderer_uid).ok_or_else(|| {
-                    CueMolError::NotFound(format!("renderer {}", renderer_uid.get()))
-                })?;
-                if renderer.renderer_type() == "*group" {
-                    return Err(CueMolError::invalid_argument(
-                        "renderer groups cannot be included in a multiple copy",
-                    ));
-                }
-                Ok(renderer.clone())
+                self.copy_workspace_renderer(*object_uid, *renderer_uid)
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(WorkspaceRendererClipboard {
-            renderer: WorkspaceRendererClipboardData::Molecule {
-                group_name: None,
-                renderers,
-            },
-        })
+        if clipboards.iter().any(WorkspaceRendererClipboard::is_group) {
+            return Err(CueMolError::invalid_argument(
+                "renderer groups cannot be included in a multiple copy",
+            ));
+        }
+        let kind = clipboards[0].kind();
+        if clipboards.iter().any(|clipboard| clipboard.kind() != kind) {
+            return Err(CueMolError::invalid_argument(
+                "multiple renderer copy requires one object type",
+            ));
+        }
+        let renderer = match kind {
+            GuiWorkspaceObjectKind::Molecule => {
+                let mut renderers = Vec::with_capacity(clipboards.len());
+                for clipboard in clipboards {
+                    let WorkspaceRendererClipboardData::Molecule {
+                        group_name: None,
+                        renderers: mut source,
+                    } = clipboard.renderer
+                    else {
+                        unreachable!("molecule clipboard kind was checked")
+                    };
+                    renderers.append(&mut source);
+                }
+                WorkspaceRendererClipboardData::Molecule {
+                    group_name: None,
+                    renderers,
+                }
+            }
+            GuiWorkspaceObjectKind::DensityMap => {
+                let renderers = clipboards
+                    .into_iter()
+                    .map(|clipboard| {
+                        let WorkspaceRendererClipboardData::DensityMap(renderer) =
+                            clipboard.renderer
+                        else {
+                            unreachable!("density-map clipboard kind was checked")
+                        };
+                        renderer
+                    })
+                    .collect();
+                WorkspaceRendererClipboardData::DensityMapList(renderers)
+            }
+            GuiWorkspaceObjectKind::Surface => {
+                let renderers = clipboards
+                    .into_iter()
+                    .map(|clipboard| {
+                        let WorkspaceRendererClipboardData::Surface(renderer) = clipboard.renderer
+                        else {
+                            unreachable!("surface clipboard kind was checked")
+                        };
+                        renderer
+                    })
+                    .collect();
+                WorkspaceRendererClipboardData::SurfaceList(renderers)
+            }
+            GuiWorkspaceObjectKind::Lightweight => {
+                let renderers = clipboards
+                    .into_iter()
+                    .map(|clipboard| {
+                        let WorkspaceRendererClipboardData::Lightweight { renderer, node } =
+                            clipboard.renderer
+                        else {
+                            unreachable!("lightweight clipboard kind was checked")
+                        };
+                        (renderer, node)
+                    })
+                    .collect();
+                WorkspaceRendererClipboardData::LightweightList(renderers)
+            }
+        };
+        Ok(WorkspaceRendererClipboard { renderer })
     }
 
     pub fn paste_workspace_renderers(
@@ -8121,6 +8191,24 @@ impl DesktopAppState {
                 Ok(WorkspaceRendererPasteResult {
                     group_uid: None,
                     renderer_uids: vec![uid],
+                })
+            }
+            WorkspaceRendererClipboardData::DensityMapList(renderers) => {
+                let mut renderer_uids = Vec::with_capacity(renderers.len());
+                for renderer in renderers {
+                    let clipboard = WorkspaceRendererClipboard {
+                        renderer: WorkspaceRendererClipboardData::DensityMap(renderer.clone()),
+                    };
+                    let pasted = self.paste_workspace_renderers(
+                        object_uid,
+                        destination_group_uid,
+                        &clipboard,
+                    )?;
+                    renderer_uids.extend(pasted.renderer_uids);
+                }
+                Ok(WorkspaceRendererPasteResult {
+                    group_uid: None,
+                    renderer_uids,
                 })
             }
             WorkspaceRendererClipboardData::DensityMapGroup { group, renderers } => {
@@ -8226,6 +8314,24 @@ impl DesktopAppState {
                 Ok(WorkspaceRendererPasteResult {
                     group_uid: None,
                     renderer_uids: vec![uid],
+                })
+            }
+            WorkspaceRendererClipboardData::SurfaceList(renderers) => {
+                let mut renderer_uids = Vec::with_capacity(renderers.len());
+                for renderer in renderers {
+                    let clipboard = WorkspaceRendererClipboard {
+                        renderer: WorkspaceRendererClipboardData::Surface(renderer.clone()),
+                    };
+                    let pasted = self.paste_workspace_renderers(
+                        object_uid,
+                        destination_group_uid,
+                        &clipboard,
+                    )?;
+                    renderer_uids.extend(pasted.renderer_uids);
+                }
+                Ok(WorkspaceRendererPasteResult {
+                    group_uid: None,
+                    renderer_uids,
                 })
             }
             WorkspaceRendererClipboardData::SurfaceGroup { group, renderers } => {
@@ -8340,6 +8446,27 @@ impl DesktopAppState {
                 Ok(WorkspaceRendererPasteResult {
                     group_uid: None,
                     renderer_uids: vec![uid],
+                })
+            }
+            WorkspaceRendererClipboardData::LightweightList(renderers) => {
+                let mut renderer_uids = Vec::with_capacity(renderers.len());
+                for (renderer, node) in renderers {
+                    let clipboard = WorkspaceRendererClipboard {
+                        renderer: WorkspaceRendererClipboardData::Lightweight {
+                            renderer: renderer.clone(),
+                            node: node.clone(),
+                        },
+                    };
+                    let pasted = self.paste_workspace_renderers(
+                        object_uid,
+                        destination_group_uid,
+                        &clipboard,
+                    )?;
+                    renderer_uids.extend(pasted.renderer_uids);
+                }
+                Ok(WorkspaceRendererPasteResult {
+                    group_uid: None,
+                    renderer_uids,
                 })
             }
             WorkspaceRendererClipboardData::LightweightGroup { group, renderers } => {
@@ -56448,6 +56575,91 @@ end_header
                 .as_deref(),
             Some("overlays(1)")
         );
+    }
+
+    #[test]
+    fn workspace_renderer_clipboard_copies_multiple_auxiliary_renderers() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("clipboard", false).result_scene;
+
+        let map_uid = app.add_density_map(scene_uid, "map", DensityMap::new());
+        let first_map_uid = app.add_density_renderer(map_uid, "contour").unwrap();
+        let second_map_uid = app.add_density_renderer(map_uid, "isosurf").unwrap();
+        let map_clipboard = app
+            .copy_workspace_renderers(&[(map_uid, first_map_uid), (map_uid, second_map_uid)])
+            .unwrap();
+        assert_eq!(map_clipboard.kind(), GuiWorkspaceObjectKind::DensityMap);
+        assert_eq!(map_clipboard.renderer_count(), 2);
+        let pasted = app
+            .paste_workspace_renderers(map_uid, None, &map_clipboard)
+            .unwrap();
+        assert_eq!(pasted.renderer_uids.len(), 2);
+        assert_eq!(app.density_map_summary(map_uid).unwrap().renderers.len(), 4);
+
+        let data = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: data.to_string(),
+                raw_data: data.as_bytes().to_vec(),
+                qsc_node: None,
+            });
+        let first_surface_uid = app.surface_summary(surface_uid).unwrap().renderers[0].uid;
+        let second_surface_uid = app.add_surface_renderer(surface_uid).unwrap();
+        let surface_clipboard = app
+            .copy_workspace_renderers(&[
+                (surface_uid, first_surface_uid),
+                (surface_uid, second_surface_uid),
+            ])
+            .unwrap();
+        assert_eq!(surface_clipboard.kind(), GuiWorkspaceObjectKind::Surface);
+        assert_eq!(surface_clipboard.renderer_count(), 2);
+        let pasted = app
+            .paste_workspace_renderers(surface_uid, None, &surface_clipboard)
+            .unwrap();
+        assert_eq!(pasted.renderer_uids.len(), 2);
+        assert_eq!(app.surface_summary(surface_uid).unwrap().renderers.len(), 4);
+
+        let lw_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_lw_object(LoadedLWObject {
+                uid: Uid::new(0),
+                name: "lightweight".to_string(),
+                srctype: "qdflwobj".to_string(),
+                raw_data: Vec::new(),
+                visible: true,
+                xform: Matrix4::IDENTITY,
+                renderers: Vec::new(),
+                qsc_node: None,
+            });
+        let first_lw_uid = app.add_lw_renderer(lw_uid).unwrap();
+        let second_lw_uid = app.add_lw_renderer(lw_uid).unwrap();
+        let lw_clipboard = app
+            .copy_workspace_renderers(&[(lw_uid, first_lw_uid), (lw_uid, second_lw_uid)])
+            .unwrap();
+        assert_eq!(lw_clipboard.kind(), GuiWorkspaceObjectKind::Lightweight);
+        assert_eq!(lw_clipboard.renderer_count(), 2);
+        let pasted = app
+            .paste_workspace_renderers(lw_uid, None, &lw_clipboard)
+            .unwrap();
+        assert_eq!(pasted.renderer_uids.len(), 2);
+        assert_eq!(app.lw_object_summary(lw_uid).unwrap().renderers.len(), 4);
+
+        assert!(app
+            .copy_workspace_renderers(
+                &[(map_uid, first_map_uid), (surface_uid, first_surface_uid),]
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("one object type"));
     }
 
     #[test]
