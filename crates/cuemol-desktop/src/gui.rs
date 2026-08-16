@@ -1548,18 +1548,30 @@ enum NativeWorkspaceTarget {
         renderer_uid: cuemol_core::Uid,
         is_group: bool,
     },
+    Camera {
+        scene_uid: cuemol_core::Uid,
+        camera_index: usize,
+    },
+    Style {
+        scene_uid: cuemol_core::Uid,
+        style_index: usize,
+    },
 }
 
 impl NativeWorkspaceTarget {
     fn scene_uid(self) -> cuemol_core::Uid {
         match self {
-            Self::Object { scene_uid, .. } | Self::Renderer { scene_uid, .. } => scene_uid,
+            Self::Object { scene_uid, .. }
+            | Self::Renderer { scene_uid, .. }
+            | Self::Camera { scene_uid, .. }
+            | Self::Style { scene_uid, .. } => scene_uid,
         }
     }
 
-    fn owner(self) -> NativePropertyObject {
+    fn owner(self) -> Option<NativePropertyObject> {
         match self {
-            Self::Object { owner, .. } | Self::Renderer { owner, .. } => owner,
+            Self::Object { owner, .. } | Self::Renderer { owner, .. } => Some(owner),
+            Self::Camera { .. } | Self::Style { .. } => None,
         }
     }
 
@@ -1567,6 +1579,7 @@ impl NativeWorkspaceTarget {
         match self {
             Self::Object { .. } => None,
             Self::Renderer { renderer_uid, .. } => Some(renderer_uid),
+            Self::Camera { .. } | Self::Style { .. } => None,
         }
     }
 
@@ -1576,6 +1589,10 @@ impl NativeWorkspaceTarget {
 
     fn is_copyable_renderer(self) -> bool {
         matches!(self, Self::Renderer { .. })
+    }
+
+    fn workspace_kind(self) -> Option<crate::GuiWorkspaceObjectKind> {
+        self.owner().map(NativePropertyObject::workspace_kind)
     }
 }
 
@@ -4323,6 +4340,35 @@ impl GuiApplication {
             });
         }
         let selection = self.workspace_aux_selection?;
+        match selection {
+            WorkspaceAuxSelection::Camera {
+                scene_uid,
+                camera_index,
+            } => {
+                return Some(NativeWorkspaceTarget::Camera {
+                    scene_uid,
+                    camera_index,
+                });
+            }
+            WorkspaceAuxSelection::Style {
+                scene_uid,
+                style_index,
+            } => {
+                if self
+                    .state
+                    .style_summaries(scene_uid)
+                    .get(style_index)
+                    .is_some_and(|style| style.local_index.is_some())
+                {
+                    return Some(NativeWorkspaceTarget::Style {
+                        scene_uid,
+                        style_index,
+                    });
+                }
+                return None;
+            }
+            _ => {}
+        }
         let (scene_uid, owner, renderer_uid) = match selection {
             WorkspaceAuxSelection::DensityMap {
                 scene_uid,
@@ -4372,33 +4418,58 @@ impl GuiApplication {
         self.selected_object = None;
         self.selected_renderer = None;
         self.workspace_aux_selection = None;
-        let scene_uid = target.scene_uid();
-        let owner = target.owner();
-        let renderer_uid = target.renderer_uid();
-        match owner {
-            NativePropertyObject::Molecule(object_uid) => {
-                self.selected_object = Some(object_uid);
-                self.selected_renderer = renderer_uid;
+        match target {
+            NativeWorkspaceTarget::Object {
+                scene_uid, owner, ..
             }
-            NativePropertyObject::DensityMap(map_uid) => {
-                self.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
+            | NativeWorkspaceTarget::Renderer {
+                scene_uid, owner, ..
+            } => {
+                let renderer_uid = target.renderer_uid();
+                match owner {
+                    NativePropertyObject::Molecule(object_uid) => {
+                        self.selected_object = Some(object_uid);
+                        self.selected_renderer = renderer_uid;
+                    }
+                    NativePropertyObject::DensityMap(map_uid) => {
+                        self.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
+                            scene_uid,
+                            map_uid,
+                            renderer_uid,
+                        });
+                    }
+                    NativePropertyObject::Surface(surface_uid) => {
+                        self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
+                            scene_uid,
+                            surface_uid,
+                            renderer_uid,
+                        });
+                    }
+                    NativePropertyObject::Lightweight(object_uid) => {
+                        self.workspace_aux_selection = Some(WorkspaceAuxSelection::Lightweight {
+                            scene_uid,
+                            object_uid,
+                            renderer_uid,
+                        });
+                    }
+                }
+            }
+            NativeWorkspaceTarget::Camera {
+                scene_uid,
+                camera_index,
+            } => {
+                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Camera {
                     scene_uid,
-                    map_uid,
-                    renderer_uid,
+                    camera_index,
                 });
             }
-            NativePropertyObject::Surface(surface_uid) => {
-                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
+            NativeWorkspaceTarget::Style {
+                scene_uid,
+                style_index,
+            } => {
+                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Style {
                     scene_uid,
-                    surface_uid,
-                    renderer_uid,
-                });
-            }
-            NativePropertyObject::Lightweight(object_uid) => {
-                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Lightweight {
-                    scene_uid,
-                    object_uid,
-                    renderer_uid,
+                    style_index,
                 });
             }
         }
@@ -4429,7 +4500,12 @@ impl GuiApplication {
             targets.remove(index);
         } else {
             targets.retain(|candidate| {
-                if candidate.owner() != target.owner() {
+                let (Some(candidate_owner), Some(target_owner)) =
+                    (candidate.owner(), target.owner())
+                else {
+                    return true;
+                };
+                if candidate_owner != target_owner {
                     return true;
                 }
                 if candidate.renderer_uid().is_none() || target.renderer_uid().is_none() {
@@ -5049,8 +5125,15 @@ impl GuiApplication {
                             scene_uid: scene.uid,
                             camera_index,
                         };
-                        let selected = self.selected_object.is_none()
-                            && self.workspace_aux_selection == Some(selection);
+                        let target = NativeWorkspaceTarget::Camera {
+                            scene_uid: scene.uid,
+                            camera_index,
+                        };
+                        let selected = self.workspace_target_selected(
+                            target,
+                            self.selected_object.is_none()
+                                && self.workspace_aux_selection == Some(selection),
+                        );
                         let mut label = summary.name.clone();
                         if !summary.source.is_empty() {
                             label.push_str("  ↗");
@@ -5061,15 +5144,21 @@ impl GuiApplication {
                         let response = ui.selectable_label(selected, label);
                         if response.clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
-                            self.workspace_multiple_selection.clear();
-                            self.selected_object = None;
-                            self.selected_renderer = None;
-                            self.workspace_aux_selection = Some(selection);
+                            let multiple = ui.input(|input| input.modifiers.command);
+                            if !self.select_workspace_target(target, multiple) {
+                                self.selected_object = None;
+                                self.selected_renderer = None;
+                                self.workspace_aux_selection = Some(selection);
+                            }
                         }
                         if response.double_clicked() {
                             self.load_workspace_camera(selection, camera);
                         }
                         response.context_menu(|ui| {
+                            if self.workspace_multiple_selection.contains(&target) {
+                                self.workspace_multiple_context_menu(ui);
+                                return;
+                            }
                             self.workspace_multiple_selection.clear();
                             ui.weak(&summary.name);
                             ui.separator();
@@ -5203,8 +5292,15 @@ impl GuiApplication {
                             scene_uid: scene.uid,
                             style_index,
                         };
-                        let selected = self.selected_object.is_none()
+                        let target = summary.local_index.map(|_| NativeWorkspaceTarget::Style {
+                            scene_uid: scene.uid,
+                            style_index,
+                        });
+                        let single_selected = self.selected_object.is_none()
                             && self.workspace_aux_selection == Some(selection);
+                        let selected = target.map_or(single_selected, |target| {
+                            self.workspace_target_selected(target, single_selected)
+                        });
                         let mut label = summary.name.clone();
                         if summary.read_only || summary.scene_uid.get() == 0 {
                             label.push_str("  🔒");
@@ -5215,15 +5311,26 @@ impl GuiApplication {
                         let response = ui.selectable_label(selected, label);
                         if response.clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
-                            self.workspace_multiple_selection.clear();
-                            self.selected_object = None;
-                            self.selected_renderer = None;
-                            self.workspace_aux_selection = Some(selection);
+                            let multiple = ui.input(|input| input.modifiers.command);
+                            if target.is_none_or(|target| {
+                                !self.select_workspace_target(target, multiple)
+                            }) {
+                                self.workspace_multiple_selection.clear();
+                                self.selected_object = None;
+                                self.selected_renderer = None;
+                                self.workspace_aux_selection = Some(selection);
+                            }
                         }
                         if response.double_clicked() && summary.local_index.is_some() {
                             self.open_style_properties(selection);
                         }
                         response.context_menu(|ui| {
+                            if target.is_some_and(|target| {
+                                self.workspace_multiple_selection.contains(&target)
+                            }) {
+                                self.workspace_multiple_context_menu(ui);
+                                return;
+                            }
                             self.workspace_multiple_selection.clear();
                             ui.weak(&summary.name);
                             ui.separator();
@@ -5536,9 +5643,9 @@ impl GuiApplication {
                 .workspace_multiple_selection
                 .first()
                 .is_some_and(|first| {
-                    self.workspace_multiple_selection.iter().all(|target| {
-                        target.owner().workspace_kind() == first.owner().workspace_kind()
-                    })
+                    self.workspace_multiple_selection
+                        .iter()
+                        .all(|target| target.workspace_kind() == first.workspace_kind())
                 });
         if ui
             .add_enabled(copy_enabled, egui::Button::new("Copy"))
@@ -6777,6 +6884,7 @@ impl GuiApplication {
                     .state
                     .set_lw_renderer_visible(object_uid, renderer_uid, visible),
             },
+            NativeWorkspaceTarget::Camera { .. } | NativeWorkspaceTarget::Style { .. } => Ok(()),
         }
     }
 
@@ -6855,6 +6963,30 @@ impl GuiApplication {
                     self.state.destroy_lw_renderer(object_uid, renderer_uid)
                 }
             },
+            NativeWorkspaceTarget::Camera {
+                scene_uid,
+                camera_index,
+            } => {
+                let name = self
+                    .state
+                    .camera_summaries(scene_uid)
+                    .get(camera_index)
+                    .map(|camera| camera.name.clone())
+                    .ok_or_else(|| CueMolError::NotFound("Workspace camera".to_string()))?;
+                self.state.destroy_scene_camera(scene_uid, &name)
+            }
+            NativeWorkspaceTarget::Style {
+                scene_uid,
+                style_index,
+            } => {
+                let local_index = self
+                    .state
+                    .style_summaries(scene_uid)
+                    .get(style_index)
+                    .and_then(|style| style.local_index)
+                    .ok_or_else(|| CueMolError::NotFound("Workspace style".to_string()))?;
+                self.state.destroy_scene_style(scene_uid, local_index)
+            }
         }?;
         if removed {
             Ok(())
@@ -6864,11 +6996,42 @@ impl GuiApplication {
     }
 
     fn delete_workspace_targets(&mut self) {
-        let targets = self.workspace_multiple_selection.clone();
+        let mut targets = self.workspace_multiple_selection.clone();
         if targets.len() < 2 {
             self.set_status("Select multiple Workspace items");
             return;
         }
+        targets.sort_by(|left, right| match (left, right) {
+            (
+                NativeWorkspaceTarget::Style {
+                    scene_uid: left_scene,
+                    style_index: left_index,
+                },
+                NativeWorkspaceTarget::Style {
+                    scene_uid: right_scene,
+                    style_index: right_index,
+                },
+            ) => left_scene
+                .cmp(right_scene)
+                .then_with(|| right_index.cmp(left_index)),
+            (NativeWorkspaceTarget::Style { .. }, _) => std::cmp::Ordering::Less,
+            (_, NativeWorkspaceTarget::Style { .. }) => std::cmp::Ordering::Greater,
+            (
+                NativeWorkspaceTarget::Camera {
+                    scene_uid: left_scene,
+                    camera_index: left_index,
+                },
+                NativeWorkspaceTarget::Camera {
+                    scene_uid: right_scene,
+                    camera_index: right_index,
+                },
+            ) => left_scene
+                .cmp(right_scene)
+                .then_with(|| right_index.cmp(left_index)),
+            (NativeWorkspaceTarget::Camera { .. }, _) => std::cmp::Ordering::Less,
+            (_, NativeWorkspaceTarget::Camera { .. }) => std::cmp::Ordering::Greater,
+            _ => std::cmp::Ordering::Equal,
+        });
         let undo = self.capture_undo();
         let result = targets
             .iter()
@@ -26800,6 +26963,78 @@ mod tests {
             .unwrap()
             .renderer(child_uid)
             .is_some());
+    }
+
+    #[test]
+    fn native_workspace_multiple_camera_and_style_delete_is_undoable() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        for name in ["camera_0", "camera_1"] {
+            let mut camera = cuemol_qsys::Camera::new();
+            camera.set_name(name);
+            app.state
+                .save_scene_camera(scene_uid, camera, false)
+                .unwrap();
+        }
+        app.state.create_scene_style(scene_uid, "style_0").unwrap();
+        app.state.create_scene_style(scene_uid, "style_1").unwrap();
+        let style_indices = app
+            .state
+            .style_summaries(scene_uid)
+            .iter()
+            .enumerate()
+            .filter_map(|(index, style)| style.local_index.map(|_| index))
+            .collect::<Vec<_>>();
+        assert_eq!(style_indices.len(), 2);
+
+        let camera_0 = NativeWorkspaceTarget::Camera {
+            scene_uid,
+            camera_index: 0,
+        };
+        let camera_1 = NativeWorkspaceTarget::Camera {
+            scene_uid,
+            camera_index: 1,
+        };
+        let style_0 = NativeWorkspaceTarget::Style {
+            scene_uid,
+            style_index: style_indices[0],
+        };
+        let style_1 = NativeWorkspaceTarget::Style {
+            scene_uid,
+            style_index: style_indices[1],
+        };
+        app.apply_workspace_target(camera_0);
+        assert!(app.select_workspace_target(style_0, true));
+        assert!(app.select_workspace_target(camera_1, true));
+        assert!(app.select_workspace_target(style_1, true));
+        assert_eq!(app.workspace_multiple_selection.len(), 4);
+
+        app.delete_workspace_targets();
+        assert!(app.state.camera_summaries(scene_uid).is_empty());
+        assert!(app
+            .state
+            .style_summaries(scene_uid)
+            .iter()
+            .all(|style| style.local_index.is_none()));
+        assert_eq!(app.undo_stack.len(), 1);
+        assert!(app.workspace_multiple_selection.is_empty());
+
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert_eq!(app.state.camera_summaries(scene_uid).len(), 2);
+        assert_eq!(
+            app.state
+                .style_summaries(scene_uid)
+                .iter()
+                .filter(|style| style.local_index.is_some())
+                .count(),
+            2
+        );
+        assert_eq!(app.workspace_multiple_selection.len(), 4);
+
+        app.set_workspace_targets_visible(false);
+        assert_eq!(app.state.camera_summaries(scene_uid).len(), 2);
+        assert_eq!(app.undo_stack.len(), 1);
     }
 
     #[test]
