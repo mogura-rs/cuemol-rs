@@ -8624,6 +8624,32 @@ impl DesktopAppState {
             .expect("scene was checked above")
             .loaded_density_maps()
             .len();
+        let uid = Uid::new(self.next_density_map_uid);
+        self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
+        let ui_order = self.next_workspace_ui_order(scene_uid);
+        let object = GuiDensityMapObject {
+            uid,
+            scene_uid,
+            storage_index,
+            name: map_name.clone(),
+            class_name: if matches!(format, "apbs" | "qdfpot") {
+                "ElePotMap".to_string()
+            } else {
+                "DensityMap".to_string()
+            },
+            format: format.to_string(),
+            visible: true,
+            locked: false,
+            ui_collapsed: false,
+            ui_order,
+            modified: false,
+            source: path.to_string_lossy().into_owned(),
+            alt_source: String::new(),
+            xform: Matrix4::IDENTITY,
+            map,
+            renderers: Vec::new(),
+        };
+        let qsc_node = density_map_qsc_node(&object, format, &object.source);
         self.scene_manager_mut()
             .scene_mut(scene_uid)
             .expect("scene was checked above")
@@ -8637,39 +8663,12 @@ impl DesktopAppState {
                 srctype: "qdfmap".to_string(),
                 data: String::from_utf8_lossy(&raw_data).into_owned(),
                 raw_data,
-                qsc_node: None,
+                qsc_node: Some(qsc_node),
             });
         if format == "qdfpot" {
-            self.surface_potential = Some(map.clone());
+            self.surface_potential = Some(object.map.clone());
         }
-        let uid = Uid::new(self.next_density_map_uid);
-        self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
-        let ui_order = self.next_workspace_ui_order(scene_uid);
-        self.density_maps.insert(
-            uid,
-            GuiDensityMapObject {
-                uid,
-                scene_uid,
-                storage_index,
-                name: map_name,
-                class_name: if matches!(format, "apbs" | "qdfpot") {
-                    "ElePotMap".to_string()
-                } else {
-                    "DensityMap".to_string()
-                },
-                format: format.to_string(),
-                visible: true,
-                locked: false,
-                ui_collapsed: false,
-                ui_order,
-                modified: false,
-                source: path.to_string_lossy().into_owned(),
-                alt_source: String::new(),
-                xform: Matrix4::IDENTITY,
-                map,
-                renderers: Vec::new(),
-            },
-        );
+        self.density_maps.insert(uid, object);
         Ok(uid)
     }
 
@@ -8723,6 +8722,17 @@ impl DesktopAppState {
                 )))
             }
         };
+        let qsc_node = if format == "msms" {
+            None
+        } else {
+            let mut node = LDom2Node::new();
+            node.set_tag_name("object");
+            node.set_type_name("MolSurfObj");
+            node.set_str_attr("name", &object_name);
+            node.set_str_attr("src", path.to_string_lossy());
+            node.set_str_attr("srctype", format);
+            Some(node)
+        };
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
@@ -8734,7 +8744,7 @@ impl DesktopAppState {
             srctype: srctype.to_string(),
             data: String::from_utf8_lossy(&raw_data).into_owned(),
             raw_data,
-            qsc_node: None,
+            qsc_node,
         }))
     }
 
@@ -58811,6 +58821,70 @@ attribute \"dep\" string \"positions\"
         reloaded.load_qsc_file(&scene_path).unwrap();
         assert_eq!(reloaded.active_density_map_summaries().len(), 1);
         assert_eq!(reloaded.active_surface_summaries().len(), 1);
+
+        for path in [map_path, surface_path, scene_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn opened_density_and_surface_objects_remain_external_qsc_links() {
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-desktop-external-object-link-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let map_path = dir.join("input-map.qdf");
+        let surface_path = dir.join("input-surface.qdf");
+        let scene_path = dir.join("linked.qsc");
+
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(&[0, 127, 255], [3, 1, 1], -1.0, 1.0, 0.0, 0.8);
+        std::fs::write(&map_path, cuemol_xtal::write_qdf_denmap_bytes(&map)).unwrap();
+
+        let mut surface = MolSurfObj::new();
+        for position in [
+            Vector4::new3(0.0, 0.0, 0.0),
+            Vector4::new3(1.0, 0.0, 0.0),
+            Vector4::new3(0.0, 1.0, 0.0),
+        ] {
+            surface
+                .mesh_mut()
+                .push_vertex(cuemol_surface::SurfaceVertex {
+                    position,
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    info: 0,
+                });
+        }
+        surface.mesh_mut().push_triangle([0, 1, 2]);
+        std::fs::write(
+            &surface_path,
+            cuemol_surface::qdf::write_qdf_surface_bytes(&surface),
+        )
+        .unwrap();
+
+        let mut app = DesktopAppState::new();
+        assert!(matches!(
+            app.open_path(&map_path).unwrap(),
+            GuiLoadedPath::Map { .. }
+        ));
+        app.open_path(&surface_path).unwrap();
+        app.save_active_scene_qsc(&scene_path).unwrap();
+
+        let qsc = std::fs::read_to_string(&scene_path).unwrap();
+        assert!(qsc.contains(&format!("src=\"{}\"", map_path.to_string_lossy())));
+        assert!(qsc.contains(&format!("src=\"{}\"", surface_path.to_string_lossy())));
+        assert!(!qsc.contains("START datachunk:"));
+
+        let mut reloaded = DesktopAppState::new();
+        reloaded.load_qsc_file(&scene_path).unwrap();
+        let maps = reloaded.active_density_map_summaries();
+        let surfaces = reloaded.active_surface_summaries();
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].source, map_path.to_string_lossy());
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0].source, surface_path.to_string_lossy());
 
         for path in [map_path, surface_path, scene_path] {
             std::fs::remove_file(path).unwrap();
