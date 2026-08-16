@@ -483,8 +483,8 @@ impl SceneXMLReader {
         Self {
             handler: InOutHandler::new(
                 "qsc_xml",
-                "CueMol Scene (*.qsc;*.qsl)",
-                "*.qsc; *.qsl",
+                "CueMol Scene (*.qsc)",
+                "*.qsc",
                 InOutHandler::IOH_CAT_SCEREADER,
             ),
             client_scene: None,

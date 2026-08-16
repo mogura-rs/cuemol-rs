@@ -20636,10 +20636,16 @@ const OBJECT_OPEN_FILTERS: &[NativeFileFilter] = &[
         extensions: &["obj", "ply", "face", "vert"],
     },
 ];
-const SCENE_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
-    label: "CueMol scene",
-    extensions: &["qsc", "qsl", "pse"],
-}];
+const SCENE_OPEN_FILTERS: &[NativeFileFilter] = &[
+    NativeFileFilter {
+        label: "CueMol Scene",
+        extensions: &["qsc"],
+    },
+    NativeFileFilter {
+        label: "PyMOL Session",
+        extensions: &["pse"],
+    },
+];
 const PSF_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "PSF file",
     extensions: &["psf"],
@@ -22204,7 +22210,7 @@ fn is_view_file(path: &Path) -> bool {
 fn is_scene_file(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
-        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "qsc" | "qsl" | "pse"))
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "qsc" | "pse"))
 }
 
 fn download_url_to_cache(url: &str) -> Result<PathBuf> {
@@ -23308,7 +23314,10 @@ mod tests {
             .flat_map(|filter| filter.extensions)
             .any(|extension| *extension == "pse"));
         let open_scene = native_file_dialog_spec(NativeFileDialog::OpenScene);
-        assert_eq!(open_scene.filters[0].extensions, &["qsc", "qsl", "pse"]);
+        assert_eq!(open_scene.filters[0].label, "CueMol Scene");
+        assert_eq!(open_scene.filters[0].extensions, &["qsc"]);
+        assert_eq!(open_scene.filters[1].label, "PyMOL Session");
+        assert_eq!(open_scene.filters[1].extensions, &["pse"]);
         assert!(is_scene_file(Path::new("session.PSE")));
         assert!(!is_scene_file(Path::new("molecule.pdb")));
         let open_msms_vertex = native_file_dialog_spec(NativeFileDialog::OpenMsmsVertex);
@@ -23323,8 +23332,8 @@ mod tests {
             PathBuf::from("scene.qsc")
         );
         assert_eq!(
-            apply_default_extension(PathBuf::from("scene.qsl"), save_scene),
-            PathBuf::from("scene.qsl")
+            apply_default_extension(PathBuf::from("scene.xml"), save_scene),
+            PathBuf::from("scene.xml")
         );
         let open_camera = native_file_dialog_spec(NativeFileDialog::OpenCamera);
         assert!(!open_camera.save);

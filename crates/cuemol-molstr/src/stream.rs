@@ -957,8 +957,8 @@ fn default_handlers() -> Vec<StreamHandlerInfo> {
         StreamHandlerInfo::new(
             "cuemol_rs::SceneXMLReader",
             "qsc_xml",
-            "CueMol Scene (*.qsc;*.qsl)",
-            "*.qsc; *.qsl",
+            "CueMol Scene (*.qsc)",
+            "*.qsc",
             HandlerCategory::SceneReader,
             Some(HandlerSniffer::QscXml),
         ),

@@ -340,7 +340,7 @@ function rememberPdbHistory(pdbId) {
 }
 
 function recentFileType(path) {
-  return /\.(qsc|qsl|pse)$/i.test(path) ? "scene" : "obj";
+  return /\.(qsc|pse)$/i.test(path) ? "scene" : "obj";
 }
 
 function fileBasename(path) {
@@ -11490,8 +11490,12 @@ async function openScene() {
     directory: false,
     filters: [
       {
-        name: "CueMol scenes",
-        extensions: ["qsc", "qsl", "pse"],
+        name: "CueMol Scene",
+        extensions: ["qsc"],
+      },
+      {
+        name: "PyMOL Session",
+        extensions: ["pse"],
       },
     ],
   });
@@ -11506,7 +11510,7 @@ async function openSelectedPaths(paths) {
   let opened = false;
   const directPaths = [];
   for (const path of objectPaths) {
-    if (/\.(qsc|qsl|pse)$/i.test(path)) {
+    if (/\.(qsc|pse)$/i.test(path)) {
       if (await mutateWithViewport("open_scene", { path })) {
         addRecentFile(path, "scene");
         opened = true;

@@ -7656,7 +7656,7 @@ impl DesktopAppState {
 
     /// Open a scene-reader file into `target_scene`, or create a scene when no
     /// reusable target is supplied. This mirrors the desktop `Open Scene` flow:
-    /// QSC/QSL and PyMOL sessions are scene readers rather than object readers.
+    /// QSC and PyMOL sessions are scene readers rather than object readers.
     pub fn open_scene_file(
         &mut self,
         path: impl AsRef<Path>,
@@ -23435,7 +23435,7 @@ impl DesktopAppState {
                 requested_format
             };
             let class_name = match format.as_str() {
-                "qsc_xml" | "qsc" | "qsl" => "SceneXMLReader",
+                "qsc_xml" | "qsc" => "SceneXMLReader",
                 "pse" => "PSEFileReader",
                 _ => {
                     return Err(script_error(format!(
@@ -45190,7 +45190,7 @@ fn density_renderer_from_script(
 fn guess_path_format(path: &Path, stream_manager: &StreamManager) -> Result<&'static str> {
     let ext = effective_extension(path);
     match ext.as_str() {
-        "qsc" | "qsl" => Ok("qsc_xml"),
+        "qsc" => Ok("qsc_xml"),
         "pdb" | "ent" => Ok("pdb"),
         "qdfpdb" => Ok("qdfpdb"),
         "cif" | "mmcif" => guess_cif_format(path),
@@ -45297,7 +45297,7 @@ fn related_path_with_extension(path: &Path, extension: &str) -> PathBuf {
 }
 
 fn is_scene_format(format: &str) -> bool {
-    matches!(format, "qsc_xml" | "qsc" | "qsl")
+    matches!(format, "qsc_xml" | "qsc")
 }
 
 fn is_desktop_extension_format(format: &str) -> bool {

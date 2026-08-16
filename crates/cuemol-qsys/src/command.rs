@@ -1372,8 +1372,8 @@ mod tests {
         let mut context = CommandContext::<()>::new();
         context.register_handler(handler(
             "qsc_xml",
-            "CueMol Scene (*.qsc;*.qsl)",
-            "*.qsc; *.qsl",
+            "CueMol Scene (*.qsc)",
+            "*.qsc",
             InOutHandler::IOH_CAT_SCEREADER,
         ));
         let manager = CmdMgr::new();

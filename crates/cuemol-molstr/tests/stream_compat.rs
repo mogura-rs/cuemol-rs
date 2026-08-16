@@ -23,9 +23,11 @@ fn stream_manager_default_registry_matches_reference_handlers() {
     assert!(manager.is_reader_registered("cuemol_rs::SceneXMLReader"));
     assert!(manager.is_reader_registered("cuemol_rs::SceneXMLWriter"));
     assert!(!manager.is_reader_registered("__nonexistent__"));
-    assert!(manager
+    let scene_reader = manager
         .handler_by_nickname("qsc_xml", HandlerCategory::SceneReader)
-        .is_some());
+        .expect("SceneXMLReader");
+    assert_eq!(scene_reader.descr, "CueMol Scene (*.qsc)");
+    assert_eq!(scene_reader.fext, "*.qsc");
     assert!(manager
         .handler_by_nickname("psefile", HandlerCategory::SceneReader)
         .is_some());

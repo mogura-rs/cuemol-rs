@@ -297,7 +297,7 @@ fn tauri_file_and_scene_open_use_reference_reader_categories() {
             "missing object reader extension {extension}"
         );
     }
-    for scene_extension in ["qsc", "qsl", "pse"] {
+    for scene_extension in ["qsc", "pse"] {
         assert!(
             !object_open.contains(&format!("\"{scene_extension}\"")),
             "scene extension leaked into object picker: {scene_extension}"
@@ -310,10 +310,13 @@ fn tauri_file_and_scene_open_use_reference_reader_categories() {
         .and_then(|source| source.split("async function openSelectedPaths").next())
         .expect("scene file picker");
     assert!(scene_open.contains("title: \"Open Scene\""));
-    assert!(scene_open.contains("extensions: [\"qsc\", \"qsl\", \"pse\"]"));
+    assert!(scene_open.contains("name: \"CueMol Scene\""));
+    assert!(scene_open.contains("extensions: [\"qsc\"]"));
+    assert!(scene_open.contains("name: \"PyMOL Session\""));
+    assert!(scene_open.contains("extensions: [\"pse\"]"));
     assert!(scene_open.contains("await openSelectedPaths(paths)"));
     assert!(JS.contains("mutateWithViewport(\"open_scene\", { path })"));
-    assert!(JS.contains("/\\.(qsc|qsl|pse)$/i.test(path)"));
+    assert!(JS.contains("/\\.(qsc|pse)$/i.test(path)"));
     assert!(TAURI_APP_RS.contains("ModelRequest::OpenSceneViewport"));
     assert!(TAURI_APP_RS.contains("fn open_scene("));
 }
