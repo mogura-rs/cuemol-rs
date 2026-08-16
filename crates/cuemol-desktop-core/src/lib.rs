@@ -9162,32 +9162,48 @@ impl DesktopAppState {
         Ok(())
     }
 
-    pub fn save_object_as(&self, object_uid: Uid, path: impl AsRef<Path>) -> Result<()> {
+    pub fn save_object_as(&mut self, object_uid: Uid, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
-        let object = self
-            .scene_manager()
-            .object(object_uid)
-            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         let ext = path
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if ext == "qdf" {
-            return QdfMolFileWriter::new().write_file(object.mol(), path);
-        }
-        let output = match ext.as_str() {
-            "pdb" | "ent" | "" => write_pdb_string(object.mol()),
-            "sdf" | "mol" => write_sdf_string(object.mol()),
-            "pqr" => PqrFileWriter::new().write_pqr_string(object.mol()),
-            "xyzr" => XyzrFileWriter::new().write_xyzr_string(object.mol()),
+        let source_type = match ext.as_str() {
+            "pdb" | "ent" | "" => "pdb",
+            "sdf" | "mol" => "sdf",
+            "qdf" => "qdfmol",
+            "pqr" => "pqr",
+            "xyzr" => "xyzr",
             other => {
                 return Err(CueMolError::invalid_argument(format!(
                     "unsupported object save extension: {other}"
                 )))
             }
         };
-        fs::write(path, output)?;
+
+        {
+            let object = self
+                .scene_manager()
+                .object(object_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+            match source_type {
+                "qdfmol" => QdfMolFileWriter::new().write_file(object.mol(), path)?,
+                "pdb" => fs::write(path, write_pdb_string(object.mol()))?,
+                "sdf" => fs::write(path, write_sdf_string(object.mol()))?,
+                "pqr" => fs::write(path, PqrFileWriter::new().write_pqr_string(object.mol()))?,
+                "xyzr" => fs::write(path, XyzrFileWriter::new().write_xyzr_string(object.mol()))?,
+                _ => unreachable!("validated object writer"),
+            }
+        }
+
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        object.set_source_type(source_type);
+        object.set_source(path.to_string_lossy().into_owned());
+        object.set_modified(false);
         Ok(())
     }
 
@@ -58605,7 +58621,15 @@ attribute \"dep\" string \"positions\"
             panic!("expected molecule load");
         };
         app.save_object_as(object_uid, &pqr_path).unwrap();
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.source(), pqr_path.to_string_lossy());
+        assert_eq!(object.source_type(), "pqr");
+        assert!(!object.modified());
         app.save_object_as(object_uid, &xyzr_path).unwrap();
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.source(), xyzr_path.to_string_lossy());
+        assert_eq!(object.source_type(), "xyzr");
+        assert!(!object.modified());
 
         let pqr = std::fs::read_to_string(&pqr_path).unwrap();
         assert!(pqr.starts_with("ATOM"));

@@ -301,6 +301,9 @@ fn tauri_file_save_uses_reference_molecule_writer_filters() {
             "missing object writer {writer}"
         );
     }
+    assert!(dialog.contains("saveOptions.defaultPath = objectSaveDefaultPath(object)"));
+    assert!(JS.contains("return directory + \"copy_of_\" + fileName"));
+    assert!(JS.contains("!source.startsWith(\"datachunk:\")"));
     assert!(dialog.contains("await mutateWithoutViewport("));
     assert!(dialog.contains("\"save_object\""));
 }

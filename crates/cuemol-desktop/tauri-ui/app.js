@@ -5747,7 +5747,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           showError("The Tauri dialog plugin is unavailable.");
           return;
         }
-        const path = await dialog.save({
+        const saveOptions = {
           defaultPath: `${object.name || "molecule"}.pdb`,
           filters: [
             { name: "PDB coordinates (*.pdb)", extensions: ["pdb"] },
@@ -5756,7 +5756,9 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
             { name: "XYZR coordinates(*.xyzr)", extensions: ["xyzr"] },
             { name: "PQR coordinates(*.pqr)", extensions: ["pqr"] },
           ],
-        });
+        };
+        saveOptions.defaultPath = objectSaveDefaultPath(object);
+        const path = await dialog.save(saveOptions);
         if (!path) return;
         await mutateWithoutViewport(
           "save_object",
@@ -6446,6 +6448,17 @@ function selectedStyle() {
 
 function selectedObject() {
   return activeObjects().find((object) => object.uid === selectedObjectUid) || null;
+}
+
+function objectSaveDefaultPath(object) {
+  const source = String(object?.source || "").trim();
+  if (source && !source.startsWith("datachunk:")) {
+    const separator = Math.max(source.lastIndexOf("/"), source.lastIndexOf("\\"));
+    const directory = source.slice(0, separator + 1);
+    const fileName = source.slice(separator + 1);
+    if (fileName) return directory + "copy_of_" + fileName;
+  }
+  return object?.name || "molecule";
 }
 
 function selectedRenderer() {

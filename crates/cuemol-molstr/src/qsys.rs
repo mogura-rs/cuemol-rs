@@ -670,6 +670,10 @@ impl MolObject {
         &self.source_type
     }
 
+    pub fn set_source_type(&mut self, source_type: impl Into<String>) {
+        self.source_type = source_type.into();
+    }
+
     pub fn mol_mut(&mut self) -> &mut MolCoord {
         self.modified = true;
         &mut self.mol
