@@ -3281,14 +3281,36 @@ impl AppModel {
             .workspace_renderer_clipboard
             .clone()
             .ok_or_else(|| "No copied renderer".to_string())?;
+        let object_uid = Uid::new(input.object_uid);
+        let scene_uid = match clipboard.kind() {
+            crate::GuiWorkspaceObjectKind::Molecule => self
+                .desktop
+                .scene_manager()
+                .scene_uid_for_object(object_uid),
+            crate::GuiWorkspaceObjectKind::DensityMap => self
+                .desktop
+                .density_map_summary(object_uid)
+                .map(|map| map.scene_uid),
+            crate::GuiWorkspaceObjectKind::Surface => self
+                .desktop
+                .surface_summary(object_uid)
+                .map(|surface| surface.scene_uid),
+            crate::GuiWorkspaceObjectKind::Lightweight => self
+                .desktop
+                .lw_object_summary(object_uid)
+                .map(|object| object.scene_uid),
+        };
         let result = self
             .desktop
             .paste_workspace_renderers(
-                Uid::new(input.object_uid),
+                object_uid,
                 input.destination_group_uid.map(Uid::new),
                 &clipboard,
             )
             .map_err(|error| error.to_string())?;
+        if let Some(scene_uid) = scene_uid {
+            self.modified_scenes.insert(scene_uid);
+        }
         self.status = format!("Pasted {} renderer(s)", result.renderer_uids.len());
         self.invalidate_mesh(false);
         Ok(())
@@ -14691,6 +14713,64 @@ mod tests {
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(model.snapshot().objects[0].renderers.is_empty());
+        assert!(model.workspace_renderer_clipboard.is_some());
+    }
+
+    #[test]
+    fn workspace_density_renderer_copy_pastes_to_compatible_map() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let source_uid =
+            model
+                .desktop
+                .add_density_map(scene_uid, "source map", cuemol_xtal::DensityMap::new());
+        let target_uid =
+            model
+                .desktop
+                .add_density_map(scene_uid, "target map", cuemol_xtal::DensityMap::new());
+        let renderer_uid = model
+            .desktop
+            .add_density_renderer(source_uid, "contour")
+            .unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CopyWorkspaceRenderer(WorkspaceRendererCopyInput {
+                object_uid: source_uid.get(),
+                renderer_uid: renderer_uid.get(),
+            }),
+        )
+        .unwrap();
+        assert!(matches!(response, ModelResponse::Message(_)));
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::PasteWorkspaceRenderers(WorkspaceRendererPasteInput {
+                object_uid: target_uid.get(),
+                destination_group_uid: None,
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected paste snapshot");
+        };
+        let target = snapshot
+            .density_maps
+            .iter()
+            .find(|map| map.uid == target_uid.get())
+            .unwrap();
+        assert_eq!(target.renderers.len(), 1);
+        assert_eq!(target.renderers[0].name, "contour 1");
+        assert_eq!(snapshot.undo_descriptions[0], "Pasted 1 renderer(s)");
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model
+            .snapshot()
+            .density_maps
+            .iter()
+            .find(|map| map.uid == target_uid.get())
+            .unwrap()
+            .renderers
+            .is_empty());
         assert!(model.workspace_renderer_clipboard.is_some());
     }
 

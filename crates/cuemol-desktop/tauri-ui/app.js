@@ -153,6 +153,7 @@ const pdbRendererSetupCache = new Map();
 let workspaceCameraClipboardAvailable = false;
 let workspaceObjectClipboardAvailable = false;
 let workspaceRendererClipboardAvailable = false;
+let workspaceRendererClipboardKind = null;
 let workspaceStyleClipboardName = null;
 let selectedDensityMapUid = null;
 let selectedDensityRendererUid = null;
@@ -6744,7 +6745,7 @@ function aroundWorkspaceSelection(selection, radius, byResidue) {
   return byResidue ? `byres ${expression}` : expression;
 }
 
-async function copyWorkspaceRenderer(objectUid, rendererUid) {
+async function copyWorkspaceRenderer(objectUid, rendererUid, kind = "object") {
   if (!invoke) return false;
   setBusy(true);
   try {
@@ -6752,6 +6753,7 @@ async function copyWorkspaceRenderer(objectUid, rendererUid) {
       input: { objectUid, rendererUid },
     });
     workspaceRendererClipboardAvailable = true;
+    workspaceRendererClipboardKind = kind;
     snapshot.status = status;
     renderStatusAndLog();
     return true;
@@ -7471,7 +7473,7 @@ function workspaceObjectContextItems(scene, object) {
       action: () => copyWorkspaceObject(object.uid),
     },
   );
-  if (workspaceRendererClipboardAvailable) {
+  if (workspaceRendererClipboardAvailable && workspaceRendererClipboardKind === "object") {
     items.push({
       label: "Paste Renderer",
       action: () => pasteWorkspaceRenderers(object.uid),
@@ -7774,6 +7776,17 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
         await copyWorkspaceObject(object.uid);
       },
     },
+    ...(workspaceRendererClipboardAvailable && workspaceRendererClipboardKind === kind
+      ? [
+          {
+            label: "Paste Renderer",
+            action: async () => {
+              if (!(await activate())) return;
+              await pasteWorkspaceRenderers(object.uid);
+            },
+          },
+        ]
+      : []),
     {
       label: "Save As…",
       action: async () => {
@@ -7812,6 +7825,11 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
 }
 
 function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
+  const objectKind = {
+    densityRenderer: "densityMap",
+    surfaceRenderer: "surface",
+    lwRenderer: "lwObject",
+  }[kind];
   const activate = async () => {
     if (snapshot.activeSceneUid === scene.uid) return true;
     return mutate("activate_scene", { sceneUid: scene.uid });
@@ -7825,6 +7843,13 @@ function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
         if (!(await activate())) return;
         selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
         beginWorkspaceInlineRename(kind, object.uid, renderer.uid);
+      },
+    },
+    {
+      label: "Copy",
+      action: async () => {
+        if (!(await activate())) return;
+        await copyWorkspaceRenderer(object.uid, renderer.uid, objectKind);
       },
     },
     {
@@ -7943,7 +7968,7 @@ async function workspaceRendererContextItems(scene, object, renderer) {
         action: () => copyWorkspaceRenderer(object.uid, renderer.uid),
       },
     );
-    if (workspaceRendererClipboardAvailable) {
+    if (workspaceRendererClipboardAvailable && workspaceRendererClipboardKind === "object") {
       items.push({
         label: "Paste Renderer",
         action: () => pasteWorkspaceRenderers(object.uid, renderer.uid),

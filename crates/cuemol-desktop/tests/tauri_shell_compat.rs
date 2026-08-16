@@ -330,6 +330,9 @@ fn tauri_workspace_exposes_lightweight_objects_and_renderers() {
         "set_lw_renderer_properties",
         "add_lw_renderer",
         "dataId",
+        "workspaceRendererClipboardKind",
+        "copyWorkspaceRenderer(object.uid, renderer.uid, objectKind)",
+        "pasteWorkspaceRenderers(object.uid)",
     ] {
         assert!(
             JS.contains(binding),

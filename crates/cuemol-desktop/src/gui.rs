@@ -5141,7 +5141,11 @@ impl GuiApplication {
         }
         if ui
             .add_enabled(
-                self.workspace_renderer_clipboard.is_some(),
+                self.workspace_renderer_clipboard
+                    .as_ref()
+                    .is_some_and(|clipboard| {
+                        clipboard.kind() == crate::GuiWorkspaceObjectKind::Molecule
+                    }),
                 egui::Button::new("Paste Renderer"),
             )
             .clicked()
@@ -5208,6 +5212,18 @@ impl GuiApplication {
             self.copy_workspace_object_to_clipboard(owner.uid());
             ui.close();
         }
+        if ui
+            .add_enabled(
+                self.workspace_renderer_clipboard
+                    .as_ref()
+                    .is_some_and(|clipboard| clipboard.kind() == owner.workspace_kind()),
+                egui::Button::new("Paste Renderer"),
+            )
+            .clicked()
+        {
+            self.paste_workspace_renderer_clipboard(scene_uid, owner.uid(), None);
+            ui.close();
+        }
         if ui.button("Save As...").clicked() {
             self.activate_workspace_scene(scene_uid, camera);
             self.selected_object = None;
@@ -5232,6 +5248,24 @@ impl GuiApplication {
         ui: &mut egui::Ui,
         selection: WorkspaceAuxSelection,
     ) {
+        let renderer = match selection {
+            WorkspaceAuxSelection::DensityMap {
+                map_uid,
+                renderer_uid: Some(renderer_uid),
+                ..
+            } => Some((map_uid, renderer_uid)),
+            WorkspaceAuxSelection::Surface {
+                surface_uid,
+                renderer_uid: Some(renderer_uid),
+                ..
+            } => Some((surface_uid, renderer_uid)),
+            WorkspaceAuxSelection::Lightweight {
+                object_uid,
+                renderer_uid: Some(renderer_uid),
+                ..
+            } => Some((object_uid, renderer_uid)),
+            _ => None,
+        };
         let can_generate_surface = match selection {
             WorkspaceAuxSelection::DensityMap {
                 map_uid,
@@ -5250,6 +5284,12 @@ impl GuiApplication {
         }
         if can_generate_surface {
             ui.separator();
+        }
+        if let Some((object_uid, renderer_uid)) = renderer {
+            if ui.button("Copy").clicked() {
+                self.copy_workspace_renderer_to_clipboard(object_uid, renderer_uid);
+                ui.close();
+            }
         }
         if ui.button("Delete").clicked() {
             self.delete_aux_selection(selection);
@@ -5342,7 +5382,12 @@ impl GuiApplication {
                                 self.copy_workspace_renderer_to_clipboard(object_uid, renderer.uid);
                                 ui.close();
                             }
-                            if self.workspace_renderer_clipboard.is_some()
+                            if self
+                                .workspace_renderer_clipboard
+                                .as_ref()
+                                .is_some_and(|clipboard| {
+                                    clipboard.kind() == crate::GuiWorkspaceObjectKind::Molecule
+                                })
                                 && ui.button("Paste Renderer").clicked()
                             {
                                 self.paste_workspace_renderer_clipboard(
@@ -5873,6 +5918,7 @@ impl GuiApplication {
             self.set_status("No copied renderer");
             return;
         };
+        let kind = clipboard.kind();
         let undo = self.capture_undo();
         match self
             .state
@@ -5882,11 +5928,39 @@ impl GuiApplication {
                 let count = result.renderer_uids.len();
                 self.push_undo_snapshot(undo);
                 self.modified_scenes.insert(scene_uid);
-                self.selected_object = Some(object_uid);
-                self.selected_renderer = result
+                let renderer_uid = result
                     .group_uid
                     .or_else(|| result.renderer_uids.first().copied());
-                self.workspace_aux_selection = None;
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.workspace_aux_selection = match kind {
+                    crate::GuiWorkspaceObjectKind::Molecule => {
+                        self.selected_object = Some(object_uid);
+                        self.selected_renderer = renderer_uid;
+                        None
+                    }
+                    crate::GuiWorkspaceObjectKind::DensityMap => {
+                        Some(WorkspaceAuxSelection::DensityMap {
+                            scene_uid,
+                            map_uid: object_uid,
+                            renderer_uid,
+                        })
+                    }
+                    crate::GuiWorkspaceObjectKind::Surface => {
+                        Some(WorkspaceAuxSelection::Surface {
+                            scene_uid,
+                            surface_uid: object_uid,
+                            renderer_uid,
+                        })
+                    }
+                    crate::GuiWorkspaceObjectKind::Lightweight => {
+                        Some(WorkspaceAuxSelection::Lightweight {
+                            scene_uid,
+                            object_uid,
+                            renderer_uid,
+                        })
+                    }
+                };
                 self.rebuild_snapshot();
                 self.set_status(format!("Pasted {count} renderer(s)"));
             }
@@ -25535,6 +25609,34 @@ mod tests {
         assert_eq!(renderer.name, "overlay");
         assert_eq!(renderer.data_id, 17);
         assert!(renderer.locked);
+
+        app.copy_workspace_renderer_to_clipboard(object_uid, renderer_uid);
+        assert_eq!(
+            app.workspace_renderer_clipboard.as_ref().unwrap().kind(),
+            crate::GuiWorkspaceObjectKind::Lightweight
+        );
+        app.paste_workspace_renderer_clipboard(scene_uid, object_uid, None);
+        let pasted_renderer_uid = match app.workspace_aux_selection.unwrap() {
+            WorkspaceAuxSelection::Lightweight {
+                renderer_uid: Some(renderer_uid),
+                ..
+            } => renderer_uid,
+            _ => panic!("pasted lightweight renderer must be selected"),
+        };
+        assert_ne!(pasted_renderer_uid, renderer_uid);
+        let renderers = app.state.lw_object_summary(object_uid).unwrap().renderers;
+        assert_eq!(renderers.len(), 2);
+        assert_eq!(renderers[1].name, "overlay(1)");
+        assert_eq!(renderers[1].data_id, 17);
+        app.undo(&mut CameraController::default());
+        assert_eq!(
+            app.state
+                .lw_object_summary(object_uid)
+                .unwrap()
+                .renderers
+                .len(),
+            1
+        );
 
         app.delete_aux_selection(WorkspaceAuxSelection::Lightweight {
             scene_uid,
