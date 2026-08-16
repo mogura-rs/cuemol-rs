@@ -5384,6 +5384,10 @@ impl GuiApplication {
             self.open_renderer_style_edit(scene_uid, object_uid, renderer_uid);
             ui.close();
         }
+        if ui.button("Create style...").clicked() {
+            self.open_renderer_style_create(scene_uid, object_uid, renderer_uid);
+            ui.close();
+        }
         ui.separator();
     }
 
@@ -15199,17 +15203,18 @@ impl GuiApplication {
         object_uid: cuemol_core::Uid,
         renderer_uid: cuemol_core::Uid,
     ) {
-        let Some(renderer) = self
+        let Ok((renderer_scene_uid, renderer_name, renderer_type, _)) = self
             .state
-            .scene_manager()
-            .scene(scene_uid)
-            .and_then(|scene| scene.object(object_uid))
-            .and_then(|object| object.renderer(renderer_uid))
+            .workspace_renderer_style_state(object_uid, renderer_uid)
         else {
             self.set_status("Renderer not found");
             return;
         };
-        if renderer.renderer_type() == "*group" {
+        if renderer_scene_uid != scene_uid {
+            self.set_status("Renderer is not in the selected scene");
+            return;
+        }
+        if renderer_type == "*group" {
             self.set_status("Renderer groups cannot be saved as styles");
             return;
         }
@@ -15224,8 +15229,8 @@ impl GuiApplication {
             scene_uid,
             object_uid,
             renderer_uid,
-            renderer_name: renderer.name().to_string(),
-            renderer_type: renderer.renderer_type().to_string(),
+            renderer_name,
+            renderer_type,
             style_set_index,
             name_prefix: String::new(),
             overwrite: false,
@@ -25543,6 +25548,37 @@ mod tests {
             .unwrap()
             .loaded_styles()[local_index];
         assert!(!style.data.contains("id=\"Widesimple\""));
+
+        let map_uid = app
+            .state
+            .add_density_map(scene_uid, "map", cuemol_xtal::DensityMap::new());
+        let map_renderer_uid = app.state.add_density_renderer(map_uid, "contour").unwrap();
+        app.open_renderer_style_create(scene_uid, map_uid, map_renderer_uid);
+        let mut draft = app.renderer_style_create_draft.take().unwrap();
+        assert_eq!(draft.renderer_name, "contour 1");
+        assert_eq!(draft.renderer_type, "contour");
+        draft.name_prefix = "Map".to_string();
+        assert_eq!(
+            app.apply_renderer_style_create(&draft).unwrap(),
+            "Mapcontour"
+        );
+        assert!(app
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("id=\"Mapcontour\""));
+        app.undo(&mut CameraController::default());
+        assert!(!app
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("id=\"Mapcontour\""));
     }
 
     #[test]

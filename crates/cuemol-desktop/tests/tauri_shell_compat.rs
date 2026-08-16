@@ -1196,6 +1196,18 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("label: \"B-factor\""));
     assert!(JS.contains("label: \"Style\", children: styleChildren"));
     assert!(JS.contains("Edit interaction list…"));
+    let aux_renderer_menu = JS
+        .split("async function workspaceAuxRendererContextItems(scene, kind, object, renderer)")
+        .nth(1)
+        .and_then(|source| source.split("function workspaceStyleSignature").next())
+        .expect("Tauri auxiliary renderer context menu");
+    for item in [
+        "label: \"Style\"",
+        "label: \"Edit style…\"",
+        "label: \"Create style…\"",
+    ] {
+        assert!(aux_renderer_menu.contains(item), "missing {item}");
+    }
     assert!(JS.contains("kind: \"renderer\""));
     assert!(JS.contains("create_workspace_renderer_group"));
     assert!(JS.contains("rename_workspace_node"));

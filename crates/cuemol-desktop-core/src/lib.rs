@@ -3271,34 +3271,63 @@ impl DesktopAppState {
         if name_prefix.is_empty() {
             return Err(CueMolError::invalid_argument("style name is required"));
         }
-        let renderer = self
-            .scene_manager()
-            .scene(scene_uid)
-            .and_then(|scene| scene.object(object_uid))
-            .and_then(|object| object.renderer(renderer_uid))
-            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?
-            .clone();
-        if renderer.renderer_type() == "*group" {
+        let (renderer_scene_uid, _, renderer_type, _) =
+            self.workspace_renderer_style_state(object_uid, renderer_uid)?;
+        if renderer_scene_uid != scene_uid {
+            return Err(CueMolError::invalid_argument(format!(
+                "renderer {} is not in scene {}",
+                renderer_uid.get(),
+                scene_uid.get()
+            )));
+        }
+        if renderer_type == "*group" {
             return Err(CueMolError::invalid_argument(
                 "renderer groups cannot be saved as styles",
             ));
         }
-        let style_name = format!("{name_prefix}{}", renderer.renderer_type());
+        let source_node = match self
+            .copy_workspace_renderer(object_uid, renderer_uid)?
+            .renderer
+        {
+            WorkspaceRendererClipboardData::Molecule { renderers, .. } => {
+                let renderer = renderers.into_iter().next().ok_or_else(|| {
+                    CueMolError::NotFound(format!("renderer {}", renderer_uid.get()))
+                })?;
+                let mut node = LDom2Node::new();
+                node.set_tag_name("renderer");
+                node.set_type_name(renderer.renderer_type());
+                node.set_str_attr("name", renderer.name());
+                for (name, value) in renderer.qsc_attrs() {
+                    node.set_str_attr(name, value);
+                }
+                for child in renderer.qsc_children() {
+                    node.append_child_node(child.clone());
+                }
+                node
+            }
+            WorkspaceRendererClipboardData::DensityMap(renderer) => {
+                density_renderer_qsc_node(&renderer)
+            }
+            WorkspaceRendererClipboardData::Surface(node)
+            | WorkspaceRendererClipboardData::Lightweight { node, .. } => node,
+        };
+        let style_name = format!("{name_prefix}{renderer_type}");
         let mut style_node = LDom2Node::new();
         style_node.set_tag_name("style");
         style_node.set_type_name("renderer");
         style_node.set_str_attr("id", &style_name);
         style_node.set_str_attr("desc", name_prefix);
-        for (name, value) in renderer.qsc_attrs() {
-            if !matches!(
-                name.as_str(),
-                "name" | "type" | "ui_order" | "group" | "style"
-            ) {
-                style_node.set_str_attr(name, value);
+        for child in source_node.children() {
+            if child.is_attr() {
+                if !matches!(
+                    child.tag_name(),
+                    "name" | "type" | "ui_order" | "group" | "style"
+                ) {
+                    style_node.set_str_attr(child.tag_name(), child.value());
+                }
+            } else {
+                style_node.append_child_node(child.clone());
             }
-        }
-        for child in renderer.qsc_children() {
-            style_node.append_child_node(child.clone());
         }
 
         let scene = self
@@ -60142,6 +60171,149 @@ attribute \"dep\" string \"positions\"
             .data;
         assert_eq!(xml.matches("id=\"Widesimple\"").count(), 1);
         assert!(xml.contains("width=\"4\""));
+
+        let map_uid = app.add_density_map(scene_uid, "map", DensityMap::new());
+        let map_renderer_uid = app.add_density_renderer(map_uid, "contour").unwrap();
+        let map_renderer = app.density_map_summary(map_uid).unwrap().renderers[0].clone();
+        app.set_density_renderer_properties(
+            map_uid,
+            map_renderer_uid,
+            map_renderer.name,
+            map_renderer.visible,
+            map_renderer.locked,
+            map_renderer.material,
+            0.4,
+            map_renderer.edge_type,
+            map_renderer.edge_width,
+            map_renderer.edge_color,
+            &map_renderer.specific,
+        )
+        .unwrap();
+        assert_eq!(
+            app.create_scene_renderer_style(
+                scene_uid,
+                local_index,
+                map_uid,
+                map_renderer_uid,
+                "Map",
+                false,
+            )
+            .unwrap(),
+            "Mapcontour"
+        );
+
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: "v 0 0 0\n".to_string(),
+                raw_data: b"v 0 0 0\n".to_vec(),
+                qsc_node: None,
+            });
+        let surface_renderer = app.surface_summary(surface_uid).unwrap().renderers[0].clone();
+        app.set_surface_renderer_properties(
+            surface_uid,
+            surface_renderer.uid,
+            surface_renderer.name,
+            &surface_renderer.selection,
+            surface_renderer.visible,
+            surface_renderer.locked,
+            surface_renderer.material,
+            0.5,
+            surface_renderer.edge_type,
+            surface_renderer.edge_width,
+            surface_renderer.edge_color,
+            &surface_renderer.specific,
+        )
+        .unwrap();
+        assert_eq!(
+            app.create_scene_renderer_style(
+                scene_uid,
+                local_index,
+                surface_uid,
+                surface_renderer.uid,
+                "Surface",
+                false,
+            )
+            .unwrap(),
+            "Surfacemolsurf"
+        );
+
+        let lw_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_lw_object(LoadedLWObject {
+                uid: Uid::new(0),
+                name: "lightweight".to_string(),
+                srctype: "qdflwobj".to_string(),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+                visible: true,
+                xform: Matrix4::IDENTITY,
+                renderers: vec![LoadedLWRenderer {
+                    name: "draw".to_string(),
+                    data_id: 0,
+                    visible: true,
+                    xform: Matrix4::IDENTITY,
+                }],
+                qsc_node: None,
+            });
+        let lw_renderer = app.lw_object_summary(lw_uid).unwrap().renderers[0].clone();
+        app.set_lw_renderer_properties(
+            lw_uid,
+            lw_renderer.uid,
+            lw_renderer.name,
+            lw_renderer.visible,
+            lw_renderer.locked,
+            &lw_renderer.style,
+            lw_renderer.material,
+            0.6,
+            lw_renderer.edge_type,
+            lw_renderer.edge_width,
+            lw_renderer.edge_color,
+            lw_renderer.data_id,
+        )
+        .unwrap();
+        assert_eq!(
+            app.create_scene_renderer_style(
+                scene_uid,
+                local_index,
+                lw_uid,
+                lw_renderer.uid,
+                "Light",
+                false,
+            )
+            .unwrap(),
+            "Lightlwrend"
+        );
+
+        let xml = &app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data;
+        let tree = parse_ldom2_xml(xml).unwrap();
+        for (name, alpha) in [
+            ("Mapcontour", "0.4"),
+            ("Surfacemolsurf", "0.5"),
+            ("Lightlwrend", "0.6"),
+        ] {
+            let style = tree
+                .top()
+                .children()
+                .iter()
+                .find(|child| child.str_attr("id").as_str() == name)
+                .unwrap();
+            assert_eq!(style.str_attr("alpha").as_str(), alpha);
+            assert!(style.str_attr("name").is_empty());
+            assert!(style.str_attr("style").is_empty());
+        }
     }
 
     #[test]

@@ -16741,6 +16741,48 @@ mod tests {
             .unwrap()
             .loaded_styles()[local_index];
         assert!(!style.data.contains("id=\"Widesimple\""));
+
+        let map_uid =
+            model
+                .desktop
+                .add_density_map(scene_uid, "map", cuemol_xtal::DensityMap::new());
+        let map_renderer_uid = model
+            .desktop
+            .add_density_renderer(map_uid, "contour")
+            .unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CreateRendererStyle(RendererStyleCreateInput {
+                scene_uid: scene_uid.get(),
+                local_index,
+                object_uid: map_uid.get(),
+                renderer_uid: map_renderer_uid.get(),
+                name_prefix: "Map".to_string(),
+                overwrite: false,
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(snapshot.status, "Created style Mapcontour");
+        assert!(model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("id=\"Mapcontour\""));
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(!model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("id=\"Mapcontour\""));
     }
 
     #[test]

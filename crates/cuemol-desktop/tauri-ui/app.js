@@ -7893,6 +7893,13 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
       },
     },
     {
+      label: "Create style…",
+      action: async () => {
+        if (!(await activate())) return;
+        await rendererStyleCreateEditor(object, renderer);
+      },
+    },
+    {
       label: "Copy",
       action: async () => {
         if (!(await activate())) return;
