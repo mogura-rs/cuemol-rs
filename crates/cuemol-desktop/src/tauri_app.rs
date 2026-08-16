@@ -2915,6 +2915,9 @@ impl AppModel {
         }
         let count = targets.len();
         for target in targets {
+            if target.kind == "rendererGroup" {
+                continue;
+            }
             self.set_workspace_visible(target, visible)?;
         }
         self.status = if visible {
@@ -15444,7 +15447,7 @@ mod tests {
 
     #[test]
     fn workspace_parent_child_delete_orders_children_first() {
-        let (mut model, object_uid, _) = model_with_renderer();
+        let (mut model, object_uid, first_uid) = model_with_renderer();
         let (group_uid, child_uid) = {
             let object = model
                 .desktop
@@ -15459,6 +15462,46 @@ mod tests {
                 .set_qsc_attr("group", "group");
             (group_uid, child_uid)
         };
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceItemsVisible {
+                targets: vec![
+                    WorkspaceToggleInput {
+                        kind: "renderer".to_string(),
+                        object_uid: object_uid.get(),
+                        renderer_uid: Some(first_uid.get()),
+                    },
+                    WorkspaceToggleInput {
+                        kind: "rendererGroup".to_string(),
+                        object_uid: object_uid.get(),
+                        renderer_uid: Some(group_uid.get()),
+                    },
+                ],
+                visible: false,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        let renderers = &snapshot.objects[0].renderers;
+        assert!(
+            !renderers
+                .iter()
+                .find(|renderer| renderer.uid == first_uid.get())
+                .unwrap()
+                .visible
+        );
+        assert!(
+            renderers
+                .iter()
+                .find(|renderer| renderer.uid == child_uid.get())
+                .unwrap()
+                .visible
+        );
+        assert_eq!(snapshot.undo_descriptions[0], "Hide 2 Workspace items");
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
 
         let response = handle_model_request(
             &mut model,

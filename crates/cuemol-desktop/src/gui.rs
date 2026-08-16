@@ -7021,14 +7021,7 @@ impl GuiApplication {
                     self.state.set_lw_object_visible(object_uid, visible)
                 }
             },
-            NativeWorkspaceTarget::Renderer {
-                owner,
-                renderer_uid,
-                is_group: true,
-                ..
-            } => self
-                .state
-                .set_renderer_group_visible(owner.uid(), renderer_uid, visible),
+            NativeWorkspaceTarget::Renderer { is_group: true, .. } => Ok(()),
             NativeWorkspaceTarget::Renderer {
                 owner,
                 renderer_uid,
@@ -27126,6 +27119,26 @@ mod tests {
             .unwrap()
             .renderer(child_uid)
             .is_some());
+
+        app.set_workspace_targets_visible(false);
+        assert!(
+            !app.state
+                .renderer_summaries(object_uid)
+                .iter()
+                .find(|renderer| renderer.uid == first_uid)
+                .unwrap()
+                .visible
+        );
+        assert!(
+            app.state
+                .renderer_summaries(grouped_object_uid)
+                .iter()
+                .find(|renderer| renderer.uid == child_uid)
+                .unwrap()
+                .visible
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        app.undo(&mut camera);
     }
 
     #[test]
