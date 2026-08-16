@@ -1367,6 +1367,8 @@ enum NativeFileDialog {
     OpenCamera,
     OpenStyle,
     SaveObject,
+    SaveDensityMap,
+    SaveSurface,
     SaveScene,
     SaveView,
     SaveCamera,
@@ -8938,21 +8940,59 @@ impl GuiApplication {
     }
 
     fn choose_save_selected_object(&mut self) {
-        let Some(object_uid) = self.target_object_uid() else {
+        let Some(target) = self.selected_workspace_object_for_save() else {
             self.set_status("No object selected");
             return;
         };
-        let Some(object) = self.state.scene_manager().object(object_uid) else {
-            self.set_status("No object selected");
-            return;
+        let (source, name, dialog) = match target {
+            NativePropertyObject::Molecule(object_uid) => {
+                let Some(object) = self.state.scene_manager().object(object_uid) else {
+                    self.set_status("No object selected");
+                    return;
+                };
+                (
+                    object.source().to_string(),
+                    object.name().to_string(),
+                    NativeFileDialog::SaveObject,
+                )
+            }
+            NativePropertyObject::DensityMap(map_uid) => {
+                let Some(map) = self.state.density_map_summary(map_uid) else {
+                    self.set_status("No density map selected");
+                    return;
+                };
+                (map.source, map.name, NativeFileDialog::SaveDensityMap)
+            }
+            NativePropertyObject::Surface(surface_uid) => {
+                let Some(surface) = self.state.surface_summary(surface_uid) else {
+                    self.set_status("No surface selected");
+                    return;
+                };
+                (surface.source, surface.name, NativeFileDialog::SaveSurface)
+            }
         };
-        let initial = object_save_initial_path(object.source(), object.name());
-        if let Some(path) = native_file_dialog(
-            NativeFileDialog::SaveObject,
-            initial.to_string_lossy().as_ref(),
-        ) {
+        let initial = object_save_initial_path(&source, &name);
+        if let Some(path) = native_file_dialog(dialog, initial.to_string_lossy().as_ref()) {
             self.object_save_path = path.to_string_lossy().into_owned();
-            self.save_selected_object();
+            match self
+                .state
+                .save_workspace_object_as(target.workspace_kind(), target.uid(), &path)
+            {
+                Ok(()) => self.set_status(format!("Saved object {}", path.display())),
+                Err(error) => self.set_error(error),
+            }
+        }
+    }
+
+    fn selected_workspace_object_for_save(&self) -> Option<NativePropertyObject> {
+        match self.workspace_aux_selection {
+            Some(WorkspaceAuxSelection::DensityMap { map_uid, .. }) => {
+                Some(NativePropertyObject::DensityMap(map_uid))
+            }
+            Some(WorkspaceAuxSelection::Surface { surface_uid, .. }) => {
+                Some(NativePropertyObject::Surface(surface_uid))
+            }
+            _ => self.target_object_uid().map(NativePropertyObject::Molecule),
         }
     }
 
@@ -20768,6 +20808,14 @@ const OBJECT_SAVE_FILTERS: &[NativeFileFilter] = &[
         extensions: &["pqr"],
     },
 ];
+const DENSITY_MAP_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "CueMol density map file (*.qdf)",
+    extensions: &["qdf"],
+}];
+const SURFACE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "CueMol molsurf file (*.qdf)",
+    extensions: &["qdf"],
+}];
 const SCENE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "CueMol scene",
     extensions: &["qsc"],
@@ -20853,6 +20901,18 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             title: "Save File As",
             filters: OBJECT_SAVE_FILTERS,
             default_extension: Some("pdb"),
+            save: true,
+        },
+        NativeFileDialog::SaveDensityMap => NativeFileDialogSpec {
+            title: "Save File As",
+            filters: DENSITY_MAP_SAVE_FILTERS,
+            default_extension: Some("qdf"),
+            save: true,
+        },
+        NativeFileDialog::SaveSurface => NativeFileDialogSpec {
+            title: "Save File As",
+            filters: SURFACE_SAVE_FILTERS,
+            default_extension: Some("qdf"),
             save: true,
         },
         NativeFileDialog::SaveScene => NativeFileDialogSpec {
@@ -23519,6 +23579,14 @@ mod tests {
                 ("PQR coordinates(*.pqr)", &["pqr"][..]),
             ]
         );
+        let save_map = native_file_dialog_spec(NativeFileDialog::SaveDensityMap);
+        assert_eq!(save_map.filters[0].label, "CueMol density map file (*.qdf)");
+        assert_eq!(save_map.filters[0].extensions, &["qdf"]);
+        assert_eq!(save_map.default_extension, Some("qdf"));
+        let save_surface = native_file_dialog_spec(NativeFileDialog::SaveSurface);
+        assert_eq!(save_surface.filters[0].label, "CueMol molsurf file (*.qdf)");
+        assert_eq!(save_surface.filters[0].extensions, &["qdf"]);
+        assert_eq!(save_surface.default_extension, Some("qdf"));
 
         assert_eq!(
             MainShortcutCommand::OpenFile.shortcut(),

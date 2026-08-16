@@ -9207,6 +9207,96 @@ impl DesktopAppState {
         Ok(())
     }
 
+    pub fn save_workspace_object_as(
+        &mut self,
+        kind: GuiWorkspaceObjectKind,
+        object_uid: Uid,
+        path: impl AsRef<Path>,
+    ) -> Result<()> {
+        match kind {
+            GuiWorkspaceObjectKind::Molecule => self.save_object_as(object_uid, path),
+            GuiWorkspaceObjectKind::DensityMap => self.save_density_map_as(object_uid, path),
+            GuiWorkspaceObjectKind::Surface => self.save_surface_as(object_uid, path),
+        }
+    }
+
+    pub fn save_density_map_as(&mut self, map_uid: Uid, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        if !Self::path_has_extension(path.to_string_lossy().as_ref(), "qdf") {
+            return Err(CueMolError::invalid_argument(
+                "density maps can only be saved as qdf",
+            ));
+        }
+        let (scene_uid, storage_index, raw_data) = {
+            let object = self
+                .density_maps
+                .get(&map_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+            (
+                object.scene_uid,
+                object.storage_index,
+                cuemol_xtal::write_qdf_denmap_bytes(&object.map),
+            )
+        };
+        fs::write(path, &raw_data)?;
+
+        let source = path.to_string_lossy().into_owned();
+        let node = {
+            let object = self
+                .density_maps
+                .get_mut(&map_uid)
+                .expect("density map was checked above");
+            object.format = "qdfmap".to_string();
+            object.source = source.clone();
+            object.modified = false;
+            density_map_qsc_node(object, "qdfmap", &source)
+        };
+        let loaded = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_density_maps_mut().get_mut(storage_index))
+            .ok_or_else(|| CueMolError::NotFound(format!("density map storage {storage_index}")))?;
+        loaded.srctype = "qdfmap".to_string();
+        loaded.data = String::from_utf8_lossy(&raw_data).into_owned();
+        loaded.raw_data = raw_data;
+        loaded.qsc_node = Some(node);
+        Ok(())
+    }
+
+    pub fn save_surface_as(&mut self, surface_uid: Uid, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        if !Self::path_has_extension(path.to_string_lossy().as_ref(), "qdf") {
+            return Err(CueMolError::invalid_argument(
+                "molecular surfaces can only be saved as qdf",
+            ));
+        }
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_surface(surface_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?;
+        let object = self
+            .scene_manager()
+            .scene(scene_uid)
+            .and_then(|scene| scene.loaded_surface(surface_uid))
+            .and_then(loaded_surface_object)
+            .ok_or_else(|| CueMolError::parse("surface data could not be converted to qdf"))?;
+        let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&object);
+        fs::write(path, &raw_data)?;
+
+        let source = path.to_string_lossy().into_owned();
+        let surface = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_surface_mut(surface_uid))
+            .expect("surface was checked above");
+        sync_loaded_surface_geometry(surface, &object);
+        let node = ensure_surface_qsc_node(surface);
+        node.set_str_attr("src", source);
+        node.set_str_attr("srctype", "qdfsurf");
+        node.remove_child("modified");
+        Ok(())
+    }
+
     /// Whether a file path ends in the given extension (case-insensitive). Front ends
     /// use it to dispatch "Export scene" between the PNG image path and POV-Ray.
     pub fn path_has_extension(path: &str, ext: &str) -> bool {
@@ -58640,6 +58730,89 @@ attribute \"dep\" string \"positions\"
         assert!(xyzr.contains("3.000000"));
 
         for path in [input_path, pqr_path, xyzr_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn desktop_app_state_saves_density_and_surface_workspace_objects() {
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-desktop-workspace-object-save-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let map_path = dir.join("density.qdf");
+        let surface_path = dir.join("surface.qdf");
+        let scene_path = dir.join("workspace.qsc");
+
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(&[0, 127, 255], [3, 1, 1], -1.0, 1.0, 0.0, 0.8);
+        let map_uid = app.add_density_map(scene_uid, "density", map);
+        app.save_workspace_object_as(GuiWorkspaceObjectKind::DensityMap, map_uid, &map_path)
+            .unwrap();
+        assert_eq!(
+            cuemol_xtal::QdfDenMapReader::new()
+                .read_file(&map_path)
+                .unwrap()
+                .byte_values(),
+            &[0, 127, 255]
+        );
+        let map_summary = app.density_map_summary(map_uid).unwrap();
+        assert_eq!(map_summary.source, map_path.to_string_lossy());
+        assert_eq!(map_summary.format, "qdfmap");
+
+        let mut surface_object = MolSurfObj::new();
+        for position in [
+            Vector4::new3(0.0, 0.0, 0.0),
+            Vector4::new3(1.0, 0.0, 0.0),
+            Vector4::new3(0.0, 1.0, 0.0),
+        ] {
+            surface_object
+                .mesh_mut()
+                .push_vertex(cuemol_surface::SurfaceVertex {
+                    position,
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    info: 0,
+                });
+        }
+        surface_object.mesh_mut().push_triangle([0, 1, 2]);
+        let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&surface_object);
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "qdfsurf".to_string(),
+                data: String::from_utf8_lossy(&raw_data).into_owned(),
+                raw_data,
+                qsc_node: None,
+            });
+        app.save_workspace_object_as(GuiWorkspaceObjectKind::Surface, surface_uid, &surface_path)
+            .unwrap();
+        assert_eq!(
+            cuemol_surface::qdf::read_qdf_surface_bytes(&std::fs::read(&surface_path).unwrap())
+                .unwrap()
+                .mesh()
+                .triangle_count(),
+            1
+        );
+        let surface_summary = app.surface_summary(surface_uid).unwrap();
+        assert_eq!(surface_summary.source, surface_path.to_string_lossy());
+        assert_eq!(surface_summary.format, "qdfsurf");
+
+        app.save_active_scene_qsc(&scene_path).unwrap();
+        let mut reloaded = DesktopAppState::new();
+        reloaded.load_qsc_file(&scene_path).unwrap();
+        assert_eq!(reloaded.active_density_map_summaries().len(), 1);
+        assert_eq!(reloaded.active_surface_summaries().len(), 1);
+
+        for path in [map_path, surface_path, scene_path] {
             std::fs::remove_file(path).unwrap();
         }
         std::fs::remove_dir(dir).unwrap();

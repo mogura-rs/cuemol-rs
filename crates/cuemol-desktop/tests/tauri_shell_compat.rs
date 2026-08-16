@@ -281,7 +281,7 @@ fn tauri_file_open_matches_reference_molecule_reader_options() {
 }
 
 #[test]
-fn tauri_file_save_uses_reference_molecule_writer_filters() {
+fn tauri_file_save_uses_reference_workspace_writer_filters() {
     let start = JS.find("} else if (title === \"Save File As\")").unwrap();
     let end = JS[start + 1..]
         .find("} else if (title === \"Save Current View\")")
@@ -295,17 +295,23 @@ fn tauri_file_save_uses_reference_molecule_writer_filters() {
         "CueMol coordinates file (*.qdf)",
         "XYZR coordinates(*.xyzr)",
         "PQR coordinates(*.pqr)",
+        "CueMol density map file (*.qdf)",
+        "CueMol molsurf file (*.qdf)",
     ] {
         assert!(
-            dialog.contains(&format!("name: \"{writer}\"")),
+            JS.contains(&format!("name: \"{writer}\"")),
             "missing object writer {writer}"
         );
     }
+    assert!(dialog.contains("selectedWorkspaceObjectForSave()"));
+    assert!(dialog.contains("filters: objectSaveFilters(object.objectKind)"));
+    assert!(dialog.contains("objectKind: object.objectKind"));
     assert!(dialog.contains("saveOptions.defaultPath = objectSaveDefaultPath(object)"));
     assert!(JS.contains("return directory + \"copy_of_\" + fileName"));
     assert!(JS.contains("!source.startsWith(\"datachunk:\")"));
     assert!(dialog.contains("await mutateWithoutViewport("));
     assert!(dialog.contains("\"save_object\""));
+    assert!(TAURI_APP_RS.contains("save_workspace_object_as(kind"));
 }
 
 #[test]

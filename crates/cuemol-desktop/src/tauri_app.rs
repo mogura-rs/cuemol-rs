@@ -6164,6 +6164,7 @@ enum ModelRequest {
     },
     SaveObject {
         object_uid: u64,
+        object_kind: String,
         path: String,
     },
     SaveView(String),
@@ -9295,13 +9296,23 @@ fn handle_model_request(
             model.log_lines.push(model.status.clone());
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::SaveObject { object_uid, path } => {
+        ModelRequest::SaveObject {
+            object_uid,
+            object_kind,
+            path,
+        } => {
             if path.trim().is_empty() {
                 return Err("an object output path is required".to_string());
             }
+            let kind = match object_kind.as_str() {
+                "object" => crate::GuiWorkspaceObjectKind::Molecule,
+                "densityMap" => crate::GuiWorkspaceObjectKind::DensityMap,
+                "surface" => crate::GuiWorkspaceObjectKind::Surface,
+                value => return Err(format!("unsupported Workspace object type: {value}")),
+            };
             model
                 .desktop
-                .save_object_as(Uid::new(object_uid), &path)
+                .save_workspace_object_as(kind, Uid::new(object_uid), &path)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Saved object: {path}");
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -11715,12 +11726,17 @@ fn save_scene(
 #[tauri::command]
 fn save_object(
     object_uid: u64,
+    object_kind: Option<String>,
     path: String,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
         &state,
-        ModelRequest::SaveObject { object_uid, path },
+        ModelRequest::SaveObject {
+            object_uid,
+            object_kind: object_kind.unwrap_or_else(|| "object".to_string()),
+            path,
+        },
     )?)
 }
 
@@ -17245,6 +17261,7 @@ mod tests {
             &mut model,
             ModelRequest::SaveObject {
                 object_uid: target,
+                object_kind: "object".to_string(),
                 path: object_path.to_string_lossy().to_string(),
             },
         )

@@ -5737,9 +5737,9 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     });
     dialogActions(run);
   } else if (title === "Save File As") {
-    const object = selectedObject();
+    const object = selectedWorkspaceObjectForSave();
     if (!object) {
-      dialogContent.append(dialogParagraph("Select a molecular object first."));
+      dialogContent.append(dialogParagraph("Select an object first."));
     } else {
       dialogContent.append(dialogParagraph(`Object: ${object.name}`));
       const save = button("Save…", "dialog-primary", async () => {
@@ -5749,20 +5749,14 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         }
         const saveOptions = {
           defaultPath: `${object.name || "molecule"}.pdb`,
-          filters: [
-            { name: "PDB coordinates (*.pdb)", extensions: ["pdb"] },
-            { name: "MOL/SDF Coordinates (*.mol;*.sdf)", extensions: ["mol", "sdf"] },
-            { name: "CueMol coordinates file (*.qdf)", extensions: ["qdf"] },
-            { name: "XYZR coordinates(*.xyzr)", extensions: ["xyzr"] },
-            { name: "PQR coordinates(*.pqr)", extensions: ["pqr"] },
-          ],
+          filters: objectSaveFilters(object.objectKind),
         };
         saveOptions.defaultPath = objectSaveDefaultPath(object);
         const path = await dialog.save(saveOptions);
         if (!path) return;
         await mutateWithoutViewport(
           "save_object",
-          { objectUid: object.uid, path },
+          { objectUid: object.uid, objectKind: object.objectKind, path },
           renderStatusAndLog,
         );
         referenceDialog.close();
@@ -6448,6 +6442,35 @@ function selectedStyle() {
 
 function selectedObject() {
   return activeObjects().find((object) => object.uid === selectedObjectUid) || null;
+}
+
+function selectedWorkspaceObjectForSave() {
+  if (["densityMap", "densityRenderer"].includes(workspaceSelectionKind)) {
+    const object = selectedDensityMap();
+    return object ? { ...object, objectKind: "densityMap" } : null;
+  }
+  if (["surface", "surfaceRenderer"].includes(workspaceSelectionKind)) {
+    const object = selectedSurface();
+    return object ? { ...object, objectKind: "surface" } : null;
+  }
+  const object = selectedObject();
+  return object ? { ...object, objectKind: "object" } : null;
+}
+
+function objectSaveFilters(objectKind) {
+  if (objectKind === "densityMap") {
+    return [{ name: "CueMol density map file (*.qdf)", extensions: ["qdf"] }];
+  }
+  if (objectKind === "surface") {
+    return [{ name: "CueMol molsurf file (*.qdf)", extensions: ["qdf"] }];
+  }
+  return [
+    { name: "PDB coordinates (*.pdb)", extensions: ["pdb"] },
+    { name: "MOL/SDF Coordinates (*.mol;*.sdf)", extensions: ["mol", "sdf"] },
+    { name: "CueMol coordinates file (*.qdf)", extensions: ["qdf"] },
+    { name: "XYZR coordinates(*.xyzr)", extensions: ["xyzr"] },
+    { name: "PQR coordinates(*.pqr)", extensions: ["pqr"] },
+  ];
 }
 
 function objectSaveDefaultPath(object) {
