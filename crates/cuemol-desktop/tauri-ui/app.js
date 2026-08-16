@@ -11465,8 +11465,33 @@ async function openFiles() {
     directory: false,
     filters: [
       {
-        name: "CueMol structures and scenes",
-        extensions: ["pdb", "ent", "cif", "mmcif", "qsc", "qdfpdb", "pse", "sdf", "mol2", "gro", "coor", "dx", "map", "mrc", "ccp4", "obj", "ply", "view", "cam"],
+        name: "CueMol objects",
+        extensions: [
+          "pdb", "ent", "cif", "mmcif", "qdfpdb", "qdf", "sdf", "mol", "mol2", "gro",
+          "psf", "prmtop", "parm7", "top", "coor", "mtz", "dx", "map", "mrc", "ccp4",
+          "cns", "brix", "omap", "obj", "ply", "face", "vert", "view", "cam",
+        ],
+      },
+    ],
+  });
+  if (!chosen) return;
+  const paths = Array.isArray(chosen) ? chosen : [chosen];
+  await openSelectedPaths(paths);
+}
+
+async function openScene() {
+  if (!dialog?.open) {
+    showError("The Tauri dialog plugin is unavailable.");
+    return;
+  }
+  const chosen = await dialog.open({
+    title: "Open Scene",
+    multiple: false,
+    directory: false,
+    filters: [
+      {
+        name: "CueMol scenes",
+        extensions: ["qsc", "qsl", "pse"],
       },
     ],
   });
@@ -11578,6 +11603,9 @@ async function handleAction(action, depth = 0) {
   switch (action) {
     case "open":
       await openFiles();
+      break;
+    case "open-scene":
+      await openScene();
       break;
     case "undo":
       await mutate("undo", { depth });
@@ -12332,6 +12360,8 @@ viewport.addEventListener(
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeWorkspaceContextMenu();
   const editing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+  const primary = event.metaKey || event.ctrlKey;
+  const key = event.key.toLowerCase();
   const shortcut = !editing && preferences?.shortcuts?.find(
     (item) =>
       item.key === event.key &&
@@ -12342,15 +12372,44 @@ window.addEventListener("keydown", (event) => {
   if (shortcut) {
     event.preventDefault();
     cameraCommand("pan", shortcut.id === "view-trans-plusx" ? 1 : -1, 0);
-  } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "o") {
+  } else if (primary && !event.altKey && !event.shiftKey && key === "n") {
+    event.preventDefault();
+    handleLocalAction("new-window");
+  } else if (primary && !event.altKey && !event.shiftKey && key === "t") {
+    event.preventDefault();
+    handleAction("new-scene");
+  } else if (primary && !event.altKey && event.shiftKey && key === "o") {
+    event.preventDefault();
+    openScene();
+  } else if (primary && !event.altKey && !event.shiftKey && key === "o") {
     event.preventDefault();
     openFiles();
-  } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+  } else if (primary && !event.altKey && !event.shiftKey && key === "r") {
+    event.preventDefault();
+    handleLocalAction("reload-scene");
+  } else if (primary && !event.altKey && key === "s") {
     event.preventDefault();
     saveScene(event.shiftKey);
-  } else if (!editing && event.key.toLowerCase() === "f") {
+  } else if (!editing && primary && !event.altKey && !event.shiftKey && key === "z") {
+    event.preventDefault();
+    handleAction("undo");
+  } else if (!editing && primary && !event.altKey && !event.shiftKey && key === "y") {
+    event.preventDefault();
+    handleAction("redo");
+  } else if (
+    primary &&
+    !event.altKey &&
+    !event.shiftKey &&
+    (key === "k" || (event.metaKey && key === ","))
+  ) {
+    event.preventDefault();
+    showReferenceDialog("Options");
+  } else if (!editing && !primary && !event.altKey && !event.shiftKey && event.key === "F2") {
+    event.preventDefault();
+    handleLocalAction("performance-measure");
+  } else if (!editing && key === "f") {
     cameraCommand("fit");
-  } else if (!editing && event.key.toLowerCase() === "p") {
+  } else if (!editing && key === "p") {
     cameraCommand("projection");
   }
 });

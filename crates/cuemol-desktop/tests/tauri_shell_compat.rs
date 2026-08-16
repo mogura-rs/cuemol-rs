@@ -280,6 +280,40 @@ fn tauri_file_open_matches_reference_molecule_reader_options() {
 }
 
 #[test]
+fn tauri_file_and_scene_open_use_reference_reader_categories() {
+    assert_eq!(HTML.matches("data-action=\"open-scene\"").count(), 2);
+
+    let object_open = JS
+        .split("async function openFiles()")
+        .nth(1)
+        .and_then(|source| source.split("async function openScene()").next())
+        .expect("object file picker");
+    for extension in [
+        "pdb", "cif", "qdf", "mol2", "psf", "prmtop", "mtz", "ccp4", "cns", "obj", "vert",
+    ] {
+        assert!(
+            object_open.contains(&format!("\"{extension}\"")),
+            "missing object reader extension {extension}"
+        );
+    }
+    for scene_extension in ["qsc", "qsl", "pse"] {
+        assert!(
+            !object_open.contains(&format!("\"{scene_extension}\"")),
+            "scene extension leaked into object picker: {scene_extension}"
+        );
+    }
+
+    let scene_open = JS
+        .split("async function openScene()")
+        .nth(1)
+        .and_then(|source| source.split("async function openSelectedPaths").next())
+        .expect("scene file picker");
+    assert!(scene_open.contains("title: \"Open Scene\""));
+    assert!(scene_open.contains("extensions: [\"qsc\", \"qsl\", \"pse\"]"));
+    assert!(scene_open.contains("await openSelectedPaths(paths)"));
+}
+
+#[test]
 fn tauri_file_open_matches_reference_namd_coor_options() {
     for label in [
         "NAMD Coor file options",
@@ -1607,4 +1641,35 @@ fn tauri_options_match_the_reference_misc_key_and_mouse_panes() {
     assert!(JS.contains("preferences?.shortcuts?.find"));
     assert!(CSS.contains(".options-tabs"));
     assert!(CSS.contains(".shortcut-table"));
+}
+
+#[test]
+fn tauri_global_shortcuts_match_the_reference_keyset() {
+    let shortcuts = JS
+        .split("window.addEventListener(\"keydown\", (event) => {")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("document.addEventListener(\"pointerdown\"")
+                .next()
+        })
+        .expect("global keydown handler");
+
+    for key in ["n", "t", "o", "r", "s", "z", "y", "k"] {
+        assert!(
+            shortcuts.contains(&format!("key === \"{key}\"")),
+            "missing reference shortcut {key}"
+        );
+    }
+    assert!(shortcuts.contains("handleLocalAction(\"new-window\")"));
+    assert!(shortcuts.contains("handleAction(\"new-scene\")"));
+    assert!(shortcuts.contains("event.shiftKey && key === \"o\""));
+    assert!(shortcuts.contains("openScene()"));
+    assert!(shortcuts.contains("handleLocalAction(\"reload-scene\")"));
+    assert!(shortcuts.contains("handleAction(\"undo\")"));
+    assert!(shortcuts.contains("handleAction(\"redo\")"));
+    assert!(shortcuts.contains("showReferenceDialog(\"Options\")"));
+    assert!(shortcuts.contains("event.key === \"F2\""));
+    assert!(shortcuts.contains("handleLocalAction(\"performance-measure\")"));
+    assert!(shortcuts.contains("!editing && primary"));
 }
