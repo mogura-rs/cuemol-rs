@@ -7418,7 +7418,7 @@ function workspaceObjectContextItems(scene, object) {
     runMoleculeSelectionAction(object.uid, selection, "select");
   const current = object.selection || "";
   const around = (byResidue) =>
-    [3, 5, 7, ...(byResidue ? [] : [10])].map((radius) => ({
+    [3, 5, 7, 10].map((radius) => ({
       label: `${radius} Å`,
       action: select(aroundWorkspaceSelection(current, radius, byResidue)),
     }));
@@ -7439,13 +7439,14 @@ function workspaceObjectContextItems(scene, object) {
     {
       label: "Selection",
       children: [
-        { label: "All", action: select("*") },
+        { label: "Select All", action: select("*") },
         { label: "Unselect", action: select("") },
         { label: "Invert", action: select(invertWorkspaceSelection(current)) },
         null,
         { label: "Protein", action: select("protein") },
-        { label: "Nucleic", action: select("nucleic") },
+        { label: "Nucleic acid", action: select("nucleic") },
         { label: "Water", action: select("water") },
+        { label: "Ligand", action: select("!protein & !nucleic & !water") },
         { label: "Sugar", action: select("sugar") },
         { label: "Hydrogen", action: select("hydrogen") },
         null,
@@ -7455,7 +7456,7 @@ function workspaceObjectContextItems(scene, object) {
         },
         null,
         { label: "Around", children: around(false) },
-        { label: "Around (byres)", children: around(true) },
+        { label: "Around Byresid", children: around(true) },
       ],
     },
   ];

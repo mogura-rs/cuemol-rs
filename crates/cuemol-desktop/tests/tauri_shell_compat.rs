@@ -1133,7 +1133,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains(
         "async function workspaceAuxRendererContextItems(scene, kind, object, renderer)"
     ));
-    assert!(JS.contains("Around (byres)"));
+    assert!(JS.contains("[3, 5, 7, 10].map((radius) => ({"));
     assert!(JS.contains("function workspaceRendererContextItems(scene, object, renderer)"));
     assert!(JS.contains("set_workspace_renderer_selection"));
     assert!(JS.contains("change_workspace_renderer_type"));
@@ -1251,7 +1251,8 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
         "object.visible ? \"Hide\" : \"Show\"",
         "label: \"Selection\"",
         "label: \"Around\"",
-        "label: \"Around (byres)\"",
+        "label: \"Around Byresid\"",
+        "label: \"Ligand\"",
         "label: \"Rename…\"",
         "label: \"Copy\"",
         "label: \"New Renderer…\"",
