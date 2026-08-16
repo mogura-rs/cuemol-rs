@@ -8938,12 +8938,19 @@ impl GuiApplication {
     }
 
     fn choose_save_selected_object(&mut self) {
-        if self.target_object_uid().is_none() {
+        let Some(object_uid) = self.target_object_uid() else {
             self.set_status("No object selected");
             return;
-        }
-        if let Some(path) = native_file_dialog(NativeFileDialog::SaveObject, &self.object_save_path)
-        {
+        };
+        let Some(object) = self.state.scene_manager().object(object_uid) else {
+            self.set_status("No object selected");
+            return;
+        };
+        let initial = object_save_initial_path(object.source(), object.name());
+        if let Some(path) = native_file_dialog(
+            NativeFileDialog::SaveObject,
+            initial.to_string_lossy().as_ref(),
+        ) {
             self.object_save_path = path.to_string_lossy().into_owned();
             self.save_selected_object();
         }
@@ -20741,16 +20748,24 @@ const MSMS_VERTEX_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
 }];
 const OBJECT_SAVE_FILTERS: &[NativeFileFilter] = &[
     NativeFileFilter {
-        label: "Protein Data Bank",
-        extensions: &["pdb", "ent"],
+        label: "PDB coordinates (*.pdb)",
+        extensions: &["pdb"],
     },
     NativeFileFilter {
-        label: "CueMol QDF molecule",
+        label: "MOL/SDF Coordinates (*.mol;*.sdf)",
+        extensions: &["mol", "sdf"],
+    },
+    NativeFileFilter {
+        label: "CueMol coordinates file (*.qdf)",
         extensions: &["qdf"],
     },
     NativeFileFilter {
-        label: "MDL structure data",
-        extensions: &["sdf", "mol"],
+        label: "XYZR coordinates(*.xyzr)",
+        extensions: &["xyzr"],
+    },
+    NativeFileFilter {
+        label: "PQR coordinates(*.pqr)",
+        extensions: &["pqr"],
     },
 ];
 const SCENE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
@@ -22278,6 +22293,21 @@ fn is_network_url(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
 }
 
+fn object_save_initial_path(source: &str, object_name: &str) -> PathBuf {
+    let source = source.trim();
+    if !source.is_empty() && !source.starts_with("datachunk:") {
+        let path = Path::new(source);
+        if let Some(file_name) = path.file_name().filter(|name| !name.is_empty()) {
+            return path.with_file_name(format!("copy_of_{}", file_name.to_string_lossy()));
+        }
+    }
+    PathBuf::from(if object_name.trim().is_empty() {
+        "object"
+    } else {
+        object_name
+    })
+}
+
 fn is_view_file(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
@@ -23431,6 +23461,14 @@ mod tests {
         }
         assert!(is_trajectory_file(Path::new("movie.XTC")));
         assert!(!is_trajectory_file(Path::new("molecule.pdb")));
+        assert_eq!(
+            object_save_initial_path("/tmp/input.pdb", "input.pdb"),
+            PathBuf::from("/tmp/copy_of_input.pdb")
+        );
+        assert_eq!(
+            object_save_initial_path("datachunk:00000", "embedded"),
+            PathBuf::from("embedded")
+        );
         let open_scene = native_file_dialog_spec(NativeFileDialog::OpenScene);
         assert_eq!(open_scene.filters[0].label, "CueMol Scene");
         assert_eq!(open_scene.filters[0].extensions, &["qsc"]);
@@ -23465,6 +23503,22 @@ mod tests {
         let save_style = native_file_dialog_spec(NativeFileDialog::SaveStyle);
         assert!(save_style.save);
         assert_eq!(save_style.default_extension, Some("xml"));
+
+        let save_object = native_file_dialog_spec(NativeFileDialog::SaveObject);
+        assert_eq!(
+            save_object
+                .filters
+                .iter()
+                .map(|filter| (filter.label, filter.extensions))
+                .collect::<Vec<_>>(),
+            vec![
+                ("PDB coordinates (*.pdb)", &["pdb"][..]),
+                ("MOL/SDF Coordinates (*.mol;*.sdf)", &["mol", "sdf"][..]),
+                ("CueMol coordinates file (*.qdf)", &["qdf"][..]),
+                ("XYZR coordinates(*.xyzr)", &["xyzr"][..]),
+                ("PQR coordinates(*.pqr)", &["pqr"][..]),
+            ]
+        );
 
         assert_eq!(
             MainShortcutCommand::OpenFile.shortcut(),

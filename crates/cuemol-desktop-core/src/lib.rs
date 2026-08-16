@@ -38,9 +38,7 @@ use cuemol_qsys::{MultiGradient, ScalarObject, StyleManager, View};
 #[cfg(any(feature = "offscreen", feature = "scripting"))]
 use cuemol_render::PngSceneExporter;
 use cuemol_render::{PovSceneExporter, RenderSceneSnapshot, UmbreonFrame, UmbreonSceneExporter};
-#[cfg(feature = "scripting")]
-use cuemol_surface::XyzrFileWriter;
-use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter};
+use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter, XyzrFileWriter};
 use cuemol_xtal::{
     density_map_from_cif, read_mmcif_map_file, read_mtz_metadata_file, read_opendx_file,
     read_opendx_str, BrixMapReader, Ccp4MapReader, MapColorMode, MapMeshRenderer, MapSurfRenderer,
@@ -9181,6 +9179,8 @@ impl DesktopAppState {
         let output = match ext.as_str() {
             "pdb" | "ent" | "" => write_pdb_string(object.mol()),
             "sdf" | "mol" => write_sdf_string(object.mol()),
+            "pqr" => PqrFileWriter::new().write_pqr_string(object.mol()),
+            "xyzr" => XyzrFileWriter::new().write_xyzr_string(object.mol()),
             other => {
                 return Err(CueMolError::invalid_argument(format!(
                     "unsupported object save extension: {other}"
@@ -58582,6 +58582,43 @@ attribute \"dep\" string \"positions\"
         let _ = std::fs::remove_file(pdb_path);
         let _ = std::fs::remove_file(pov_path);
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn desktop_app_state_saves_reference_surface_coordinate_formats() {
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-desktop-surface-coordinate-save-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input_path = dir.join("input.pdb");
+        let pqr_path = dir.join("output.pqr");
+        let xyzr_path = dir.join("output.xyzr");
+        std::fs::write(
+            &input_path,
+            "ATOM      1  N   GLY A   1       1.000   2.000   3.000  1.00 10.00           N\nEND\n",
+        )
+        .unwrap();
+
+        let mut app = DesktopAppState::new();
+        let GuiLoadedPath::Object { object_uid, .. } = app.open_path(&input_path).unwrap() else {
+            panic!("expected molecule load");
+        };
+        app.save_object_as(object_uid, &pqr_path).unwrap();
+        app.save_object_as(object_uid, &xyzr_path).unwrap();
+
+        let pqr = std::fs::read_to_string(&pqr_path).unwrap();
+        assert!(pqr.starts_with("ATOM"));
+        assert!(pqr.contains("  1.000   2.000   3.000"));
+        let xyzr = std::fs::read_to_string(&xyzr_path).unwrap();
+        assert!(xyzr.contains("1.000000"));
+        assert!(xyzr.contains("2.000000"));
+        assert!(xyzr.contains("3.000000"));
+
+        for path in [input_path, pqr_path, xyzr_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]

@@ -281,6 +281,31 @@ fn tauri_file_open_matches_reference_molecule_reader_options() {
 }
 
 #[test]
+fn tauri_file_save_uses_reference_molecule_writer_filters() {
+    let start = JS.find("} else if (title === \"Save File As\")").unwrap();
+    let end = JS[start + 1..]
+        .find("} else if (title === \"Save Current View\")")
+        .map(|offset| start + 1 + offset)
+        .unwrap();
+    let dialog = &JS[start..end];
+
+    for writer in [
+        "PDB coordinates (*.pdb)",
+        "MOL/SDF Coordinates (*.mol;*.sdf)",
+        "CueMol coordinates file (*.qdf)",
+        "XYZR coordinates(*.xyzr)",
+        "PQR coordinates(*.pqr)",
+    ] {
+        assert!(
+            dialog.contains(&format!("name: \"{writer}\"")),
+            "missing object writer {writer}"
+        );
+    }
+    assert!(dialog.contains("await mutateWithoutViewport("));
+    assert!(dialog.contains("\"save_object\""));
+}
+
+#[test]
 fn tauri_file_and_scene_open_use_reference_reader_categories() {
     assert_eq!(HTML.matches("data-action=\"open-scene\"").count(), 2);
 

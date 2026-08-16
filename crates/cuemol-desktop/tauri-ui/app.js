@@ -5750,7 +5750,11 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         const path = await dialog.save({
           defaultPath: `${object.name || "molecule"}.pdb`,
           filters: [
-            { name: "Molecular structure", extensions: ["pdb", "sdf", "qdf"] },
+            { name: "PDB coordinates (*.pdb)", extensions: ["pdb"] },
+            { name: "MOL/SDF Coordinates (*.mol;*.sdf)", extensions: ["mol", "sdf"] },
+            { name: "CueMol coordinates file (*.qdf)", extensions: ["qdf"] },
+            { name: "XYZR coordinates(*.xyzr)", extensions: ["xyzr"] },
+            { name: "PQR coordinates(*.pqr)", extensions: ["pqr"] },
           ],
         });
         if (!path) return;
