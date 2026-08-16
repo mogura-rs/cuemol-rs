@@ -1439,8 +1439,11 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
 #[test]
 fn tauri_workspace_multiple_selection_matches_reference_actions() {
     assert!(JS.contains("let workspaceMultipleSelection = [];"));
+    assert!(JS.contains("let workspaceSelectionAnchor = null;"));
     assert!(JS.contains("function selectWorkspaceTreeTarget(event, target)"));
-    assert!(JS.contains("!event.ctrlKey && !event.metaKey"));
+    assert!(JS.contains("const multiple = event.ctrlKey || event.metaKey;"));
+    assert!(JS.contains("if (event.shiftKey)"));
+    assert!(JS.contains("row.workspaceSelectionTarget"));
     assert!(JS.contains("function workspaceMultipleContextItems()"));
     assert!(JS.contains("function showWorkspaceMultipleContextMenu(event, target)"));
     assert!(JS.contains("function workspaceRendererTargetClipboardKind(target)"));
@@ -1460,6 +1463,8 @@ fn tauri_workspace_multiple_selection_matches_reference_actions() {
     }
     assert!(NATIVE_GUI_RS.contains("enum NativeWorkspaceTarget"));
     assert!(NATIVE_GUI_RS.contains("input.modifiers.command"));
+    assert!(NATIVE_GUI_RS.contains("input.modifiers.shift"));
+    assert!(NATIVE_GUI_RS.contains("fn select_workspace_target_with_modifiers"));
     assert!(NATIVE_GUI_RS.contains("fn workspace_multiple_context_menu"));
     assert!(NATIVE_GUI_RS.contains("fn copy_workspace_target_renderers"));
     assert!(NATIVE_GUI_RS.contains("Some((owner.uid(), *renderer_uid))"));

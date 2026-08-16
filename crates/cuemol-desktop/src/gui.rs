@@ -902,6 +902,7 @@ struct GuiApplication {
     selected_renderer: Option<cuemol_core::Uid>,
     workspace_aux_selection: Option<WorkspaceAuxSelection>,
     workspace_multiple_selection: Vec<NativeWorkspaceTarget>,
+    workspace_selection_order: Vec<NativeWorkspaceTarget>,
     editing_saved_camera: Option<(cuemol_core::Uid, String)>,
     camera_visibility_draft: Option<NativeCameraVisibilityDraft>,
     style_properties_draft: Option<NativeStyleProperties>,
@@ -3228,6 +3229,7 @@ impl GuiApplication {
             selected_object: None,
             workspace_aux_selection: None,
             workspace_multiple_selection: Vec::new(),
+            workspace_selection_order: Vec::new(),
             editing_saved_camera: None,
             camera_visibility_draft: None,
             style_properties_draft: None,
@@ -4518,8 +4520,159 @@ impl GuiApplication {
         true
     }
 
+    fn select_workspace_target_with_modifiers(
+        &mut self,
+        target: NativeWorkspaceTarget,
+        multiple: bool,
+        range: bool,
+    ) -> bool {
+        if !range {
+            return self.select_workspace_target(target, multiple);
+        }
+        let anchor = self
+            .current_workspace_target()
+            .or_else(|| self.workspace_multiple_selection.first().copied());
+        let Some((anchor_index, target_index)) = anchor.and_then(|anchor| {
+            Some((
+                self.workspace_selection_order
+                    .iter()
+                    .position(|candidate| *candidate == anchor)?,
+                self.workspace_selection_order
+                    .iter()
+                    .position(|candidate| *candidate == target)?,
+            ))
+        }) else {
+            return self.select_workspace_target(target, multiple);
+        };
+        let start = anchor_index.min(target_index);
+        let end = anchor_index.max(target_index);
+        let range_targets = self.workspace_selection_order[start..=end].to_vec();
+        let mut targets = if multiple {
+            self.workspace_multiple_selection.clone()
+        } else {
+            Vec::new()
+        };
+        for candidate in range_targets {
+            if !targets.contains(&candidate) {
+                targets.push(candidate);
+            }
+        }
+        if targets.len() == 1 {
+            self.apply_workspace_target(targets[0]);
+            self.workspace_multiple_selection.clear();
+        } else {
+            self.workspace_multiple_selection = targets;
+        }
+        true
+    }
+
+    fn workspace_targets_in_tree_order(&self) -> Vec<NativeWorkspaceTarget> {
+        let mut targets = Vec::new();
+        for scene in self.state.scene_summaries() {
+            let mut objects = self
+                .state
+                .object_summaries(scene.uid)
+                .into_iter()
+                .map(NativeWorkspaceObjectSummary::Molecule)
+                .chain(
+                    self.state
+                        .density_map_summaries(scene.uid)
+                        .into_iter()
+                        .map(NativeWorkspaceObjectSummary::DensityMap),
+                )
+                .chain(
+                    self.state
+                        .surface_summaries(scene.uid)
+                        .into_iter()
+                        .map(NativeWorkspaceObjectSummary::Surface),
+                )
+                .chain(
+                    self.state
+                        .lw_object_summaries(scene.uid)
+                        .into_iter()
+                        .map(NativeWorkspaceObjectSummary::Lightweight),
+                )
+                .collect::<Vec<_>>();
+            objects.sort_by_key(NativeWorkspaceObjectSummary::sort_key);
+            for object in objects {
+                let (owner, collapsed, nodes) = match object {
+                    NativeWorkspaceObjectSummary::Molecule(summary) => (
+                        NativePropertyObject::Molecule(summary.uid),
+                        summary.ui_collapsed,
+                        native_renderer_tree_nodes(self.state.renderer_summaries(summary.uid)),
+                    ),
+                    NativeWorkspaceObjectSummary::DensityMap(summary) => (
+                        NativePropertyObject::DensityMap(summary.uid),
+                        summary.ui_collapsed,
+                        native_density_renderer_tree_nodes(&summary),
+                    ),
+                    NativeWorkspaceObjectSummary::Surface(summary) => (
+                        NativePropertyObject::Surface(summary.uid),
+                        summary.ui_collapsed,
+                        native_surface_renderer_tree_nodes(&summary),
+                    ),
+                    NativeWorkspaceObjectSummary::Lightweight(summary) => (
+                        NativePropertyObject::Lightweight(summary.uid),
+                        summary.ui_collapsed,
+                        native_lw_renderer_tree_nodes(&summary),
+                    ),
+                };
+                targets.push(NativeWorkspaceTarget::Object {
+                    scene_uid: scene.uid,
+                    owner,
+                });
+                if collapsed {
+                    continue;
+                }
+                for node in nodes {
+                    let is_group = node.renderer.renderer_type == "*group";
+                    targets.push(NativeWorkspaceTarget::Renderer {
+                        scene_uid: scene.uid,
+                        owner,
+                        renderer_uid: node.renderer.uid,
+                        is_group,
+                    });
+                    if is_group && !node.renderer.ui_collapsed {
+                        targets.extend(node.children.into_iter().map(|renderer| {
+                            NativeWorkspaceTarget::Renderer {
+                                scene_uid: scene.uid,
+                                owner,
+                                renderer_uid: renderer.uid,
+                                is_group: false,
+                            }
+                        }));
+                    }
+                }
+            }
+            targets.extend(
+                self.state
+                    .camera_summaries(scene.uid)
+                    .iter()
+                    .enumerate()
+                    .map(|(camera_index, _)| NativeWorkspaceTarget::Camera {
+                        scene_uid: scene.uid,
+                        camera_index,
+                    }),
+            );
+            targets.extend(
+                self.state
+                    .style_summaries(scene.uid)
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(style_index, style)| {
+                        style.local_index.map(|_| NativeWorkspaceTarget::Style {
+                            scene_uid: scene.uid,
+                            style_index,
+                        })
+                    }),
+            );
+        }
+        targets
+    }
+
     /// Workspace section — the scene/object/renderer tree (CueMol2 `objectTree`).
     fn workspace_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        self.workspace_selection_order = self.workspace_targets_in_tree_order();
         for scene in self.state.scene_summaries() {
             let objects = self.state.object_summaries(scene.uid);
             let density_maps = self.state.density_map_summaries(scene.uid);
@@ -4670,9 +4823,12 @@ impl GuiApplication {
                                         }
                                         if ui.selectable_label(selected, label).clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
-                                            let multiple =
-                                                ui.input(|input| input.modifiers.command);
-                                            if !self.select_workspace_target(target, multiple) {
+                                            let (multiple, range) = ui.input(|input| {
+                                                (input.modifiers.command, input.modifiers.shift)
+                                            });
+                                            if !self.select_workspace_target_with_modifiers(
+                                                target, multiple, range,
+                                            ) {
                                                 self.selected_object = Some(object.uid);
                                                 self.selected_renderer = None;
                                                 self.workspace_aux_selection = None;
@@ -4785,9 +4941,12 @@ impl GuiApplication {
                                         let label = format!("{} ({})", map.name, map.class_name);
                                         if ui.selectable_label(selected, label).clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
-                                            let multiple =
-                                                ui.input(|input| input.modifiers.command);
-                                            if !self.select_workspace_target(target, multiple) {
+                                            let (multiple, range) = ui.input(|input| {
+                                                (input.modifiers.command, input.modifiers.shift)
+                                            });
+                                            if !self.select_workspace_target_with_modifiers(
+                                                target, multiple, range,
+                                            ) {
                                                 self.selected_object = None;
                                                 self.selected_renderer = None;
                                                 self.workspace_aux_selection =
@@ -4901,9 +5060,12 @@ impl GuiApplication {
                                             format!("{} ({})", surface.name, surface.class_name);
                                         if ui.selectable_label(selected, label).clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
-                                            let multiple =
-                                                ui.input(|input| input.modifiers.command);
-                                            if !self.select_workspace_target(target, multiple) {
+                                            let (multiple, range) = ui.input(|input| {
+                                                (input.modifiers.command, input.modifiers.shift)
+                                            });
+                                            if !self.select_workspace_target_with_modifiers(
+                                                target, multiple, range,
+                                            ) {
                                                 self.selected_object = None;
                                                 self.selected_renderer = None;
                                                 self.workspace_aux_selection =
@@ -5014,9 +5176,12 @@ impl GuiApplication {
                                             format!("{} ({})", object.name, object.class_name);
                                         if ui.selectable_label(selected, label).clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
-                                            let multiple =
-                                                ui.input(|input| input.modifiers.command);
-                                            if !self.select_workspace_target(target, multiple) {
+                                            let (multiple, range) = ui.input(|input| {
+                                                (input.modifiers.command, input.modifiers.shift)
+                                            });
+                                            if !self.select_workspace_target_with_modifiers(
+                                                target, multiple, range,
+                                            ) {
                                                 self.selected_object = None;
                                                 self.selected_renderer = None;
                                                 self.workspace_aux_selection =
@@ -5138,8 +5303,10 @@ impl GuiApplication {
                         let response = ui.selectable_label(selected, label);
                         if response.clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
-                            let multiple = ui.input(|input| input.modifiers.command);
-                            if !self.select_workspace_target(target, multiple) {
+                            let (multiple, range) =
+                                ui.input(|input| (input.modifiers.command, input.modifiers.shift));
+                            if !self.select_workspace_target_with_modifiers(target, multiple, range)
+                            {
                                 self.selected_object = None;
                                 self.selected_renderer = None;
                                 self.workspace_aux_selection = Some(selection);
@@ -5305,9 +5472,11 @@ impl GuiApplication {
                         let response = ui.selectable_label(selected, label);
                         if response.clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
-                            let multiple = ui.input(|input| input.modifiers.command);
+                            let (multiple, range) =
+                                ui.input(|input| (input.modifiers.command, input.modifiers.shift));
                             if target.is_none_or(|target| {
-                                !self.select_workspace_target(target, multiple)
+                                !self
+                                    .select_workspace_target_with_modifiers(target, multiple, range)
                             }) {
                                 self.workspace_multiple_selection.clear();
                                 self.selected_object = None;
@@ -6183,8 +6352,9 @@ impl GuiApplication {
                     };
                     if ui.selectable_label(selected, label).clicked() {
                         self.activate_workspace_scene(scene_uid, camera);
-                        let multiple = ui.input(|input| input.modifiers.command);
-                        if !self.select_workspace_target(target, multiple) {
+                        let (multiple, range) =
+                            ui.input(|input| (input.modifiers.command, input.modifiers.shift));
+                        if !self.select_workspace_target_with_modifiers(target, multiple, range) {
                             self.selected_object = None;
                             self.selected_renderer = None;
                             self.workspace_aux_selection = Some(selection);
@@ -6338,8 +6508,9 @@ impl GuiApplication {
                     let response = ui.selectable_label(selected, label);
                     if response.clicked() {
                         self.activate_workspace_scene(scene_uid, camera);
-                        let multiple = ui.input(|input| input.modifiers.command);
-                        if !self.select_workspace_target(target, multiple) {
+                        let (multiple, range) =
+                            ui.input(|input| (input.modifiers.command, input.modifiers.shift));
+                        if !self.select_workspace_target_with_modifiers(target, multiple, range) {
                             self.selected_object = Some(object_uid);
                             self.selected_renderer = Some(renderer.uid);
                             self.workspace_aux_selection = None;
@@ -26997,8 +27168,8 @@ mod tests {
         };
 
         app.apply_workspace_target(object);
-        assert!(app.select_workspace_target(group, true));
-        assert!(app.select_workspace_target(child, true));
+        app.workspace_selection_order = app.workspace_targets_in_tree_order();
+        assert!(app.select_workspace_target_with_modifiers(child, false, true));
         assert_eq!(app.workspace_multiple_selection, [object, group, child]);
 
         app.delete_workspace_targets();

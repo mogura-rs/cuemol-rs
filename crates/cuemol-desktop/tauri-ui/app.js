@@ -165,6 +165,7 @@ let selectedCameraName = null;
 let selectedStyleIndex = null;
 let workspaceSelectionKind = "object";
 let workspaceMultipleSelection = [];
+let workspaceSelectionAnchor = null;
 let workspaceInlineRename = null;
 let workspaceRenameTimer = null;
 let molstructObjectUid = null;
@@ -8740,6 +8741,7 @@ function applyWorkspaceSelectionTarget(target) {
 
 function clearWorkspaceMultipleSelection() {
   workspaceMultipleSelection = [];
+  workspaceSelectionAnchor = null;
 }
 
 function workspaceTargetIsSelected(target, singleSelected = false) {
@@ -8749,9 +8751,46 @@ function workspaceTargetIsSelected(target, singleSelected = false) {
 }
 
 function selectWorkspaceTreeTarget(event, target) {
-  if (!event.ctrlKey && !event.metaKey) {
+  const multiple = event.ctrlKey || event.metaKey;
+  if (!multiple && !event.shiftKey) {
     clearWorkspaceMultipleSelection();
+    workspaceSelectionAnchor = target;
     return false;
+  }
+  if (event.shiftKey) {
+    const orderedTargets = [...sceneTree.querySelectorAll("button")]
+      .map((row) => row.workspaceSelectionTarget)
+      .filter(Boolean);
+    const anchor = workspaceSelectionAnchor || currentWorkspaceSelectionTarget();
+    const anchorKey = anchor ? workspaceTargetKey(anchor) : null;
+    const anchorIndex = orderedTargets.findIndex(
+      (candidate) => workspaceTargetKey(candidate) === anchorKey,
+    );
+    const targetKey = workspaceTargetKey(target);
+    const targetIndex = orderedTargets.findIndex(
+      (candidate) => workspaceTargetKey(candidate) === targetKey,
+    );
+    if (anchorIndex >= 0 && targetIndex >= 0) {
+      const start = Math.min(anchorIndex, targetIndex);
+      const end = Math.max(anchorIndex, targetIndex);
+      const targets = multiple ? [...workspaceMultipleSelection] : [];
+      for (const candidate of orderedTargets.slice(start, end + 1)) {
+        if (!targets.some((item) => workspaceTargetKey(item) === workspaceTargetKey(candidate))) {
+          targets.push(candidate);
+        }
+      }
+      clearWorkspaceRenameTimer();
+      if (targets.length === 1) {
+        clearWorkspaceMultipleSelection();
+        workspaceSelectionAnchor = anchor;
+        applyWorkspaceSelectionTarget(targets[0]);
+      } else {
+        workspaceMultipleSelection = targets;
+        workspaceSelectionKind = "multiple";
+      }
+      renderShell();
+      return true;
+    }
   }
   let targets =
     workspaceSelectionKind === "multiple"
@@ -8765,9 +8804,11 @@ function selectWorkspaceTreeTarget(event, target) {
   } else {
     targets.push(target);
   }
+  workspaceSelectionAnchor = target;
   clearWorkspaceRenameTimer();
   if (targets.length === 1) {
     clearWorkspaceMultipleSelection();
+    workspaceSelectionAnchor = target;
     applyWorkspaceSelectionTarget(targets[0]);
   } else {
     workspaceMultipleSelection = targets;
@@ -9165,6 +9206,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           renderShell();
         },
       );
+      objectRow.workspaceSelectionTarget = objectTarget;
       objectRow.dataset.workspaceRenameTarget = workspaceRenameTarget("object", object.uid);
       objectRow.addEventListener("dblclick", () => {
         clearWorkspaceRenameTimer();
@@ -9247,6 +9289,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             renderShell();
           },
         );
+        rendererRow.workspaceSelectionTarget = rendererTarget;
         rendererRow.dataset.workspaceRenameTarget = workspaceRenameTarget(
           selectionKind,
           object.uid,
@@ -9375,6 +9418,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           renderShell();
         },
       );
+      surfaceRow.workspaceSelectionTarget = surfaceTarget;
       surfaceRow.dataset.workspaceRenameTarget = workspaceRenameTarget("surface", surface.uid);
       surfaceRow.addEventListener("dblclick", () => {
         clearWorkspaceRenameTimer();
@@ -9449,6 +9493,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             renderShell();
           },
         );
+        rendererRow.workspaceSelectionTarget = rendererTarget;
         rendererRow.dataset.workspaceRenameTarget = workspaceRenameTarget(
           "surfaceRenderer",
           surface.uid,
@@ -9534,6 +9579,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           renderShell();
         },
       );
+      mapRow.workspaceSelectionTarget = mapTarget;
       mapRow.dataset.workspaceRenameTarget = workspaceRenameTarget("densityMap", map.uid);
       mapRow.addEventListener("dblclick", () => {
         clearWorkspaceRenameTimer();
@@ -9606,6 +9652,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             renderShell();
           },
         );
+        rendererRow.workspaceSelectionTarget = rendererTarget;
         rendererRow.dataset.workspaceRenameTarget = workspaceRenameTarget(
           "densityRenderer",
           map.uid,
@@ -9686,6 +9733,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           renderShell();
         },
       );
+      objectRow.workspaceSelectionTarget = objectTarget;
       objectRow.dataset.workspaceRenameTarget = workspaceRenameTarget("lwObject", object.uid);
       objectRow.addEventListener("dblclick", () => {
         clearWorkspaceRenameTimer();
@@ -9760,6 +9808,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             renderShell();
           },
         );
+        rendererRow.workspaceSelectionTarget = rendererTarget;
         rendererRow.dataset.workspaceRenameTarget = workspaceRenameTarget(
           "lwRenderer",
           object.uid,
@@ -9876,6 +9925,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           }
         },
       );
+      cameraRow.workspaceSelectionTarget = cameraTarget;
       cameraRow.dataset.workspaceRenameTarget = workspaceRenameTarget(
         "camera",
         scene.uid,
@@ -9970,6 +10020,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           }
         },
       );
+      if (styleTarget) styleRow.workspaceSelectionTarget = styleTarget;
       if (style.localIndex !== null) {
         styleRow.addEventListener("dblclick", () => showStyleProperties(style));
       }
