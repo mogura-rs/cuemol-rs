@@ -8765,7 +8765,19 @@ impl DesktopAppState {
                 visible: true,
                 xform: Matrix4::IDENTITY,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let mut qsc_node = LDom2Node::new();
+        qsc_node.set_tag_name("object");
+        qsc_node.set_type_name("LWObject");
+        qsc_node.set_str_attr("name", &object_name);
+        qsc_node.set_str_attr("src", path.to_string_lossy());
+        qsc_node.set_str_attr("srctype", "qdflwobj");
+        for renderer in &renderers {
+            let node = qsc_node.append_child("renderer");
+            node.set_type_name("lwrend");
+            node.set_str_attr("name", &renderer.name);
+            node.set_str_attr("data_id", renderer.data_id.to_string());
+        }
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
@@ -8778,7 +8790,7 @@ impl DesktopAppState {
             visible: true,
             xform: Matrix4::IDENTITY,
             renderers,
-            qsc_node: None,
+            qsc_node: Some(qsc_node),
         });
         Ok(())
     }
@@ -57807,6 +57819,7 @@ attribute \"dep\" string \"positions\"
         let vert_path = dir.join("msms.vert");
         let qdf_surface_path = dir.join("surface.qdf");
         let qdf_lw_path = dir.join("lightweight.qdf");
+        let scene_path = dir.join("objects.qsc");
 
         std::fs::write(
             &ply_path,
@@ -57880,6 +57893,34 @@ attribute \"dep\" string \"positions\"
                 .mesh_triangle_count(),
             4
         );
+        app.save_active_scene_qsc(&scene_path).unwrap();
+        let qsc = std::fs::read_to_string(&scene_path).unwrap();
+        assert!(qsc.contains(&format!("src=\"{}\"", qdf_lw_path.to_string_lossy())));
+
+        let mut reloaded = DesktopAppState::new();
+        reloaded.load_qsc_file(&scene_path).unwrap();
+        let reloaded_scene = reloaded
+            .scene_manager()
+            .scene(reloaded.active_scene().unwrap())
+            .unwrap();
+        assert_eq!(reloaded_scene.loaded_lw_objects().len(), 1);
+        assert_eq!(reloaded_scene.loaded_lw_objects()[0].renderers.len(), 1);
+        assert_eq!(
+            reloaded_scene.loaded_lw_objects()[0]
+                .qsc_node
+                .as_ref()
+                .unwrap()
+                .str_attr("src")
+                .as_str(),
+            qdf_lw_path.to_string_lossy()
+        );
+        assert_eq!(
+            reloaded
+                .active_render_snapshot("")
+                .unwrap()
+                .mesh_triangle_count(),
+            4
+        );
 
         for path in [
             ply_path,
@@ -57887,6 +57928,7 @@ attribute \"dep\" string \"positions\"
             vert_path,
             qdf_surface_path,
             qdf_lw_path,
+            scene_path,
         ] {
             let _ = std::fs::remove_file(path);
         }
