@@ -3132,7 +3132,7 @@ impl AppModel {
             .collect::<Vec<_>>()
             .join(",");
         self.desktop
-            .set_renderer_styles(
+            .set_workspace_renderer_styles(
                 Uid::new(input.object_uid),
                 Uid::new(input.renderer_uid),
                 &styles,
@@ -14788,6 +14788,66 @@ mod tests {
             .renderers
             .is_empty());
         assert!(model.workspace_renderer_clipboard.is_some());
+    }
+
+    #[test]
+    fn workspace_aux_renderer_style_requests_are_undoable() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let style_index = model.desktop.create_scene_style(scene_uid, "aux").unwrap();
+        model
+            .desktop
+            .update_scene_style(
+                scene_uid,
+                style_index,
+                "aux",
+                false,
+                "<styles><style id=\"Widecontour\" type=\"renderer\" width=\"2\"/></styles>",
+            )
+            .unwrap();
+        let map_uid =
+            model
+                .desktop
+                .add_density_map(scene_uid, "map", cuemol_xtal::DensityMap::new());
+        let renderer_uid = model
+            .desktop
+            .add_density_renderer(map_uid, "contour")
+            .unwrap();
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::ApplyWorkspaceRendererStyle(WorkspaceRendererStyleInput {
+                object_uid: map_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                style_name: "Widecontour".to_string(),
+                component: "shape".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(snapshot.density_maps[0].renderers[0].style, "Widecontour");
+        assert_eq!(snapshot.undo_descriptions[0], "Change style");
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceRendererStyles(WorkspaceRendererStylesInput {
+                object_uid: map_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                style_names: vec!["Widecontour".to_string(), "EgLineAux".to_string()],
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            model.snapshot().density_maps[0].renderers[0].style,
+            "Widecontour,EgLineAux"
+        );
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(
+            model.snapshot().density_maps[0].renderers[0].style,
+            "Widecontour"
+        );
     }
 
     #[test]

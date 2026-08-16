@@ -3751,6 +3751,18 @@ impl DesktopAppState {
         })
     }
 
+    pub fn set_lw_renderer_styles(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        styles: &str,
+    ) -> Result<()> {
+        let styles = styles.trim().to_string();
+        self.update_lw_renderer(object_uid, renderer_uid, |_, node| {
+            set_qsc_string_attr(node, "style", &styles, "");
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn set_lw_renderer_properties(
         &mut self,
@@ -6782,6 +6794,113 @@ impl DesktopAppState {
         Ok(())
     }
 
+    /// Return the scene, name, type, and directly assigned styles for any Workspace renderer.
+    pub fn workspace_renderer_style_state(
+        &self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+    ) -> Result<(Uid, String, String, String)> {
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_object(object_uid) {
+            let renderer = self
+                .scene_manager()
+                .object(object_uid)
+                .and_then(|object| object.renderer(renderer_uid))
+                .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+            return Ok((
+                scene_uid,
+                renderer.name().to_string(),
+                renderer.renderer_type().to_string(),
+                renderer.style().unwrap_or_default().to_string(),
+            ));
+        }
+        if let Some(map) = self.density_map_summary(object_uid) {
+            let renderer = map
+                .renderers
+                .into_iter()
+                .find(|renderer| renderer.uid == renderer_uid)
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
+                })?;
+            return Ok((
+                map.scene_uid,
+                renderer.name,
+                renderer.renderer_type,
+                renderer.specific.get("style").cloned().unwrap_or_default(),
+            ));
+        }
+        if let Some(surface) = self.surface_summary(object_uid) {
+            let renderer = surface
+                .renderers
+                .into_iter()
+                .find(|renderer| renderer.uid == renderer_uid)
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("surface renderer {}", renderer_uid.get()))
+                })?;
+            return Ok((
+                surface.scene_uid,
+                renderer.name,
+                renderer.renderer_type,
+                renderer.specific.get("style").cloned().unwrap_or_default(),
+            ));
+        }
+        if let Some(object) = self.lw_object_summary(object_uid) {
+            let renderer = object
+                .renderers
+                .into_iter()
+                .find(|renderer| renderer.uid == renderer_uid)
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("LWRenderer {}", renderer_uid.get()))
+                })?;
+            return Ok((
+                object.scene_uid,
+                renderer.name,
+                renderer.renderer_type,
+                renderer.style,
+            ));
+        }
+        Err(CueMolError::NotFound(format!(
+            "Workspace object {}",
+            object_uid.get()
+        )))
+    }
+
+    /// Set the directly assigned styles for any Workspace renderer.
+    pub fn set_workspace_renderer_styles(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        styles: &str,
+    ) -> Result<()> {
+        if self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .is_some()
+        {
+            return self.set_renderer_styles(object_uid, renderer_uid, styles);
+        }
+        if self.density_maps.contains_key(&object_uid) {
+            return self.set_density_renderer_styles(object_uid, renderer_uid, styles);
+        }
+        if self
+            .scene_manager()
+            .scene_uid_for_surface(object_uid)
+            .is_some()
+        {
+            return self.set_surface_renderer_styles(object_uid, renderer_uid, styles);
+        }
+        if self
+            .scene_manager()
+            .scene_uid_for_lw_object(object_uid)
+            .is_some()
+        {
+            return self.set_lw_renderer_styles(object_uid, renderer_uid, styles);
+        }
+        Err(CueMolError::NotFound(format!(
+            "Workspace object {}",
+            object_uid.get()
+        )))
+    }
+
     /// Replace one Workspace renderer style component and append the selected style.
     /// The component categories mirror CueMol2's separate Style and Coloring menus.
     pub fn apply_renderer_style_option(
@@ -6792,24 +6911,17 @@ impl DesktopAppState {
         component: &str,
     ) -> Result<String> {
         let style_name = style_name.trim();
-        let (scene_uid, renderer_type, current_styles) = {
-            let scene_uid = self
-                .scene_manager()
-                .scene_uid_for_object(object_uid)
-                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-            let object = self
-                .scene_manager()
-                .object(object_uid)
-                .expect("object was found above");
-            let renderer = object
-                .renderer(renderer_uid)
-                .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
-            (
-                scene_uid,
-                renderer.renderer_type().to_string(),
-                renderer.style().unwrap_or_default().to_string(),
-            )
-        };
+        let is_molecule = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .is_some();
+        let (scene_uid, _, renderer_type, current_styles) =
+            self.workspace_renderer_style_state(object_uid, renderer_uid)?;
+        if component == "coloring" && !is_molecule {
+            return Err(CueMolError::invalid_argument(
+                "coloring styles require a molecule renderer",
+            ));
+        }
         if !self
             .renderer_style_options(scene_uid, &renderer_type)
             .iter()
@@ -6862,7 +6974,7 @@ impl DesktopAppState {
         });
         styles.push(style_name.to_string());
         let styles = styles.join(",");
-        self.set_renderer_styles(object_uid, renderer_uid, &styles)?;
+        self.set_workspace_renderer_styles(object_uid, renderer_uid, &styles)?;
         if component == "coloring" {
             self.set_renderer_coloring_details(
                 object_uid,
@@ -56854,6 +56966,128 @@ end_header
             .unwrap();
         assert_eq!(first_paint.str_attr("sel").as_str(), "protein");
         assert_eq!(first_paint.str_attr("color").as_str(), "hsb(0, 1.0, 1.0)");
+    }
+
+    #[test]
+    fn workspace_aux_renderer_style_actions_update_every_object_kind() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("aux renderer styles", false).result_scene;
+        let style_index = app.create_scene_style(scene_uid, "aux").unwrap();
+        app.update_scene_style(
+            scene_uid,
+            style_index,
+            "aux",
+            false,
+            "<styles>\
+               <style id=\"Densecontour\" type=\"renderer\" width=\"2\"/>\
+               <style id=\"Glossymolsurf\" type=\"renderer\" material=\"glossy\"/>\
+               <style id=\"Wirelwrend\" type=\"renderer\" egtype=\"edges\"/>\
+               <style id=\"EgLineAux\" type=\"renderer\" eglinew=\"0.2\"/>\
+             </styles>",
+        )
+        .unwrap();
+
+        let map_uid = app.add_density_map(scene_uid, "map", DensityMap::new());
+        let map_renderer_uid = app.add_density_renderer(map_uid, "contour").unwrap();
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: "v 0 0 0\n".to_string(),
+                raw_data: b"v 0 0 0\n".to_vec(),
+                qsc_node: None,
+            });
+        let surface_renderer_uid = app.surface_summary(surface_uid).unwrap().renderers[0].uid;
+        let lw_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_lw_object(LoadedLWObject {
+                uid: Uid::new(0),
+                name: "lightweight".to_string(),
+                srctype: "qdflwobj".to_string(),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+                visible: true,
+                xform: Matrix4::IDENTITY,
+                renderers: vec![LoadedLWRenderer {
+                    name: "draw".to_string(),
+                    data_id: 0,
+                    visible: true,
+                    xform: Matrix4::IDENTITY,
+                }],
+                qsc_node: None,
+            });
+        let lw_renderer_uid = app.lw_object_summary(lw_uid).unwrap().renderers[0].uid;
+
+        assert_eq!(
+            app.apply_renderer_style_option(map_uid, map_renderer_uid, "Densecontour", "shape")
+                .unwrap(),
+            "Densecontour"
+        );
+        assert_eq!(
+            app.apply_renderer_style_option(map_uid, map_renderer_uid, "EgLineAux", "edge")
+                .unwrap(),
+            "Densecontour,EgLineAux"
+        );
+        assert_eq!(
+            app.apply_renderer_style_option(
+                surface_uid,
+                surface_renderer_uid,
+                "Glossymolsurf",
+                "shape",
+            )
+            .unwrap(),
+            "Glossymolsurf"
+        );
+        assert_eq!(
+            app.apply_renderer_style_option(lw_uid, lw_renderer_uid, "Wirelwrend", "shape")
+                .unwrap(),
+            "Wirelwrend"
+        );
+        assert!(app
+            .apply_renderer_style_option(
+                map_uid,
+                map_renderer_uid,
+                "DefaultCPKColoring",
+                "coloring",
+            )
+            .is_err());
+
+        assert_eq!(
+            app.workspace_renderer_style_state(map_uid, map_renderer_uid)
+                .unwrap(),
+            (
+                scene_uid,
+                "contour 1".to_string(),
+                "contour".to_string(),
+                "Densecontour,EgLineAux".to_string(),
+            )
+        );
+        assert_eq!(
+            app.workspace_renderer_style_state(surface_uid, surface_renderer_uid)
+                .unwrap()
+                .3,
+            "Glossymolsurf"
+        );
+        assert_eq!(
+            app.workspace_renderer_style_state(lw_uid, lw_renderer_uid)
+                .unwrap()
+                .3,
+            "Wirelwrend"
+        );
+        app.set_workspace_renderer_styles(lw_uid, lw_renderer_uid, "")
+            .unwrap();
+        assert_eq!(
+            app.workspace_renderer_style_state(lw_uid, lw_renderer_uid)
+                .unwrap()
+                .3,
+            ""
+        );
     }
 
     #[test]

@@ -1120,13 +1120,16 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("function showWorkspaceContextMenu(event, items)"));
     assert!(JS.contains("function workspaceObjectContextItems(scene, object)"));
     assert!(JS.contains("function workspaceAuxObjectContextItems(scene, kind, object)"));
-    assert!(JS.contains("function workspaceAuxRendererContextItems(scene, kind, object, renderer)"));
+    assert!(JS.contains(
+        "async function workspaceAuxRendererContextItems(scene, kind, object, renderer)"
+    ));
     assert!(JS.contains("Around (byres)"));
     assert!(JS.contains("function workspaceRendererContextItems(scene, object, renderer)"));
     assert!(JS.contains("set_workspace_renderer_selection"));
     assert!(JS.contains("change_workspace_renderer_type"));
     assert!(JS.contains("cachedWorkspaceRendererStyles"));
     assert!(JS.contains("apply_workspace_renderer_style"));
+    assert!(JS.contains("showApplyRendererStyleDialog(object, renderer, styleOptions)"));
     assert!(JS.contains("set_workspace_renderer_coloring"));
     assert!(JS.contains("insert_workspace_renderer_paint"));
     assert!(JS.contains("insert_workspace_object_paint"));

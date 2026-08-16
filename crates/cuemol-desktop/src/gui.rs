@@ -5254,20 +5254,20 @@ impl GuiApplication {
     ) {
         let renderer = match selection {
             WorkspaceAuxSelection::DensityMap {
+                scene_uid,
                 map_uid,
                 renderer_uid: Some(renderer_uid),
-                ..
-            } => Some((map_uid, renderer_uid)),
+            } => Some((scene_uid, map_uid, renderer_uid)),
             WorkspaceAuxSelection::Surface {
+                scene_uid,
                 surface_uid,
                 renderer_uid: Some(renderer_uid),
-                ..
-            } => Some((surface_uid, renderer_uid)),
+            } => Some((scene_uid, surface_uid, renderer_uid)),
             WorkspaceAuxSelection::Lightweight {
+                scene_uid,
                 object_uid,
                 renderer_uid: Some(renderer_uid),
-                ..
-            } => Some((object_uid, renderer_uid)),
+            } => Some((scene_uid, object_uid, renderer_uid)),
             _ => None,
         };
         let can_generate_surface = match selection {
@@ -5289,7 +5289,19 @@ impl GuiApplication {
         if can_generate_surface {
             ui.separator();
         }
-        if let Some((object_uid, renderer_uid)) = renderer {
+        if let Some((scene_uid, object_uid, renderer_uid)) = renderer {
+            if let Ok((_, _, renderer_type, _)) = self
+                .state
+                .workspace_renderer_style_state(object_uid, renderer_uid)
+            {
+                self.workspace_aux_renderer_style_menus(
+                    ui,
+                    scene_uid,
+                    object_uid,
+                    renderer_uid,
+                    &renderer_type,
+                );
+            }
             if ui.button("Copy").clicked() {
                 self.copy_workspace_renderer_to_clipboard(object_uid, renderer_uid);
                 ui.close();
@@ -5304,6 +5316,75 @@ impl GuiApplication {
             self.open_aux_properties(selection);
             ui.close();
         }
+    }
+
+    fn workspace_aux_renderer_style_menus(
+        &mut self,
+        ui: &mut egui::Ui,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        renderer_type: &str,
+    ) {
+        let options = self.state.renderer_style_options(scene_uid, renderer_type);
+        let renderer_type = renderer_type.trim_start_matches('*').to_ascii_lowercase();
+        let suffix = match renderer_type.as_str() {
+            "name_label" | "namelabel" => "label",
+            "gpu_mapmesh" => "contour",
+            other => other,
+        };
+        let shape = options
+            .iter()
+            .filter(|style| style.name.to_ascii_lowercase().ends_with(suffix))
+            .collect::<Vec<_>>();
+        let edge = options
+            .iter()
+            .filter(|style| style.name.to_ascii_lowercase().starts_with("egline"))
+            .collect::<Vec<_>>();
+        ui.menu_button("Style", |ui| {
+            for style in &shape {
+                let label = if style.description.is_empty() {
+                    style.name.as_str()
+                } else {
+                    style.description.as_str()
+                };
+                if ui.button(label).clicked() {
+                    self.apply_workspace_renderer_style(
+                        scene_uid,
+                        object_uid,
+                        renderer_uid,
+                        &style.name,
+                        "shape",
+                    );
+                    ui.close();
+                }
+            }
+            if !shape.is_empty() && !edge.is_empty() {
+                ui.separator();
+            }
+            for style in &edge {
+                let label = if style.description.is_empty() {
+                    style.name.as_str()
+                } else {
+                    style.description.as_str()
+                };
+                if ui.button(label).clicked() {
+                    self.apply_workspace_renderer_style(
+                        scene_uid,
+                        object_uid,
+                        renderer_uid,
+                        &style.name,
+                        "edge",
+                    );
+                    ui.close();
+                }
+            }
+        });
+        if ui.button("Edit style...").clicked() {
+            self.open_renderer_style_edit(scene_uid, object_uid, renderer_uid);
+            ui.close();
+        }
+        ui.separator();
     }
 
     fn workspace_molecule_renderer_row(
@@ -14863,23 +14944,17 @@ impl GuiApplication {
         object_uid: cuemol_core::Uid,
         renderer_uid: cuemol_core::Uid,
     ) {
-        let Some((renderer_name, renderer_type, style_list)) = self
+        let Ok((renderer_scene_uid, renderer_name, renderer_type, style_list)) = self
             .state
-            .scene_manager()
-            .scene(scene_uid)
-            .and_then(|scene| scene.object(object_uid))
-            .and_then(|object| object.renderer(renderer_uid))
-            .map(|renderer| {
-                (
-                    renderer.name().to_string(),
-                    renderer.renderer_type().to_string(),
-                    renderer.style().unwrap_or_default().to_string(),
-                )
-            })
+            .workspace_renderer_style_state(object_uid, renderer_uid)
         else {
             self.set_status("Renderer not found");
             return;
         };
+        if renderer_scene_uid != scene_uid {
+            self.set_status("Renderer is not in the selected scene");
+            return;
+        }
         let initial_styles = style_list
             .split(',')
             .map(str::trim)
@@ -14949,7 +15024,7 @@ impl GuiApplication {
             .join(",");
         let undo = self.capture_undo();
         self.state
-            .set_renderer_styles(draft.object_uid, draft.renderer_uid, &styles)
+            .set_workspace_renderer_styles(draft.object_uid, draft.renderer_uid, &styles)
             .map_err(|error| error.to_string())?;
         self.push_undo_snapshot(undo);
         self.modified_scenes.insert(draft.scene_uid);
@@ -26235,6 +26310,35 @@ mod tests {
         assert_eq!(
             app.state.renderer_summaries(object_uid)[0].style.as_deref(),
             Some("DefaultSimple,DefaultCPKColoring")
+        );
+
+        let map_uid = app
+            .state
+            .add_density_map(scene_uid, "map", cuemol_xtal::DensityMap::new());
+        let map_renderer_uid = app.state.add_density_renderer(map_uid, "contour").unwrap();
+        app.state
+            .set_density_renderer_styles(map_uid, map_renderer_uid, "DefaultContour")
+            .unwrap();
+        app.open_renderer_style_edit(scene_uid, map_uid, map_renderer_uid);
+        let mut draft = app.renderer_style_edit_draft.take().unwrap();
+        assert_eq!(draft.renderer_type, "contour");
+        assert_eq!(draft.initial_styles, ["DefaultContour"]);
+        draft.styles = vec!["ThickContour".to_string()];
+        assert!(app.apply_renderer_style_edit(&draft).unwrap());
+        assert_eq!(
+            app.state.density_map_summary(map_uid).unwrap().renderers[0]
+                .specific
+                .get("style")
+                .map(String::as_str),
+            Some("ThickContour")
+        );
+        app.undo(&mut CameraController::default());
+        assert_eq!(
+            app.state.density_map_summary(map_uid).unwrap().renderers[0]
+                .specific
+                .get("style")
+                .map(String::as_str),
+            Some("DefaultContour")
         );
     }
 

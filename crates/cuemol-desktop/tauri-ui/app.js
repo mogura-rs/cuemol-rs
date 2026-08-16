@@ -7830,7 +7830,7 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
   return items;
 }
 
-function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
+async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
   const objectKind = {
     densityRenderer: "densityMap",
     surfaceRenderer: "surface",
@@ -7840,6 +7840,39 @@ function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
     if (snapshot.activeSceneUid === scene.uid) return true;
     return mutate("activate_scene", { sceneUid: scene.uid });
   };
+  const styleOptions = await cachedWorkspaceRendererStyles(scene.uid, renderer.rendererType);
+  const lowerType = renderer.rendererType.replace(/^\*/, "").toLowerCase();
+  const suffix = ["name_label", "namelabel"].includes(lowerType)
+    ? "label"
+    : lowerType === "gpu_mapmesh"
+      ? "contour"
+      : lowerType;
+  const shapeStyles = styleOptions.filter((style) =>
+    style.name.toLowerCase().endsWith(suffix),
+  );
+  const edgeStyles = styleOptions.filter((style) =>
+    style.name.toLowerCase().startsWith("egline"),
+  );
+  const applyStyle = (styleName, component) => () =>
+    mutate("apply_workspace_renderer_style", {
+      input: {
+        objectUid: object.uid,
+        rendererUid: renderer.uid,
+        styleName,
+        component,
+      },
+    });
+  const styleChildren = shapeStyles.map((style) => ({
+    label: style.description || style.name,
+    action: applyStyle(style.name, "shape"),
+  }));
+  if (shapeStyles.length > 0 && edgeStyles.length > 0) styleChildren.push(null);
+  styleChildren.push(
+    ...edgeStyles.map((style) => ({
+      label: style.description || style.name,
+      action: applyStyle(style.name, "edge"),
+    })),
+  );
   const items = [
     { label: renderer.name, disabled: true },
     null,
@@ -7849,6 +7882,14 @@ function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
         if (!(await activate())) return;
         selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
         beginWorkspaceInlineRename(kind, object.uid, renderer.uid);
+      },
+    },
+    ...(styleChildren.length > 0 ? [{ label: "Style", children: styleChildren }] : []),
+    {
+      label: "Edit style…",
+      action: async () => {
+        if (!(await activate())) return;
+        await showApplyRendererStyleDialog(object, renderer, styleOptions);
       },
     },
     {
@@ -8867,11 +8908,17 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           clearWorkspaceRenameTimer();
           showReferenceDialog("Renderer Properties");
         });
-        rendererRow.addEventListener("contextmenu", (event) => {
+        rendererRow.addEventListener("contextmenu", async (event) => {
+          event.preventDefault();
           selectWorkspaceAuxItem("surfaceRenderer", surface.uid, renderer.uid);
           showWorkspaceContextMenu(
             event,
-            workspaceAuxRendererContextItems(scene, "surfaceRenderer", surface, renderer),
+            await workspaceAuxRendererContextItems(
+              scene,
+              "surfaceRenderer",
+              surface,
+              renderer,
+            ),
           );
         });
         rendererRow.prepend(
@@ -8985,11 +9032,17 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           clearWorkspaceRenameTimer();
           showReferenceDialog("Renderer Properties");
         });
-        rendererRow.addEventListener("contextmenu", (event) => {
+        rendererRow.addEventListener("contextmenu", async (event) => {
+          event.preventDefault();
           selectWorkspaceAuxItem("densityRenderer", map.uid, renderer.uid);
           showWorkspaceContextMenu(
             event,
-            workspaceAuxRendererContextItems(scene, "densityRenderer", map, renderer),
+            await workspaceAuxRendererContextItems(
+              scene,
+              "densityRenderer",
+              map,
+              renderer,
+            ),
           );
         });
         rendererRow.prepend(
@@ -9105,11 +9158,12 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           clearWorkspaceRenameTimer();
           showReferenceDialog("Renderer Properties");
         });
-        rendererRow.addEventListener("contextmenu", (event) => {
+        rendererRow.addEventListener("contextmenu", async (event) => {
+          event.preventDefault();
           selectWorkspaceAuxItem("lwRenderer", object.uid, renderer.uid);
           showWorkspaceContextMenu(
             event,
-            workspaceAuxRendererContextItems(scene, "lwRenderer", object, renderer),
+            await workspaceAuxRendererContextItems(scene, "lwRenderer", object, renderer),
           );
         });
         rendererRow.prepend(
