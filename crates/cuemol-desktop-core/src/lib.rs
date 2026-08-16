@@ -7663,26 +7663,26 @@ impl DesktopAppState {
         target_scene: Option<Uid>,
     ) -> Result<Uid> {
         let path = path.as_ref();
-        let format = guess_path_format(path, &self.stream_manager)?;
-        if is_scene_format(format) {
-            let scene_uid = self
-                .load_qsc_file_into(path, target_scene)?
-                .ok_or_else(|| CueMolError::parse("scene was not loaded"))?;
-            if target_scene.is_some() {
-                if let Some(camera) = self.active_scene_saved_camera() {
-                    self.set_active_view_camera(&camera)?;
-                }
-            }
-            return Ok(scene_uid);
-        }
-        if format != "pse" {
-            return Err(CueMolError::invalid_argument(format!(
-                "unsupported scene format: {format}"
-            )));
-        }
-
         let backup = self.clone();
         let result = (|| {
+            let format = guess_path_format(path, &self.stream_manager)?;
+            if is_scene_format(format) {
+                let scene_uid = self
+                    .load_qsc_file_into(path, target_scene)?
+                    .ok_or_else(|| CueMolError::parse("scene was not loaded"))?;
+                if target_scene.is_some() {
+                    if let Some(camera) = self.active_scene_saved_camera() {
+                        self.set_active_view_camera(&camera)?;
+                    }
+                }
+                return Ok(scene_uid);
+            }
+            if format != "pse" {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unsupported scene format: {format}"
+                )));
+            }
+
             let scene_name = path
                 .file_stem()
                 .or_else(|| path.file_name())
@@ -54041,6 +54041,49 @@ end_header
         assert_eq!(maps[0].value_count, 2);
         assert!(app.active_scene_skipped_objects().is_empty());
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn open_scene_file_rolls_back_failed_qsc_post_processing() {
+        let directory =
+            std::env::temp_dir().join(format!("cuemol-open-scene-rollback-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let pdb_path = directory.join("existing.pdb");
+        std::fs::write(
+            &pdb_path,
+            "ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let qsc_path = directory.join("broken.qsc");
+        std::fs::write(
+            &qsc_path,
+            "<scene><object type=\"DensityMap\" name=\"broken-map\" \
+             src=\"broken.dx\" srctype=\"apbs\"/></scene>",
+        )
+        .unwrap();
+        std::fs::write(directory.join("broken.dx"), "not an OpenDX map").unwrap();
+
+        let mut app = DesktopAppState::new();
+        let GuiLoadedPath::Object {
+            scene_uid,
+            object_uid,
+        } = app.open_path(&pdb_path).unwrap()
+        else {
+            panic!("expected molecule");
+        };
+        let original_name = app.active_scene_summary().unwrap().name;
+
+        for target in [None, Some(scene_uid)] {
+            let error = app.open_scene_file(&qsc_path, target).unwrap_err();
+            assert!(error.to_string().contains("OpenDX"));
+            assert_eq!(app.active_scene(), Some(scene_uid));
+            assert_eq!(app.scene_summaries().len(), 1);
+            assert_eq!(app.active_scene_summary().unwrap().name, original_name);
+            assert!(app.scene_manager().object(object_uid).is_some());
+            assert!(app.active_density_map_summaries().is_empty());
+        }
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

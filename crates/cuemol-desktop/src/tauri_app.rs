@@ -4866,7 +4866,6 @@ impl AppModel {
 
     fn open_scene(&mut self, path: String) -> Result<(), String> {
         self.start_renderer_warmup();
-        self.opened_paths.clear();
         let reusable_scene = self
             .active_scene_is_just_created()
             .then(|| self.desktop.active_scene())
@@ -4878,6 +4877,7 @@ impl AppModel {
             .desktop
             .open_scene_file(&path, reusable_scene)
             .map_err(|error| error.to_string())?;
+        self.opened_paths.clear();
         let saved_camera = self.desktop.active_scene_saved_camera();
         self.camera = saved_camera
             .clone()
@@ -12605,6 +12605,38 @@ mod tests {
 
         fs::remove_file(first_path).unwrap();
         fs::remove_file(second_path).unwrap();
+    }
+
+    #[test]
+    fn failed_open_scene_preserves_the_active_tab_and_opened_path() {
+        let directory = std::env::temp_dir().join(format!(
+            "cuemol-tauri-open-scene-rollback-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("broken.qsc");
+        fs::write(
+            &path,
+            "<scene><object type=\"DensityMap\" name=\"broken-map\" \
+             src=\"broken.dx\" srctype=\"apbs\"/></scene>",
+        )
+        .unwrap();
+        fs::write(directory.join("broken.dx"), "not an OpenDX map").unwrap();
+
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        model.opened_paths = vec!["existing.pdb".to_string()];
+
+        let error = model
+            .open_scene(path.to_string_lossy().into_owned())
+            .unwrap_err();
+        assert!(error.contains("OpenDX"));
+        assert_eq!(model.desktop.active_scene(), Some(scene_uid));
+        assert_eq!(model.desktop.scene_summaries().len(), 1);
+        assert!(model.desktop.active_scene_is_just_created());
+        assert_eq!(model.opened_paths, ["existing.pdb"]);
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
