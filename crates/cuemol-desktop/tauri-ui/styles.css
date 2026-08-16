@@ -764,7 +764,17 @@ summary:focus-visible {
 }
 
 .tree-renderer.renderer-group::before {
-  content: "▾";
+  width: 0;
+  content: "";
+}
+
+.workspace-group-twisty {
+  display: inline-flex;
+  flex: 0 0 14px;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+  cursor: default;
 }
 
 .renderer-row.renderer-group {

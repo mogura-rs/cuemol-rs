@@ -475,6 +475,7 @@ struct RendererDto {
     name: String,
     renderer_type: String,
     group: Option<String>,
+    ui_collapsed: bool,
     selection: String,
     visible: bool,
     locked: bool,
@@ -720,6 +721,7 @@ struct LwRendererDto {
     name: String,
     renderer_type: String,
     group: Option<String>,
+    ui_collapsed: bool,
     visible: bool,
     locked: bool,
     style: String,
@@ -1107,6 +1109,14 @@ struct WorkspaceMoveRendererInput {
     renderer_uid: u64,
     target_uid: u64,
     position: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceRendererCollapsedInput {
+    object_uid: u64,
+    renderer_uid: u64,
+    collapsed: bool,
 }
 
 #[derive(Deserialize)]
@@ -1659,6 +1669,7 @@ impl AppModel {
                             name: renderer.name,
                             renderer_type: renderer.renderer_type,
                             group: renderer.group,
+                            ui_collapsed: renderer.ui_collapsed,
                             selection: if matches!(
                                 state.renderer_type(),
                                 "*namelabel" | "name_label"
@@ -1796,6 +1807,7 @@ impl AppModel {
                             name: renderer.name,
                             renderer_type: renderer.renderer_type,
                             group: renderer.group,
+                            ui_collapsed: false,
                             selection: String::new(),
                             visible: renderer.visible,
                             locked: renderer.locked,
@@ -1877,6 +1889,7 @@ impl AppModel {
                             name: renderer.name,
                             renderer_type: renderer.renderer_type,
                             group: renderer.group,
+                            ui_collapsed: false,
                             selection: renderer.selection,
                             visible: renderer.visible,
                             locked: renderer.locked,
@@ -1958,6 +1971,7 @@ impl AppModel {
                                 name: renderer.name,
                                 renderer_type: renderer.renderer_type,
                                 group: renderer.group,
+                                ui_collapsed: false,
                                 visible: renderer.visible,
                                 locked: renderer.locked,
                                 style: renderer.style.clone(),
@@ -3160,6 +3174,31 @@ impl AppModel {
             self.status = "Move renderer".to_string();
         }
         Ok(moved)
+    }
+
+    fn set_workspace_renderer_collapsed(
+        &mut self,
+        input: WorkspaceRendererCollapsedInput,
+    ) -> Result<(), String> {
+        let object_uid = Uid::new(input.object_uid);
+        let renderer_uid = Uid::new(input.renderer_uid);
+        let (scene_uid, _, renderer_type, _) = self
+            .desktop
+            .workspace_renderer_style_state(object_uid, renderer_uid)
+            .map_err(|error| error.to_string())?;
+        if renderer_type != "*group" {
+            return Err("only renderer groups can be collapsed".to_string());
+        }
+        self.desktop
+            .set_renderer_group_collapsed(object_uid, renderer_uid, input.collapsed)
+            .map_err(|error| error.to_string())?;
+        self.modified_scenes.insert(scene_uid);
+        self.status = if input.collapsed {
+            "Collapse renderer group".to_string()
+        } else {
+            "Expand renderer group".to_string()
+        };
+        Ok(())
     }
 
     fn move_workspace_object(&mut self, input: WorkspaceMoveObjectInput) -> Result<bool, String> {
@@ -6320,6 +6359,7 @@ enum ModelRequest {
     DeleteWorkspaceItem(WorkspaceDeleteInput),
     MoveWorkspaceObject(WorkspaceMoveObjectInput),
     MoveWorkspaceRenderer(WorkspaceMoveRendererInput),
+    SetWorkspaceRendererCollapsed(WorkspaceRendererCollapsedInput),
     SetWorkspaceRendererSelection(WorkspaceRendererSelectionInput),
     ChangeWorkspaceRendererType(WorkspaceRendererTypeInput),
     ApplyWorkspaceRendererStyle(WorkspaceRendererStyleInput),
@@ -7375,6 +7415,7 @@ fn aux_renderer_group_dto(group: crate::GuiAuxRendererGroupSummary) -> RendererD
         name: group.name,
         renderer_type: "*group".to_string(),
         group: None,
+        ui_collapsed: group.ui_collapsed,
         selection: String::new(),
         visible: group.visible,
         locked: group.locked,
@@ -7410,6 +7451,7 @@ fn aux_lw_renderer_group_dto(group: crate::GuiAuxRendererGroupSummary) -> LwRend
         name: group.name,
         renderer_type: "*group".to_string(),
         group: None,
+        ui_collapsed: group.ui_collapsed,
         visible: group.visible,
         locked: group.locked,
         style: group.style.clone(),
@@ -8261,6 +8303,10 @@ fn handle_model_request(
             if model.move_workspace_renderer(input)? {
                 model.push_undo(undo);
             }
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetWorkspaceRendererCollapsed(input) => {
+            model.set_workspace_renderer_collapsed(input)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetWorkspaceRendererSelection(input) => {
@@ -10900,6 +10946,17 @@ fn move_workspace_renderer(
 }
 
 #[tauri::command]
+fn set_workspace_renderer_collapsed(
+    input: WorkspaceRendererCollapsedInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetWorkspaceRendererCollapsed(input),
+    )?)
+}
+
+#[tauri::command]
 fn move_workspace_object(
     input: WorkspaceMoveObjectInput,
     state: State<'_, ManagedState>,
@@ -12601,6 +12658,7 @@ pub fn run() -> Result<(), tauri::Error> {
             delete_workspace_item,
             move_workspace_object,
             move_workspace_renderer,
+            set_workspace_renderer_collapsed,
             set_workspace_renderer_selection,
             change_workspace_renderer_type,
             apply_workspace_renderer_style,
@@ -16307,6 +16365,23 @@ mod tests {
                 .group
                 .as_deref(),
             Some("maps")
+        );
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceRendererCollapsed(WorkspaceRendererCollapsedInput {
+                object_uid: map_uid.get(),
+                renderer_uid: group_uid,
+                collapsed: true,
+            }),
+        )
+        .unwrap();
+        assert!(
+            model.snapshot().density_maps[0]
+                .renderers
+                .iter()
+                .find(|renderer| renderer.uid == group_uid)
+                .unwrap()
+                .ui_collapsed
         );
 
         handle_model_request(

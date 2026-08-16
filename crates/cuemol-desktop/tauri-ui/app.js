@@ -8448,6 +8448,26 @@ function configureWorkspaceRendererDrag(row, object, renderer, disabled = false)
   });
 }
 
+function workspaceRendererGroupTwisty(object, renderer) {
+  const twisty = document.createElement("span");
+  twisty.className = "workspace-group-twisty";
+  twisty.textContent = renderer.uiCollapsed ? "▸" : "▾";
+  twisty.title = renderer.uiCollapsed ? "Expand renderer group" : "Collapse renderer group";
+  twisty.setAttribute("role", "button");
+  twisty.setAttribute("aria-expanded", String(!renderer.uiCollapsed));
+  twisty.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    await mutateWithoutViewport("set_workspace_renderer_collapsed", {
+      input: {
+        objectUid: object.uid,
+        rendererUid: renderer.uid,
+        collapsed: !renderer.uiCollapsed,
+      },
+    });
+  });
+  return twisty;
+}
+
 function selectedDensityMap() {
   return snapshot?.densityMaps.find((map) => map.uid === selectedDensityMapUid) || null;
 }
@@ -8970,6 +8990,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             !isGroup,
           ),
         );
+        if (isGroup) rendererRow.prepend(workspaceRendererGroupTwisty(object, renderer));
         if (isRenaming) {
           rendererRow.append(workspaceInlineRenameInput(selectionKind, object, renderer));
         }
@@ -8977,7 +8998,9 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       };
       for (const node of groupedMoleculeRenderers(object.renderers)) {
         appendMoleculeRendererRow(node.renderer);
-        for (const child of node.children) appendMoleculeRendererRow(child, true);
+        if (!node.renderer.uiCollapsed) {
+          for (const child of node.children) appendMoleculeRendererRow(child, true);
+        }
       }
       workspaceObjectBlocks.push({
         uiOrder: object.uiOrder,
@@ -9044,7 +9067,10 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         surface.renderers,
       ).flatMap((node) => [
         { renderer: node.renderer, isChild: false },
-        ...node.children.map((renderer) => ({ renderer, isChild: true })),
+        ...(node.renderer.uiCollapsed ? [] : node.children).map((renderer) => ({
+          renderer,
+          isChild: true,
+        })),
       ])) {
         const isGroup = renderer.rendererType === "*group";
         const rendererIsRenaming =
@@ -9119,6 +9145,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             !isGroup,
           ),
         );
+        if (isGroup) rendererRow.prepend(workspaceRendererGroupTwisty(surface, renderer));
         if (rendererIsRenaming) {
           rendererRow.append(
             workspaceInlineRenameInput("surfaceRenderer", surface, renderer),
@@ -9186,7 +9213,10 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       for (const { renderer, isChild } of groupedMoleculeRenderers(map.renderers).flatMap(
         (node) => [
           { renderer: node.renderer, isChild: false },
-          ...node.children.map((renderer) => ({ renderer, isChild: true })),
+          ...(node.renderer.uiCollapsed ? [] : node.children).map((renderer) => ({
+            renderer,
+            isChild: true,
+          })),
         ],
       )) {
         const isGroup = renderer.rendererType === "*group";
@@ -9257,6 +9287,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             !isGroup,
           ),
         );
+        if (isGroup) rendererRow.prepend(workspaceRendererGroupTwisty(map, renderer));
         if (rendererIsRenaming) {
           rendererRow.append(workspaceInlineRenameInput("densityRenderer", map, renderer));
         }
@@ -9327,7 +9358,10 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         object.renderers,
       ).flatMap((node) => [
         { renderer: node.renderer, isChild: false },
-        ...node.children.map((renderer) => ({ renderer, isChild: true })),
+        ...(node.renderer.uiCollapsed ? [] : node.children).map((renderer) => ({
+          renderer,
+          isChild: true,
+        })),
       ])) {
         const isGroup = renderer.rendererType === "*group";
         const rendererIsRenaming =
@@ -9392,6 +9426,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
             !isGroup,
           ),
         );
+        if (isGroup) rendererRow.prepend(workspaceRendererGroupTwisty(object, renderer));
         if (rendererIsRenaming) {
           rendererRow.append(workspaceInlineRenameInput("lwRenderer", object, renderer));
         }

@@ -2347,6 +2347,7 @@ fn native_aux_group_summary(
     crate::GuiRendererSummary {
         uid: group.uid,
         ui_order: group.ui_order,
+        ui_collapsed: group.ui_collapsed,
         name: group.name.clone(),
         renderer_type: "*group".to_string(),
         visible: group.visible,
@@ -2365,6 +2366,7 @@ fn native_density_renderer_tree_nodes(
         .map(|renderer| crate::GuiRendererSummary {
             uid: renderer.uid,
             ui_order: renderer.ui_order,
+            ui_collapsed: false,
             name: renderer.name.clone(),
             renderer_type: renderer.renderer_type.clone(),
             visible: renderer.visible,
@@ -2386,6 +2388,7 @@ fn native_surface_renderer_tree_nodes(
         .map(|renderer| crate::GuiRendererSummary {
             uid: renderer.uid,
             ui_order: renderer.ui_order,
+            ui_collapsed: false,
             name: renderer.name.clone(),
             renderer_type: renderer.renderer_type.clone(),
             visible: renderer.visible,
@@ -2407,6 +2410,7 @@ fn native_lw_renderer_tree_nodes(
         .map(|renderer| crate::GuiRendererSummary {
             uid: renderer.uid,
             ui_order: renderer.ui_order,
+            ui_collapsed: false,
             name: renderer.name.clone(),
             renderer_type: renderer.renderer_type.clone(),
             visible: renderer.visible,
@@ -4354,7 +4358,7 @@ impl GuiApplication {
                                         &node.renderer,
                                         is_group,
                                     );
-                                    if is_group {
+                                    if is_group && !node.renderer.ui_collapsed {
                                         ui.indent(
                                             format!("renderer-group-{}", node.renderer.uid.get()),
                                             |ui| {
@@ -4438,7 +4442,7 @@ impl GuiApplication {
                                         owner,
                                         &node.renderer,
                                     );
-                                    if is_group {
+                                    if is_group && !node.renderer.ui_collapsed {
                                         ui.indent(
                                             format!(
                                                 "density-renderer-group-{}",
@@ -4525,7 +4529,7 @@ impl GuiApplication {
                                         owner,
                                         &node.renderer,
                                     );
-                                    if is_group {
+                                    if is_group && !node.renderer.ui_collapsed {
                                         ui.indent(
                                             format!(
                                                 "surface-renderer-group-{}",
@@ -4609,7 +4613,7 @@ impl GuiApplication {
                                         owner,
                                         &node.renderer,
                                     );
-                                    if is_group {
+                                    if is_group && !node.renderer.ui_collapsed {
                                         ui.indent(
                                             format!(
                                                 "lw-renderer-group-{}",
@@ -5592,6 +5596,23 @@ impl GuiApplication {
             |ui| {
                 let mut visible = renderer.visible;
                 ui.horizontal(|ui| {
+                    if is_group
+                        && ui
+                            .small_button(if renderer.ui_collapsed { "▶" } else { "▼" })
+                            .on_hover_text(if renderer.ui_collapsed {
+                                "Expand renderer group"
+                            } else {
+                                "Collapse renderer group"
+                            })
+                            .clicked()
+                    {
+                        self.set_workspace_renderer_group_collapsed(
+                            scene_uid,
+                            owner,
+                            renderer.uid,
+                            !renderer.ui_collapsed,
+                        );
+                    }
                     if ui
                         .checkbox(&mut visible, "")
                         .on_hover_text(if is_group {
@@ -5712,6 +5733,23 @@ impl GuiApplication {
             |ui| {
                 let mut visible = renderer.visible;
                 ui.horizontal(|ui| {
+                    if is_group
+                        && ui
+                            .small_button(if renderer.ui_collapsed { "▶" } else { "▼" })
+                            .on_hover_text(if renderer.ui_collapsed {
+                                "Expand renderer group"
+                            } else {
+                                "Collapse renderer group"
+                            })
+                            .clicked()
+                    {
+                        self.set_workspace_renderer_group_collapsed(
+                            scene_uid,
+                            NativePropertyObject::Molecule(object_uid),
+                            renderer.uid,
+                            !renderer.ui_collapsed,
+                        );
+                    }
                     if ui
                         .checkbox(&mut visible, "")
                         .on_hover_text(if is_group {
@@ -6468,6 +6506,29 @@ impl GuiApplication {
             }
             Ok(false) => {}
             Err(error) => self.set_status(format!("Move renderer error: {error}")),
+        }
+    }
+
+    fn set_workspace_renderer_group_collapsed(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        owner: NativePropertyObject,
+        renderer_uid: cuemol_core::Uid,
+        collapsed: bool,
+    ) {
+        match self
+            .state
+            .set_renderer_group_collapsed(owner.uid(), renderer_uid, collapsed)
+        {
+            Ok(()) => {
+                self.modified_scenes.insert(scene_uid);
+                self.set_status(if collapsed {
+                    "Collapse renderer group"
+                } else {
+                    "Expand renderer group"
+                });
+            }
+            Err(error) => self.set_status(format!("Renderer group error: {error}")),
         }
     }
 
@@ -26435,6 +26496,23 @@ mod tests {
         assert_eq!(tree[0].children.len(), 1);
         assert_eq!(tree[0].children[0].group.as_deref(), Some("maps"));
         let member_uid = tree[0].children[0].uid;
+        app.set_workspace_renderer_group_collapsed(
+            scene_uid,
+            NativePropertyObject::DensityMap(map_uid),
+            group_uid,
+            true,
+        );
+        assert!(
+            native_density_renderer_tree_nodes(&app.state.density_map_summary(map_uid).unwrap())[0]
+                .renderer
+                .ui_collapsed
+        );
+        app.set_workspace_renderer_group_collapsed(
+            scene_uid,
+            NativePropertyObject::DensityMap(map_uid),
+            group_uid,
+            false,
+        );
         app.move_workspace_renderer(scene_uid, map_uid, member_uid, group_uid, "before");
         assert!(app.state.density_map_summary(map_uid).unwrap().renderers[0]
             .group

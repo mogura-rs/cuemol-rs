@@ -549,6 +549,7 @@ pub struct GuiObjectSummary {
 pub struct GuiRendererSummary {
     pub uid: Uid,
     pub ui_order: i32,
+    pub ui_collapsed: bool,
     pub name: String,
     pub renderer_type: String,
     pub visible: bool,
@@ -5141,6 +5142,7 @@ impl DesktopAppState {
                             .qsc_attr("ui_order")
                             .and_then(|value| value.parse().ok())
                             .unwrap_or_else(|| renderer.uid().get() as i32),
+                        ui_collapsed: renderer.qsc_attr("ui_collapsed").is_some_and(qsc_bool),
                         name: renderer.name().to_string(),
                         renderer_type: renderer.renderer_type().to_string(),
                         visible: renderer.is_visible(),
@@ -7513,6 +7515,74 @@ impl DesktopAppState {
                 .set_visible(visible);
         }
         Ok(())
+    }
+
+    pub fn set_renderer_group_collapsed(
+        &mut self,
+        object_uid: Uid,
+        group_uid: Uid,
+        collapsed: bool,
+    ) -> Result<()> {
+        if let Some(object) = self.scene_manager_mut().object_mut(object_uid) {
+            let group = object
+                .renderer_mut(group_uid)
+                .filter(|renderer| renderer.renderer_type() == "*group")
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+                })?;
+            if collapsed {
+                group.set_qsc_attr("ui_collapsed", "true");
+            } else {
+                group.remove_qsc_attr("ui_collapsed");
+            }
+            return Ok(());
+        }
+        let group_index = aux_renderer_group_index(object_uid, group_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer group {}", group_uid.get())))?;
+        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+            let group = map.renderer_groups.get_mut(group_index).ok_or_else(|| {
+                CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+            })?;
+            set_qsc_bool_attr(group, "ui_collapsed", collapsed, false);
+            map.modified = true;
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let surface = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                .expect("surface scene was checked above");
+            let node = ensure_surface_qsc_node(surface);
+            let child_index = renderer_group_child_index(node, object_uid, group_uid)?;
+            set_qsc_bool_attr(
+                &mut node.children_mut()[child_index],
+                "ui_collapsed",
+                collapsed,
+                false,
+            );
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
+            let object = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+                .expect("LWObject scene was checked above");
+            let node = ensure_lw_qsc_node(object);
+            let child_index = renderer_group_child_index(node, object_uid, group_uid)?;
+            set_qsc_bool_attr(
+                &mut node.children_mut()[child_index],
+                "ui_collapsed",
+                collapsed,
+                false,
+            );
+            return Ok(());
+        }
+        Err(CueMolError::NotFound(format!(
+            "object {}",
+            object_uid.get()
+        )))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -55924,6 +55994,25 @@ end_header
 
         app.set_renderer_group_visible(object_uid, group_uid, false)
             .unwrap();
+        app.set_renderer_group_collapsed(object_uid, group_uid, true)
+            .unwrap();
+        assert!(
+            app.renderer_summaries(object_uid)
+                .into_iter()
+                .find(|renderer| renderer.uid == group_uid)
+                .unwrap()
+                .ui_collapsed
+        );
+        app.set_renderer_group_collapsed(object_uid, group_uid, false)
+            .unwrap();
+        assert!(app
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(group_uid)
+            .unwrap()
+            .qsc_attr("ui_collapsed")
+            .is_none());
         let object = app.scene_manager().object(object_uid).unwrap();
         for uid in [group_uid, first_uid, second_uid] {
             assert!(!object.renderer(uid).unwrap().is_visible());
@@ -58906,6 +58995,8 @@ end_header
                 "#123456",
             )
             .unwrap();
+            app.set_renderer_group_collapsed(object_uid, group_uid, true)
+                .unwrap();
             assert_eq!(
                 app.workspace_renderer_style_state(object_uid, group_uid)
                     .unwrap()
@@ -58918,10 +59009,12 @@ end_header
         assert_eq!(map.renderer_groups[0].name, "representations");
         assert!(map.renderer_groups[0].locked);
         assert_eq!(map.renderer_groups[0].material, "matte");
+        assert!(map.renderer_groups[0].ui_collapsed);
         assert_eq!(map.renderers[0].group.as_deref(), Some("representations"));
         assert!(!map.renderers[0].visible);
         let surface = app.surface_summary(surface_uid).unwrap();
         assert_eq!(surface.renderer_groups[0].name, "representations");
+        assert!(surface.renderer_groups[0].ui_collapsed);
         assert_eq!(
             surface.renderers[0].group.as_deref(),
             Some("representations")
@@ -58929,6 +59022,7 @@ end_header
         assert!(!surface.renderers[0].visible);
         let lw = app.lw_object_summary(lw_uid).unwrap();
         assert_eq!(lw.renderer_groups[0].name, "representations");
+        assert!(lw.renderer_groups[0].ui_collapsed);
         assert_eq!(lw.renderers[0].group.as_deref(), Some("representations"));
         assert!(!lw.renderers[0].visible);
 
@@ -59063,11 +59157,13 @@ end_header
         let qsc = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
         assert_eq!(qsc.matches("type=\"*group\"").count(), 3);
         assert_eq!(qsc.matches("group=\"representations\"").count(), 6);
+        assert_eq!(qsc.matches("ui_collapsed=\"true\"").count(), 3);
 
         let mut reloaded = DesktopAppState::new();
         let reloaded_scene_uid = reloaded.load_qsc_file(&path).unwrap().unwrap();
         let reloaded_map = reloaded.density_map_summaries(reloaded_scene_uid).remove(0);
         assert_eq!(reloaded_map.renderer_groups[0].name, "representations");
+        assert!(reloaded_map.renderer_groups[0].ui_collapsed);
         assert_eq!(
             reloaded_map.renderers[0].group.as_deref(),
             Some("representations")
@@ -59084,6 +59180,7 @@ end_header
         );
         let reloaded_surface = reloaded.surface_summaries(reloaded_scene_uid).remove(0);
         assert_eq!(reloaded_surface.renderer_groups[0].name, "representations");
+        assert!(reloaded_surface.renderer_groups[0].ui_collapsed);
         assert_eq!(reloaded_surface.renderers.len(), 2);
         assert_eq!(
             reloaded_surface
@@ -59096,6 +59193,7 @@ end_header
         );
         let reloaded_lw = reloaded.lw_object_summaries(reloaded_scene_uid).remove(0);
         assert_eq!(reloaded_lw.renderer_groups[0].name, "representations");
+        assert!(reloaded_lw.renderer_groups[0].ui_collapsed);
         assert_eq!(reloaded_lw.renderers.len(), 2);
         assert_eq!(
             reloaded_lw

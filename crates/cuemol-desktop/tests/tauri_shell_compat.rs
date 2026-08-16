@@ -1092,8 +1092,13 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
     assert!(JS.contains("candidate.group === renderer.name"));
     assert!(JS.contains("workspaceSelectionKind === \"rendererGroup\""));
     assert!(JS.contains("groupName:"));
+    assert!(JS.contains("function workspaceRendererGroupTwisty(object, renderer)"));
+    assert!(JS.contains("mutateWithoutViewport(\"set_workspace_renderer_collapsed\""));
+    assert!(JS.contains("node.renderer.uiCollapsed"));
     assert!(CSS.contains(".tree-renderer.renderer-group"));
     assert!(CSS.contains(".tree-renderer.group-child"));
+    assert!(CSS.contains(".workspace-group-twisty"));
+    assert!(NATIVE_GUI_RS.contains("fn set_workspace_renderer_group_collapsed("));
 }
 
 #[test]
