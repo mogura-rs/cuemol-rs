@@ -1787,10 +1787,12 @@ impl AppModel {
                     .renderers
                     .into_iter()
                     .map(|renderer| {
+                        let ui_order = renderer.ui_order;
+                        let uid = renderer.uid.get();
                         let coloring_type = scalar_coloring_type(&renderer.specific);
                         let coloring_attrs = scalar_coloring_attrs(&renderer.specific);
-                        RendererDto {
-                            uid: renderer.uid.get(),
+                        let dto = RendererDto {
+                            uid,
                             name: renderer.name,
                             renderer_type: renderer.renderer_type,
                             group: renderer.group,
@@ -1828,10 +1830,16 @@ impl AppModel {
                                 .cloned()
                                 .unwrap_or_else(|| "#c0c0ff".to_string()),
                             specific: renderer.specific,
-                        }
+                        };
+                        (ui_order, uid, dto)
                     })
                     .collect();
-                renderers.extend(map.renderer_groups.into_iter().map(aux_renderer_group_dto));
+                renderers.extend(map.renderer_groups.into_iter().map(|group| {
+                    let ui_order = group.ui_order;
+                    let uid = group.uid.get();
+                    (ui_order, uid, aux_renderer_group_dto(group))
+                }));
+                let renderers = ordered_renderer_dtos(renderers);
                 DensityMapDto {
                     uid: map.uid.get(),
                     scene_uid: map.scene_uid.get(),
@@ -1860,10 +1868,12 @@ impl AppModel {
                     .renderers
                     .into_iter()
                     .map(|renderer| {
+                        let ui_order = renderer.ui_order;
+                        let uid = renderer.uid.get();
                         let coloring_type = scalar_coloring_type(&renderer.specific);
                         let coloring_attrs = scalar_coloring_attrs(&renderer.specific);
-                        RendererDto {
-                            uid: renderer.uid.get(),
+                        let dto = RendererDto {
+                            uid,
                             name: renderer.name,
                             renderer_type: renderer.renderer_type,
                             group: renderer.group,
@@ -1901,15 +1911,16 @@ impl AppModel {
                                 .cloned()
                                 .unwrap_or_else(|| "#c0c0ff".to_string()),
                             specific: renderer.specific,
-                        }
+                        };
+                        (ui_order, uid, dto)
                     })
                     .collect();
-                renderers.extend(
-                    surface
-                        .renderer_groups
-                        .into_iter()
-                        .map(aux_renderer_group_dto),
-                );
+                renderers.extend(surface.renderer_groups.into_iter().map(|group| {
+                    let ui_order = group.ui_order;
+                    let uid = group.uid.get();
+                    (ui_order, uid, aux_renderer_group_dto(group))
+                }));
+                let renderers = ordered_renderer_dtos(renderers);
                 SurfaceDto {
                     uid: surface.uid.get(),
                     scene_uid: surface.scene_uid.get(),
@@ -1936,32 +1947,40 @@ impl AppModel {
                 let mut renderers: Vec<_> = object
                     .renderers
                     .into_iter()
-                    .map(|renderer| LwRendererDto {
-                        uid: renderer.uid.get(),
-                        name: renderer.name,
-                        renderer_type: renderer.renderer_type,
-                        group: renderer.group,
-                        visible: renderer.visible,
-                        locked: renderer.locked,
-                        style: renderer.style.clone(),
-                        material: renderer.material,
-                        alpha: renderer.alpha,
-                        edge_type: renderer.edge_type,
-                        edge_width: renderer.edge_width,
-                        edge_color: renderer.edge_color,
-                        data_id: renderer.data_id,
-                        specific: BTreeMap::from([
-                            ("data_id".to_string(), renderer.data_id.to_string()),
-                            ("style".to_string(), renderer.style),
-                        ]),
+                    .map(|renderer| {
+                        let ui_order = renderer.ui_order;
+                        let uid = renderer.uid.get();
+                        (
+                            ui_order,
+                            uid,
+                            LwRendererDto {
+                                uid,
+                                name: renderer.name,
+                                renderer_type: renderer.renderer_type,
+                                group: renderer.group,
+                                visible: renderer.visible,
+                                locked: renderer.locked,
+                                style: renderer.style.clone(),
+                                material: renderer.material,
+                                alpha: renderer.alpha,
+                                edge_type: renderer.edge_type,
+                                edge_width: renderer.edge_width,
+                                edge_color: renderer.edge_color,
+                                data_id: renderer.data_id,
+                                specific: BTreeMap::from([
+                                    ("data_id".to_string(), renderer.data_id.to_string()),
+                                    ("style".to_string(), renderer.style),
+                                ]),
+                            },
+                        )
                     })
                     .collect();
-                renderers.extend(
-                    object
-                        .renderer_groups
-                        .into_iter()
-                        .map(aux_lw_renderer_group_dto),
-                );
+                renderers.extend(object.renderer_groups.into_iter().map(|group| {
+                    let ui_order = group.ui_order;
+                    let uid = group.uid.get();
+                    (ui_order, uid, aux_lw_renderer_group_dto(group))
+                }));
+                let renderers = ordered_renderer_dtos(renderers);
                 LwObjectDto {
                     uid: object.uid.get(),
                     scene_uid: object.scene_uid.get(),
@@ -7402,6 +7421,14 @@ fn aux_lw_renderer_group_dto(group: crate::GuiAuxRendererGroupSummary) -> LwRend
         data_id: 0,
         specific: BTreeMap::from([("style".to_string(), group.style)]),
     }
+}
+
+fn ordered_renderer_dtos<T>(mut entries: Vec<(i32, u64, T)>) -> Vec<T> {
+    entries.sort_by_key(|(ui_order, uid, _)| (*ui_order, *uid));
+    entries
+        .into_iter()
+        .map(|(_, _, renderer)| renderer)
+        .collect()
 }
 
 fn validate_coloring_update(input: &ColoringUpdateInput) -> Result<(), String> {
@@ -16346,6 +16373,40 @@ mod tests {
             }),
         )
         .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddDensityRenderer {
+                map_uid: map_uid.get(),
+                renderer_type: "isosurf".to_string(),
+                group_name: Some("renamed maps".to_string()),
+            },
+        )
+        .unwrap();
+        let second_uid = model.snapshot().density_maps[0]
+            .renderers
+            .iter()
+            .find(|renderer| renderer.renderer_type == "isosurf")
+            .unwrap()
+            .uid;
+        handle_model_request(
+            &mut model,
+            ModelRequest::MoveWorkspaceRenderer(WorkspaceMoveRendererInput {
+                object_uid: map_uid.get(),
+                renderer_uid: second_uid,
+                target_uid: renderer_uid,
+                position: "before".to_string(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            model.snapshot().density_maps[0]
+                .renderers
+                .iter()
+                .filter(|renderer| renderer.renderer_type != "*group")
+                .map(|renderer| renderer.uid)
+                .collect::<Vec<_>>(),
+            vec![second_uid, renderer_uid]
+        );
 
         handle_model_request(
             &mut model,
@@ -16390,7 +16451,7 @@ mod tests {
         .unwrap();
         assert!(model.snapshot().density_maps[0].renderers.is_empty());
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
-        assert_eq!(model.snapshot().density_maps[0].renderers.len(), 2);
+        assert_eq!(model.snapshot().density_maps[0].renderers.len(), 3);
     }
 
     #[test]

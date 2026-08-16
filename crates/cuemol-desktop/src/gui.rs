@@ -2314,8 +2314,9 @@ fn strip_native_renderer_common_specific(
 }
 
 fn native_renderer_tree_nodes(
-    renderers: Vec<crate::GuiRendererSummary>,
+    mut renderers: Vec<crate::GuiRendererSummary>,
 ) -> Vec<NativeRendererTreeNode> {
+    renderers.sort_by_key(|renderer| (renderer.ui_order, renderer.uid));
     let mut children = std::collections::BTreeMap::<String, Vec<_>>::new();
     for renderer in renderers.iter().filter(|renderer| renderer.group.is_some()) {
         children
@@ -2345,6 +2346,7 @@ fn native_aux_group_summary(
 ) -> crate::GuiRendererSummary {
     crate::GuiRendererSummary {
         uid: group.uid,
+        ui_order: group.ui_order,
         name: group.name.clone(),
         renderer_type: "*group".to_string(),
         visible: group.visible,
@@ -2362,6 +2364,7 @@ fn native_density_renderer_tree_nodes(
         .iter()
         .map(|renderer| crate::GuiRendererSummary {
             uid: renderer.uid,
+            ui_order: renderer.ui_order,
             name: renderer.name.clone(),
             renderer_type: renderer.renderer_type.clone(),
             visible: renderer.visible,
@@ -2382,6 +2385,7 @@ fn native_surface_renderer_tree_nodes(
         .iter()
         .map(|renderer| crate::GuiRendererSummary {
             uid: renderer.uid,
+            ui_order: renderer.ui_order,
             name: renderer.name.clone(),
             renderer_type: renderer.renderer_type.clone(),
             visible: renderer.visible,
@@ -2402,6 +2406,7 @@ fn native_lw_renderer_tree_nodes(
         .iter()
         .map(|renderer| crate::GuiRendererSummary {
             uid: renderer.uid,
+            ui_order: renderer.ui_order,
             name: renderer.name.clone(),
             renderer_type: renderer.renderer_type.clone(),
             visible: renderer.visible,
@@ -26441,6 +26446,32 @@ mod tests {
                 .group
                 .as_deref(),
             Some("maps")
+        );
+        let second_uid = app.state.add_density_renderer(map_uid, "isosurf").unwrap();
+        app.state
+            .set_workspace_renderer_group_name(map_uid, second_uid, Some("maps"))
+            .unwrap();
+        app.move_workspace_renderer(scene_uid, map_uid, second_uid, member_uid, "before");
+        let tree =
+            native_density_renderer_tree_nodes(&app.state.density_map_summary(map_uid).unwrap());
+        assert_eq!(
+            tree[0]
+                .children
+                .iter()
+                .map(|renderer| renderer.uid)
+                .collect::<Vec<_>>(),
+            vec![second_uid, member_uid]
+        );
+        app.undo(&mut camera);
+        let tree =
+            native_density_renderer_tree_nodes(&app.state.density_map_summary(map_uid).unwrap());
+        assert_eq!(
+            tree[0]
+                .children
+                .iter()
+                .map(|renderer| renderer.uid)
+                .collect::<Vec<_>>(),
+            vec![member_uid, second_uid]
         );
 
         let mut properties =

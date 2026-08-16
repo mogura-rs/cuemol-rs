@@ -548,6 +548,7 @@ pub struct GuiObjectSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiRendererSummary {
     pub uid: Uid,
+    pub ui_order: i32,
     pub name: String,
     pub renderer_type: String,
     pub visible: bool,
@@ -1311,6 +1312,7 @@ pub struct GuiDensityMapSummary {
 pub struct GuiDensityRendererSummary {
     pub map_uid: Uid,
     pub uid: Uid,
+    pub ui_order: i32,
     pub name: String,
     pub renderer_type: String,
     pub visible: bool,
@@ -1356,6 +1358,7 @@ pub enum GuiWorkspaceObjectKind {
 pub struct GuiLoadedSurfaceRendererSummary {
     pub surface_uid: Uid,
     pub uid: Uid,
+    pub ui_order: i32,
     pub name: String,
     pub renderer_type: String,
     pub selection: String,
@@ -1390,6 +1393,7 @@ pub struct GuiLoadedLwObjectSummary {
 pub struct GuiLoadedLwRendererSummary {
     pub object_uid: Uid,
     pub uid: Uid,
+    pub ui_order: i32,
     pub name: String,
     pub renderer_type: String,
     pub visible: bool,
@@ -1408,6 +1412,7 @@ pub struct GuiLoadedLwRendererSummary {
 pub struct GuiAuxRendererGroupSummary {
     pub object_uid: Uid,
     pub uid: Uid,
+    pub ui_order: i32,
     pub name: String,
     pub visible: bool,
     pub locked: bool,
@@ -1418,6 +1423,14 @@ pub struct GuiAuxRendererGroupSummary {
     pub edge_type: String,
     pub edge_width: f64,
     pub edge_color: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuxRendererOrderEntry {
+    uid: Uid,
+    ui_order: i32,
+    is_group: bool,
+    group: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3794,6 +3807,7 @@ impl DesktopAppState {
     }
 
     pub fn add_lw_renderer(&mut self, object_uid: Uid) -> Result<Uid> {
+        let ui_order = self.next_aux_renderer_ui_order(object_uid)?;
         let scene_uid = self
             .scene_manager()
             .scene_uid_for_lw_object(object_uid)
@@ -3818,7 +3832,16 @@ impl DesktopAppState {
             visible: true,
             xform: Matrix4::IDENTITY,
         });
-        ensure_lw_qsc_node(object);
+        let node = ensure_lw_qsc_node(object);
+        let renderer = node
+            .children_mut()
+            .iter_mut()
+            .filter(|node| {
+                !node.is_attr() && node.tag_name() == "renderer" && node.type_name() == "lwrend"
+            })
+            .nth(renderer_index)
+            .expect("LWObject node contains the appended renderer");
+        renderer.set_str_attr("ui_order", ui_order.to_string());
         Ok(lw_renderer_uid(scene_uid, object_uid, renderer_index))
     }
 
@@ -4110,6 +4133,7 @@ impl DesktopAppState {
     }
 
     pub fn add_surface_renderer(&mut self, surface_uid: Uid) -> Result<Uid> {
+        let ui_order = self.next_aux_renderer_ui_order(surface_uid)?;
         let scene_uid = self
             .scene_manager()
             .scene_uid_for_surface(surface_uid)
@@ -4123,7 +4147,9 @@ impl DesktopAppState {
         materialize_implicit_surface_renderer(object_node);
         let renderer_index = surface_renderer_nodes(object_node).count();
         let renderer_uid = surface_renderer_uid(scene_uid, surface_uid, renderer_index);
-        object_node.append_child_node(default_surface_renderer_node(renderer_index + 1));
+        let mut renderer = default_surface_renderer_node(renderer_index + 1);
+        renderer.set_str_attr("ui_order", ui_order.to_string());
+        object_node.append_child_node(renderer);
         Ok(renderer_uid)
     }
 
@@ -4622,9 +4648,12 @@ impl DesktopAppState {
             .and_then(|map| {
                 map.renderers
                     .iter()
-                    .find(|renderer| renderer.uid == renderer_uid)
+                    .enumerate()
+                    .find(|(_, renderer)| renderer.uid == renderer_uid)
             })
-            .map(|renderer| density_renderer_summary(map_uid, renderer, &styles))
+            .map(|(index, renderer)| {
+                density_renderer_summary(map_uid, renderer, index as i32 + 1, &styles)
+            })
             .ok_or_else(|| {
                 CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
             })?;
@@ -4678,6 +4707,7 @@ impl DesktopAppState {
                 map_uid.get()
             )));
         }
+        let ui_order = self.next_aux_renderer_ui_order(map_uid)?;
         let uid = self.next_density_renderer_uid();
         let map = self
             .density_maps
@@ -4713,6 +4743,7 @@ impl DesktopAppState {
                 .expect("built-in density renderer color must parse"),
             xferfn_type: "rainbow1".to_string(),
             attributes: BTreeMap::from([
+                ("ui_order".to_string(), ui_order.to_string()),
                 ("autoupdate".to_string(), "true".to_string()),
                 ("dragupdate".to_string(), "false".to_string()),
                 ("bufsize".to_string(), "100".to_string()),
@@ -5106,6 +5137,10 @@ impl DesktopAppState {
                     .iter()
                     .map(|renderer| GuiRendererSummary {
                         uid: renderer.uid(),
+                        ui_order: renderer
+                            .qsc_attr("ui_order")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or_else(|| renderer.uid().get() as i32),
                         name: renderer.name().to_string(),
                         renderer_type: renderer.renderer_type().to_string(),
                         visible: renderer.is_visible(),
@@ -7631,14 +7666,22 @@ impl DesktopAppState {
             }
             return Ok(object.add_renderer("*group", name));
         }
-        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+        if self.density_maps.contains_key(&object_uid) {
+            let ui_order = self.next_aux_renderer_ui_order(object_uid)?;
+            let map = self
+                .density_maps
+                .get_mut(&object_uid)
+                .expect("density map was checked above");
             ensure_aux_renderer_group_name_available(&map.renderer_groups, None, name)?;
             let index = map.renderer_groups.len();
-            map.renderer_groups.push(renderer_group_qsc_node(name));
+            let mut group = renderer_group_qsc_node(name);
+            group.set_str_attr("ui_order", ui_order.to_string());
+            map.renderer_groups.push(group);
             map.modified = true;
             return Ok(aux_renderer_group_uid(object_uid, index));
         }
         if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let ui_order = self.next_aux_renderer_ui_order(object_uid)?;
             let surface = self
                 .scene_manager_mut()
                 .scene_mut(scene_uid)
@@ -7652,10 +7695,13 @@ impl DesktopAppState {
                 name,
             )?;
             let index = aux_renderer_group_nodes(node).count();
-            node.append_child_node(renderer_group_qsc_node(name));
+            let mut group = renderer_group_qsc_node(name);
+            group.set_str_attr("ui_order", ui_order.to_string());
+            node.append_child_node(group);
             return Ok(aux_renderer_group_uid(object_uid, index));
         }
         if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
+            let ui_order = self.next_aux_renderer_ui_order(object_uid)?;
             let object = self
                 .scene_manager_mut()
                 .scene_mut(scene_uid)
@@ -7668,7 +7714,9 @@ impl DesktopAppState {
                 name,
             )?;
             let index = aux_renderer_group_nodes(node).count();
-            node.append_child_node(renderer_group_qsc_node(name));
+            let mut group = renderer_group_qsc_node(name);
+            group.set_str_attr("ui_order", ui_order.to_string());
+            node.append_child_node(group);
             return Ok(aux_renderer_group_uid(object_uid, index));
         }
         Err(CueMolError::NotFound(format!(
@@ -7718,7 +7766,7 @@ impl DesktopAppState {
                         CueMolError::NotFound(format!("renderer group {}", renderer_uid.get()))
                     })?;
                 let group_name = group.str_attr("name").to_string();
-                let renderers = map
+                let mut renderers = map
                     .renderers
                     .iter()
                     .filter(|renderer| {
@@ -7728,7 +7776,14 @@ impl DesktopAppState {
                             .is_some_and(|name| name == &group_name)
                     })
                     .cloned()
-                    .collect();
+                    .collect::<Vec<_>>();
+                renderers.sort_by_key(|renderer| {
+                    renderer
+                        .attributes
+                        .get("ui_order")
+                        .and_then(|value| value.parse::<i32>().ok())
+                        .unwrap_or(i32::MAX)
+                });
                 return Ok(WorkspaceRendererClipboard {
                     renderer: WorkspaceRendererClipboardData::DensityMapGroup { group, renderers },
                 });
@@ -7761,10 +7816,17 @@ impl DesktopAppState {
                         CueMolError::NotFound(format!("renderer group {}", renderer_uid.get()))
                     })?;
                 let group_name = group.str_attr("name").to_string();
-                let renderers = surface_renderer_nodes(object_node)
+                let mut renderers = surface_renderer_nodes(object_node)
                     .filter(|renderer| renderer.str_attr("group").as_str() == group_name)
                     .cloned()
-                    .collect();
+                    .collect::<Vec<_>>();
+                renderers.sort_by_key(|renderer| {
+                    renderer
+                        .str_attr("ui_order")
+                        .as_str()
+                        .parse::<i32>()
+                        .unwrap_or(i32::MAX)
+                });
                 return Ok(WorkspaceRendererClipboard {
                     renderer: WorkspaceRendererClipboardData::SurfaceGroup { group, renderers },
                 });
@@ -7800,13 +7862,19 @@ impl DesktopAppState {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                let renderers = object
+                let mut renderers = object
                     .renderers
                     .iter()
                     .cloned()
                     .zip(renderer_nodes)
                     .filter(|(_, node)| node.str_attr("group").as_str() == group_name)
-                    .collect();
+                    .collect::<Vec<_>>();
+                renderers.sort_by_key(|(_, node)| {
+                    node.str_attr("ui_order")
+                        .as_str()
+                        .parse::<i32>()
+                        .unwrap_or(i32::MAX)
+                });
                 return Ok(WorkspaceRendererClipboard {
                     renderer: WorkspaceRendererClipboardData::LightweightGroup { group, renderers },
                 });
@@ -7864,6 +7932,7 @@ impl DesktopAppState {
                         "renderer clipboard is only compatible with a density map",
                     ));
                 }
+                let ui_order = self.next_aux_renderer_ui_order(object_uid)?;
                 let uid = self.next_density_renderer_uid();
                 let map = self
                     .density_maps
@@ -7887,6 +7956,9 @@ impl DesktopAppState {
                 } else {
                     renderer.attributes.remove("group");
                 }
+                renderer
+                    .attributes
+                    .insert("ui_order".to_string(), ui_order.to_string());
                 renderer.name = unique_workspace_renderer_name(
                     &renderer.name,
                     map.renderers.iter().map(|renderer| renderer.name.as_str()),
@@ -7899,6 +7971,7 @@ impl DesktopAppState {
                 })
             }
             WorkspaceRendererClipboardData::DensityMapGroup { group, renderers } => {
+                let mut next_ui_order = self.next_aux_renderer_ui_order(object_uid)?;
                 let renderer_uids = (0..renderers.len())
                     .map(|_| self.next_density_renderer_uid())
                     .collect::<Vec<_>>();
@@ -7934,6 +8007,8 @@ impl DesktopAppState {
                     let group_uid = aux_renderer_group_uid(object_uid, map.renderer_groups.len());
                     let mut group = group.clone();
                     group.set_str_attr("name", &group_name);
+                    group.set_str_attr("ui_order", next_ui_order.to_string());
+                    next_ui_order = next_ui_order.saturating_add(1);
                     map.renderer_groups.push(group);
                     (group_uid, group_name)
                 };
@@ -7947,6 +8022,10 @@ impl DesktopAppState {
                     renderer
                         .attributes
                         .insert("group".to_string(), group_name.clone());
+                    renderer
+                        .attributes
+                        .insert("ui_order".to_string(), next_ui_order.to_string());
+                    next_ui_order = next_ui_order.saturating_add(1);
                     map.renderers.push(renderer);
                 }
                 map.modified = true;
@@ -7956,6 +8035,7 @@ impl DesktopAppState {
                 })
             }
             WorkspaceRendererClipboardData::Surface(renderer_node) => {
+                let ui_order = self.next_aux_renderer_ui_order(object_uid)?;
                 let scene_uid = self
                     .scene_manager()
                     .scene_uid_for_surface(object_uid)
@@ -7988,6 +8068,7 @@ impl DesktopAppState {
                     existing_names.iter().map(String::as_str),
                 );
                 renderer_node.set_str_attr("name", name);
+                renderer_node.set_str_attr("ui_order", ui_order.to_string());
                 object_node.append_child_node(renderer_node);
                 Ok(WorkspaceRendererPasteResult {
                     group_uid: None,
@@ -7995,6 +8076,7 @@ impl DesktopAppState {
                 })
             }
             WorkspaceRendererClipboardData::SurfaceGroup { group, renderers } => {
+                let mut next_ui_order = self.next_aux_renderer_ui_order(object_uid)?;
                 let scene_uid = self
                     .scene_manager()
                     .scene_uid_for_surface(object_uid)
@@ -8030,6 +8112,8 @@ impl DesktopAppState {
                     );
                     let mut group = group.clone();
                     group.set_str_attr("name", &group_name);
+                    group.set_str_attr("ui_order", next_ui_order.to_string());
+                    next_ui_order = next_ui_order.saturating_add(1);
                     object_node.append_child_node(group);
                     (group_uid, group_name)
                 };
@@ -8047,6 +8131,8 @@ impl DesktopAppState {
                     );
                     renderer.set_str_attr("name", name);
                     renderer.set_str_attr("group", &group_name);
+                    renderer.set_str_attr("ui_order", next_ui_order.to_string());
+                    next_ui_order = next_ui_order.saturating_add(1);
                     object_node.append_child_node(renderer);
                     renderer_uids.push(uid);
                 }
@@ -8056,6 +8142,7 @@ impl DesktopAppState {
                 })
             }
             WorkspaceRendererClipboardData::Lightweight { renderer, node } => {
+                let ui_order = self.next_aux_renderer_ui_order(object_uid)?;
                 let scene_uid = self
                     .scene_manager()
                     .scene_uid_for_lw_object(object_uid)
@@ -8091,6 +8178,7 @@ impl DesktopAppState {
                 } else {
                     node.remove_child("group");
                 }
+                node.set_str_attr("ui_order", ui_order.to_string());
                 object
                     .qsc_node
                     .as_mut()
@@ -8102,6 +8190,7 @@ impl DesktopAppState {
                 })
             }
             WorkspaceRendererClipboardData::LightweightGroup { group, renderers } => {
+                let mut next_ui_order = self.next_aux_renderer_ui_order(object_uid)?;
                 let scene_uid = self
                     .scene_manager()
                     .scene_uid_for_lw_object(object_uid)
@@ -8138,6 +8227,8 @@ impl DesktopAppState {
                         );
                         let mut group = group.clone();
                         group.set_str_attr("name", &group_name);
+                        group.set_str_attr("ui_order", next_ui_order.to_string());
+                        next_ui_order = next_ui_order.saturating_add(1);
                         object_node.append_child_node(group);
                         (group_uid, group_name)
                     }
@@ -8159,6 +8250,8 @@ impl DesktopAppState {
                     let mut node = source_node.clone();
                     node.set_str_attr("name", name);
                     node.set_str_attr("group", &group_name);
+                    node.set_str_attr("ui_order", next_ui_order.to_string());
+                    next_ui_order = next_ui_order.saturating_add(1);
                     object
                         .qsc_node
                         .as_mut()
@@ -9107,33 +9200,216 @@ impl DesktopAppState {
                     "renderer groups cannot be moved into another group",
                 ));
             }
-            return Ok(false);
         }
-        let source_group = self.aux_renderer_group_membership(object_uid, renderer_uid)?;
-        let destination_group = match position {
-            "inside" if target_is_group => Some(target_name),
+        let mut entries = self.aux_renderer_order_entries(object_uid)?;
+        let source_index = entries
+            .iter()
+            .position(|entry| entry.uid == renderer_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        let source_group = entries[source_index].group.clone();
+        let (anchor_uid, after, destination_group) = match position {
+            "inside" if target_is_group && !source_is_group => {
+                let anchor_uid = entries
+                    .iter()
+                    .rfind(|entry| {
+                        entry.uid != renderer_uid
+                            && !entry.is_group
+                            && entry.group.as_deref() == Some(target_name.as_str())
+                    })
+                    .map_or(target_uid, |entry| entry.uid);
+                (anchor_uid, true, Some(target_name))
+            }
+            "inside" if source_is_group => {
+                return Err(CueMolError::invalid_argument(
+                    "renderer groups cannot be moved into another group",
+                ));
+            }
             "inside" => {
                 return Err(CueMolError::invalid_argument(
                     "renderers can only be moved inside renderer groups",
                 ));
             }
-            "before" | "after" if target_is_group => None,
-            "before" | "after" => self.aux_renderer_group_membership(object_uid, target_uid)?,
+            "before" | "after" => {
+                let destination_group = if source_is_group || target_is_group {
+                    None
+                } else {
+                    entries
+                        .iter()
+                        .find(|entry| entry.uid == target_uid)
+                        .and_then(|entry| entry.group.clone())
+                };
+                (target_uid, position == "after", destination_group)
+            }
             _ => {
                 return Err(CueMolError::invalid_argument(format!(
                     "unsupported renderer drop position: {position}"
                 )));
             }
         };
-        if source_group == destination_group {
-            return Ok(false);
+        let original_order = entries.iter().map(|entry| entry.uid).collect::<Vec<_>>();
+        let mut source = entries.remove(source_index);
+        source.group.clone_from(&destination_group);
+        let anchor_index = entries
+            .iter()
+            .position(|entry| entry.uid == anchor_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", anchor_uid.get())))?;
+        entries.insert(anchor_index + usize::from(after), source);
+        let order_changed = entries
+            .iter()
+            .map(|entry| entry.uid)
+            .ne(original_order.iter().copied());
+        let group_changed = source_group != destination_group;
+        if group_changed {
+            self.set_workspace_renderer_group_name(
+                object_uid,
+                renderer_uid,
+                destination_group.as_deref(),
+            )?;
         }
-        self.set_workspace_renderer_group_name(
-            object_uid,
-            renderer_uid,
-            destination_group.as_deref(),
-        )?;
-        Ok(true)
+        if order_changed {
+            self.set_aux_renderer_ui_orders(object_uid, &entries)?;
+        }
+        Ok(group_changed || order_changed)
+    }
+
+    fn aux_renderer_order_entries(&self, object_uid: Uid) -> Result<Vec<AuxRendererOrderEntry>> {
+        let mut entries = if let Some(map) = self.density_map_summary(object_uid) {
+            map.renderers
+                .into_iter()
+                .map(|renderer| AuxRendererOrderEntry {
+                    uid: renderer.uid,
+                    ui_order: renderer.ui_order,
+                    is_group: false,
+                    group: renderer.group,
+                })
+                .chain(
+                    map.renderer_groups
+                        .into_iter()
+                        .map(|group| AuxRendererOrderEntry {
+                            uid: group.uid,
+                            ui_order: group.ui_order,
+                            is_group: true,
+                            group: None,
+                        }),
+                )
+                .collect::<Vec<_>>()
+        } else if let Some(surface) = self.surface_summary(object_uid) {
+            surface
+                .renderers
+                .into_iter()
+                .map(|renderer| AuxRendererOrderEntry {
+                    uid: renderer.uid,
+                    ui_order: renderer.ui_order,
+                    is_group: false,
+                    group: renderer.group,
+                })
+                .chain(
+                    surface
+                        .renderer_groups
+                        .into_iter()
+                        .map(|group| AuxRendererOrderEntry {
+                            uid: group.uid,
+                            ui_order: group.ui_order,
+                            is_group: true,
+                            group: None,
+                        }),
+                )
+                .collect::<Vec<_>>()
+        } else if let Some(object) = self.lw_object_summary(object_uid) {
+            object
+                .renderers
+                .into_iter()
+                .map(|renderer| AuxRendererOrderEntry {
+                    uid: renderer.uid,
+                    ui_order: renderer.ui_order,
+                    is_group: false,
+                    group: renderer.group,
+                })
+                .chain(
+                    object
+                        .renderer_groups
+                        .into_iter()
+                        .map(|group| AuxRendererOrderEntry {
+                            uid: group.uid,
+                            ui_order: group.ui_order,
+                            is_group: true,
+                            group: None,
+                        }),
+                )
+                .collect::<Vec<_>>()
+        } else {
+            return Err(CueMolError::NotFound(format!(
+                "object {}",
+                object_uid.get()
+            )));
+        };
+        entries.sort_by_key(|entry| (entry.ui_order, entry.uid));
+        Ok(entries)
+    }
+
+    fn next_aux_renderer_ui_order(&self, object_uid: Uid) -> Result<i32> {
+        Ok(self
+            .aux_renderer_order_entries(object_uid)?
+            .into_iter()
+            .map(|entry| entry.ui_order)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1))
+    }
+
+    fn set_aux_renderer_ui_orders(
+        &mut self,
+        object_uid: Uid,
+        entries: &[AuxRendererOrderEntry],
+    ) -> Result<()> {
+        let orders = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.uid, index as i32 + 1))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+            for renderer in &mut map.renderers {
+                if let Some(order) = orders.get(&renderer.uid) {
+                    renderer
+                        .attributes
+                        .insert("ui_order".to_string(), order.to_string());
+                }
+            }
+            for (index, group) in map.renderer_groups.iter_mut().enumerate() {
+                let uid = aux_renderer_group_uid(object_uid, index);
+                if let Some(order) = orders.get(&uid) {
+                    group.set_str_attr("ui_order", order.to_string());
+                }
+            }
+            map.modified = true;
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let surface = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                .expect("surface scene was checked above");
+            let node = ensure_surface_qsc_node(surface);
+            materialize_implicit_surface_renderer(node);
+            set_qsc_aux_renderer_ui_orders(node, object_uid, scene_uid, &orders, true);
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
+            let object = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+                .expect("LWObject scene was checked above");
+            let node = ensure_lw_qsc_node(object);
+            set_qsc_aux_renderer_ui_orders(node, object_uid, scene_uid, &orders, false);
+            return Ok(());
+        }
+        Err(CueMolError::NotFound(format!(
+            "object {}",
+            object_uid.get()
+        )))
     }
 
     fn aux_renderer_group_membership(
@@ -46713,13 +46989,24 @@ fn density_map_summary(
         renderers: object
             .renderers
             .iter()
-            .map(|renderer| density_renderer_summary(object.uid, renderer, styles))
+            .enumerate()
+            .map(|(index, renderer)| {
+                density_renderer_summary(object.uid, renderer, index as i32 + 1, styles)
+            })
             .collect(),
         renderer_groups: object
             .renderer_groups
             .iter()
             .enumerate()
-            .map(|(index, node)| aux_renderer_group_summary(object.uid, index, node, styles))
+            .map(|(index, node)| {
+                aux_renderer_group_summary(
+                    object.uid,
+                    index,
+                    node,
+                    (object.renderers.len() + index) as i32 + 1,
+                    styles,
+                )
+            })
             .collect(),
     }
 }
@@ -46739,6 +47026,7 @@ fn parse_density_i32(name: &str, value: &str) -> Result<i32> {
 fn density_renderer_summary(
     map_uid: Uid,
     renderer: &GuiDensityRenderer,
+    fallback_ui_order: i32,
     styles: &StyleManager,
 ) -> GuiDensityRendererSummary {
     let attribute = |name: &str, fallback: &str| {
@@ -46806,6 +47094,11 @@ fn density_renderer_summary(
     GuiDensityRendererSummary {
         map_uid,
         uid: renderer.uid,
+        ui_order: renderer
+            .attributes
+            .get("ui_order")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(fallback_ui_order),
         name: renderer.name.clone(),
         renderer_type: renderer.renderer_type.clone(),
         visible: renderer.visible,
@@ -46925,6 +47218,41 @@ fn renderer_group_name(object_node: &LDom2Node, object_uid: Uid, group_uid: Uid)
         .to_string())
 }
 
+fn set_qsc_aux_renderer_ui_orders(
+    object_node: &mut LDom2Node,
+    object_uid: Uid,
+    scene_uid: Uid,
+    orders: &BTreeMap<Uid, i32>,
+    surface: bool,
+) {
+    let mut renderer_index = 0;
+    let mut group_index = 0;
+    for node in object_node
+        .children_mut()
+        .iter_mut()
+        .filter(|node| !node.is_attr() && node.tag_name() == "renderer")
+    {
+        let uid = if matches!(node.type_name(), "*group" | "RendGroup") {
+            let uid = aux_renderer_group_uid(object_uid, group_index);
+            group_index += 1;
+            uid
+        } else if surface && matches!(node.type_name(), "molsurf" | "MolSurfRenderer") {
+            let uid = surface_renderer_uid(scene_uid, object_uid, renderer_index);
+            renderer_index += 1;
+            uid
+        } else if !surface && node.type_name() == "lwrend" {
+            let uid = lw_renderer_uid(scene_uid, object_uid, renderer_index);
+            renderer_index += 1;
+            uid
+        } else {
+            continue;
+        };
+        if let Some(order) = orders.get(&uid) {
+            node.set_str_attr("ui_order", order.to_string());
+        }
+    }
+}
+
 fn rename_qsc_renderer_group(
     object_node: &mut LDom2Node,
     object_uid: Uid,
@@ -47005,6 +47333,7 @@ fn aux_renderer_group_summary(
     object_uid: Uid,
     group_index: usize,
     node: &LDom2Node,
+    fallback_ui_order: i32,
     styles: &StyleManager,
 ) -> GuiAuxRendererGroupSummary {
     let style = node.str_attr("style").to_string();
@@ -47021,6 +47350,11 @@ fn aux_renderer_group_summary(
     GuiAuxRendererGroupSummary {
         object_uid,
         uid: aux_renderer_group_uid(object_uid, group_index),
+        ui_order: node
+            .str_attr("ui_order")
+            .as_str()
+            .parse()
+            .unwrap_or(fallback_ui_order),
         name: attr("name", &format!("group{}", group_index + 1)),
         visible: qsc_bool(&attr("visible", "true")),
         locked: qsc_bool(&attr("locked", "false")),
@@ -47131,12 +47465,24 @@ fn surface_summary(
             .filter(|value| !value.is_empty())
     };
     let renderers = node
-        .map(surface_renderer_nodes)
         .into_iter()
-        .flatten()
+        .flat_map(|node| {
+            node.children()
+                .iter()
+                .filter(|child| !child.is_attr() && child.tag_name() == "renderer")
+                .enumerate()
+        })
+        .filter(|(_, child)| matches!(child.type_name(), "molsurf" | "MolSurfRenderer"))
         .enumerate()
-        .map(|(index, renderer)| {
-            surface_renderer_summary(scene_uid, surface.uid, index, Some(renderer), styles)
+        .map(|(index, (child_index, renderer))| {
+            surface_renderer_summary(
+                scene_uid,
+                surface.uid,
+                index,
+                child_index as i32 + 1,
+                Some(renderer),
+                styles,
+            )
         })
         .collect::<Vec<_>>();
     let renderers = if renderers.is_empty() && node.is_none() {
@@ -47144,6 +47490,7 @@ fn surface_summary(
             scene_uid,
             surface.uid,
             0,
+            1,
             None,
             styles,
         )]
@@ -47170,11 +47517,18 @@ fn surface_summary(
             .unwrap_or(0.0),
         renderers,
         renderer_groups: node
-            .map(aux_renderer_group_nodes)
             .into_iter()
-            .flatten()
+            .flat_map(|node| {
+                node.children()
+                    .iter()
+                    .filter(|child| !child.is_attr() && child.tag_name() == "renderer")
+                    .enumerate()
+            })
+            .filter(|(_, child)| matches!(child.type_name(), "*group" | "RendGroup"))
             .enumerate()
-            .map(|(index, node)| aux_renderer_group_summary(surface.uid, index, node, styles))
+            .map(|(index, (child_index, node))| {
+                aux_renderer_group_summary(surface.uid, index, node, child_index as i32 + 1, styles)
+            })
             .collect(),
     }
 }
@@ -47242,10 +47596,13 @@ fn lw_object_summary(
     let node = object.qsc_node.as_ref();
     let renderer_nodes = node
         .into_iter()
-        .flat_map(|node| node.children())
-        .filter(|node| {
-            !node.is_attr() && node.tag_name() == "renderer" && node.type_name() == "lwrend"
+        .flat_map(|node| {
+            node.children()
+                .iter()
+                .filter(|child| !child.is_attr() && child.tag_name() == "renderer")
+                .enumerate()
         })
+        .filter(|(_, node)| node.type_name() == "lwrend")
         .collect::<Vec<_>>();
     GuiLoadedLwObjectSummary {
         uid: object.uid,
@@ -47264,7 +47621,10 @@ fn lw_object_summary(
             .iter()
             .enumerate()
             .map(|(index, renderer)| {
-                let node = renderer_nodes.get(index).copied();
+                let (fallback_ui_order, node) = renderer_nodes
+                    .get(index)
+                    .map(|(child_index, node)| (*child_index as i32 + 1, Some(*node)))
+                    .unwrap_or((index as i32 + 1, None));
                 let style = node
                     .map(|node| node.str_attr("style").to_string())
                     .unwrap_or_default();
@@ -47277,6 +47637,9 @@ fn lw_object_summary(
                 GuiLoadedLwRendererSummary {
                     object_uid: object.uid,
                     uid: lw_renderer_uid(scene_uid, object.uid, index),
+                    ui_order: node
+                        .and_then(|node| node.str_attr("ui_order").as_str().parse().ok())
+                        .unwrap_or(fallback_ui_order),
                     name: renderer.name.clone(),
                     renderer_type: "lwrend".to_string(),
                     visible: renderer.visible,
@@ -47297,11 +47660,18 @@ fn lw_object_summary(
             })
             .collect(),
         renderer_groups: node
-            .map(aux_renderer_group_nodes)
             .into_iter()
-            .flatten()
+            .flat_map(|node| {
+                node.children()
+                    .iter()
+                    .filter(|child| !child.is_attr() && child.tag_name() == "renderer")
+                    .enumerate()
+            })
+            .filter(|(_, child)| matches!(child.type_name(), "*group" | "RendGroup"))
             .enumerate()
-            .map(|(index, node)| aux_renderer_group_summary(object.uid, index, node, styles))
+            .map(|(index, (child_index, node))| {
+                aux_renderer_group_summary(object.uid, index, node, child_index as i32 + 1, styles)
+            })
             .collect(),
     }
 }
@@ -47373,6 +47743,7 @@ fn surface_renderer_summary(
     scene_uid: Uid,
     surface_uid: Uid,
     renderer_index: usize,
+    fallback_ui_order: i32,
     node: Option<&LDom2Node>,
     styles: &StyleManager,
 ) -> GuiLoadedSurfaceRendererSummary {
@@ -47420,6 +47791,9 @@ fn surface_renderer_summary(
     GuiLoadedSurfaceRendererSummary {
         surface_uid,
         uid: surface_renderer_uid(scene_uid, surface_uid, renderer_index),
+        ui_order: node
+            .and_then(|node| node.str_attr("ui_order").as_str().parse().ok())
+            .unwrap_or(fallback_ui_order),
         name: attr("name", &format!("molsurf {}", renderer_index + 1)),
         renderer_type: "molsurf".to_string(),
         selection: attr("sel", "*"),
@@ -58592,9 +58966,33 @@ end_header
         assert!(app
             .move_renderer_in_object(surface_uid, surface_free_uid, surface_group_uid, "inside",)
             .unwrap());
+        assert_eq!(
+            app.aux_renderer_order_entries(surface_uid)
+                .unwrap()
+                .iter()
+                .map(|entry| (entry.uid, entry.ui_order))
+                .collect::<Vec<_>>(),
+            vec![
+                (surface_renderer_uid, 1),
+                (surface_free_uid, 2),
+                (surface_group_uid, 3),
+            ]
+        );
         assert!(app
             .move_renderer_in_object(surface_uid, surface_free_uid, surface_group_uid, "after",)
             .unwrap());
+        assert_eq!(
+            app.aux_renderer_order_entries(surface_uid)
+                .unwrap()
+                .iter()
+                .map(|entry| (entry.uid, entry.ui_order))
+                .collect::<Vec<_>>(),
+            vec![
+                (surface_renderer_uid, 1),
+                (surface_group_uid, 2),
+                (surface_free_uid, 3),
+            ]
+        );
 
         let lw_free_uid = app.add_lw_renderer(lw_uid).unwrap();
         let lw_group_uid = app.lw_object_summary(lw_uid).unwrap().renderer_groups[0].uid;
@@ -58604,10 +59002,58 @@ end_header
         assert!(app
             .move_renderer_in_object(lw_uid, lw_free_uid, lw_group_uid, "before")
             .unwrap());
-        app.destroy_density_renderer(map_uid, map_free_uid).unwrap();
-        app.destroy_surface_renderer(surface_uid, surface_free_uid)
-            .unwrap();
-        app.destroy_lw_renderer(lw_uid, lw_free_uid).unwrap();
+
+        for (object_uid, free_uid, first_uid, group_uid) in [
+            (map_uid, map_free_uid, map_renderer_uid, map_group_uid),
+            (
+                surface_uid,
+                surface_free_uid,
+                surface_renderer_uid,
+                surface_group_uid,
+            ),
+            (lw_uid, lw_free_uid, lw_renderer_uid, lw_group_uid),
+        ] {
+            assert!(app
+                .move_renderer_in_object(object_uid, free_uid, group_uid, "inside")
+                .unwrap());
+            assert_eq!(
+                app.aux_renderer_order_entries(object_uid)
+                    .unwrap()
+                    .iter()
+                    .map(|entry| (entry.uid, entry.ui_order))
+                    .collect::<Vec<_>>(),
+                vec![(first_uid, 1), (free_uid, 2), (group_uid, 3)],
+                "inside object {}",
+                object_uid.get()
+            );
+            assert!(app
+                .move_renderer_in_object(object_uid, free_uid, first_uid, "before")
+                .unwrap());
+            let entries = app.aux_renderer_order_entries(object_uid).unwrap();
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|entry| (entry.uid, entry.ui_order, entry.group.clone()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (free_uid, 1, Some("representations".to_string())),
+                    (first_uid, 2, Some("representations".to_string())),
+                    (group_uid, 3, None),
+                ],
+                "object {}",
+                object_uid.get()
+            );
+            assert_eq!(
+                entries
+                    .iter()
+                    .map(|entry| entry.ui_order)
+                    .collect::<Vec<_>>(),
+                vec![1, 2, 3]
+            );
+            assert!(entries[..2]
+                .iter()
+                .all(|entry| entry.group.as_deref() == Some("representations")));
+        }
 
         let path = std::env::temp_dir().join(format!(
             "cuemol-desktop-aux-renderer-groups-{}.qsc",
@@ -58616,7 +59062,7 @@ end_header
         app.save_active_scene_qsc(&path).unwrap();
         let qsc = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
         assert_eq!(qsc.matches("type=\"*group\"").count(), 3);
-        assert_eq!(qsc.matches("group=\"representations\"").count(), 3);
+        assert_eq!(qsc.matches("group=\"representations\"").count(), 6);
 
         let mut reloaded = DesktopAppState::new();
         let reloaded_scene_uid = reloaded.load_qsc_file(&path).unwrap().unwrap();
@@ -58626,10 +59072,40 @@ end_header
             reloaded_map.renderers[0].group.as_deref(),
             Some("representations")
         );
+        assert_eq!(reloaded_map.renderers.len(), 2);
+        assert_eq!(
+            reloaded_map
+                .renderers
+                .iter()
+                .min_by_key(|renderer| renderer.ui_order)
+                .unwrap()
+                .name,
+            "isosurf 1"
+        );
         let reloaded_surface = reloaded.surface_summaries(reloaded_scene_uid).remove(0);
         assert_eq!(reloaded_surface.renderer_groups[0].name, "representations");
+        assert_eq!(reloaded_surface.renderers.len(), 2);
+        assert_eq!(
+            reloaded_surface
+                .renderers
+                .iter()
+                .min_by_key(|renderer| renderer.ui_order)
+                .unwrap()
+                .name,
+            "molsurf 2"
+        );
         let reloaded_lw = reloaded.lw_object_summaries(reloaded_scene_uid).remove(0);
         assert_eq!(reloaded_lw.renderer_groups[0].name, "representations");
+        assert_eq!(reloaded_lw.renderers.len(), 2);
+        assert_eq!(
+            reloaded_lw
+                .renderers
+                .iter()
+                .min_by_key(|renderer| renderer.ui_order)
+                .unwrap()
+                .name,
+            "lwrend 1"
+        );
         let _ = std::fs::remove_file(path);
 
         for object_uid in [map_uid, surface_uid, lw_uid] {
