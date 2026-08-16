@@ -5919,11 +5919,7 @@ impl GuiApplication {
         }
         if ui
             .add_enabled(
-                self.workspace_renderer_clipboard
-                    .as_ref()
-                    .is_some_and(|clipboard| {
-                        clipboard.kind() == crate::GuiWorkspaceObjectKind::Molecule
-                    }),
+                self.workspace_renderer_clipboard.is_some(),
                 egui::Button::new("Paste Renderer"),
             )
             .clicked()
@@ -5997,9 +5993,7 @@ impl GuiApplication {
         }
         if ui
             .add_enabled(
-                self.workspace_renderer_clipboard
-                    .as_ref()
-                    .is_some_and(|clipboard| clipboard.kind() == owner.workspace_kind()),
+                self.workspace_renderer_clipboard.is_some(),
                 egui::Button::new("Paste Renderer"),
             )
             .clicked()
@@ -6049,11 +6043,7 @@ impl GuiApplication {
                 self.copy_workspace_renderer_to_clipboard(owner.uid(), group.uid);
                 ui.close();
             }
-            if self
-                .workspace_renderer_clipboard
-                .as_ref()
-                .is_some_and(|clipboard| clipboard.kind() == owner.workspace_kind())
-                && ui.button("Paste Renderer").clicked()
+            if self.workspace_renderer_clipboard.is_some() && ui.button("Paste Renderer").clicked()
             {
                 if let Some(scene_uid) = self.workspace_owner_scene_uid(owner) {
                     self.paste_workspace_renderer_clipboard(
@@ -6544,12 +6534,7 @@ impl GuiApplication {
                                 self.copy_workspace_renderer_to_clipboard(object_uid, renderer.uid);
                                 ui.close();
                             }
-                            if self
-                                .workspace_renderer_clipboard
-                                .as_ref()
-                                .is_some_and(|clipboard| {
-                                    clipboard.kind() == crate::GuiWorkspaceObjectKind::Molecule
-                                })
+                            if self.workspace_renderer_clipboard.is_some()
                                 && ui.button("Paste Renderer").clicked()
                             {
                                 self.paste_workspace_renderer_clipboard(
@@ -7284,7 +7269,18 @@ impl GuiApplication {
             self.set_status("No copied renderer");
             return;
         };
-        let kind = clipboard.kind();
+        let kind = if self.state.scene_manager().object(object_uid).is_some() {
+            crate::GuiWorkspaceObjectKind::Molecule
+        } else if self.state.density_map_summary(object_uid).is_some() {
+            crate::GuiWorkspaceObjectKind::DensityMap
+        } else if self.state.surface_summary(object_uid).is_some() {
+            crate::GuiWorkspaceObjectKind::Surface
+        } else if self.state.lw_object_summary(object_uid).is_some() {
+            crate::GuiWorkspaceObjectKind::Lightweight
+        } else {
+            self.set_status("Paste renderer error: object not found");
+            return;
+        };
         let undo = self.capture_undo();
         match self
             .state
@@ -7292,6 +7288,10 @@ impl GuiApplication {
         {
             Ok(result) => {
                 let count = result.renderer_uids.len();
+                if count == 0 && result.group_uid.is_none() {
+                    self.set_status("Pasted 0 renderer(s)");
+                    return;
+                }
                 self.push_undo_snapshot(undo);
                 self.modified_scenes.insert(scene_uid);
                 let renderer_uid = result
@@ -27077,6 +27077,20 @@ mod tests {
         app.copy_workspace_target_renderers();
         let clipboard = app.workspace_renderer_clipboard.as_ref().unwrap();
         assert_eq!(clipboard.kind(), crate::GuiWorkspaceObjectKind::DensityMap);
+        assert_eq!(clipboard.renderer_count(), 2);
+
+        app.workspace_multiple_selection = vec![
+            first,
+            NativeWorkspaceTarget::Renderer {
+                scene_uid,
+                owner: map_owner,
+                renderer_uid: first_map_uid,
+                is_group: false,
+            },
+        ];
+        app.copy_workspace_target_renderers();
+        let clipboard = app.workspace_renderer_clipboard.as_ref().unwrap();
+        assert!(clipboard.is_mixed_kind());
         assert_eq!(clipboard.renderer_count(), 2);
 
         let grouped_object_uid = app

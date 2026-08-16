@@ -330,8 +330,7 @@ fn tauri_workspace_exposes_lightweight_objects_and_renderers() {
         "set_lw_renderer_properties",
         "add_lw_renderer",
         "dataId",
-        "workspaceRendererClipboardKind",
-        "copyWorkspaceRenderer(object.uid, renderer.uid, objectKind)",
+        "copyWorkspaceRenderer(object.uid, renderer.uid)",
         "pasteWorkspaceRenderers(object.uid)",
         "Lightweight renderer properties",
         "[\"Common\", \"Lightweight\"]",
@@ -1447,6 +1446,7 @@ fn tauri_workspace_multiple_selection_matches_reference_actions() {
     assert!(JS.contains("function workspaceMultipleContextItems()"));
     assert!(JS.contains("function showWorkspaceMultipleContextMenu(event, target)"));
     assert!(JS.contains("function workspaceRendererTargetClipboardKind(target)"));
+    assert!(!JS.contains("workspaceRendererClipboardKind"));
     assert!(JS.contains("workspaceSelectionTarget(\"camera\""));
     assert!(JS.contains("workspaceSelectionTarget(\"style\""));
     assert!(JS.contains("sceneUid: target.objectUid"));

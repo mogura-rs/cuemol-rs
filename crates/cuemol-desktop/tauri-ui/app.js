@@ -153,7 +153,6 @@ const pdbRendererSetupCache = new Map();
 let workspaceCameraClipboardAvailable = false;
 let workspaceObjectClipboardAvailable = false;
 let workspaceRendererClipboardAvailable = false;
-let workspaceRendererClipboardKind = null;
 let workspaceStyleClipboardName = null;
 let selectedDensityMapUid = null;
 let selectedDensityRendererUid = null;
@@ -6753,7 +6752,7 @@ function aroundWorkspaceSelection(selection, radius, byResidue) {
   return byResidue ? `byres ${expression}` : expression;
 }
 
-async function copyWorkspaceRenderer(objectUid, rendererUid, kind = "object") {
+async function copyWorkspaceRenderer(objectUid, rendererUid) {
   if (!invoke) return false;
   setBusy(true);
   try {
@@ -6761,7 +6760,6 @@ async function copyWorkspaceRenderer(objectUid, rendererUid, kind = "object") {
       input: { objectUid, rendererUid },
     });
     workspaceRendererClipboardAvailable = true;
-    workspaceRendererClipboardKind = kind;
     snapshot.status = status;
     renderStatusAndLog();
     return true;
@@ -6794,7 +6792,6 @@ async function copyWorkspaceRenderers(targets) {
       })),
     });
     workspaceRendererClipboardAvailable = true;
-    workspaceRendererClipboardKind = workspaceRendererTargetClipboardKind(targets[0]);
     snapshot.status = status;
     renderStatusAndLog();
     return true;
@@ -7515,7 +7512,7 @@ function workspaceObjectContextItems(scene, object) {
       action: () => copyWorkspaceObject(object.uid),
     },
   );
-  if (workspaceRendererClipboardAvailable && workspaceRendererClipboardKind === "object") {
+  if (workspaceRendererClipboardAvailable) {
     items.push({
       label: "Paste Renderer",
       action: () => pasteWorkspaceRenderers(object.uid),
@@ -7837,7 +7834,7 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
         await copyWorkspaceObject(object.uid);
       },
     },
-    ...(workspaceRendererClipboardAvailable && workspaceRendererClipboardKind === kind
+    ...(workspaceRendererClipboardAvailable
       ? [
           {
             label: "Paste Renderer",
@@ -7886,11 +7883,6 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
 }
 
 async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
-  const objectKind = {
-    densityRenderer: "densityMap",
-    surfaceRenderer: "surface",
-    lwRenderer: "lwObject",
-  }[kind];
   const activate = async () => {
     if (snapshot.activeSceneUid === scene.uid) return true;
     return mutate("activate_scene", { sceneUid: scene.uid });
@@ -7923,11 +7915,10 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
         label: "Copy",
         action: async () => {
           if (!(await activate())) return;
-          await copyWorkspaceRenderer(object.uid, renderer.uid, objectKind);
+          await copyWorkspaceRenderer(object.uid, renderer.uid);
         },
       },
-      ...(workspaceRendererClipboardAvailable &&
-      workspaceRendererClipboardKind === objectKind
+      ...(workspaceRendererClipboardAvailable
         ? [
             {
               label: "Paste Renderer",
@@ -8046,7 +8037,7 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
       label: "Copy",
       action: async () => {
         if (!(await activate())) return;
-        await copyWorkspaceRenderer(object.uid, renderer.uid, objectKind);
+        await copyWorkspaceRenderer(object.uid, renderer.uid);
       },
     },
     {
@@ -8165,7 +8156,7 @@ async function workspaceRendererContextItems(scene, object, renderer) {
         action: () => copyWorkspaceRenderer(object.uid, renderer.uid),
       },
     );
-    if (workspaceRendererClipboardAvailable && workspaceRendererClipboardKind === "object") {
+    if (workspaceRendererClipboardAvailable) {
       items.push({
         label: "Paste Renderer",
         action: () => pasteWorkspaceRenderers(object.uid, renderer.uid),
@@ -8846,14 +8837,10 @@ function workspaceTargetExists(target) {
 
 function workspaceMultipleContextItems() {
   const targets = [...workspaceMultipleSelection];
-  const clipboardKind = workspaceRendererTargetClipboardKind(targets[0]);
-  const copyEnabled =
-    Boolean(clipboardKind) &&
-    targets.every(
-      (target) =>
-        target.rendererUid !== null &&
-        workspaceRendererTargetClipboardKind(target) === clipboardKind,
-    );
+  const copyEnabled = targets.every(
+    (target) =>
+      target.rendererUid !== null && Boolean(workspaceRendererTargetClipboardKind(target)),
+  );
   const setVisible = (visible) => () =>
     mutate("set_workspace_items_visible", {
       targets: targets.map(workspaceCommandTarget),
