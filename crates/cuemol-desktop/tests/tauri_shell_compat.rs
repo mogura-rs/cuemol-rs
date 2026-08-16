@@ -1449,6 +1449,12 @@ fn tauri_workspace_multiple_selection_matches_reference_actions() {
     for label in ["Copy", "Delete", "Show", "Hide"] {
         assert!(JS.contains(&format!("label: \"{label}\"")));
     }
+    assert!(NATIVE_GUI_RS.contains("enum NativeWorkspaceTarget"));
+    assert!(NATIVE_GUI_RS.contains("input.modifiers.command"));
+    assert!(NATIVE_GUI_RS.contains("fn workspace_multiple_context_menu"));
+    assert!(NATIVE_GUI_RS.contains("fn copy_workspace_target_renderers"));
+    assert!(NATIVE_GUI_RS.contains("fn set_workspace_targets_visible"));
+    assert!(NATIVE_GUI_RS.contains("fn delete_workspace_targets"));
 }
 
 #[test]

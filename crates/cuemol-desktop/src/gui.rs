@@ -901,6 +901,7 @@ struct GuiApplication {
     selected_object: Option<cuemol_core::Uid>,
     selected_renderer: Option<cuemol_core::Uid>,
     workspace_aux_selection: Option<WorkspaceAuxSelection>,
+    workspace_multiple_selection: Vec<NativeWorkspaceTarget>,
     editing_saved_camera: Option<(cuemol_core::Uid, String)>,
     camera_visibility_draft: Option<NativeCameraVisibilityDraft>,
     style_properties_draft: Option<NativeStyleProperties>,
@@ -1097,6 +1098,7 @@ struct GuiUndoSnapshot {
     selected_object: Option<cuemol_core::Uid>,
     selected_renderer: Option<cuemol_core::Uid>,
     workspace_aux_selection: Option<WorkspaceAuxSelection>,
+    workspace_multiple_selection: Vec<NativeWorkspaceTarget>,
     selection_text: String,
     last_loaded_path: Option<PathBuf>,
     modified_scenes: std::collections::BTreeSet<cuemol_core::Uid>,
@@ -1531,6 +1533,56 @@ impl NativePropertyObject {
             Self::Surface(_) => crate::GuiWorkspaceObjectKind::Surface,
             Self::Lightweight(_) => crate::GuiWorkspaceObjectKind::Lightweight,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum NativeWorkspaceTarget {
+    Object {
+        scene_uid: cuemol_core::Uid,
+        owner: NativePropertyObject,
+    },
+    Renderer {
+        scene_uid: cuemol_core::Uid,
+        owner: NativePropertyObject,
+        renderer_uid: cuemol_core::Uid,
+        is_group: bool,
+    },
+}
+
+impl NativeWorkspaceTarget {
+    fn scene_uid(self) -> cuemol_core::Uid {
+        match self {
+            Self::Object { scene_uid, .. } | Self::Renderer { scene_uid, .. } => scene_uid,
+        }
+    }
+
+    fn owner(self) -> NativePropertyObject {
+        match self {
+            Self::Object { owner, .. } | Self::Renderer { owner, .. } => owner,
+        }
+    }
+
+    fn renderer_uid(self) -> Option<cuemol_core::Uid> {
+        match self {
+            Self::Object { .. } => None,
+            Self::Renderer { renderer_uid, .. } => Some(renderer_uid),
+        }
+    }
+
+    fn is_group(self) -> bool {
+        matches!(self, Self::Renderer { is_group: true, .. })
+    }
+
+    fn is_copyable_renderer(self) -> bool {
+        matches!(
+            self,
+            Self::Renderer {
+                owner: NativePropertyObject::Molecule(_),
+                is_group: false,
+                ..
+            }
+        )
     }
 }
 
@@ -3157,6 +3209,7 @@ impl GuiApplication {
             selection_text: String::new(),
             selected_object: None,
             workspace_aux_selection: None,
+            workspace_multiple_selection: Vec::new(),
             editing_saved_camera: None,
             camera_visibility_draft: None,
             style_properties_draft: None,
@@ -4258,6 +4311,150 @@ impl GuiApplication {
         }
     }
 
+    fn current_workspace_target(&self) -> Option<NativeWorkspaceTarget> {
+        if let Some(object_uid) = self.selected_object {
+            let scene_uid = self
+                .state
+                .scene_manager()
+                .scene_uid_for_object(object_uid)?;
+            let owner = NativePropertyObject::Molecule(object_uid);
+            return Some(if let Some(renderer_uid) = self.selected_renderer {
+                NativeWorkspaceTarget::Renderer {
+                    scene_uid,
+                    owner,
+                    renderer_uid,
+                    is_group: self.selected_renderer_is_group(),
+                }
+            } else {
+                NativeWorkspaceTarget::Object { scene_uid, owner }
+            });
+        }
+        let selection = self.workspace_aux_selection?;
+        let (scene_uid, owner, renderer_uid) = match selection {
+            WorkspaceAuxSelection::DensityMap {
+                scene_uid,
+                map_uid,
+                renderer_uid,
+            } => (
+                scene_uid,
+                NativePropertyObject::DensityMap(map_uid),
+                renderer_uid,
+            ),
+            WorkspaceAuxSelection::Surface {
+                scene_uid,
+                surface_uid,
+                renderer_uid,
+            } => (
+                scene_uid,
+                NativePropertyObject::Surface(surface_uid),
+                renderer_uid,
+            ),
+            WorkspaceAuxSelection::Lightweight {
+                scene_uid,
+                object_uid,
+                renderer_uid,
+            } => (
+                scene_uid,
+                NativePropertyObject::Lightweight(object_uid),
+                renderer_uid,
+            ),
+            WorkspaceAuxSelection::CameraRoot { .. }
+            | WorkspaceAuxSelection::Camera { .. }
+            | WorkspaceAuxSelection::StyleRoot { .. }
+            | WorkspaceAuxSelection::Style { .. } => return None,
+        };
+        Some(if let Some(renderer_uid) = renderer_uid {
+            NativeWorkspaceTarget::Renderer {
+                scene_uid,
+                owner,
+                renderer_uid,
+                is_group: self.workspace_aux_group_summary(selection).is_some(),
+            }
+        } else {
+            NativeWorkspaceTarget::Object { scene_uid, owner }
+        })
+    }
+
+    fn apply_workspace_target(&mut self, target: NativeWorkspaceTarget) {
+        self.selected_object = None;
+        self.selected_renderer = None;
+        self.workspace_aux_selection = None;
+        let scene_uid = target.scene_uid();
+        let owner = target.owner();
+        let renderer_uid = target.renderer_uid();
+        match owner {
+            NativePropertyObject::Molecule(object_uid) => {
+                self.selected_object = Some(object_uid);
+                self.selected_renderer = renderer_uid;
+            }
+            NativePropertyObject::DensityMap(map_uid) => {
+                self.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
+                    scene_uid,
+                    map_uid,
+                    renderer_uid,
+                });
+            }
+            NativePropertyObject::Surface(surface_uid) => {
+                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
+                    scene_uid,
+                    surface_uid,
+                    renderer_uid,
+                });
+            }
+            NativePropertyObject::Lightweight(object_uid) => {
+                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Lightweight {
+                    scene_uid,
+                    object_uid,
+                    renderer_uid,
+                });
+            }
+        }
+    }
+
+    fn workspace_target_selected(&self, target: NativeWorkspaceTarget, single: bool) -> bool {
+        if self.workspace_multiple_selection.len() < 2 {
+            single
+        } else {
+            self.workspace_multiple_selection.contains(&target)
+        }
+    }
+
+    fn select_workspace_target(&mut self, target: NativeWorkspaceTarget, multiple: bool) -> bool {
+        if !multiple {
+            self.workspace_multiple_selection.clear();
+            return false;
+        }
+        let mut targets = if self.workspace_multiple_selection.len() > 1 {
+            self.workspace_multiple_selection.clone()
+        } else {
+            self.current_workspace_target().into_iter().collect()
+        };
+        if let Some(index) = targets.iter().position(|candidate| *candidate == target) {
+            if targets.len() == 1 {
+                return true;
+            }
+            targets.remove(index);
+        } else {
+            targets.retain(|candidate| {
+                if candidate.owner() != target.owner() {
+                    return true;
+                }
+                if candidate.renderer_uid().is_none() || target.renderer_uid().is_none() {
+                    return false;
+                }
+                !candidate.is_group() && !target.is_group()
+            });
+            targets.push(target);
+        }
+        if targets.len() == 1 {
+            self.apply_workspace_target(targets[0]);
+            self.workspace_multiple_selection.clear();
+        } else {
+            self.workspace_multiple_selection = targets;
+        }
+        true
+    }
+
     /// Workspace section — the scene/object/renderer tree (CueMol2 `objectTree`).
     fn workspace_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         for scene in self.state.scene_summaries() {
@@ -4294,6 +4491,7 @@ impl GuiApplication {
             let scene_response = ui.selectable_label(selected_scene, scene_label);
             if scene_response.clicked() {
                 self.activate_workspace_scene(scene.uid, camera);
+                self.workspace_multiple_selection.clear();
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
@@ -4311,6 +4509,7 @@ impl GuiApplication {
                 .scene(scene.uid)
                 .is_some_and(|value| scene_attr_bool(value.scene_attribute("use_colproof"), false));
             scene_response.context_menu(|ui| {
+                self.workspace_multiple_selection.clear();
                 ui.menu_button("Background color", |ui| {
                     for (label, background, value) in [
                         ("White", SceneBackground::White, "white"),
@@ -4356,14 +4555,21 @@ impl GuiApplication {
                 for workspace_object in workspace_objects {
                     match workspace_object {
                         NativeWorkspaceObjectSummary::Molecule(object) => {
-                            let selected = self.workspace_aux_selection.is_none()
-                                && self.selected_object == Some(object.uid);
+                            let owner = NativePropertyObject::Molecule(object.uid);
+                            let target = NativeWorkspaceTarget::Object {
+                                scene_uid: scene.uid,
+                                owner,
+                            };
+                            let selected = self.workspace_target_selected(
+                                target,
+                                self.workspace_aux_selection.is_none()
+                                    && self.selected_object == Some(object.uid),
+                            );
                             let label = format!(
                                 "{}  [{} atoms, {} bonds]",
                                 object.name, object.atom_count, object.bond_count
                             );
                             let mut visible = object.visible;
-                            let owner = NativePropertyObject::Molecule(object.uid);
                             let drag_source = ui.dnd_drag_source(
                                 egui::Id::new(("workspace-object-drag", owner)),
                                 NativeWorkspaceObjectDragPayload {
@@ -4401,9 +4607,13 @@ impl GuiApplication {
                                         }
                                         if ui.selectable_label(selected, label).clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
-                                            self.selected_object = Some(object.uid);
-                                            self.selected_renderer = None;
-                                            self.workspace_aux_selection = None;
+                                            let multiple =
+                                                ui.input(|input| input.modifiers.command);
+                                            if !self.select_workspace_target(target, multiple) {
+                                                self.selected_object = Some(object.uid);
+                                                self.selected_renderer = None;
+                                                self.workspace_aux_selection = None;
+                                            }
                                         }
                                     })
                                 },
@@ -4415,9 +4625,14 @@ impl GuiApplication {
                                 &drag_source.response,
                             );
                             drag_source.response.context_menu(|ui| {
-                                self.workspace_molecule_object_context_menu(
-                                    ui, camera, scene.uid, object.uid,
-                                );
+                                if self.workspace_multiple_selection.contains(&target) {
+                                    self.workspace_multiple_context_menu(ui);
+                                } else {
+                                    self.workspace_multiple_selection.clear();
+                                    self.workspace_molecule_object_context_menu(
+                                        ui, camera, scene.uid, object.uid,
+                                    );
+                                }
                             });
                             if !object.ui_collapsed {
                                 ui.indent(format!("object-{}", object.uid.get()), |ui| {
@@ -4460,8 +4675,15 @@ impl GuiApplication {
                                 map_uid: map.uid,
                                 renderer_uid: None,
                             };
-                            let selected = self.selected_object.is_none()
-                                && self.workspace_aux_selection == Some(object_selection);
+                            let target = NativeWorkspaceTarget::Object {
+                                scene_uid: scene.uid,
+                                owner: NativePropertyObject::DensityMap(map.uid),
+                            };
+                            let selected = self.workspace_target_selected(
+                                target,
+                                self.selected_object.is_none()
+                                    && self.workspace_aux_selection == Some(object_selection),
+                            );
                             let mut visible = map.visible;
                             let owner = NativePropertyObject::DensityMap(map.uid);
                             let drag_source = ui.dnd_drag_source(
@@ -4500,9 +4722,14 @@ impl GuiApplication {
                                         let label = format!("{} ({})", map.name, map.class_name);
                                         if ui.selectable_label(selected, label).clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
-                                            self.selected_object = None;
-                                            self.selected_renderer = None;
-                                            self.workspace_aux_selection = Some(object_selection);
+                                            let multiple =
+                                                ui.input(|input| input.modifiers.command);
+                                            if !self.select_workspace_target(target, multiple) {
+                                                self.selected_object = None;
+                                                self.selected_renderer = None;
+                                                self.workspace_aux_selection =
+                                                    Some(object_selection);
+                                            }
                                         }
                                     })
                                 },
@@ -4514,13 +4741,18 @@ impl GuiApplication {
                                 &drag_source.response,
                             );
                             drag_source.response.context_menu(|ui| {
-                                self.workspace_aux_object_context_menu(
-                                    ui,
-                                    camera,
-                                    scene.uid,
-                                    object_selection,
-                                    owner,
-                                );
+                                if self.workspace_multiple_selection.contains(&target) {
+                                    self.workspace_multiple_context_menu(ui);
+                                } else {
+                                    self.workspace_multiple_selection.clear();
+                                    self.workspace_aux_object_context_menu(
+                                        ui,
+                                        camera,
+                                        scene.uid,
+                                        object_selection,
+                                        owner,
+                                    );
+                                }
                             });
                             if !map.ui_collapsed {
                                 ui.indent(format!("density-map-{}", map.uid.get()), |ui| {
@@ -4558,8 +4790,15 @@ impl GuiApplication {
                                 surface_uid: surface.uid,
                                 renderer_uid: None,
                             };
-                            let selected = self.selected_object.is_none()
-                                && self.workspace_aux_selection == Some(object_selection);
+                            let target = NativeWorkspaceTarget::Object {
+                                scene_uid: scene.uid,
+                                owner: NativePropertyObject::Surface(surface.uid),
+                            };
+                            let selected = self.workspace_target_selected(
+                                target,
+                                self.selected_object.is_none()
+                                    && self.workspace_aux_selection == Some(object_selection),
+                            );
                             let mut visible = surface.visible;
                             let owner = NativePropertyObject::Surface(surface.uid);
                             let drag_source = ui.dnd_drag_source(
@@ -4599,9 +4838,14 @@ impl GuiApplication {
                                             format!("{} ({})", surface.name, surface.class_name);
                                         if ui.selectable_label(selected, label).clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
-                                            self.selected_object = None;
-                                            self.selected_renderer = None;
-                                            self.workspace_aux_selection = Some(object_selection);
+                                            let multiple =
+                                                ui.input(|input| input.modifiers.command);
+                                            if !self.select_workspace_target(target, multiple) {
+                                                self.selected_object = None;
+                                                self.selected_renderer = None;
+                                                self.workspace_aux_selection =
+                                                    Some(object_selection);
+                                            }
                                         }
                                     })
                                 },
@@ -4613,13 +4857,18 @@ impl GuiApplication {
                                 &drag_source.response,
                             );
                             drag_source.response.context_menu(|ui| {
-                                self.workspace_aux_object_context_menu(
-                                    ui,
-                                    camera,
-                                    scene.uid,
-                                    object_selection,
-                                    owner,
-                                );
+                                if self.workspace_multiple_selection.contains(&target) {
+                                    self.workspace_multiple_context_menu(ui);
+                                } else {
+                                    self.workspace_multiple_selection.clear();
+                                    self.workspace_aux_object_context_menu(
+                                        ui,
+                                        camera,
+                                        scene.uid,
+                                        object_selection,
+                                        owner,
+                                    );
+                                }
                             });
                             if !surface.ui_collapsed {
                                 ui.indent(format!("surface-{}", surface.uid.get()), |ui| {
@@ -4657,8 +4906,15 @@ impl GuiApplication {
                                 object_uid: object.uid,
                                 renderer_uid: None,
                             };
-                            let selected = self.selected_object.is_none()
-                                && self.workspace_aux_selection == Some(object_selection);
+                            let target = NativeWorkspaceTarget::Object {
+                                scene_uid: scene.uid,
+                                owner: NativePropertyObject::Lightweight(object.uid),
+                            };
+                            let selected = self.workspace_target_selected(
+                                target,
+                                self.selected_object.is_none()
+                                    && self.workspace_aux_selection == Some(object_selection),
+                            );
                             let mut visible = object.visible;
                             let owner = NativePropertyObject::Lightweight(object.uid);
                             let drag_source = ui.dnd_drag_source(
@@ -4695,9 +4951,14 @@ impl GuiApplication {
                                             format!("{} ({})", object.name, object.class_name);
                                         if ui.selectable_label(selected, label).clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
-                                            self.selected_object = None;
-                                            self.selected_renderer = None;
-                                            self.workspace_aux_selection = Some(object_selection);
+                                            let multiple =
+                                                ui.input(|input| input.modifiers.command);
+                                            if !self.select_workspace_target(target, multiple) {
+                                                self.selected_object = None;
+                                                self.selected_renderer = None;
+                                                self.workspace_aux_selection =
+                                                    Some(object_selection);
+                                            }
                                         }
                                     })
                                 },
@@ -4709,13 +4970,18 @@ impl GuiApplication {
                                 &drag_source.response,
                             );
                             drag_source.response.context_menu(|ui| {
-                                self.workspace_aux_object_context_menu(
-                                    ui,
-                                    camera,
-                                    scene.uid,
-                                    object_selection,
-                                    owner,
-                                );
+                                if self.workspace_multiple_selection.contains(&target) {
+                                    self.workspace_multiple_context_menu(ui);
+                                } else {
+                                    self.workspace_multiple_selection.clear();
+                                    self.workspace_aux_object_context_menu(
+                                        ui,
+                                        camera,
+                                        scene.uid,
+                                        object_selection,
+                                        owner,
+                                    );
+                                }
                             });
                             if !object.ui_collapsed {
                                 ui.indent(format!("lw-object-{}", object.uid.get()), |ui| {
@@ -4757,11 +5023,13 @@ impl GuiApplication {
                 let root_response = ui.selectable_label(root_selected, "Camera");
                 if root_response.clicked() {
                     self.activate_workspace_scene(scene.uid, camera);
+                    self.workspace_multiple_selection.clear();
                     self.selected_object = None;
                     self.selected_renderer = None;
                     self.workspace_aux_selection = Some(root_selection);
                 }
                 root_response.context_menu(|ui| {
+                    self.workspace_multiple_selection.clear();
                     ui.weak("Cameras");
                     ui.separator();
                     if ui.button("New Camera…").clicked() {
@@ -4800,6 +5068,7 @@ impl GuiApplication {
                         let response = ui.selectable_label(selected, label);
                         if response.clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
+                            self.workspace_multiple_selection.clear();
                             self.selected_object = None;
                             self.selected_renderer = None;
                             self.workspace_aux_selection = Some(selection);
@@ -4808,6 +5077,7 @@ impl GuiApplication {
                             self.load_workspace_camera(selection, camera);
                         }
                         response.context_menu(|ui| {
+                            self.workspace_multiple_selection.clear();
                             ui.weak(&summary.name);
                             ui.separator();
                             if ui.button("New Camera…").clicked() {
@@ -4907,11 +5177,13 @@ impl GuiApplication {
                 let root_response = ui.selectable_label(root_selected, "Styles");
                 if root_response.clicked() {
                     self.activate_workspace_scene(scene.uid, camera);
+                    self.workspace_multiple_selection.clear();
                     self.selected_object = None;
                     self.selected_renderer = None;
                     self.workspace_aux_selection = Some(root_selection);
                 }
                 root_response.context_menu(|ui| {
+                    self.workspace_multiple_selection.clear();
                     ui.weak("Styles");
                     ui.separator();
                     if ui.button("New Style…").clicked() {
@@ -4950,6 +5222,7 @@ impl GuiApplication {
                         let response = ui.selectable_label(selected, label);
                         if response.clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
+                            self.workspace_multiple_selection.clear();
                             self.selected_object = None;
                             self.selected_renderer = None;
                             self.workspace_aux_selection = Some(selection);
@@ -4958,6 +5231,7 @@ impl GuiApplication {
                             self.open_style_properties(selection);
                         }
                         response.context_menu(|ui| {
+                            self.workspace_multiple_selection.clear();
                             ui.weak(&summary.name);
                             ui.separator();
                             if ui.button("New Style…").clicked() {
@@ -5060,12 +5334,13 @@ impl GuiApplication {
         }
         ui.separator();
         ui.horizontal(|ui| {
-            let zoom_enabled = (self.selected_object.is_some()
-                && !self.selected_renderer_is_group())
-                || matches!(
-                    self.workspace_aux_selection,
-                    Some(WorkspaceAuxSelection::DensityMap { .. })
-                );
+            let multiple_selected = self.workspace_multiple_selection.len() > 1;
+            let zoom_enabled = !multiple_selected
+                && ((self.selected_object.is_some() && !self.selected_renderer_is_group())
+                    || matches!(
+                        self.workspace_aux_selection,
+                        Some(WorkspaceAuxSelection::DensityMap { .. })
+                    ));
             if ui
                 .add_enabled(zoom_enabled, egui::Button::new("Zoom"))
                 .on_hover_text("Zoom at selected item")
@@ -5084,7 +5359,7 @@ impl GuiApplication {
                 Some(WorkspaceAuxSelection::StyleRoot { .. } | WorkspaceAuxSelection::Style { .. })
             );
             if ui
-                .button("Add")
+                .add_enabled(!multiple_selected, egui::Button::new("Add"))
                 .on_hover_text(if adding_camera {
                     "Save current view as camera"
                 } else if adding_style {
@@ -5118,7 +5393,8 @@ impl GuiApplication {
                     self.open_renderer_dialog(object_uid);
                 }
             }
-            let delete_enabled = self.selected_object.is_some()
+            let delete_enabled = multiple_selected
+                || self.selected_object.is_some()
                 || self
                     .workspace_aux_selection
                     .is_some_and(|selection| match selection {
@@ -5136,7 +5412,9 @@ impl GuiApplication {
                 .add_enabled(delete_enabled, egui::Button::new("Delete"))
                 .clicked()
             {
-                if let Some(object_uid) = self.selected_object {
+                if multiple_selected {
+                    self.delete_workspace_targets();
+                } else if let Some(object_uid) = self.selected_object {
                     if let Some(renderer_uid) = self.selected_renderer {
                         self.delete_renderer(object_uid, renderer_uid);
                     } else {
@@ -5146,20 +5424,22 @@ impl GuiApplication {
                     self.delete_aux_selection(selection);
                 }
             }
-            let property_enabled = !matches!(
-                self.workspace_aux_selection,
-                Some(
-                    WorkspaceAuxSelection::CameraRoot { .. }
-                        | WorkspaceAuxSelection::StyleRoot { .. }
+            let property_enabled = !multiple_selected
+                && !matches!(
+                    self.workspace_aux_selection,
+                    Some(
+                        WorkspaceAuxSelection::CameraRoot { .. }
+                            | WorkspaceAuxSelection::StyleRoot { .. }
+                    )
                 )
-            ) && self.workspace_aux_selection.is_none_or(|selection| {
-                match selection {
-                    WorkspaceAuxSelection::Style { .. } => self
-                        .style_summary_for_selection(selection)
-                        .is_some_and(|style| style.local_index.is_some()),
-                    _ => true,
-                }
-            });
+                && self
+                    .workspace_aux_selection
+                    .is_none_or(|selection| match selection {
+                        WorkspaceAuxSelection::Style { .. } => self
+                            .style_summary_for_selection(selection)
+                            .is_some_and(|style| style.local_index.is_some()),
+                        _ => true,
+                    });
             if ui
                 .add_enabled(property_enabled, egui::Button::new("Property"))
                 .clicked()
@@ -5247,6 +5527,36 @@ impl GuiApplication {
             }
             Ok(false) => {}
             Err(error) => self.set_status(format!("Move object error: {error}")),
+        }
+    }
+
+    fn workspace_multiple_context_menu(&mut self, ui: &mut egui::Ui) {
+        let count = self.workspace_multiple_selection.len();
+        ui.weak(format!("{count} items"));
+        ui.separator();
+        let copy_enabled = self
+            .workspace_multiple_selection
+            .iter()
+            .copied()
+            .all(NativeWorkspaceTarget::is_copyable_renderer);
+        if ui
+            .add_enabled(copy_enabled, egui::Button::new("Copy"))
+            .clicked()
+        {
+            self.copy_workspace_target_renderers();
+            ui.close();
+        }
+        if ui.button("Delete").clicked() {
+            self.delete_workspace_targets();
+            ui.close();
+        }
+        if ui.button("Show").clicked() {
+            self.set_workspace_targets_visible(true);
+            ui.close();
+        }
+        if ui.button("Hide").clicked() {
+            self.set_workspace_targets_visible(false);
+            ui.close();
         }
     }
 
@@ -5706,9 +6016,17 @@ impl GuiApplication {
                 renderer_uid: Some(renderer.uid),
             },
         };
-        let selected =
-            self.selected_object.is_none() && self.workspace_aux_selection == Some(selection);
         let is_group = renderer.renderer_type == "*group";
+        let target = NativeWorkspaceTarget::Renderer {
+            scene_uid,
+            owner,
+            renderer_uid: renderer.uid,
+            is_group,
+        };
+        let selected = self.workspace_target_selected(
+            target,
+            self.selected_object.is_none() && self.workspace_aux_selection == Some(selection),
+        );
         let payload = NativeRendererDragPayload {
             object_uid: owner.uid(),
             renderer_uid: renderer.uid,
@@ -5763,15 +6081,23 @@ impl GuiApplication {
                     };
                     if ui.selectable_label(selected, label).clicked() {
                         self.activate_workspace_scene(scene_uid, camera);
-                        self.selected_object = None;
-                        self.selected_renderer = None;
-                        self.workspace_aux_selection = Some(selection);
+                        let multiple = ui.input(|input| input.modifiers.command);
+                        if !self.select_workspace_target(target, multiple) {
+                            self.selected_object = None;
+                            self.selected_renderer = None;
+                            self.workspace_aux_selection = Some(selection);
+                        }
                     }
                 });
             },
         );
         drag_source.response.context_menu(|ui| {
-            self.workspace_aux_renderer_context_menu(ui, selection);
+            if self.workspace_multiple_selection.contains(&target) {
+                self.workspace_multiple_context_menu(ui);
+            } else {
+                self.workspace_multiple_selection.clear();
+                self.workspace_aux_renderer_context_menu(ui, selection);
+            }
         });
         let drop_rect = drag_source.response.rect;
         if let Some(source) = drag_source
@@ -5843,9 +6169,19 @@ impl GuiApplication {
         renderer: &crate::GuiRendererSummary,
         is_group: bool,
     ) {
-        let selected = self.workspace_aux_selection.is_none()
-            && self.selected_object == Some(object_uid)
-            && self.selected_renderer == Some(renderer.uid);
+        let owner = NativePropertyObject::Molecule(object_uid);
+        let target = NativeWorkspaceTarget::Renderer {
+            scene_uid,
+            owner,
+            renderer_uid: renderer.uid,
+            is_group,
+        };
+        let selected = self.workspace_target_selected(
+            target,
+            self.workspace_aux_selection.is_none()
+                && self.selected_object == Some(object_uid)
+                && self.selected_renderer == Some(renderer.uid),
+        );
         let payload = NativeRendererDragPayload {
             object_uid,
             renderer_uid: renderer.uid,
@@ -5869,7 +6205,7 @@ impl GuiApplication {
                     {
                         self.set_workspace_renderer_group_collapsed(
                             scene_uid,
-                            NativePropertyObject::Molecule(object_uid),
+                            owner,
                             renderer.uid,
                             !renderer.ui_collapsed,
                         );
@@ -5890,11 +6226,7 @@ impl GuiApplication {
                         }
                     }
                     if let Some(locked) = workspace_lock_toggle(ui, renderer.locked, !is_group) {
-                        self.set_workspace_renderer_locked(
-                            NativePropertyObject::Molecule(object_uid),
-                            renderer.uid,
-                            locked,
-                        );
+                        self.set_workspace_renderer_locked(owner, renderer.uid, locked);
                     }
                     let label = if is_group {
                         format!("{} (group)", renderer.name)
@@ -5904,11 +6236,19 @@ impl GuiApplication {
                     let response = ui.selectable_label(selected, label);
                     if response.clicked() {
                         self.activate_workspace_scene(scene_uid, camera);
-                        self.selected_object = Some(object_uid);
-                        self.selected_renderer = Some(renderer.uid);
-                        self.workspace_aux_selection = None;
+                        let multiple = ui.input(|input| input.modifiers.command);
+                        if !self.select_workspace_target(target, multiple) {
+                            self.selected_object = Some(object_uid);
+                            self.selected_renderer = Some(renderer.uid);
+                            self.workspace_aux_selection = None;
+                        }
                     }
                     response.context_menu(|ui| {
+                        if self.workspace_multiple_selection.contains(&target) {
+                            self.workspace_multiple_context_menu(ui);
+                            return;
+                        }
+                        self.workspace_multiple_selection.clear();
                         if is_group {
                             ui.weak(&renderer.name);
                             ui.separator();
@@ -6358,6 +6698,202 @@ impl GuiApplication {
                 self.set_status(format!("Copied {count} renderer(s)"));
             }
             Err(error) => self.set_status(format!("Copy renderer error: {error}")),
+        }
+    }
+
+    fn copy_workspace_target_renderers(&mut self) {
+        let targets = self
+            .workspace_multiple_selection
+            .iter()
+            .filter_map(|target| match target {
+                NativeWorkspaceTarget::Renderer {
+                    owner: NativePropertyObject::Molecule(object_uid),
+                    renderer_uid,
+                    is_group: false,
+                    ..
+                } => Some((*object_uid, *renderer_uid)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if targets.len() != self.workspace_multiple_selection.len() || targets.is_empty() {
+            self.set_status("Multiple copy requires molecule renderers");
+            return;
+        }
+        match self.state.copy_workspace_renderers(&targets) {
+            Ok(clipboard) => {
+                let count = clipboard.renderer_count();
+                self.workspace_renderer_clipboard = Some(clipboard);
+                self.set_status(format!("Copied {count} renderer(s)"));
+            }
+            Err(error) => self.set_status(format!("Copy renderer error: {error}")),
+        }
+    }
+
+    fn set_workspace_target_visible(
+        &mut self,
+        target: NativeWorkspaceTarget,
+        visible: bool,
+    ) -> Result<()> {
+        match target {
+            NativeWorkspaceTarget::Object { owner, .. } => match owner {
+                NativePropertyObject::Molecule(object_uid) => {
+                    self.state.set_object_visible(object_uid, visible)
+                }
+                NativePropertyObject::DensityMap(map_uid) => {
+                    self.state.set_density_map_visible(map_uid, visible)
+                }
+                NativePropertyObject::Surface(surface_uid) => {
+                    self.state.set_surface_visible(surface_uid, visible)
+                }
+                NativePropertyObject::Lightweight(object_uid) => {
+                    self.state.set_lw_object_visible(object_uid, visible)
+                }
+            },
+            NativeWorkspaceTarget::Renderer {
+                owner,
+                renderer_uid,
+                is_group: true,
+                ..
+            } => self
+                .state
+                .set_renderer_group_visible(owner.uid(), renderer_uid, visible),
+            NativeWorkspaceTarget::Renderer {
+                owner,
+                renderer_uid,
+                is_group: false,
+                ..
+            } => match owner {
+                NativePropertyObject::Molecule(object_uid) => {
+                    self.state
+                        .set_renderer_visible(object_uid, renderer_uid, visible)
+                }
+                NativePropertyObject::DensityMap(map_uid) => self
+                    .state
+                    .set_density_renderer_visible(map_uid, renderer_uid, visible),
+                NativePropertyObject::Surface(surface_uid) => self
+                    .state
+                    .set_surface_renderer_visible(surface_uid, renderer_uid, visible),
+                NativePropertyObject::Lightweight(object_uid) => self
+                    .state
+                    .set_lw_renderer_visible(object_uid, renderer_uid, visible),
+            },
+        }
+    }
+
+    fn set_workspace_targets_visible(&mut self, visible: bool) {
+        let targets = self.workspace_multiple_selection.clone();
+        if targets.len() < 2 {
+            self.set_status("Select multiple Workspace items");
+            return;
+        }
+        let undo = self.capture_undo();
+        let result = targets
+            .iter()
+            .copied()
+            .try_for_each(|target| self.set_workspace_target_visible(target, visible));
+        match result {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.extend(
+                    targets
+                        .iter()
+                        .copied()
+                        .map(NativeWorkspaceTarget::scene_uid),
+                );
+                self.rebuild_snapshot();
+                self.set_status(if visible {
+                    format!("Show {} Workspace items", targets.len())
+                } else {
+                    format!("Hide {} Workspace items", targets.len())
+                });
+            }
+            Err(error) => {
+                self.restore_gui_undo_state(undo);
+                self.set_error(error);
+            }
+        }
+    }
+
+    fn destroy_workspace_target(&mut self, target: NativeWorkspaceTarget) -> Result<()> {
+        let removed = match target {
+            NativeWorkspaceTarget::Object { owner, .. } => match owner {
+                NativePropertyObject::Molecule(object_uid) => self.state.destroy_object(object_uid),
+                NativePropertyObject::DensityMap(map_uid) => {
+                    self.state.destroy_density_map(map_uid)
+                }
+                NativePropertyObject::Surface(surface_uid) => {
+                    self.state.destroy_surface(surface_uid)
+                }
+                NativePropertyObject::Lightweight(object_uid) => {
+                    self.state.destroy_lw_object(object_uid)
+                }
+            },
+            NativeWorkspaceTarget::Renderer {
+                owner,
+                renderer_uid,
+                is_group: true,
+                ..
+            } => self
+                .state
+                .destroy_renderer_group_in_object(owner.uid(), renderer_uid),
+            NativeWorkspaceTarget::Renderer {
+                owner,
+                renderer_uid,
+                is_group: false,
+                ..
+            } => match owner {
+                NativePropertyObject::Molecule(object_uid) => self
+                    .state
+                    .destroy_renderer_in_object(object_uid, renderer_uid),
+                NativePropertyObject::DensityMap(map_uid) => {
+                    self.state.destroy_density_renderer(map_uid, renderer_uid)
+                }
+                NativePropertyObject::Surface(surface_uid) => self
+                    .state
+                    .destroy_surface_renderer(surface_uid, renderer_uid),
+                NativePropertyObject::Lightweight(object_uid) => {
+                    self.state.destroy_lw_renderer(object_uid, renderer_uid)
+                }
+            },
+        }?;
+        if removed {
+            Ok(())
+        } else {
+            Err(CueMolError::NotFound("Workspace item".to_string()))
+        }
+    }
+
+    fn delete_workspace_targets(&mut self) {
+        let targets = self.workspace_multiple_selection.clone();
+        if targets.len() < 2 {
+            self.set_status("Select multiple Workspace items");
+            return;
+        }
+        let undo = self.capture_undo();
+        let result = targets
+            .iter()
+            .copied()
+            .try_for_each(|target| self.destroy_workspace_target(target));
+        match result {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.extend(
+                    targets
+                        .iter()
+                        .copied()
+                        .map(NativeWorkspaceTarget::scene_uid),
+                );
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.workspace_aux_selection = None;
+                self.workspace_multiple_selection.clear();
+                self.rebuild_snapshot();
+                self.set_status(format!("Destroy {} Workspace items", targets.len()));
+            }
+            Err(error) => {
+                self.restore_gui_undo_state(undo);
+                self.set_error(error);
+            }
         }
     }
 
@@ -18929,6 +19465,7 @@ impl GuiApplication {
             selected_object: self.selected_object,
             selected_renderer: self.selected_renderer,
             workspace_aux_selection: self.workspace_aux_selection,
+            workspace_multiple_selection: self.workspace_multiple_selection.clone(),
             selection_text: self.selection_text.clone(),
             last_loaded_path: self.last_loaded_path.clone(),
             modified_scenes: self.modified_scenes.clone(),
@@ -18950,16 +19487,21 @@ impl GuiApplication {
         self.redo_stack.clear();
     }
 
-    fn restore_undo_snapshot(&mut self, snapshot: GuiUndoSnapshot, camera: &mut CameraController) {
+    fn restore_gui_undo_state(&mut self, snapshot: GuiUndoSnapshot) {
         self.state = snapshot.state;
         self.selected_object = snapshot.selected_object;
         self.selected_renderer = snapshot.selected_renderer;
         self.workspace_aux_selection = snapshot.workspace_aux_selection;
+        self.workspace_multiple_selection = snapshot.workspace_multiple_selection;
         self.selection_text = snapshot.selection_text;
         self.last_loaded_path = snapshot.last_loaded_path;
         self.modified_scenes = snapshot.modified_scenes;
         self.sync_active_scene_properties();
         self.rebuild_snapshot();
+    }
+
+    fn restore_undo_snapshot(&mut self, snapshot: GuiUndoSnapshot, camera: &mut CameraController) {
+        self.restore_gui_undo_state(snapshot);
         camera.fit_snapshot(&self.snapshot);
     }
 
@@ -26104,6 +26646,94 @@ mod tests {
         app.undo(&mut camera);
         assert!(!app.state.renderer_summaries(object_uid)[0].locked);
         assert!(app.modified_scenes.contains(&scene_uid));
+    }
+
+    #[test]
+    fn native_workspace_multiple_actions_share_one_undo_transaction() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("mol", cuemol_molstr::MolCoord::new());
+        let (first_uid, second_uid) = {
+            let object = app
+                .state
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .unwrap();
+            (
+                object.add_renderer("simple", "main"),
+                object.add_renderer("cpk", "atoms"),
+            )
+        };
+        let owner = NativePropertyObject::Molecule(object_uid);
+        let first = NativeWorkspaceTarget::Renderer {
+            scene_uid,
+            owner,
+            renderer_uid: first_uid,
+            is_group: false,
+        };
+        let second = NativeWorkspaceTarget::Renderer {
+            scene_uid,
+            owner,
+            renderer_uid: second_uid,
+            is_group: false,
+        };
+        app.apply_workspace_target(first);
+        assert!(app.select_workspace_target(second, true));
+        assert_eq!(app.workspace_multiple_selection, [first, second]);
+
+        app.copy_workspace_target_renderers();
+        assert_eq!(
+            app.workspace_renderer_clipboard
+                .as_ref()
+                .unwrap()
+                .renderer_count(),
+            2
+        );
+        assert!(app.undo_stack.is_empty());
+
+        app.set_workspace_targets_visible(false);
+        assert!(app
+            .state
+            .renderer_summaries(object_uid)
+            .iter()
+            .all(|renderer| !renderer.visible));
+        assert_eq!(app.undo_stack.len(), 1);
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert!(app
+            .state
+            .renderer_summaries(object_uid)
+            .iter()
+            .all(|renderer| renderer.visible));
+        assert_eq!(app.workspace_multiple_selection, [first, second]);
+
+        app.delete_workspace_targets();
+        assert!(app.state.renderer_summaries(object_uid).is_empty());
+        assert_eq!(app.undo_stack.len(), 1);
+        assert!(app.workspace_multiple_selection.is_empty());
+        app.undo(&mut camera);
+        assert_eq!(app.state.renderer_summaries(object_uid).len(), 2);
+        assert_eq!(app.workspace_multiple_selection, [first, second]);
+
+        let invalid = NativeWorkspaceTarget::Renderer {
+            scene_uid,
+            owner: NativePropertyObject::Molecule(cuemol_core::Uid::new(u64::MAX)),
+            renderer_uid: first_uid,
+            is_group: false,
+        };
+        app.workspace_multiple_selection = vec![first, invalid];
+        app.set_workspace_targets_visible(false);
+        assert!(app
+            .state
+            .renderer_summaries(object_uid)
+            .iter()
+            .all(|renderer| renderer.visible));
+        assert!(app.undo_stack.is_empty());
     }
 
     #[test]
