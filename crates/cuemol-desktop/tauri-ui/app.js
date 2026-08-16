@@ -340,7 +340,7 @@ function rememberPdbHistory(pdbId) {
 }
 
 function recentFileType(path) {
-  return /\.qsc$/i.test(path) ? "scene" : "obj";
+  return /\.(qsc|qsl|pse)$/i.test(path) ? "scene" : "obj";
 }
 
 function fileBasename(path) {
@@ -11506,6 +11506,13 @@ async function openSelectedPaths(paths) {
   let opened = false;
   const directPaths = [];
   for (const path of objectPaths) {
+    if (/\.(qsc|qsl|pse)$/i.test(path)) {
+      if (await mutateWithViewport("open_scene", { path })) {
+        addRecentFile(path, "scene");
+        opened = true;
+      }
+      continue;
+    }
     let defaults;
     try {
       defaults = await invoke("get_file_renderer_setup", { path });

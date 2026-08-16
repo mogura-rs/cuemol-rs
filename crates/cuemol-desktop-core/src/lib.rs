@@ -7654,6 +7654,76 @@ impl DesktopAppState {
         self.load_qsc_file_into(path.as_ref(), None)
     }
 
+    /// Open a scene-reader file into `target_scene`, or create a scene when no
+    /// reusable target is supplied. This mirrors the desktop `Open Scene` flow:
+    /// QSC/QSL and PyMOL sessions are scene readers rather than object readers.
+    pub fn open_scene_file(
+        &mut self,
+        path: impl AsRef<Path>,
+        target_scene: Option<Uid>,
+    ) -> Result<Uid> {
+        let path = path.as_ref();
+        let format = guess_path_format(path, &self.stream_manager)?;
+        if is_scene_format(format) {
+            let scene_uid = self
+                .load_qsc_file_into(path, target_scene)?
+                .ok_or_else(|| CueMolError::parse("scene was not loaded"))?;
+            if target_scene.is_some() {
+                if let Some(camera) = self.active_scene_saved_camera() {
+                    self.set_active_view_camera(&camera)?;
+                }
+            }
+            return Ok(scene_uid);
+        }
+        if format != "pse" {
+            return Err(CueMolError::invalid_argument(format!(
+                "unsupported scene format: {format}"
+            )));
+        }
+
+        let backup = self.clone();
+        let result = (|| {
+            let scene_name = path
+                .file_stem()
+                .or_else(|| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "loaded scene".to_string());
+            let scene_uid = if let Some(scene_uid) = target_scene {
+                let scene = self
+                    .scene_manager_mut()
+                    .scene_mut(scene_uid)
+                    .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+                scene.clear_all_data();
+                scene.set_name(&scene_name);
+                scene_uid
+            } else {
+                self.new_scene(&scene_name, true).result_scene
+            };
+            self.load_pse_objects(scene_uid, path, &scene_name)?;
+            let scene = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .expect("the PSE target scene must remain live");
+            scene.set_source(path.to_string_lossy());
+            scene.set_source_type("psefile");
+            scene.set_base_path(
+                path.parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_string_lossy(),
+            );
+            self.active_scene = Some(scene_uid);
+            if let Some(camera) = self.active_scene_saved_camera() {
+                self.set_active_view_camera(&camera)?;
+            }
+            Ok(scene_uid)
+        })();
+        if result.is_err() {
+            *self = backup;
+        }
+        result
+    }
+
     fn load_qsc_file_into(
         &mut self,
         path: &Path,

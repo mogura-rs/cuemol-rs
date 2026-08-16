@@ -78,6 +78,7 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
         "molecule_selection_action",
         "get_molecule_details",
         "open_initial_paths",
+        "open_scene",
     ] {
         assert!(JS.contains(command), "missing IPC binding {command}");
     }
@@ -311,6 +312,10 @@ fn tauri_file_and_scene_open_use_reference_reader_categories() {
     assert!(scene_open.contains("title: \"Open Scene\""));
     assert!(scene_open.contains("extensions: [\"qsc\", \"qsl\", \"pse\"]"));
     assert!(scene_open.contains("await openSelectedPaths(paths)"));
+    assert!(JS.contains("mutateWithViewport(\"open_scene\", { path })"));
+    assert!(JS.contains("/\\.(qsc|qsl|pse)$/i.test(path)"));
+    assert!(TAURI_APP_RS.contains("ModelRequest::OpenSceneViewport"));
+    assert!(TAURI_APP_RS.contains("fn open_scene("));
 }
 
 #[test]

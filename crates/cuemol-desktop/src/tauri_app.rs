@@ -4856,6 +4856,58 @@ impl AppModel {
         Ok(loaded)
     }
 
+    fn active_scene_is_just_created(&self) -> bool {
+        let Some(scene) = self
+            .desktop
+            .active_scene()
+            .and_then(|scene_uid| self.desktop.scene_manager().scene(scene_uid))
+        else {
+            return false;
+        };
+        scene.source().is_empty()
+            && scene.objects().is_empty()
+            && scene.cameras().is_empty()
+            && scene.loaded_surfaces().is_empty()
+            && scene.loaded_density_maps().is_empty()
+            && scene.loaded_lw_objects().is_empty()
+            && scene.loaded_qsc_objects().is_empty()
+            && scene.loaded_styles().is_empty()
+            && scene.scene_attributes().is_empty()
+            && scene.scene_extension_nodes().is_empty()
+            && scene.animation_node().is_none()
+    }
+
+    fn open_scene(&mut self, path: String) -> Result<(), String> {
+        self.start_renderer_warmup();
+        self.opened_paths.clear();
+        let reusable_scene = self
+            .active_scene_is_just_created()
+            .then(|| self.desktop.active_scene())
+            .flatten();
+        if reusable_scene.is_none() && self.desktop.active_scene().is_some() {
+            self.persist_camera()?;
+        }
+        let scene_uid = self
+            .desktop
+            .open_scene_file(&path, reusable_scene)
+            .map_err(|error| error.to_string())?;
+        let saved_camera = self.desktop.active_scene_saved_camera();
+        self.camera = saved_camera
+            .clone()
+            .or_else(|| self.desktop.active_view_camera())
+            .unwrap_or_default();
+        self.opened_paths.push(path.clone());
+        self.selection.clear();
+        self.sync_active_scene_properties();
+        self.status = format!("Scene file: [{path}] is loaded.");
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.modified_scenes.remove(&scene_uid);
+        self.touch_structure_details();
+        self.invalidate_mesh(saved_camera.is_none());
+        Ok(())
+    }
+
     fn set_trajectory_frame(&mut self, object_uid: u64, frame: usize) -> Result<(), String> {
         self.desktop
             .apply_trajectory_frame(Uid::new(object_uid), frame)
@@ -5835,6 +5887,11 @@ enum ModelRequest {
     ClearUndo,
     OpenPathsViewport {
         paths: Vec<String>,
+        width: u32,
+        height: u32,
+    },
+    OpenSceneViewport {
+        path: String,
         width: u32,
         height: u32,
     },
@@ -7791,6 +7848,20 @@ fn handle_model_request(
             height,
         } => {
             apply_open_paths(model, paths)?;
+            let viewport = model.viewport_metadata(width, height);
+            Ok(ModelResponse::MolStructUpdate(Box::new(
+                MolStructUpdateDto {
+                    snapshot: model.snapshot(),
+                    viewport,
+                },
+            )))
+        }
+        ModelRequest::OpenSceneViewport {
+            path,
+            width,
+            height,
+        } => {
+            model.open_scene(path)?;
             let viewport = model.viewport_metadata(width, height);
             Ok(ModelResponse::MolStructUpdate(Box::new(
                 MolStructUpdateDto {
@@ -10502,6 +10573,23 @@ fn open_paths(
 }
 
 #[tauri::command]
+fn open_scene(
+    path: String,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<MolStructUpdateDto, String> {
+    molecule_selection_update_response(request_model(
+        &state,
+        ModelRequest::OpenSceneViewport {
+            path,
+            width,
+            height,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn open_initial_paths(
     width: u32,
     height: u32,
@@ -11922,6 +12010,7 @@ pub fn run() -> Result<(), tauri::Error> {
             redo,
             clear_undo,
             open_paths,
+            open_scene,
             open_initial_paths,
             reload_scene,
             get_pdb_history,
@@ -12465,6 +12554,132 @@ mod tests {
         assert!(model.mesh_refit_pending);
         assert_eq!(update.viewport.width, 800);
         assert_eq!(update.viewport.height, 600);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn open_scene_reuses_an_empty_tab_then_creates_a_new_tab() {
+        let first_path = std::env::temp_dir().join(format!(
+            "cuemol-open-scene-first-{}.qsc",
+            std::process::id()
+        ));
+        let second_path = std::env::temp_dir().join(format!(
+            "cuemol-open-scene-second-{}.qsc",
+            std::process::id()
+        ));
+        fs::write(&first_path, "<scene name=\"first\"/>").unwrap();
+        fs::write(&second_path, "<scene name=\"second\"/>").unwrap();
+
+        let mut model = model_without_gpu();
+        let empty_scene_uid = model.desktop.active_scene().unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::OpenSceneViewport {
+                path: first_path.to_string_lossy().into_owned(),
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        let ModelResponse::MolStructUpdate(update) = response else {
+            panic!("expected scene update");
+        };
+        assert_eq!(update.snapshot.scenes.len(), 1);
+        assert_eq!(
+            update.snapshot.active_scene_uid,
+            Some(empty_scene_uid.get())
+        );
+        assert_eq!(update.snapshot.opened_paths, [first_path.to_string_lossy()]);
+        assert!(!update.snapshot.can_undo);
+        assert!(!update.snapshot.scenes[0].modified);
+        assert!(model.mesh_refit_pending);
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::OpenSceneViewport {
+                path: second_path.to_string_lossy().into_owned(),
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        let ModelResponse::MolStructUpdate(update) = response else {
+            panic!("expected scene update");
+        };
+        assert_eq!(update.snapshot.scenes.len(), 2);
+        assert_ne!(
+            update.snapshot.active_scene_uid,
+            Some(empty_scene_uid.get())
+        );
+        assert_eq!(
+            update.snapshot.opened_paths,
+            [second_path.to_string_lossy()]
+        );
+
+        fs::remove_file(first_path).unwrap();
+        fs::remove_file(second_path).unwrap();
+    }
+
+    #[test]
+    fn open_pse_uses_the_scene_reader_tab_contract() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../cuemol-importers/tests/fixtures/mol3.pse");
+        let mut model = model_without_gpu();
+        let empty_scene_uid = model.desktop.active_scene().unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::OpenSceneViewport {
+                path: path.to_string_lossy().into_owned(),
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.scenes.len(), 1);
+        assert_eq!(snapshot.active_scene_uid, Some(empty_scene_uid.get()));
+        assert!(!snapshot.objects.is_empty());
+        let scene = model
+            .desktop
+            .scene_manager()
+            .scene(empty_scene_uid)
+            .unwrap();
+        assert_eq!(scene.source_type(), "psefile");
+        assert_eq!(scene.source(), path.to_string_lossy());
+        assert!(!snapshot.can_undo);
+        assert!(!snapshot.scenes[0].modified);
+    }
+
+    #[test]
+    fn open_scene_applies_its_saved_camera_to_a_reused_view() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-open-scene-camera-{}.qsc",
+            std::process::id()
+        ));
+        let mut source = DesktopAppState::new();
+        source.new_scene("camera", true);
+        let mut camera = Camera::new();
+        camera.set_name("__current");
+        camera.set_zoom(73.0);
+        source.set_active_scene_camera(camera).unwrap();
+        source.save_active_scene_qsc(&path).unwrap();
+
+        let mut model = model_without_gpu();
+        let empty_scene_uid = model.desktop.active_scene().unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::OpenSceneViewport {
+                path: path.to_string_lossy().into_owned(),
+                width: 800,
+                height: 600,
+            },
+        )
+        .unwrap();
+        assert_eq!(model.desktop.active_scene(), Some(empty_scene_uid));
+        assert_eq!(model.camera.zoom(), 73.0);
+        assert_eq!(model.desktop.active_view_camera().unwrap().zoom(), 73.0);
+        assert!(!model.mesh_refit_pending);
+
         fs::remove_file(path).unwrap();
     }
 
