@@ -1879,6 +1879,7 @@ impl NativeWorkspaceObjectSummary {
 struct NativeWorkspaceObjectDragPayload {
     scene_uid: cuemol_core::Uid,
     owner: NativePropertyObject,
+    enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4567,6 +4568,18 @@ impl GuiApplication {
         }
     }
 
+    fn workspace_object_drag_payload(
+        &self,
+        scene_uid: cuemol_core::Uid,
+        owner: NativePropertyObject,
+    ) -> NativeWorkspaceObjectDragPayload {
+        NativeWorkspaceObjectDragPayload {
+            scene_uid,
+            owner,
+            enabled: self.workspace_multiple_selection.len() < 2,
+        }
+    }
+
     fn select_workspace_target(&mut self, target: NativeWorkspaceTarget, multiple: bool) -> bool {
         if !multiple {
             self.workspace_multiple_selection.clear();
@@ -4862,10 +4875,7 @@ impl GuiApplication {
                             let mut visible = object.visible;
                             let drag_source = ui.dnd_drag_source(
                                 egui::Id::new(("workspace-object-drag", owner)),
-                                NativeWorkspaceObjectDragPayload {
-                                    scene_uid: scene.uid,
-                                    owner,
-                                },
+                                self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
                                         if let Some(collapsed) = workspace_collapse_toggle(
@@ -4981,10 +4991,7 @@ impl GuiApplication {
                             let owner = NativePropertyObject::DensityMap(map.uid);
                             let drag_source = ui.dnd_drag_source(
                                 egui::Id::new(("workspace-object-drag", owner)),
-                                NativeWorkspaceObjectDragPayload {
-                                    scene_uid: scene.uid,
-                                    owner,
-                                },
+                                self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
                                         if let Some(collapsed) = workspace_collapse_toggle(
@@ -5099,10 +5106,7 @@ impl GuiApplication {
                             let owner = NativePropertyObject::Surface(surface.uid);
                             let drag_source = ui.dnd_drag_source(
                                 egui::Id::new(("workspace-object-drag", owner)),
-                                NativeWorkspaceObjectDragPayload {
-                                    scene_uid: scene.uid,
-                                    owner,
-                                },
+                                self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
                                         if let Some(collapsed) = workspace_collapse_toggle(
@@ -5218,10 +5222,7 @@ impl GuiApplication {
                             let owner = NativePropertyObject::Lightweight(object.uid);
                             let drag_source = ui.dnd_drag_source(
                                 egui::Id::new(("workspace-object-drag", owner)),
-                                NativeWorkspaceObjectDragPayload {
-                                    scene_uid: scene.uid,
-                                    owner,
-                                },
+                                self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
                                         if let Some(collapsed) = workspace_collapse_toggle(
@@ -5815,7 +5816,7 @@ impl GuiApplication {
     ) {
         let drop_rect = response.rect;
         if let Some(source) = response.dnd_hover_payload::<NativeWorkspaceObjectDragPayload>() {
-            if source.scene_uid == scene_uid && source.owner != target {
+            if source.enabled && source.scene_uid == scene_uid && source.owner != target {
                 let y = if ctx_pointer_vertical_fraction(ui.ctx(), drop_rect) < 0.5 {
                     drop_rect.top()
                 } else {
@@ -5834,7 +5835,7 @@ impl GuiApplication {
         else {
             return;
         };
-        if source.scene_uid != scene_uid || source.owner == target {
+        if !source.enabled || source.scene_uid != scene_uid || source.owner == target {
             return;
         }
         let after = ctx_pointer_vertical_fraction(ui.ctx(), drop_rect) >= 0.5;
@@ -28397,12 +28398,26 @@ mod tests {
             .state
             .add_density_map(scene_uid, "map", cuemol_xtal::DensityMap::new());
 
-        app.move_workspace_object(
-            scene_uid,
-            NativePropertyObject::DensityMap(map_uid),
-            NativePropertyObject::Molecule(molecule_uid),
-            false,
+        let molecule = NativePropertyObject::Molecule(molecule_uid);
+        let map = NativePropertyObject::DensityMap(map_uid);
+        assert!(
+            app.workspace_object_drag_payload(scene_uid, molecule)
+                .enabled
         );
+        app.workspace_multiple_selection = vec![
+            NativeWorkspaceTarget::Object {
+                scene_uid,
+                owner: molecule,
+            },
+            NativeWorkspaceTarget::Object {
+                scene_uid,
+                owner: map,
+            },
+        ];
+        assert!(!app.workspace_object_drag_payload(scene_uid, map).enabled);
+        app.workspace_multiple_selection.clear();
+
+        app.move_workspace_object(scene_uid, map, molecule, false);
         assert_eq!(app.state.density_map_summary(map_uid).unwrap().ui_order, 1);
         assert_eq!(app.state.object_summaries(scene_uid)[0].ui_order, 2);
         assert_eq!(app.undo_stack.len(), 1);

@@ -9281,7 +9281,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       count.textContent = `${object.atomCount} AT`;
       objectRow.append(count);
       configureWorkspaceObjectDrag(objectRow, scene.uid, "object", object.uid);
-      objectRow.draggable = !objectIsRenaming;
+      objectRow.draggable = !objectIsRenaming && workspaceSelectionKind !== "multiple";
       objectBlock.append(objectRow);
       const appendMoleculeRendererRow = (renderer, isChild = false) => {
         const isGroup = renderer.rendererType === "*group";
@@ -9442,7 +9442,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       count.textContent = "SURF";
       surfaceRow.append(count);
       configureWorkspaceObjectDrag(surfaceRow, scene.uid, "surface", surface.uid);
-      surfaceRow.draggable = !surfaceIsRenaming;
+      surfaceRow.draggable = !surfaceIsRenaming && workspaceSelectionKind !== "multiple";
       surfaceBlock.append(surfaceRow);
       for (const { renderer, isChild } of visibleWorkspaceRendererRows(surface)) {
         const isGroup = renderer.rendererType === "*group";
@@ -9601,7 +9601,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       count.textContent = `${map.counts.join("×")} MAP`;
       mapRow.append(count);
       configureWorkspaceObjectDrag(mapRow, scene.uid, "densityMap", map.uid);
-      mapRow.draggable = !mapIsRenaming;
+      mapRow.draggable = !mapIsRenaming && workspaceSelectionKind !== "multiple";
       mapBlock.append(mapRow);
       for (const { renderer, isChild } of visibleWorkspaceRendererRows(map)) {
         const isGroup = renderer.rendererType === "*group";
@@ -9757,7 +9757,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       count.textContent = "LWO";
       objectRow.append(count);
       configureWorkspaceObjectDrag(objectRow, scene.uid, "lwObject", object.uid);
-      objectRow.draggable = !objectIsRenaming;
+      objectRow.draggable = !objectIsRenaming && workspaceSelectionKind !== "multiple";
       objectBlock.append(objectRow);
       for (const { renderer, isChild } of visibleWorkspaceRendererRows(object)) {
         const isGroup = renderer.rendererType === "*group";

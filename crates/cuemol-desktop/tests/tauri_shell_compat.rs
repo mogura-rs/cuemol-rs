@@ -1122,6 +1122,7 @@ fn tauri_workspace_reorders_and_regroups_renderers_by_dragging() {
 #[test]
 fn tauri_workspace_reorders_objects_across_supported_kinds() {
     assert!(JS.contains("function configureWorkspaceObjectDrag(row, sceneUid, kind, uid)"));
+    assert!(JS.contains("draggable = !objectIsRenaming && workspaceSelectionKind !== \"multiple\""));
     assert!(JS.contains("application/x-cuemol-object"));
     assert!(JS.contains("mutateWithoutViewport(\"move_workspace_object\""));
     assert!(JS.contains("workspaceObjectBlocks.sort("));
