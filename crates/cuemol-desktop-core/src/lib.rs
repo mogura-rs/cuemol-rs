@@ -1280,6 +1280,7 @@ pub struct GuiDensityMapSummary {
     pub center: [f64; 3],
     pub radius: f64,
     pub renderers: Vec<GuiDensityRendererSummary>,
+    pub renderer_groups: Vec<GuiAuxRendererGroupSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1290,6 +1291,7 @@ pub struct GuiDensityRendererSummary {
     pub renderer_type: String,
     pub visible: bool,
     pub locked: bool,
+    pub group: Option<String>,
     pub material: String,
     pub alpha: f64,
     pub edge_type: String,
@@ -1315,6 +1317,7 @@ pub struct GuiLoadedSurfaceSummary {
     pub original_density: f64,
     pub original_probe_radius: f64,
     pub renderers: Vec<GuiLoadedSurfaceRendererSummary>,
+    pub renderer_groups: Vec<GuiAuxRendererGroupSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1334,6 +1337,7 @@ pub struct GuiLoadedSurfaceRendererSummary {
     pub selection: String,
     pub visible: bool,
     pub locked: bool,
+    pub group: Option<String>,
     pub material: String,
     pub alpha: f64,
     pub edge_type: String,
@@ -1355,6 +1359,7 @@ pub struct GuiLoadedLwObjectSummary {
     pub locked: bool,
     pub source: String,
     pub renderers: Vec<GuiLoadedLwRendererSummary>,
+    pub renderer_groups: Vec<GuiAuxRendererGroupSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1365,6 +1370,7 @@ pub struct GuiLoadedLwRendererSummary {
     pub renderer_type: String,
     pub visible: bool,
     pub locked: bool,
+    pub group: Option<String>,
     pub style: String,
     pub material: String,
     pub alpha: f64,
@@ -1372,6 +1378,22 @@ pub struct GuiLoadedLwRendererSummary {
     pub edge_width: f64,
     pub edge_color: String,
     pub data_id: i32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuiAuxRendererGroupSummary {
+    pub object_uid: Uid,
+    pub uid: Uid,
+    pub name: String,
+    pub visible: bool,
+    pub locked: bool,
+    pub ui_collapsed: bool,
+    pub style: String,
+    pub material: String,
+    pub alpha: f64,
+    pub edge_type: String,
+    pub edge_width: f64,
+    pub edge_color: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1392,6 +1414,7 @@ struct GuiDensityMapObject {
     xform: Matrix4,
     map: DensityMap,
     renderers: Vec<GuiDensityRenderer>,
+    renderer_groups: Vec<LDom2Node>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5691,6 +5714,7 @@ impl DesktopAppState {
                 xform: Matrix4::IDENTITY,
                 map,
                 renderers: Vec::new(),
+                renderer_groups: Vec::new(),
             },
         );
         uid
@@ -6843,49 +6867,89 @@ impl DesktopAppState {
             ));
         }
         if let Some(map) = self.density_map_summary(object_uid) {
-            let renderer = map
+            if let Some(renderer) = map
                 .renderers
                 .into_iter()
                 .find(|renderer| renderer.uid == renderer_uid)
-                .ok_or_else(|| {
-                    CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
-                })?;
-            return Ok((
-                map.scene_uid,
-                renderer.name,
-                renderer.renderer_type,
-                renderer.specific.get("style").cloned().unwrap_or_default(),
-            ));
+            {
+                return Ok((
+                    map.scene_uid,
+                    renderer.name,
+                    renderer.renderer_type,
+                    renderer.specific.get("style").cloned().unwrap_or_default(),
+                ));
+            }
+            if let Some(group) = map
+                .renderer_groups
+                .into_iter()
+                .find(|group| group.uid == renderer_uid)
+            {
+                return Ok((map.scene_uid, group.name, "*group".to_string(), group.style));
+            }
+            return Err(CueMolError::NotFound(format!(
+                "density renderer {}",
+                renderer_uid.get()
+            )));
         }
         if let Some(surface) = self.surface_summary(object_uid) {
-            let renderer = surface
+            if let Some(renderer) = surface
                 .renderers
                 .into_iter()
                 .find(|renderer| renderer.uid == renderer_uid)
-                .ok_or_else(|| {
-                    CueMolError::NotFound(format!("surface renderer {}", renderer_uid.get()))
-                })?;
-            return Ok((
-                surface.scene_uid,
-                renderer.name,
-                renderer.renderer_type,
-                renderer.specific.get("style").cloned().unwrap_or_default(),
-            ));
+            {
+                return Ok((
+                    surface.scene_uid,
+                    renderer.name,
+                    renderer.renderer_type,
+                    renderer.specific.get("style").cloned().unwrap_or_default(),
+                ));
+            }
+            if let Some(group) = surface
+                .renderer_groups
+                .into_iter()
+                .find(|group| group.uid == renderer_uid)
+            {
+                return Ok((
+                    surface.scene_uid,
+                    group.name,
+                    "*group".to_string(),
+                    group.style,
+                ));
+            }
+            return Err(CueMolError::NotFound(format!(
+                "surface renderer {}",
+                renderer_uid.get()
+            )));
         }
         if let Some(object) = self.lw_object_summary(object_uid) {
-            let renderer = object
+            if let Some(renderer) = object
                 .renderers
                 .into_iter()
                 .find(|renderer| renderer.uid == renderer_uid)
-                .ok_or_else(|| {
-                    CueMolError::NotFound(format!("LWRenderer {}", renderer_uid.get()))
-                })?;
-            return Ok((
-                object.scene_uid,
-                renderer.name,
-                renderer.renderer_type,
-                renderer.style,
-            ));
+            {
+                return Ok((
+                    object.scene_uid,
+                    renderer.name,
+                    renderer.renderer_type,
+                    renderer.style,
+                ));
+            }
+            if let Some(group) = object
+                .renderer_groups
+                .into_iter()
+                .find(|group| group.uid == renderer_uid)
+            {
+                return Ok((
+                    object.scene_uid,
+                    group.name,
+                    "*group".to_string(),
+                    group.style,
+                ));
+            }
+            return Err(CueMolError::NotFound(format!(
+                "LWRenderer {}",
+                renderer_uid.get()
+            )));
         }
         Err(CueMolError::NotFound(format!(
             "Workspace object {}",
@@ -6907,6 +6971,9 @@ impl DesktopAppState {
         {
             return self.set_renderer_styles(object_uid, renderer_uid, styles);
         }
+        if aux_renderer_group_index(object_uid, renderer_uid).is_some() {
+            return self.set_aux_renderer_group_styles(object_uid, renderer_uid, styles);
+        }
         if self.density_maps.contains_key(&object_uid) {
             return self.set_density_renderer_styles(object_uid, renderer_uid, styles);
         }
@@ -6926,6 +6993,51 @@ impl DesktopAppState {
         }
         Err(CueMolError::NotFound(format!(
             "Workspace object {}",
+            object_uid.get()
+        )))
+    }
+
+    fn set_aux_renderer_group_styles(
+        &mut self,
+        object_uid: Uid,
+        group_uid: Uid,
+        styles: &str,
+    ) -> Result<()> {
+        let group_index = aux_renderer_group_index(object_uid, group_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer group {}", group_uid.get())))?;
+        let styles = styles.trim();
+        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+            let group = map.renderer_groups.get_mut(group_index).ok_or_else(|| {
+                CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+            })?;
+            set_qsc_string_attr(group, "style", styles, "");
+            map.modified = true;
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let surface = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                .expect("surface scene was checked above");
+            let node = ensure_surface_qsc_node(surface);
+            let child_index = renderer_group_child_index(node, object_uid, group_uid)?;
+            set_qsc_string_attr(&mut node.children_mut()[child_index], "style", styles, "");
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
+            let object = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+                .expect("LWObject scene was checked above");
+            let node = ensure_lw_qsc_node(object);
+            let child_index = renderer_group_child_index(node, object_uid, group_uid)?;
+            set_qsc_string_attr(&mut node.children_mut()[child_index], "style", styles, "");
+            return Ok(());
+        }
+        Err(CueMolError::NotFound(format!(
+            "object {}",
             object_uid.get()
         )))
     }
@@ -7307,6 +7419,9 @@ impl DesktopAppState {
         group_uid: Uid,
         visible: bool,
     ) -> Result<()> {
+        if self.scene_manager().object(object_uid).is_none() {
+            return self.set_aux_renderer_group_visible(object_uid, group_uid, visible);
+        }
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -7349,6 +7464,21 @@ impl DesktopAppState {
         edge_color: impl AsRef<str>,
     ) -> Result<()> {
         let name = name.into();
+        if self.scene_manager().object(object_uid).is_none() {
+            self.rename_renderer_group(object_uid, group_uid, &name)?;
+            self.set_aux_renderer_group_common_properties(
+                object_uid,
+                group_uid,
+                visible,
+                locked,
+                material.as_ref(),
+                alpha,
+                edge_type.as_ref(),
+                edge_width,
+                edge_color.as_ref(),
+            )?;
+            return Ok(());
+        }
         self.rename_renderer_group(object_uid, group_uid, &name)?;
         self.set_renderer_common_properties(
             object_uid, group_uid, &name, "*", visible, locked, material, alpha, edge_type,
@@ -7376,6 +7506,76 @@ impl DesktopAppState {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn set_aux_renderer_group_common_properties(
+        &mut self,
+        object_uid: Uid,
+        group_uid: Uid,
+        visible: bool,
+        locked: bool,
+        material: &str,
+        alpha: f64,
+        edge_type: &str,
+        edge_width: f64,
+        edge_color: &str,
+    ) -> Result<()> {
+        if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
+            return Err(CueMolError::invalid_argument(
+                "renderer group alpha must be between 0 and 1",
+            ));
+        }
+        if !edge_width.is_finite() || edge_width < 0.0 {
+            return Err(CueMolError::invalid_argument(
+                "renderer group edge width must be non-negative",
+            ));
+        }
+        self.set_aux_renderer_group_visible(object_uid, group_uid, visible)?;
+        let update = |node: &mut LDom2Node| {
+            set_qsc_bool_attr(node, "locked", locked, false);
+            set_qsc_string_attr(node, "material", material.trim(), "");
+            set_qsc_f64_attr(node, "alpha", alpha, 1.0);
+            set_qsc_string_attr(node, "egtype", edge_type.trim(), "none");
+            set_qsc_f64_attr(node, "eglinew", edge_width, 0.01);
+            set_qsc_string_attr(node, "egcolor", edge_color.trim(), "#000000");
+        };
+        let group_index = aux_renderer_group_index(object_uid, group_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer group {}", group_uid.get())))?;
+        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+            let group = map.renderer_groups.get_mut(group_index).ok_or_else(|| {
+                CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+            })?;
+            update(group);
+            map.modified = true;
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let surface = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                .expect("surface scene was checked above");
+            let node = ensure_surface_qsc_node(surface);
+            let child_index = renderer_group_child_index(node, object_uid, group_uid)?;
+            update(&mut node.children_mut()[child_index]);
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
+            let object = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+                .expect("LWObject scene was checked above");
+            let node = ensure_lw_qsc_node(object);
+            let child_index = renderer_group_child_index(node, object_uid, group_uid)?;
+            update(&mut node.children_mut()[child_index]);
+            return Ok(());
+        }
+        Err(CueMolError::NotFound(format!(
+            "object {}",
+            object_uid.get()
+        )))
+    }
+
     pub fn create_renderer_group(
         &mut self,
         object_uid: Uid,
@@ -7388,20 +7588,62 @@ impl DesktopAppState {
                 "renderer group name cannot be empty",
             ));
         }
-        let object = self
-            .scene_manager_mut()
-            .object_mut(object_uid)
-            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        if object
-            .renderers()
-            .iter()
-            .any(|renderer| renderer.renderer_type() == "*group" && renderer.name() == name)
-        {
-            return Err(CueMolError::invalid_argument(format!(
-                "renderer group name already exists: {name}"
-            )));
+        if let Some(object) = self.scene_manager_mut().object_mut(object_uid) {
+            if object
+                .renderers()
+                .iter()
+                .any(|renderer| renderer.renderer_type() == "*group" && renderer.name() == name)
+            {
+                return Err(CueMolError::invalid_argument(format!(
+                    "renderer group name already exists: {name}"
+                )));
+            }
+            return Ok(object.add_renderer("*group", name));
         }
-        Ok(object.add_renderer("*group", name))
+        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+            ensure_aux_renderer_group_name_available(&map.renderer_groups, None, name)?;
+            let index = map.renderer_groups.len();
+            map.renderer_groups.push(renderer_group_qsc_node(name));
+            map.modified = true;
+            return Ok(aux_renderer_group_uid(object_uid, index));
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let surface = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                .expect("surface scene was checked above");
+            let node = ensure_surface_qsc_node(surface);
+            materialize_implicit_surface_renderer(node);
+            ensure_aux_renderer_group_name_available(
+                &aux_renderer_group_nodes(node).cloned().collect::<Vec<_>>(),
+                None,
+                name,
+            )?;
+            let index = aux_renderer_group_nodes(node).count();
+            node.append_child_node(renderer_group_qsc_node(name));
+            return Ok(aux_renderer_group_uid(object_uid, index));
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
+            let object = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+                .expect("LWObject scene was checked above");
+            let node = ensure_lw_qsc_node(object);
+            ensure_aux_renderer_group_name_available(
+                &aux_renderer_group_nodes(node).cloned().collect::<Vec<_>>(),
+                None,
+                name,
+            )?;
+            let index = aux_renderer_group_nodes(node).count();
+            node.append_child_node(renderer_group_qsc_node(name));
+            return Ok(aux_renderer_group_uid(object_uid, index));
+        }
+        Err(CueMolError::NotFound(format!(
+            "object {}",
+            object_uid.get()
+        )))
     }
 
     pub fn copy_workspace_renderer(
@@ -7852,6 +8094,9 @@ impl DesktopAppState {
                 "renderer group name cannot be empty",
             ));
         }
+        if self.scene_manager().object(object_uid).is_none() {
+            return self.rename_aux_renderer_group(object_uid, group_uid, name);
+        }
         let (old_name, duplicate) = {
             let object = self
                 .scene_manager()
@@ -7899,6 +8144,233 @@ impl DesktopAppState {
                 .set_qsc_attr("group", name);
         }
         Ok(())
+    }
+
+    pub fn set_workspace_renderer_group_name(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        group_name: Option<&str>,
+    ) -> Result<()> {
+        let group_name = group_name.map(str::trim).filter(|name| !name.is_empty());
+        if let Some(object) = self.scene_manager_mut().object_mut(object_uid) {
+            let renderer = object
+                .renderer_mut(renderer_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+            if let Some(group_name) = group_name {
+                renderer.set_qsc_attr("group", group_name);
+            } else {
+                renderer.remove_qsc_attr("group");
+            }
+            return Ok(());
+        }
+        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+            if let Some(group_name) = group_name {
+                ensure_aux_renderer_group_exists(&map.renderer_groups, group_name)?;
+            }
+            let renderer = map
+                .renderers
+                .iter_mut()
+                .find(|renderer| renderer.uid == renderer_uid)
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
+                })?;
+            if let Some(group_name) = group_name {
+                renderer
+                    .attributes
+                    .insert("group".to_string(), group_name.to_string());
+            } else {
+                renderer.attributes.remove("group");
+            }
+            map.modified = true;
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let surface = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                .expect("surface scene was checked above");
+            let node = ensure_surface_qsc_node(surface);
+            if let Some(group_name) = group_name {
+                ensure_aux_renderer_group_exists(
+                    &aux_renderer_group_nodes(node).cloned().collect::<Vec<_>>(),
+                    group_name,
+                )?;
+            }
+            let renderer = ensure_surface_renderer_node(surface, scene_uid, renderer_uid)?;
+            set_qsc_string_attr(renderer, "group", group_name.unwrap_or_default(), "");
+            return Ok(());
+        }
+        if self
+            .scene_manager()
+            .scene_uid_for_lw_object(object_uid)
+            .is_some()
+        {
+            if let Some(group_name) = group_name {
+                let object = self.lw_object_summary(object_uid).expect("LWObject exists");
+                if !object
+                    .renderer_groups
+                    .iter()
+                    .any(|group| group.name == group_name)
+                {
+                    return Err(CueMolError::NotFound(format!(
+                        "renderer group {group_name}"
+                    )));
+                }
+            }
+            return self.update_lw_renderer(object_uid, renderer_uid, |_, node| {
+                set_qsc_string_attr(node, "group", group_name.unwrap_or_default(), "");
+            });
+        }
+        Err(CueMolError::NotFound(format!(
+            "object {}",
+            object_uid.get()
+        )))
+    }
+
+    fn rename_aux_renderer_group(
+        &mut self,
+        object_uid: Uid,
+        group_uid: Uid,
+        name: &str,
+    ) -> Result<()> {
+        let group_index = aux_renderer_group_index(object_uid, group_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer group {}", group_uid.get())))?;
+        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+            ensure_aux_renderer_group_name_available(
+                &map.renderer_groups,
+                Some(group_index),
+                name,
+            )?;
+            let group = map.renderer_groups.get_mut(group_index).ok_or_else(|| {
+                CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+            })?;
+            let old_name = group.str_attr("name").to_string();
+            group.set_str_attr("name", name);
+            for renderer in &mut map.renderers {
+                if renderer
+                    .attributes
+                    .get("group")
+                    .is_some_and(|group| group == &old_name)
+                {
+                    renderer
+                        .attributes
+                        .insert("group".to_string(), name.to_string());
+                }
+            }
+            map.modified = true;
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let surface = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                .expect("surface scene was checked above");
+            return rename_qsc_renderer_group(
+                ensure_surface_qsc_node(surface),
+                object_uid,
+                group_uid,
+                name,
+            );
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
+            let object = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+                .expect("LWObject scene was checked above");
+            return rename_qsc_renderer_group(
+                ensure_lw_qsc_node(object),
+                object_uid,
+                group_uid,
+                name,
+            );
+        }
+        Err(CueMolError::NotFound(format!(
+            "object {}",
+            object_uid.get()
+        )))
+    }
+
+    fn set_aux_renderer_group_visible(
+        &mut self,
+        object_uid: Uid,
+        group_uid: Uid,
+        visible: bool,
+    ) -> Result<()> {
+        let group_index = aux_renderer_group_index(object_uid, group_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer group {}", group_uid.get())))?;
+        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+            let group = map.renderer_groups.get_mut(group_index).ok_or_else(|| {
+                CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+            })?;
+            let group_name = group.str_attr("name").to_string();
+            set_qsc_bool_attr(group, "visible", visible, true);
+            for renderer in &mut map.renderers {
+                if renderer
+                    .attributes
+                    .get("group")
+                    .is_some_and(|group| group == &group_name)
+                {
+                    renderer.visible = visible;
+                }
+            }
+            map.modified = true;
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let surface = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                .expect("surface scene was checked above");
+            set_qsc_renderer_group_visible(
+                ensure_surface_qsc_node(surface),
+                object_uid,
+                group_uid,
+                visible,
+            )?;
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
+            let object = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+                .expect("LWObject scene was checked above");
+            let group_name = set_qsc_renderer_group_visible(
+                ensure_lw_qsc_node(object),
+                object_uid,
+                group_uid,
+                visible,
+            )?;
+            let member_indices = object
+                .qsc_node
+                .as_ref()
+                .expect("LWObject node was ensured")
+                .children()
+                .iter()
+                .filter(|node| {
+                    !node.is_attr() && node.tag_name() == "renderer" && node.type_name() == "lwrend"
+                })
+                .enumerate()
+                .filter_map(|(index, node)| {
+                    (node.str_attr("group").as_str() == group_name).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            for index in member_indices {
+                if let Some(renderer) = object.renderers.get_mut(index) {
+                    renderer.visible = visible;
+                }
+            }
+            return Ok(());
+        }
+        Err(CueMolError::NotFound(format!(
+            "object {}",
+            object_uid.get()
+        )))
     }
 
     /// The object's current object-level coloring scheme class name (e.g.
@@ -8410,6 +8882,9 @@ impl DesktopAppState {
         object_uid: Uid,
         group_uid: Uid,
     ) -> Result<bool> {
+        if self.scene_manager().object(object_uid).is_none() {
+            return self.destroy_aux_renderer_group(object_uid, group_uid);
+        }
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -8429,6 +8904,75 @@ impl DesktopAppState {
             object.destroy_renderer(renderer_uid);
         }
         Ok(object.destroy_renderer(group_uid))
+    }
+
+    fn destroy_aux_renderer_group(&mut self, object_uid: Uid, group_uid: Uid) -> Result<bool> {
+        let group_index = aux_renderer_group_index(object_uid, group_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("renderer group {}", group_uid.get())))?;
+        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+            let group = map.renderer_groups.get(group_index).ok_or_else(|| {
+                CueMolError::NotFound(format!("renderer group {}", group_uid.get()))
+            })?;
+            let group_name = group.str_attr("name").to_string();
+            map.renderer_groups.remove(group_index);
+            map.renderers.retain(|renderer| {
+                renderer
+                    .attributes
+                    .get("group")
+                    .is_none_or(|group| group != &group_name)
+            });
+            map.modified = true;
+            return Ok(true);
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let surface = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                .expect("surface scene was checked above");
+            destroy_qsc_renderer_group(ensure_surface_qsc_node(surface), object_uid, group_uid)?;
+            return Ok(true);
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
+            let object = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+                .expect("LWObject scene was checked above");
+            let group_name =
+                renderer_group_name(ensure_lw_qsc_node(object), object_uid, group_uid)?;
+            let removed_indices = object
+                .qsc_node
+                .as_ref()
+                .expect("LWObject node was ensured")
+                .children()
+                .iter()
+                .filter(|node| {
+                    !node.is_attr() && node.tag_name() == "renderer" && node.type_name() == "lwrend"
+                })
+                .enumerate()
+                .filter_map(|(index, node)| {
+                    (node.str_attr("group").as_str() == group_name).then_some(index)
+                })
+                .collect::<BTreeSet<_>>();
+            destroy_qsc_renderer_group(
+                object.qsc_node.as_mut().expect("LWObject node was ensured"),
+                object_uid,
+                group_uid,
+            )?;
+            object.renderers = object
+                .renderers
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !removed_indices.contains(index))
+                .map(|(_, renderer)| renderer.clone())
+                .collect();
+            return Ok(true);
+        }
+        Err(CueMolError::NotFound(format!(
+            "object {}",
+            object_uid.get()
+        )))
     }
 
     pub fn destroy_object(&mut self, object_uid: Uid) -> Result<bool> {
@@ -8755,6 +9299,14 @@ impl DesktopAppState {
                 self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
                 let default_ui_order = self.next_workspace_ui_order(scene_uid);
                 let mut renderers = density_renderer_configs(loaded.qsc_node.as_ref(), &styles);
+                let renderer_groups = loaded
+                    .qsc_node
+                    .as_ref()
+                    .map(aux_renderer_group_nodes)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .collect();
                 for renderer in &mut renderers {
                     renderer.uid = self.next_density_renderer_uid();
                 }
@@ -8806,6 +9358,7 @@ impl DesktopAppState {
                             .unwrap_or(Matrix4::IDENTITY),
                         map,
                         renderers,
+                        renderer_groups,
                     },
                 );
             }
@@ -9574,6 +10127,7 @@ impl DesktopAppState {
             xform: Matrix4::IDENTITY,
             map,
             renderers: Vec::new(),
+            renderer_groups: Vec::new(),
         };
         let qsc_node = density_map_qsc_node(&object, format, &object.source);
         self.scene_manager_mut()
@@ -44810,6 +45364,9 @@ fn density_map_qsc_node(
     for renderer in &object.renderers {
         node.append_child_node(density_renderer_qsc_node(renderer));
     }
+    for group in &object.renderer_groups {
+        node.append_child_node(group.clone());
+    }
     node
 }
 
@@ -45742,6 +46299,12 @@ fn density_map_summary(
             .iter()
             .map(|renderer| density_renderer_summary(object.uid, renderer, styles))
             .collect(),
+        renderer_groups: object
+            .renderer_groups
+            .iter()
+            .enumerate()
+            .map(|(index, node)| aux_renderer_group_summary(object.uid, index, node, styles))
+            .collect(),
     }
 }
 
@@ -45831,6 +46394,11 @@ fn density_renderer_summary(
         renderer_type: renderer.renderer_type.clone(),
         visible: renderer.visible,
         locked: attribute("locked", "false").as_str() == "true",
+        group: renderer
+            .attributes
+            .get("group")
+            .cloned()
+            .filter(|group| !group.is_empty()),
         material: attribute("material", ""),
         alpha: attribute("alpha", "1").parse().unwrap_or(1.0),
         edge_type: attribute("egtype", "none"),
@@ -45856,6 +46424,198 @@ fn surface_renderer_nodes(node: &LDom2Node) -> impl Iterator<Item = &LDom2Node> 
             && !child.is_attr()
             && matches!(child.type_name(), "molsurf" | "MolSurfRenderer")
     })
+}
+
+fn aux_renderer_group_nodes(node: &LDom2Node) -> impl Iterator<Item = &LDom2Node> {
+    node.children().iter().filter(|child| {
+        child.tag_name() == "renderer"
+            && !child.is_attr()
+            && matches!(child.type_name(), "*group" | "RendGroup")
+    })
+}
+
+fn renderer_group_qsc_node(name: &str) -> LDom2Node {
+    let mut node = LDom2Node::new();
+    node.set_tag_name("renderer");
+    node.set_type_name("*group");
+    node.set_str_attr("name", name);
+    node
+}
+
+fn ensure_aux_renderer_group_name_available(
+    groups: &[LDom2Node],
+    excluded_index: Option<usize>,
+    name: &str,
+) -> Result<()> {
+    if groups.iter().enumerate().any(|(index, group)| {
+        Some(index) != excluded_index && group.str_attr("name").as_str() == name
+    }) {
+        return Err(CueMolError::invalid_argument(format!(
+            "renderer group name already exists: {name}"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_aux_renderer_group_exists(groups: &[LDom2Node], name: &str) -> Result<()> {
+    if groups
+        .iter()
+        .any(|group| group.str_attr("name").as_str() == name)
+    {
+        Ok(())
+    } else {
+        Err(CueMolError::NotFound(format!("renderer group {name}")))
+    }
+}
+
+fn aux_renderer_group_uid(object_uid: Uid, group_index: usize) -> Uid {
+    Uid::new(
+        9_000_000_000_000_000_u64
+            .saturating_add(object_uid.get().saturating_mul(1_000))
+            .saturating_add(group_index as u64 + 1),
+    )
+}
+
+fn aux_renderer_group_index(object_uid: Uid, group_uid: Uid) -> Option<usize> {
+    let first_uid = aux_renderer_group_uid(object_uid, 0).get();
+    usize::try_from(group_uid.get().checked_sub(first_uid)?).ok()
+}
+
+fn renderer_group_child_index(
+    object_node: &LDom2Node,
+    object_uid: Uid,
+    group_uid: Uid,
+) -> Result<usize> {
+    let group_index = aux_renderer_group_index(object_uid, group_uid)
+        .ok_or_else(|| CueMolError::NotFound(format!("renderer group {}", group_uid.get())))?;
+    object_node
+        .children()
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            !node.is_attr()
+                && node.tag_name() == "renderer"
+                && matches!(node.type_name(), "*group" | "RendGroup")
+        })
+        .nth(group_index)
+        .map(|(index, _)| index)
+        .ok_or_else(|| CueMolError::NotFound(format!("renderer group {}", group_uid.get())))
+}
+
+fn renderer_group_name(object_node: &LDom2Node, object_uid: Uid, group_uid: Uid) -> Result<String> {
+    let child_index = renderer_group_child_index(object_node, object_uid, group_uid)?;
+    Ok(object_node.children()[child_index]
+        .str_attr("name")
+        .to_string())
+}
+
+fn rename_qsc_renderer_group(
+    object_node: &mut LDom2Node,
+    object_uid: Uid,
+    group_uid: Uid,
+    name: &str,
+) -> Result<()> {
+    let child_index = renderer_group_child_index(object_node, object_uid, group_uid)?;
+    let group_index = aux_renderer_group_index(object_uid, group_uid).expect("group UID checked");
+    ensure_aux_renderer_group_name_available(
+        &aux_renderer_group_nodes(object_node)
+            .cloned()
+            .collect::<Vec<_>>(),
+        Some(group_index),
+        name,
+    )?;
+    let old_name = object_node.children()[child_index]
+        .str_attr("name")
+        .to_string();
+    object_node.children_mut()[child_index].set_str_attr("name", name);
+    for renderer in object_node.children_mut().iter_mut().filter(|node| {
+        !node.is_attr()
+            && node.tag_name() == "renderer"
+            && !matches!(node.type_name(), "*group" | "RendGroup")
+    }) {
+        if renderer.str_attr("group").as_str() == old_name {
+            renderer.set_str_attr("group", name);
+        }
+    }
+    Ok(())
+}
+
+fn set_qsc_renderer_group_visible(
+    object_node: &mut LDom2Node,
+    object_uid: Uid,
+    group_uid: Uid,
+    visible: bool,
+) -> Result<String> {
+    let child_index = renderer_group_child_index(object_node, object_uid, group_uid)?;
+    let group_name = object_node.children()[child_index]
+        .str_attr("name")
+        .to_string();
+    set_qsc_bool_attr(
+        &mut object_node.children_mut()[child_index],
+        "visible",
+        visible,
+        true,
+    );
+    for renderer in object_node.children_mut().iter_mut().filter(|node| {
+        !node.is_attr()
+            && node.tag_name() == "renderer"
+            && !matches!(node.type_name(), "*group" | "RendGroup")
+    }) {
+        if renderer.str_attr("group").as_str() == group_name {
+            set_qsc_bool_attr(renderer, "visible", visible, true);
+        }
+    }
+    Ok(group_name)
+}
+
+fn destroy_qsc_renderer_group(
+    object_node: &mut LDom2Node,
+    object_uid: Uid,
+    group_uid: Uid,
+) -> Result<()> {
+    let group_name = renderer_group_name(object_node, object_uid, group_uid)?;
+    object_node.retain_children(|node| {
+        let is_renderer = !node.is_attr() && node.tag_name() == "renderer";
+        let is_group = matches!(node.type_name(), "*group" | "RendGroup")
+            && node.str_attr("name").as_str() == group_name;
+        let is_member = !matches!(node.type_name(), "*group" | "RendGroup")
+            && node.str_attr("group").as_str() == group_name;
+        !is_renderer || (!is_group && !is_member)
+    });
+    Ok(())
+}
+
+fn aux_renderer_group_summary(
+    object_uid: Uid,
+    group_index: usize,
+    node: &LDom2Node,
+    styles: &StyleManager,
+) -> GuiAuxRendererGroupSummary {
+    let style = node.str_attr("style").to_string();
+    let attr = |name: &str, fallback: &str| {
+        let inline = node.str_attr(name).to_string();
+        if inline.is_empty() {
+            styles
+                .resolve_style_attr(DEFAULT_STYLE_SCOPE, &style, name)
+                .unwrap_or_else(|| fallback.to_string())
+        } else {
+            inline
+        }
+    };
+    GuiAuxRendererGroupSummary {
+        object_uid,
+        uid: aux_renderer_group_uid(object_uid, group_index),
+        name: attr("name", &format!("group{}", group_index + 1)),
+        visible: qsc_bool(&attr("visible", "true")),
+        locked: qsc_bool(&attr("locked", "false")),
+        ui_collapsed: qsc_bool(&attr("ui_collapsed", "false")),
+        style: style.clone(),
+        material: attr("material", ""),
+        alpha: attr("alpha", "1").parse().unwrap_or(1.0),
+        edge_type: attr("egtype", "none"),
+        edge_width: attr("eglinew", "0.01").parse().unwrap_or(0.01),
+        edge_color: attr("egcolor", "#000000"),
+    }
 }
 
 fn default_surface_renderer_node(serial: usize) -> LDom2Node {
@@ -45993,6 +46753,13 @@ fn surface_summary(
             .and_then(|value| value.parse().ok())
             .unwrap_or(0.0),
         renderers,
+        renderer_groups: node
+            .map(aux_renderer_group_nodes)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, node)| aux_renderer_group_summary(surface.uid, index, node, styles))
+            .collect(),
     }
 }
 
@@ -46098,6 +46865,9 @@ fn lw_object_summary(
                     renderer_type: "lwrend".to_string(),
                     visible: renderer.visible,
                     locked: node.is_some_and(|node| qsc_bool(node.str_attr("locked").as_str())),
+                    group: node
+                        .map(|node| node.str_attr("group").to_string())
+                        .filter(|group| !group.is_empty()),
                     style: style.clone(),
                     material: attr("material", ""),
                     alpha: attr("alpha", "1").parse().unwrap_or(1.0),
@@ -46109,6 +46879,13 @@ fn lw_object_summary(
                         .unwrap_or(renderer.data_id),
                 }
             })
+            .collect(),
+        renderer_groups: node
+            .map(aux_renderer_group_nodes)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, node)| aux_renderer_group_summary(object.uid, index, node, styles))
             .collect(),
     }
 }
@@ -46232,6 +47009,9 @@ fn surface_renderer_summary(
         selection: attr("sel", "*"),
         visible: qsc_bool(&attr("visible", "true")),
         locked: qsc_bool(&attr("locked", "false")),
+        group: node
+            .map(|node| node.str_attr("group").to_string())
+            .filter(|group| !group.is_empty()),
         material: attr("material", ""),
         alpha: attr("alpha", "1").parse().unwrap_or(1.0),
         edge_type: attr("egtype", "none"),
@@ -57117,6 +57897,144 @@ end_header
                 .3,
             ""
         );
+    }
+
+    #[test]
+    fn workspace_aux_renderer_groups_persist_and_control_members() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("aux renderer groups", false).result_scene;
+        let map_uid = app.add_density_map(scene_uid, "map", DensityMap::new());
+        let map_renderer_uid = app.add_density_renderer(map_uid, "contour").unwrap();
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: "v 0 0 0\n".to_string(),
+                raw_data: b"v 0 0 0\n".to_vec(),
+                qsc_node: None,
+            });
+        let surface_renderer_uid = app.surface_summary(surface_uid).unwrap().renderers[0].uid;
+        let lw_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_lw_object(LoadedLWObject {
+                uid: Uid::new(0),
+                name: "lightweight".to_string(),
+                srctype: "qdflwobj".to_string(),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+                visible: true,
+                xform: Matrix4::IDENTITY,
+                renderers: vec![LoadedLWRenderer {
+                    name: "draw".to_string(),
+                    data_id: 0,
+                    visible: true,
+                    xform: Matrix4::IDENTITY,
+                }],
+                qsc_node: None,
+            });
+        let lw_renderer_uid = app.lw_object_summary(lw_uid).unwrap().renderers[0].uid;
+
+        for (object_uid, renderer_uid) in [
+            (map_uid, map_renderer_uid),
+            (surface_uid, surface_renderer_uid),
+            (lw_uid, lw_renderer_uid),
+        ] {
+            let group_uid = app.create_renderer_group(object_uid, "group1").unwrap();
+            app.set_workspace_renderer_group_name(object_uid, renderer_uid, Some("group1"))
+                .unwrap();
+            app.rename_renderer_group(object_uid, group_uid, "representations")
+                .unwrap();
+            app.set_renderer_group_common_properties(
+                object_uid,
+                group_uid,
+                "representations",
+                false,
+                true,
+                "matte",
+                0.5,
+                "edges",
+                0.2,
+                "#123456",
+            )
+            .unwrap();
+            assert_eq!(
+                app.workspace_renderer_style_state(object_uid, group_uid)
+                    .unwrap()
+                    .2,
+                "*group"
+            );
+        }
+
+        let map = app.density_map_summary(map_uid).unwrap();
+        assert_eq!(map.renderer_groups[0].name, "representations");
+        assert!(map.renderer_groups[0].locked);
+        assert_eq!(map.renderer_groups[0].material, "matte");
+        assert_eq!(map.renderers[0].group.as_deref(), Some("representations"));
+        assert!(!map.renderers[0].visible);
+        let surface = app.surface_summary(surface_uid).unwrap();
+        assert_eq!(surface.renderer_groups[0].name, "representations");
+        assert_eq!(
+            surface.renderers[0].group.as_deref(),
+            Some("representations")
+        );
+        assert!(!surface.renderers[0].visible);
+        let lw = app.lw_object_summary(lw_uid).unwrap();
+        assert_eq!(lw.renderer_groups[0].name, "representations");
+        assert_eq!(lw.renderers[0].group.as_deref(), Some("representations"));
+        assert!(!lw.renderers[0].visible);
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-desktop-aux-renderer-groups-{}.qsc",
+            std::process::id()
+        ));
+        app.save_active_scene_qsc(&path).unwrap();
+        let qsc = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+        assert_eq!(qsc.matches("type=\"*group\"").count(), 3);
+        assert_eq!(qsc.matches("group=\"representations\"").count(), 3);
+
+        let mut reloaded = DesktopAppState::new();
+        let reloaded_scene_uid = reloaded.load_qsc_file(&path).unwrap().unwrap();
+        let reloaded_map = reloaded.density_map_summaries(reloaded_scene_uid).remove(0);
+        assert_eq!(reloaded_map.renderer_groups[0].name, "representations");
+        assert_eq!(
+            reloaded_map.renderers[0].group.as_deref(),
+            Some("representations")
+        );
+        let reloaded_surface = reloaded.surface_summaries(reloaded_scene_uid).remove(0);
+        assert_eq!(reloaded_surface.renderer_groups[0].name, "representations");
+        let reloaded_lw = reloaded.lw_object_summaries(reloaded_scene_uid).remove(0);
+        assert_eq!(reloaded_lw.renderer_groups[0].name, "representations");
+        let _ = std::fs::remove_file(path);
+
+        for object_uid in [map_uid, surface_uid, lw_uid] {
+            let group_uid = if object_uid == map_uid {
+                app.density_map_summary(object_uid).unwrap().renderer_groups[0].uid
+            } else if object_uid == surface_uid {
+                app.surface_summary(object_uid).unwrap().renderer_groups[0].uid
+            } else {
+                app.lw_object_summary(object_uid).unwrap().renderer_groups[0].uid
+            };
+            assert!(app
+                .destroy_renderer_group_in_object(object_uid, group_uid)
+                .unwrap());
+        }
+        assert!(app
+            .density_map_summary(map_uid)
+            .unwrap()
+            .renderers
+            .is_empty());
+        assert!(app
+            .surface_summary(surface_uid)
+            .unwrap()
+            .renderers
+            .is_empty());
+        assert!(app.lw_object_summary(lw_uid).unwrap().renderers.is_empty());
     }
 
     #[test]

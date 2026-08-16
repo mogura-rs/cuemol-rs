@@ -7766,6 +7766,25 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
         }
       },
     },
+    {
+      label: "New Group…",
+      action: async () => {
+        if (!(await activate())) return;
+        const used = new Set((object.renderers || []).map((renderer) => renderer.name));
+        let serial = 1;
+        while (used.has(`group${serial}`)) serial += 1;
+        const name = await showTextPromptDialog({
+          title: "New Renderer Group",
+          label: "Name for new group:",
+          defaultValue: `group${serial}`,
+          confirmLabel: "Create",
+        });
+        if (name === null) return;
+        await mutateWithoutViewport("create_workspace_renderer_group", {
+          input: { objectUid: object.uid, name },
+        });
+      },
+    },
     null,
     {
       label: "Rename…",
@@ -7840,6 +7859,75 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
     if (snapshot.activeSceneUid === scene.uid) return true;
     return mutate("activate_scene", { sceneUid: scene.uid });
   };
+  if (renderer.rendererType === "*group") {
+    return [
+      { label: renderer.name, disabled: true },
+      null,
+      {
+        label: renderer.visible ? "Hide" : "Show",
+        action: () =>
+          mutate("set_workspace_visible", {
+            target: {
+              kind: "rendererGroup",
+              objectUid: object.uid,
+              rendererUid: renderer.uid,
+            },
+            visible: !renderer.visible,
+          }),
+      },
+      {
+        label: "Rename…",
+        action: async () => {
+          if (!(await activate())) return;
+          selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
+          beginWorkspaceInlineRename(kind, object.uid, renderer.uid);
+        },
+      },
+      {
+        label: "New Renderer…",
+        action: async () => {
+          if (!(await activate())) return;
+          if (kind === "lwRenderer") {
+            await mutate("add_lw_renderer", {
+              objectUid: object.uid,
+              groupName: renderer.name,
+            });
+          } else if (kind === "densityRenderer") {
+            await mutate("add_density_renderer", {
+              mapUid: object.uid,
+              rendererType: rendererType.value,
+              groupName: renderer.name,
+            });
+          } else {
+            await mutate("add_surface_renderer", {
+              surfaceUid: object.uid,
+              groupName: renderer.name,
+            });
+          }
+        },
+      },
+      {
+        label: "Delete",
+        action: () =>
+          mutate("delete_workspace_item", {
+            target: {
+              kind: "rendererGroup",
+              objectUid: object.uid,
+              rendererUid: renderer.uid,
+            },
+          }),
+      },
+      null,
+      {
+        label: "Properties…",
+        action: async () => {
+          if (!(await activate())) return;
+          selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
+          showReferenceDialog("Renderer Properties");
+        },
+      },
+    ];
+  }
   const styleOptions = await cachedWorkspaceRendererStyles(scene.uid, renderer.rendererType);
   const lowerType = renderer.rendererType.replace(/^\*/, "").toLowerCase();
   const suffix = ["name_label", "namelabel"].includes(lowerType)
@@ -8879,19 +8967,31 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       configureWorkspaceObjectDrag(surfaceRow, scene.uid, "surface", surface.uid);
       surfaceRow.draggable = !surfaceIsRenaming;
       surfaceBlock.append(surfaceRow);
-      for (const renderer of surface.renderers) {
+      for (const { renderer, isChild } of groupedMoleculeRenderers(
+        surface.renderers,
+      ).flatMap((node) => [
+        { renderer: node.renderer, isChild: false },
+        ...node.children.map((renderer) => ({ renderer, isChild: true })),
+      ])) {
+        const isGroup = renderer.rendererType === "*group";
         const rendererIsRenaming =
           workspaceInlineRename?.kind === "surfaceRenderer" &&
           workspaceInlineRename.objectUid === surface.uid &&
           workspaceInlineRename.rendererUid === renderer.uid;
         const rendererRow = button(
-          rendererIsRenaming ? "" : `${renderer.rendererType} · ${renderer.name}`,
+          rendererIsRenaming
+            ? ""
+            : isGroup
+              ? `${renderer.name} (group)`
+              : `${renderer.rendererType} · ${renderer.name}`,
           `tree-renderer surface-renderer${
             workspaceSelectionKind === "surfaceRenderer" &&
             renderer.uid === selectedSurfaceRendererUid
               ? " active"
               : ""
-          }${renderer.visible ? "" : " hidden"}`,
+          }${isGroup ? " renderer-group" : ""}${isChild ? " group-child" : ""}${
+            renderer.visible ? "" : " hidden"
+          }`,
           () => {
             const alreadySelected =
               workspaceSelectionKind === "surfaceRenderer" &&
@@ -8931,12 +9031,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         rendererRow.prepend(
           workspaceStateControls(
             {
-              kind: "surfaceRenderer",
+              kind: isGroup ? "rendererGroup" : "surfaceRenderer",
               objectUid: surface.uid,
               rendererUid: renderer.uid,
             },
             renderer.visible,
             renderer.locked,
+            !isGroup,
           ),
         );
         if (rendererIsRenaming) {
@@ -9003,19 +9104,31 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       configureWorkspaceObjectDrag(mapRow, scene.uid, "densityMap", map.uid);
       mapRow.draggable = !mapIsRenaming;
       mapBlock.append(mapRow);
-      for (const renderer of map.renderers) {
+      for (const { renderer, isChild } of groupedMoleculeRenderers(map.renderers).flatMap(
+        (node) => [
+          { renderer: node.renderer, isChild: false },
+          ...node.children.map((renderer) => ({ renderer, isChild: true })),
+        ],
+      )) {
+        const isGroup = renderer.rendererType === "*group";
         const rendererIsRenaming =
           workspaceInlineRename?.kind === "densityRenderer" &&
           workspaceInlineRename.objectUid === map.uid &&
           workspaceInlineRename.rendererUid === renderer.uid;
         const rendererRow = button(
-          rendererIsRenaming ? "" : `${renderer.rendererType} · ${renderer.name}`,
+          rendererIsRenaming
+            ? ""
+            : isGroup
+              ? `${renderer.name} (group)`
+              : `${renderer.rendererType} · ${renderer.name}`,
           `tree-renderer density-renderer${
             workspaceSelectionKind === "densityRenderer" &&
             renderer.uid === selectedDensityRendererUid
               ? " active"
               : ""
-          }${renderer.visible ? "" : " hidden"}`,
+          }${isGroup ? " renderer-group" : ""}${isChild ? " group-child" : ""}${
+            renderer.visible ? "" : " hidden"
+          }`,
           () => {
             const alreadySelected =
               workspaceSelectionKind === "densityRenderer" &&
@@ -9055,12 +9168,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         rendererRow.prepend(
           workspaceStateControls(
             {
-              kind: "densityRenderer",
+              kind: isGroup ? "rendererGroup" : "densityRenderer",
               objectUid: map.uid,
               rendererUid: renderer.uid,
             },
             renderer.visible,
             renderer.locked,
+            !isGroup,
           ),
         );
         if (rendererIsRenaming) {
@@ -9129,19 +9243,31 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       configureWorkspaceObjectDrag(objectRow, scene.uid, "lwObject", object.uid);
       objectRow.draggable = !objectIsRenaming;
       objectBlock.append(objectRow);
-      for (const renderer of object.renderers) {
+      for (const { renderer, isChild } of groupedMoleculeRenderers(
+        object.renderers,
+      ).flatMap((node) => [
+        { renderer: node.renderer, isChild: false },
+        ...node.children.map((renderer) => ({ renderer, isChild: true })),
+      ])) {
+        const isGroup = renderer.rendererType === "*group";
         const rendererIsRenaming =
           workspaceInlineRename?.kind === "lwRenderer" &&
           workspaceInlineRename.objectUid === object.uid &&
           workspaceInlineRename.rendererUid === renderer.uid;
         const rendererRow = button(
-          rendererIsRenaming ? "" : `${renderer.rendererType} · ${renderer.name}`,
+          rendererIsRenaming
+            ? ""
+            : isGroup
+              ? `${renderer.name} (group)`
+              : `${renderer.rendererType} · ${renderer.name}`,
           `tree-renderer lightweight-renderer${
             workspaceSelectionKind === "lwRenderer" &&
             renderer.uid === selectedLwRendererUid
               ? " active"
               : ""
-          }${renderer.visible ? "" : " hidden"}`,
+          }${isGroup ? " renderer-group" : ""}${isChild ? " group-child" : ""}${
+            renderer.visible ? "" : " hidden"
+          }`,
           () => {
             const alreadySelected =
               workspaceSelectionKind === "lwRenderer" &&
@@ -9176,12 +9302,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         rendererRow.prepend(
           workspaceStateControls(
             {
-              kind: "lwRenderer",
+              kind: isGroup ? "rendererGroup" : "lwRenderer",
               objectUid: object.uid,
               rendererUid: renderer.uid,
             },
             renderer.visible,
             renderer.locked,
+            !isGroup,
           ),
         );
         if (rendererIsRenaming) {
