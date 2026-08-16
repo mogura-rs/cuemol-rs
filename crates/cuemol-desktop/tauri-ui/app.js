@@ -6775,6 +6775,7 @@ async function copyWorkspaceRenderer(objectUid, rendererUid, kind = "object") {
 function workspaceRendererTargetClipboardKind(target) {
   return {
     renderer: "object",
+    rendererGroup: "object",
     densityRenderer: "densityMap",
     surfaceRenderer: "surface",
     lwRenderer: "lwObject",
@@ -8763,7 +8764,6 @@ function workspaceMultipleContextItems() {
     Boolean(clipboardKind) &&
     targets.every(
       (target) =>
-        target.kind !== "rendererGroup" &&
         target.rendererUid !== null &&
         workspaceRendererTargetClipboardKind(target) === clipboardKind,
     );

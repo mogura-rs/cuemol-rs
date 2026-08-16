@@ -1575,13 +1575,7 @@ impl NativeWorkspaceTarget {
     }
 
     fn is_copyable_renderer(self) -> bool {
-        matches!(
-            self,
-            Self::Renderer {
-                is_group: false,
-                ..
-            }
-        )
+        matches!(self, Self::Renderer { .. })
     }
 }
 
@@ -6716,14 +6710,13 @@ impl GuiApplication {
                 NativeWorkspaceTarget::Renderer {
                     owner,
                     renderer_uid,
-                    is_group: false,
                     ..
                 } => Some((owner.uid(), *renderer_uid)),
                 _ => None,
             })
             .collect::<Vec<_>>();
         if targets.len() != self.workspace_multiple_selection.len() || targets.is_empty() {
-            self.set_status("Multiple copy requires regular renderers");
+            self.set_status("Multiple copy requires renderers");
             return;
         }
         match self.state.copy_workspace_renderers(&targets) {
@@ -26766,6 +26759,47 @@ mod tests {
         let clipboard = app.workspace_renderer_clipboard.as_ref().unwrap();
         assert_eq!(clipboard.kind(), crate::GuiWorkspaceObjectKind::DensityMap);
         assert_eq!(clipboard.renderer_count(), 2);
+
+        let grouped_object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("grouped", cuemol_molstr::MolCoord::new());
+        let (group_uid, child_uid) = {
+            let object = app
+                .state
+                .scene_manager_mut()
+                .object_mut(grouped_object_uid)
+                .unwrap();
+            let group_uid = object.add_renderer("*group", "group");
+            let child_uid = object.add_renderer("simple", "child");
+            object
+                .renderer_mut(child_uid)
+                .unwrap()
+                .set_qsc_attr("group", "group");
+            (group_uid, child_uid)
+        };
+        app.workspace_multiple_selection = vec![
+            first,
+            NativeWorkspaceTarget::Renderer {
+                scene_uid,
+                owner: NativePropertyObject::Molecule(grouped_object_uid),
+                renderer_uid: group_uid,
+                is_group: true,
+            },
+        ];
+        app.copy_workspace_target_renderers();
+        let clipboard = app.workspace_renderer_clipboard.as_ref().unwrap();
+        assert_eq!(clipboard.kind(), crate::GuiWorkspaceObjectKind::Molecule);
+        assert_eq!(clipboard.renderer_count(), 2);
+        assert!(app
+            .state
+            .scene_manager()
+            .object(grouped_object_uid)
+            .unwrap()
+            .renderer(child_uid)
+            .is_some());
     }
 
     #[test]

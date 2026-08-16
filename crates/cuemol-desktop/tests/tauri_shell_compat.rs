@@ -1444,6 +1444,7 @@ fn tauri_workspace_multiple_selection_matches_reference_actions() {
     assert!(JS.contains("function workspaceMultipleContextItems()"));
     assert!(JS.contains("function showWorkspaceMultipleContextMenu(event, target)"));
     assert!(JS.contains("function workspaceRendererTargetClipboardKind(target)"));
+    assert!(JS.contains("rendererGroup: \"object\""));
     for kind in ["densityRenderer", "surfaceRenderer", "lwRenderer"] {
         assert!(JS.contains(&format!("{kind}:")));
     }
