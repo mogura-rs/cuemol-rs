@@ -12579,6 +12579,7 @@ mod tests {
         assert_eq!(update.snapshot.opened_paths, [first_path.to_string_lossy()]);
         assert!(!update.snapshot.can_undo);
         assert!(!update.snapshot.scenes[0].modified);
+        assert_eq!(update.snapshot.scenes[0].source_type, "qsc_xml");
         assert!(model.mesh_refit_pending);
 
         let response = handle_model_request(

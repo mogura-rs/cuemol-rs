@@ -3419,7 +3419,7 @@ impl MolCommandManager {
             .scene_mut(scene_uid)
             .expect("loaded scene must exist");
         scene.set_source(file_path.to_string_lossy());
-        scene.set_source_type("qsc");
+        scene.set_source_type("qsc_xml");
         scene.set_base_path(
             file_path
                 .parent()

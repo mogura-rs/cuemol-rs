@@ -9025,7 +9025,7 @@ impl DesktopAppState {
         scene.set_qsc_options(Some(qsc_save_options_node(options)))?;
         scene.set_name(default_object_name(path));
         scene.set_source(path.to_string_lossy());
-        scene.set_source_type("qsc");
+        scene.set_source_type("qsc_xml");
         scene.set_base_path(
             path.parent()
                 .unwrap_or_else(|| Path::new("."))
@@ -55948,6 +55948,13 @@ end_header
         if app.load_qsc_file(&fixture).ok().flatten().is_none() {
             return;
         }
+        assert_eq!(
+            app.scene_manager()
+                .scene(app.active_scene().unwrap())
+                .unwrap()
+                .source_type(),
+            "qsc_xml"
+        );
         let camera = app
             .active_scene_saved_camera()
             .expect("the .qsc's saved camera must be restored");
@@ -58396,6 +58403,13 @@ attribute \"dep\" string \"positions\"
         app.set_active_scene_camera(camera).unwrap();
         app.save_active_scene_qsc_with_options(&linked_path, GuiSceneSaveOptions::default())
             .unwrap();
+        assert_eq!(
+            app.scene_manager()
+                .scene(app.active_scene().unwrap())
+                .unwrap()
+                .source_type(),
+            "qsc_xml"
+        );
         let linked = std::fs::read_to_string(&linked_path).unwrap();
         assert!(linked.contains("<scene>"));
         assert!(linked.contains("name=\"__current\""));
