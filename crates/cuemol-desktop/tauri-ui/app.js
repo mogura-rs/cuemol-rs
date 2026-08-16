@@ -8677,6 +8677,7 @@ function workspaceChromeRenderKey() {
     renderer.group,
     renderer.visible,
     renderer.locked,
+    renderer.uiCollapsed,
   ];
   return JSON.stringify({
     selection: [
@@ -8705,6 +8706,7 @@ function workspaceChromeRenderKey() {
       object.name,
       object.visible,
       object.locked,
+      object.uiCollapsed,
       object.renderers.map(rendererKey),
     ]),
     views: (snapshot.views || []).map((view) => [
@@ -8721,6 +8723,7 @@ function workspaceChromeRenderKey() {
       object.selection,
       object.visible,
       object.locked,
+      object.uiCollapsed,
       object.atomCount,
       object.residueCount,
       object.bondCount,
@@ -8733,6 +8736,7 @@ function workspaceChromeRenderKey() {
       map.name,
       map.visible,
       map.locked,
+      map.uiCollapsed,
       map.counts,
       map.renderers.map(rendererKey),
     ]),
@@ -8743,6 +8747,7 @@ function workspaceChromeRenderKey() {
       surface.name,
       surface.visible,
       surface.locked,
+      surface.uiCollapsed,
       surface.className,
       surface.format,
       surface.renderers.map(rendererKey),

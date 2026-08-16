@@ -1046,6 +1046,7 @@ fn tauri_workspace_chrome_reuses_unchanged_dom() {
     assert!(JS.contains("renderSceneTabs(workspaceRenderKey)"));
     assert!(JS.contains("renderSceneTree(workspaceRenderKey)"));
     assert!(JS.contains("renderInspector(workspaceRenderKey)"));
+    assert!(workspace_key.matches(".uiCollapsed").count() >= 5);
     assert!(!workspace_key.contains("snapshot.camera."));
     assert!(!workspace_key.contains("snapshot.densityLevel"));
 }
