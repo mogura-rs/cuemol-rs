@@ -679,6 +679,42 @@ fn workspace_renderer_clipboard_count(renderer: &WorkspaceRendererClipboardData)
     }
 }
 
+fn workspace_renderer_clipboard_group_for_kind(
+    renderer: &WorkspaceRendererClipboardData,
+    kind: GuiWorkspaceObjectKind,
+) -> Option<WorkspaceRendererClipboardData> {
+    let (name, node) = match renderer {
+        WorkspaceRendererClipboardData::Molecule {
+            group_name: Some(name),
+            ..
+        } => (name.clone(), None),
+        WorkspaceRendererClipboardData::DensityMapGroup { group, .. }
+        | WorkspaceRendererClipboardData::SurfaceGroup { group, .. }
+        | WorkspaceRendererClipboardData::LightweightGroup { group, .. } => {
+            (group.str_attr("name").to_string(), Some(group.clone()))
+        }
+        _ => return None,
+    };
+    Some(match kind {
+        GuiWorkspaceObjectKind::Molecule => WorkspaceRendererClipboardData::Molecule {
+            group_name: Some(name),
+            renderers: Vec::new(),
+        },
+        GuiWorkspaceObjectKind::DensityMap => WorkspaceRendererClipboardData::DensityMapGroup {
+            group: node.unwrap_or_else(|| renderer_group_qsc_node(&name)),
+            renderers: Vec::new(),
+        },
+        GuiWorkspaceObjectKind::Surface => WorkspaceRendererClipboardData::SurfaceGroup {
+            group: node.unwrap_or_else(|| renderer_group_qsc_node(&name)),
+            renderers: Vec::new(),
+        },
+        GuiWorkspaceObjectKind::Lightweight => WorkspaceRendererClipboardData::LightweightGroup {
+            group: node.unwrap_or_else(|| renderer_group_qsc_node(&name)),
+            renderers: Vec::new(),
+        },
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceRendererPasteResult {
     pub group_uid: Option<Uid>,
@@ -8635,19 +8671,25 @@ impl DesktopAppState {
             }
             WorkspaceRendererClipboardData::Multiple { items, .. } => {
                 let mut renderer_uids = Vec::new();
+                let mut group_uid = None;
                 for item in items {
-                    let clipboard = WorkspaceRendererClipboard {
-                        renderer: item.clone(),
+                    let item = if workspace_renderer_clipboard_kind(item) == destination_kind {
+                        item.clone()
+                    } else {
+                        workspace_renderer_clipboard_group_for_kind(item, destination_kind)
+                            .unwrap_or_else(|| item.clone())
                     };
+                    let clipboard = WorkspaceRendererClipboard { renderer: item };
                     let pasted = self.paste_workspace_renderers(
                         object_uid,
                         destination_group_uid,
                         &clipboard,
                     )?;
+                    group_uid = group_uid.or(pasted.group_uid);
                     renderer_uids.extend(pasted.renderer_uids);
                 }
                 Ok(WorkspaceRendererPasteResult {
-                    group_uid: None,
+                    group_uid,
                     renderer_uids,
                 })
             }
@@ -56490,11 +56532,11 @@ end_header
             .paste_workspace_renderers(group_multi_target_uid, None, &group_multi_clipboard)
             .unwrap();
         assert_eq!(group_multi_paste.renderer_uids.len(), 1);
-        assert_eq!(group_multi_paste.group_uid, None);
+        let pasted_group_uid = group_multi_paste.group_uid.unwrap();
         let group_multi_target = app.scene_manager().object(group_multi_target_uid).unwrap();
-        assert!(group_multi_target.renderers().iter().any(|renderer| {
-            renderer.renderer_type() == "*group" && renderer.name() == "representations"
-        }));
+        let pasted_group = group_multi_target.renderer(pasted_group_uid).unwrap();
+        assert_eq!(pasted_group.renderer_type(), "*group");
+        assert_eq!(pasted_group.name(), "representations");
         assert!(group_multi_target
             .renderers()
             .iter()
@@ -56837,6 +56879,27 @@ end_header
             .unwrap();
         assert!(pasted.renderer_uids.is_empty());
         assert_eq!(app.lw_object_summary(lw_uid).unwrap().renderers.len(), 4);
+
+        let map_group_uid = app.create_renderer_group(map_uid, "mixed group").unwrap();
+        let mixed_group_clipboard = app
+            .copy_workspace_renderers(&[(map_uid, map_group_uid), (surface_uid, first_surface_uid)])
+            .unwrap();
+        let pasted = app
+            .paste_workspace_renderers(surface_uid, None, &mixed_group_clipboard)
+            .unwrap();
+        assert_eq!(pasted.renderer_uids.len(), 1);
+        let pasted_group_uid = pasted.group_uid.unwrap();
+        let surface = app.surface_summary(surface_uid).unwrap();
+        assert_eq!(surface.renderers.len(), 6);
+        assert_eq!(
+            surface
+                .renderer_groups
+                .iter()
+                .find(|group| group.uid == pasted_group_uid)
+                .unwrap()
+                .name,
+            "mixed group"
+        );
     }
 
     #[test]
