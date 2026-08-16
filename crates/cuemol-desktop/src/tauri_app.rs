@@ -1123,6 +1123,15 @@ struct WorkspaceMoveRendererInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceMoveRenderersInput {
+    object_uid: u64,
+    renderer_uids: Vec<u64>,
+    target_uid: u64,
+    position: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceRendererCollapsedInput {
     object_uid: u64,
     renderer_uid: u64,
@@ -3291,6 +3300,30 @@ impl AppModel {
             .map_err(|error| error.to_string())?;
         if moved {
             self.status = "Move renderer".to_string();
+        }
+        Ok(moved)
+    }
+
+    fn move_workspace_renderers(
+        &mut self,
+        input: WorkspaceMoveRenderersInput,
+    ) -> Result<bool, String> {
+        let renderer_uids = input
+            .renderer_uids
+            .into_iter()
+            .map(Uid::new)
+            .collect::<Vec<_>>();
+        let moved = self
+            .desktop
+            .move_renderers_in_object(
+                Uid::new(input.object_uid),
+                &renderer_uids,
+                Uid::new(input.target_uid),
+                &input.position,
+            )
+            .map_err(|error| error.to_string())?;
+        if moved {
+            self.status = format!("Move {} renderers", renderer_uids.len());
         }
         Ok(moved)
     }
@@ -6542,6 +6575,7 @@ enum ModelRequest {
     DeleteWorkspaceItems(Vec<WorkspaceDeleteInput>),
     MoveWorkspaceObject(WorkspaceMoveObjectInput),
     MoveWorkspaceRenderer(WorkspaceMoveRendererInput),
+    MoveWorkspaceRenderers(WorkspaceMoveRenderersInput),
     SetWorkspaceObjectCollapsed(WorkspaceObjectCollapsedInput),
     SetWorkspaceRendererCollapsed(WorkspaceRendererCollapsedInput),
     SetWorkspaceRendererSelection(WorkspaceRendererSelectionInput),
@@ -8509,6 +8543,18 @@ fn handle_model_request(
             let undo = model.capture_undo();
             if model.move_workspace_renderer(input)? {
                 model.push_undo(undo);
+            }
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::MoveWorkspaceRenderers(input) => {
+            let undo = model.capture_undo();
+            match model.move_workspace_renderers(input) {
+                Ok(true) => model.push_undo(undo),
+                Ok(false) => {}
+                Err(error) => {
+                    model.restore_undo(undo)?;
+                    return Err(error);
+                }
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11184,6 +11230,17 @@ fn move_workspace_renderer(
 }
 
 #[tauri::command]
+fn move_workspace_renderers(
+    input: WorkspaceMoveRenderersInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::MoveWorkspaceRenderers(input),
+    )?)
+}
+
+#[tauri::command]
 fn set_workspace_object_collapsed(
     input: WorkspaceObjectCollapsedInput,
     state: State<'_, ManagedState>,
@@ -12920,6 +12977,7 @@ pub fn run() -> Result<(), tauri::Error> {
             delete_workspace_items,
             move_workspace_object,
             move_workspace_renderer,
+            move_workspace_renderers,
             set_workspace_object_collapsed,
             set_workspace_renderer_collapsed,
             set_workspace_renderer_selection,
@@ -17140,6 +17198,32 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![second_uid, renderer_uid]
         );
+
+        let undo_count = model.undo_stack.len();
+        handle_model_request(
+            &mut model,
+            ModelRequest::MoveWorkspaceRenderers(WorkspaceMoveRenderersInput {
+                object_uid: map_uid.get(),
+                renderer_uids: vec![second_uid, renderer_uid],
+                target_uid: group_uid,
+                position: "before".to_string(),
+            }),
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(model.undo_stack.len(), undo_count + 1);
+        assert_eq!(snapshot.undo_descriptions[0], "Move 2 renderers");
+        assert!(snapshot.density_maps[0]
+            .renderers
+            .iter()
+            .filter(|renderer| renderer.renderer_type != "*group")
+            .all(|renderer| renderer.group.is_none()));
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model.snapshot().density_maps[0]
+            .renderers
+            .iter()
+            .filter(|renderer| renderer.renderer_type != "*group")
+            .all(|renderer| renderer.group.as_deref() == Some("renamed maps")));
 
         handle_model_request(
             &mut model,

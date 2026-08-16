@@ -9596,6 +9596,111 @@ impl DesktopAppState {
         Ok(object.move_renderer_relative(renderer_uid, anchor_uid, after) || group_changed)
     }
 
+    pub fn workspace_renderer_parent_group(
+        &self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+    ) -> Result<Option<String>> {
+        if let Some(object) = self.scene_manager().object(object_uid) {
+            let renderer = object
+                .renderer(renderer_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+            return Ok(renderer.group().map(str::to_string));
+        }
+        let (_, _, renderer_type, _) =
+            self.workspace_renderer_style_state(object_uid, renderer_uid)?;
+        if renderer_type == "*group" {
+            Ok(None)
+        } else {
+            self.aux_renderer_group_membership(object_uid, renderer_uid)
+        }
+    }
+
+    pub fn move_renderers_in_object(
+        &mut self,
+        object_uid: Uid,
+        renderer_uids: &[Uid],
+        target_uid: Uid,
+        position: &str,
+    ) -> Result<bool> {
+        if renderer_uids.is_empty() {
+            return Ok(false);
+        }
+        if !matches!(position, "before" | "after" | "inside") {
+            return Err(CueMolError::invalid_argument(format!(
+                "unsupported renderer drop position: {position}"
+            )));
+        }
+        let mut sources = Vec::with_capacity(renderer_uids.len());
+        for renderer_uid in renderer_uids {
+            if *renderer_uid == target_uid {
+                return Err(CueMolError::invalid_argument(
+                    "renderer drop target cannot be part of the dragged selection",
+                ));
+            }
+            if !sources.contains(renderer_uid) {
+                sources.push(*renderer_uid);
+            }
+        }
+        let source_states = sources
+            .iter()
+            .map(|renderer_uid| {
+                Ok((
+                    self.workspace_renderer_parent_group(object_uid, *renderer_uid)?,
+                    self.workspace_renderer_style_state(object_uid, *renderer_uid)?
+                        .2,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let source_parent = source_states[0].0.as_deref();
+        if source_states
+            .iter()
+            .any(|(parent, _)| parent.as_deref() != source_parent)
+        {
+            return Err(CueMolError::invalid_argument(
+                "dragged renderers must have the same parent",
+            ));
+        }
+        let target_type = self
+            .workspace_renderer_style_state(object_uid, target_uid)?
+            .2;
+        let target_parent = self.workspace_renderer_parent_group(object_uid, target_uid)?;
+        if position == "inside"
+            && (target_type != "*group"
+                || source_states
+                    .iter()
+                    .any(|(_, renderer_type)| renderer_type == "*group"))
+        {
+            return Err(CueMolError::invalid_argument(
+                "only renderers can be moved into renderer groups",
+            ));
+        }
+        if position != "inside"
+            && target_parent.is_some()
+            && source_states
+                .iter()
+                .any(|(_, renderer_type)| renderer_type == "*group")
+        {
+            return Err(CueMolError::invalid_argument(
+                "renderer groups cannot be moved into another group",
+            ));
+        }
+
+        let mut changed = false;
+        if position == "after" {
+            for renderer_uid in sources.into_iter().rev() {
+                changed |=
+                    self.move_renderer_in_object(object_uid, renderer_uid, target_uid, position)?;
+            }
+        } else {
+            for renderer_uid in sources {
+                changed |=
+                    self.move_renderer_in_object(object_uid, renderer_uid, target_uid, position)?;
+            }
+        }
+        Ok(changed)
+    }
+
     fn move_aux_renderer_in_object(
         &mut self,
         object_uid: Uid,
@@ -56430,6 +56535,38 @@ end_header
             object.renderer(first_uid).unwrap().qsc_attr("ui_order"),
             Some("4")
         );
+
+        assert!(app
+            .move_renderers_in_object(object_uid, &[second_uid, free_uid], group_uid, "before")
+            .is_err());
+        assert!(app
+            .move_renderers_in_object(object_uid, &[free_uid, first_uid], second_uid, "before")
+            .unwrap());
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert_eq!(
+            object
+                .renderers()
+                .iter()
+                .map(|renderer| renderer.uid())
+                .collect::<Vec<_>>(),
+            [free_uid, first_uid, second_uid, group_uid]
+        );
+        assert_eq!(object.renderer(free_uid).unwrap().group(), None);
+        assert_eq!(object.renderer(first_uid).unwrap().group(), None);
+        assert!(app
+            .move_renderers_in_object(object_uid, &[free_uid, first_uid], group_uid, "inside")
+            .unwrap());
+        let object = app.scene_manager().object(object_uid).unwrap();
+        assert_eq!(
+            object
+                .renderers()
+                .iter()
+                .map(|renderer| renderer.uid())
+                .collect::<Vec<_>>(),
+            [second_uid, group_uid, free_uid, first_uid]
+        );
+        assert_eq!(object.renderer(free_uid).unwrap().group(), Some("renamed"));
+        assert_eq!(object.renderer(first_uid).unwrap().group(), Some("renamed"));
 
         assert!(app
             .destroy_renderer_group_in_object(object_uid, group_uid)

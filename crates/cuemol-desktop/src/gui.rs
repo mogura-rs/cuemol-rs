@@ -1892,11 +1892,11 @@ struct NativeWorkspaceObjectDragPayload {
     owner: NativePropertyObject,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeRendererDragPayload {
     object_uid: cuemol_core::Uid,
-    renderer_uid: cuemol_core::Uid,
-    is_group: bool,
+    renderer_uids: Vec<cuemol_core::Uid>,
+    contains_group: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4493,6 +4493,91 @@ impl GuiApplication {
         }
     }
 
+    fn workspace_renderer_drag_payload(
+        &self,
+        target: NativeWorkspaceTarget,
+        owner: NativePropertyObject,
+        renderer_uid: cuemol_core::Uid,
+        is_group: bool,
+    ) -> NativeRendererDragPayload {
+        let single = || NativeRendererDragPayload {
+            object_uid: owner.uid(),
+            renderer_uids: vec![renderer_uid],
+            contains_group: is_group,
+        };
+        if self.workspace_multiple_selection.len() < 2
+            || !self.workspace_multiple_selection.contains(&target)
+        {
+            return single();
+        }
+        let mut renderer_uids = Vec::new();
+        let mut contains_group = false;
+        for candidate in &self.workspace_selection_order {
+            if !self.workspace_multiple_selection.contains(candidate) {
+                continue;
+            }
+            let NativeWorkspaceTarget::Renderer {
+                owner: candidate_owner,
+                renderer_uid,
+                is_group,
+                ..
+            } = candidate
+            else {
+                return NativeRendererDragPayload {
+                    object_uid: owner.uid(),
+                    renderer_uids: Vec::new(),
+                    contains_group: false,
+                };
+            };
+            if *candidate_owner != owner {
+                return NativeRendererDragPayload {
+                    object_uid: owner.uid(),
+                    renderer_uids: Vec::new(),
+                    contains_group: false,
+                };
+            }
+            renderer_uids.push(*renderer_uid);
+            contains_group |= *is_group;
+        }
+        if renderer_uids.len() != self.workspace_multiple_selection.len() {
+            return NativeRendererDragPayload {
+                object_uid: owner.uid(),
+                renderer_uids: Vec::new(),
+                contains_group: false,
+            };
+        }
+        let parent_groups = renderer_uids
+            .iter()
+            .map(|renderer_uid| {
+                self.state
+                    .workspace_renderer_parent_group(owner.uid(), *renderer_uid)
+            })
+            .collect::<Result<Vec<_>>>();
+        let Ok(parent_groups) = parent_groups else {
+            return NativeRendererDragPayload {
+                object_uid: owner.uid(),
+                renderer_uids: Vec::new(),
+                contains_group: false,
+            };
+        };
+        if parent_groups
+            .iter()
+            .skip(1)
+            .any(|group| group != &parent_groups[0])
+        {
+            return NativeRendererDragPayload {
+                object_uid: owner.uid(),
+                renderer_uids: Vec::new(),
+                contains_group: false,
+            };
+        }
+        NativeRendererDragPayload {
+            object_uid: owner.uid(),
+            renderer_uids,
+            contains_group,
+        }
+    }
+
     fn select_workspace_target(&mut self, target: NativeWorkspaceTarget, multiple: bool) -> bool {
         if !multiple {
             self.workspace_multiple_selection.clear();
@@ -6288,11 +6373,7 @@ impl GuiApplication {
             target,
             self.selected_object.is_none() && self.workspace_aux_selection == Some(selection),
         );
-        let payload = NativeRendererDragPayload {
-            object_uid: owner.uid(),
-            renderer_uid: renderer.uid,
-            is_group,
-        };
+        let payload = self.workspace_renderer_drag_payload(target, owner, renderer.uid, is_group);
         let drag_source = ui.dnd_drag_source(
             egui::Id::new(("workspace-aux-renderer-drag", renderer.uid.get())),
             payload,
@@ -6367,11 +6448,13 @@ impl GuiApplication {
             .dnd_hover_payload::<NativeRendererDragPayload>()
         {
             if source.object_uid == owner.uid()
-                && source.renderer_uid != renderer.uid
-                && (!source.is_group || renderer.group.is_none())
+                && !source.renderer_uids.is_empty()
+                && !source.renderer_uids.contains(&renderer.uid)
+                && (!source.contains_group || renderer.group.is_none())
             {
                 let fraction = ctx_pointer_vertical_fraction(ui.ctx(), drop_rect);
-                let inside = is_group && !source.is_group && (0.25..=0.75).contains(&fraction);
+                let inside =
+                    is_group && !source.contains_group && (0.25..=0.75).contains(&fraction);
                 let stroke = egui::Stroke::new(2.0, ui.visuals().selection.bg_fill);
                 if inside {
                     ui.painter()
@@ -6398,25 +6481,28 @@ impl GuiApplication {
         else {
             return;
         };
-        if source.object_uid != owner.uid() || source.renderer_uid == renderer.uid {
+        if source.object_uid != owner.uid()
+            || source.renderer_uids.is_empty()
+            || source.renderer_uids.contains(&renderer.uid)
+        {
             return;
         }
-        if source.is_group && renderer.group.is_some() {
+        if source.contains_group && renderer.group.is_some() {
             self.set_status("Renderer groups cannot be moved into another group");
             return;
         }
         let fraction = ctx_pointer_vertical_fraction(ui.ctx(), drop_rect);
-        let position = if is_group && !source.is_group && (0.25..=0.75).contains(&fraction) {
+        let position = if is_group && !source.contains_group && (0.25..=0.75).contains(&fraction) {
             "inside"
         } else if fraction < 0.5 {
             "before"
         } else {
             "after"
         };
-        self.move_workspace_renderer(
+        self.move_workspace_renderers(
             scene_uid,
             owner.uid(),
-            source.renderer_uid,
+            &source.renderer_uids,
             renderer.uid,
             position,
         );
@@ -6444,11 +6530,7 @@ impl GuiApplication {
                 && self.selected_object == Some(object_uid)
                 && self.selected_renderer == Some(renderer.uid),
         );
-        let payload = NativeRendererDragPayload {
-            object_uid,
-            renderer_uid: renderer.uid,
-            is_group,
-        };
+        let payload = self.workspace_renderer_drag_payload(target, owner, renderer.uid, is_group);
         let drag_source = ui.dnd_drag_source(
             egui::Id::new(("workspace-renderer-drag", renderer.uid.get())),
             payload,
@@ -6658,11 +6740,13 @@ impl GuiApplication {
             .dnd_hover_payload::<NativeRendererDragPayload>()
         {
             if source.object_uid == object_uid
-                && source.renderer_uid != renderer.uid
-                && (!source.is_group || renderer.group.is_none())
+                && !source.renderer_uids.is_empty()
+                && !source.renderer_uids.contains(&renderer.uid)
+                && (!source.contains_group || renderer.group.is_none())
             {
                 let fraction = ctx_pointer_vertical_fraction(ui.ctx(), drop_rect);
-                let inside = is_group && !source.is_group && (0.25..=0.75).contains(&fraction);
+                let inside =
+                    is_group && !source.contains_group && (0.25..=0.75).contains(&fraction);
                 let stroke = egui::Stroke::new(2.0, ui.visuals().selection.bg_fill);
                 if inside {
                     ui.painter()
@@ -6689,25 +6773,28 @@ impl GuiApplication {
         else {
             return;
         };
-        if source.object_uid != object_uid || source.renderer_uid == renderer.uid {
+        if source.object_uid != object_uid
+            || source.renderer_uids.is_empty()
+            || source.renderer_uids.contains(&renderer.uid)
+        {
             return;
         }
-        if source.is_group && renderer.group.is_some() {
+        if source.contains_group && renderer.group.is_some() {
             self.set_status("Renderer groups cannot be moved into another group");
             return;
         }
         let fraction = ctx_pointer_vertical_fraction(ui.ctx(), drop_rect);
-        let position = if is_group && !source.is_group && (0.25..=0.75).contains(&fraction) {
+        let position = if is_group && !source.contains_group && (0.25..=0.75).contains(&fraction) {
             "inside"
         } else if fraction < 0.5 {
             "before"
         } else {
             "after"
         };
-        self.move_workspace_renderer(
+        self.move_workspace_renderers(
             scene_uid,
             object_uid,
-            source.renderer_uid,
+            &source.renderer_uids,
             renderer.uid,
             position,
         );
@@ -7427,6 +7514,7 @@ impl GuiApplication {
         }
     }
 
+    #[cfg(test)]
     fn move_workspace_renderer(
         &mut self,
         scene_uid: cuemol_core::Uid,
@@ -7435,18 +7523,42 @@ impl GuiApplication {
         target_uid: cuemol_core::Uid,
         position: &str,
     ) {
+        self.move_workspace_renderers(
+            scene_uid,
+            object_uid,
+            std::slice::from_ref(&renderer_uid),
+            target_uid,
+            position,
+        );
+    }
+
+    fn move_workspace_renderers(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
+        renderer_uids: &[cuemol_core::Uid],
+        target_uid: cuemol_core::Uid,
+        position: &str,
+    ) {
         let undo = self.capture_undo();
         match self
             .state
-            .move_renderer_in_object(object_uid, renderer_uid, target_uid, position)
+            .move_renderers_in_object(object_uid, renderer_uids, target_uid, position)
         {
             Ok(true) => {
                 self.push_undo_snapshot(undo);
                 self.modified_scenes.insert(scene_uid);
-                self.set_status("Move renderer");
+                if renderer_uids.len() == 1 {
+                    self.set_status("Move renderer");
+                } else {
+                    self.set_status(format!("Move {} renderers", renderer_uids.len()));
+                }
             }
             Ok(false) => {}
-            Err(error) => self.set_status(format!("Move renderer error: {error}")),
+            Err(error) => {
+                self.restore_gui_undo_state(undo);
+                self.set_status(format!("Move renderer error: {error}"));
+            }
         }
     }
 
@@ -27209,6 +27321,96 @@ mod tests {
         assert!(restored.renderer(group_uid).is_some());
         assert!(restored.renderer(child_uid).is_some());
         assert_eq!(app.workspace_multiple_selection, [object, group, child]);
+    }
+
+    #[test]
+    fn native_workspace_multiple_renderer_drag_moves_one_undoable_block() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("grouped", cuemol_molstr::MolCoord::new());
+        let (group_uid, first_uid, second_uid, free_uid) = {
+            let object = app
+                .state
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .unwrap();
+            let group_uid = object.add_renderer("*group", "group");
+            let first_uid = object.add_renderer("simple", "first");
+            object
+                .renderer_mut(first_uid)
+                .unwrap()
+                .set_qsc_attr("group", "group");
+            let second_uid = object.add_renderer("cpk", "second");
+            object
+                .renderer_mut(second_uid)
+                .unwrap()
+                .set_qsc_attr("group", "group");
+            let free_uid = object.add_renderer("trace", "free");
+            (group_uid, first_uid, second_uid, free_uid)
+        };
+        let owner = NativePropertyObject::Molecule(object_uid);
+        let first = NativeWorkspaceTarget::Renderer {
+            scene_uid,
+            owner,
+            renderer_uid: first_uid,
+            is_group: false,
+        };
+        let second = NativeWorkspaceTarget::Renderer {
+            scene_uid,
+            owner,
+            renderer_uid: second_uid,
+            is_group: false,
+        };
+        app.workspace_multiple_selection = vec![second, first];
+        app.workspace_selection_order = app.workspace_targets_in_tree_order();
+        let payload = app.workspace_renderer_drag_payload(first, owner, first_uid, false);
+        assert_eq!(payload.renderer_uids, [first_uid, second_uid]);
+        assert!(!payload.contains_group);
+
+        app.move_workspace_renderers(
+            scene_uid,
+            object_uid,
+            &payload.renderer_uids,
+            free_uid,
+            "before",
+        );
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert_eq!(
+            object
+                .renderers()
+                .iter()
+                .map(|renderer| renderer.uid())
+                .collect::<Vec<_>>(),
+            [group_uid, first_uid, second_uid, free_uid]
+        );
+        assert!(object
+            .renderers()
+            .iter()
+            .filter(|renderer| [first_uid, second_uid].contains(&renderer.uid()))
+            .all(|renderer| renderer.group().is_none()));
+        assert_eq!(app.undo_stack.len(), 1);
+        assert_eq!(app.status, "Move 2 renderers");
+
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.renderer(first_uid).unwrap().group(), Some("group"));
+        assert_eq!(object.renderer(second_uid).unwrap().group(), Some("group"));
+
+        let free = NativeWorkspaceTarget::Renderer {
+            scene_uid,
+            owner,
+            renderer_uid: free_uid,
+            is_group: false,
+        };
+        app.workspace_multiple_selection = vec![first, free];
+        let payload = app.workspace_renderer_drag_payload(first, owner, first_uid, false);
+        assert!(payload.renderer_uids.is_empty());
     }
 
     #[test]

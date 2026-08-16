@@ -8399,6 +8399,48 @@ function clearWorkspaceRendererDropMarkers() {
     .forEach((row) => row.classList.remove("drop-before", "drop-after", "drop-inside"));
 }
 
+function workspaceRendererDragPayload(object, renderer, target) {
+  const single = {
+    objectUid: object.uid,
+    rendererUid: renderer.uid,
+    rendererUids: [renderer.uid],
+    isGroup: renderer.rendererType === "*group",
+  };
+  if (
+    workspaceSelectionKind !== "multiple" ||
+    workspaceMultipleSelection.length < 2 ||
+    !workspaceTargetIsSelected(target)
+  ) {
+    return single;
+  }
+  if (
+    workspaceMultipleSelection.some(
+      (candidate) => candidate.objectUid !== object.uid || candidate.rendererUid === null,
+    )
+  ) {
+    return { ...single, rendererUids: [] };
+  }
+  const selectedUids = new Set(
+    workspaceMultipleSelection.map((candidate) => candidate.rendererUid),
+  );
+  const renderers = (object.renderers || []).filter((candidate) => selectedUids.has(candidate.uid));
+  if (renderers.length !== workspaceMultipleSelection.length) {
+    return { ...single, rendererUids: [] };
+  }
+  const parentGroup = (candidate) =>
+    candidate.rendererType === "*group" ? null : candidate.group || null;
+  const parent = parentGroup(renderers[0]);
+  if (renderers.some((candidate) => parentGroup(candidate) !== parent)) {
+    return { ...single, rendererUids: [] };
+  }
+  return {
+    objectUid: object.uid,
+    rendererUid: renderers[0].uid,
+    rendererUids: renderers.map((candidate) => candidate.uid),
+    isGroup: renderers.some((candidate) => candidate.rendererType === "*group"),
+  };
+}
+
 function workspaceRendererDropPosition(event, renderer) {
   const bounds = event.currentTarget.getBoundingClientRect();
   const fraction = bounds.height > 0 ? (event.clientY - bounds.top) / bounds.height : 0.5;
@@ -8415,7 +8457,14 @@ function workspaceRendererDropPosition(event, renderer) {
 
 function canDropWorkspaceRenderer(object, renderer, position) {
   const source = draggedWorkspaceRenderer;
-  if (!source || source.objectUid !== object.uid || source.rendererUid === renderer.uid) return false;
+  if (
+    !source ||
+    source.objectUid !== object.uid ||
+    source.rendererUids.length === 0 ||
+    source.rendererUids.includes(renderer.uid)
+  ) {
+    return false;
+  }
   if (position === "inside") return !source.isGroup && renderer.rendererType === "*group";
   if (source.isGroup && renderer.group) return false;
   return true;
@@ -8424,13 +8473,12 @@ function canDropWorkspaceRenderer(object, renderer, position) {
 function configureWorkspaceRendererDrag(row, object, renderer, disabled = false) {
   row.draggable = !disabled;
   if (disabled) return;
-  const isGroup = renderer.rendererType === "*group";
   row.addEventListener("dragstart", (event) => {
-    draggedWorkspaceRenderer = {
-      objectUid: object.uid,
-      rendererUid: renderer.uid,
-      isGroup,
-    };
+    draggedWorkspaceRenderer = workspaceRendererDragPayload(
+      object,
+      renderer,
+      row.workspaceSelectionTarget,
+    );
     row.classList.add("dragging");
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData(
@@ -8459,13 +8507,21 @@ function configureWorkspaceRendererDrag(row, object, renderer, disabled = false)
     if (!source || !canDropWorkspaceRenderer(object, renderer, position)) return;
     event.preventDefault();
     draggedWorkspaceRenderer = null;
-    await mutateWithoutViewport("move_workspace_renderer", {
-      input: {
-        objectUid: object.uid,
-        rendererUid: source.rendererUid,
-        targetUid: renderer.uid,
-        position,
-      },
+    const multiple = source.rendererUids.length > 1;
+    await mutateWithoutViewport(multiple ? "move_workspace_renderers" : "move_workspace_renderer", {
+      input: multiple
+        ? {
+            objectUid: object.uid,
+            rendererUids: source.rendererUids,
+            targetUid: renderer.uid,
+            position,
+          }
+        : {
+            objectUid: object.uid,
+            rendererUid: source.rendererUid,
+            targetUid: renderer.uid,
+            position,
+          },
     });
   });
   row.addEventListener("dragend", () => {
@@ -9282,55 +9338,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           object.uid,
           renderer.uid,
         );
-        rendererRow.draggable = !isRenaming;
-        rendererRow.addEventListener("dragstart", (event) => {
-          draggedWorkspaceRenderer = {
-            objectUid: object.uid,
-            rendererUid: renderer.uid,
-            isGroup,
-          };
-          rendererRow.classList.add("dragging");
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData(
-            "application/x-cuemol-renderer",
-            JSON.stringify(draggedWorkspaceRenderer),
-          );
-        });
-        rendererRow.addEventListener("dragover", (event) => {
-          const position = workspaceRendererDropPosition(event, renderer);
-          if (!canDropWorkspaceRenderer(object, renderer, position)) return;
-          event.preventDefault();
-          event.dataTransfer.dropEffect = "move";
-          clearWorkspaceRendererDropMarkers();
-          rendererRow.classList.add(`drop-${position}`);
-          rendererRow.dataset.dropPosition = position;
-        });
-        rendererRow.addEventListener("dragleave", (event) => {
-          if (!rendererRow.contains(event.relatedTarget)) {
-            rendererRow.classList.remove("drop-before", "drop-after", "drop-inside");
-          }
-        });
-        rendererRow.addEventListener("drop", async (event) => {
-          const source = draggedWorkspaceRenderer;
-          const position = rendererRow.dataset.dropPosition || "before";
-          clearWorkspaceRendererDropMarkers();
-          if (!source || !canDropWorkspaceRenderer(object, renderer, position)) return;
-          event.preventDefault();
-          draggedWorkspaceRenderer = null;
-          await mutateWithoutViewport("move_workspace_renderer", {
-            input: {
-              objectUid: object.uid,
-              rendererUid: source.rendererUid,
-              targetUid: renderer.uid,
-              position,
-            },
-          });
-        });
-        rendererRow.addEventListener("dragend", () => {
-          draggedWorkspaceRenderer = null;
-          rendererRow.classList.remove("dragging");
-          clearWorkspaceRendererDropMarkers();
-        });
+        configureWorkspaceRendererDrag(rendererRow, object, renderer, isRenaming);
         rendererRow.addEventListener("dblclick", () => {
           clearWorkspaceRenameTimer();
           showReferenceDialog("Renderer Properties");

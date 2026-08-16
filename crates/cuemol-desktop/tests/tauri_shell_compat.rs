@@ -1108,10 +1108,13 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
 
 #[test]
 fn tauri_workspace_reorders_and_regroups_renderers_by_dragging() {
-    assert!(JS.contains("rendererRow.draggable = !isRenaming"));
+    assert!(JS.contains("function configureWorkspaceRendererDrag(row, object, renderer"));
+    assert!(JS.contains("row.draggable = !disabled"));
+    assert!(JS.contains("function workspaceRendererDragPayload(object, renderer, target)"));
     assert!(JS.contains("application/x-cuemol-renderer"));
     assert!(JS.contains("function workspaceRendererDropPosition(event, renderer)"));
-    assert!(JS.contains("mutateWithoutViewport(\"move_workspace_renderer\""));
+    assert!(JS.contains("\"move_workspace_renderers\" : \"move_workspace_renderer\""));
+    assert!(TAURI_APP_RS.contains("fn move_workspace_renderers("));
     assert!(CSS.contains(".tree-renderer.drop-before::after"));
     assert!(CSS.contains(".tree-renderer.drop-inside"));
 }
