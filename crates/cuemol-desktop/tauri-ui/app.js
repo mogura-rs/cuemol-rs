@@ -8468,6 +8468,36 @@ function workspaceRendererGroupTwisty(object, renderer) {
   return twisty;
 }
 
+function workspaceObjectTwisty(object) {
+  const twisty = document.createElement("span");
+  twisty.className = "workspace-object-twisty";
+  twisty.textContent = object.uiCollapsed ? "▸" : "▾";
+  twisty.title = object.uiCollapsed ? "Expand object" : "Collapse object";
+  twisty.setAttribute("role", "button");
+  twisty.setAttribute("aria-expanded", String(!object.uiCollapsed));
+  twisty.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    await mutateWithoutViewport("set_workspace_object_collapsed", {
+      input: {
+        objectUid: object.uid,
+        collapsed: !object.uiCollapsed,
+      },
+    });
+  });
+  return twisty;
+}
+
+function visibleWorkspaceRendererRows(object) {
+  if (object.uiCollapsed) return [];
+  return groupedMoleculeRenderers(object.renderers || []).flatMap((node) => [
+    { renderer: node.renderer, isChild: false },
+    ...(node.renderer.uiCollapsed ? [] : node.children).map((renderer) => ({
+      renderer,
+      isChild: true,
+    })),
+  ]);
+}
+
 function selectedDensityMap() {
   return snapshot?.densityMaps.find((map) => map.uid === selectedDensityMapUid) || null;
 }
@@ -8861,6 +8891,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           object.locked,
         ),
       );
+      if (object.renderers.length > 0) objectRow.prepend(workspaceObjectTwisty(object));
       if (objectIsRenaming) {
         objectRow.append(workspaceInlineRenameInput("object", object));
       }
@@ -8996,11 +9027,8 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         }
         objectBlock.append(rendererRow);
       };
-      for (const node of groupedMoleculeRenderers(object.renderers)) {
-        appendMoleculeRendererRow(node.renderer);
-        if (!node.renderer.uiCollapsed) {
-          for (const child of node.children) appendMoleculeRendererRow(child, true);
-        }
+      for (const { renderer, isChild } of visibleWorkspaceRendererRows(object)) {
+        appendMoleculeRendererRow(renderer, isChild);
       }
       workspaceObjectBlocks.push({
         uiOrder: object.uiOrder,
@@ -9054,6 +9082,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           surface.locked,
         ),
       );
+      if (surface.renderers.length > 0) surfaceRow.prepend(workspaceObjectTwisty(surface));
       if (surfaceIsRenaming) {
         surfaceRow.append(workspaceInlineRenameInput("surface", surface));
       }
@@ -9063,15 +9092,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       configureWorkspaceObjectDrag(surfaceRow, scene.uid, "surface", surface.uid);
       surfaceRow.draggable = !surfaceIsRenaming;
       surfaceBlock.append(surfaceRow);
-      for (const { renderer, isChild } of groupedMoleculeRenderers(
-        surface.renderers,
-      ).flatMap((node) => [
-        { renderer: node.renderer, isChild: false },
-        ...(node.renderer.uiCollapsed ? [] : node.children).map((renderer) => ({
-          renderer,
-          isChild: true,
-        })),
-      ])) {
+      for (const { renderer, isChild } of visibleWorkspaceRendererRows(surface)) {
         const isGroup = renderer.rendererType === "*group";
         const rendererIsRenaming =
           workspaceInlineRename?.kind === "surfaceRenderer" &&
@@ -9203,6 +9224,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           map.locked,
         ),
       );
+      if (map.renderers.length > 0) mapRow.prepend(workspaceObjectTwisty(map));
       if (mapIsRenaming) mapRow.append(workspaceInlineRenameInput("densityMap", map));
       const count = document.createElement("small");
       count.textContent = `${map.counts.join("×")} MAP`;
@@ -9210,15 +9232,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       configureWorkspaceObjectDrag(mapRow, scene.uid, "densityMap", map.uid);
       mapRow.draggable = !mapIsRenaming;
       mapBlock.append(mapRow);
-      for (const { renderer, isChild } of groupedMoleculeRenderers(map.renderers).flatMap(
-        (node) => [
-          { renderer: node.renderer, isChild: false },
-          ...(node.renderer.uiCollapsed ? [] : node.children).map((renderer) => ({
-            renderer,
-            isChild: true,
-          })),
-        ],
-      )) {
+      for (const { renderer, isChild } of visibleWorkspaceRendererRows(map)) {
         const isGroup = renderer.rendererType === "*group";
         const rendererIsRenaming =
           workspaceInlineRename?.kind === "densityRenderer" &&
@@ -9345,6 +9359,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           object.locked,
         ),
       );
+      if (object.renderers.length > 0) objectRow.prepend(workspaceObjectTwisty(object));
       if (objectIsRenaming) {
         objectRow.append(workspaceInlineRenameInput("lwObject", object));
       }
@@ -9354,15 +9369,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       configureWorkspaceObjectDrag(objectRow, scene.uid, "lwObject", object.uid);
       objectRow.draggable = !objectIsRenaming;
       objectBlock.append(objectRow);
-      for (const { renderer, isChild } of groupedMoleculeRenderers(
-        object.renderers,
-      ).flatMap((node) => [
-        { renderer: node.renderer, isChild: false },
-        ...(node.renderer.uiCollapsed ? [] : node.children).map((renderer) => ({
-          renderer,
-          isChild: true,
-        })),
-      ])) {
+      for (const { renderer, isChild } of visibleWorkspaceRendererRows(object)) {
         const isGroup = renderer.rendererType === "*group";
         const rendererIsRenaming =
           workspaceInlineRename?.kind === "lwRenderer" &&

@@ -1095,10 +1095,15 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
     assert!(JS.contains("function workspaceRendererGroupTwisty(object, renderer)"));
     assert!(JS.contains("mutateWithoutViewport(\"set_workspace_renderer_collapsed\""));
     assert!(JS.contains("node.renderer.uiCollapsed"));
+    assert!(JS.contains("function workspaceObjectTwisty(object)"));
+    assert!(JS.contains("mutateWithoutViewport(\"set_workspace_object_collapsed\""));
+    assert!(JS.contains("if (object.uiCollapsed) return []"));
     assert!(CSS.contains(".tree-renderer.renderer-group"));
     assert!(CSS.contains(".tree-renderer.group-child"));
     assert!(CSS.contains(".workspace-group-twisty"));
+    assert!(CSS.contains(".workspace-object-twisty"));
     assert!(NATIVE_GUI_RS.contains("fn set_workspace_renderer_group_collapsed("));
+    assert!(NATIVE_GUI_RS.contains("fn set_workspace_object_collapsed("));
 }
 
 #[test]

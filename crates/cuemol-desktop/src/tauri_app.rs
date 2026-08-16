@@ -543,6 +543,7 @@ struct ObjectDto {
     uid: u64,
     scene_uid: u64,
     ui_order: i32,
+    ui_collapsed: bool,
     name: String,
     source: String,
     source_type: String,
@@ -666,6 +667,7 @@ struct DensityMapDto {
     uid: u64,
     scene_uid: u64,
     ui_order: i32,
+    ui_collapsed: bool,
     name: String,
     class_name: String,
     format: String,
@@ -686,6 +688,7 @@ struct SurfaceDto {
     uid: u64,
     scene_uid: u64,
     ui_order: i32,
+    ui_collapsed: bool,
     name: String,
     class_name: String,
     format: String,
@@ -705,6 +708,7 @@ struct LwObjectDto {
     uid: u64,
     scene_uid: u64,
     ui_order: i32,
+    ui_collapsed: bool,
     name: String,
     class_name: String,
     format: String,
@@ -1116,6 +1120,13 @@ struct WorkspaceMoveRendererInput {
 struct WorkspaceRendererCollapsedInput {
     object_uid: u64,
     renderer_uid: u64,
+    collapsed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceObjectCollapsedInput {
+    object_uid: u64,
     collapsed: bool,
 }
 
@@ -1747,6 +1758,7 @@ impl AppModel {
                     uid: object.uid.get(),
                     scene_uid: scene.uid.get(),
                     ui_order: object.ui_order,
+                    ui_collapsed: object.ui_collapsed,
                     name: object.name,
                     source: object_state.source().to_string(),
                     source_type: object_state.source_type().to_string(),
@@ -1856,6 +1868,7 @@ impl AppModel {
                     uid: map.uid.get(),
                     scene_uid: map.scene_uid.get(),
                     ui_order: map.ui_order,
+                    ui_collapsed: map.ui_collapsed,
                     name: map.name,
                     class_name: map.class_name,
                     format: map.format,
@@ -1938,6 +1951,7 @@ impl AppModel {
                     uid: surface.uid.get(),
                     scene_uid: surface.scene_uid.get(),
                     ui_order: surface.ui_order,
+                    ui_collapsed: surface.ui_collapsed,
                     name: surface.name,
                     class_name: surface.class_name,
                     format: surface.format,
@@ -1999,6 +2013,7 @@ impl AppModel {
                     uid: object.uid.get(),
                     scene_uid: object.scene_uid.get(),
                     ui_order: object.ui_order,
+                    ui_collapsed: object.ui_collapsed,
                     name: object.name,
                     class_name: object.class_name,
                     format: object.format,
@@ -3174,6 +3189,43 @@ impl AppModel {
             self.status = "Move renderer".to_string();
         }
         Ok(moved)
+    }
+
+    fn set_workspace_object_collapsed(
+        &mut self,
+        input: WorkspaceObjectCollapsedInput,
+    ) -> Result<(), String> {
+        let object_uid = Uid::new(input.object_uid);
+        let scene_uid = self
+            .desktop
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .or_else(|| {
+                self.desktop
+                    .density_map_summary(object_uid)
+                    .map(|map| map.scene_uid)
+            })
+            .or_else(|| {
+                self.desktop
+                    .scene_manager()
+                    .scene_uid_for_surface(object_uid)
+            })
+            .or_else(|| {
+                self.desktop
+                    .scene_manager()
+                    .scene_uid_for_lw_object(object_uid)
+            })
+            .ok_or_else(|| format!("object {} not found", object_uid.get()))?;
+        self.desktop
+            .set_workspace_object_collapsed(object_uid, input.collapsed)
+            .map_err(|error| error.to_string())?;
+        self.modified_scenes.insert(scene_uid);
+        self.status = if input.collapsed {
+            "Collapse object".to_string()
+        } else {
+            "Expand object".to_string()
+        };
+        Ok(())
     }
 
     fn set_workspace_renderer_collapsed(
@@ -6359,6 +6411,7 @@ enum ModelRequest {
     DeleteWorkspaceItem(WorkspaceDeleteInput),
     MoveWorkspaceObject(WorkspaceMoveObjectInput),
     MoveWorkspaceRenderer(WorkspaceMoveRendererInput),
+    SetWorkspaceObjectCollapsed(WorkspaceObjectCollapsedInput),
     SetWorkspaceRendererCollapsed(WorkspaceRendererCollapsedInput),
     SetWorkspaceRendererSelection(WorkspaceRendererSelectionInput),
     ChangeWorkspaceRendererType(WorkspaceRendererTypeInput),
@@ -8303,6 +8356,10 @@ fn handle_model_request(
             if model.move_workspace_renderer(input)? {
                 model.push_undo(undo);
             }
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetWorkspaceObjectCollapsed(input) => {
+            model.set_workspace_object_collapsed(input)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetWorkspaceRendererCollapsed(input) => {
@@ -10946,6 +11003,17 @@ fn move_workspace_renderer(
 }
 
 #[tauri::command]
+fn set_workspace_object_collapsed(
+    input: WorkspaceObjectCollapsedInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetWorkspaceObjectCollapsed(input),
+    )?)
+}
+
+#[tauri::command]
 fn set_workspace_renderer_collapsed(
     input: WorkspaceRendererCollapsedInput,
     state: State<'_, ManagedState>,
@@ -12658,6 +12726,7 @@ pub fn run() -> Result<(), tauri::Error> {
             delete_workspace_item,
             move_workspace_object,
             move_workspace_renderer,
+            set_workspace_object_collapsed,
             set_workspace_renderer_collapsed,
             set_workspace_renderer_selection,
             change_workspace_renderer_type,
@@ -16642,6 +16711,15 @@ mod tests {
         let (mut model, object_uid, renderer_uid) = model_with_renderer();
         handle_model_request(
             &mut model,
+            ModelRequest::SetWorkspaceObjectCollapsed(WorkspaceObjectCollapsedInput {
+                object_uid: object_uid.get(),
+                collapsed: true,
+            }),
+        )
+        .unwrap();
+        assert!(model.snapshot().objects[0].ui_collapsed);
+        handle_model_request(
+            &mut model,
             ModelRequest::SetWorkspaceVisible {
                 target: WorkspaceToggleInput {
                     kind: "object".to_string(),
@@ -16696,6 +16774,7 @@ mod tests {
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(!model.snapshot().objects[0].renderers[0].locked);
+        assert!(model.snapshot().objects[0].ui_collapsed);
         assert_eq!(model.status, "Undo: Workspace item locked");
     }
 

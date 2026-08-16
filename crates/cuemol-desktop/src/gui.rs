@@ -2291,6 +2291,20 @@ fn workspace_lock_toggle(ui: &mut egui::Ui, locked: bool, enabled: bool) -> Opti
         .then_some(!locked)
 }
 
+fn workspace_collapse_toggle(
+    ui: &mut egui::Ui,
+    collapsed: bool,
+    has_children: bool,
+) -> Option<bool> {
+    if !has_children {
+        return None;
+    }
+    ui.add(egui::Button::new(if collapsed { "▶" } else { "▼" }).frame(false))
+        .on_hover_text(if collapsed { "Expand" } else { "Collapse" })
+        .clicked()
+        .then_some(!collapsed)
+}
+
 fn ctx_pointer_vertical_fraction(ctx: &egui::Context, rect: egui::Rect) -> f32 {
     let y = ctx
         .input(|input| input.pointer.latest_pos())
@@ -4306,6 +4320,15 @@ impl GuiApplication {
                                 },
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        if let Some(collapsed) = workspace_collapse_toggle(
+                                            ui,
+                                            object.ui_collapsed,
+                                            object.renderer_count > 0,
+                                        ) {
+                                            self.set_workspace_object_collapsed(
+                                                scene.uid, owner, collapsed,
+                                            );
+                                        }
                                         if ui
                                             .checkbox(&mut visible, "")
                                             .on_hover_text("Visible")
@@ -4344,35 +4367,40 @@ impl GuiApplication {
                                     ui, camera, scene.uid, object.uid,
                                 );
                             });
-                            ui.indent(format!("object-{}", object.uid.get()), |ui| {
-                                let nodes = native_renderer_tree_nodes(
-                                    self.state.renderer_summaries(object.uid),
-                                );
-                                for node in nodes {
-                                    let is_group = node.renderer.renderer_type == "*group";
-                                    self.workspace_molecule_renderer_row(
-                                        ui,
-                                        camera,
-                                        scene.uid,
-                                        object.uid,
-                                        &node.renderer,
-                                        is_group,
+                            if !object.ui_collapsed {
+                                ui.indent(format!("object-{}", object.uid.get()), |ui| {
+                                    let nodes = native_renderer_tree_nodes(
+                                        self.state.renderer_summaries(object.uid),
                                     );
-                                    if is_group && !node.renderer.ui_collapsed {
-                                        ui.indent(
-                                            format!("renderer-group-{}", node.renderer.uid.get()),
-                                            |ui| {
-                                                for renderer in &node.children {
-                                                    self.workspace_molecule_renderer_row(
-                                                        ui, camera, scene.uid, object.uid,
-                                                        renderer, false,
-                                                    );
-                                                }
-                                            },
+                                    for node in nodes {
+                                        let is_group = node.renderer.renderer_type == "*group";
+                                        self.workspace_molecule_renderer_row(
+                                            ui,
+                                            camera,
+                                            scene.uid,
+                                            object.uid,
+                                            &node.renderer,
+                                            is_group,
                                         );
+                                        if is_group && !node.renderer.ui_collapsed {
+                                            ui.indent(
+                                                format!(
+                                                    "renderer-group-{}",
+                                                    node.renderer.uid.get()
+                                                ),
+                                                |ui| {
+                                                    for renderer in &node.children {
+                                                        self.workspace_molecule_renderer_row(
+                                                            ui, camera, scene.uid, object.uid,
+                                                            renderer, false,
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        }
                                     }
-                                }
-                            });
+                                });
+                            }
                         }
                         NativeWorkspaceObjectSummary::DensityMap(map) => {
                             let object_selection = WorkspaceAuxSelection::DensityMap {
@@ -4392,6 +4420,16 @@ impl GuiApplication {
                                 },
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        if let Some(collapsed) = workspace_collapse_toggle(
+                                            ui,
+                                            map.ui_collapsed,
+                                            !map.renderers.is_empty()
+                                                || !map.renderer_groups.is_empty(),
+                                        ) {
+                                            self.set_workspace_object_collapsed(
+                                                scene.uid, owner, collapsed,
+                                            );
+                                        }
                                         if ui
                                             .checkbox(&mut visible, "")
                                             .on_hover_text("Visible")
@@ -4432,33 +4470,35 @@ impl GuiApplication {
                                     owner,
                                 );
                             });
-                            ui.indent(format!("density-map-{}", map.uid.get()), |ui| {
-                                for node in native_density_renderer_tree_nodes(&map) {
-                                    let is_group = node.renderer.renderer_type == "*group";
-                                    self.workspace_aux_renderer_row(
-                                        ui,
-                                        camera,
-                                        scene.uid,
-                                        owner,
-                                        &node.renderer,
-                                    );
-                                    if is_group && !node.renderer.ui_collapsed {
-                                        ui.indent(
-                                            format!(
-                                                "density-renderer-group-{}",
-                                                node.renderer.uid.get()
-                                            ),
-                                            |ui| {
-                                                for renderer in &node.children {
-                                                    self.workspace_aux_renderer_row(
-                                                        ui, camera, scene.uid, owner, renderer,
-                                                    );
-                                                }
-                                            },
+                            if !map.ui_collapsed {
+                                ui.indent(format!("density-map-{}", map.uid.get()), |ui| {
+                                    for node in native_density_renderer_tree_nodes(&map) {
+                                        let is_group = node.renderer.renderer_type == "*group";
+                                        self.workspace_aux_renderer_row(
+                                            ui,
+                                            camera,
+                                            scene.uid,
+                                            owner,
+                                            &node.renderer,
                                         );
+                                        if is_group && !node.renderer.ui_collapsed {
+                                            ui.indent(
+                                                format!(
+                                                    "density-renderer-group-{}",
+                                                    node.renderer.uid.get()
+                                                ),
+                                                |ui| {
+                                                    for renderer in &node.children {
+                                                        self.workspace_aux_renderer_row(
+                                                            ui, camera, scene.uid, owner, renderer,
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        }
                                     }
-                                }
-                            });
+                                });
+                            }
                         }
                         NativeWorkspaceObjectSummary::Surface(surface) => {
                             let object_selection = WorkspaceAuxSelection::Surface {
@@ -4478,6 +4518,16 @@ impl GuiApplication {
                                 },
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        if let Some(collapsed) = workspace_collapse_toggle(
+                                            ui,
+                                            surface.ui_collapsed,
+                                            !surface.renderers.is_empty()
+                                                || !surface.renderer_groups.is_empty(),
+                                        ) {
+                                            self.set_workspace_object_collapsed(
+                                                scene.uid, owner, collapsed,
+                                            );
+                                        }
                                         if ui
                                             .checkbox(&mut visible, "")
                                             .on_hover_text("Visible")
@@ -4519,33 +4569,35 @@ impl GuiApplication {
                                     owner,
                                 );
                             });
-                            ui.indent(format!("surface-{}", surface.uid.get()), |ui| {
-                                for node in native_surface_renderer_tree_nodes(&surface) {
-                                    let is_group = node.renderer.renderer_type == "*group";
-                                    self.workspace_aux_renderer_row(
-                                        ui,
-                                        camera,
-                                        scene.uid,
-                                        owner,
-                                        &node.renderer,
-                                    );
-                                    if is_group && !node.renderer.ui_collapsed {
-                                        ui.indent(
-                                            format!(
-                                                "surface-renderer-group-{}",
-                                                node.renderer.uid.get()
-                                            ),
-                                            |ui| {
-                                                for renderer in &node.children {
-                                                    self.workspace_aux_renderer_row(
-                                                        ui, camera, scene.uid, owner, renderer,
-                                                    );
-                                                }
-                                            },
+                            if !surface.ui_collapsed {
+                                ui.indent(format!("surface-{}", surface.uid.get()), |ui| {
+                                    for node in native_surface_renderer_tree_nodes(&surface) {
+                                        let is_group = node.renderer.renderer_type == "*group";
+                                        self.workspace_aux_renderer_row(
+                                            ui,
+                                            camera,
+                                            scene.uid,
+                                            owner,
+                                            &node.renderer,
                                         );
+                                        if is_group && !node.renderer.ui_collapsed {
+                                            ui.indent(
+                                                format!(
+                                                    "surface-renderer-group-{}",
+                                                    node.renderer.uid.get()
+                                                ),
+                                                |ui| {
+                                                    for renderer in &node.children {
+                                                        self.workspace_aux_renderer_row(
+                                                            ui, camera, scene.uid, owner, renderer,
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        }
                                     }
-                                }
-                            });
+                                });
+                            }
                         }
                         NativeWorkspaceObjectSummary::Lightweight(object) => {
                             let object_selection = WorkspaceAuxSelection::Lightweight {
@@ -4565,6 +4617,16 @@ impl GuiApplication {
                                 },
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        if let Some(collapsed) = workspace_collapse_toggle(
+                                            ui,
+                                            object.ui_collapsed,
+                                            !object.renderers.is_empty()
+                                                || !object.renderer_groups.is_empty(),
+                                        ) {
+                                            self.set_workspace_object_collapsed(
+                                                scene.uid, owner, collapsed,
+                                            );
+                                        }
                                         if ui
                                             .checkbox(&mut visible, "")
                                             .on_hover_text("Visible")
@@ -4603,33 +4665,35 @@ impl GuiApplication {
                                     owner,
                                 );
                             });
-                            ui.indent(format!("lw-object-{}", object.uid.get()), |ui| {
-                                for node in native_lw_renderer_tree_nodes(&object) {
-                                    let is_group = node.renderer.renderer_type == "*group";
-                                    self.workspace_aux_renderer_row(
-                                        ui,
-                                        camera,
-                                        scene.uid,
-                                        owner,
-                                        &node.renderer,
-                                    );
-                                    if is_group && !node.renderer.ui_collapsed {
-                                        ui.indent(
-                                            format!(
-                                                "lw-renderer-group-{}",
-                                                node.renderer.uid.get()
-                                            ),
-                                            |ui| {
-                                                for renderer in &node.children {
-                                                    self.workspace_aux_renderer_row(
-                                                        ui, camera, scene.uid, owner, renderer,
-                                                    );
-                                                }
-                                            },
+                            if !object.ui_collapsed {
+                                ui.indent(format!("lw-object-{}", object.uid.get()), |ui| {
+                                    for node in native_lw_renderer_tree_nodes(&object) {
+                                        let is_group = node.renderer.renderer_type == "*group";
+                                        self.workspace_aux_renderer_row(
+                                            ui,
+                                            camera,
+                                            scene.uid,
+                                            owner,
+                                            &node.renderer,
                                         );
+                                        if is_group && !node.renderer.ui_collapsed {
+                                            ui.indent(
+                                                format!(
+                                                    "lw-renderer-group-{}",
+                                                    node.renderer.uid.get()
+                                                ),
+                                                |ui| {
+                                                    for renderer in &node.children {
+                                                        self.workspace_aux_renderer_row(
+                                                            ui, camera, scene.uid, owner, renderer,
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        }
                                     }
-                                }
-                            });
+                                });
+                            }
                         }
                     }
                 }
@@ -19340,6 +19404,28 @@ impl GuiApplication {
         );
     }
 
+    fn set_workspace_object_collapsed(
+        &mut self,
+        scene_uid: cuemol_core::Uid,
+        owner: NativePropertyObject,
+        collapsed: bool,
+    ) {
+        match self
+            .state
+            .set_workspace_object_collapsed(owner.uid(), collapsed)
+        {
+            Ok(()) => {
+                self.modified_scenes.insert(scene_uid);
+                self.set_status(if collapsed {
+                    "Collapse object"
+                } else {
+                    "Expand object"
+                });
+            }
+            Err(error) => self.set_status(format!("Object collapse error: {error}")),
+        }
+    }
+
     fn set_workspace_object_locked(&mut self, owner: NativePropertyObject, locked: bool) {
         let scene_uid = self.workspace_owner_scene_uid(owner);
         let undo = self.capture_undo();
@@ -25968,6 +26054,14 @@ mod tests {
             .object_mut(object_uid)
             .unwrap()
             .add_renderer("simple", "simple");
+
+        app.set_workspace_object_collapsed(
+            scene_uid,
+            NativePropertyObject::Molecule(object_uid),
+            true,
+        );
+        assert!(app.state.object_summaries(scene_uid)[0].ui_collapsed);
+        assert!(app.undo_stack.is_empty());
 
         app.set_workspace_object_visibility(NativePropertyObject::Molecule(object_uid), false);
         app.set_workspace_object_locked(NativePropertyObject::Molecule(object_uid), true);

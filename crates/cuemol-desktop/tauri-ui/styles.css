@@ -768,6 +768,7 @@ summary:focus-visible {
   content: "";
 }
 
+.workspace-object-twisty,
 .workspace-group-twisty {
   display: inline-flex;
   flex: 0 0 14px;

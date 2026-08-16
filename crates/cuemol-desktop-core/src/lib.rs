@@ -536,6 +536,7 @@ pub struct GuiStyleSummary {
 pub struct GuiObjectSummary {
     pub uid: Uid,
     pub ui_order: i32,
+    pub ui_collapsed: bool,
     pub name: String,
     pub visible: bool,
     pub locked: bool,
@@ -1291,6 +1292,7 @@ pub struct GuiDensityMapSummary {
     pub uid: Uid,
     pub scene_uid: Uid,
     pub ui_order: i32,
+    pub ui_collapsed: bool,
     pub name: String,
     pub class_name: String,
     pub format: String,
@@ -1333,6 +1335,7 @@ pub struct GuiLoadedSurfaceSummary {
     pub uid: Uid,
     pub scene_uid: Uid,
     pub ui_order: i32,
+    pub ui_collapsed: bool,
     pub name: String,
     pub class_name: String,
     pub format: String,
@@ -1380,6 +1383,7 @@ pub struct GuiLoadedLwObjectSummary {
     pub uid: Uid,
     pub scene_uid: Uid,
     pub ui_order: i32,
+    pub ui_collapsed: bool,
     pub name: String,
     pub class_name: String,
     pub format: String,
@@ -3564,6 +3568,7 @@ impl DesktopAppState {
                     .map(|object| GuiObjectSummary {
                         uid: object.uid(),
                         ui_order: effective_workspace_order(object.ui_order(), object.uid()),
+                        ui_collapsed: object.is_ui_collapsed(),
                         name: object.name().to_string(),
                         visible: object.is_visible(),
                         locked: object.is_ui_locked(),
@@ -7515,6 +7520,49 @@ impl DesktopAppState {
                 .set_visible(visible);
         }
         Ok(())
+    }
+
+    pub fn set_workspace_object_collapsed(
+        &mut self,
+        object_uid: Uid,
+        collapsed: bool,
+    ) -> Result<()> {
+        if let Some(object) = self.scene_manager_mut().object_mut(object_uid) {
+            object.set_ui_collapsed(collapsed);
+            return Ok(());
+        }
+        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+            map.ui_collapsed = collapsed;
+            map.modified = true;
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let surface = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                .expect("surface scene was checked above");
+            set_qsc_bool_attr(
+                ensure_surface_qsc_node(surface),
+                "ui_collapsed",
+                collapsed,
+                false,
+            );
+            return Ok(());
+        }
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
+            let object = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+                .expect("LWObject scene was checked above");
+            set_qsc_bool_attr(ensure_lw_qsc_node(object), "ui_collapsed", collapsed, false);
+            return Ok(());
+        }
+        Err(CueMolError::NotFound(format!(
+            "object {}",
+            object_uid.get()
+        )))
     }
 
     pub fn set_renderer_group_collapsed(
@@ -47038,6 +47086,7 @@ fn density_map_summary(
         uid: object.uid,
         scene_uid: object.scene_uid,
         ui_order: effective_workspace_order(object.ui_order, object.uid),
+        ui_collapsed: object.ui_collapsed,
         name: object.name.clone(),
         class_name: object.class_name.clone(),
         format: object.format.clone(),
@@ -47571,6 +47620,7 @@ fn surface_summary(
         uid: surface.uid,
         scene_uid,
         ui_order: effective_workspace_order(surface_ui_order(surface), surface.uid),
+        ui_collapsed: attr("ui_collapsed").is_some_and(|value| qsc_bool(&value)),
         name: surface.name.clone(),
         class_name: "MolSurfObj".to_string(),
         format: surface.srctype.clone(),
@@ -47678,6 +47728,7 @@ fn lw_object_summary(
         uid: object.uid,
         scene_uid,
         ui_order: effective_workspace_order(lw_object_ui_order(object), object.uid),
+        ui_collapsed: node.is_some_and(|node| qsc_bool(node.str_attr("ui_collapsed").as_str())),
         name: object.name.clone(),
         class_name: "LWObject".to_string(),
         format: object.srctype.clone(),
@@ -56569,11 +56620,15 @@ end_header
     fn workspace_objects_move_across_kinds_and_persist_ui_order() {
         let mut app = DesktopAppState::new();
         let scene_uid = app.new_scene("order", false).result_scene;
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n",
+        )
+        .unwrap();
         let molecule_uid = app
             .scene_manager_mut()
             .scene_mut(scene_uid)
             .unwrap()
-            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+            .add_molecule("molecule", molecule);
         let map_uid = app.add_density_map(scene_uid, "map", DensityMap::new());
         let surface_uid = app
             .scene_manager_mut()
@@ -56602,6 +56657,15 @@ end_header
                 renderers: Vec::new(),
                 qsc_node: None,
             });
+
+        for object_uid in [molecule_uid, map_uid, surface_uid, lw_uid] {
+            app.set_workspace_object_collapsed(object_uid, true)
+                .unwrap();
+        }
+        assert!(app.object_summaries(scene_uid)[0].ui_collapsed);
+        assert!(app.density_map_summary(map_uid).unwrap().ui_collapsed);
+        assert!(app.surface_summary(surface_uid).unwrap().ui_collapsed);
+        assert!(app.lw_object_summary(lw_uid).unwrap().ui_collapsed);
 
         assert!(app
             .move_workspace_object(
@@ -56663,6 +56727,11 @@ end_header
                 .as_str(),
             "4"
         );
+        assert!(scene.loaded_density_maps()[0]
+            .qsc_node
+            .as_ref()
+            .unwrap()
+            .bool_attr("ui_collapsed"));
         assert_eq!(
             scene
                 .loaded_lw_object(lw_uid)
@@ -56674,6 +56743,36 @@ end_header
                 .as_str(),
             "1"
         );
+        assert!(scene
+            .loaded_surface(surface_uid)
+            .unwrap()
+            .qsc_node
+            .as_ref()
+            .unwrap()
+            .bool_attr("ui_collapsed"));
+        assert!(scene
+            .loaded_lw_object(lw_uid)
+            .unwrap()
+            .qsc_node
+            .as_ref()
+            .unwrap()
+            .bool_attr("ui_collapsed"));
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-workspace-object-collapse-{}.qsc",
+            std::process::id()
+        ));
+        app.save_active_scene_qsc(&path).unwrap();
+        let qsc = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+        assert_eq!(qsc.matches("ui_collapsed=\"true\"").count(), 4);
+
+        let mut reloaded = DesktopAppState::new();
+        let reloaded_scene_uid = reloaded.load_qsc_file(&path).unwrap().unwrap();
+        assert!(reloaded.object_summaries(reloaded_scene_uid)[0].ui_collapsed);
+        assert!(reloaded.active_density_map_summaries()[0].ui_collapsed);
+        assert!(reloaded.active_surface_summaries()[0].ui_collapsed);
+        assert!(reloaded.active_lw_object_summaries()[0].ui_collapsed);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
