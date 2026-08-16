@@ -296,6 +296,7 @@ fn tauri_file_save_uses_reference_workspace_writer_filters() {
         "XYZR coordinates(*.xyzr)",
         "PQR coordinates(*.pqr)",
         "CueMol density map file (*.qdf)",
+        "CueMol elepot file (*.qdf)",
         "CueMol molsurf file (*.qdf)",
     ] {
         assert!(
@@ -304,7 +305,8 @@ fn tauri_file_save_uses_reference_workspace_writer_filters() {
         );
     }
     assert!(dialog.contains("selectedWorkspaceObjectForSave()"));
-    assert!(dialog.contains("filters: objectSaveFilters(object.objectKind)"));
+    assert!(dialog.contains("filters: objectSaveFilters(object)"));
+    assert!(JS.contains("object.className === \"ElePotMap\""));
     assert!(dialog.contains("objectKind: object.objectKind"));
     assert!(dialog.contains("saveOptions.defaultPath = objectSaveDefaultPath(object)"));
     assert!(JS.contains("return directory + \"copy_of_\" + fileName"));

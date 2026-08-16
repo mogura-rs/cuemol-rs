@@ -5749,7 +5749,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         }
         const saveOptions = {
           defaultPath: `${object.name || "molecule"}.pdb`,
-          filters: objectSaveFilters(object.objectKind),
+          filters: objectSaveFilters(object),
         };
         saveOptions.defaultPath = objectSaveDefaultPath(object);
         const path = await dialog.save(saveOptions);
@@ -6457,11 +6457,14 @@ function selectedWorkspaceObjectForSave() {
   return object ? { ...object, objectKind: "object" } : null;
 }
 
-function objectSaveFilters(objectKind) {
-  if (objectKind === "densityMap") {
+function objectSaveFilters(object) {
+  if (object.objectKind === "densityMap" && object.className === "ElePotMap") {
+    return [{ name: "CueMol elepot file (*.qdf)", extensions: ["qdf"] }];
+  }
+  if (object.objectKind === "densityMap") {
     return [{ name: "CueMol density map file (*.qdf)", extensions: ["qdf"] }];
   }
-  if (objectKind === "surface") {
+  if (object.objectKind === "surface") {
     return [{ name: "CueMol molsurf file (*.qdf)", extensions: ["qdf"] }];
   }
   return [

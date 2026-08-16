@@ -1368,6 +1368,7 @@ enum NativeFileDialog {
     OpenStyle,
     SaveObject,
     SaveDensityMap,
+    SavePotentialMap,
     SaveSurface,
     SaveScene,
     SaveView,
@@ -8961,7 +8962,12 @@ impl GuiApplication {
                     self.set_status("No density map selected");
                     return;
                 };
-                (map.source, map.name, NativeFileDialog::SaveDensityMap)
+                let dialog = if map.class_name == "ElePotMap" {
+                    NativeFileDialog::SavePotentialMap
+                } else {
+                    NativeFileDialog::SaveDensityMap
+                };
+                (map.source, map.name, dialog)
             }
             NativePropertyObject::Surface(surface_uid) => {
                 let Some(surface) = self.state.surface_summary(surface_uid) else {
@@ -20812,6 +20818,10 @@ const DENSITY_MAP_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "CueMol density map file (*.qdf)",
     extensions: &["qdf"],
 }];
+const POTENTIAL_MAP_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "CueMol elepot file (*.qdf)",
+    extensions: &["qdf"],
+}];
 const SURFACE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "CueMol molsurf file (*.qdf)",
     extensions: &["qdf"],
@@ -20906,6 +20916,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
         NativeFileDialog::SaveDensityMap => NativeFileDialogSpec {
             title: "Save File As",
             filters: DENSITY_MAP_SAVE_FILTERS,
+            default_extension: Some("qdf"),
+            save: true,
+        },
+        NativeFileDialog::SavePotentialMap => NativeFileDialogSpec {
+            title: "Save File As",
+            filters: POTENTIAL_MAP_SAVE_FILTERS,
             default_extension: Some("qdf"),
             save: true,
         },
@@ -23583,6 +23599,13 @@ mod tests {
         assert_eq!(save_map.filters[0].label, "CueMol density map file (*.qdf)");
         assert_eq!(save_map.filters[0].extensions, &["qdf"]);
         assert_eq!(save_map.default_extension, Some("qdf"));
+        let save_potential = native_file_dialog_spec(NativeFileDialog::SavePotentialMap);
+        assert_eq!(
+            save_potential.filters[0].label,
+            "CueMol elepot file (*.qdf)"
+        );
+        assert_eq!(save_potential.filters[0].extensions, &["qdf"]);
+        assert_eq!(save_potential.default_extension, Some("qdf"));
         let save_surface = native_file_dialog_spec(NativeFileDialog::SaveSurface);
         assert_eq!(save_surface.filters[0].label, "CueMol molsurf file (*.qdf)");
         assert_eq!(save_surface.filters[0].extensions, &["qdf"]);

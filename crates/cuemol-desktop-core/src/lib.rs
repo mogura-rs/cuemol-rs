@@ -9249,15 +9249,25 @@ impl DesktopAppState {
                 "density maps can only be saved as qdf",
             ));
         }
-        let (scene_uid, storage_index, raw_data) = {
+        let (scene_uid, storage_index, source_type, raw_data) = {
             let object = self
                 .density_maps
                 .get(&map_uid)
                 .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+            let (source_type, raw_data) = if object.class_name == "ElePotMap" {
+                (
+                    "qdfpot",
+                    cuemol_surface::QdfPotWriter::new()
+                        .write_bytes(&electrostatic_map_from_density_map(&object.map)),
+                )
+            } else {
+                ("qdfmap", cuemol_xtal::write_qdf_denmap_bytes(&object.map))
+            };
             (
                 object.scene_uid,
                 object.storage_index,
-                cuemol_xtal::write_qdf_denmap_bytes(&object.map),
+                source_type,
+                raw_data,
             )
         };
         fs::write(path, &raw_data)?;
@@ -9268,17 +9278,17 @@ impl DesktopAppState {
                 .density_maps
                 .get_mut(&map_uid)
                 .expect("density map was checked above");
-            object.format = "qdfmap".to_string();
+            object.format = source_type.to_string();
             object.source = source.clone();
             object.modified = false;
-            density_map_qsc_node(object, "qdfmap", &source)
+            density_map_qsc_node(object, source_type, &source)
         };
         let loaded = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
             .and_then(|scene| scene.loaded_density_maps_mut().get_mut(storage_index))
             .ok_or_else(|| CueMolError::NotFound(format!("density map storage {storage_index}")))?;
-        loaded.srctype = "qdfmap".to_string();
+        loaded.srctype = source_type.to_string();
         loaded.data = String::from_utf8_lossy(&raw_data).into_owned();
         loaded.raw_data = raw_data;
         loaded.qsc_node = Some(node);
@@ -35618,33 +35628,6 @@ impl DesktopAppState {
             }
             Err(script_error("density-map target is unavailable"))
         }
-        fn electrostatic_map_from_density_map(map: &DensityMap) -> cuemol_surface::ElePotMap {
-            let counts = [map.col_no(), map.row_no(), map.sec_no()];
-            let mut values = Vec::with_capacity(
-                counts[0]
-                    .saturating_mul(counts[1])
-                    .saturating_mul(counts[2]),
-            );
-            for sec in 0..counts[2] {
-                for row in 0..counts[1] {
-                    for col in 0..counts[0] {
-                        values.push(map.at_float(col as isize, row as isize, sec as isize));
-                    }
-                }
-            }
-            let mut potential = cuemol_surface::ElePotMap::new();
-            potential.set_map_float_array(
-                &values,
-                counts,
-                [
-                    map.col_grid_size(),
-                    map.row_grid_size(),
-                    map.sec_grid_size(),
-                ],
-                map.conv_to_orth(Vector4::ZERO),
-            );
-            potential
-        }
         fn script_target_potential_map(
             target: &JsValue,
             ctx: &mut Context,
@@ -45577,6 +45560,34 @@ fn validate_mtz_map_reader_options(options: &GuiMtzMapReaderOptions) -> Result<(
         ));
     }
     Ok(())
+}
+
+fn electrostatic_map_from_density_map(map: &DensityMap) -> cuemol_surface::ElePotMap {
+    let counts = [map.col_no(), map.row_no(), map.sec_no()];
+    let mut values = Vec::with_capacity(
+        counts[0]
+            .saturating_mul(counts[1])
+            .saturating_mul(counts[2]),
+    );
+    for sec in 0..counts[2] {
+        for row in 0..counts[1] {
+            for col in 0..counts[0] {
+                values.push(map.at_float(col as isize, row as isize, sec as isize));
+            }
+        }
+    }
+    let mut potential = cuemol_surface::ElePotMap::new();
+    potential.set_map_float_array(
+        &values,
+        counts,
+        [
+            map.col_grid_size(),
+            map.row_grid_size(),
+            map.sec_grid_size(),
+        ],
+        map.conv_to_orth(Vector4::ZERO),
+    );
+    potential
 }
 
 fn read_density_map(path: &Path, format: &str) -> Result<DensityMap> {
@@ -58795,6 +58806,7 @@ attribute \"dep\" string \"positions\"
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let map_path = dir.join("density.qdf");
+        let potential_path = dir.join("potential.qdf");
         let surface_path = dir.join("surface.qdf");
         let scene_path = dir.join("workspace.qsc");
 
@@ -58815,6 +58827,25 @@ attribute \"dep\" string \"positions\"
         let map_summary = app.density_map_summary(map_uid).unwrap();
         assert_eq!(map_summary.source, map_path.to_string_lossy());
         assert_eq!(map_summary.format, "qdfmap");
+
+        let potential_map = app.density_maps.get(&map_uid).unwrap().map.clone();
+        let potential_uid = app.add_density_map(scene_uid, "potential", potential_map);
+        let potential = app.density_maps.get_mut(&potential_uid).unwrap();
+        potential.class_name = "ElePotMap".to_string();
+        potential.format = "apbs".to_string();
+        app.save_workspace_object_as(
+            GuiWorkspaceObjectKind::DensityMap,
+            potential_uid,
+            &potential_path,
+        )
+        .unwrap();
+        assert_eq!(
+            cuemol_qsys::qdf_file_type(&std::fs::read(&potential_path).unwrap()).as_deref(),
+            Some("POT1")
+        );
+        let potential_summary = app.density_map_summary(potential_uid).unwrap();
+        assert_eq!(potential_summary.source, potential_path.to_string_lossy());
+        assert_eq!(potential_summary.format, "qdfpot");
 
         let mut surface_object = MolSurfObj::new();
         for position in [
@@ -58861,10 +58892,11 @@ attribute \"dep\" string \"positions\"
         app.save_active_scene_qsc(&scene_path).unwrap();
         let mut reloaded = DesktopAppState::new();
         reloaded.load_qsc_file(&scene_path).unwrap();
-        assert_eq!(reloaded.active_density_map_summaries().len(), 1);
+        assert_eq!(reloaded.active_density_map_summaries().len(), 2);
+        assert!(reloaded.surface_potential.is_some());
         assert_eq!(reloaded.active_surface_summaries().len(), 1);
 
-        for path in [map_path, surface_path, scene_path] {
+        for path in [map_path, potential_path, surface_path, scene_path] {
             std::fs::remove_file(path).unwrap();
         }
         std::fs::remove_dir(dir).unwrap();
