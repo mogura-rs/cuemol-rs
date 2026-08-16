@@ -5186,12 +5186,12 @@ impl GuiApplication {
         selection: WorkspaceAuxSelection,
         owner: NativePropertyObject,
     ) {
-        if !matches!(owner, NativePropertyObject::Lightweight(_)) {
-            if ui.button("New Renderer...").clicked() {
-                self.activate_workspace_scene(scene_uid, camera);
-                self.open_aux_renderer_dialog(selection);
-                ui.close();
-            }
+        if !matches!(owner, NativePropertyObject::Lightweight(_))
+            && ui.button("New Renderer...").clicked()
+        {
+            self.activate_workspace_scene(scene_uid, camera);
+            self.open_aux_renderer_dialog(selection);
+            ui.close();
         }
         let can_regenerate = match selection {
             WorkspaceAuxSelection::Surface { surface_uid, .. } => self
@@ -5203,6 +5203,10 @@ impl GuiApplication {
         if can_regenerate && ui.button("Regenerate surface...").clicked() {
             self.activate_workspace_scene(scene_uid, camera);
             self.regenerate_workspace_surface(selection);
+            ui.close();
+        }
+        if ui.button("Copy Object").clicked() {
+            self.copy_workspace_object_to_clipboard(owner.uid());
             ui.close();
         }
         if ui.button("Save As...").clicked() {
@@ -5818,14 +5822,41 @@ impl GuiApplication {
             self.set_status("No copied object");
             return;
         };
+        let kind = clipboard.kind();
         let undo = self.capture_undo();
         match self.state.paste_workspace_object(scene_uid, &clipboard) {
             Ok(object_uid) => {
                 self.push_undo_snapshot(undo);
                 self.modified_scenes.insert(scene_uid);
-                self.selected_object = Some(object_uid);
+                self.selected_object = None;
                 self.selected_renderer = None;
-                self.workspace_aux_selection = None;
+                self.workspace_aux_selection = match kind {
+                    crate::GuiWorkspaceObjectKind::Molecule => {
+                        self.selected_object = Some(object_uid);
+                        None
+                    }
+                    crate::GuiWorkspaceObjectKind::DensityMap => {
+                        Some(WorkspaceAuxSelection::DensityMap {
+                            scene_uid,
+                            map_uid: object_uid,
+                            renderer_uid: None,
+                        })
+                    }
+                    crate::GuiWorkspaceObjectKind::Surface => {
+                        Some(WorkspaceAuxSelection::Surface {
+                            scene_uid,
+                            surface_uid: object_uid,
+                            renderer_uid: None,
+                        })
+                    }
+                    crate::GuiWorkspaceObjectKind::Lightweight => {
+                        Some(WorkspaceAuxSelection::Lightweight {
+                            scene_uid,
+                            object_uid,
+                            renderer_uid: None,
+                        })
+                    }
+                };
                 self.rebuild_snapshot();
                 self.set_status("Paste object");
             }

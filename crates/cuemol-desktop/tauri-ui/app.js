@@ -7748,6 +7748,13 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
       },
     },
     {
+      label: "Copy Object",
+      action: async () => {
+        if (!(await activate())) return;
+        await copyWorkspaceObject(object.uid);
+      },
+    },
+    {
       label: "Delete",
       action: () =>
         mutate("delete_workspace_item", {

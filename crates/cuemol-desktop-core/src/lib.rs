@@ -580,12 +580,37 @@ pub struct WorkspaceRendererPasteResult {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceObjectClipboard {
-    object: MolObject,
+    object: WorkspaceObjectClipboardData,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum WorkspaceObjectClipboardData {
+    Molecule(MolObject),
+    DensityMap {
+        object: GuiDensityMapObject,
+        loaded: LoadedDensityMap,
+    },
+    Surface(LoadedSurface),
+    Lightweight(LoadedLWObject),
 }
 
 impl WorkspaceObjectClipboard {
     pub fn name(&self) -> &str {
-        self.object.name()
+        match &self.object {
+            WorkspaceObjectClipboardData::Molecule(object) => object.name(),
+            WorkspaceObjectClipboardData::DensityMap { object, .. } => &object.name,
+            WorkspaceObjectClipboardData::Surface(surface) => &surface.name,
+            WorkspaceObjectClipboardData::Lightweight(object) => &object.name,
+        }
+    }
+
+    pub fn kind(&self) -> GuiWorkspaceObjectKind {
+        match &self.object {
+            WorkspaceObjectClipboardData::Molecule(_) => GuiWorkspaceObjectKind::Molecule,
+            WorkspaceObjectClipboardData::DensityMap { .. } => GuiWorkspaceObjectKind::DensityMap,
+            WorkspaceObjectClipboardData::Surface(_) => GuiWorkspaceObjectKind::Surface,
+            WorkspaceObjectClipboardData::Lightweight(_) => GuiWorkspaceObjectKind::Lightweight,
+        }
     }
 }
 
@@ -2017,7 +2042,9 @@ impl DesktopAppState {
             .map(|scene| GuiSceneSummary {
                 uid: scene.uid(),
                 name: scene.name().to_string(),
-                object_count: scene.objects().len(),
+                object_count: scene.objects().len()
+                    + scene.loaded_surfaces().len()
+                    + scene.loaded_lw_objects().len(),
                 map_count: self
                     .density_maps
                     .values()
@@ -7188,13 +7215,44 @@ impl DesktopAppState {
     }
 
     pub fn copy_workspace_object(&self, object_uid: Uid) -> Result<WorkspaceObjectClipboard> {
-        let object = self
-            .scene_manager()
-            .object(object_uid)
-            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        Ok(WorkspaceObjectClipboard {
-            object: object.clone(),
-        })
+        let object = if let Some(object) = self.scene_manager().object(object_uid) {
+            WorkspaceObjectClipboardData::Molecule(object.clone())
+        } else if let Some(object) = self.density_maps.get(&object_uid) {
+            let loaded = self
+                .scene_manager()
+                .scene(object.scene_uid)
+                .and_then(|scene| scene.loaded_density_maps().get(object.storage_index))
+                .cloned()
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("density map storage {}", object.storage_index))
+                })?;
+            WorkspaceObjectClipboardData::DensityMap {
+                object: object.clone(),
+                loaded,
+            }
+        } else if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            WorkspaceObjectClipboardData::Surface(
+                self.scene_manager()
+                    .scene(scene_uid)
+                    .and_then(|scene| scene.loaded_surface(object_uid))
+                    .cloned()
+                    .expect("surface scene was checked above"),
+            )
+        } else if let Some(scene_uid) = self.scene_manager().scene_uid_for_lw_object(object_uid) {
+            WorkspaceObjectClipboardData::Lightweight(
+                self.scene_manager()
+                    .scene(scene_uid)
+                    .and_then(|scene| scene.loaded_lw_object(object_uid))
+                    .cloned()
+                    .expect("LWObject scene was checked above"),
+            )
+        } else {
+            return Err(CueMolError::NotFound(format!(
+                "object {}",
+                object_uid.get()
+            )));
+        };
+        Ok(WorkspaceObjectClipboard { object })
     }
 
     pub fn paste_workspace_object(
@@ -7202,37 +7260,109 @@ impl DesktopAppState {
         scene_uid: Uid,
         clipboard: &WorkspaceObjectClipboard,
     ) -> Result<Uid> {
-        let ui_order = self
-            .object_summaries(scene_uid)
-            .into_iter()
-            .map(|object| object.ui_order)
-            .chain(
-                self.density_map_summaries(scene_uid)
-                    .into_iter()
-                    .map(|map| map.ui_order),
-            )
-            .chain(
-                self.surface_summaries(scene_uid)
-                    .into_iter()
-                    .map(|surface| surface.ui_order),
-            )
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        let scene = self
-            .scene_manager_mut()
-            .scene_mut(scene_uid)
+        self.scene_manager()
+            .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let ui_order = self.next_workspace_ui_order(scene_uid);
         let source_name = clipboard.name();
-        let name = if scene.object_by_name(source_name).is_none() {
+        let name = if !self.workspace_object_name_exists(scene_uid, source_name) {
             source_name.to_string()
         } else {
             (1_u64..)
                 .map(|index| format!("copy{index}_{source_name}"))
-                .find(|candidate| scene.object_by_name(candidate).is_none())
+                .find(|candidate| !self.workspace_object_name_exists(scene_uid, candidate))
                 .expect("the object name suffix space is inexhaustible")
         };
-        Ok(scene.attach_molecule_copy(&clipboard.object, name, ui_order))
+        match &clipboard.object {
+            WorkspaceObjectClipboardData::Molecule(object) => Ok(self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .expect("target scene was checked above")
+                .attach_molecule_copy(object, name, ui_order)),
+            WorkspaceObjectClipboardData::DensityMap { object, loaded } => {
+                let uid = Uid::new(self.next_density_map_uid);
+                self.next_density_map_uid = self
+                    .next_density_map_uid
+                    .saturating_add(1)
+                    .max(uid.get().saturating_add(1));
+                let renderer_uids = (0..object.renderers.len())
+                    .map(|_| self.next_density_renderer_uid())
+                    .collect::<Vec<_>>();
+                let storage_index = self
+                    .scene_manager()
+                    .scene(scene_uid)
+                    .expect("target scene was checked above")
+                    .loaded_density_maps()
+                    .len();
+                let mut object = object.clone();
+                object.uid = uid;
+                object.scene_uid = scene_uid;
+                object.storage_index = storage_index;
+                object.name = name;
+                object.ui_order = ui_order;
+                object.modified = true;
+                for (renderer, uid) in object.renderers.iter_mut().zip(renderer_uids) {
+                    renderer.uid = uid;
+                }
+                let mut loaded = loaded.clone();
+                loaded.name = object.name.clone();
+                let source = if object.source.is_empty() {
+                    "datachunk:"
+                } else {
+                    object.source.as_str()
+                };
+                loaded.qsc_node = Some(density_map_qsc_node(&object, &loaded.srctype, source));
+                self.scene_manager_mut()
+                    .scene_mut(scene_uid)
+                    .expect("target scene was checked above")
+                    .add_loaded_density_map(loaded);
+                self.density_maps.insert(uid, object);
+                Ok(uid)
+            }
+            WorkspaceObjectClipboardData::Surface(surface) => {
+                let mut surface = surface.clone();
+                surface.uid = Uid::new(0);
+                surface.name = name.clone();
+                let node = ensure_surface_qsc_node(&mut surface);
+                node.set_str_attr("name", name);
+                node.set_str_attr("ui_order", ui_order.to_string());
+                Ok(self
+                    .scene_manager_mut()
+                    .scene_mut(scene_uid)
+                    .expect("target scene was checked above")
+                    .add_loaded_surface(surface))
+            }
+            WorkspaceObjectClipboardData::Lightweight(object) => {
+                let mut object = object.clone();
+                object.uid = Uid::new(0);
+                object.name = name.clone();
+                let node = ensure_lw_qsc_node(&mut object);
+                node.set_str_attr("name", name);
+                node.set_str_attr("ui_order", ui_order.to_string());
+                Ok(self
+                    .scene_manager_mut()
+                    .scene_mut(scene_uid)
+                    .expect("target scene was checked above")
+                    .add_loaded_lw_object(object))
+            }
+        }
+    }
+
+    fn workspace_object_name_exists(&self, scene_uid: Uid, name: &str) -> bool {
+        self.scene_manager().scene(scene_uid).is_some_and(|scene| {
+            scene.object_by_name(name).is_some()
+                || scene
+                    .loaded_surfaces()
+                    .iter()
+                    .any(|surface| surface.name == name)
+                || scene
+                    .loaded_lw_objects()
+                    .iter()
+                    .any(|object| object.name == name)
+        }) || self
+            .density_maps
+            .values()
+            .any(|map| map.scene_uid == scene_uid && map.name == name)
     }
 
     pub fn rename_renderer_group(
@@ -46658,6 +46788,20 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "scripting")]
+    fn read_qsc_xml_prefix(path: &Path) -> String {
+        let bytes = std::fs::read(path).expect("QSC file is readable");
+        let marker = QSC_XML_END_MARKER.as_bytes();
+        let end = bytes
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .map(|index| index + marker.len())
+            .expect("QSC XML terminator is present");
+        std::str::from_utf8(&bytes[..end])
+            .expect("QSC XML prefix is UTF-8")
+            .to_string()
+    }
+
+    #[cfg(feature = "scripting")]
     #[test]
     fn run_script_js_executes_real_javascript() {
         // The embedded boa engine runs the full JS language (var / arithmetic / string
@@ -50909,7 +51053,7 @@ end_header
         let path = std::env::temp_dir().join(format!("cuemol-morph-{}.qsc", std::process::id()));
         app.save_active_scene_qsc(&path)
             .expect("MorphMol scene is saved");
-        let saved = std::fs::read_to_string(&path).expect("saved MorphMol QSC is readable");
+        let saved = read_qsc_xml_prefix(&path);
         assert!(saved.contains("type=\"MorphMol\""));
         assert!(saved.contains("<frames>"));
         assert!(saved.contains("scale_frame=\"true\""));
@@ -51202,7 +51346,7 @@ end_header
             std::env::temp_dir().join(format!("cuemol-renderer-qif-{}.qsc", std::process::id()));
         app.save_active_scene_qsc(&path)
             .expect("renderer coloring scene is saved");
-        let saved = std::fs::read_to_string(&path).expect("renderer QSC is readable");
+        let saved = read_qsc_xml_prefix(&path);
         assert!(saved.contains("<coloring type=\"RainbowColoring\""));
         assert!(saved.contains("<coloring type=\"PaintColoring\">"));
         let mut reloaded = DesktopAppState::new();
@@ -53860,6 +54004,106 @@ end_header
             app.scene_manager().object(second_uid).unwrap().name(),
             "molecule"
         );
+    }
+
+    #[test]
+    fn workspace_object_clipboard_copies_auxiliary_object_kinds() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("clipboard", false).result_scene;
+        let map_uid = app.add_density_map(scene_uid, "shared", DensityMap::new());
+        let map_renderer_uid = app.add_density_renderer(map_uid, "contour").unwrap();
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: "v 0 0 0\n".to_string(),
+                raw_data: b"v 0 0 0\n".to_vec(),
+                qsc_node: None,
+            });
+        let lw_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_lw_object(LoadedLWObject {
+                uid: Uid::new(0),
+                name: "lightweight".to_string(),
+                srctype: "qdflwobj".to_string(),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+                visible: true,
+                xform: Matrix4::IDENTITY,
+                renderers: vec![LoadedLWRenderer {
+                    name: "draw".to_string(),
+                    data_id: 1,
+                    visible: true,
+                    xform: Matrix4::IDENTITY,
+                }],
+                qsc_node: None,
+            });
+        let lw_renderer_uid = app.lw_object_summary(lw_uid).unwrap().renderers[0].uid;
+
+        let map_clipboard = app.copy_workspace_object(map_uid).unwrap();
+        assert_eq!(map_clipboard.kind(), GuiWorkspaceObjectKind::DensityMap);
+        let pasted_map_uid = app
+            .paste_workspace_object(scene_uid, &map_clipboard)
+            .unwrap();
+        let pasted_map = app.density_map_summary(pasted_map_uid).unwrap();
+        assert_eq!(pasted_map.name, "copy1_shared");
+        assert_ne!(pasted_map.renderers[0].uid, map_renderer_uid);
+
+        let surface_clipboard = app.copy_workspace_object(surface_uid).unwrap();
+        assert_eq!(surface_clipboard.kind(), GuiWorkspaceObjectKind::Surface);
+        let pasted_surface_uid = app
+            .paste_workspace_object(scene_uid, &surface_clipboard)
+            .unwrap();
+        let pasted_surface = app.surface_summary(pasted_surface_uid).unwrap();
+        assert_eq!(pasted_surface.name, "copy1_surface");
+        assert_eq!(pasted_surface.source, "datachunk:");
+
+        let lw_clipboard = app.copy_workspace_object(lw_uid).unwrap();
+        assert_eq!(lw_clipboard.kind(), GuiWorkspaceObjectKind::Lightweight);
+        let pasted_lw_uid = app
+            .paste_workspace_object(scene_uid, &lw_clipboard)
+            .unwrap();
+        let pasted_lw = app.lw_object_summary(pasted_lw_uid).unwrap();
+        assert_eq!(pasted_lw.name, "copy1_lightweight");
+        assert_ne!(pasted_lw.renderers[0].uid, lw_renderer_uid);
+        assert_eq!(pasted_lw.renderers[0].name, "draw");
+
+        let orders = [
+            pasted_map.ui_order,
+            pasted_surface.ui_order,
+            pasted_lw.ui_order,
+        ];
+        assert!(orders.windows(2).all(|pair| pair[0] < pair[1]));
+        let scene = app.active_scene_summary().unwrap();
+        assert_eq!(scene.object_count, 4);
+        assert_eq!(scene.map_count, 2);
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-workspace-aux-clipboard-{}.qsc",
+            std::process::id()
+        ));
+        app.save_active_scene_qsc(&path).unwrap();
+        let mut reloaded = DesktopAppState::new();
+        reloaded.load_qsc_file(&path).unwrap();
+        assert!(reloaded
+            .active_density_map_summaries()
+            .iter()
+            .any(|map| map.name == "copy1_shared"));
+        assert!(reloaded
+            .active_surface_summaries()
+            .iter()
+            .any(|surface| surface.name == "copy1_surface"));
+        assert!(reloaded
+            .active_lw_object_summaries()
+            .iter()
+            .any(|object| object.name == "copy1_lightweight"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
