@@ -289,20 +289,42 @@ fn tauri_file_and_scene_open_use_reference_reader_categories() {
         .nth(1)
         .and_then(|source| source.split("async function openScene()").next())
         .expect("object file picker");
-    for extension in [
-        "pdb", "cif", "qdf", "mol2", "psf", "prmtop", "mtz", "ccp4", "cns", "obj", "vert",
+    for reader in [
+        "PDB Coordinates (*.pdb;*.ent;*.pdb.gz)",
+        "mmCIF Coordinates (*.cif;*.cif.gz)",
+        "MOL/SDF Coordinates (*.mol;*.sdf)",
+        "SYBYL Mol2 Coordinates (*.mol2)",
+        "GROMACS Coordinates (*.gro)",
+        "CHARMM/NAMD PSF topology (*.psf)",
+        "AMBER topology file (*.parm7;*.prmtop)",
+        "NAMD binary coordinates (*.coor)",
+        "DCD binary trajectory (*.dcd)",
+        "GROMACS TRR trajectory (*.trr)",
+        "GROMACS XTC trajectory (*.xtc)",
+        "AMBER NetCDF trajectory (*.nc)",
+        "APBS Potential Map(*.dx)",
+        "mmCIF Map Coeff (*.cif;*.cif.gz)",
+        "CCP4 Density Map(*.map;*.ccp4;*.mrc;*.ccp4.gz)",
+        "XPLOR/CNS Density Map(*.map;*.cns)",
+        "BRIX Density Map(*.brix;*.omap)",
+        "MTZ Structure Factor (*.mtz)",
+        "MSMS Surface (*.vert;*.face)",
+        "PLY polygon file (*.ply)",
     ] {
         assert!(
-            object_open.contains(&format!("\"{extension}\"")),
-            "missing object reader extension {extension}"
+            object_open.contains(&format!("name: \"{reader}\"")),
+            "missing object reader {reader}"
         );
     }
-    for scene_extension in ["qsc", "pse"] {
+    for hidden_extension in [
+        "qdfpdb", "qdf", "mmcif", "top", "obj", "view", "cam", "qsc", "pse",
+    ] {
         assert!(
-            !object_open.contains(&format!("\"{scene_extension}\"")),
-            "scene extension leaked into object picker: {scene_extension}"
+            !object_open.contains(&format!("\"{hidden_extension}\"")),
+            "hidden extension leaked into object picker: {hidden_extension}"
         );
     }
+    assert!(JS.contains("showReferenceDialog(\"Open MD Trajectory\", trajectoryPaths)"));
 
     let scene_open = JS
         .split("async function openScene()")

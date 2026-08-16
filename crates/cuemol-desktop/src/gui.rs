@@ -9104,6 +9104,14 @@ impl GuiApplication {
             return;
         }
         let path = PathBuf::from(&open_path);
+        if is_trajectory_file(&path) {
+            self.md_trajectory_draft = Some(NativeMdTrajectoryDraft {
+                trajectory_paths: vec![open_path],
+                selected_path: Some(0),
+                ..NativeMdTrajectoryDraft::default()
+            });
+            return;
+        }
         if is_view_file(&path) {
             self.open_current_path(camera);
             return;
@@ -20625,19 +20633,84 @@ fn tool_status_text(_title: &str) -> &'static str {
 
 const OBJECT_OPEN_FILTERS: &[NativeFileFilter] = &[
     NativeFileFilter {
-        label: "Molecule coordinates",
-        extensions: &[
-            "pdb", "ent", "cif", "mmcif", "sdf", "mol", "mol2", "gro", "psf", "prmtop", "parm7",
-            "top", "coor", "qdf",
-        ],
+        label: "PDB Coordinates (*.pdb;*.ent;*.pdb.gz)",
+        extensions: &["pdb", "ent", "pdb.gz"],
     },
     NativeFileFilter {
-        label: "Density maps",
-        extensions: &["mtz", "dx", "ccp4", "mrc", "cns", "brix", "omap", "map"],
+        label: "mmCIF Coordinates (*.cif;*.cif.gz)",
+        extensions: &["cif", "cif.gz"],
     },
     NativeFileFilter {
-        label: "Molecular surfaces",
-        extensions: &["obj", "ply", "face", "vert"],
+        label: "MOL/SDF Coordinates (*.mol;*.sdf)",
+        extensions: &["mol", "sdf"],
+    },
+    NativeFileFilter {
+        label: "SYBYL Mol2 Coordinates (*.mol2)",
+        extensions: &["mol2"],
+    },
+    NativeFileFilter {
+        label: "GROMACS Coordinates (*.gro)",
+        extensions: &["gro"],
+    },
+    NativeFileFilter {
+        label: "CHARMM/NAMD PSF topology (*.psf)",
+        extensions: &["psf"],
+    },
+    NativeFileFilter {
+        label: "AMBER topology file (*.parm7;*.prmtop)",
+        extensions: &["parm7", "prmtop"],
+    },
+    NativeFileFilter {
+        label: "NAMD binary coordinates (*.coor)",
+        extensions: &["coor"],
+    },
+    NativeFileFilter {
+        label: "DCD binary trajectory (*.dcd)",
+        extensions: &["dcd"],
+    },
+    NativeFileFilter {
+        label: "GROMACS TRR trajectory (*.trr)",
+        extensions: &["trr"],
+    },
+    NativeFileFilter {
+        label: "GROMACS XTC trajectory (*.xtc)",
+        extensions: &["xtc"],
+    },
+    NativeFileFilter {
+        label: "AMBER NetCDF trajectory (*.nc)",
+        extensions: &["nc"],
+    },
+    NativeFileFilter {
+        label: "APBS Potential Map(*.dx)",
+        extensions: &["dx"],
+    },
+    NativeFileFilter {
+        label: "mmCIF Map Coeff (*.cif;*.cif.gz)",
+        extensions: &["cif", "cif.gz"],
+    },
+    NativeFileFilter {
+        label: "CCP4 Density Map(*.map;*.ccp4;*.mrc;*.ccp4.gz)",
+        extensions: &["map", "ccp4", "mrc", "ccp4.gz"],
+    },
+    NativeFileFilter {
+        label: "XPLOR/CNS Density Map(*.map;*.cns)",
+        extensions: &["map", "cns"],
+    },
+    NativeFileFilter {
+        label: "BRIX Density Map(*.brix;*.omap)",
+        extensions: &["brix", "omap", "omap.gz"],
+    },
+    NativeFileFilter {
+        label: "MTZ Structure Factor (*.mtz)",
+        extensions: &["mtz"],
+    },
+    NativeFileFilter {
+        label: "MSMS Surface (*.vert;*.face)",
+        extensions: &["vert", "face"],
+    },
+    NativeFileFilter {
+        label: "PLY polygon file (*.ply)",
+        extensions: &["ply"],
     },
 ];
 const SCENE_OPEN_FILTERS: &[NativeFileFilter] = &[
@@ -22211,6 +22284,17 @@ fn is_view_file(path: &Path) -> bool {
         .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "cam" | "view"))
 }
 
+fn is_trajectory_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "dcd" | "trr" | "xtc" | "nc"
+            )
+        })
+}
+
 fn is_scene_file(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
@@ -23307,16 +23391,46 @@ mod tests {
     fn native_dialogs_and_shortcuts_match_reference_commands() {
         let open = native_file_dialog_spec(NativeFileDialog::OpenObject);
         assert!(!open.save);
-        assert!(open
+        assert_eq!(open.filters.len(), 20);
+        assert_eq!(
+            open.filters
+                .iter()
+                .map(|filter| filter.label)
+                .collect::<Vec<_>>(),
+            vec![
+                "PDB Coordinates (*.pdb;*.ent;*.pdb.gz)",
+                "mmCIF Coordinates (*.cif;*.cif.gz)",
+                "MOL/SDF Coordinates (*.mol;*.sdf)",
+                "SYBYL Mol2 Coordinates (*.mol2)",
+                "GROMACS Coordinates (*.gro)",
+                "CHARMM/NAMD PSF topology (*.psf)",
+                "AMBER topology file (*.parm7;*.prmtop)",
+                "NAMD binary coordinates (*.coor)",
+                "DCD binary trajectory (*.dcd)",
+                "GROMACS TRR trajectory (*.trr)",
+                "GROMACS XTC trajectory (*.xtc)",
+                "AMBER NetCDF trajectory (*.nc)",
+                "APBS Potential Map(*.dx)",
+                "mmCIF Map Coeff (*.cif;*.cif.gz)",
+                "CCP4 Density Map(*.map;*.ccp4;*.mrc;*.ccp4.gz)",
+                "XPLOR/CNS Density Map(*.map;*.cns)",
+                "BRIX Density Map(*.brix;*.omap)",
+                "MTZ Structure Factor (*.mtz)",
+                "MSMS Surface (*.vert;*.face)",
+                "PLY polygon file (*.ply)",
+            ]
+        );
+        let open_extensions = open
             .filters
             .iter()
             .flat_map(|filter| filter.extensions)
-            .any(|extension| *extension == "mmcif"));
-        assert!(!open
-            .filters
-            .iter()
-            .flat_map(|filter| filter.extensions)
-            .any(|extension| *extension == "pse"));
+            .copied()
+            .collect::<Vec<_>>();
+        for hidden in ["qdfpdb", "qdf", "mmcif", "top", "obj", "view", "cam", "pse"] {
+            assert!(!open_extensions.contains(&hidden));
+        }
+        assert!(is_trajectory_file(Path::new("movie.XTC")));
+        assert!(!is_trajectory_file(Path::new("molecule.pdb")));
         let open_scene = native_file_dialog_spec(NativeFileDialog::OpenScene);
         assert_eq!(open_scene.filters[0].label, "CueMol Scene");
         assert_eq!(open_scene.filters[0].extensions, &["qsc"]);

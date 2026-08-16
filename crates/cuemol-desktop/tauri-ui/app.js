@@ -4837,7 +4837,7 @@ async function showEditInteractionListDialog(object, renderer) {
   });
 }
 
-async function showReferenceDialog(title) {
+async function showReferenceDialog(title, initialTrajectoryPaths = []) {
   if (referenceDialog.open) referenceDialog.close();
   atomPickerTarget = null;
   viewport.classList.remove("atom-picking");
@@ -5905,7 +5905,7 @@ async function showReferenceDialog(title) {
   } else if (title === "Open MD Trajectory") {
     const topologyPath = dialogField("Topology file (.gro)", "");
     topologyPath.placeholder = "/path/to/system.gro";
-    const trajectoryPaths = [];
+    const trajectoryPaths = [...initialTrajectoryPaths];
     const topologyActions = document.createElement("div");
     topologyActions.className = "trajectory-path-actions";
     const browseTopology = button("Browse topology…", "", async () => {
@@ -6031,7 +6031,7 @@ async function showReferenceDialog(title) {
       open.disabled = topologyPath.value.trim().length === 0 || trajectoryPaths.length === 0;
     }
     topologyPath.addEventListener("input", updateOpenState);
-    updateOpenState();
+    renderPaths();
     dialogActions(open);
   } else if (title === "Open PDB") {
     pdbRendererSetupCache.clear();
@@ -11465,13 +11465,31 @@ async function openFiles() {
     directory: false,
     filters: [
       {
-        name: "CueMol objects",
-        extensions: [
-          "pdb", "ent", "cif", "mmcif", "qdfpdb", "qdf", "sdf", "mol", "mol2", "gro",
-          "psf", "prmtop", "parm7", "top", "coor", "mtz", "dx", "map", "mrc", "ccp4",
-          "cns", "brix", "omap", "obj", "ply", "face", "vert", "view", "cam",
-        ],
+        name: "PDB Coordinates (*.pdb;*.ent;*.pdb.gz)",
+        extensions: ["pdb", "ent", "pdb.gz"],
       },
+      { name: "mmCIF Coordinates (*.cif;*.cif.gz)", extensions: ["cif", "cif.gz"] },
+      { name: "MOL/SDF Coordinates (*.mol;*.sdf)", extensions: ["mol", "sdf"] },
+      { name: "SYBYL Mol2 Coordinates (*.mol2)", extensions: ["mol2"] },
+      { name: "GROMACS Coordinates (*.gro)", extensions: ["gro"] },
+      { name: "CHARMM/NAMD PSF topology (*.psf)", extensions: ["psf"] },
+      { name: "AMBER topology file (*.parm7;*.prmtop)", extensions: ["parm7", "prmtop"] },
+      { name: "NAMD binary coordinates (*.coor)", extensions: ["coor"] },
+      { name: "DCD binary trajectory (*.dcd)", extensions: ["dcd"] },
+      { name: "GROMACS TRR trajectory (*.trr)", extensions: ["trr"] },
+      { name: "GROMACS XTC trajectory (*.xtc)", extensions: ["xtc"] },
+      { name: "AMBER NetCDF trajectory (*.nc)", extensions: ["nc"] },
+      { name: "APBS Potential Map(*.dx)", extensions: ["dx"] },
+      { name: "mmCIF Map Coeff (*.cif;*.cif.gz)", extensions: ["cif", "cif.gz"] },
+      {
+        name: "CCP4 Density Map(*.map;*.ccp4;*.mrc;*.ccp4.gz)",
+        extensions: ["map", "ccp4", "mrc", "ccp4.gz"],
+      },
+      { name: "XPLOR/CNS Density Map(*.map;*.cns)", extensions: ["map", "cns"] },
+      { name: "BRIX Density Map(*.brix;*.omap)", extensions: ["brix", "omap", "omap.gz"] },
+      { name: "MTZ Structure Factor (*.mtz)", extensions: ["mtz"] },
+      { name: "MSMS Surface (*.vert;*.face)", extensions: ["vert", "face"] },
+      { name: "PLY polygon file (*.ply)", extensions: ["ply"] },
     ],
   });
   if (!chosen) return;
@@ -11506,7 +11524,10 @@ async function openScene() {
 
 async function openSelectedPaths(paths) {
   const viewPaths = paths.filter((path) => /\.(view|cam)$/i.test(path));
-  const objectPaths = paths.filter((path) => !/\.(view|cam)$/i.test(path));
+  const trajectoryPaths = paths.filter((path) => /\.(dcd|trr|xtc|nc)$/i.test(path));
+  const objectPaths = paths.filter(
+    (path) => !/\.(view|cam|dcd|trr|xtc|nc)$/i.test(path),
+  );
   let opened = false;
   const directPaths = [];
   for (const path of objectPaths) {
@@ -11555,6 +11576,9 @@ async function openSelectedPaths(paths) {
   }
   for (const path of viewPaths) {
     opened = (await mutate("load_view", { path })) || opened;
+  }
+  if (trajectoryPaths.length) {
+    await showReferenceDialog("Open MD Trajectory", trajectoryPaths);
   }
   return opened;
 }
