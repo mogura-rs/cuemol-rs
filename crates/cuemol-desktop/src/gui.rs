@@ -1370,6 +1370,7 @@ enum NativeFileDialog {
     SaveDensityMap,
     SavePotentialMap,
     SaveSurface,
+    SaveLightweight,
     SaveScene,
     SaveView,
     SaveCamera,
@@ -1509,12 +1510,16 @@ enum NativePropertyObject {
     Molecule(cuemol_core::Uid),
     DensityMap(cuemol_core::Uid),
     Surface(cuemol_core::Uid),
+    Lightweight(cuemol_core::Uid),
 }
 
 impl NativePropertyObject {
     fn uid(self) -> cuemol_core::Uid {
         match self {
-            Self::Molecule(uid) | Self::DensityMap(uid) | Self::Surface(uid) => uid,
+            Self::Molecule(uid)
+            | Self::DensityMap(uid)
+            | Self::Surface(uid)
+            | Self::Lightweight(uid) => uid,
         }
     }
 
@@ -1523,6 +1528,7 @@ impl NativePropertyObject {
             Self::Molecule(_) => crate::GuiWorkspaceObjectKind::Molecule,
             Self::DensityMap(_) => crate::GuiWorkspaceObjectKind::DensityMap,
             Self::Surface(_) => crate::GuiWorkspaceObjectKind::Surface,
+            Self::Lightweight(_) => crate::GuiWorkspaceObjectKind::Lightweight,
         }
     }
 }
@@ -1551,6 +1557,11 @@ enum WorkspaceAuxSelection {
     Surface {
         scene_uid: cuemol_core::Uid,
         surface_uid: cuemol_core::Uid,
+        renderer_uid: Option<cuemol_core::Uid>,
+    },
+    Lightweight {
+        scene_uid: cuemol_core::Uid,
+        object_uid: cuemol_core::Uid,
         renderer_uid: Option<cuemol_core::Uid>,
     },
 }
@@ -1773,6 +1784,7 @@ enum NativeWorkspaceObjectSummary {
     Molecule(crate::GuiObjectSummary),
     DensityMap(crate::GuiDensityMapSummary),
     Surface(crate::GuiLoadedSurfaceSummary),
+    Lightweight(crate::GuiLoadedLwObjectSummary),
 }
 
 impl NativeWorkspaceObjectSummary {
@@ -1791,6 +1803,11 @@ impl NativeWorkspaceObjectSummary {
             Self::Surface(summary) => (
                 summary.ui_order,
                 crate::GuiWorkspaceObjectKind::Surface,
+                summary.uid,
+            ),
+            Self::Lightweight(summary) => (
+                summary.ui_order,
+                crate::GuiWorkspaceObjectKind::Lightweight,
                 summary.uid,
             ),
         }
@@ -1996,6 +2013,34 @@ impl NativeRendererProperties {
         ))
     }
 
+    fn from_lw_state(
+        state: &DesktopAppState,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+    ) -> Option<Self> {
+        let renderer = state
+            .lw_object_summary(object_uid)?
+            .renderers
+            .into_iter()
+            .find(|renderer| renderer.uid == renderer_uid)?;
+        Some(Self::from_workspace_summary(
+            NativePropertyObject::Lightweight(object_uid),
+            renderer.uid,
+            renderer.renderer_type,
+            renderer.name,
+            String::new(),
+            renderer.visible,
+            renderer.locked,
+            String::new(),
+            String::new(),
+            1.0,
+            "none".to_string(),
+            0.01,
+            "#000000".to_string(),
+            std::collections::BTreeMap::new(),
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn from_workspace_summary(
         owner: NativePropertyObject,
@@ -2150,6 +2195,17 @@ impl NativeObjectProperties {
             visible: surface.visible,
             locked: surface.locked,
             linked: workspace_linked_text(&surface.source, &surface.format),
+        })
+    }
+
+    fn from_lw_state(state: &DesktopAppState, object_uid: cuemol_core::Uid) -> Option<Self> {
+        let object = state.lw_object_summary(object_uid)?;
+        Some(Self {
+            target: NativePropertyObject::Lightweight(object_uid),
+            name: object.name,
+            visible: object.visible,
+            locked: object.locked,
+            linked: workspace_linked_text(&object.source, &object.format),
         })
     }
 }
@@ -3996,9 +4052,11 @@ impl GuiApplication {
             let objects = self.state.object_summaries(scene.uid);
             let density_maps = self.state.density_map_summaries(scene.uid);
             let surfaces = self.state.surface_summaries(scene.uid);
+            let lw_objects = self.state.lw_object_summaries(scene.uid);
             let cameras = self.state.camera_summaries(scene.uid);
             let styles = self.state.style_summaries(scene.uid);
-            let object_count = objects.len() + density_maps.len() + surfaces.len();
+            let object_count =
+                objects.len() + density_maps.len() + surfaces.len() + lw_objects.len();
             let mut workspace_objects = objects
                 .into_iter()
                 .map(NativeWorkspaceObjectSummary::Molecule)
@@ -4011,6 +4069,11 @@ impl GuiApplication {
                     surfaces
                         .into_iter()
                         .map(NativeWorkspaceObjectSummary::Surface),
+                )
+                .chain(
+                    lw_objects
+                        .into_iter()
+                        .map(NativeWorkspaceObjectSummary::Lightweight),
                 )
                 .collect::<Vec<_>>();
             workspace_objects.sort_by_key(NativeWorkspaceObjectSummary::sort_key);
@@ -4382,6 +4445,112 @@ impl GuiApplication {
                                 }
                             });
                         }
+                        NativeWorkspaceObjectSummary::Lightweight(object) => {
+                            let object_selection = WorkspaceAuxSelection::Lightweight {
+                                scene_uid: scene.uid,
+                                object_uid: object.uid,
+                                renderer_uid: None,
+                            };
+                            let selected = self.selected_object.is_none()
+                                && self.workspace_aux_selection == Some(object_selection);
+                            let mut visible = object.visible;
+                            let owner = NativePropertyObject::Lightweight(object.uid);
+                            let drag_source = ui.dnd_drag_source(
+                                egui::Id::new(("workspace-object-drag", owner)),
+                                NativeWorkspaceObjectDragPayload {
+                                    scene_uid: scene.uid,
+                                    owner,
+                                },
+                                |ui| {
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .checkbox(&mut visible, "")
+                                            .on_hover_text("Visible")
+                                            .changed()
+                                        {
+                                            self.set_workspace_object_visibility(owner, visible);
+                                        }
+                                        if let Some(locked) =
+                                            workspace_lock_toggle(ui, object.locked, true)
+                                        {
+                                            self.set_workspace_object_locked(owner, locked);
+                                        }
+                                        let label =
+                                            format!("{} ({})", object.name, object.class_name);
+                                        if ui.selectable_label(selected, label).clicked() {
+                                            self.activate_workspace_scene(scene.uid, camera);
+                                            self.selected_object = None;
+                                            self.selected_renderer = None;
+                                            self.workspace_aux_selection = Some(object_selection);
+                                        }
+                                    })
+                                },
+                            );
+                            self.workspace_object_drop_target(
+                                ui,
+                                scene.uid,
+                                owner,
+                                &drag_source.response,
+                            );
+                            drag_source.response.context_menu(|ui| {
+                                self.workspace_aux_object_context_menu(
+                                    ui,
+                                    camera,
+                                    scene.uid,
+                                    object_selection,
+                                    owner,
+                                );
+                            });
+                            ui.indent(format!("lw-object-{}", object.uid.get()), |ui| {
+                                for renderer in object.renderers {
+                                    let selection = WorkspaceAuxSelection::Lightweight {
+                                        scene_uid: scene.uid,
+                                        object_uid: object.uid,
+                                        renderer_uid: Some(renderer.uid),
+                                    };
+                                    let selected = self.selected_object.is_none()
+                                        && self.workspace_aux_selection == Some(selection);
+                                    let mut visible = renderer.visible;
+                                    let response = ui
+                                        .horizontal(|ui| {
+                                            if ui
+                                                .checkbox(&mut visible, "")
+                                                .on_hover_text("Visible")
+                                                .changed()
+                                            {
+                                                self.set_lw_renderer_visibility(
+                                                    object.uid,
+                                                    renderer.uid,
+                                                    visible,
+                                                );
+                                            }
+                                            if let Some(locked) =
+                                                workspace_lock_toggle(ui, renderer.locked, true)
+                                            {
+                                                self.set_workspace_renderer_locked(
+                                                    owner,
+                                                    renderer.uid,
+                                                    locked,
+                                                );
+                                            }
+                                            let label = format!(
+                                                "{} ({})",
+                                                renderer.name, renderer.renderer_type
+                                            );
+                                            if ui.selectable_label(selected, label).clicked() {
+                                                self.activate_workspace_scene(scene.uid, camera);
+                                                self.selected_object = None;
+                                                self.selected_renderer = None;
+                                                self.workspace_aux_selection = Some(selection);
+                                            }
+                                        })
+                                        .response;
+                                    response.context_menu(|ui| {
+                                        self.workspace_aux_renderer_context_menu(ui, selection);
+                                    });
+                                }
+                            });
+                        }
                     }
                 }
                 let root_selection = WorkspaceAuxSelection::CameraRoot {
@@ -4718,12 +4887,18 @@ impl GuiApplication {
                 self.workspace_aux_selection,
                 Some(WorkspaceAuxSelection::StyleRoot { .. } | WorkspaceAuxSelection::Style { .. })
             );
+            let adding_lightweight = matches!(
+                self.workspace_aux_selection,
+                Some(WorkspaceAuxSelection::Lightweight { .. })
+            );
             if ui
-                .button("Add")
+                .add_enabled(!adding_lightweight, egui::Button::new("Add"))
                 .on_hover_text(if adding_camera {
                     "Save current view as camera"
                 } else if adding_style {
                     "Create scene style"
+                } else if adding_lightweight {
+                    "Lightweight renderers are fixed by the source file"
                 } else {
                     "Add renderer"
                 })
@@ -4762,7 +4937,8 @@ impl GuiApplication {
                             .style_summary_for_selection(selection)
                             .is_some_and(|style| style.local_index.is_some()),
                         WorkspaceAuxSelection::DensityMap { .. }
-                        | WorkspaceAuxSelection::Surface { .. } => true,
+                        | WorkspaceAuxSelection::Surface { .. }
+                        | WorkspaceAuxSelection::Lightweight { .. } => true,
                         WorkspaceAuxSelection::CameraRoot { .. }
                         | WorkspaceAuxSelection::StyleRoot { .. } => false,
                     });
@@ -5010,10 +5186,12 @@ impl GuiApplication {
         selection: WorkspaceAuxSelection,
         owner: NativePropertyObject,
     ) {
-        if ui.button("New Renderer...").clicked() {
-            self.activate_workspace_scene(scene_uid, camera);
-            self.open_aux_renderer_dialog(selection);
-            ui.close();
+        if !matches!(owner, NativePropertyObject::Lightweight(_)) {
+            if ui.button("New Renderer...").clicked() {
+                self.activate_workspace_scene(scene_uid, camera);
+                self.open_aux_renderer_dialog(selection);
+                ui.close();
+            }
         }
         let can_regenerate = match selection {
             WorkspaceAuxSelection::Surface { surface_uid, .. } => self
@@ -5025,6 +5203,14 @@ impl GuiApplication {
         if can_regenerate && ui.button("Regenerate surface...").clicked() {
             self.activate_workspace_scene(scene_uid, camera);
             self.regenerate_workspace_surface(selection);
+            ui.close();
+        }
+        if ui.button("Save As...").clicked() {
+            self.activate_workspace_scene(scene_uid, camera);
+            self.selected_object = None;
+            self.selected_renderer = None;
+            self.workspace_aux_selection = Some(selection);
+            self.choose_save_selected_object();
             ui.close();
         }
         if ui.button("Delete Object").clicked() {
@@ -5887,7 +6073,8 @@ impl GuiApplication {
                     | WorkspaceAuxSelection::Camera { .. }
                     | WorkspaceAuxSelection::StyleRoot { .. }
                     | WorkspaceAuxSelection::Style { .. }
-                    | WorkspaceAuxSelection::Surface { .. },
+                    | WorkspaceAuxSelection::Surface { .. }
+                    | WorkspaceAuxSelection::Lightweight { .. },
                 )
                 | None => false,
             }
@@ -8976,6 +9163,17 @@ impl GuiApplication {
                 };
                 (surface.source, surface.name, NativeFileDialog::SaveSurface)
             }
+            NativePropertyObject::Lightweight(object_uid) => {
+                let Some(object) = self.state.lw_object_summary(object_uid) else {
+                    self.set_status("No lightweight object selected");
+                    return;
+                };
+                (
+                    object.source,
+                    object.name,
+                    NativeFileDialog::SaveLightweight,
+                )
+            }
         };
         let initial = object_save_initial_path(&source, &name);
         if let Some(path) = native_file_dialog(dialog, initial.to_string_lossy().as_ref()) {
@@ -8997,6 +9195,9 @@ impl GuiApplication {
             }
             Some(WorkspaceAuxSelection::Surface { surface_uid, .. }) => {
                 Some(NativePropertyObject::Surface(surface_uid))
+            }
+            Some(WorkspaceAuxSelection::Lightweight { object_uid, .. }) => {
+                Some(NativePropertyObject::Lightweight(object_uid))
             }
             _ => self.target_object_uid().map(NativePropertyObject::Molecule),
         }
@@ -11544,6 +11745,15 @@ impl GuiApplication {
         self.object_properties_draft = Some(properties);
     }
 
+    fn open_lw_object_properties(&mut self, object_uid: cuemol_core::Uid) {
+        let Some(properties) = NativeObjectProperties::from_lw_state(&self.state, object_uid)
+        else {
+            self.set_status(format!("LWObject {} was not found", object_uid.get()));
+            return;
+        };
+        self.object_properties_draft = Some(properties);
+    }
+
     fn object_props_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut draft) = self.object_properties_draft.take() else {
             return;
@@ -11646,6 +11856,11 @@ impl GuiApplication {
                 .surface_summary(surface_uid)
                 .map(|surface| surface.scene_uid)
                 .ok_or_else(|| format!("surface {} was not found", surface_uid.get()))?,
+            NativePropertyObject::Lightweight(object_uid) => self
+                .state
+                .lw_object_summary(object_uid)
+                .map(|object| object.scene_uid)
+                .ok_or_else(|| format!("LWObject {} was not found", object_uid.get()))?,
         };
         let undo = self.capture_undo();
         match draft.target {
@@ -11678,6 +11893,18 @@ impl GuiApplication {
                 self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
                     scene_uid,
                     surface_uid,
+                    renderer_uid: None,
+                });
+            }
+            NativePropertyObject::Lightweight(object_uid) => {
+                self.state
+                    .set_lw_object_common_properties(object_uid, name, draft.visible, draft.locked)
+                    .map_err(|error| error.to_string())?;
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Lightweight {
+                    scene_uid,
+                    object_uid,
                     renderer_uid: None,
                 });
             }
@@ -11759,6 +11986,20 @@ impl GuiApplication {
         self.renderer_properties_draft = Some(properties);
     }
 
+    fn open_lw_renderer_properties(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+    ) {
+        let Some(properties) =
+            NativeRendererProperties::from_lw_state(&self.state, object_uid, renderer_uid)
+        else {
+            self.set_status(format!("LWRenderer {} was not found", renderer_uid.get()));
+            return;
+        };
+        self.renderer_properties_draft = Some(properties);
+    }
+
     fn renderer_props_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut draft) = self.renderer_properties_draft.take() else {
             return;
@@ -11775,6 +12016,10 @@ impl GuiApplication {
                 .state
                 .surface_summary(surface_uid)
                 .map(|surface| surface.scene_uid),
+            NativePropertyObject::Lightweight(object_uid) => self
+                .state
+                .lw_object_summary(object_uid)
+                .map(|object| object.scene_uid),
         };
         let material_names = scene_uid
             .map(|scene_uid| self.state.material_names(scene_uid.get()))
@@ -13270,6 +13515,37 @@ impl GuiApplication {
             }
             NativePropertyObject::Surface(surface_uid) => {
                 self.apply_surface_renderer_properties(draft, surface_uid)
+            }
+            NativePropertyObject::Lightweight(object_uid) => {
+                validate_native_renderer_properties(draft)?;
+                let scene_uid = self
+                    .state
+                    .lw_object_summary(object_uid)
+                    .map(|object| object.scene_uid)
+                    .ok_or_else(|| format!("LWObject {} was not found", object_uid.get()))?;
+                let undo = self.capture_undo();
+                self.state
+                    .rename_lw_renderer(object_uid, draft.renderer_uid, draft.name.trim())
+                    .and_then(|()| {
+                        self.state.set_lw_renderer_visible(
+                            object_uid,
+                            draft.renderer_uid,
+                            draft.visible,
+                        )
+                    })
+                    .and_then(|()| {
+                        self.state.set_lw_renderer_locked(
+                            object_uid,
+                            draft.renderer_uid,
+                            draft.locked,
+                        )
+                    })
+                    .map_err(|error| error.to_string())?;
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.rebuild_snapshot();
+                self.set_status("Renderer properties updated");
+                Ok(())
             }
         }
     }
@@ -15777,6 +16053,7 @@ impl GuiApplication {
                         NativePropertyObject::Molecule(uid) => ("molecule", uid),
                         NativePropertyObject::DensityMap(uid) => ("density map", uid),
                         NativePropertyObject::Surface(uid) => ("surface", uid),
+                        NativePropertyObject::Lightweight(uid) => ("lightweight object", uid),
                     };
                     ui.monospace(format!("{kind} uid: {}", uid.get()));
                 }
@@ -15786,6 +16063,7 @@ impl GuiApplication {
                 let renderer_types = match self.new_renderer_owner {
                     Some(NativePropertyObject::DensityMap(_)) => DENSITY_RENDERER_TYPES,
                     Some(NativePropertyObject::Surface(_)) => SURFACE_RENDERER_TYPES,
+                    Some(NativePropertyObject::Lightweight(_)) => &[],
                     Some(NativePropertyObject::Molecule(_)) | None => RENDERER_TYPES,
                 };
                 if self.new_renderer_type == "*group" {
@@ -18086,6 +18364,7 @@ impl GuiApplication {
                     .unwrap_or(1);
                 self.new_renderer_name = format!("molsurf {serial}");
             }
+            WorkspaceAuxSelection::Lightweight { .. } => return,
         }
         self.show_renderer_dialog = true;
     }
@@ -18191,6 +18470,9 @@ impl GuiApplication {
                 )?;
                 Ok(renderer_uid)
             })(),
+            NativePropertyObject::Lightweight(_) => Err(CueMolError::invalid_argument(
+                "LWObject renderers are fixed by the source file",
+            )),
         };
         match created {
             Ok(renderer_uid) => {
@@ -18226,6 +18508,20 @@ impl GuiApplication {
                         self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
                             scene_uid,
                             surface_uid,
+                            renderer_uid: Some(renderer_uid),
+                        });
+                    }
+                    NativePropertyObject::Lightweight(object_uid) => {
+                        let scene_uid = self
+                            .state
+                            .lw_object_summary(object_uid)
+                            .map(|object| object.scene_uid)
+                            .expect("created LWRenderer must retain its object");
+                        self.selected_object = None;
+                        self.selected_renderer = None;
+                        self.workspace_aux_selection = Some(WorkspaceAuxSelection::Lightweight {
+                            scene_uid,
+                            object_uid,
                             renderer_uid: Some(renderer_uid),
                         });
                     }
@@ -18278,6 +18574,10 @@ impl GuiApplication {
                 .state
                 .surface_summary(surface_uid)
                 .map(|surface| surface.scene_uid),
+            NativePropertyObject::Lightweight(object_uid) => self
+                .state
+                .lw_object_summary(object_uid)
+                .map(|object| object.scene_uid),
         }
     }
 
@@ -18317,6 +18617,9 @@ impl GuiApplication {
             NativePropertyObject::Surface(surface_uid) => {
                 self.state.set_surface_visible(surface_uid, visible)
             }
+            NativePropertyObject::Lightweight(object_uid) => {
+                self.state.set_lw_object_visible(object_uid, visible)
+            }
         };
         self.finish_workspace_toggle(
             undo,
@@ -18338,6 +18641,9 @@ impl GuiApplication {
             }
             NativePropertyObject::Surface(surface_uid) => {
                 self.state.set_surface_locked(surface_uid, locked)
+            }
+            NativePropertyObject::Lightweight(object_uid) => {
+                self.state.set_lw_object_locked(object_uid, locked)
             }
         };
         self.finish_workspace_toggle(
@@ -18372,6 +18678,10 @@ impl GuiApplication {
                 NativePropertyObject::Surface(surface_uid) => self
                     .state
                     .set_surface_renderer_locked(surface_uid, renderer_uid, locked),
+                NativePropertyObject::Lightweight(object_uid) => {
+                    self.state
+                        .set_lw_renderer_locked(object_uid, renderer_uid, locked)
+                }
             };
         self.finish_workspace_toggle(
             undo,
@@ -18505,6 +18815,33 @@ impl GuiApplication {
         }
     }
 
+    fn set_lw_renderer_visibility(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        visible: bool,
+    ) {
+        let scene_uid = self
+            .state
+            .lw_object_summary(object_uid)
+            .map(|object| object.scene_uid);
+        let undo = self.capture_undo();
+        match self
+            .state
+            .set_lw_renderer_visible(object_uid, renderer_uid, visible)
+        {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                if let Some(scene_uid) = scene_uid {
+                    self.modified_scenes.insert(scene_uid);
+                }
+                self.rebuild_snapshot();
+                self.set_status(format!("LWRenderer visibility: {visible}"));
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
     fn open_aux_properties(&mut self, selection: WorkspaceAuxSelection) {
         match selection {
             WorkspaceAuxSelection::CameraRoot { .. }
@@ -18531,6 +18868,16 @@ impl GuiApplication {
                 renderer_uid: None,
                 ..
             } => self.open_surface_properties(surface_uid),
+            WorkspaceAuxSelection::Lightweight {
+                object_uid,
+                renderer_uid: Some(renderer_uid),
+                ..
+            } => self.open_lw_renderer_properties(object_uid, renderer_uid),
+            WorkspaceAuxSelection::Lightweight {
+                object_uid,
+                renderer_uid: None,
+                ..
+            } => self.open_lw_object_properties(object_uid),
         }
     }
 
@@ -18589,6 +18936,11 @@ impl GuiApplication {
                 renderer_uid: None,
                 ..
             } => self.delete_workspace_object(NativePropertyObject::Surface(surface_uid)),
+            WorkspaceAuxSelection::Lightweight {
+                object_uid,
+                renderer_uid: None,
+                ..
+            } => self.delete_workspace_object(NativePropertyObject::Lightweight(object_uid)),
             WorkspaceAuxSelection::DensityMap {
                 scene_uid,
                 map_uid,
@@ -18627,6 +18979,28 @@ impl GuiApplication {
                         self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
                             scene_uid,
                             surface_uid,
+                            renderer_uid: None,
+                        });
+                        self.rebuild_snapshot();
+                        self.set_status("Renderer deleted");
+                    }
+                    Ok(false) => self.set_status("Renderer was already absent"),
+                    Err(error) => self.set_error(error),
+                }
+            }
+            WorkspaceAuxSelection::Lightweight {
+                scene_uid,
+                object_uid,
+                renderer_uid: Some(renderer_uid),
+            } => {
+                let undo = self.capture_undo();
+                match self.state.destroy_lw_renderer(object_uid, renderer_uid) {
+                    Ok(true) => {
+                        self.push_undo_snapshot(undo);
+                        self.modified_scenes.insert(scene_uid);
+                        self.workspace_aux_selection = Some(WorkspaceAuxSelection::Lightweight {
+                            scene_uid,
+                            object_uid,
                             renderer_uid: None,
                         });
                         self.rebuild_snapshot();
@@ -18711,12 +19085,19 @@ impl GuiApplication {
                 .state
                 .surface_summary(surface_uid)
                 .map(|surface| surface.scene_uid),
+            NativePropertyObject::Lightweight(object_uid) => self
+                .state
+                .lw_object_summary(object_uid)
+                .map(|object| object.scene_uid),
         };
         let undo = self.capture_undo();
         let result = match target {
             NativePropertyObject::Molecule(object_uid) => self.state.destroy_object(object_uid),
             NativePropertyObject::DensityMap(map_uid) => self.state.destroy_density_map(map_uid),
             NativePropertyObject::Surface(surface_uid) => self.state.destroy_surface(surface_uid),
+            NativePropertyObject::Lightweight(object_uid) => {
+                self.state.destroy_lw_object(object_uid)
+            }
         };
         match result {
             Ok(true) => {
@@ -20826,6 +21207,10 @@ const SURFACE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "CueMol molsurf file (*.qdf)",
     extensions: &["qdf"],
 }];
+const LIGHTWEIGHT_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "CueMol light-weight obj file (*.qdf)",
+    extensions: &["qdf"],
+}];
 const SCENE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "CueMol scene",
     extensions: &["qsc"],
@@ -20928,6 +21313,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
         NativeFileDialog::SaveSurface => NativeFileDialogSpec {
             title: "Save File As",
             filters: SURFACE_SAVE_FILTERS,
+            default_extension: Some("qdf"),
+            save: true,
+        },
+        NativeFileDialog::SaveLightweight => NativeFileDialogSpec {
+            title: "Save File As",
+            filters: LIGHTWEIGHT_SAVE_FILTERS,
             default_extension: Some("qdf"),
             save: true,
         },
@@ -23610,6 +24001,13 @@ mod tests {
         assert_eq!(save_surface.filters[0].label, "CueMol molsurf file (*.qdf)");
         assert_eq!(save_surface.filters[0].extensions, &["qdf"]);
         assert_eq!(save_surface.default_extension, Some("qdf"));
+        let save_lightweight = native_file_dialog_spec(NativeFileDialog::SaveLightweight);
+        assert_eq!(
+            save_lightweight.filters[0].label,
+            "CueMol light-weight obj file (*.qdf)"
+        );
+        assert_eq!(save_lightweight.filters[0].extensions, &["qdf"]);
+        assert_eq!(save_lightweight.default_extension, Some("qdf"));
 
         assert_eq!(
             MainShortcutCommand::OpenFile.shortcut(),

@@ -158,6 +158,8 @@ let selectedDensityMapUid = null;
 let selectedDensityRendererUid = null;
 let selectedSurfaceUid = null;
 let selectedSurfaceRendererUid = null;
+let selectedLwObjectUid = null;
+let selectedLwRendererUid = null;
 let selectedCameraName = null;
 let selectedStyleIndex = null;
 let workspaceSelectionKind = "object";
@@ -1614,6 +1616,7 @@ function propertyCheckbox(host, label, checked) {
 function objectPropertiesEditor(object) {
   const densityMap = Array.isArray(object.counts);
   const surfaceObject = object.className === "MolSurfObj";
+  const lightweightObject = workspaceSelectionKind === "lwObject";
   const { editor, page } = workspacePropertyPage();
   const name = document.createElement("input");
   name.value = object.name;
@@ -1641,6 +1644,8 @@ function objectPropertiesEditor(object) {
         ? "set_density_map_properties"
         : surfaceObject
           ? "set_surface_properties"
+          : lightweightObject
+            ? "set_lw_object_properties"
           : "set_object_properties",
       {
         properties: {
@@ -1662,6 +1667,7 @@ function objectPropertiesEditor(object) {
 function rendererPropertiesEditor(object, renderer, styleOptions = []) {
   const densityMap = Array.isArray(object.counts);
   const surfaceObject = object.className === "MolSurfObj";
+  const lightweightObject = workspaceSelectionKind === "lwRenderer";
   const rendererGroup = renderer.rendererType === "*group";
   const directSurfaceLike = ["dsurface", "dsurf2"].includes(renderer.rendererType);
   const surfaceLike = surfaceObject || directSurfaceLike;
@@ -3268,6 +3274,8 @@ function rendererPropertiesEditor(object, renderer, styleOptions = []) {
         ? "set_density_renderer_properties"
         : surfaceObject
           ? "set_surface_renderer_properties"
+          : lightweightObject
+            ? "set_lw_renderer_properties"
           : "set_renderer_properties",
       {
         properties: {
@@ -4989,6 +4997,8 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         ? selectedDensityMap()
         : workspaceSelectionKind === "surface"
           ? selectedSurface()
+          : workspaceSelectionKind === "lwObject"
+            ? selectedLwObject()
           : selectedObject();
     if (object) {
       objectPropertiesEditor(object);
@@ -4999,15 +5009,20 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     dialogTitle.textContent = "Renderer properties";
     const densityRenderer = workspaceSelectionKind === "densityRenderer";
     const surfaceRenderer = workspaceSelectionKind === "surfaceRenderer";
+    const lwRenderer = workspaceSelectionKind === "lwRenderer";
     const object = densityRenderer
       ? selectedDensityMap()
       : surfaceRenderer
         ? selectedSurface()
+        : lwRenderer
+          ? selectedLwObject()
         : selectedObject();
     const renderer = densityRenderer
       ? selectedDensityRenderer()
       : surfaceRenderer
         ? selectedSurfaceRenderer()
+        : lwRenderer
+          ? selectedLwRenderer()
         : selectedRenderer();
     if (object && renderer) {
       let styleOptions = [];
@@ -6418,6 +6433,13 @@ function activeSurfaces() {
   );
 }
 
+function activeLwObjects() {
+  if (!snapshot) return [];
+  return (snapshot.lwObjects || []).filter(
+    (object) => object.sceneUid === snapshot.activeSceneUid,
+  );
+}
+
 function activeCameras() {
   if (!snapshot) return [];
   return (snapshot.cameras || []).filter(
@@ -6453,6 +6475,10 @@ function selectedWorkspaceObjectForSave() {
     const object = selectedSurface();
     return object ? { ...object, objectKind: "surface" } : null;
   }
+  if (["lwObject", "lwRenderer"].includes(workspaceSelectionKind)) {
+    const object = selectedLwObject();
+    return object ? { ...object, objectKind: "lwObject" } : null;
+  }
   const object = selectedObject();
   return object ? { ...object, objectKind: "object" } : null;
 }
@@ -6466,6 +6492,9 @@ function objectSaveFilters(object) {
   }
   if (object.objectKind === "surface") {
     return [{ name: "CueMol molsurf file (*.qdf)", extensions: ["qdf"] }];
+  }
+  if (object.objectKind === "lwObject") {
+    return [{ name: "CueMol light-weight obj file (*.qdf)", extensions: ["qdf"] }];
   }
   return [
     { name: "PDB coordinates (*.pdb)", extensions: ["pdb"] },
@@ -7497,6 +7526,8 @@ function selectWorkspaceAuxItem(kind, objectUid, rendererUid = null) {
   selectedDensityRendererUid = kind === "densityRenderer" ? rendererUid : null;
   selectedSurfaceUid = kind.startsWith("surface") ? objectUid : null;
   selectedSurfaceRendererUid = kind === "surfaceRenderer" ? rendererUid : null;
+  selectedLwObjectUid = kind.startsWith("lw") ? objectUid : null;
+  selectedLwRendererUid = kind === "lwRenderer" ? rendererUid : null;
   workspaceSelectionKind = kind;
 }
 
@@ -7546,6 +7577,14 @@ function selectedWorkspaceRenameCoordinates(kind = workspaceSelectionKind) {
       return selectedSurfaceUid == null || selectedSurfaceRendererUid == null
         ? null
         : { objectUid: selectedSurfaceUid, rendererUid: selectedSurfaceRendererUid };
+    case "lwObject":
+      return selectedLwObjectUid == null
+        ? null
+        : { objectUid: selectedLwObjectUid, rendererUid: null };
+    case "lwRenderer":
+      return selectedLwObjectUid == null || selectedLwRendererUid == null
+        ? null
+        : { objectUid: selectedLwObjectUid, rendererUid: selectedLwRendererUid };
     case "camera":
       return snapshot?.activeSceneUid == null || selectedCameraName == null
         ? null
@@ -7674,6 +7713,7 @@ function workspaceCameraInlineRenameInput(scene, camera) {
 
 function workspaceAuxObjectContextItems(scene, kind, object) {
   const isDensityMap = kind === "densityMap";
+  const isLightweight = kind === "lwObject";
   const activate = async () => {
     if (snapshot.activeSceneUid === scene.uid) return true;
     return mutate("activate_scene", { sceneUid: scene.uid });
@@ -7683,9 +7723,12 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
     null,
     {
       label: "New Renderer…",
+      disabled: isLightweight,
       action: async () => {
         if (!(await activate())) return;
-        if (isDensityMap) {
+        if (isLightweight) {
+          return;
+        } else if (isDensityMap) {
           await mutate("add_density_renderer", {
             mapUid: object.uid,
             rendererType: rendererType.value,
@@ -7727,6 +7770,16 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
       action: async () => {
         if (!(await activate())) return;
         await mutate("regenerate_surface", { surfaceUid: object.uid });
+      },
+    });
+  }
+  if (isLightweight) {
+    items.splice(5, 0, {
+      label: "Save As…",
+      action: async () => {
+        if (!(await activate())) return;
+        selectWorkspaceAuxItem(kind, object.uid);
+        showReferenceDialog("Save File As");
       },
     });
   }
@@ -8154,6 +8207,18 @@ function selectedSurfaceRenderer() {
   );
 }
 
+function selectedLwObject() {
+  return activeLwObjects().find((object) => object.uid === selectedLwObjectUid) || null;
+}
+
+function selectedLwRenderer() {
+  return (
+    selectedLwObject()?.renderers.find(
+      (renderer) => renderer.uid === selectedLwRendererUid,
+    ) || null
+  );
+}
+
 function selectedWorkspaceTarget() {
   if (workspaceSelectionKind === "object") {
     const object = selectedObject();
@@ -8188,6 +8253,17 @@ function selectedWorkspaceTarget() {
       ? { kind: "surfaceRenderer", objectUid: surface.uid, rendererUid: renderer.uid }
       : null;
   }
+  if (workspaceSelectionKind === "lwObject") {
+    const object = selectedLwObject();
+    return object ? { kind: "lwObject", objectUid: object.uid, rendererUid: null } : null;
+  }
+  if (workspaceSelectionKind === "lwRenderer") {
+    const object = selectedLwObject();
+    const renderer = selectedLwRenderer();
+    return object && renderer
+      ? { kind: "lwRenderer", objectUid: object.uid, rendererUid: renderer.uid }
+      : null;
+  }
   return null;
 }
 
@@ -8220,6 +8296,16 @@ function normalizeSelection() {
       workspaceSelectionKind = "surface";
     }
   }
+  if (["lwObject", "lwRenderer"].includes(workspaceSelectionKind)) {
+    if (!selectedLwObject()) {
+      selectedLwObjectUid = null;
+      selectedLwRendererUid = null;
+      workspaceSelectionKind = snapshot.objects.length > 0 ? "object" : "scene";
+    } else if (workspaceSelectionKind === "lwRenderer" && !selectedLwRenderer()) {
+      selectedLwRendererUid = null;
+      workspaceSelectionKind = "lwObject";
+    }
+  }
   const objects = activeObjects();
   if (!objects.some((object) => object.uid === selectedObjectUid)) {
     selectedObjectUid = objects[0]?.uid ?? null;
@@ -8235,6 +8321,8 @@ function normalizeSelection() {
         "densityRenderer",
         "surface",
         "surfaceRenderer",
+        "lwObject",
+        "lwRenderer",
       ].includes(workspaceSelectionKind)
     ) {
       const surface = activeSurfaces()[0];
@@ -8249,6 +8337,9 @@ function normalizeSelection() {
       } else if (map) {
         selectedDensityMapUid = map.uid;
         workspaceSelectionKind = "densityMap";
+      } else if (activeLwObjects()[0]) {
+        selectedLwObjectUid = activeLwObjects()[0].uid;
+        workspaceSelectionKind = "lwObject";
       } else {
         workspaceSelectionKind = "scene";
       }
@@ -8280,6 +8371,8 @@ function workspaceChromeRenderKey() {
       selectedDensityRendererUid,
       selectedSurfaceUid,
       selectedSurfaceRendererUid,
+      selectedLwObjectUid,
+      selectedLwRendererUid,
       selectedCameraName,
       selectedStyleIndex,
     ],
@@ -8289,6 +8382,14 @@ function workspaceChromeRenderKey() {
       scene.active,
       scene.objectCount,
       scene.mapCount,
+    ]),
+    lwObjects: (snapshot.lwObjects || []).map((object) => [
+      object.uid,
+      object.uiOrder,
+      object.name,
+      object.visible,
+      object.locked,
+      object.renderers.map(rendererKey),
     ]),
     views: (snapshot.views || []).map((view) => [
       view.uid,
@@ -8858,6 +8959,126 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         block: mapBlock,
       });
     }
+    for (const object of (snapshot.lwObjects || []).filter(
+      (item) => item.sceneUid === scene.uid,
+    )) {
+      const objectBlock = document.createDocumentFragment();
+      const objectIsRenaming =
+        workspaceInlineRename?.kind === "lwObject" &&
+        workspaceInlineRename.objectUid === object.uid;
+      const objectRow = button(
+        objectIsRenaming ? "" : object.name,
+        `tree-object lightweight-object${
+          workspaceSelectionKind === "lwObject" && object.uid === selectedLwObjectUid
+            ? " active"
+            : ""
+        }${object.visible ? "" : " hidden"}`,
+        () => {
+          const alreadySelected =
+            workspaceSelectionKind === "lwObject" && selectedLwObjectUid === object.uid;
+          selectWorkspaceAuxItem("lwObject", object.uid);
+          if (alreadySelected && !objectIsRenaming) {
+            scheduleWorkspaceInlineRename("lwObject", object.uid);
+            return;
+          }
+          clearWorkspaceRenameTimer();
+          renderShell();
+        },
+      );
+      objectRow.dataset.workspaceRenameTarget = workspaceRenameTarget("lwObject", object.uid);
+      objectRow.addEventListener("dblclick", () => {
+        clearWorkspaceRenameTimer();
+        showReferenceDialog("Object Properties");
+      });
+      objectRow.addEventListener("contextmenu", (event) => {
+        selectWorkspaceAuxItem("lwObject", object.uid);
+        showWorkspaceContextMenu(
+          event,
+          workspaceAuxObjectContextItems(scene, "lwObject", object),
+        );
+      });
+      objectRow.prepend(
+        workspaceStateControls(
+          { kind: "lwObject", objectUid: object.uid },
+          object.visible,
+          object.locked,
+        ),
+      );
+      if (objectIsRenaming) {
+        objectRow.append(workspaceInlineRenameInput("lwObject", object));
+      }
+      const count = document.createElement("small");
+      count.textContent = "LWO";
+      objectRow.append(count);
+      configureWorkspaceObjectDrag(objectRow, scene.uid, "lwObject", object.uid);
+      objectRow.draggable = !objectIsRenaming;
+      objectBlock.append(objectRow);
+      for (const renderer of object.renderers) {
+        const rendererIsRenaming =
+          workspaceInlineRename?.kind === "lwRenderer" &&
+          workspaceInlineRename.objectUid === object.uid &&
+          workspaceInlineRename.rendererUid === renderer.uid;
+        const rendererRow = button(
+          rendererIsRenaming ? "" : `${renderer.rendererType} · ${renderer.name}`,
+          `tree-renderer lightweight-renderer${
+            workspaceSelectionKind === "lwRenderer" &&
+            renderer.uid === selectedLwRendererUid
+              ? " active"
+              : ""
+          }${renderer.visible ? "" : " hidden"}`,
+          () => {
+            const alreadySelected =
+              workspaceSelectionKind === "lwRenderer" &&
+              selectedLwObjectUid === object.uid &&
+              selectedLwRendererUid === renderer.uid;
+            selectWorkspaceAuxItem("lwRenderer", object.uid, renderer.uid);
+            if (alreadySelected && !rendererIsRenaming) {
+              scheduleWorkspaceInlineRename("lwRenderer", object.uid, renderer.uid);
+              return;
+            }
+            clearWorkspaceRenameTimer();
+            renderShell();
+          },
+        );
+        rendererRow.dataset.workspaceRenameTarget = workspaceRenameTarget(
+          "lwRenderer",
+          object.uid,
+          renderer.uid,
+        );
+        rendererRow.addEventListener("dblclick", () => {
+          clearWorkspaceRenameTimer();
+          showReferenceDialog("Renderer Properties");
+        });
+        rendererRow.addEventListener("contextmenu", (event) => {
+          selectWorkspaceAuxItem("lwRenderer", object.uid, renderer.uid);
+          showWorkspaceContextMenu(
+            event,
+            workspaceAuxRendererContextItems(scene, "lwRenderer", object, renderer),
+          );
+        });
+        rendererRow.prepend(
+          workspaceStateControls(
+            {
+              kind: "lwRenderer",
+              objectUid: object.uid,
+              rendererUid: renderer.uid,
+            },
+            renderer.visible,
+            renderer.locked,
+          ),
+        );
+        if (rendererIsRenaming) {
+          rendererRow.append(workspaceInlineRenameInput("lwRenderer", object, renderer));
+        }
+        objectBlock.append(rendererRow);
+      }
+      workspaceObjectBlocks.push({
+        uiOrder: object.uiOrder,
+        kindOrder: 3,
+        uid: object.uid,
+        block: objectBlock,
+      });
+    }
     workspaceObjectBlocks.sort(
       (left, right) =>
         (left.uiOrder ?? Number.MAX_SAFE_INTEGER) -
@@ -9014,10 +9235,14 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         ? !selectedDensityRenderer()
         : workspaceSelectionKind === "surfaceRenderer"
           ? !selectedSurfaceRenderer()
+        : workspaceSelectionKind === "lwRenderer"
+          ? !selectedLwRenderer()
         : workspaceSelectionKind === "densityMap"
           ? !selectedDensityMap()
           : workspaceSelectionKind === "surface"
             ? !selectedSurface()
+          : workspaceSelectionKind === "lwObject"
+            ? !selectedLwObject()
           : workspaceSelectionKind === "camera"
             ? !selectedCamera()
           : workspaceSelectionKind === "cameraRoot"
@@ -9036,10 +9261,14 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         ? !selectedDensityRenderer()
         : workspaceSelectionKind === "surfaceRenderer"
           ? !selectedSurfaceRenderer()
+        : workspaceSelectionKind === "lwRenderer"
+          ? !selectedLwRenderer()
           : workspaceSelectionKind === "densityMap"
             ? !selectedDensityMap()
             : workspaceSelectionKind === "surface"
               ? !selectedSurface()
+            : workspaceSelectionKind === "lwObject"
+              ? !selectedLwObject()
               : workspaceSelectionKind === "camera"
                 ? !selectedCamera()
               : workspaceSelectionKind === "style"
@@ -9049,7 +9278,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
                 : true;
   workspaceZoom.disabled =
     workspaceDelete.disabled ||
-    ["rendererGroup", "cameraRoot", "camera", "styleRoot", "style"].includes(
+    ["rendererGroup", "lwObject", "lwRenderer", "cameraRoot", "camera", "styleRoot", "style"].includes(
       workspaceSelectionKind,
     );
 }
@@ -9063,14 +9292,17 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
   const surface = ["surface", "surfaceRenderer"].includes(workspaceSelectionKind)
     ? selectedSurface()
     : null;
+  const lwObject = ["lwObject", "lwRenderer"].includes(workspaceSelectionKind)
+    ? selectedLwObject()
+    : null;
   const object =
-    !map && !surface && ["object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)
+    !map && !surface && !lwObject && ["object", "renderer", "rendererGroup"].includes(workspaceSelectionKind)
       ? selectedObject()
       : null;
   const camera = workspaceSelectionKind === "camera" ? selectedCamera() : null;
   const style = workspaceSelectionKind === "style" ? selectedStyle() : null;
   inspectorTitle.textContent =
-    object?.name || map?.name || surface?.name || camera?.name || style?.name || "No object";
+    object?.name || map?.name || surface?.name || lwObject?.name || camera?.name || style?.name || "No object";
   const labels = style
     ? ["Scope", "Read only", "Source"]
     : camera
@@ -9078,6 +9310,8 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
     : map
     ? ["Columns", "Rows", "Sections"]
     : surface
+      ? ["Type", "Format", "Renderers"]
+    : lwObject
       ? ["Type", "Format", "Renderers"]
       : ["Atoms", "Residues", "Bonds"];
   const values = style
@@ -9090,6 +9324,8 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
       ? map.counts
       : surface
         ? [surface.className, surface.format || "—", surface.renderers.length]
+      : lwObject
+        ? [lwObject.className, lwObject.format || "—", lwObject.renderers.length]
         : ["—", "—", "—"];
   objectStats.querySelectorAll("dt").forEach((node, index) => {
     node.textContent = labels[index];
@@ -9105,7 +9341,12 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
       ]
     : surface
       ? [["molsurf", "Molecular surface"]]
+    : lwObject
+      ? []
       : MOLECULE_RENDERER_TYPES.map((rendererType) => [rendererType, rendererType]);
+  document.querySelectorAll('[data-action="add-renderer"]').forEach((control) => {
+    control.disabled = Boolean(lwObject);
+  });
   rendererType.replaceChildren();
   for (const [value, label] of rendererChoices) {
     const option = document.createElement("option");
@@ -9114,14 +9355,14 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
     rendererType.append(option);
   }
   rendererList.replaceChildren();
-  if (!object && !map && !surface) {
+  if (!object && !map && !surface && !lwObject) {
     const empty = document.createElement("div");
     empty.className = "renderer-empty";
     empty.textContent = "Select an object.";
     rendererList.append(empty);
     return;
   }
-  const renderers = object?.renderers || map?.renderers || surface.renderers;
+  const renderers = object?.renderers || map?.renderers || surface?.renderers || lwObject.renderers;
   if (renderers.length === 0) {
     const empty = document.createElement("div");
     empty.className = "renderer-empty";
@@ -9140,6 +9381,8 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
       ? selectedDensityRendererUid
       : surface
         ? selectedSurfaceRendererUid
+      : lwObject
+        ? selectedLwRendererUid
         : selectedRendererUid;
     row.className = `renderer-row${renderer.rendererType === "*group" ? " renderer-group" : ""}${
       child ? " group-child" : ""
@@ -9161,6 +9404,15 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
         mutate("set_surface_renderer_visible", {
           surfaceUid: surface.uid,
           rendererUid: renderer.uid,
+          visible: visible.checked,
+        });
+      } else if (lwObject) {
+        mutate("set_workspace_visible", {
+          target: {
+            kind: "lwRenderer",
+            objectUid: lwObject.uid,
+            rendererUid: renderer.uid,
+          },
           visible: visible.checked,
         });
       } else {
@@ -9187,6 +9439,10 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
         selectedSurfaceUid = surface.uid;
         selectedSurfaceRendererUid = renderer.uid;
         workspaceSelectionKind = "surfaceRenderer";
+      } else if (lwObject) {
+        selectedLwObjectUid = lwObject.uid;
+        selectedLwRendererUid = renderer.uid;
+        workspaceSelectionKind = "lwRenderer";
       } else {
         selectedRendererUid = renderer.uid;
         workspaceSelectionKind = renderer.rendererType === "*group" ? "rendererGroup" : "renderer";
@@ -11431,7 +11687,10 @@ async function mutateWithViewport(command, args = {}, render = renderShell) {
 function snapshotHasRenderableContent() {
   return Boolean(
     snapshot &&
-      (snapshot.objects.length || snapshot.densityMaps.length || snapshot.surfaces.length),
+      (snapshot.objects.length ||
+        snapshot.densityMaps.length ||
+        snapshot.surfaces.length ||
+        (snapshot.lwObjects || []).length),
   );
 }
 
@@ -11756,6 +12015,13 @@ async function handleAction(action, depth = 0) {
       const surface = ["surface", "surfaceRenderer"].includes(workspaceSelectionKind)
         ? selectedSurface()
         : null;
+      const lwObject = ["lwObject", "lwRenderer"].includes(workspaceSelectionKind)
+        ? selectedLwObject()
+        : null;
+      if (lwObject) {
+        showError("Lightweight renderers are defined by the object file.");
+        break;
+      }
       if (!object && !map && !surface) {
         showError("Select an object first.");
         return;
@@ -11875,11 +12141,15 @@ workspaceProperties.addEventListener("click", async () => {
     showReferenceDialog("Renderer Properties");
   } else if (workspaceSelectionKind === "surfaceRenderer" && selectedSurfaceRenderer()) {
     showReferenceDialog("Renderer Properties");
+  } else if (workspaceSelectionKind === "lwRenderer" && selectedLwRenderer()) {
+    showReferenceDialog("Renderer Properties");
   } else if (workspaceSelectionKind === "object" && selectedObject()) {
     showReferenceDialog("Object Properties");
   } else if (workspaceSelectionKind === "densityMap" && selectedDensityMap()) {
     showReferenceDialog("Object Properties");
   } else if (workspaceSelectionKind === "surface" && selectedSurface()) {
+    showReferenceDialog("Object Properties");
+  } else if (workspaceSelectionKind === "lwObject" && selectedLwObject()) {
     showReferenceDialog("Object Properties");
   } else {
     showReferenceDialog("Scene Properties");

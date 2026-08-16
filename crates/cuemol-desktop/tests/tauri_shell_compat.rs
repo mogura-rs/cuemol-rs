@@ -298,6 +298,7 @@ fn tauri_file_save_uses_reference_workspace_writer_filters() {
         "CueMol density map file (*.qdf)",
         "CueMol elepot file (*.qdf)",
         "CueMol molsurf file (*.qdf)",
+        "CueMol light-weight obj file (*.qdf)",
     ] {
         assert!(
             JS.contains(&format!("name: \"{writer}\"")),
@@ -314,6 +315,37 @@ fn tauri_file_save_uses_reference_workspace_writer_filters() {
     assert!(dialog.contains("await mutateWithoutViewport("));
     assert!(dialog.contains("\"save_object\""));
     assert!(TAURI_APP_RS.contains("save_workspace_object_as(kind"));
+    assert!(TAURI_APP_RS.contains("GuiWorkspaceObjectKind::Lightweight"));
+}
+
+#[test]
+fn tauri_workspace_exposes_lightweight_objects_and_renderers() {
+    for binding in [
+        "lwObjects",
+        "lwObject",
+        "lwRenderer",
+        "selectedLwObject",
+        "selectedLwRenderer",
+        "set_lw_object_properties",
+        "set_lw_renderer_properties",
+    ] {
+        assert!(
+            JS.contains(binding),
+            "missing lightweight binding {binding}"
+        );
+    }
+    for binding in [
+        "lw_objects: Vec<LwObjectDto>",
+        "SetLwObjectProperties",
+        "SetLwRendererProperties",
+        "destroy_lw_object",
+        "destroy_lw_renderer",
+    ] {
+        assert!(
+            TAURI_APP_RS.contains(binding),
+            "missing lightweight backend {binding}"
+        );
+    }
 }
 
 #[test]

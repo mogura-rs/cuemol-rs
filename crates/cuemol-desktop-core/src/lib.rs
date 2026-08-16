@@ -1262,6 +1262,7 @@ pub enum GuiWorkspaceObjectKind {
     Molecule,
     DensityMap,
     Surface,
+    Lightweight,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1280,6 +1281,31 @@ pub struct GuiLoadedSurfaceRendererSummary {
     pub edge_color: String,
     pub multi_gradient: Vec<(f64, String)>,
     pub specific: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiLoadedLwObjectSummary {
+    pub uid: Uid,
+    pub scene_uid: Uid,
+    pub ui_order: i32,
+    pub name: String,
+    pub class_name: String,
+    pub format: String,
+    pub visible: bool,
+    pub locked: bool,
+    pub source: String,
+    pub renderers: Vec<GuiLoadedLwRendererSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiLoadedLwRendererSummary {
+    pub object_uid: Uid,
+    pub uid: Uid,
+    pub name: String,
+    pub renderer_type: String,
+    pub visible: bool,
+    pub locked: bool,
+    pub data_id: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2319,6 +2345,12 @@ impl DesktopAppState {
                         .into_iter()
                         .find(|surface| surface.name == target)
                         .map(|surface| surface.uid)
+                })
+                .or_else(|| {
+                    self.lw_object_summaries(scene_uid)
+                        .into_iter()
+                        .find(|object| object.name == target)
+                        .map(|object| object.uid)
                 });
         }
         if let Some(renderer) = scene.object_by_name(client).and_then(|object| {
@@ -2346,6 +2378,21 @@ impl DesktopAppState {
                     .find(|surface| surface.name == client)
                     .and_then(|surface| {
                         surface
+                            .renderers
+                            .into_iter()
+                            .find(|renderer| {
+                                renderer.name == target
+                                    && (type_name.is_empty() || renderer.renderer_type == type_name)
+                            })
+                            .map(|renderer| renderer.uid)
+                    })
+            })
+            .or_else(|| {
+                self.lw_object_summaries(scene_uid)
+                    .into_iter()
+                    .find(|object| object.name == client)
+                    .and_then(|object| {
+                        object
                             .renderers
                             .into_iter()
                             .find(|renderer| {
@@ -2608,6 +2655,34 @@ impl DesktopAppState {
                     )
                 }),
         );
+        groups.extend(
+            self.lw_object_summaries(scene_uid)
+                .into_iter()
+                .map(|object| {
+                    let mut entries = vec![entry(
+                        object.uid,
+                        None,
+                        object.name,
+                        object.class_name,
+                        true,
+                    )];
+                    entries.extend(object.renderers.into_iter().map(|renderer| {
+                        entry(
+                            renderer.uid,
+                            Some(object.uid),
+                            renderer.name,
+                            renderer.renderer_type,
+                            false,
+                        )
+                    }));
+                    (
+                        object.ui_order,
+                        GuiWorkspaceObjectKind::Lightweight,
+                        object.uid,
+                        entries,
+                    )
+                }),
+        );
         groups.sort_by_key(|(order, kind, uid, _)| (*order, *kind, *uid));
         Ok(groups
             .into_iter()
@@ -2713,6 +2788,18 @@ impl DesktopAppState {
                     )
                 }),
         );
+        settings.extend(
+            self.lw_object_summaries(scene_uid)
+                .into_iter()
+                .flat_map(|object| {
+                    std::iter::once((object.uid, object.visible, true)).chain(
+                        object
+                            .renderers
+                            .into_iter()
+                            .map(|renderer| (renderer.uid, renderer.visible, false)),
+                    )
+                }),
+        );
         Ok(settings)
     }
 
@@ -2726,6 +2813,8 @@ impl DesktopAppState {
             DensityRenderer(Uid, Uid),
             SurfaceObject(Uid),
             SurfaceRenderer(Uid, Uid),
+            LightweightObject(Uid),
+            LightweightRenderer(Uid, Uid),
         }
 
         let density_renderers = self
@@ -2757,6 +2846,20 @@ impl DesktopAppState {
                     .map(move |renderer| (renderer.uid, surface.uid))
             })
             .collect::<BTreeMap<_, _>>();
+        let lw_summaries = self.lw_object_summaries(scene_uid);
+        let lw_objects = lw_summaries
+            .iter()
+            .map(|object| object.uid)
+            .collect::<BTreeSet<_>>();
+        let lw_renderers = lw_summaries
+            .into_iter()
+            .flat_map(|object| {
+                object
+                    .renderers
+                    .into_iter()
+                    .map(move |renderer| (renderer.uid, object.uid))
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut remaining = Vec::new();
         {
             let scene = self
@@ -2777,6 +2880,8 @@ impl DesktopAppState {
                         remaining.push((Target::DensityObject(target), visible));
                     } else if surface_objects.contains(&target) {
                         remaining.push((Target::SurfaceObject(target), visible));
+                    } else if lw_objects.contains(&target) {
+                        remaining.push((Target::LightweightObject(target), visible));
                     }
                     continue;
                 }
@@ -2798,6 +2903,8 @@ impl DesktopAppState {
                     remaining.push((Target::DensityRenderer(*map_uid, target), visible));
                 } else if let Some(surface_uid) = surface_renderers.get(&target) {
                     remaining.push((Target::SurfaceRenderer(*surface_uid, target), visible));
+                } else if let Some(object_uid) = lw_renderers.get(&target) {
+                    remaining.push((Target::LightweightRenderer(*object_uid, target), visible));
                 }
             }
         }
@@ -2810,6 +2917,10 @@ impl DesktopAppState {
                 Target::SurfaceObject(uid) => self.set_surface_visible(uid, visible)?,
                 Target::SurfaceRenderer(parent_uid, uid) => {
                     self.set_surface_renderer_visible(parent_uid, uid, visible)?
+                }
+                Target::LightweightObject(uid) => self.set_lw_object_visible(uid, visible)?,
+                Target::LightweightRenderer(parent_uid, uid) => {
+                    self.set_lw_renderer_visible(parent_uid, uid, visible)?
                 }
             }
         }
@@ -3430,6 +3541,159 @@ impl DesktopAppState {
         self.active_scene
             .map(|scene_uid| self.surface_summaries(scene_uid))
             .unwrap_or_default()
+    }
+
+    pub fn lw_object_summary(&self, object_uid: Uid) -> Option<GuiLoadedLwObjectSummary> {
+        let scene_uid = self.scene_manager().scene_uid_for_lw_object(object_uid)?;
+        self.scene_manager()
+            .scene(scene_uid)?
+            .loaded_lw_object(object_uid)
+            .map(|object| lw_object_summary(scene_uid, object))
+    }
+
+    pub fn lw_object_summaries(&self, scene_uid: Uid) -> Vec<GuiLoadedLwObjectSummary> {
+        self.scene_manager()
+            .scene(scene_uid)
+            .map(|scene| {
+                scene
+                    .loaded_lw_objects()
+                    .iter()
+                    .map(|object| lw_object_summary(scene_uid, object))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn active_lw_object_summaries(&self) -> Vec<GuiLoadedLwObjectSummary> {
+        self.active_scene
+            .map(|scene_uid| self.lw_object_summaries(scene_uid))
+            .unwrap_or_default()
+    }
+
+    pub fn set_lw_object_common_properties(
+        &mut self,
+        object_uid: Uid,
+        name: impl Into<String>,
+        visible: bool,
+        locked: bool,
+    ) -> Result<()> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_lw_object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("LWObject {}", object_uid.get())))?;
+        let object = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+            .expect("LWObject was checked above");
+        let name = name.into();
+        object.name = name.clone();
+        object.visible = visible;
+        let node = ensure_lw_qsc_node(object);
+        node.set_str_attr("name", name);
+        set_qsc_bool_attr(node, "visible", visible, true);
+        set_qsc_bool_attr(node, "locked", locked, false);
+        Ok(())
+    }
+
+    pub fn rename_lw_object(&mut self, object_uid: Uid, name: impl Into<String>) -> Result<()> {
+        let summary = self
+            .lw_object_summary(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("LWObject {}", object_uid.get())))?;
+        self.set_lw_object_common_properties(object_uid, name, summary.visible, summary.locked)
+    }
+
+    pub fn set_lw_object_visible(&mut self, object_uid: Uid, visible: bool) -> Result<()> {
+        let summary = self
+            .lw_object_summary(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("LWObject {}", object_uid.get())))?;
+        self.set_lw_object_common_properties(object_uid, summary.name, visible, summary.locked)
+    }
+
+    pub fn set_lw_object_locked(&mut self, object_uid: Uid, locked: bool) -> Result<()> {
+        let summary = self
+            .lw_object_summary(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("LWObject {}", object_uid.get())))?;
+        self.set_lw_object_common_properties(object_uid, summary.name, summary.visible, locked)
+    }
+
+    pub fn set_lw_renderer_visible(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        visible: bool,
+    ) -> Result<()> {
+        self.update_lw_renderer(object_uid, renderer_uid, |renderer, node| {
+            renderer.visible = visible;
+            set_qsc_bool_attr(node, "visible", visible, true);
+        })
+    }
+
+    pub fn set_lw_renderer_locked(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        locked: bool,
+    ) -> Result<()> {
+        self.update_lw_renderer(object_uid, renderer_uid, |_, node| {
+            set_qsc_bool_attr(node, "locked", locked, false);
+        })
+    }
+
+    pub fn rename_lw_renderer(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        name: impl Into<String>,
+    ) -> Result<()> {
+        let name = name.into();
+        self.update_lw_renderer(object_uid, renderer_uid, |renderer, node| {
+            renderer.name = name.clone();
+            node.set_str_attr("name", &name);
+        })
+    }
+
+    fn update_lw_renderer(
+        &mut self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+        update: impl FnOnce(&mut LoadedLWRenderer, &mut LDom2Node),
+    ) -> Result<()> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_lw_object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("LWObject {}", object_uid.get())))?;
+        let object = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+            .expect("LWObject was checked above");
+        let renderer_index = lw_renderer_index(scene_uid, object_uid, renderer_uid)
+            .filter(|index| *index < object.renderers.len())
+            .ok_or_else(|| CueMolError::NotFound(format!("LWRenderer {}", renderer_uid.get())))?;
+        ensure_lw_qsc_node(object);
+        let node_index = object
+            .qsc_node
+            .as_ref()
+            .expect("LWObject node was ensured")
+            .children()
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                !node.is_attr() && node.tag_name() == "renderer" && node.type_name() == "lwrend"
+            })
+            .nth(renderer_index)
+            .map(|(index, _)| index)
+            .expect("LWObject node contains every renderer");
+        let (renderers, qsc_node) = (&mut object.renderers, &mut object.qsc_node);
+        update(
+            &mut renderers[renderer_index],
+            &mut qsc_node
+                .as_mut()
+                .expect("LWObject node was ensured")
+                .children_mut()[node_index],
+        );
+        Ok(())
     }
 
     pub fn set_surface_common_properties(
@@ -5239,6 +5503,9 @@ impl DesktopAppState {
                     .map(|object| effective_workspace_order(object.ui_order(), object.uid()))
                     .chain(scene.loaded_surfaces().iter().map(|surface| {
                         effective_workspace_order(surface_ui_order(surface), surface.uid)
+                    }))
+                    .chain(scene.loaded_lw_objects().iter().map(|object| {
+                        effective_workspace_order(lw_object_ui_order(object), object.uid)
                     }))
             });
         let density_orders = self
@@ -7451,6 +7718,11 @@ impl DesktopAppState {
                 uid: surface.uid,
                 order: effective_workspace_order(surface_ui_order(surface), surface.uid),
             }))
+            .chain(scene.loaded_lw_objects().iter().map(|object| Entry {
+                kind: GuiWorkspaceObjectKind::Lightweight,
+                uid: object.uid,
+                order: effective_workspace_order(lw_object_ui_order(object), object.uid),
+            }))
             .collect::<Vec<_>>();
         entries.extend(
             self.density_maps
@@ -7515,6 +7787,14 @@ impl DesktopAppState {
                         .and_then(|scene| scene.loaded_surface_mut(entry.uid))
                         .expect("workspace surface was checked above");
                     ensure_surface_qsc_node(surface).set_str_attr("ui_order", order.to_string());
+                }
+                GuiWorkspaceObjectKind::Lightweight => {
+                    let object = self
+                        .scene_manager_mut()
+                        .scene_mut(scene_uid)
+                        .and_then(|scene| scene.loaded_lw_object_mut(entry.uid))
+                        .expect("workspace LWObject was checked above");
+                    ensure_lw_qsc_node(object).set_str_attr("ui_order", order.to_string());
                 }
             }
         }
@@ -7609,6 +7889,48 @@ impl DesktopAppState {
             .scene_mut(scene_uid)
             .expect("surface scene was checked above")
             .remove_loaded_surface(surface_uid))
+    }
+
+    pub fn destroy_lw_object(&mut self, object_uid: Uid) -> Result<bool> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_lw_object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("LWObject {}", object_uid.get())))?;
+        Ok(self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .expect("LWObject scene was checked above")
+            .remove_loaded_lw_object(object_uid))
+    }
+
+    pub fn destroy_lw_renderer(&mut self, object_uid: Uid, renderer_uid: Uid) -> Result<bool> {
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_lw_object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("LWObject {}", object_uid.get())))?;
+        let object = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+            .expect("LWObject was checked above");
+        let Some(renderer_index) = lw_renderer_index(scene_uid, object_uid, renderer_uid)
+            .filter(|index| *index < object.renderers.len())
+        else {
+            return Ok(false);
+        };
+        ensure_lw_qsc_node(object);
+        object.renderers.remove(renderer_index);
+        let node = object.qsc_node.as_mut().expect("LWObject node was ensured");
+        let mut index = 0usize;
+        node.retain_children(|child| {
+            if child.is_attr() || child.tag_name() != "renderer" || child.type_name() != "lwrend" {
+                return true;
+            }
+            let keep = index != renderer_index;
+            index += 1;
+            keep
+        });
+        Ok(true)
     }
 
     pub fn destroy_surface_renderer(
@@ -9239,6 +9561,7 @@ impl DesktopAppState {
             GuiWorkspaceObjectKind::Molecule => self.save_object_as(object_uid, path),
             GuiWorkspaceObjectKind::DensityMap => self.save_density_map_as(object_uid, path),
             GuiWorkspaceObjectKind::Surface => self.save_surface_as(object_uid, path),
+            GuiWorkspaceObjectKind::Lightweight => self.save_lw_object_as(object_uid, path),
         }
     }
 
@@ -9326,6 +9649,40 @@ impl DesktopAppState {
         node.set_str_attr("src", source);
         node.set_str_attr("srctype", "qdfsurf");
         node.remove_child("modified");
+        Ok(())
+    }
+
+    pub fn save_lw_object_as(&mut self, object_uid: Uid, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        if !Self::path_has_extension(path.to_string_lossy().as_ref(), "qdf") {
+            return Err(CueMolError::invalid_argument(
+                "lightweight objects can only be saved as qdf",
+            ));
+        }
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_lw_object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("LWObject {}", object_uid.get())))?;
+        let raw_data = self
+            .scene_manager()
+            .scene(scene_uid)
+            .and_then(|scene| scene.loaded_lw_object(object_uid))
+            .expect("LWObject was checked above")
+            .raw_data
+            .clone();
+        cuemol_lwview::read_qdf_lwobj_bytes(&raw_data)?;
+        fs::write(path, &raw_data)?;
+
+        let object = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
+            .expect("LWObject was checked above");
+        object.srctype = "qdflwobj".to_string();
+        let source = path.to_string_lossy().into_owned();
+        let node = ensure_lw_qsc_node(object);
+        node.set_str_attr("src", source);
+        node.set_str_attr("srctype", "qdflwobj");
         Ok(())
     }
 
@@ -42150,12 +42507,6 @@ fn sync_script_surface(surface: &mut LoadedSurface, state: &ScriptObj) {
 
 #[cfg(feature = "scripting")]
 fn script_lw_renderers(object: &LoadedLWObject, scene_uid: Uid) -> Vec<ScriptRend> {
-    let object_local = object
-        .uid
-        .get()
-        .saturating_sub(1_000_000_000 + scene_uid.get() * 1_000_000);
-    let renderer_base =
-        2_000_000_000 + scene_uid.get() * 1_000_000 + object_local.saturating_mul(1_000);
     object
         .renderers
         .iter()
@@ -42184,7 +42535,7 @@ fn script_lw_renderers(object: &LoadedLWObject, scene_uid: Uid) -> Vec<ScriptRen
                 attributes.insert("xformMat".to_string(), renderer.xform.to_script_string());
             }
             ScriptRend {
-                uid: renderer_base.saturating_add(index as u64 + 1),
+                uid: lw_renderer_uid(scene_uid, object.uid, index).get(),
                 object_uid: object.uid.get(),
                 scene_uid: scene_uid.get(),
                 name: renderer.name.clone(),
@@ -45000,6 +45351,134 @@ fn effective_workspace_order(order: i32, uid: Uid) -> i32 {
     } else {
         i32::try_from(uid.get()).unwrap_or(i32::MAX)
     }
+}
+
+fn lw_renderer_uid(scene_uid: Uid, object_uid: Uid, renderer_index: usize) -> Uid {
+    let object_local = object_uid
+        .get()
+        .saturating_sub(1_000_000_000 + scene_uid.get() * 1_000_000);
+    Uid::new(
+        2_000_000_000_u64
+            .saturating_add(scene_uid.get().saturating_mul(1_000_000))
+            .saturating_add(object_local.saturating_mul(1_000))
+            .saturating_add(renderer_index as u64 + 1),
+    )
+}
+
+fn lw_renderer_index(scene_uid: Uid, object_uid: Uid, renderer_uid: Uid) -> Option<usize> {
+    let first_uid = lw_renderer_uid(scene_uid, object_uid, 0).get();
+    usize::try_from(renderer_uid.get().checked_sub(first_uid)?).ok()
+}
+
+fn lw_object_ui_order(object: &LoadedLWObject) -> i32 {
+    object
+        .qsc_node
+        .as_ref()
+        .and_then(|node| node.str_attr("ui_order").as_str().parse().ok())
+        .unwrap_or(0)
+}
+
+fn lw_object_summary(scene_uid: Uid, object: &LoadedLWObject) -> GuiLoadedLwObjectSummary {
+    let node = object.qsc_node.as_ref();
+    let renderer_nodes = node
+        .into_iter()
+        .flat_map(|node| node.children())
+        .filter(|node| {
+            !node.is_attr() && node.tag_name() == "renderer" && node.type_name() == "lwrend"
+        })
+        .collect::<Vec<_>>();
+    GuiLoadedLwObjectSummary {
+        uid: object.uid,
+        scene_uid,
+        ui_order: effective_workspace_order(lw_object_ui_order(object), object.uid),
+        name: object.name.clone(),
+        class_name: "LWObject".to_string(),
+        format: object.srctype.clone(),
+        visible: object.visible,
+        locked: node.is_some_and(|node| qsc_bool(node.str_attr("locked").as_str())),
+        source: node
+            .map(|node| node.str_attr("src").to_string())
+            .unwrap_or_default(),
+        renderers: object
+            .renderers
+            .iter()
+            .enumerate()
+            .map(|(index, renderer)| GuiLoadedLwRendererSummary {
+                object_uid: object.uid,
+                uid: lw_renderer_uid(scene_uid, object.uid, index),
+                name: renderer.name.clone(),
+                renderer_type: "lwrend".to_string(),
+                visible: renderer.visible,
+                locked: renderer_nodes
+                    .get(index)
+                    .is_some_and(|node| qsc_bool(node.str_attr("locked").as_str())),
+                data_id: renderer.data_id,
+            })
+            .collect(),
+    }
+}
+
+fn lw_renderer_qsc_node(renderer: &LoadedLWRenderer) -> LDom2Node {
+    let mut node = LDom2Node::new();
+    node.set_tag_name("renderer");
+    node.set_type_name("lwrend");
+    node.set_str_attr("name", &renderer.name);
+    node.set_str_attr("data_id", renderer.data_id.to_string());
+    if !renderer.visible {
+        node.set_str_attr("visible", "false");
+    }
+    if renderer.xform != Matrix4::IDENTITY {
+        node.set_str_attr("xformMat", renderer.xform.to_script_string());
+    }
+    node
+}
+
+fn ensure_lw_qsc_node(object: &mut LoadedLWObject) -> &mut LDom2Node {
+    if object.qsc_node.is_none() {
+        let mut node = LDom2Node::new();
+        node.set_tag_name("object");
+        node.set_type_name("LWObject");
+        node.set_str_attr("name", &object.name);
+        node.set_str_attr("src", "datachunk:");
+        node.set_str_attr("srctype", &object.srctype);
+        if !object.visible {
+            node.set_str_attr("visible", "false");
+        }
+        if object.xform != Matrix4::IDENTITY {
+            node.set_str_attr("xformMat", object.xform.to_script_string());
+        }
+        for renderer in &object.renderers {
+            node.append_child_node(lw_renderer_qsc_node(renderer));
+        }
+        object.qsc_node = Some(node);
+    }
+    let existing_renderer_count = object
+        .qsc_node
+        .as_ref()
+        .expect("LWObject node was inserted")
+        .children()
+        .iter()
+        .filter(|node| {
+            !node.is_attr() && node.tag_name() == "renderer" && node.type_name() == "lwrend"
+        })
+        .count();
+    if existing_renderer_count < object.renderers.len() {
+        let missing = object.renderers[existing_renderer_count..]
+            .iter()
+            .map(lw_renderer_qsc_node)
+            .collect::<Vec<_>>();
+        let node = object
+            .qsc_node
+            .as_mut()
+            .expect("LWObject node was inserted");
+        for renderer in missing {
+            node.append_child_node(renderer);
+        }
+    }
+    object
+        .qsc_node
+        .as_mut()
+        .expect("LWObject node was inserted")
 }
 
 fn surface_renderer_summary(
@@ -53406,6 +53885,20 @@ end_header
                 raw_data: Vec::new(),
                 qsc_node: None,
             });
+        let lw_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_lw_object(LoadedLWObject {
+                uid: Uid::new(0),
+                name: "lightweight".to_string(),
+                srctype: "qdflwobj".to_string(),
+                raw_data: cuemol_lwview::write_qdf_lwobj_bytes(&cuemol_lwview::LWObject::new()),
+                visible: true,
+                xform: Matrix4::IDENTITY,
+                renderers: Vec::new(),
+                qsc_node: None,
+            });
 
         assert!(app
             .move_workspace_object(
@@ -53430,6 +53923,20 @@ end_header
                 false,
             )
             .unwrap());
+        assert!(app
+            .move_workspace_object(
+                scene_uid,
+                GuiWorkspaceObjectKind::Lightweight,
+                lw_uid,
+                GuiWorkspaceObjectKind::Surface,
+                surface_uid,
+                false,
+            )
+            .unwrap());
+        assert_eq!(app.lw_object_summary(lw_uid).unwrap().ui_order, 1);
+        assert_eq!(app.surface_summary(surface_uid).unwrap().ui_order, 2);
+        assert_eq!(app.object_summaries(scene_uid)[0].ui_order, 3);
+        assert_eq!(app.density_map_summary(map_uid).unwrap().ui_order, 4);
 
         app.sync_density_map_qsc_nodes(scene_uid).unwrap();
         let scene = app.scene_manager().scene(scene_uid).unwrap();
@@ -53442,7 +53949,7 @@ end_header
                 .unwrap()
                 .str_attr("ui_order")
                 .as_str(),
-            "1"
+            "2"
         );
         assert_eq!(
             scene.loaded_density_maps()[0]
@@ -53451,7 +53958,18 @@ end_header
                 .unwrap()
                 .str_attr("ui_order")
                 .as_str(),
-            "3"
+            "4"
+        );
+        assert_eq!(
+            scene
+                .loaded_lw_object(lw_uid)
+                .unwrap()
+                .qsc_node
+                .as_ref()
+                .unwrap()
+                .str_attr("ui_order")
+                .as_str(),
+            "1"
         );
     }
 
@@ -57830,6 +58348,7 @@ attribute \"dep\" string \"positions\"
         let vert_path = dir.join("msms.vert");
         let qdf_surface_path = dir.join("surface.qdf");
         let qdf_lw_path = dir.join("lightweight.qdf");
+        let qdf_lw_save_path = dir.join("saved-lightweight.qdf");
         let scene_path = dir.join("objects.qsc");
 
         std::fs::write(
@@ -57904,9 +58423,42 @@ attribute \"dep\" string \"positions\"
                 .mesh_triangle_count(),
             4
         );
+        let lw_summary = app.active_lw_object_summaries().pop().unwrap();
+        assert_eq!(lw_summary.source, qdf_lw_path.to_string_lossy());
+        assert_eq!(lw_summary.renderers.len(), 1);
+        let lw_uid = lw_summary.uid;
+        let lw_renderer_uid = lw_summary.renderers[0].uid;
+        app.set_lw_object_common_properties(lw_uid, "saved-lw", false, true)
+            .unwrap();
+        app.set_lw_renderer_visible(lw_uid, lw_renderer_uid, false)
+            .unwrap();
+        app.set_lw_renderer_locked(lw_uid, lw_renderer_uid, true)
+            .unwrap();
+        app.rename_lw_renderer(lw_uid, lw_renderer_uid, "saved-lwrend")
+            .unwrap();
+        let lw_summary = app.lw_object_summary(lw_uid).unwrap();
+        assert_eq!(lw_summary.name, "saved-lw");
+        assert!(!lw_summary.visible);
+        assert!(lw_summary.locked);
+        assert_eq!(lw_summary.renderers[0].name, "saved-lwrend");
+        assert!(!lw_summary.renderers[0].visible);
+        assert!(lw_summary.renderers[0].locked);
+        app.set_lw_object_visible(lw_uid, true).unwrap();
+        app.set_lw_renderer_visible(lw_uid, lw_renderer_uid, true)
+            .unwrap();
+        app.save_workspace_object_as(
+            GuiWorkspaceObjectKind::Lightweight,
+            lw_uid,
+            &qdf_lw_save_path,
+        )
+        .unwrap();
+        assert_eq!(
+            cuemol_qsys::qdf_file_type(&std::fs::read(&qdf_lw_save_path).unwrap()).as_deref(),
+            Some("LWO3")
+        );
         app.save_active_scene_qsc(&scene_path).unwrap();
         let qsc = std::fs::read_to_string(&scene_path).unwrap();
-        assert!(qsc.contains(&format!("src=\"{}\"", qdf_lw_path.to_string_lossy())));
+        assert!(qsc.contains(&format!("src=\"{}\"", qdf_lw_save_path.to_string_lossy())));
 
         let mut reloaded = DesktopAppState::new();
         reloaded.load_qsc_file(&scene_path).unwrap();
@@ -57923,8 +58475,13 @@ attribute \"dep\" string \"positions\"
                 .unwrap()
                 .str_attr("src")
                 .as_str(),
-            qdf_lw_path.to_string_lossy()
+            qdf_lw_save_path.to_string_lossy()
         );
+        let reloaded_lw = reloaded.active_lw_object_summaries().pop().unwrap();
+        assert_eq!(reloaded_lw.name, "saved-lw");
+        assert!(reloaded_lw.locked);
+        assert_eq!(reloaded_lw.renderers[0].name, "saved-lwrend");
+        assert!(reloaded_lw.renderers[0].locked);
         assert_eq!(
             reloaded
                 .active_render_snapshot("")
@@ -57939,6 +58496,7 @@ attribute \"dep\" string \"positions\"
             vert_path,
             qdf_surface_path,
             qdf_lw_path,
+            qdf_lw_save_path,
             scene_path,
         ] {
             let _ = std::fs::remove_file(path);

@@ -700,6 +700,32 @@ struct SurfaceDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct LwObjectDto {
+    uid: u64,
+    scene_uid: u64,
+    ui_order: i32,
+    name: String,
+    class_name: String,
+    format: String,
+    visible: bool,
+    locked: bool,
+    source: String,
+    renderers: Vec<LwRendererDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LwRendererDto {
+    uid: u64,
+    name: String,
+    renderer_type: String,
+    visible: bool,
+    locked: bool,
+    data_id: i32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct AnimationObjectDto {
     index: usize,
     name: String,
@@ -759,6 +785,7 @@ struct AppSnapshot {
     crystals: Vec<CrystalDto>,
     density_maps: Vec<DensityMapDto>,
     surfaces: Vec<SurfaceDto>,
+    lw_objects: Vec<LwObjectDto>,
     active_scene_uid: Option<u64>,
     selection: String,
     measure_result: Option<String>,
@@ -1016,6 +1043,16 @@ struct ViewPropertiesUpdateDto {
 #[serde(rename_all = "camelCase")]
 struct ObjectPropertiesInput {
     object_uid: u64,
+    name: String,
+    visible: bool,
+    locked: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LwRendererPropertiesInput {
+    object_uid: u64,
+    renderer_uid: u64,
     name: String,
     visible: bool,
     locked: bool,
@@ -1866,6 +1903,34 @@ impl AppModel {
                     .collect(),
             })
             .collect();
+        let lw_objects = self
+            .desktop
+            .active_lw_object_summaries()
+            .into_iter()
+            .map(|object| LwObjectDto {
+                uid: object.uid.get(),
+                scene_uid: object.scene_uid.get(),
+                ui_order: object.ui_order,
+                name: object.name,
+                class_name: object.class_name,
+                format: object.format,
+                visible: object.visible,
+                locked: object.locked,
+                source: object.source,
+                renderers: object
+                    .renderers
+                    .into_iter()
+                    .map(|renderer| LwRendererDto {
+                        uid: renderer.uid.get(),
+                        name: renderer.name,
+                        renderer_type: renderer.renderer_type,
+                        visible: renderer.visible,
+                        locked: renderer.locked,
+                        data_id: renderer.data_id,
+                    })
+                    .collect(),
+            })
+            .collect();
         let mut animation_start = 0.0;
         let animation_objects = self
             .animation_objects
@@ -1941,6 +2006,7 @@ impl AppModel {
             crystals,
             density_maps,
             surfaces,
+            lw_objects,
             active_scene_uid,
             selection: self.selection.clone(),
             measure_result: self.desktop.active_measure(&self.selection),
@@ -2545,6 +2611,65 @@ impl AppModel {
         Ok(())
     }
 
+    fn set_lw_object_properties(
+        &mut self,
+        properties: ObjectPropertiesInput,
+    ) -> Result<(), String> {
+        let name = properties.name.trim();
+        if name.is_empty() || name.contains(':') {
+            return Err(
+                "lightweight object name must be non-empty and cannot contain ':'".to_string(),
+            );
+        }
+        self.desktop
+            .set_lw_object_common_properties(
+                Uid::new(properties.object_uid),
+                name,
+                properties.visible,
+                properties.locked,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = "Lightweight object properties updated".to_string();
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn set_lw_renderer_properties(
+        &mut self,
+        properties: LwRendererPropertiesInput,
+    ) -> Result<(), String> {
+        let name = properties.name.trim();
+        if name.is_empty() || name.contains(':') {
+            return Err(
+                "lightweight renderer name must be non-empty and cannot contain ':'".to_string(),
+            );
+        }
+        self.desktop
+            .rename_lw_renderer(
+                Uid::new(properties.object_uid),
+                Uid::new(properties.renderer_uid),
+                name,
+            )
+            .map_err(|error| error.to_string())?;
+        self.desktop
+            .set_lw_renderer_visible(
+                Uid::new(properties.object_uid),
+                Uid::new(properties.renderer_uid),
+                properties.visible,
+            )
+            .map_err(|error| error.to_string())?;
+        self.desktop
+            .set_lw_renderer_locked(
+                Uid::new(properties.object_uid),
+                Uid::new(properties.renderer_uid),
+                properties.locked,
+            )
+            .map_err(|error| error.to_string())?;
+        self.status = "Lightweight renderer properties updated".to_string();
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
     fn set_surface_renderer_visible(
         &mut self,
         surface_uid: u64,
@@ -2599,6 +2724,11 @@ impl AppModel {
                 self.desktop
                     .set_surface_renderer_visible(object_uid, renderer_uid()?, visible)
             }
+            "lwObject" => self.desktop.set_lw_object_visible(object_uid, visible),
+            "lwRenderer" => {
+                self.desktop
+                    .set_lw_renderer_visible(object_uid, renderer_uid()?, visible)
+            }
             kind => return Err(format!("unsupported Workspace item type: {kind}")),
         }
         .map_err(|error| error.to_string())?;
@@ -2637,6 +2767,11 @@ impl AppModel {
             "surfaceRenderer" => {
                 self.desktop
                     .set_surface_renderer_locked(object_uid, renderer_uid()?, locked)
+            }
+            "lwObject" => self.desktop.set_lw_object_locked(object_uid, locked),
+            "lwRenderer" => {
+                self.desktop
+                    .set_lw_renderer_locked(object_uid, renderer_uid()?, locked)
             }
             "rendererGroup" => return Err("renderer group locking is not supported".to_string()),
             kind => return Err(format!("unsupported Workspace item type: {kind}")),
@@ -2796,6 +2931,54 @@ impl AppModel {
                 }
                 self.status = format!("Delete renderer: {}/{renderer_name}", surface.name);
             }
+            "lwObject" => {
+                let name = self
+                    .desktop
+                    .lw_object_summary(object_uid)
+                    .map(|object| object.name)
+                    .ok_or_else(|| format!("lightweight object {} not found", target.object_uid))?;
+                if !self
+                    .desktop
+                    .destroy_lw_object(object_uid)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!(
+                        "lightweight object {} could not be deleted",
+                        target.object_uid
+                    ));
+                }
+                self.status = format!("Destroy object {name}");
+            }
+            "lwRenderer" => {
+                let renderer_uid = Uid::new(
+                    target
+                        .renderer_uid
+                        .ok_or_else(|| "renderer UID is required".to_string())?,
+                );
+                let object = self
+                    .desktop
+                    .lw_object_summary(object_uid)
+                    .ok_or_else(|| format!("lightweight object {} not found", target.object_uid))?;
+                let renderer_name = object
+                    .renderers
+                    .iter()
+                    .find(|renderer| renderer.uid == renderer_uid)
+                    .map(|renderer| renderer.name.clone())
+                    .ok_or_else(|| {
+                        format!("lightweight renderer {} not found", renderer_uid.get())
+                    })?;
+                if !self
+                    .desktop
+                    .destroy_lw_renderer(object_uid, renderer_uid)
+                    .map_err(|error| error.to_string())?
+                {
+                    return Err(format!(
+                        "lightweight renderer {} could not be deleted",
+                        renderer_uid.get()
+                    ));
+                }
+                self.status = format!("Delete renderer: {}/{renderer_name}", object.name);
+            }
             kind => return Err(format!("unsupported Workspace item type: {kind}")),
         }
         self.invalidate_mesh(false);
@@ -2826,6 +3009,7 @@ impl AppModel {
             "object" => Ok(crate::GuiWorkspaceObjectKind::Molecule),
             "densityMap" => Ok(crate::GuiWorkspaceObjectKind::DensityMap),
             "surface" => Ok(crate::GuiWorkspaceObjectKind::Surface),
+            "lwObject" => Ok(crate::GuiWorkspaceObjectKind::Lightweight),
             _ => Err(format!("unsupported Workspace object type: {value}")),
         };
         let after = match input.position.as_str() {
@@ -3230,6 +3414,21 @@ impl AppModel {
                     .map_err(|error| error.to_string())?;
                 self.status = format!("Rename to {name}");
             }
+            "lwObject" => {
+                self.desktop
+                    .rename_lw_object(object_uid, name)
+                    .map_err(|error| error.to_string())?;
+                self.status = format!("Rename to {name}");
+            }
+            "lwRenderer" => {
+                let renderer_uid = input
+                    .renderer_uid
+                    .ok_or_else(|| "lightweight renderer UID is required".to_string())?;
+                self.desktop
+                    .rename_lw_renderer(object_uid, Uid::new(renderer_uid), name)
+                    .map_err(|error| error.to_string())?;
+                self.status = format!("Rename to {name}");
+            }
             kind => return Err(format!("unsupported Workspace item type: {kind}")),
         }
         Ok(())
@@ -3271,7 +3470,7 @@ impl AppModel {
                     .map_err(|error| error.to_string())?;
                 true
             }
-            "surface" | "surfaceRenderer" => false,
+            "surface" | "surfaceRenderer" | "lwObject" | "lwRenderer" => false,
             kind => return Err(format!("unsupported Workspace item type: {kind}")),
         };
         if fitted {
@@ -5762,6 +5961,8 @@ enum ModelRequest {
     },
     SetSurfaceProperties(ObjectPropertiesInput),
     SetSurfaceRendererProperties(RendererPropertiesInput),
+    SetLwObjectProperties(ObjectPropertiesInput),
+    SetLwRendererProperties(LwRendererPropertiesInput),
     SetSurfaceRendererVisible {
         surface_uid: u64,
         renderer_uid: u64,
@@ -7369,6 +7570,18 @@ fn handle_model_request(
         ModelRequest::SetSurfaceRendererProperties(properties) => {
             let undo = model.capture_undo();
             model.set_surface_renderer_properties(properties)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetLwObjectProperties(properties) => {
+            let undo = model.capture_undo();
+            model.set_lw_object_properties(properties)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetLwRendererProperties(properties) => {
+            let undo = model.capture_undo();
+            model.set_lw_renderer_properties(properties)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -9308,6 +9521,7 @@ fn handle_model_request(
                 "object" => crate::GuiWorkspaceObjectKind::Molecule,
                 "densityMap" => crate::GuiWorkspaceObjectKind::DensityMap,
                 "surface" => crate::GuiWorkspaceObjectKind::Surface,
+                "lwObject" => crate::GuiWorkspaceObjectKind::Lightweight,
                 value => return Err(format!("unsupported Workspace object type: {value}")),
             };
             model
@@ -9966,6 +10180,28 @@ fn set_surface_renderer_properties(
     snapshot_response(request_model(
         &state,
         ModelRequest::SetSurfaceRendererProperties(properties),
+    )?)
+}
+
+#[tauri::command]
+fn set_lw_object_properties(
+    properties: ObjectPropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetLwObjectProperties(properties),
+    )?)
+}
+
+#[tauri::command]
+fn set_lw_renderer_properties(
+    properties: LwRendererPropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetLwRendererProperties(properties),
     )?)
 }
 
@@ -11962,6 +12198,8 @@ pub fn run() -> Result<(), tauri::Error> {
             generate_density_surface,
             set_surface_properties,
             set_surface_renderer_properties,
+            set_lw_object_properties,
+            set_lw_renderer_properties,
             set_surface_renderer_visible,
             add_surface_renderer,
             regenerate_surface,

@@ -1739,6 +1739,18 @@ impl MolScene {
         &mut self.loaded_lw_objects
     }
 
+    pub fn loaded_lw_object(&self, uid: Uid) -> Option<&LoadedLWObject> {
+        self.loaded_lw_objects
+            .iter()
+            .find(|object| object.uid == uid)
+    }
+
+    pub fn loaded_lw_object_mut(&mut self, uid: Uid) -> Option<&mut LoadedLWObject> {
+        self.loaded_lw_objects
+            .iter_mut()
+            .find(|object| object.uid == uid)
+    }
+
     pub fn remove_loaded_lw_object(&mut self, uid: Uid) -> bool {
         let previous = self.loaded_lw_objects.len();
         self.loaded_lw_objects.retain(|object| object.uid != uid);
@@ -3156,6 +3168,13 @@ impl MolSceneManager {
         self.scenes
             .iter()
             .find(|scene| scene.loaded_surface(uid).is_some())
+            .map(MolScene::uid)
+    }
+
+    pub fn scene_uid_for_lw_object(&self, uid: Uid) -> Option<Uid> {
+        self.scenes
+            .iter()
+            .find(|scene| scene.loaded_lw_object(uid).is_some())
             .map(MolScene::uid)
     }
 
