@@ -7157,7 +7157,7 @@ enum ModelRequest {
         height: u32,
     },
     ClearLog,
-    ExecuteScript(String),
+    ExecuteScriptFile(String),
     ExportPov {
         path: String,
     },
@@ -10578,7 +10578,8 @@ fn handle_model_request(
             model.status = "Output log cleared".to_string();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::ExecuteScript(script) => {
+        ModelRequest::ExecuteScriptFile(path) => {
+            let script = fs::read_to_string(&path).map_err(|error| error.to_string())?;
             if script.trim().is_empty() {
                 return Err("a script is required".to_string());
             }
@@ -10593,6 +10594,9 @@ fn handle_model_request(
             if let Some(selection) = selection {
                 model.selection = selection;
             }
+            model
+                .log_lines
+                .push(format!("Exec internal JS: {path} done."));
             model.invalidate_mesh(false);
             model.status = "Script executed".to_string();
             model.push_undo(undo);
@@ -13471,8 +13475,14 @@ fn clear_log(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
-fn execute_script(script: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
-    snapshot_response(request_model(&state, ModelRequest::ExecuteScript(script))?)
+fn execute_script_file(
+    path: String,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ExecuteScriptFile(path),
+    )?)
 }
 
 #[tauri::command]
@@ -13954,7 +13964,7 @@ pub fn run() -> Result<(), tauri::Error> {
             tick_animation,
             tick_animation_frame,
             clear_log,
-            execute_script,
+            execute_script_file,
             export_pov,
             start_pov_render,
             poll_pov_render,
@@ -20409,6 +20419,31 @@ mod tests {
     }
 
     #[test]
+    fn execute_script_file_reads_and_runs_internal_javascript() {
+        let script_path = std::env::temp_dir().join(format!(
+            "cuemol-tauri-script-file-{}.js",
+            std::process::id()
+        ));
+        std::fs::write(&script_path, "print('file-script');").unwrap();
+        let mut model = model_without_gpu();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::ExecuteScriptFile(script_path.to_string_lossy().into_owned()),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.log_lines[0], "file-script");
+        assert_eq!(
+            snapshot.log_lines[1],
+            format!("Exec internal JS: {} done.", script_path.to_string_lossy())
+        );
+        assert_eq!(snapshot.status, "Script executed");
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[test]
     fn rendering_and_script_dialog_requests_produce_outputs() {
         let root = option_env!("CUEMOL2_REF_DIR")
             .map(PathBuf::from)
@@ -20419,19 +20454,26 @@ mod tests {
         }
         let pov_path =
             std::env::temp_dir().join(format!("cuemol-tauri-pov-{}.pov", std::process::id()));
+        let script_path =
+            std::env::temp_dir().join(format!("cuemol-tauri-script-{}.js", std::process::id()));
+        std::fs::write(&script_path, "print('tauri-script');").unwrap();
         let mut model = model_without_gpu();
         model.desktop.open_path(&pdb).unwrap();
         model.rebuild_mesh(true).unwrap();
 
         let response = handle_model_request(
             &mut model,
-            ModelRequest::ExecuteScript("print('tauri-script');".to_string()),
+            ModelRequest::ExecuteScriptFile(script_path.to_string_lossy().into_owned()),
         )
         .unwrap();
         let ModelResponse::Snapshot(snapshot) = response else {
             panic!("expected a snapshot");
         };
-        assert_eq!(snapshot.log_lines, ["tauri-script"]);
+        assert_eq!(snapshot.log_lines[0], "tauri-script");
+        assert_eq!(
+            snapshot.log_lines[1],
+            format!("Exec internal JS: {} done.", script_path.to_string_lossy())
+        );
         handle_model_request(
             &mut model,
             ModelRequest::ExportPov {
@@ -20447,6 +20489,7 @@ mod tests {
             panic!("expected a snapshot");
         };
         assert!(snapshot.log_lines.is_empty());
+        let _ = std::fs::remove_file(script_path);
         let _ = std::fs::remove_file(pov_path);
     }
 

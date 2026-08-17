@@ -6679,17 +6679,6 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       referenceDialog.close();
     });
     dialogActions(chooseDir, start);
-  } else if (title === "Execute script") {
-    const script = dialogTextArea(
-      "JavaScript",
-      'print("CueMol2");\n// cuemol.select("name CA");',
-    );
-    const run = button("Execute", "dialog-primary", async () => {
-      await mutate("execute_script", { script: script.value });
-      showBottomPanel("output");
-      referenceDialog.close();
-    });
-    dialogActions(run);
   } else if (title === "Save File As") {
     const object = selectedWorkspaceObjectForSave();
     if (!object) {
@@ -7166,6 +7155,23 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
   if (!referenceDialog.open) {
     if (usesBondPicker && referenceDialog.show) referenceDialog.show();
     else if (referenceDialog.showModal) referenceDialog.showModal();
+  }
+}
+
+async function chooseExecuteScriptFile() {
+  if (!dialog?.open) {
+    showError("The Tauri dialog plugin is unavailable.");
+    return;
+  }
+  const path = await dialog.open({
+    title: "Select a File",
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Internal Javascript", extensions: ["js"] }],
+  });
+  if (!path) return;
+  if (await mutate("execute_script_file", { path })) {
+    showBottomPanel("output");
   }
 }
 
@@ -14094,9 +14100,13 @@ document.querySelectorAll("[data-action]").forEach((element) => {
 });
 
 document.querySelectorAll("[data-dialog]").forEach((element) => {
-  element.addEventListener("click", () => {
+  element.addEventListener("click", async () => {
     closeMenus();
-    showReferenceDialog(element.dataset.dialog);
+    if (element.dataset.dialog === "Execute script") {
+      await chooseExecuteScriptFile();
+    } else {
+      await showReferenceDialog(element.dataset.dialog);
+    }
   });
 });
 

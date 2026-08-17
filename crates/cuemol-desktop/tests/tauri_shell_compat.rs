@@ -169,7 +169,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "remove_morph_frame",
         "apply_morph_frame",
         "clear_log",
-        "execute_script",
+        "execute_script_file",
         "export_pov",
         "render_animation",
         "open_pdb",
@@ -186,6 +186,9 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     ] {
         assert!(JS.contains(command), "missing menu binding {command}");
     }
+    assert!(JS.contains("title: \"Select a File\""));
+    assert!(JS.contains("name: \"Internal Javascript\""));
+    assert!(!JS.contains("dialogTextArea(\n      \"JavaScript\""));
     assert!(HTML.contains("data-interaction=\"rotate\""));
     assert!(HTML.contains("data-interaction=\"rect-select\""));
     assert!(JS.contains("bondList.className = \"bond-list\""));

@@ -13359,6 +13359,8 @@ impl GuiApplication {
                         self.apply_molecule_selection(object_uid, expr, "Script selection");
                     }
                 }
+                self.log_lines
+                    .push(format!("Exec internal JS: {} done.", self.script_path));
                 self.set_status("Script executed");
             }
             Err(error) => self.set_status(format!("Script error: {error}")),
