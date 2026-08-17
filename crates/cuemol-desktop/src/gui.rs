@@ -1052,6 +1052,9 @@ struct GuiApplication {
     /// Molecule chosen in the MolStruct panel's molecule selector (CueMol2
     /// `molstruct-panel.xul`); independent of the Workspace tree selection.
     molstruct_object: Option<cuemol_core::Uid>,
+    /// Selected rows and range anchor in the MolStruct multi-select tree.
+    molstruct_selection: Vec<MolstructTreeRow>,
+    molstruct_selection_anchor: Option<MolstructTreeRow>,
     /// MolStruct tree expand-all / collapse-all state. Folded into each node's
     /// persistent id so toggling recreates every chain/residue node with this as the
     /// default-open state (egui only honours `default_open` on first creation).
@@ -1283,6 +1286,118 @@ struct GuiUndoSnapshot {
 struct MoleculePanelCacheKey {
     scene_uid: Option<cuemol_core::Uid>,
     objects: Vec<(cuemol_core::Uid, String, usize)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MolstructTreeRow {
+    Chain {
+        object_uid: cuemol_core::Uid,
+        chain: String,
+    },
+    Residue {
+        object_uid: cuemol_core::Uid,
+        chain: String,
+        res_id: i32,
+        ins_code: Option<char>,
+    },
+    Atom {
+        object_uid: cuemol_core::Uid,
+        serial: i32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MolstructAction {
+    Select,
+    Center,
+    Zoom,
+}
+
+impl MolstructTreeRow {
+    fn object_uid(&self) -> cuemol_core::Uid {
+        match self {
+            Self::Chain { object_uid, .. }
+            | Self::Residue { object_uid, .. }
+            | Self::Atom { object_uid, .. } => *object_uid,
+        }
+    }
+
+    fn selector(&self) -> String {
+        match self {
+            Self::Chain { chain, .. } => format!("c;'{chain}'"),
+            Self::Residue {
+                chain,
+                res_id,
+                ins_code,
+                ..
+            } => format!("'{chain}'.{}.*", residue_index(*res_id, *ins_code)),
+            Self::Atom { serial, .. } => format!("aid {serial}"),
+        }
+    }
+}
+
+fn residue_index(res_id: i32, ins_code: Option<char>) -> String {
+    match ins_code {
+        Some(ins_code) => format!("{res_id}{ins_code}"),
+        None => res_id.to_string(),
+    }
+}
+
+fn molstruct_selection_expression(
+    visible_rows: &[MolstructTreeRow],
+    selected_rows: &[MolstructTreeRow],
+) -> String {
+    let mut selectors = Vec::new();
+    let mut index = 0;
+    while index < visible_rows.len() {
+        let row = &visible_rows[index];
+        if !selected_rows.contains(row) {
+            index += 1;
+            continue;
+        }
+        if let MolstructTreeRow::Residue {
+            object_uid,
+            chain,
+            res_id,
+            ins_code,
+        } = row
+        {
+            let mut end = index;
+            while let Some(MolstructTreeRow::Residue {
+                object_uid: next_object_uid,
+                chain: next_chain,
+                ..
+            }) = visible_rows.get(end + 1)
+            {
+                if next_object_uid != object_uid
+                    || next_chain != chain
+                    || !selected_rows.contains(&visible_rows[end + 1])
+                {
+                    break;
+                }
+                end += 1;
+            }
+            if end == index {
+                selectors.push(row.selector());
+            } else if let MolstructTreeRow::Residue {
+                res_id: end_res_id,
+                ins_code: end_ins_code,
+                ..
+            } = &visible_rows[end]
+            {
+                selectors.push(format!(
+                    "'{chain}'.{}:{}.*",
+                    residue_index(*res_id, *ins_code),
+                    residue_index(*end_res_id, *end_ins_code)
+                ));
+            }
+            index = end + 1;
+            continue;
+        }
+        selectors.push(row.selector());
+        index += 1;
+    }
+    selectors.join("|")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3728,6 +3843,8 @@ impl GuiApplication {
             workspace_style_clipboard: None,
             pending_style_paste_scene: None,
             molstruct_object: None,
+            molstruct_selection: Vec::new(),
+            molstruct_selection_anchor: None,
             molstruct_expand_all: false,
             molstruct_tree_cache: None,
             sequence_summary_cache: None,
@@ -8674,8 +8791,7 @@ impl GuiApplication {
 
     /// MolStruct section — the molecule's chain → residue → atom hierarchy
     /// (CueMol2 `molstruct-panel.xul` `molStructTree`): a molecule selector menulist,
-    /// a Select/Center/Zoom/Property toolbar, and a collapsible tree where each row is
-    /// click-to-select (the triangle toggles, the label selects, like the XUL tree).
+    /// a multi-select tree and the Select/Center/Zoom/Property toolbar below it.
     fn molstruct_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         let tree = self.cached_active_structure_tree();
         if tree.is_empty() {
@@ -8708,6 +8824,8 @@ impl GuiApplication {
             });
         self.molstruct_object = selected;
         if selected != before {
+            self.molstruct_selection.clear();
+            self.molstruct_selection_anchor = None;
             if let Some(object_uid) = selected {
                 self.selection_text = self
                     .state
@@ -8722,30 +8840,17 @@ impl GuiApplication {
         else {
             return;
         };
+        if self
+            .molstruct_selection
+            .iter()
+            .any(|row| row.object_uid() != object.object_uid)
+        {
+            self.molstruct_selection.clear();
+            self.molstruct_selection_anchor = None;
+        }
 
-        // Toolbar (CueMol2 molStruct toolbar: Select atoms / Center at / Zoom at /
-        // Properties). "Select atoms" selects the whole molecule; finer selection comes
-        // from clicking a chain / residue / atom row below.
-        let mut apply: Option<String> = None;
-        let mut center = false;
-        let mut zoom = false;
-        ui.horizontal(|ui| {
-            if ui.button("↖").on_hover_text("Select atoms").clicked() {
-                apply = Some("*".to_string());
-            }
-            if ui.button("⌖").on_hover_text("Center at").clicked() {
-                center = true;
-            }
-            if ui.button("⌕").on_hover_text("Zoom at").clicked() {
-                zoom = true;
-            }
-            if ui.button("⚙").on_hover_text("Properties ...").clicked() {
-                self.selected_object = Some(object.object_uid);
-                self.selected_renderer = None;
-                self.workspace_aux_selection = None;
-                self.open_object_properties(object.object_uid);
-            }
-        });
+        let visible_rows = self.molstruct_visible_rows(ui, object);
+        let mut row_click: Option<(MolstructTreeRow, bool, bool, bool)> = None;
 
         egui::ScrollArea::vertical()
             .max_height(360.0)
@@ -8770,8 +8875,20 @@ impl GuiApplication {
                     )
                     .show_header(ui, |ui| {
                         let label = format!("Chain {chain_disp}  ({} res)", chain.residues.len());
-                        if ui.selectable_label(false, label).clicked() {
-                            apply = Some(format!("chain {}", chain.chain_id));
+                        let row = MolstructTreeRow::Chain {
+                            object_uid: object.object_uid,
+                            chain: chain.chain_id.clone(),
+                        };
+                        let response =
+                            ui.selectable_label(self.molstruct_selection.contains(&row), label);
+                        if response.double_clicked() || response.clicked() {
+                            let modifiers = ui.input(|input| input.modifiers);
+                            row_click = Some((
+                                row,
+                                modifiers.shift,
+                                modifiers.command,
+                                response.double_clicked(),
+                            ));
                         }
                     })
                     .body(|ui| {
@@ -8787,26 +8904,51 @@ impl GuiApplication {
                                 residue.ins_code,
                                 self.molstruct_expand_all,
                             ));
-                            let res_sel = if chain.chain_id.is_empty() {
-                                format!("resid {}", residue.res_id)
-                            } else {
-                                format!("chain {} and resid {}", chain.chain_id, residue.res_id)
-                            };
                             egui::collapsing_header::CollapsingState::load_with_default_open(
                                 ui.ctx(),
                                 res_id,
                                 self.molstruct_expand_all,
                             )
                             .show_header(ui, |ui| {
-                                if ui.selectable_label(false, &res_label).clicked() {
-                                    apply = Some(res_sel.clone());
+                                let row = MolstructTreeRow::Residue {
+                                    object_uid: object.object_uid,
+                                    chain: chain.chain_id.clone(),
+                                    res_id: residue.res_id,
+                                    ins_code: residue.ins_code,
+                                };
+                                let response = ui.selectable_label(
+                                    self.molstruct_selection.contains(&row),
+                                    &res_label,
+                                );
+                                if response.double_clicked() || response.clicked() {
+                                    let modifiers = ui.input(|input| input.modifiers);
+                                    row_click = Some((
+                                        row,
+                                        modifiers.shift,
+                                        modifiers.command,
+                                        response.double_clicked(),
+                                    ));
                                 }
                             })
                             .body(|ui| {
                                 for atom in &residue.atoms {
                                     let atom_label = format!("{}  ({})", atom.name, atom.element);
-                                    if ui.selectable_label(false, atom_label).clicked() {
-                                        apply = Some(format!("aid {}", atom.serial));
+                                    let row = MolstructTreeRow::Atom {
+                                        object_uid: object.object_uid,
+                                        serial: atom.serial,
+                                    };
+                                    let response = ui.selectable_label(
+                                        self.molstruct_selection.contains(&row),
+                                        atom_label,
+                                    );
+                                    if response.double_clicked() || response.clicked() {
+                                        let modifiers = ui.input(|input| input.modifiers);
+                                        row_click = Some((
+                                            row,
+                                            modifiers.shift,
+                                            modifiers.command,
+                                            response.double_clicked(),
+                                        ));
                                     }
                                 }
                             });
@@ -8815,43 +8957,204 @@ impl GuiApplication {
                 }
             });
 
-        if let Some(sel) = apply {
-            self.apply_molecule_selection(object.object_uid, sel, "Selected molecule atoms");
-        }
-        if center {
-            if let Some(target) = self.selection_centroid() {
-                camera.target = target;
-                self.set_status("Centered on selection");
+        let mut action = None;
+        if let Some((row, shift, toggle, double_clicked)) = row_click {
+            if double_clicked {
+                self.molstruct_selection.clear();
+                self.molstruct_selection.push(row.clone());
+                self.molstruct_selection_anchor = Some(row);
+                action = Some(MolstructAction::Center);
+            } else {
+                self.update_molstruct_selection(row, shift, toggle, &visible_rows);
             }
         }
-        if zoom {
-            camera.fit_snapshot(&self.snapshot);
-            self.set_status("Zoomed to molecule");
+
+        let expression = molstruct_selection_expression(&visible_rows, &self.molstruct_selection);
+        let selection_enabled = !expression.is_empty();
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(selection_enabled, egui::Button::new("↖"))
+                .on_hover_text("Select atoms")
+                .clicked()
+            {
+                action = Some(MolstructAction::Select);
+            }
+            if ui
+                .add_enabled(selection_enabled, egui::Button::new("⌖"))
+                .on_hover_text("Center at")
+                .clicked()
+            {
+                action = Some(MolstructAction::Center);
+            }
+            if ui
+                .add_enabled(selection_enabled, egui::Button::new("⌕"))
+                .on_hover_text("Zoom at")
+                .clicked()
+            {
+                action = Some(MolstructAction::Zoom);
+            }
+            if ui.button("⚙").on_hover_text("Properties ...").clicked() {
+                self.selected_object = Some(object.object_uid);
+                self.selected_renderer = None;
+                self.workspace_aux_selection = None;
+                self.open_object_properties(object.object_uid);
+            }
+        });
+
+        if let Some(action) = action {
+            self.apply_molstruct_action(object.object_uid, expression, action, camera);
         }
     }
 
-    /// Centroid of the currently selected atoms in the live snapshot (used by the
-    /// MolStruct "Center" toolbar button). Falls back to the whole-scene bounds
-    /// centre when nothing is selected.
-    fn selection_centroid(&self) -> Option<Vec3> {
-        let mut sum = Vec3::ZERO;
-        let mut count = 0u32;
-        for atom in self
-            .state
-            .active_pick_atoms(&self.selection_text)
-            .unwrap_or_default()
-            .iter()
-            .filter(|atom| atom.selected)
+    fn molstruct_visible_rows(
+        &self,
+        ui: &egui::Ui,
+        object: &GuiStructObject,
+    ) -> Vec<MolstructTreeRow> {
+        let mut rows = Vec::new();
+        for chain in &object.chains {
+            let chain_disp = if chain.chain_id.is_empty() {
+                "_"
+            } else {
+                chain.chain_id.as_str()
+            };
+            rows.push(MolstructTreeRow::Chain {
+                object_uid: object.object_uid,
+                chain: chain.chain_id.clone(),
+            });
+            let chain_id = ui.make_persistent_id((
+                "molstruct-chain",
+                object.object_uid.get(),
+                chain_disp,
+                self.molstruct_expand_all,
+            ));
+            let chain_open = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                chain_id,
+                self.molstruct_expand_all,
+            )
+            .is_open();
+            if !chain_open {
+                continue;
+            }
+            for residue in &chain.residues {
+                rows.push(MolstructTreeRow::Residue {
+                    object_uid: object.object_uid,
+                    chain: chain.chain_id.clone(),
+                    res_id: residue.res_id,
+                    ins_code: residue.ins_code,
+                });
+                let res_id = ui.make_persistent_id((
+                    "molstruct-res",
+                    object.object_uid.get(),
+                    chain_disp,
+                    residue.res_id,
+                    residue.ins_code,
+                    self.molstruct_expand_all,
+                ));
+                let residue_open =
+                    egui::collapsing_header::CollapsingState::load_with_default_open(
+                        ui.ctx(),
+                        res_id,
+                        self.molstruct_expand_all,
+                    )
+                    .is_open();
+                if residue_open {
+                    rows.extend(residue.atoms.iter().map(|atom| MolstructTreeRow::Atom {
+                        object_uid: object.object_uid,
+                        serial: atom.serial,
+                    }));
+                }
+            }
+        }
+        rows
+    }
+
+    fn update_molstruct_selection(
+        &mut self,
+        row: MolstructTreeRow,
+        shift: bool,
+        toggle: bool,
+        visible_rows: &[MolstructTreeRow],
+    ) {
+        if shift {
+            let range = self
+                .molstruct_selection_anchor
+                .as_ref()
+                .and_then(|anchor| visible_rows.iter().position(|visible| visible == anchor))
+                .zip(visible_rows.iter().position(|visible| visible == &row));
+            if let Some((start, end)) = range {
+                if !toggle {
+                    self.molstruct_selection.clear();
+                }
+                let (start, end) = (start.min(end), start.max(end));
+                for visible in &visible_rows[start..=end] {
+                    if !self.molstruct_selection.contains(visible) {
+                        self.molstruct_selection.push(visible.clone());
+                    }
+                }
+            } else {
+                self.molstruct_selection.clear();
+                self.molstruct_selection.push(row.clone());
+            }
+        } else if toggle {
+            if let Some(index) = self
+                .molstruct_selection
+                .iter()
+                .position(|selected| selected == &row)
+            {
+                self.molstruct_selection.remove(index);
+            } else {
+                self.molstruct_selection.push(row.clone());
+            }
+        } else {
+            self.molstruct_selection.clear();
+            self.molstruct_selection.push(row.clone());
+        }
+        self.molstruct_selection_anchor = Some(row);
+    }
+
+    fn apply_molstruct_action(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        expression: String,
+        action: MolstructAction,
+        camera: &mut CameraController,
+    ) {
+        if expression.is_empty()
+            || !self.apply_molecule_selection(object_uid, expression, "Change mol selection")
         {
-            sum += vec3_from_vector(atom.center);
-            count += 1;
+            return;
         }
-        if count > 0 {
-            return Some(sum / count as f32);
+        match action {
+            MolstructAction::Select => {}
+            MolstructAction::Center => match self.state.selected_molecule_center(object_uid) {
+                Ok(Some(center)) => camera.target = vec3_from_vector(center),
+                Ok(None) => {}
+                Err(error) => self.set_error(error),
+            },
+            MolstructAction::Zoom => {
+                let Some(scene_uid) = self.state.active_scene() else {
+                    self.set_status("Error: no active scene");
+                    return;
+                };
+                let mut view = View::new(cuemol_core::Uid::new(1), scene_uid);
+                view.set_camera(&camera.to_qsys_camera("MolStruct fit"));
+                let viewport = self
+                    .viewport_rect
+                    .map(|rect| rect.size())
+                    .unwrap_or_else(|| egui::vec2(800.0, 600.0));
+                view.set_view_size(
+                    viewport.x.max(1.0).round() as u32,
+                    viewport.y.max(1.0).round() as u32,
+                );
+                match self.state.fit_selected_molecule_view(object_uid, &mut view) {
+                    Ok(true) => *camera = CameraController::from_qsys_camera(&view.camera()),
+                    Ok(false) => {}
+                    Err(error) => self.set_error(error),
+                }
+            }
         }
-        self.snapshot
-            .bounds
-            .map(|(min, max)| (vec3_from_vector(min) + vec3_from_vector(max)) * 0.5)
     }
 
     /// Selection section (CueMol2 `selection-panel.xul`): a molecule selector and two
@@ -29420,6 +29723,50 @@ fn default_config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn molstruct_tree_selection_matches_reference_ranges_and_modifiers() {
+        let object_uid = cuemol_core::Uid::new(7);
+        let chain = MolstructTreeRow::Chain {
+            object_uid,
+            chain: "A".to_string(),
+        };
+        let residue_1 = MolstructTreeRow::Residue {
+            object_uid,
+            chain: "A".to_string(),
+            res_id: 1,
+            ins_code: None,
+        };
+        let residue_2a = MolstructTreeRow::Residue {
+            object_uid,
+            chain: "A".to_string(),
+            res_id: 2,
+            ins_code: Some('A'),
+        };
+        let atom = MolstructTreeRow::Atom {
+            object_uid,
+            serial: 9,
+        };
+        let visible = vec![
+            chain.clone(),
+            residue_1.clone(),
+            residue_2a.clone(),
+            atom.clone(),
+        ];
+
+        assert_eq!(
+            molstruct_selection_expression(&visible, &visible),
+            "c;'A'|'A'.1:2A.*|aid 9"
+        );
+
+        let mut app = GuiApplication::new();
+        app.update_molstruct_selection(chain.clone(), false, false, &visible);
+        app.update_molstruct_selection(residue_2a.clone(), true, false, &visible);
+        assert_eq!(app.molstruct_selection, visible[..3]);
+        app.update_molstruct_selection(residue_1.clone(), false, true, &visible);
+        assert_eq!(app.molstruct_selection, vec![chain, residue_2a]);
+        assert_eq!(app.molstruct_selection_anchor, Some(residue_1));
+    }
 
     #[test]
     fn png_export_units_round_trip_at_selected_dpi() {
