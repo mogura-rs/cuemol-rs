@@ -7601,8 +7601,15 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         optional.read = () => ({});
       }
 
-      const apply = button("Apply", "dialog-primary", async () => {
-        await mutate("set_animation_object_properties", {
+      const reset = button("Reset all to default", "", async () => {
+        if (!globalThis.confirm("Reset all to default?")) return;
+        const changed = await mutate("set_animation_object_properties", {
+          input: defaultAnimationObjectProperties(object),
+        });
+        if (changed) referenceDialog.close();
+      });
+      const apply = button("OK", "dialog-primary", async () => {
+        const changed = await mutate("set_animation_object_properties", {
           input: {
             index: object.index,
             name: name.value,
@@ -7614,9 +7621,9 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
             ...optional.read(),
           },
         });
-        referenceDialog.close();
+        if (changed) referenceDialog.close();
       });
-      dialogActions(apply, button("Cancel", "", () => referenceDialog.close()));
+      dialogActions(reset, apply, button("Cancel", "", () => referenceDialog.close()));
     }
   } else if (title === "Open MD Trajectory") {
     const topologyPath = dialogField("Topology file (.gro)", "");
@@ -13748,6 +13755,65 @@ function formatAnimationObjectTime(seconds) {
   if (hours > 0) return `${hours}:${minutes}:${secondsText}`;
   if (totalMinutes > 0) return `${totalMinutes}:${secondsText}`;
   return secondsText;
+}
+
+function defaultAnimationObjectProperties(object) {
+  const input = {
+    index: object.index,
+    name: object.name,
+    disabled: false,
+    timeRefName: object.timeRefName || "",
+    start: object.relativeStart,
+    duration: object.duration,
+    quadric: 0,
+  };
+  if (object.typeName === "SimpleSpin") {
+    Object.assign(input, { angle: 0, axis: [0, 1, 0] });
+  } else if (object.typeName === "CamMotion") {
+    Object.assign(input, {
+      targetCamera: object.targetCamera || "",
+      ignoreRotate: false,
+      ignoreCenter: false,
+      ignoreZoom: false,
+      ignoreSlab: false,
+      keepQuaternionPositive: true,
+    });
+  } else if (object.typeName === "ShowHideAnim") {
+    Object.assign(input, {
+      rendererNames: object.rendererNames || "",
+      hide: false,
+      fade: true,
+      targetAlpha: 1,
+    });
+  } else if (object.typeName === "SlideInOutAnim") {
+    Object.assign(input, {
+      rendererNames: object.rendererNames || "",
+      hide: false,
+      direction: 0,
+      distance: 1,
+    });
+  } else if (object.typeName === "MolAnim") {
+    Object.assign(input, {
+      moleculeName: object.moleculeName || "",
+      propertyName: object.propertyName || "",
+      startValue: object.startValue,
+      endValue: object.endValue,
+    });
+  } else if (object.typeName === "RealPropAnim") {
+    Object.assign(input, {
+      rendererNames: object.rendererNames || "",
+      propertyName: object.propertyName || "",
+      startValue: object.startValue,
+      endValue: object.endValue,
+    });
+  } else if (object.typeName === "RendXformAnim") {
+    Object.assign(input, {
+      rendererNames: object.rendererNames || "",
+      startPosition: object.startPosition,
+      endPosition: object.endPosition,
+    });
+  }
+  return input;
 }
 
 const animationAddKinds = [

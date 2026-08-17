@@ -1182,6 +1182,7 @@ struct GuiApplication {
     animation_selection: std::collections::BTreeSet<usize>,
     animation_selection_anchor: Option<usize>,
     animation_properties_draft: Option<NativeAnimationProperties>,
+    animation_reset_confirmation: bool,
     animation_start_camera: Option<CameraController>,
     animation_start_state: Option<DesktopAppState>,
     animation_render_settings: AnimationRenderSettings,
@@ -1489,6 +1490,47 @@ impl NativeAnimationProperties {
             AnimMotion::Noop(_) | AnimMotion::Unknown { .. } => {}
         }
         draft
+    }
+
+    fn reset_defaultable(&mut self) {
+        self.disabled = false;
+        self.quadric = 0.0;
+        if self.angle.is_some() {
+            self.angle = Some(0.0);
+        }
+        if self.axis.is_some() {
+            self.axis = Some([0.0, 1.0, 0.0]);
+        }
+        if self.ignore_center.is_some() {
+            self.ignore_center = Some(false);
+        }
+        if self.ignore_rotate.is_some() {
+            self.ignore_rotate = Some(false);
+        }
+        if self.ignore_zoom.is_some() {
+            self.ignore_zoom = Some(false);
+        }
+        if self.ignore_slab.is_some() {
+            self.ignore_slab = Some(false);
+        }
+        if self.keep_quaternion_positive.is_some() {
+            self.keep_quaternion_positive = Some(true);
+        }
+        if self.hide.is_some() {
+            self.hide = Some(false);
+        }
+        if self.fade.is_some() {
+            self.fade = Some(true);
+        }
+        if self.target_alpha.is_some() {
+            self.target_alpha = Some(1.0);
+        }
+        if self.direction.is_some() {
+            self.direction = Some(0.0);
+        }
+        if self.distance.is_some() {
+            self.distance = Some(1.0);
+        }
     }
 }
 
@@ -3651,6 +3693,7 @@ impl GuiApplication {
             animation_selection: std::collections::BTreeSet::new(),
             animation_selection_anchor: None,
             animation_properties_draft: None,
+            animation_reset_confirmation: false,
             animation_start_camera: None,
             animation_start_state: None,
             animation_render_settings: AnimationRenderSettings::default(),
@@ -10206,7 +10249,26 @@ impl GuiApplication {
             .ok_or_else(|| format!("animation object {index} was not found"))?;
         let draft = NativeAnimationProperties::from_motion(index, motion);
         self.set_animation_selection(index);
+        self.animation_reset_confirmation = false;
         self.animation_properties_draft = Some(draft);
+        Ok(())
+    }
+
+    fn reset_animation_properties(
+        &mut self,
+        index: usize,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
+        let animation = self.active_animation_manager()?;
+        let motion = animation
+            .motions()
+            .get(index)
+            .ok_or_else(|| format!("animation object {index} was not found"))?;
+        let mut draft = NativeAnimationProperties::from_motion(index, motion);
+        draft.reset_defaultable();
+        self.apply_animation_properties(&draft, camera)?;
+        self.animation_reset_confirmation = false;
+        self.set_status("Animation object properties reset to default");
         Ok(())
     }
 
@@ -15385,9 +15447,9 @@ impl GuiApplication {
             })
             .unwrap_or_default();
         let mut open = true;
-        let mut apply = false;
         let mut accept = false;
         let mut cancel = false;
+        let mut reset = false;
         egui::Window::new("Animation object properties")
             .open(&mut open)
             .collapsible(false)
@@ -15562,23 +15624,42 @@ impl GuiApplication {
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
+                    if ui.button("Reset all to default").clicked() {
+                        self.animation_reset_confirmation = true;
+                    }
                     if ui.button("OK").clicked() {
                         accept = true;
-                    }
-                    if ui.button("Apply").clicked() {
-                        apply = true;
                     }
                     if ui.button("Cancel").clicked() {
                         cancel = true;
                     }
                 });
+                if self.animation_reset_confirmation {
+                    ui.separator();
+                    ui.label("Reset all to default?");
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset").clicked() {
+                            reset = true;
+                            self.animation_reset_confirmation = false;
+                        }
+                        if ui.button("Cancel reset").clicked() {
+                            self.animation_reset_confirmation = false;
+                        }
+                    });
+                }
             });
 
-        if apply || accept {
-            match self.apply_animation_properties(&draft, camera) {
-                Ok(()) if apply && !accept => {
+        if reset {
+            match self.reset_animation_properties(draft.index, camera) {
+                Ok(()) => {}
+                Err(error) => {
                     self.animation_properties_draft = Some(draft);
+                    self.set_status(format!("Error: {error}"));
                 }
+            }
+        } else if accept {
+            self.animation_reset_confirmation = false;
+            match self.apply_animation_properties(&draft, camera) {
                 Ok(()) => {}
                 Err(error) => {
                     self.animation_properties_draft = Some(draft);
@@ -15587,6 +15668,8 @@ impl GuiApplication {
             }
         } else if open && !cancel {
             self.animation_properties_draft = Some(draft);
+        } else {
+            self.animation_reset_confirmation = false;
         }
     }
 
@@ -34512,12 +34595,93 @@ mod tests {
             "animation object cannot reference itself"
         );
 
+        let undo_count = app.undo_stack.len();
+        app.reset_animation_properties(0, &mut camera).unwrap();
+        assert_eq!(app.undo_stack.len(), undo_count + 1);
+        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
+        let AnimMotion::Spin(spin) = &animation.motions()[0] else {
+            panic!("expected SimpleSpin");
+        };
+        assert_eq!(spin.base().name(), "turn");
+        assert!(!spin.base().disabled());
+        assert_eq!(spin.base().rel_start(), time_from_seconds(0.25));
+        assert_eq!(spin.base().rel_end(), time_from_seconds(2.75));
+        assert_eq!(spin.base().quadric(), 0.0);
+        assert_eq!(spin.angle(), 0.0);
+        assert_eq!(spin.axis(), Vector4::new3(0.0, 1.0, 0.0));
+        app.undo(&mut camera);
+        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
+        let AnimMotion::Spin(spin) = &animation.motions()[0] else {
+            panic!("expected SimpleSpin");
+        };
+        assert!(spin.base().disabled());
+        assert_eq!(spin.angle(), 180.0);
+
         app.open_animation_properties(0).unwrap();
         let ctx = egui::Context::default();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             app.animation_properties_dialog(ctx, &mut camera);
         });
         assert!(app.animation_properties_draft.is_some());
+    }
+
+    #[test]
+    fn native_animation_property_reset_matches_qif_defaults() {
+        let mut camera =
+            NativeAnimationProperties::from_motion(0, &AnimMotion::Camera(CamMotion::new()));
+        camera.disabled = true;
+        camera.quadric = 0.25;
+        camera.target_camera = Some("saved-camera".to_string());
+        camera.ignore_center = Some(true);
+        camera.ignore_rotate = Some(true);
+        camera.ignore_zoom = Some(true);
+        camera.ignore_slab = Some(true);
+        camera.keep_quaternion_positive = Some(false);
+        camera.reset_defaultable();
+        assert!(!camera.disabled);
+        assert_eq!(camera.quadric, 0.0);
+        assert_eq!(camera.target_camera.as_deref(), Some("saved-camera"));
+        assert_eq!(camera.ignore_center, Some(false));
+        assert_eq!(camera.ignore_rotate, Some(false));
+        assert_eq!(camera.ignore_zoom, Some(false));
+        assert_eq!(camera.ignore_slab, Some(false));
+        assert_eq!(camera.keep_quaternion_positive, Some(true));
+
+        let mut show =
+            NativeAnimationProperties::from_motion(0, &AnimMotion::ShowHide(ShowHideAnim::new()));
+        show.renderer_names = Some("target".to_string());
+        show.hide = Some(true);
+        show.fade = Some(false);
+        show.target_alpha = Some(0.25);
+        show.reset_defaultable();
+        assert_eq!(show.renderer_names.as_deref(), Some("target"));
+        assert_eq!(show.hide, Some(false));
+        assert_eq!(show.fade, Some(true));
+        assert_eq!(show.target_alpha, Some(1.0));
+
+        let mut slide =
+            NativeAnimationProperties::from_motion(0, &AnimMotion::Slide(SlideInOutAnim::new()));
+        slide.renderer_names = Some("target".to_string());
+        slide.hide = Some(true);
+        slide.direction = Some(45.0);
+        slide.distance = Some(2.0);
+        slide.reset_defaultable();
+        assert_eq!(slide.renderer_names.as_deref(), Some("target"));
+        assert_eq!(slide.hide, Some(false));
+        assert_eq!(slide.direction, Some(0.0));
+        assert_eq!(slide.distance, Some(1.0));
+
+        let mut molecule =
+            NativeAnimationProperties::from_motion(0, &AnimMotion::Molecule(MolAnim::new()));
+        molecule.molecule_name = Some("morph".to_string());
+        molecule.property_name = Some("frame".to_string());
+        molecule.start_value = Some(2.0);
+        molecule.end_value = Some(4.0);
+        molecule.reset_defaultable();
+        assert_eq!(molecule.molecule_name.as_deref(), Some("morph"));
+        assert_eq!(molecule.property_name.as_deref(), Some("frame"));
+        assert_eq!(molecule.start_value, Some(2.0));
+        assert_eq!(molecule.end_value, Some(4.0));
     }
 
     #[test]
