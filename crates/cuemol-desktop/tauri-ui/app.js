@@ -16524,6 +16524,50 @@ async function closeActiveTab() {
   return mutate("close_active_scene");
 }
 
+let applicationCloseAllowed = false;
+let applicationClosePending = false;
+
+async function confirmApplicationExit() {
+  const modifiedScenes = (snapshot?.scenes || []).filter((scene) => scene.modified);
+  for (const originalScene of modifiedScenes) {
+    const scene = snapshot?.scenes?.find((item) => item.uid === originalScene.uid);
+    if (!scene?.modified) continue;
+    const view = (snapshot?.views || []).find((item) => item.sceneUid === scene.uid);
+    if (!view) {
+      showError(`Scene "${scene.name || "(unnamed)"}" has no view to save.`);
+      return false;
+    }
+    if (!view.active && !(await mutate("activate_view", { viewUid: view.uid }))) {
+      return false;
+    }
+    const result = await showConfirmCloseTabDialog(scene.name || "");
+    if (result === "cancel") return false;
+    if (result === "save" && !(await saveScene())) return false;
+  }
+  return true;
+}
+
+async function setupApplicationCloseGuard() {
+  const getCurrent =
+    tauri?.webviewWindow?.getCurrentWebviewWindow || tauri?.window?.getCurrentWindow;
+  if (!getCurrent) return;
+  const appWindow = await getCurrent();
+  if (!appWindow?.onCloseRequested) return;
+  await appWindow.onCloseRequested(async (event) => {
+    if (applicationCloseAllowed) return;
+    event.preventDefault();
+    if (applicationClosePending) return;
+    applicationClosePending = true;
+    try {
+      if (!(await confirmApplicationExit())) return;
+      applicationCloseAllowed = true;
+      await appWindow.close();
+    } finally {
+      applicationClosePending = false;
+    }
+  });
+}
+
 async function exportPng() {
   const options = await showPngExportOptions(
     viewportDimensions().width,
@@ -17468,6 +17512,7 @@ async function start() {
     const initial = await invoke("get_initial_state", viewportDimensions());
     preferences = initial.preferences;
     snapshot = initial.snapshot;
+    await setupApplicationCloseGuard();
     syncEmptyMoleculeDetails();
     applyViewport(initial.viewport, sequence);
     if (snapshotHasRenderableContent()) void renderViewport();

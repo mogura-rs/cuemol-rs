@@ -1061,6 +1061,12 @@ fn close_tab_matches_last_modified_view_confirmation_flow() {
     assert!(JS.contains("await showConfirmCloseTabDialog"));
     assert!(JS.contains("if (result === \"save\" && !(await saveScene()))"));
     assert!(JS.contains("await closeActiveTab()"));
+    assert!(JS.contains("async function confirmApplicationExit()"));
+    assert!(JS.contains("async function setupApplicationCloseGuard()"));
+    assert!(JS.contains("appWindow.onCloseRequested"));
+    assert!(JS.contains("event.preventDefault()"));
+    assert!(JS.contains("applicationCloseAllowed = true"));
+    assert!(JS.contains("await appWindow.close()"));
     assert!(CSS.contains(".reference-dialog.confirm-close-dialog"));
     assert!(NATIVE_GUI_RS.contains("fn close_tab_dialog"));
     assert!(NATIVE_GUI_RS.contains("close_after_scene_save"));
