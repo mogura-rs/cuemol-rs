@@ -8488,6 +8488,7 @@ function restoreDefaultPanels() {
     if (disclosure) disclosure.textContent = open ? "▾" : "▸";
   });
   syncSidePanelVisibility();
+  if (sidePanelWidth === 0) setSidePanelWidth(expandedSidePanelWidth, true);
   for (const name of openPanels) renderSidePanel(name);
   document.querySelector(".side-panel")?.scrollTo({ top: 0 });
   scheduleRender(140);
@@ -8534,10 +8535,19 @@ function renderSidePanel(name) {
 
 function syncSidePanelVisibility() {
   const cards = [...document.querySelectorAll("[data-side-card]")];
-  sidePanel.hidden = !cards.some((card) => !card.hidden);
+  const anyVisible = cards.some((card) => !card.hidden);
+  sidePanel.hidden = !anyVisible;
+  contentHolder?.classList.toggle("no-visible-side-panels", !anyVisible);
   document.querySelectorAll("[data-panel-menu]").forEach((element) => {
     element.classList.toggle("checked", !sidePanelCard(element.dataset.panelMenu)?.hidden);
   });
+}
+
+function closeSidePanelCard(card) {
+  if (!card) return;
+  card.hidden = true;
+  syncSidePanelVisibility();
+  scheduleRender(140);
 }
 
 async function renderWindowsMenu() {
@@ -16702,6 +16712,9 @@ document.querySelectorAll("[data-panel-menu]").forEach((element) => {
     if (!card) return;
     card.hidden = !card.hidden;
     syncSidePanelVisibility();
+    if (!card.hidden && sidePanelWidth === 0) {
+      setSidePanelWidth(expandedSidePanelWidth, true);
+    }
     if (!card.hidden) card.scrollIntoView({ block: "nearest" });
     if (!card.hidden && card.classList.contains("open")) renderSidePanel(element.dataset.panelMenu);
     scheduleRender(140);
@@ -16743,6 +16756,14 @@ document.querySelectorAll("[data-panel-toggle]").forEach((element) => {
     const name = element.querySelector("span:nth-child(2)")?.textContent;
     if (open && name) renderSidePanel(name);
     scheduleRender(140);
+  });
+});
+
+document.querySelectorAll(".panel-close").forEach((element) => {
+  element.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeSidePanelCard(element.closest("[data-side-card]"));
   });
 });
 

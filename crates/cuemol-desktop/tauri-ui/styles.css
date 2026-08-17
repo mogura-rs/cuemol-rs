@@ -518,6 +518,14 @@ summary:focus-visible {
   visibility: hidden;
 }
 
+.content-holder.no-visible-side-panels {
+  grid-template-columns: 0 0 minmax(0, 1fr);
+}
+
+.content-holder.no-visible-side-panels .vertical-splitter {
+  visibility: hidden;
+}
+
 body.resizing-side-panel {
   cursor: col-resize;
   user-select: none;
