@@ -1836,6 +1836,33 @@ enum NativeSequenceAction {
     Copy(String),
 }
 
+const NATIVE_SEQUENCE_CELL_WIDTH: f32 = 10.0;
+const NATIVE_SEQUENCE_ROW_HEIGHT: f32 = 19.0;
+const NATIVE_SEQUENCE_RULER_HEIGHT: f32 = 16.0;
+const NATIVE_SEQUENCE_MAX_WIDTH: f32 = 30_000.0;
+
+fn sequence_residue_column(index: &str) -> Option<usize> {
+    let index = index.trim_start();
+    let index = index.strip_prefix('+').unwrap_or(index);
+    let digit_count = index.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_count == 0 {
+        return None;
+    }
+    index[..digit_count].parse().ok()
+}
+
+fn native_sequence_column_count(chains: &[crate::GuiSeqChain]) -> usize {
+    let maximum = chains
+        .iter()
+        .flat_map(|chain| &chain.residues)
+        .filter_map(|residue| sequence_residue_column(&residue.residue_index))
+        .max()
+        .unwrap_or(0);
+    maximum
+        .saturating_add(10)
+        .min((NATIVE_SEQUENCE_MAX_WIDTH / NATIVE_SEQUENCE_CELL_WIDTH) as usize)
+}
+
 fn sequence_positions_share_row(
     lhs: &NativeSequencePosition,
     rhs: &NativeSequencePosition,
@@ -13909,38 +13936,79 @@ impl GuiApplication {
         let primary_down = ui.input(|input| input.pointer.primary_down());
         let primary_released = ui.input(|input| input.pointer.primary_released());
         let shift = ui.input(|input| input.modifiers.shift);
+        let column_count = native_sequence_column_count(&chains);
+        let sequence_width = column_count as f32 * NATIVE_SEQUENCE_CELL_WIDTH;
         egui::ScrollArea::both().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_sized([140.0, NATIVE_SEQUENCE_RULER_HEIGHT], egui::Label::new(""));
+                ui.separator();
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(sequence_width, NATIVE_SEQUENCE_RULER_HEIGHT),
+                    egui::Sense::hover(),
+                );
+                let color = ui.visuals().weak_text_color();
+                for column in 0..column_count {
+                    let x = rect.left() + (column as f32 + 0.5) * NATIVE_SEQUENCE_CELL_WIDTH;
+                    ui.painter().line_segment(
+                        [
+                            egui::pos2(x, rect.top() + 12.0),
+                            egui::pos2(x, rect.bottom()),
+                        ],
+                        egui::Stroke::new(1.0, color),
+                    );
+                    if column >= 5 && column % 5 == 0 {
+                        ui.painter().text(
+                            egui::pos2(x, rect.top()),
+                            egui::Align2::CENTER_TOP,
+                            column,
+                            egui::FontId::monospace(10.0),
+                            color,
+                        );
+                    }
+                }
+            });
             for chain in &chains {
                 let chain_disp = if chain.chain_id.is_empty() {
                     "_"
                 } else {
                     chain.chain_id.as_str()
                 };
-                let title = format!(
-                    "{} : chain {} ({} res)",
-                    chain.object_name,
-                    chain_disp,
-                    chain.residues.len()
-                );
+                let title = format!("{}:{}", chain_disp, chain.object_name);
                 let current_selection = self.sequence_current_selection(chain.object_uid);
                 ui.horizontal(|ui| {
                     ui.add_sized(
-                        [180.0, 20.0],
+                        [140.0, NATIVE_SEQUENCE_ROW_HEIGHT],
                         egui::Label::new(egui::RichText::new(title).monospace()),
                     );
                     ui.separator();
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
+                        let mut next_column = 0;
                         for (position, residue) in chain.residues.iter().enumerate() {
+                            let Some(column) = sequence_residue_column(&residue.residue_index)
+                            else {
+                                continue;
+                            };
+                            if column >= column_count || column < next_column {
+                                continue;
+                            }
+                            if column > next_column {
+                                ui.add_space(
+                                    (column - next_column) as f32 * NATIVE_SEQUENCE_CELL_WIDTH,
+                                );
+                            }
                             let sequence_position = NativeSequencePosition {
                                 object_uid: chain.object_uid,
                                 chain_id: chain.chain_id.clone(),
                                 position,
                             };
                             let response = ui
-                                .selectable_label(
-                                    residue.selected,
-                                    egui::RichText::new(&residue.letter).monospace(),
+                                .add_sized(
+                                    [NATIVE_SEQUENCE_CELL_WIDTH, NATIVE_SEQUENCE_ROW_HEIGHT],
+                                    egui::Button::selectable(
+                                        residue.selected,
+                                        egui::RichText::new(&residue.letter).monospace(),
+                                    ),
                                 )
                                 .on_hover_text(format!(
                                     "{} {}",
@@ -13971,7 +14039,7 @@ impl GuiApplication {
                             if self.sequence_marker.as_ref() == Some(&sequence_position) {
                                 ui.painter().line_segment(
                                     [response.rect.left_bottom(), response.rect.right_bottom()],
-                                    egui::Stroke::new(2.0, ui.visuals().text_color()),
+                                    egui::Stroke::new(2.0, egui::Color32::RED),
                                 );
                             }
                             if sequence_position_in_drag_range(
@@ -13982,10 +14050,7 @@ impl GuiApplication {
                                 ui.painter().rect_stroke(
                                     response.rect,
                                     0.0,
-                                    egui::Stroke::new(
-                                        1.0,
-                                        ui.visuals().widgets.active.fg_stroke.color,
-                                    ),
+                                    egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 128, 0)),
                                     egui::StrokeKind::Inside,
                                 );
                             }
@@ -14080,6 +14145,12 @@ impl GuiApplication {
                                     ui.close();
                                 }
                             });
+                            next_column = column + 1;
+                        }
+                        if next_column < column_count {
+                            ui.add_space(
+                                (column_count - next_column) as f32 * NATIVE_SEQUENCE_CELL_WIDTH,
+                            );
                         }
                     });
                 });
@@ -36424,6 +36495,11 @@ mod tests {
 
     #[test]
     fn native_sequence_range_and_context_actions_match_reference() {
+        assert_eq!(sequence_residue_column("12A"), Some(12));
+        assert_eq!(sequence_residue_column(" +7"), Some(7));
+        assert_eq!(sequence_residue_column("-1"), None);
+        assert_eq!(sequence_residue_column("A"), None);
+
         let mut app = GuiApplication::new();
         let scene_uid = app.state.active_scene().unwrap();
         let molecule = cuemol_molstr::read_pdb_str(
@@ -36439,6 +36515,7 @@ mod tests {
             .unwrap()
             .add_molecule_with_source_type("molecule", molecule, "pdb");
         let chains = app.state.active_sequence_view("");
+        assert_eq!(native_sequence_column_count(&chains), 13);
         let position = |value| NativeSequencePosition {
             object_uid,
             chain_id: "A".to_string(),

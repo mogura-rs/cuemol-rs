@@ -612,6 +612,9 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
         "setSequenceMarker(cell)",
         "previewSequenceRange(sequenceDrag.start, cell)",
         "navigator.clipboard.writeText(sequence)",
+        "function createSequenceRuler(columnCount)",
+        "function sequenceColumnCount(chains)",
+        "sequenceResidueColumn(residue.residueIndex)",
     ] {
         assert!(JS.contains(binding), "missing Sequence binding {binding}");
     }
@@ -630,8 +633,9 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
     assert!(JS.contains("residue.residueIndex"));
     assert!(CSS.contains(".sequence-cell.marked"));
     assert!(CSS.contains(".sequence-cell.range-preview"));
-    assert!(CSS.contains("grid-template-columns: 180px max-content;"));
-    assert!(CSS.contains("flex-wrap: nowrap;"));
+    assert!(CSS.contains(".sequence-ruler"));
+    assert!(CSS.contains("grid-template-columns: 140px max-content;"));
+    assert!(CSS.contains("width: 10px;"));
     assert!(CSS.contains("position: sticky;"));
     assert!(TAURI_APP_RS.contains("fn apply_sequence_action("));
     assert!(TAURI_APP_RS.contains("molecule_residue_range_selection_text"));
@@ -652,7 +656,9 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
         .and_then(|source| source.split("fn trajectory_tab(").next())
         .expect("native Sequence panel");
     assert!(native_sequence.contains("egui::ScrollArea::both()"));
-    assert!(native_sequence.contains("[180.0, 20.0]"));
+    assert!(native_sequence.contains("NATIVE_SEQUENCE_RULER_HEIGHT"));
+    assert!(native_sequence.contains("[140.0, NATIVE_SEQUENCE_ROW_HEIGHT]"));
+    assert!(native_sequence.contains("sequence_residue_column"));
     assert!(!native_sequence.contains("horizontal_wrapped"));
 }
 

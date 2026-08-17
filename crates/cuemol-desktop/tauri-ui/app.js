@@ -14547,6 +14547,70 @@ function renderView() {
   syncViewPanelControls();
 }
 
+const SEQUENCE_CELL_WIDTH = 10;
+const SEQUENCE_ROW_HEIGHT = 19;
+const SEQUENCE_RULER_HEIGHT = 16;
+const SEQUENCE_MAX_CANVAS_WIDTH = 30_000;
+
+function sequenceResidueColumn(value) {
+  const column = Number.parseInt(String(value), 10);
+  return Number.isFinite(column) && column >= 0 ? column : null;
+}
+
+function sequenceColumnCount(chains) {
+  let maximum = 0;
+  for (const chain of chains) {
+    for (const residue of chain.residues) {
+      const column = sequenceResidueColumn(residue.residueIndex);
+      if (column !== null && column > maximum) maximum = column;
+    }
+  }
+  return Math.min(
+    maximum + 10,
+    Math.floor(SEQUENCE_MAX_CANVAS_WIDTH / SEQUENCE_CELL_WIDTH),
+  );
+}
+
+function createSequenceRuler(columnCount) {
+  const row = document.createElement("div");
+  row.className = "sequence-ruler";
+  const corner = document.createElement("div");
+  corner.className = "sequence-ruler-corner";
+  const canvas = document.createElement("canvas");
+  canvas.className = "sequence-ruler-canvas";
+  const width = Math.min(
+    (columnCount + 1) * SEQUENCE_CELL_WIDTH,
+    SEQUENCE_MAX_CANVAS_WIDTH,
+  );
+  const pixelRatio = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(width * pixelRatio);
+  canvas.height = Math.floor(SEQUENCE_RULER_HEIGHT * pixelRatio);
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${SEQUENCE_RULER_HEIGHT}px`;
+  const context = canvas.getContext("2d");
+  if (context) {
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    context.strokeStyle = "#555";
+    context.beginPath();
+    for (let index = 0; index < columnCount; index += 1) {
+      const x = (index + 0.5) * SEQUENCE_CELL_WIDTH;
+      context.moveTo(x, 12);
+      context.lineTo(x, 16);
+    }
+    context.stroke();
+    context.fillStyle = "#555";
+    context.font = `10px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
+    context.textBaseline = "alphabetic";
+    for (let index = 5; index < columnCount; index += 5) {
+      const label = String(index);
+      const x = (index + 0.5) * SEQUENCE_CELL_WIDTH;
+      context.fillText(label, x - context.measureText(label).width / 2, 10);
+    }
+  }
+  row.append(corner, canvas);
+  return row;
+}
+
 function sameSequenceRow(lhs, rhs) {
   return (
     lhs &&
@@ -14688,14 +14752,25 @@ function renderSequence() {
     sequenceView.append(empty);
     return;
   }
-  for (const chain of moleculeDetails.sequence) {
+  const columnCount = sequenceColumnCount(moleculeDetails.sequence);
+  const sequenceWidth = Math.min(
+    (columnCount + 1) * SEQUENCE_CELL_WIDTH,
+    SEQUENCE_MAX_CANVAS_WIDTH,
+  );
+  sequenceView.append(createSequenceRuler(columnCount));
+  for (const [rowIndex, chain] of moleculeDetails.sequence.entries()) {
     const row = document.createElement("section");
-    row.className = "sequence-chain";
+    row.className = `sequence-chain${rowIndex % 2 === 1 ? " odd" : ""}`;
     const title = document.createElement("strong");
-    title.textContent = `${chain.objectName} : chain ${chain.chainId || "_"}`;
+    title.textContent = `${chain.chainId || "_"}:${chain.objectName}`;
+    title.title = title.textContent;
     const residues = document.createElement("div");
     residues.className = "sequence-residues";
+    residues.style.width = `${sequenceWidth}px`;
+    residues.style.height = `${SEQUENCE_ROW_HEIGHT}px`;
     for (const [position, residue] of chain.residues.entries()) {
+      const column = sequenceResidueColumn(residue.residueIndex);
+      if (column === null || column >= columnCount) continue;
       const cell = document.createElement("button");
       cell.type = "button";
       cell.textContent = residue.letter;
@@ -14704,6 +14779,7 @@ function renderSequence() {
       cell.dataset.chainId = chain.chainId;
       cell.dataset.residuePosition = String(position);
       cell.dataset.selection = residue.selection;
+      cell.style.left = `${column * SEQUENCE_CELL_WIDTH}px`;
       cell.title = `${residue.resName} ${residue.residueIndex}`;
       if (
         sequenceMarker?.objectUid === cell.dataset.objectUid &&

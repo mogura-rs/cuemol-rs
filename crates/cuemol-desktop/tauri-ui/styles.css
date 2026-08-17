@@ -2039,7 +2039,7 @@ summary:focus-visible {
 
 .sequence-placeholder {
   overflow: auto;
-  padding: 7px;
+  padding: 0;
   color: #555;
 }
 
@@ -2054,11 +2054,33 @@ summary:focus-visible {
   margin: 5px;
 }
 
+.sequence-ruler {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: 140px max-content;
+  height: 16px;
+  border-bottom: 1px solid #aaa;
+  background: #fff;
+}
+
+.sequence-ruler-corner {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  border-right: 1px solid #aaa;
+  background: #fff;
+}
+
+.sequence-ruler-canvas {
+  display: block;
+}
+
 .sequence-chain {
   display: grid;
-  grid-template-columns: 180px max-content;
-  min-height: 21px;
-  border-bottom: 1px solid #ddd;
+  grid-template-columns: 140px max-content;
+  min-height: 19px;
 }
 
 .sequence-chain > strong {
@@ -2068,48 +2090,59 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   min-width: 0;
-  padding: 2px 6px;
+  height: 19px;
+  padding: 0 4px;
   overflow: hidden;
   border-right: 1px solid #aaa;
   background: #fff;
-  font: 600 11px var(--font-mono);
+  font: 500 12px/19px var(--font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .sequence-residues {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: stretch;
+  position: relative;
+  overflow: hidden;
+  background: #fff;
+}
+
+.sequence-chain.odd > strong,
+.sequence-chain.odd .sequence-residues {
+  background: #f0f0f0;
 }
 
 .sequence-cell {
-  min-width: 20px;
-  min-height: 20px;
-  padding: 1px 4px;
+  position: absolute;
+  top: 0;
+  width: 10px;
+  min-width: 10px;
+  height: 19px;
+  min-height: 19px;
+  padding: 0;
+  border: 0;
   border-radius: 0;
-  border-right-width: 0;
-  background: #fff;
+  background: transparent;
   box-shadow: none;
-  font-family: var(--font-mono);
+  font: 600 13px/19px var(--font-mono);
 }
 
-.sequence-cell:last-child {
-  border-right-width: 1px;
+.sequence-cell:hover {
+  background: #dce8f4;
 }
 
 .sequence-cell.selected {
-  background: var(--selection);
-  color: var(--selection-text);
+  background: #00ffff;
+  color: #000;
 }
 
 .sequence-cell.marked {
-  box-shadow: inset 0 -2px #1d1d1d;
+  outline: 1px solid #f00;
+  outline-offset: -1px;
 }
 
 .sequence-cell.range-preview {
-  outline: 1px solid #555;
-  outline-offset: -2px;
+  outline: 1px solid #008000;
+  outline-offset: -1px;
 }
 
 .trajectory-panel {
