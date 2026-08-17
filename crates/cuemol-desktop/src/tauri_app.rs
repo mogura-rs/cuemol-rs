@@ -167,6 +167,14 @@ struct RendererSetupOptionDto {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceRendererSetupOptionsDto {
+    renderer_type: Option<String>,
+    recenter: bool,
+    options: Vec<RendererStyleOptionDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RendererSetupDto {
     target_kind: String,
     object_name: String,
@@ -1183,6 +1191,7 @@ struct WorkspaceNewRendererInput {
     selection: Option<String>,
     group_name: Option<String>,
     density_centering: Option<String>,
+    recenter: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -11333,11 +11342,20 @@ fn get_workspace_renderer_setup_options(
     scene_uid: u64,
     kind: String,
     state: State<'_, ManagedState>,
-) -> Result<Vec<RendererStyleOptionDto>, String> {
-    renderer_style_options_response(request_model(
+) -> Result<WorkspaceRendererSetupOptionsDto, String> {
+    let options = renderer_style_options_response(request_model(
         &state,
         ModelRequest::GetWorkspaceRendererSetupOptions { scene_uid, kind },
-    )?)
+    )?)?;
+    let preferences = crate::load_renderer_setup_preferences();
+    let renderer_type = preferences
+        .renderer_type
+        .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type));
+    Ok(WorkspaceRendererSetupOptionsDto {
+        renderer_type,
+        recenter: preferences.recenter,
+        options,
+    })
 }
 
 #[tauri::command]
@@ -11538,10 +11556,16 @@ fn create_workspace_renderer(
     input: WorkspaceNewRendererInput,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
-    snapshot_response(request_model(
+    let renderer_type = input.renderer_type.clone();
+    let recenter = input
+        .recenter
+        .unwrap_or_else(|| crate::load_renderer_setup_preferences().recenter);
+    let snapshot = snapshot_response(request_model(
         &state,
         ModelRequest::CreateWorkspaceRenderer(input),
-    )?)
+    )?)?;
+    let _ = crate::save_renderer_setup_preferences(&renderer_type, recenter);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -15513,6 +15537,7 @@ mod tests {
                 selection: Some("bad selector (".to_string()),
                 group_name: None,
                 density_centering: None,
+                recenter: Some(true),
             }),
         );
         assert!(invalid.is_err());
@@ -15529,6 +15554,7 @@ mod tests {
                 selection: Some("protein".to_string()),
                 group_name: None,
                 density_centering: None,
+                recenter: Some(false),
             }),
         )
         .unwrap();
@@ -15573,6 +15599,7 @@ mod tests {
                 selection: None,
                 group_name: None,
                 density_centering: None,
+                recenter: Some(true),
             }),
         )
         .unwrap();
@@ -15603,6 +15630,7 @@ mod tests {
                 selection: None,
                 group_name: None,
                 density_centering: Some("map".to_string()),
+                recenter: None,
             }),
         )
         .unwrap();

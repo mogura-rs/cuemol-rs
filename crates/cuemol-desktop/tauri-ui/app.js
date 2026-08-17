@@ -8142,9 +8142,9 @@ async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = n
         : kind === "surfaceRenderer"
           ? SURFACE_RENDERER_TYPES
           : LIGHTWEIGHT_RENDERER_TYPES;
-  let compatibleOptions;
+  let setupDefaults;
   try {
-    compatibleOptions = await invoke("get_workspace_renderer_setup_options", {
+    setupDefaults = await invoke("get_workspace_renderer_setup_options", {
       sceneUid: scene.uid,
       kind,
     });
@@ -8152,13 +8152,16 @@ async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = n
     showError(error);
     return;
   }
+  let compatibleOptions = setupDefaults?.options;
   if (!Array.isArray(compatibleOptions) || compatibleOptions.length === 0) {
     compatibleOptions = fallbackTypes.map((name) => ({ name, description: name }));
   }
   const compatibleTypes = compatibleOptions.map((option) => option.name);
-  const selectedType = compatibleTypes.includes(rendererType.value)
-    ? rendererType.value
-    : compatibleTypes[0];
+  const selectedType = compatibleTypes.includes(setupDefaults?.rendererType)
+    ? setupDefaults.rendererType
+    : compatibleTypes.includes(rendererType.value)
+      ? rendererType.value
+      : compatibleTypes[0];
   const objectName = dialogField("Object:", object.name);
   objectName.disabled = true;
   const type = dialogSelect(
@@ -8211,7 +8214,7 @@ async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = n
           ],
           "map",
         )
-      : dialogCheckbox("Recenter view", true);
+      : dialogCheckbox("Recenter view", setupDefaults?.recenter ?? true);
 
   const cancel = button("Cancel", "", () => referenceDialog.close());
   const create = button("OK", "dialog-primary", async () => {
@@ -8226,6 +8229,7 @@ async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = n
         selection: useSelection?.checked ? selection.value : null,
         groupName,
         densityCentering: kind === "densityRenderer" ? recenter.value : null,
+        recenter: kind === "densityRenderer" ? null : recenter.checked,
       },
     });
     if (!changed) return;

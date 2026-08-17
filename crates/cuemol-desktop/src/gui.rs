@@ -1014,6 +1014,7 @@ struct GuiApplication {
     new_renderer_group: Option<String>,
     new_renderer_type: String,
     new_renderer_name: String,
+    new_renderer_name_default: bool,
     new_renderer_use_selection: bool,
     new_renderer_selection: String,
     new_renderer_recenter: bool,
@@ -3305,6 +3306,7 @@ impl GuiApplication {
             new_renderer_group: None,
             new_renderer_type: "simple".to_string(),
             new_renderer_name: "simple".to_string(),
+            new_renderer_name_default: true,
             new_renderer_use_selection: false,
             new_renderer_selection: String::new(),
             new_renderer_recenter: true,
@@ -17998,6 +18000,7 @@ impl GuiApplication {
                 if is_group {
                     ui.label("Type: Renderer group");
                 } else {
+                    let previous_type = self.new_renderer_type.clone();
                     egui::ComboBox::from_label("Renderer type:")
                         .selected_text(renderer_type_label(&self.new_renderer_type))
                         .show_ui(ui, |ui| {
@@ -18009,13 +18012,34 @@ impl GuiApplication {
                                 );
                             }
                         });
+                    if self.new_renderer_type != previous_type && self.new_renderer_name_default {
+                        self.new_renderer_name = self
+                            .state
+                            .suggest_renderer_name_in_active_scene(&self.new_renderer_type)
+                            .unwrap_or_else(|_| {
+                                format!("{}1", self.new_renderer_type.trim_start_matches('*'))
+                            });
+                    }
                 }
                 ui.horizontal(|ui| {
                     ui.label("Renderer name:");
-                    ui.add(
+                    let response = ui.add(
                         egui::TextEdit::singleline(&mut self.new_renderer_name)
                             .desired_width(ui.available_width()),
                     );
+                    if response.changed() {
+                        if self.new_renderer_name.trim().is_empty() {
+                            self.new_renderer_name_default = true;
+                            self.new_renderer_name = self
+                                .state
+                                .suggest_renderer_name_in_active_scene(&self.new_renderer_type)
+                                .unwrap_or_else(|_| {
+                                    format!("{}1", self.new_renderer_type.trim_start_matches('*'))
+                                });
+                        } else {
+                            self.new_renderer_name_default = false;
+                        }
+                    }
                 });
                 if !is_group {
                     match self.new_renderer_owner {
@@ -20315,6 +20339,7 @@ impl GuiApplication {
         self.new_renderer_group = None;
         self.new_renderer_type = "*group".to_string();
         self.new_renderer_name = format!("group{serial}");
+        self.new_renderer_name_default = true;
         self.new_renderer_use_selection = false;
         self.new_renderer_selection.clear();
         self.new_renderer_recenter = false;
@@ -20352,6 +20377,7 @@ impl GuiApplication {
             .state
             .suggest_renderer_name_in_active_scene(&self.new_renderer_type)
             .unwrap_or_else(|_| format!("{}1", self.new_renderer_type.trim()));
+        self.new_renderer_name_default = true;
         self.new_renderer_selection = self
             .state
             .molecule_selection_text(object_uid)
@@ -20389,6 +20415,7 @@ impl GuiApplication {
                     })
                     .unwrap_or(1);
                 self.new_renderer_name = format!("{} {serial}", self.new_renderer_type);
+                self.new_renderer_name_default = true;
             }
             WorkspaceAuxSelection::Surface { surface_uid, .. } => {
                 self.new_renderer_owner = Some(NativePropertyObject::Surface(surface_uid));
@@ -20402,6 +20429,7 @@ impl GuiApplication {
                     .map(|surface| surface.renderers.len() + 1)
                     .unwrap_or(1);
                 self.new_renderer_name = format!("molsurf {serial}");
+                self.new_renderer_name_default = true;
             }
             WorkspaceAuxSelection::Lightweight { object_uid, .. } => {
                 self.new_renderer_owner = Some(NativePropertyObject::Lightweight(object_uid));
@@ -20415,6 +20443,7 @@ impl GuiApplication {
                     .map(|object| object.renderers.len() + 1)
                     .unwrap_or(1);
                 self.new_renderer_name = format!("lwrend {serial}");
+                self.new_renderer_name_default = true;
             }
         }
         self.new_renderer_use_selection = false;

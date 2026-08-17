@@ -1145,9 +1145,13 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("async function showNewWorkspaceRendererDialog("));
     assert!(JS.contains("dialogTitle.textContent = \"Setup renderer\""));
     assert!(JS.contains("get_workspace_renderer_setup_options"));
+    assert!(JS.contains("setupDefaults?.rendererType"));
+    assert!(JS.contains("setupDefaults?.recenter ?? true"));
     assert!(TAURI_APP_RS.contains("GetWorkspaceRendererSetupOptions"));
     assert!(TAURI_APP_RS.contains("new_renderer_from_setup("));
+    assert!(TAURI_APP_RS.contains("save_renderer_setup_preferences(&renderer_type, recenter)"));
     assert!(NATIVE_GUI_RS.contains("molecule_renderer_setup_options(scene_uid)"));
+    assert!(NATIVE_GUI_RS.contains("new_renderer_name_default"));
     assert!(JS.contains("densityCentering: kind === \"densityRenderer\" ? recenter.value : null"));
     assert!(TAURI_APP_RS.contains("set_density_renderer_center("));
     assert!(NATIVE_GUI_RS.contains("\"Set map center\""));
