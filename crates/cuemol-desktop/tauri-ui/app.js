@@ -7486,38 +7486,34 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         }
         const targetCamera = dialogSelect(
           "Target camera",
-          [["", "None"], ...cameras],
+          [["", "(none)"], ...cameras],
           object.targetCamera || "",
           typePage,
         );
-        const ignoreRotate = dialogCheckbox("Ignore rotate", object.ignoreRotate, typePage);
+        const ignoreRotate = dialogCheckbox("Ignore rotation", object.ignoreRotate, typePage);
         const ignoreCenter = dialogCheckbox("Ignore center", object.ignoreCenter, typePage);
         const ignoreZoom = dialogCheckbox("Ignore zoom", object.ignoreZoom, typePage);
         const ignoreSlab = dialogCheckbox("Ignore slab", object.ignoreSlab, typePage);
-        const keepQuaternion = dialogCheckbox(
-          "Keep quaternion positive",
-          object.keepQuaternionPositive,
-          typePage,
-        );
+        let keepQuaternionPositive = object.keepQuaternionPositive;
         optional.read = () => ({
           targetCamera: targetCamera.value,
           ignoreRotate: ignoreRotate.checked,
           ignoreCenter: ignoreCenter.checked,
           ignoreZoom: ignoreZoom.checked,
           ignoreSlab: ignoreSlab.checked,
-          keepQuaternionPositive: keepQuaternion.checked,
+          keepQuaternionPositive,
         });
         optional.reset = (defaults) => {
           ignoreRotate.checked = defaults.ignoreRotate;
           ignoreCenter.checked = defaults.ignoreCenter;
           ignoreZoom.checked = defaults.ignoreZoom;
           ignoreSlab.checked = defaults.ignoreSlab;
-          keepQuaternion.checked = defaults.keepQuaternionPositive;
+          keepQuaternionPositive = defaults.keepQuaternionPositive;
         };
       } else if (object.typeName === "ShowHideAnim") {
         const readTargets = rendererTargets(object.rendererNames);
         const showHide = dialogSelect(
-          "Show-Hide",
+          "Show/Hide",
           [["show", "Show"], ["hide", "Hide"]],
           object.hide ? "hide" : "show",
           typePage,
@@ -7545,12 +7541,6 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         };
       } else if (object.typeName === "SlideInOutAnim") {
         const readTargets = rendererTargets(object.rendererNames);
-        const showHide = dialogSelect(
-          "Show-Hide",
-          [["show", "Show"], ["hide", "Hide"]],
-          object.hide ? "hide" : "show",
-          typePage,
-        );
         const direction = dialogField(
           "Direction angle",
           String(object.direction),
@@ -7585,6 +7575,12 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         distance.min = "0";
         distance.max = "2";
         distance.step = "0.1";
+        const showHide = dialogSelect(
+          "Show/Hide",
+          [["show", "Show"], ["hide", "Hide"]],
+          object.hide ? "hide" : "show",
+          typePage,
+        );
         optional.read = () => ({
           rendererNames: readTargets(),
           hide: showHide.value === "hide",
@@ -7616,12 +7612,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           object.moleculeName || "",
           typePage,
         );
-        const property = dialogField(
-          "Property",
-          object.propertyName || "frame",
-          "text",
-          typePage,
-        );
+        const propertyName = object.propertyName || "frame";
         const startValue = dialogField(
           "Start value",
           String(object.startValue),
@@ -7642,7 +7633,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         endValue.step = "0.1";
         optional.read = () => ({
           moleculeName: molecule.value,
-          propertyName: property.value,
+          propertyName,
           startValue: Number(startValue.value),
           endValue: Number(endValue.value),
         });

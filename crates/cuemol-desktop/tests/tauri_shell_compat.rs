@@ -985,7 +985,7 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
         "Spin axis X",
         "Target camera",
         "Target renderers",
-        "Show-Hide",
+        "Show/Hide",
         "Target opacity",
         "Direction angle",
         "Direction preset",
@@ -1023,6 +1023,11 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     }
     assert!(NATIVE_GUI_RS.contains("animation_slide_direction"));
     assert!(JS.contains("keepQuaternionPositive: true"));
+    assert!(!JS.contains("Keep quaternion positive"));
+    assert!(!JS.contains(
+        "dialogField(\n          \"Property\",\n          object.propertyName || \"frame\""
+    ));
+    assert!(!NATIVE_GUI_RS.contains("\"Keep quaternion positive\","));
     assert!(JS.contains("fade: true"));
     assert!(JS.contains("distance: 1"));
     assert!(JS.contains("function formatAnimationObjectTime(seconds)"));

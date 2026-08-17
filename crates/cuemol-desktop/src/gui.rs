@@ -15659,12 +15659,12 @@ impl GuiApplication {
                                 ui.label("Target camera:");
                                 egui::ComboBox::from_id_salt("animation_target_camera")
                                     .selected_text(if target.is_empty() {
-                                        "None"
+                                        "(none)"
                                     } else {
                                         target.as_str()
                                     })
                                     .show_ui(ui, |ui| {
-                                        ui.selectable_value(target, String::new(), "None");
+                                        ui.selectable_value(target, String::new(), "(none)");
                                         for name in &camera_names {
                                             ui.selectable_value(target, name.clone(), name);
                                         }
@@ -15676,10 +15676,6 @@ impl GuiApplication {
                             ("Ignore rotation", &mut draft.ignore_rotate),
                             ("Ignore zoom", &mut draft.ignore_zoom),
                             ("Ignore slab", &mut draft.ignore_slab),
-                            (
-                                "Keep quaternion positive",
-                                &mut draft.keep_quaternion_positive,
-                            ),
                         ] {
                             if let Some(value) = value {
                                 ui.checkbox(value, label);
@@ -15690,7 +15686,15 @@ impl GuiApplication {
                         ui.heading("Show / Hide");
                         animation_renderer_names_ui(ui, &mut draft.renderer_names);
                         if let Some(value) = &mut draft.hide {
-                            ui.checkbox(value, "Hide");
+                            ui.horizontal(|ui| {
+                                ui.label("Show/Hide:");
+                                egui::ComboBox::from_id_salt("animation_show_hide")
+                                    .selected_text(if *value { "Hide" } else { "Show" })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(value, false, "Show");
+                                        ui.selectable_value(value, true, "Hide");
+                                    });
+                            });
                         }
                         if let Some(value) = &mut draft.fade {
                             ui.checkbox(value, "Fade");
@@ -15705,9 +15709,6 @@ impl GuiApplication {
                     "SlideInOutAnim" => {
                         ui.heading("SlideIn / SlideOut");
                         animation_renderer_names_ui(ui, &mut draft.renderer_names);
-                        if let Some(value) = &mut draft.hide {
-                            ui.checkbox(value, "Hide after animation");
-                        }
                         if let Some(value) = &mut draft.direction {
                             ui.horizontal(|ui| {
                                 ui.label("Direction angle:");
@@ -15755,6 +15756,17 @@ impl GuiApplication {
                                 );
                             });
                         }
+                        if let Some(value) = &mut draft.hide {
+                            ui.horizontal(|ui| {
+                                ui.label("Show/Hide:");
+                                egui::ComboBox::from_id_salt("animation_slide_show_hide")
+                                    .selected_text(if *value { "Hide" } else { "Show" })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(value, false, "Show");
+                                        ui.selectable_value(value, true, "Hide");
+                                    });
+                            });
+                        }
                     }
                     "MolAnim" => {
                         ui.heading("MolAnim");
@@ -15775,7 +15787,6 @@ impl GuiApplication {
                                     });
                             });
                         }
-                        animation_optional_text_ui(ui, "Property:", &mut draft.property_name);
                         animation_value_range_ui(
                             ui,
                             &mut draft.start_value,
