@@ -1731,7 +1731,7 @@ summary:focus-visible {
 
 .main-view {
   display: grid;
-  grid-template-rows: 26px minmax(100px, 1fr) 6px 148px;
+  grid-template-rows: 26px minmax(100px, 1fr) 6px var(--bottom-panel-height, 148px);
   min-width: 0;
   min-height: 0;
   background: var(--chrome);
@@ -1975,6 +1975,17 @@ summary:focus-visible {
   border-bottom: 1px solid rgba(0, 0, 0, 0.35);
   background: #d2d2d2;
   cursor: row-resize;
+  touch-action: none;
+}
+
+.horizontal-splitter:hover,
+.horizontal-splitter.dragging {
+  background: #aaa;
+}
+
+body.resizing-bottom-panel {
+  cursor: row-resize;
+  user-select: none;
 }
 
 /* Output / Sequence bottom dock */
@@ -3820,7 +3831,7 @@ summary:focus-visible {
 
 @media (max-height: 700px) {
   .main-view {
-    grid-template-rows: 26px minmax(100px, 1fr) 6px 112px;
+    --bottom-panel-height: 112px;
   }
 
   .scene-tree {

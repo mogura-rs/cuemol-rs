@@ -2,6 +2,8 @@
 
 const appShell = document.querySelector(".app-shell");
 const sidePanel = document.querySelector(".side-panel");
+const mainView = document.querySelector(".main-view");
+const horizontalSplitter = document.querySelector(".horizontal-splitter");
 const viewport = document.getElementById("viewport");
 const viewportImage = document.getElementById("viewport-image");
 const viewportLines = document.getElementById("viewport-lines");
@@ -114,6 +116,7 @@ const RECENT_STORAGE_KEY = "cuemol2.recentFiles.v1";
 const SELECTION_HISTORY_STORAGE_KEY = "cuemol2.selectionHistory.v1";
 const ANIMATION_RENDER_STORAGE_KEY = "cuemol2.animationRender.v1";
 const COMMAND_HISTORY_STORAGE_KEY = "cuemol2.commandHistory.v1";
+const BOTTOM_PANEL_HEIGHT_STORAGE_KEY = "cuemol2.bottomPanelHeight.v1";
 const MAX_RECENT_FILES = 10;
 const MAX_SELECTION_HISTORY = 20;
 const MAX_COMMAND_HISTORY = 100;
@@ -566,6 +569,72 @@ function closeMenus(except = null) {
   closeHistoryMenus();
 }
 
+let bottomPanelHeight = 148;
+try {
+  const storedBottomPanelHeight = Number(localStorage.getItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY));
+  if (Number.isFinite(storedBottomPanelHeight)) bottomPanelHeight = storedBottomPanelHeight;
+} catch {
+  // Storage can be unavailable in restricted webviews.
+}
+
+function bottomPanelMinimumHeight() {
+  return document.querySelector('[data-bottom-panel="trajectory"]')?.classList.contains("active")
+    ? 205
+    : 80;
+}
+
+function setBottomPanelHeight(height, persist = false) {
+  const minimum = bottomPanelMinimumHeight();
+  const maximum = Math.max(minimum, (mainView?.getBoundingClientRect().height || 480) - 126);
+  bottomPanelHeight = Math.min(maximum, Math.max(minimum, height));
+  mainView?.style.setProperty("--bottom-panel-height", `${bottomPanelHeight}px`);
+  horizontalSplitter?.setAttribute("aria-valuemin", String(minimum));
+  horizontalSplitter?.setAttribute("aria-valuemax", String(Math.round(maximum)));
+  horizontalSplitter?.setAttribute("aria-valuenow", String(Math.round(bottomPanelHeight)));
+  if (!persist) return;
+  try {
+    localStorage.setItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY, String(bottomPanelHeight));
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+}
+
+function setupBottomPanelSplitter() {
+  if (!horizontalSplitter) return;
+  setBottomPanelHeight(bottomPanelHeight);
+  horizontalSplitter.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = bottomPanelHeight;
+    horizontalSplitter.setPointerCapture(event.pointerId);
+    horizontalSplitter.classList.add("dragging");
+    document.body.classList.add("resizing-bottom-panel");
+    const resize = (moveEvent) => {
+      setBottomPanelHeight(startHeight + startY - moveEvent.clientY);
+    };
+    const finish = (finishEvent) => {
+      if (finishEvent.type !== "pointercancel") resize(finishEvent);
+      setBottomPanelHeight(bottomPanelHeight, true);
+      horizontalSplitter.classList.remove("dragging");
+      document.body.classList.remove("resizing-bottom-panel");
+      horizontalSplitter.removeEventListener("pointermove", resize);
+      horizontalSplitter.removeEventListener("pointerup", finish);
+      horizontalSplitter.removeEventListener("pointercancel", finish);
+    };
+    horizontalSplitter.addEventListener("pointermove", resize);
+    horizontalSplitter.addEventListener("pointerup", finish);
+    horizontalSplitter.addEventListener("pointercancel", finish);
+  });
+  horizontalSplitter.addEventListener("dblclick", () => setBottomPanelHeight(148, true));
+  horizontalSplitter.addEventListener("keydown", (event) => {
+    if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    setBottomPanelHeight(bottomPanelHeight + (event.key === "ArrowUp" ? 10 : -10), true);
+  });
+  window.addEventListener("resize", () => setBottomPanelHeight(bottomPanelHeight));
+}
+
 function showBottomPanel(name) {
   document.querySelectorAll("[data-bottom-select]").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.bottomSelect === name);
@@ -573,6 +642,7 @@ function showBottomPanel(name) {
   document.querySelectorAll("[data-bottom-panel]").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.bottomPanel === name);
   });
+  setBottomPanelHeight(bottomPanelHeight);
   if (name === "sequence") {
     renderSequence();
     scheduleMoleculeDetailsRefresh(0);
@@ -17125,6 +17195,8 @@ window.addEventListener("drop", (event) => {
     openSelectedPaths(paths);
   }
 });
+
+setupBottomPanelSplitter();
 
 async function start() {
   if (!invoke) {

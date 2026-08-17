@@ -31,6 +31,11 @@ fn tauri_shell_matches_the_reference_xul_dock_order() {
             "missing reference GUI surface {surface}"
         );
     }
+    assert!(HTML.contains("aria-label=\"Resize bottom panel\""));
+    assert!(CSS.contains("var(--bottom-panel-height, 148px)"));
+    assert!(JS.contains("function setupBottomPanelSplitter()"));
+    assert!(JS.contains("BOTTOM_PANEL_HEIGHT_STORAGE_KEY"));
+    assert!(JS.contains("startHeight + startY - moveEvent.clientY"));
 }
 
 #[test]
