@@ -1165,6 +1165,7 @@ struct GuiApplication {
     show_workspace: bool,
     left_panel_visible: [bool; LeftPanel::ALL.len()],
     left_panel_open: [bool; LeftPanel::ALL.len()],
+    left_panel_order: [LeftPanel; LeftPanel::ALL.len()],
     left_panel_width: f32,
     reset_left_panel_layout: bool,
     show_inspector: bool,
@@ -4103,6 +4104,12 @@ impl LeftPanel {
         }
     }
 
+    fn from_title(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|panel| panel.title() == value.trim())
+    }
+
     fn default_open(self) -> bool {
         matches!(
             self,
@@ -4117,6 +4124,28 @@ impl LeftPanel {
     fn index(self) -> usize {
         self as usize
     }
+}
+
+fn parse_left_panel_order(value: &str) -> [LeftPanel; LeftPanel::ALL.len()] {
+    let mut panels = Vec::with_capacity(LeftPanel::ALL.len());
+    for value in value.split('|') {
+        let Some(panel) = LeftPanel::from_title(value) else {
+            return LeftPanel::ALL;
+        };
+        if panels.contains(&panel) {
+            return LeftPanel::ALL;
+        }
+        panels.push(panel);
+    }
+    panels.try_into().unwrap_or(LeftPanel::ALL)
+}
+
+fn format_left_panel_order(order: &[LeftPanel; LeftPanel::ALL.len()]) -> String {
+    order
+        .iter()
+        .map(|panel| panel.title())
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 impl GuiApplication {
@@ -4141,6 +4170,7 @@ impl GuiApplication {
                 !panel.default_open(),
             )
         });
+        let left_panel_order = parse_left_panel_order(&state.config_value("left_panel:order"));
         let left_panel_width = state
             .config_value("left_panel:width")
             .parse::<f32>()
@@ -4288,6 +4318,7 @@ impl GuiApplication {
             show_workspace: true,
             left_panel_visible,
             left_panel_open,
+            left_panel_order,
             left_panel_width,
             reset_left_panel_layout: false,
             // CueMol2 opens properties on demand (no docked inspector); start closed.
@@ -5371,7 +5402,8 @@ impl GuiApplication {
             .show(ctx, |ui| {
                 egui::ScrollArea::both().show(ui, |ui| {
                     let reset_layout = self.reset_left_panel_layout;
-                    for panel in LeftPanel::ALL {
+                    let mut panel_move = None;
+                    for panel in self.left_panel_order {
                         let index = panel.index();
                         if !self.left_panel_visible[index] {
                             continue;
@@ -5390,18 +5422,56 @@ impl GuiApplication {
                         }
                         let mut close_panel = false;
                         let header = state.show_header(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(panel.title());
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        close_panel = ui
-                                            .small_button("×")
-                                            .on_hover_text("Close panel")
-                                            .clicked();
-                                    },
-                                );
-                            });
+                            let drag_source = ui.dnd_drag_source(
+                                egui::Id::new(("left-panel-drag", panel.title())),
+                                panel,
+                                |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(panel.title());
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                close_panel = ui
+                                                    .small_button("×")
+                                                    .on_hover_text("Close panel")
+                                                    .clicked();
+                                            },
+                                        );
+                                    });
+                                },
+                            );
+                            let drop_rect = drag_source.response.rect;
+                            if let Some(source) =
+                                drag_source.response.dnd_hover_payload::<LeftPanel>()
+                            {
+                                if *source != panel {
+                                    let fraction =
+                                        ctx_pointer_vertical_fraction(ui.ctx(), drop_rect);
+                                    let y = if fraction < 0.5 {
+                                        drop_rect.top()
+                                    } else {
+                                        drop_rect.bottom()
+                                    };
+                                    ui.painter().line_segment(
+                                        [
+                                            egui::pos2(drop_rect.left(), y),
+                                            egui::pos2(drop_rect.right(), y),
+                                        ],
+                                        egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                                    );
+                                }
+                            }
+                            if let Some(source) =
+                                drag_source.response.dnd_release_payload::<LeftPanel>()
+                            {
+                                if *source != panel {
+                                    panel_move = Some((
+                                        *source,
+                                        panel,
+                                        ctx_pointer_vertical_fraction(ui.ctx(), drop_rect) >= 0.5,
+                                    ));
+                                }
+                            }
                         });
                         let open = header.is_open();
                         header.body(|ui| {
@@ -5422,6 +5492,9 @@ impl GuiApplication {
                             );
                         }
                     }
+                    if let Some((source, target, after)) = panel_move {
+                        self.move_left_panel(source, target, after);
+                    }
                     self.reset_left_panel_layout = false;
                 });
             });
@@ -5431,6 +5504,33 @@ impl GuiApplication {
             self.state
                 .put_config_value("left_panel:width", width.to_string());
         }
+    }
+
+    fn move_left_panel(&mut self, source: LeftPanel, target: LeftPanel, after: bool) {
+        if source == target {
+            return;
+        }
+        let mut order = self.left_panel_order.to_vec();
+        let Some(source_index) = order.iter().position(|panel| *panel == source) else {
+            return;
+        };
+        order.remove(source_index);
+        let Some(mut target_index) = order.iter().position(|panel| *panel == target) else {
+            return;
+        };
+        if after {
+            target_index += 1;
+        }
+        order.insert(target_index, source);
+        let Ok(order) = order.try_into() else {
+            return;
+        };
+        self.left_panel_order = order;
+        self.state.put_config_value(
+            "left_panel:order",
+            format_left_panel_order(&self.left_panel_order),
+        );
+        self.set_status(format!("Moved {} panel", source.title()));
     }
 
     fn left_panel_body(
@@ -19442,6 +19542,8 @@ impl GuiApplication {
                 !panel.default_open(),
             )
         });
+        self.left_panel_order =
+            parse_left_panel_order(&self.state.config_value("left_panel:order"));
         self.left_panel_width = self
             .state
             .config_value("left_panel:width")
@@ -26967,6 +27069,11 @@ impl GuiApplication {
     fn restore_panels(&mut self) {
         self.show_workspace = true;
         self.left_panel_visible.fill(true);
+        self.left_panel_order = LeftPanel::ALL;
+        self.state.put_config_value(
+            "left_panel:order",
+            format_left_panel_order(&self.left_panel_order),
+        );
         for panel in LeftPanel::ALL {
             let index = panel.index();
             self.left_panel_open[index] = panel.default_open();
@@ -32971,7 +33078,7 @@ mod tests {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
             input: Ok(Some(
-                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\n"
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\n"
                     .to_string(),
             )),
         });
@@ -32980,6 +33087,7 @@ mod tests {
         assert!(!app.show_toolbar);
         assert!(!app.left_panel_visible[LeftPanel::Workspace.index()]);
         assert!(!app.left_panel_open[LeftPanel::Workspace.index()]);
+        assert_eq!(app.left_panel_order[0], LeftPanel::Animation);
         assert_eq!(app.left_panel_width, 310.0);
         assert!(!app.show_bottom_panel);
         assert_eq!(app.bottom_tab, BottomTab::Sequence);
@@ -33111,6 +33219,12 @@ mod tests {
             "false"
         );
         assert!(app.left_panel_visible.iter().all(|visible| *visible));
+        app.move_left_panel(LeftPanel::Animation, LeftPanel::Workspace, false);
+        assert_eq!(app.left_panel_order[0], LeftPanel::Animation);
+        assert!(app
+            .state
+            .config_value("left_panel:order")
+            .starts_with("Animation|Workspace"));
         app.left_panel_visible[LeftPanel::Workspace.index()] = false;
         app.left_panel_open[LeftPanel::Workspace.index()] = false;
         app.left_panel_width = 315.0;
@@ -33136,6 +33250,11 @@ mod tests {
 
         assert!(app.show_workspace);
         assert!(app.left_panel_visible.iter().all(|visible| *visible));
+        assert_eq!(app.left_panel_order, LeftPanel::ALL);
+        assert_eq!(
+            app.state.config_value("left_panel:order"),
+            format_left_panel_order(&LeftPanel::ALL)
+        );
         for panel in LeftPanel::ALL {
             assert_eq!(app.left_panel_open[panel.index()], panel.default_open());
             assert_eq!(

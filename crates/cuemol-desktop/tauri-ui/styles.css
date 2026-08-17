@@ -538,7 +538,31 @@ body.resizing-side-panel {
 }
 
 .side-card {
+  position: relative;
   border-bottom: 1px solid #979797;
+}
+
+.side-card.panel-dragging {
+  opacity: 0.55;
+}
+
+.side-card.panel-drop-before::before,
+.side-card.panel-drop-after::after {
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: #2e78c7;
+  content: "";
+}
+
+.side-card.panel-drop-before::before {
+  top: 0;
+}
+
+.side-card.panel-drop-after::after {
+  bottom: 0;
 }
 
 .side-title {

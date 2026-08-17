@@ -8507,10 +8507,11 @@ function sidePanelCardName(card) {
 }
 
 function saveSidePanelState() {
-  const state = {};
+  const state = { __order: [] };
   for (const card of document.querySelectorAll("[data-side-card]")) {
     const name = sidePanelCardName(card);
     if (name) {
+      state.__order.push(name);
       state[name] = {
         hidden: card.hidden,
         open: card.classList.contains("open"),
@@ -8532,6 +8533,22 @@ function restoreSidePanelState() {
     return;
   }
   if (!state || typeof state !== "object") return;
+  if (Array.isArray(state.__order)) {
+    const cards = new Map(
+      [...document.querySelectorAll("[data-side-card]")].map((card) => [
+        sidePanelCardName(card),
+        card,
+      ]),
+    );
+    for (const name of state.__order) {
+      const card = cards.get(name);
+      if (card) {
+        sidePanel.append(card);
+        cards.delete(name);
+      }
+    }
+    for (const card of cards.values()) sidePanel.append(card);
+  }
   for (const card of document.querySelectorAll("[data-side-card]")) {
     const saved = state[sidePanelCardName(card)];
     if (!saved || typeof saved !== "object") continue;
@@ -8543,6 +8560,47 @@ function restoreSidePanelState() {
     if (disclosure) disclosure.textContent = saved.open ? "▾" : "▸";
   }
   syncSidePanelVisibility();
+}
+
+function setupSidePanelReordering() {
+  let sourceCard = null;
+  const clearDropIndicators = () => {
+    document.querySelectorAll("[data-side-card]").forEach((card) => {
+      card.classList.remove("panel-drop-before", "panel-drop-after");
+    });
+  };
+  for (const card of document.querySelectorAll("[data-side-card]")) {
+    const title = card.querySelector("[data-panel-toggle]");
+    if (!title) continue;
+    title.draggable = true;
+    title.addEventListener("dragstart", (event) => {
+      sourceCard = card;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", sidePanelCardName(card));
+      card.classList.add("panel-dragging");
+    });
+    title.addEventListener("dragend", () => {
+      card.classList.remove("panel-dragging");
+      sourceCard = null;
+      clearDropIndicators();
+    });
+    card.addEventListener("dragover", (event) => {
+      if (!sourceCard || sourceCard === card) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      clearDropIndicators();
+      const after = event.clientY >= card.getBoundingClientRect().top + card.offsetHeight / 2;
+      card.classList.add(after ? "panel-drop-after" : "panel-drop-before");
+    });
+    card.addEventListener("drop", (event) => {
+      if (!sourceCard || sourceCard === card) return;
+      event.preventDefault();
+      const after = event.clientY >= card.getBoundingClientRect().top + card.offsetHeight / 2;
+      sidePanel.insertBefore(sourceCard, after ? card.nextSibling : card);
+      clearDropIndicators();
+      saveSidePanelState();
+    });
+  }
 }
 
 function sidePanelIsExpanded(name) {
@@ -17378,6 +17436,7 @@ window.addEventListener("drop", (event) => {
 });
 
 restoreSidePanelState();
+setupSidePanelReordering();
 setupSidePanelSplitter();
 setupBottomPanelSplitter();
 setupRibbonCollapse();
