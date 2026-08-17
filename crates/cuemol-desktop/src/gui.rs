@@ -1297,6 +1297,7 @@ struct GuiApplication {
     show_view_props: bool,
     view_properties_draft: Option<NativeViewProperties>,
     view_property_selected: usize,
+    show_delete_dialog: bool,
     show_chain_dialog: bool,
     show_residue_dialog: bool,
     show_renderer_dialog: bool,
@@ -1309,6 +1310,8 @@ struct GuiApplication {
     new_renderer_selection: String,
     new_renderer_recenter: bool,
     new_renderer_density_move_view: bool,
+    delete_object: Option<cuemol_core::Uid>,
+    chain_object: Option<cuemol_core::Uid>,
     chain_edit_value: String,
     residue_object: Option<cuemol_core::Uid>,
     residue_shift_mode: bool,
@@ -4905,6 +4908,7 @@ impl GuiApplication {
             show_view_props: false,
             view_properties_draft: None,
             view_property_selected: 0,
+            show_delete_dialog: false,
             show_chain_dialog: false,
             show_residue_dialog: false,
             show_renderer_dialog: false,
@@ -4917,6 +4921,8 @@ impl GuiApplication {
             new_renderer_selection: String::new(),
             new_renderer_recenter: true,
             new_renderer_density_move_view: false,
+            delete_object: None,
+            chain_object: None,
             chain_edit_value: "A".to_string(),
             residue_object: None,
             residue_shift_mode: true,
@@ -5617,10 +5623,12 @@ impl GuiApplication {
                         ui.close();
                     }
                     if ui.button("Delete mol atoms...").clicked() {
-                        self.delete_selected_atoms();
+                        self.delete_object = self.selected_object;
+                        self.show_delete_dialog = true;
                         ui.close();
                     }
                     if ui.button("Change chain ID...").clicked() {
+                        self.chain_object = self.selected_object;
                         self.show_chain_dialog = true;
                         ui.close();
                     }
@@ -20066,6 +20074,7 @@ impl GuiApplication {
         self.renderer_style_edit_dialog(ctx);
         self.style_paste_confirmation_dialog(ctx);
         self.crystal_create_confirmation_dialog(ctx);
+        self.delete_atoms_dialog(ctx);
         self.chain_dialog(ctx);
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx, camera);
@@ -25848,22 +25857,111 @@ impl GuiApplication {
         Ok(())
     }
 
+    fn delete_atoms_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_delete_dialog {
+            return;
+        }
+        let objects = self.state.active_object_summaries();
+        if self
+            .delete_object
+            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
+        {
+            self.delete_object = objects.first().map(|object| object.uid);
+        }
+        let mut open = self.show_delete_dialog;
+        let mut apply = false;
+        egui::Window::new("Delete mol atoms")
+            .open(&mut open)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                egui::Grid::new("delete-molecule-atoms-fields")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Molecule:");
+                        egui::ComboBox::from_id_salt("delete-molecule-atoms-object")
+                            .selected_text(object_combo_label(&objects, self.delete_object))
+                            .show_ui(ui, |ui| {
+                                for object in &objects {
+                                    ui.selectable_value(
+                                        &mut self.delete_object,
+                                        Some(object.uid),
+                                        object.name.as_str(),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Selection:");
+                        ui.add_sized(
+                            [240.0, 22.0],
+                            egui::TextEdit::singleline(&mut self.selection_text),
+                        );
+                        ui.end_row();
+                    });
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.show_delete_dialog = false;
+                    }
+                });
+            });
+        self.show_delete_dialog = open && self.show_delete_dialog;
+        if apply {
+            self.delete_selected_atoms();
+        }
+    }
+
     fn chain_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_chain_dialog {
             return;
         }
+        let objects = self.state.active_object_summaries();
+        if self
+            .chain_object
+            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
+        {
+            self.chain_object = objects.first().map(|object| object.uid);
+        }
         let mut open = self.show_chain_dialog;
         let mut apply = false;
-        egui::Window::new("Change Chain ID")
+        egui::Window::new("Change chain ID")
             .open(&mut open)
             .collapsible(false)
             .show(ctx, |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 22.0],
-                    egui::TextEdit::singleline(&mut self.chain_edit_value),
-                );
+                egui::Grid::new("change-chain-id-fields")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Molecule:");
+                        egui::ComboBox::from_id_salt("change-chain-id-object")
+                            .selected_text(object_combo_label(&objects, self.chain_object))
+                            .show_ui(ui, |ui| {
+                                for object in &objects {
+                                    ui.selectable_value(
+                                        &mut self.chain_object,
+                                        Some(object.uid),
+                                        object.name.as_str(),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Selection:");
+                        ui.add_sized(
+                            [240.0, 22.0],
+                            egui::TextEdit::singleline(&mut self.selection_text),
+                        );
+                        ui.end_row();
+                        ui.label("New chain ID:");
+                        ui.add_sized(
+                            [120.0, 22.0],
+                            egui::TextEdit::singleline(&mut self.chain_edit_value),
+                        );
+                        ui.end_row();
+                    });
                 ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
+                    if ui.button("OK").clicked() {
                         apply = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -30577,7 +30675,11 @@ impl GuiApplication {
         if !self.require_selection_for_edit() {
             return;
         }
-        let Some(object_uid) = self.target_object_uid() else {
+        let Some(object_uid) = self
+            .delete_object
+            .filter(|uid| self.state.scene_manager().object(*uid).is_some())
+            .or_else(|| self.target_object_uid())
+        else {
             self.set_status("No object selected");
             return;
         };
@@ -30586,11 +30688,14 @@ impl GuiApplication {
             .state
             .delete_atoms_in_object(object_uid, &self.selection_text)
         {
-            Ok(count) => {
+            Ok(count) if count > 0 => {
                 self.push_undo_snapshot(undo);
+                self.show_delete_dialog = false;
+                self.invalidate_molecule_panel_caches();
                 self.rebuild_snapshot();
                 self.set_status(format!("Deleted {count} atoms"));
             }
+            Ok(_) => self.set_status("No atoms matched the selection"),
             Err(error) => self.set_error(error),
         }
     }
@@ -30599,23 +30704,32 @@ impl GuiApplication {
         if !self.require_selection_for_edit() {
             return;
         }
-        let Some(object_uid) = self.target_object_uid() else {
+        let Some(object_uid) = self
+            .chain_object
+            .filter(|uid| self.state.scene_manager().object(*uid).is_some())
+            .or_else(|| self.target_object_uid())
+        else {
             self.set_status("No object selected");
             return;
         };
+        if self.chain_edit_value.trim().is_empty() {
+            self.set_status("New chain ID is required");
+            return;
+        }
         let undo = self.capture_undo();
         match self.state.change_chain_in_object(
             object_uid,
             &self.selection_text,
             &self.chain_edit_value,
         ) {
-            Ok(count) => {
+            Ok(count) if count > 0 => {
                 self.push_undo_snapshot(undo);
                 self.show_chain_dialog = false;
                 self.invalidate_molecule_panel_caches();
                 self.rebuild_snapshot();
                 self.set_status(format!("Changed chain ID on {count} atoms"));
             }
+            Ok(_) => self.set_status("No atoms matched the selection"),
             Err(error) => self.set_error(error),
         }
     }

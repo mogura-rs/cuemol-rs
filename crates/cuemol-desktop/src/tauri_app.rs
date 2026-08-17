@@ -11329,10 +11329,14 @@ fn handle_model_request(
             if selection.is_empty() {
                 return Err("an atom selection is required".to_string());
             }
+            let chain_name = chain_name.trim();
+            if chain_name.is_empty() {
+                return Err("new chain ID is required".to_string());
+            }
             let undo = model.capture_undo();
             let count = model
                 .desktop
-                .change_chain_in_object(Uid::new(object_uid), selection, &chain_name)
+                .change_chain_in_object(Uid::new(object_uid), selection, chain_name)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Changed chain ID for {count} atom(s)");
             if count > 0 {
@@ -22276,6 +22280,24 @@ mod tests {
         assert_eq!(snapshot.undo_descriptions[0], "Deleted 1 atom(s)");
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().objects[0].atom_count, 327);
+    }
+
+    #[test]
+    fn change_chain_rejects_an_empty_target() {
+        let mut model = model_without_gpu();
+        let result = handle_model_request(
+            &mut model,
+            ModelRequest::ChangeChain {
+                object_uid: 1,
+                selection: "*".to_string(),
+                chain_name: "  ".to_string(),
+            },
+        );
+        match result {
+            Err(error) => assert_eq!(error, "new chain ID is required"),
+            Ok(_) => panic!("empty chain ID should fail"),
+        }
+        assert!(model.undo_stack.is_empty());
     }
 
     #[test]

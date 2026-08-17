@@ -454,6 +454,13 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     assert!(JS.contains("renumber: renumber.checked"));
     assert!(TAURI_APP_RS.contains("shift_mode: bool"));
     assert!(TAURI_APP_RS.contains("renumber: bool"));
+    for id in ["delete-molecule-atoms-object", "change-chain-id-object"] {
+        assert!(
+            NATIVE_GUI_RS.contains(id),
+            "missing native object picker {id}"
+        );
+    }
+    assert!(JS.matches("objectUid: Number(object.value)").count() >= 3);
     assert!(CSS.contains(".bond-list-row"));
     assert!(CSS.contains(".bond-list-columns"));
     assert!(CSS.contains(".bond-column-splitter"));

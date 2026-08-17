@@ -8154,33 +8154,46 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       updateMergeState();
     }
   } else if (title === "Delete mol atoms") {
-    const object = selectedObject();
-    if (!object) {
+    const objects = activeObjects();
+    if (objects.length === 0) {
       dialogContent.append(dialogParagraph("Select a molecular object first."));
     } else {
+      const object = dialogSelect(
+        "Molecule",
+        objects.map((candidate) => [candidate.uid, candidate.name]),
+        selectedObjectUid ?? objects[0].uid,
+      );
       const selection = dialogField("Selection", snapshot.selection);
-      const apply = button("Delete", "dialog-primary", async () => {
+      const apply = button("OK", "dialog-primary", async () => {
         await mutate("delete_atoms", {
-          objectUid: object.uid,
+          objectUid: Number(object.value),
           selection: selection.value,
         });
+        rememberSelection(selection.value);
         referenceDialog.close();
       });
       dialogActions(apply);
     }
   } else if (title === "Change chain ID") {
-    const object = selectedObject();
-    if (!object) {
+    const objects = activeObjects();
+    if (objects.length === 0) {
       dialogContent.append(dialogParagraph("Select a molecular object first."));
     } else {
+      const object = dialogSelect(
+        "Molecule",
+        objects.map((candidate) => [candidate.uid, candidate.name]),
+        selectedObjectUid ?? objects[0].uid,
+      );
       const selection = dialogField("Selection", snapshot.selection);
       const chainName = dialogField("New chain ID", "A");
       const apply = button("OK", "dialog-primary", async () => {
+        if (chainName.value.trim() === "") return;
         await mutate("change_chain", {
-          objectUid: object.uid,
+          objectUid: Number(object.value),
           selection: selection.value,
           chainName: chainName.value,
         });
+        rememberSelection(selection.value);
         referenceDialog.close();
       });
       dialogActions(apply);
