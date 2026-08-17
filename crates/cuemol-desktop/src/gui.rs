@@ -64,6 +64,7 @@ const POV_RADIOSITY_MODES: &[(i32, &str)] = &[
     (9, "IndoorLQ"),
     (10, "IndoorHQ"),
 ];
+const POV_PREVIEW_ZOOM_LEVELS: &[u32] = &[10, 25, 50, 75, 100, 125, 150, 200, 300];
 const MOUSE_PRESETS: &[(&str, &str)] = &[
     ("DefaultViewInConf", "Default"),
     ("CootViewInConf", "Coot"),
@@ -714,6 +715,25 @@ impl NativePngUnit {
             Self::Inch => "inch",
         }
     }
+
+    fn preference_value(self) -> &'static str {
+        match self {
+            Self::Pixel => "px",
+            Self::Millimeter => "mm",
+            Self::Centimeter => "cm",
+            Self::Inch => "in",
+        }
+    }
+
+    fn from_preference(value: &str) -> Option<Self> {
+        match value.trim() {
+            "px" => Some(Self::Pixel),
+            "mm" => Some(Self::Millimeter),
+            "cm" => Some(Self::Centimeter),
+            "in" => Some(Self::Inch),
+            _ => None,
+        }
+    }
 }
 
 fn png_pixels_to_unit(pixels: u32, unit: NativePngUnit, dpi: u32) -> f64 {
@@ -745,6 +765,7 @@ fn png_unit_to_pixels(value: f64, unit: NativePngUnit, dpi: u32) -> u32 {
 struct NativePovRenderSettings {
     width: u32,
     height: u32,
+    size_initialized: bool,
     unit: NativePngUnit,
     dpi: u32,
     threads: u32,
@@ -772,6 +793,7 @@ impl Default for NativePovRenderSettings {
         Self {
             width: 1_000,
             height: 1_000,
+            size_initialized: false,
             unit: NativePngUnit::Pixel,
             dpi: 600,
             threads: 2,
@@ -1097,6 +1119,7 @@ struct GuiApplication {
     pov_render_job: Option<NativePovRenderJob>,
     pov_render_result: Option<NativePovRenderResult>,
     pov_preview_texture: Option<AnimationPreviewTexture>,
+    pov_preview_zoom: u32,
     ribbon_tab: RibbonTab,
     interaction_mode: InteractionMode,
     measure_mode: MeasureMode,
@@ -1522,6 +1545,7 @@ enum NativeFileDialog {
     OpenTrajectoryBlock,
     OpenPsf,
     OpenMsmsVertex,
+    OpenPovExecutable,
     OpenScene,
     OpenCamera,
     OpenStyle,
@@ -3444,6 +3468,7 @@ impl GuiApplication {
             pov_render_job: None,
             pov_render_result: None,
             pov_preview_texture: None,
+            pov_preview_zoom: 100,
             ribbon_tab: RibbonTab::Home,
             interaction_mode: InteractionMode::Rotate,
             measure_mode: MeasureMode::Distance,
@@ -11224,13 +11249,14 @@ impl GuiApplication {
 
     fn open_pov_render_tool(&mut self) {
         self.render_backend = "POV-Ray".to_string();
-        if self.pov_render_result.is_none() && self.pov_render_job.is_none() {
+        if !self.pov_render_settings.size_initialized {
             if let Some(rect) = self.viewport_rect {
                 self.pov_render_settings.width = rect.width().round().max(1.0) as u32;
                 self.pov_render_settings.height = rect.height().round().max(1.0) as u32;
                 self.pov_render_settings.dpi = 72;
                 self.pov_render_settings.unit = NativePngUnit::Pixel;
             }
+            self.pov_render_settings.size_initialized = true;
         }
         self.tool_dialog = Some("POV-Ray rendering".to_string());
     }
@@ -11302,6 +11328,17 @@ impl GuiApplication {
                             }
                         });
                     ui.label("DPI:");
+                    let previous_dpi = self.pov_render_settings.dpi;
+                    let width_in_unit = png_pixels_to_unit(
+                        self.pov_render_settings.width,
+                        self.pov_render_settings.unit,
+                        previous_dpi,
+                    );
+                    let height_in_unit = png_pixels_to_unit(
+                        self.pov_render_settings.height,
+                        self.pov_render_settings.unit,
+                        previous_dpi,
+                    );
                     egui::ComboBox::from_id_salt("native_pov_dpi")
                         .selected_text(self.pov_render_settings.dpi.to_string())
                         .show_ui(ui, |ui| {
@@ -11313,6 +11350,50 @@ impl GuiApplication {
                                 );
                             }
                         });
+                    if self.pov_render_settings.dpi != previous_dpi {
+                        self.pov_render_settings.width = png_unit_to_pixels(
+                            width_in_unit,
+                            self.pov_render_settings.unit,
+                            self.pov_render_settings.dpi,
+                        );
+                        self.pov_render_settings.height = png_unit_to_pixels(
+                            height_in_unit,
+                            self.pov_render_settings.unit,
+                            self.pov_render_settings.dpi,
+                        );
+                    }
+                    ui.end_row();
+
+                    ui.label("Preset size:");
+                    ui.menu_button("Preset size", |ui| {
+                        if ui.button("Same as view").clicked() {
+                            if let Some(rect) = self.viewport_rect {
+                                self.pov_render_settings.width =
+                                    rect.width().round().max(1.0) as u32;
+                                self.pov_render_settings.height =
+                                    rect.height().round().max(1.0) as u32;
+                            }
+                            self.pov_render_settings.dpi = 72;
+                            self.pov_render_settings.unit = NativePngUnit::Pixel;
+                            ui.close();
+                        }
+                        for (label, width, height, dpi) in [
+                            ("100x100@72dpi", 100, 100, 72),
+                            ("300x300@300dpi", 300, 300, 300),
+                            ("600x600@300dpi", 600, 600, 300),
+                            ("1200x1200@600dpi", 1_200, 1_200, 600),
+                        ] {
+                            if ui.button(label).clicked() {
+                                self.pov_render_settings.width = width;
+                                self.pov_render_settings.height = height;
+                                self.pov_render_settings.dpi = dpi;
+                                self.pov_render_settings.unit = NativePngUnit::Pixel;
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.label("");
+                    ui.label("");
                     ui.end_row();
 
                     ui.label("Projection:");
@@ -11387,10 +11468,26 @@ impl GuiApplication {
             ui.horizontal(|ui| {
                 ui.label("Povray-exe-path:");
                 ui.text_edit_singleline(&mut self.pov_render_settings.executable);
+                if ui.button("Change ...").clicked() {
+                    if let Some(path) = native_file_dialog(
+                        NativeFileDialog::OpenPovExecutable,
+                        &self.pov_render_settings.executable,
+                    ) {
+                        self.pov_render_settings.executable = path.to_string_lossy().into_owned();
+                    }
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Povray-inc-path:");
                 ui.text_edit_singleline(&mut self.pov_render_settings.include_dir);
+                if ui.button("Change ...").clicked() {
+                    if let Some(path) = native_folder_dialog(
+                        "Select POV-Ray inc folder",
+                        &self.pov_render_settings.include_dir,
+                    ) {
+                        self.pov_render_settings.include_dir = path.to_string_lossy().into_owned();
+                    }
+                }
             });
             egui::ComboBox::from_label("Radiosity")
                 .selected_text(pov_radiosity_label(self.pov_render_settings.radiosity))
@@ -11443,6 +11540,47 @@ impl GuiApplication {
 
         ui.separator();
         ui.strong("Result");
+        ui.horizontal(|ui| {
+            let zoom_index = POV_PREVIEW_ZOOM_LEVELS
+                .iter()
+                .position(|value| *value == self.pov_preview_zoom)
+                .unwrap_or(4);
+            if ui
+                .add_enabled(zoom_index > 0, egui::Button::new("−"))
+                .on_hover_text("Unzoom")
+                .clicked()
+            {
+                self.pov_preview_zoom = POV_PREVIEW_ZOOM_LEVELS[zoom_index - 1];
+            }
+            egui::ComboBox::from_id_salt("native_pov_preview_zoom")
+                .selected_text(format!("{}%", self.pov_preview_zoom))
+                .show_ui(ui, |ui| {
+                    for zoom in POV_PREVIEW_ZOOM_LEVELS {
+                        ui.selectable_value(&mut self.pov_preview_zoom, *zoom, format!("{zoom}%"));
+                    }
+                });
+            if ui
+                .add_enabled(
+                    zoom_index + 1 < POV_PREVIEW_ZOOM_LEVELS.len(),
+                    egui::Button::new("+"),
+                )
+                .on_hover_text("Zoom")
+                .clicked()
+            {
+                self.pov_preview_zoom = POV_PREVIEW_ZOOM_LEVELS[zoom_index + 1];
+            }
+            ui.label("Progress:");
+            ui.add(
+                egui::ProgressBar::new(if running {
+                    0.5
+                } else if self.pov_render_result.is_some() {
+                    1.0
+                } else {
+                    0.0
+                })
+                .animate(running),
+            );
+        });
         if running {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -11457,11 +11595,8 @@ impl GuiApplication {
             if let Err(error) = self.load_pov_preview_texture(ui.ctx(), &path) {
                 ui.colored_label(egui::Color32::DARK_RED, error);
             } else if let Some(preview) = &self.pov_preview_texture {
-                let max_size = egui::vec2(ui.available_width(), 360.0);
-                let scale = (max_size.x / preview.size.x)
-                    .min(max_size.y / preview.size.y)
-                    .clamp(0.01, 1.0);
-                ui.vertical_centered(|ui| {
+                let scale = self.pov_preview_zoom as f32 / 100.0;
+                egui::ScrollArea::both().max_height(360.0).show(ui, |ui| {
                     ui.add(egui::Image::new((
                         preview.texture.id(),
                         preview.size * scale,
@@ -11496,6 +11631,102 @@ impl GuiApplication {
                 self.start_pov_render(camera);
             }
         });
+    }
+
+    fn persist_pov_render_settings(&mut self) {
+        let settings = &self.pov_render_settings;
+        let width = png_pixels_to_unit(settings.width, settings.unit, settings.dpi);
+        let height = png_pixels_to_unit(settings.height, settings.unit, settings.dpi);
+        for (key, value) in [
+            ("cuemol2.ui.render.pov-img-width", width.to_string()),
+            ("cuemol2.ui.render.pov-img-height", height.to_string()),
+            ("cuemol2.ui.render.pov-img-dpi", settings.dpi.to_string()),
+            (
+                "cuemol2.ui.render.pov-img-unit",
+                settings.unit.preference_value().to_string(),
+            ),
+            ("cuemol2.ui.render.pov-ncpu", settings.threads.to_string()),
+            (
+                "cuemol2.ui.render.pov-projection",
+                if settings.perspective {
+                    "perspec".to_string()
+                } else {
+                    "ortho".to_string()
+                },
+            ),
+            (
+                "cuemol2.ui.render.pov-stereo",
+                match settings.stereo {
+                    1 => "right",
+                    -1 => "left",
+                    _ => "none",
+                }
+                .to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-stereodepth",
+                settings.stereo_depth.to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-transp",
+                settings.transparent.to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-clip-plane",
+                settings.clip_plane.to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-useblend",
+                settings.post_blend.to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-edgelines",
+                settings.edge_lines.to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-pixlabels",
+                settings.pixel_labels.to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-radiosity",
+                settings.radiosity.to_string(),
+            ),
+            ("cuemol2.ui.render.pov-shadow", settings.shadow.to_string()),
+            (
+                "cuemol2.ui.render.pov-lightdefault",
+                settings.default_lighting.to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-lightspread",
+                settings.light_spread.to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-lightinten",
+                settings.light_intensity.to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-flashfrac",
+                settings.flash_fraction.to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-ambinten",
+                settings.ambient_fraction.to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-exe-path",
+                settings.executable.trim().to_string(),
+            ),
+            (
+                "cuemol2.ui.render.pov-inc-path",
+                settings.include_dir.trim().to_string(),
+            ),
+        ] {
+            self.state.put_config_value(key, value);
+        }
+        let config_path = PathBuf::from(self.config_path.trim());
+        if config_path.is_absolute() {
+            let _ = self.state.save_config_file(config_path);
+        }
     }
 
     fn start_pov_render(&mut self, camera: &CameraController) {
@@ -11586,18 +11817,7 @@ impl GuiApplication {
             self.set_status(format!("Failed to start POV-Ray worker: {error}"));
             return;
         }
-        self.state.put_config_value(
-            "cuemol2.ui.render.pov-exe-path",
-            settings.executable.trim().to_string(),
-        );
-        self.state.put_config_value(
-            "cuemol2.ui.render.pov-inc-path",
-            settings.include_dir.trim().to_string(),
-        );
-        let config_path = PathBuf::from(self.config_path.trim());
-        if config_path.is_absolute() {
-            let _ = self.state.save_config_file(config_path);
-        }
+        self.persist_pov_render_settings();
         self.pov_render_job = Some(NativePovRenderJob {
             receiver,
             cancel,
@@ -14614,6 +14834,91 @@ impl GuiApplication {
         if !povray_include_dir.trim().is_empty() {
             self.pov_render_settings.include_dir = povray_include_dir;
         }
+        if let Some(unit) = NativePngUnit::from_preference(
+            &self.state.config_value("cuemol2.ui.render.pov-img-unit"),
+        ) {
+            self.pov_render_settings.unit = unit;
+        }
+        if let Ok(dpi) = self
+            .state
+            .config_value("cuemol2.ui.render.pov-img-dpi")
+            .parse::<u32>()
+        {
+            self.pov_render_settings.dpi = dpi.max(1);
+        }
+        let stored_width = self
+            .state
+            .config_value("cuemol2.ui.render.pov-img-width")
+            .parse::<f64>();
+        let stored_height = self
+            .state
+            .config_value("cuemol2.ui.render.pov-img-height")
+            .parse::<f64>();
+        if let (Ok(width), Ok(height)) = (stored_width, stored_height) {
+            self.pov_render_settings.width = png_unit_to_pixels(
+                width,
+                self.pov_render_settings.unit,
+                self.pov_render_settings.dpi,
+            );
+            self.pov_render_settings.height = png_unit_to_pixels(
+                height,
+                self.pov_render_settings.unit,
+                self.pov_render_settings.dpi,
+            );
+            self.pov_render_settings.size_initialized = true;
+        }
+        if let Ok(threads) = self
+            .state
+            .config_value("cuemol2.ui.render.pov-ncpu")
+            .parse::<u32>()
+        {
+            self.pov_render_settings.threads = threads.clamp(1, 32);
+        }
+        match self
+            .state
+            .config_value("cuemol2.ui.render.pov-projection")
+            .as_str()
+        {
+            "perspec" => self.pov_render_settings.perspective = true,
+            "ortho" => self.pov_render_settings.perspective = false,
+            _ => {}
+        }
+        self.pov_render_settings.stereo = match self
+            .state
+            .config_value("cuemol2.ui.render.pov-stereo")
+            .as_str()
+        {
+            "right" => 1,
+            "left" => -1,
+            _ => 0,
+        };
+        macro_rules! restore_pov_value {
+            ($field:ident, $key:literal, $type:ty) => {
+                if let Ok(value) = self.state.config_value($key).parse::<$type>() {
+                    self.pov_render_settings.$field = value;
+                }
+            };
+        }
+        macro_rules! restore_pov_bool {
+            ($field:ident, $key:literal) => {
+                if let Ok(value) = parse_view_bool(&self.state.config_value($key)) {
+                    self.pov_render_settings.$field = value;
+                }
+            };
+        }
+        restore_pov_value!(stereo_depth, "cuemol2.ui.render.pov-stereodepth", f64);
+        restore_pov_bool!(transparent, "cuemol2.ui.render.pov-transp");
+        restore_pov_bool!(clip_plane, "cuemol2.ui.render.pov-clip-plane");
+        restore_pov_bool!(post_blend, "cuemol2.ui.render.pov-useblend");
+        restore_pov_bool!(edge_lines, "cuemol2.ui.render.pov-edgelines");
+        restore_pov_bool!(pixel_labels, "cuemol2.ui.render.pov-pixlabels");
+        restore_pov_value!(radiosity, "cuemol2.ui.render.pov-radiosity", i32);
+        restore_pov_bool!(shadow, "cuemol2.ui.render.pov-shadow");
+        restore_pov_bool!(default_lighting, "cuemol2.ui.render.pov-lightdefault");
+        restore_pov_value!(light_spread, "cuemol2.ui.render.pov-lightspread", u32);
+        restore_pov_value!(light_intensity, "cuemol2.ui.render.pov-lightinten", f64);
+        restore_pov_value!(flash_fraction, "cuemol2.ui.render.pov-flashfrac", f64);
+        restore_pov_value!(ambient_fraction, "cuemol2.ui.render.pov-ambinten", f64);
     }
 
     fn open_object_properties(&mut self, object_uid: cuemol_core::Uid) {
@@ -19433,6 +19738,9 @@ impl GuiApplication {
         if (!open || close) && !blocking_job {
             if title == "Mol bond editor" {
                 self.bond_picker_target = None;
+            }
+            if title == "POV-Ray rendering" {
+                self.persist_pov_render_settings();
             }
             self.tool_dialog = None;
         }
@@ -25260,6 +25568,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             default_extension: None,
             save: false,
         },
+        NativeFileDialog::OpenPovExecutable => NativeFileDialogSpec {
+            title: "Select POV-Ray executable file",
+            filters: &[],
+            default_extension: None,
+            save: false,
+        },
         NativeFileDialog::OpenScene => NativeFileDialogSpec {
             title: "Open Scene",
             filters: SCENE_OPEN_FILTERS,
@@ -25376,6 +25690,20 @@ fn native_multi_file_dialog(dialog: NativeFileDialog, initial: &str) -> Option<V
         return None;
     }
     native_file_picker(spec, initial).pick_files()
+}
+
+fn native_folder_dialog(title: &str, initial: &str) -> Option<PathBuf> {
+    let mut picker = rfd::FileDialog::new().set_title(title);
+    let initial = initial.trim();
+    if !initial.is_empty() {
+        let path = Path::new(initial);
+        if path.is_dir() {
+            picker = picker.set_directory(path);
+        } else if let Some(parent) = path.parent().filter(|parent| parent.is_dir()) {
+            picker = picker.set_directory(parent);
+        }
+    }
+    picker.pick_folder()
 }
 
 fn native_file_picker(spec: NativeFileDialogSpec, initial: &str) -> rfd::FileDialog {
@@ -30342,6 +30670,46 @@ mod tests {
             .any(|line| line.contains("POV-Ray> render complete")));
         app.clear_pov_render_result();
         fs::remove_file(script).unwrap();
+    }
+
+    #[test]
+    fn native_pov_tool_restores_reference_preferences_and_physical_size() {
+        let mut app = GuiApplication::new();
+        for (key, value) in [
+            ("cuemol2.ui.render.pov-img-width", "2"),
+            ("cuemol2.ui.render.pov-img-height", "1"),
+            ("cuemol2.ui.render.pov-img-dpi", "300"),
+            ("cuemol2.ui.render.pov-img-unit", "in"),
+            ("cuemol2.ui.render.pov-ncpu", "6"),
+            ("cuemol2.ui.render.pov-projection", "ortho"),
+            ("cuemol2.ui.render.pov-stereo", "left"),
+            ("cuemol2.ui.render.pov-transp", "true"),
+            ("cuemol2.ui.render.pov-useblend", "false"),
+            ("cuemol2.ui.render.pov-radiosity", "7"),
+        ] {
+            app.state.put_config_value(key, value);
+        }
+        app.apply_stored_preferences();
+        assert_eq!(app.pov_render_settings.width, 600);
+        assert_eq!(app.pov_render_settings.height, 300);
+        assert_eq!(app.pov_render_settings.unit, NativePngUnit::Inch);
+        assert_eq!(app.pov_render_settings.dpi, 300);
+        assert_eq!(app.pov_render_settings.threads, 6);
+        assert!(!app.pov_render_settings.perspective);
+        assert_eq!(app.pov_render_settings.stereo, -1);
+        assert!(app.pov_render_settings.transparent);
+        assert!(!app.pov_render_settings.post_blend);
+        assert_eq!(app.pov_render_settings.radiosity, 7);
+
+        app.persist_pov_render_settings();
+        assert_eq!(
+            app.state.config_value("cuemol2.ui.render.pov-img-width"),
+            "2"
+        );
+        assert_eq!(
+            app.state.config_value("cuemol2.ui.render.pov-img-height"),
+            "1"
+        );
     }
 
     #[test]

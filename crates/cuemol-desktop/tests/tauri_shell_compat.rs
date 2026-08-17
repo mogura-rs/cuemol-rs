@@ -868,6 +868,9 @@ fn png_export_matches_the_reference_options_dialog() {
 fn pov_render_matches_the_reference_options_and_cancellable_flow() {
     for label in [
         "Main options",
+        "Preset size",
+        "Same as view",
+        "1200x1200@600dpi",
         "Projection",
         "Stereo depth",
         "Transp background",
@@ -882,6 +885,8 @@ fn pov_render_matches_the_reference_options_and_cancellable_flow() {
         "Use default settings",
         "Save image…",
         "Copy to clipboard",
+        "Unzoom",
+        "const zoomLevels = [10, 25, 50, 75, 100, 125, 150, 200, 300]",
     ] {
         assert!(JS.contains(label), "missing POV-Ray option {label}");
     }
@@ -899,7 +904,9 @@ fn pov_render_matches_the_reference_options_and_cancellable_flow() {
     }
     assert!(NATIVE_GUI_RS.contains("fn start_pov_render"));
     assert!(NATIVE_GUI_RS.contains("fn poll_pov_render"));
+    assert!(NATIVE_GUI_RS.contains("fn persist_pov_render_settings"));
     assert!(DESKTOP_LIB_RS.contains("run_pov_process"));
+    assert!(CSS.contains(".pov-preview-scroll"));
 }
 
 #[test]

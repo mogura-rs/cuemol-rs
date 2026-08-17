@@ -2078,6 +2078,41 @@ summary:focus-visible {
   width: min(320px, calc(100vw - 48px));
 }
 
+.reference-dialog.pov-render-dialog {
+  width: min(780px, calc(100vw - 48px));
+}
+
+.pov-render-dialog progress {
+  width: 100%;
+}
+
+.pov-preview-controls {
+  align-items: center;
+  justify-content: flex-start;
+  margin: 0 0 7px;
+}
+
+.pov-preview-controls .dialog-field {
+  display: flex;
+  gap: 5px;
+  margin: 0;
+}
+
+.pov-preview-scroll {
+  min-height: 180px;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid #999;
+  background-color: #fff;
+  background-image:
+    linear-gradient(45deg, #ddd 25%, transparent 25%),
+    linear-gradient(-45deg, #ddd 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #ddd 75%),
+    linear-gradient(-45deg, transparent 75%, #ddd 75%);
+  background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+  background-size: 8px 8px;
+}
+
 .stream-progress-dialog progress {
   width: 100%;
 }

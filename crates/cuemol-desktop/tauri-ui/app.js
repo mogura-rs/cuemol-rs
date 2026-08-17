@@ -5014,16 +5014,19 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
   const usesGenericProperties =
     usesViewProperties || usesCameraProperties || title === "Scene Properties";
   const usesPreferences = title === "Options";
+  const usesPovRender = title === "POV-Ray rendering";
   const usesWorkspaceProperties = ["Object Properties", "Renderer Properties"].includes(title);
   const usesBondPicker = title === "Mol bond editor";
   referenceDialog.classList.toggle("property-editor", usesGenericProperties);
   referenceDialog.classList.toggle("options-dialog", usesPreferences);
   referenceDialog.classList.toggle("workspace-property-dialog", usesWorkspaceProperties);
   referenceDialog.classList.toggle("bond-picker-dialog", usesBondPicker);
+  referenceDialog.classList.toggle("pov-render-dialog", usesPovRender);
   referenceDialog.classList.toggle(
     "wide",
     usesGenericProperties ||
       usesPreferences ||
+      usesPovRender ||
       (usesApplicationInfo && title !== "About CueMol2"),
   );
   let applicationInfo = null;
@@ -6007,16 +6010,27 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     }
   } else if (title === "POV-Ray rendering") {
     const scene = snapshot?.scenes.find((item) => item.active);
+    const currentViewSize = viewportDimensions();
     dialogSelect(
       "Target",
       scene ? [[scene.uid, scene.name]] : [],
       scene?.uid ?? "",
     );
     const mainGroup = dialogGroup("Main options");
-    const width = dialogField("W", "1000", "number", mainGroup);
+    const width = dialogField(
+      "W",
+      localStorage.getItem("cuemol.povWidth") || String(currentViewSize.width),
+      "number",
+      mainGroup,
+    );
     width.min = "1";
     width.max = "10000";
-    const height = dialogField("H", "1000", "number", mainGroup);
+    const height = dialogField(
+      "H",
+      localStorage.getItem("cuemol.povHeight") || String(currentViewSize.height),
+      "number",
+      mainGroup,
+    );
     height.min = "1";
     height.max = "10000";
     const unit = dialogSelect(
@@ -6036,6 +6050,59 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       Number(localStorage.getItem("cuemol.povDpi") || 600),
       mainGroup,
     );
+    let previousUnit = unit.value;
+    const pixelsForUnit = (value, selectedUnit, selectedDpi) => {
+      const numeric = Number(value);
+      if (selectedUnit === "in") return numeric * selectedDpi;
+      if (selectedUnit === "mm") return (numeric / 25.4) * selectedDpi;
+      if (selectedUnit === "cm") return (numeric / 2.54) * selectedDpi;
+      return numeric;
+    };
+    const valueForUnit = (pixels, selectedUnit, selectedDpi) => {
+      if (selectedUnit === "in") return pixels / selectedDpi;
+      if (selectedUnit === "mm") return (pixels / selectedDpi) * 25.4;
+      if (selectedUnit === "cm") return (pixels / selectedDpi) * 2.54;
+      return Math.round(pixels);
+    };
+    const setPixelSize = (widthPixels, heightPixels, selectedDpi) => {
+      width.value = String(valueForUnit(widthPixels, "px", selectedDpi));
+      height.value = String(valueForUnit(heightPixels, "px", selectedDpi));
+      dpi.value = String(selectedDpi);
+      unit.value = "px";
+      previousUnit = "px";
+    };
+    unit.addEventListener("change", () => {
+      const selectedDpi = Number(dpi.value);
+      const widthPixels = pixelsForUnit(width.value, previousUnit, selectedDpi);
+      const heightPixels = pixelsForUnit(height.value, previousUnit, selectedDpi);
+      width.value = String(valueForUnit(widthPixels, unit.value, selectedDpi));
+      height.value = String(valueForUnit(heightPixels, unit.value, selectedDpi));
+      previousUnit = unit.value;
+    });
+    const presetSize = dialogSelect(
+      "Preset size",
+      [
+        ["", "Preset size"],
+        ["view", "Same as view"],
+        ["100,100,72", "100x100@72dpi"],
+        ["300,300,300", "300x300@300dpi"],
+        ["600,600,300", "600x600@300dpi"],
+        ["1200,1200,600", "1200x1200@600dpi"],
+      ],
+      "",
+      mainGroup,
+    );
+    presetSize.addEventListener("change", () => {
+      if (presetSize.value === "view") {
+        setPixelSize(currentViewSize.width, currentViewSize.height, 72);
+      } else if (presetSize.value) {
+        const [presetWidth, presetHeight, presetDpi] = presetSize.value
+          .split(",")
+          .map(Number);
+        setPixelSize(presetWidth, presetHeight, presetDpi);
+      }
+      presetSize.value = "";
+    });
     const projection = dialogSelect(
       "Projection",
       [
@@ -6072,15 +6139,35 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     );
     threads.min = "1";
     threads.max = "32";
-    const transparent = dialogCheckbox("Transp background", false, mainGroup);
-    const clipPlane = dialogCheckbox("Clipping plane", true, mainGroup);
-    const postBlend = dialogCheckbox(
-      "Post-render alpha blending",
-      true,
+    const storedCheckbox = (key, fallback) => {
+      const value = localStorage.getItem(key);
+      return value === null ? fallback : value === "true";
+    };
+    const transparent = dialogCheckbox(
+      "Transp background",
+      storedCheckbox("cuemol.povTransparent", false),
       mainGroup,
     );
-    const edgeLines = dialogCheckbox("Edge lines", true, mainGroup);
-    const pixelLabels = dialogCheckbox("Pix labels", false, mainGroup);
+    const clipPlane = dialogCheckbox(
+      "Clipping plane",
+      storedCheckbox("cuemol.povClipPlane", true),
+      mainGroup,
+    );
+    const postBlend = dialogCheckbox(
+      "Post-render alpha blending",
+      storedCheckbox("cuemol.povPostBlend", true),
+      mainGroup,
+    );
+    const edgeLines = dialogCheckbox(
+      "Edge lines",
+      storedCheckbox("cuemol.povEdgeLines", true),
+      mainGroup,
+    );
+    const pixelLabels = dialogCheckbox(
+      "Pix labels",
+      storedCheckbox("cuemol.povPixelLabels", false),
+      mainGroup,
+    );
 
     const optionsGroup = dialogGroup("POV-Ray options");
     const executable = dialogField(
@@ -6089,12 +6176,40 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       "text",
       optionsGroup,
     );
+    const changeExecutable = button("Change ...", "", async () => {
+      if (!dialog?.open) {
+        showError("The Tauri dialog plugin is unavailable.");
+        return;
+      }
+      const path = await dialog.open({
+        title: "Select POV-Ray executable file",
+        multiple: false,
+        directory: false,
+        defaultPath: executable.value || undefined,
+      });
+      if (path) executable.value = path;
+    });
+    executable.closest("label").append(changeExecutable);
     const includeDir = dialogField(
       "Povray-inc-path",
       localStorage.getItem("cuemol.povIncludeDir") || "",
       "text",
       optionsGroup,
     );
+    const changeIncludeDir = button("Change ...", "", async () => {
+      if (!dialog?.open) {
+        showError("The Tauri dialog plugin is unavailable.");
+        return;
+      }
+      const path = await dialog.open({
+        title: "Select POV-Ray inc folder",
+        multiple: false,
+        directory: true,
+        defaultPath: includeDir.value || undefined,
+      });
+      if (path) includeDir.value = path;
+    });
+    includeDir.closest("label").append(changeIncludeDir);
     const radiosity = dialogSelect(
       "Radiosity",
       [
@@ -6114,22 +6229,36 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       Number(localStorage.getItem("cuemol.povRadiosity") || -1),
       optionsGroup,
     );
-    const shadow = dialogCheckbox("Shadow", false, optionsGroup);
-    const defaultLighting = dialogCheckbox(
-      "Use default settings",
-      true,
+    const shadow = dialogCheckbox(
+      "Shadow",
+      storedCheckbox("cuemol.povShadow", false),
       optionsGroup,
     );
-    const lightSpread = dialogField("Spread", "1", "number", optionsGroup);
+    const defaultLighting = dialogCheckbox(
+      "Use default settings",
+      storedCheckbox("cuemol.povDefaultLighting", true),
+      optionsGroup,
+    );
+    const lightSpread = dialogField(
+      "Spread",
+      localStorage.getItem("cuemol.povLightSpread") || "1",
+      "number",
+      optionsGroup,
+    );
     lightSpread.min = "1";
     lightSpread.max = "10";
-    const lightIntensity = dialogField("Intensity", "1.3", "number", optionsGroup);
+    const lightIntensity = dialogField(
+      "Intensity",
+      localStorage.getItem("cuemol.povLightIntensity") || "1.3",
+      "number",
+      optionsGroup,
+    );
     lightIntensity.min = "0";
     lightIntensity.max = "2";
     lightIntensity.step = "0.1";
     const flashFraction = dialogField(
       "Flash fraction",
-      String(0.8 / 1.3),
+      localStorage.getItem("cuemol.povFlashFraction") || String(0.8 / 1.3),
       "number",
       optionsGroup,
     );
@@ -6138,7 +6267,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     flashFraction.step = "0.1";
     const ambientFraction = dialogField(
       "Ambient fraction",
-      "0",
+      localStorage.getItem("cuemol.povAmbientFraction") || "0",
       "number",
       optionsGroup,
     );
@@ -6171,22 +6300,62 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     syncLighting();
 
     const resultGroup = dialogGroup("Result");
+    const zoomLevels = [10, 25, 50, 75, 100, 125, 150, 200, 300];
+    const zoomRow = document.createElement("div");
+    zoomRow.className = "dialog-actions pov-preview-controls";
+    const zoomOut = button("Unzoom", "", () => {
+      const index = zoomLevels.indexOf(Number(zoom.value));
+      if (index > 0) zoom.value = String(zoomLevels[index - 1]);
+      updatePreviewZoom();
+    });
+    zoomRow.append(zoomOut);
+    const zoom = dialogSelect(
+      "Zoom",
+      zoomLevels.map((value) => [value, `${value}%`]),
+      100,
+      zoomRow,
+    );
+    const zoomIn = button("Zoom", "", () => {
+      const index = zoomLevels.indexOf(Number(zoom.value));
+      if (index >= 0 && index + 1 < zoomLevels.length) {
+        zoom.value = String(zoomLevels[index + 1]);
+      }
+      updatePreviewZoom();
+    });
+    zoomRow.append(zoomIn);
+    resultGroup.append(zoomRow);
+    const renderProgress = document.createElement("progress");
+    renderProgress.max = 1;
+    renderProgress.value = 0;
+    renderProgress.setAttribute("aria-label", "Progress");
+    resultGroup.append(renderProgress);
     const progress = dialogParagraph("No rendered image.");
     progress.className = "dialog-hint";
     resultGroup.append(progress);
+    const previewScroll = document.createElement("div");
+    previewScroll.className = "pov-preview-scroll";
     const preview = document.createElement("img");
     preview.alt = "POV-Ray result";
     preview.hidden = true;
-    preview.style.maxWidth = "100%";
-    preview.style.maxHeight = "360px";
+    preview.draggable = false;
     preview.style.objectFit = "contain";
-    resultGroup.append(preview);
+    previewScroll.append(preview);
+    resultGroup.append(previewScroll);
+    const updatePreviewZoom = () => {
+      if (!preview.naturalWidth || !preview.naturalHeight) return;
+      const scale = Number(zoom.value) / 100;
+      preview.style.width = `${Math.max(1, Math.round(preview.naturalWidth * scale))}px`;
+      preview.style.height = `${Math.max(1, Math.round(preview.naturalHeight * scale))}px`;
+    };
+    zoom.addEventListener("change", updatePreviewZoom);
+    preview.addEventListener("load", updatePreviewZoom);
 
     const controls = [
       width,
       height,
       unit,
       dpi,
+      presetSize,
       projection,
       stereo,
       stereoDepth,
@@ -6197,7 +6366,9 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       edgeLines,
       pixelLabels,
       executable,
+      changeExecutable,
       includeDir,
+      changeIncludeDir,
       radiosity,
       shadow,
       defaultLighting,
@@ -6211,6 +6382,30 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     let pollTimer = null;
     let pollPending = false;
     let renderedImage = "";
+    const persistSettings = () => {
+      localStorage.setItem("cuemol.povWidth", width.value);
+      localStorage.setItem("cuemol.povHeight", height.value);
+      localStorage.setItem("cuemol.povExecutable", executable.value.trim());
+      localStorage.setItem("cuemol.povIncludeDir", includeDir.value.trim());
+      localStorage.setItem("cuemol.povUnit", unit.value);
+      localStorage.setItem("cuemol.povDpi", dpi.value);
+      localStorage.setItem("cuemol.povThreads", threads.value);
+      localStorage.setItem("cuemol.povProjection", projection.value);
+      localStorage.setItem("cuemol.povStereo", stereo.value);
+      localStorage.setItem("cuemol.povStereoDepth", stereoDepth.value);
+      localStorage.setItem("cuemol.povTransparent", String(transparent.checked));
+      localStorage.setItem("cuemol.povClipPlane", String(clipPlane.checked));
+      localStorage.setItem("cuemol.povPostBlend", String(postBlend.checked));
+      localStorage.setItem("cuemol.povEdgeLines", String(edgeLines.checked));
+      localStorage.setItem("cuemol.povPixelLabels", String(pixelLabels.checked));
+      localStorage.setItem("cuemol.povRadiosity", radiosity.value);
+      localStorage.setItem("cuemol.povShadow", String(shadow.checked));
+      localStorage.setItem("cuemol.povDefaultLighting", String(defaultLighting.checked));
+      localStorage.setItem("cuemol.povLightSpread", lightSpread.value);
+      localStorage.setItem("cuemol.povLightIntensity", lightIntensity.value);
+      localStorage.setItem("cuemol.povFlashFraction", flashFraction.value);
+      localStorage.setItem("cuemol.povAmbientFraction", ambientFraction.value);
+    };
     const headerClose = referenceDialog.querySelector('button[aria-label="Close"]');
     const close = button("Close", "", () => referenceDialog.close());
     const savePov = button("Save POV scene…", "", async () => {
@@ -6251,24 +6446,24 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         }
         return;
       }
-      const pixels = (value, selectedUnit, selectedDpi) => {
-        const numeric = Number(value);
-        if (selectedUnit === "in") return Math.round(numeric * selectedDpi);
-        if (selectedUnit === "mm") return Math.round((numeric / 25.4) * selectedDpi);
-        if (selectedUnit === "cm") return Math.round((numeric / 2.54) * selectedDpi);
-        return Math.round(numeric);
-      };
-      const widthPixels = pixels(width.value, unit.value, Number(dpi.value));
-      const heightPixels = pixels(height.value, unit.value, Number(dpi.value));
-      localStorage.setItem("cuemol.povExecutable", executable.value.trim());
-      localStorage.setItem("cuemol.povIncludeDir", includeDir.value.trim());
-      localStorage.setItem("cuemol.povUnit", unit.value);
-      localStorage.setItem("cuemol.povDpi", dpi.value);
-      localStorage.setItem("cuemol.povThreads", threads.value);
-      localStorage.setItem("cuemol.povProjection", projection.value);
-      localStorage.setItem("cuemol.povStereo", stereo.value);
-      localStorage.setItem("cuemol.povStereoDepth", stereoDepth.value);
-      localStorage.setItem("cuemol.povRadiosity", radiosity.value);
+      const widthPixels = Math.round(
+        pixelsForUnit(width.value, unit.value, Number(dpi.value)),
+      );
+      const heightPixels = Math.round(
+        pixelsForUnit(height.value, unit.value, Number(dpi.value)),
+      );
+      if (
+        !Number.isFinite(widthPixels) ||
+        !Number.isFinite(heightPixels) ||
+        widthPixels < 1 ||
+        heightPixels < 1 ||
+        widthPixels > 10000 ||
+        heightPixels > 10000
+      ) {
+        showError("POV-Ray image dimensions must be between 1 and 10000 pixels.");
+        return;
+      }
+      persistSettings();
       try {
         const state = await invoke("start_pov_render", {
           input: {
@@ -6305,6 +6500,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         if (headerClose) headerClose.disabled = true;
         render.textContent = "Stop";
         progress.textContent = "Rendering with POV-Ray...";
+        renderProgress.removeAttribute("value");
         pollTimer = setInterval(poll, 150);
       } catch (error) {
         showError(error);
@@ -6322,6 +6518,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       if (headerClose) headerClose.disabled = false;
       render.disabled = false;
       render.textContent = "Render";
+      renderProgress.value = 0;
     };
     const poll = async () => {
       if (!running || pollPending) return;
@@ -6334,6 +6531,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           renderedImage = state.slice("complete:".length);
           preview.src = renderedImage;
           preview.hidden = false;
+          renderProgress.value = 1;
           saveImage.disabled = false;
           copyImage.disabled = !navigator.clipboard?.write || !globalThis.ClipboardItem;
           progress.textContent = "POV-Ray rendering complete.";
@@ -6345,6 +6543,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           progress.textContent = stopping ? "POV-Ray rendering stopped." : message;
           if (!stopping) showError(message);
           stopping = false;
+          renderProgress.value = 0;
         }
       } catch (error) {
         finishPolling();
@@ -6360,6 +6559,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     referenceDialog.addEventListener(
       "close",
       () => {
+        persistSettings();
         clearInterval(pollTimer);
         referenceDialog.removeEventListener("cancel", preventCloseWhileRunning);
       },
