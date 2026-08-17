@@ -15248,6 +15248,10 @@ mod tests {
         let ModelResponse::Snapshot(snapshot) = response else {
             panic!("expected workspace snapshot");
         };
+        assert_ne!(
+            snapshot.density_maps[0].renderers[0].uid,
+            map_renderer_uid.get()
+        );
         assert_eq!(
             snapshot.density_maps[0].renderers[0].renderer_type,
             "isosurf"
@@ -15257,6 +15261,10 @@ mod tests {
         assert_eq!(
             model.snapshot().density_maps[0].renderers[0].renderer_type,
             "contour"
+        );
+        assert_eq!(
+            model.snapshot().density_maps[0].renderers[0].uid,
+            map_renderer_uid.get()
         );
     }
 

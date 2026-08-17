@@ -28685,12 +28685,14 @@ mod tests {
         let map_uid = app.state.add_density_map(scene_uid, "map", map);
         let map_renderer_uid = app.state.add_density_renderer(map_uid, "contour").unwrap();
         app.change_workspace_renderer_type(scene_uid, map_uid, map_renderer_uid, "isosurf");
+        let changed_uid = app.state.density_map_summary(map_uid).unwrap().renderers[0].uid;
+        assert_ne!(changed_uid, map_renderer_uid);
         assert_eq!(
             app.workspace_aux_selection,
             Some(WorkspaceAuxSelection::DensityMap {
                 scene_uid,
                 map_uid,
-                renderer_uid: Some(map_renderer_uid),
+                renderer_uid: Some(changed_uid),
             })
         );
         assert_eq!(

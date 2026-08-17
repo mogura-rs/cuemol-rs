@@ -6796,8 +6796,8 @@ impl DesktopAppState {
     }
 
     /// Change a Workspace renderer to another compatible type.
-    /// Molecular renderers are replaced with a new UID, while density renderer
-    /// properties and identity are retained across compatible map types.
+    /// Compatible renderers are replaced with a new UID. `*selection` is kept
+    /// and converted into an additional molecular renderer.
     pub fn change_renderer_type_in_object(
         &mut self,
         object_uid: Uid,
@@ -6805,7 +6805,7 @@ impl DesktopAppState {
         renderer_type: &str,
     ) -> Result<Uid> {
         let renderer_type = renderer_type.trim();
-        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+        if self.density_maps.contains_key(&object_uid) {
             let kind = match renderer_type {
                 "contour" => GuiDensityRendererKind::Contour,
                 "isosurf" => GuiDensityRendererKind::IsoSurface,
@@ -6816,19 +6816,32 @@ impl DesktopAppState {
                     )));
                 }
             };
-            let renderer = map
+            let (renderer_index, source_type) = self
+                .density_maps
+                .get(&object_uid)
+                .expect("density map was checked above")
                 .renderers
-                .iter_mut()
-                .find(|renderer| renderer.uid == renderer_uid)
+                .iter()
+                .enumerate()
+                .find(|(_, renderer)| renderer.uid == renderer_uid)
+                .map(|(index, renderer)| (index, renderer.renderer_type.clone()))
                 .ok_or_else(|| {
                     CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
                 })?;
-            if renderer.renderer_type != renderer_type {
-                renderer.renderer_type = renderer_type.to_string();
-                renderer.kind = kind;
-                map.modified = true;
+            if source_type == renderer_type {
+                return Ok(renderer_uid);
             }
-            return Ok(renderer_uid);
+            let new_uid = self.next_density_renderer_uid();
+            let map = self
+                .density_maps
+                .get_mut(&object_uid)
+                .expect("density map was checked above");
+            let renderer = &mut map.renderers[renderer_index];
+            renderer.uid = new_uid;
+            renderer.renderer_type = renderer_type.to_string();
+            renderer.kind = kind;
+            map.modified = true;
+            return Ok(new_uid);
         }
         if !MOLECULE_RENDERER_TYPES.contains(&renderer_type)
             || matches!(renderer_type, "atomintr" | "disorder")
@@ -59662,11 +59675,12 @@ end_header
         let changed_uid = app
             .change_renderer_type_in_object(map_uid, density_renderer_uid, "isosurf")
             .unwrap();
-        assert_eq!(changed_uid, density_renderer_uid);
+        assert_ne!(changed_uid, density_renderer_uid);
         let density = app.density_map_summary(map_uid).unwrap();
+        assert_eq!(density.renderers[0].uid, changed_uid);
         assert_eq!(density.renderers[0].renderer_type, "isosurf");
         assert!(app
-            .change_renderer_type_in_object(map_uid, density_renderer_uid, "cartoon")
+            .change_renderer_type_in_object(map_uid, changed_uid, "cartoon")
             .is_err());
     }
 

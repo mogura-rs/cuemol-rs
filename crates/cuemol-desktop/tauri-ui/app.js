@@ -12463,7 +12463,20 @@ async function changeWorkspaceAuxRendererType(kind, object, renderer, targetType
     () => {},
   );
   if (!changed) return;
-  selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
+  const collection =
+    kind === "densityRenderer"
+      ? snapshot.densityMaps
+      : kind === "surfaceRenderer"
+        ? snapshot.surfaces
+        : snapshot.lwObjects;
+  const target = collection
+    .find((candidate) => candidate.uid === object.uid)
+    ?.renderers.filter(
+      (candidate) =>
+        candidate.rendererType === targetType && candidate.name === renderer.name,
+    )
+    .sort((left, right) => right.uid - left.uid)[0];
+  selectWorkspaceAuxItem(kind, object.uid, target?.uid ?? renderer.uid);
   renderShell();
 }
 
