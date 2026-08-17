@@ -1731,6 +1731,15 @@ impl DesktopAppState {
         let scene_name = source_scene.name().to_string();
         let cameras = source_scene.cameras().to_vec();
         let objects = source_scene.objects().to_vec();
+        let surfaces = source_scene.loaded_surfaces().to_vec();
+        let lw_objects = source_scene.loaded_lw_objects().to_vec();
+        let styles = scene_style_manager(source_scene);
+        let density_maps = self
+            .density_maps
+            .values()
+            .filter(|map| map.scene_uid == scene_uid)
+            .cloned()
+            .collect::<Vec<_>>();
         let views = self
             .command_manager
             .views()
@@ -1757,21 +1766,126 @@ impl DesktopAppState {
                 runtime_object.set_property_str(name, value);
             }
             for renderer in object.renderers() {
-                let mut runtime_renderer =
-                    cuemol_qsys::Renderer::with_uid(renderer.renderer_type(), renderer.uid());
-                runtime_renderer.set_name(renderer.name());
-                runtime_renderer.set_visible(renderer.is_visible());
-                runtime_renderer.set_xform_matrix(renderer.xform_matrix());
-                if let Some(alpha) = renderer
+                let alpha = renderer
                     .qsc_attr("alpha")
                     .and_then(|value| value.parse::<f64>().ok())
-                {
-                    runtime_renderer.set_alpha(alpha);
-                }
-                for (name, value) in renderer.qsc_attrs() {
-                    runtime_renderer.set_property_str(name, value);
-                }
+                    .unwrap_or(1.0);
+                let runtime_renderer = animation_runtime_renderer(
+                    renderer.uid(),
+                    renderer.renderer_type(),
+                    renderer.name(),
+                    renderer.is_visible(),
+                    alpha,
+                    renderer.xform_matrix(),
+                    renderer.qsc_attrs(),
+                );
                 runtime_object.attach_renderer(runtime_renderer);
+            }
+            runtime.insert_object(runtime_object);
+        }
+        for surface in &surfaces {
+            let summary = surface_summary(scene_uid, surface, &styles);
+            let xform = surface
+                .qsc_node
+                .as_ref()
+                .map(|node| node.str_attr("xformMat").to_string())
+                .filter(|value| !value.is_empty())
+                .and_then(|value| Matrix4::from_script_string(&value).ok())
+                .unwrap_or(Matrix4::IDENTITY);
+            let mut runtime_object = cuemol_qsys::SceneObject::new(surface.uid, ());
+            runtime_object.set_class_name(&summary.class_name);
+            runtime_object.set_name(&summary.name);
+            runtime_object.set_visible(summary.visible);
+            runtime_object.set_xform_matrix(xform);
+            for renderer in &summary.renderers {
+                let renderer_xform = renderer
+                    .specific
+                    .get("xformMat")
+                    .and_then(|value| Matrix4::from_script_string(value).ok())
+                    .unwrap_or(Matrix4::IDENTITY);
+                runtime_object.attach_renderer(animation_runtime_renderer(
+                    renderer.uid,
+                    &renderer.renderer_type,
+                    &renderer.name,
+                    renderer.visible,
+                    renderer.alpha,
+                    renderer_xform,
+                    &renderer.specific,
+                ));
+            }
+            runtime.insert_object(runtime_object);
+        }
+        for object in &lw_objects {
+            let summary = lw_object_summary(scene_uid, object, &styles);
+            let renderer_nodes = object
+                .qsc_node
+                .as_ref()
+                .into_iter()
+                .flat_map(|node| node.children())
+                .filter(|node| {
+                    !node.is_attr() && node.tag_name() == "renderer" && node.type_name() == "lwrend"
+                })
+                .collect::<Vec<_>>();
+            let mut runtime_object = cuemol_qsys::SceneObject::new(object.uid, ());
+            runtime_object.set_class_name(&summary.class_name);
+            runtime_object.set_name(&summary.name);
+            runtime_object.set_visible(summary.visible);
+            runtime_object.set_xform_matrix(object.xform);
+            for (index, renderer) in summary.renderers.iter().enumerate() {
+                let mut properties = renderer_nodes
+                    .get(index)
+                    .map(|node| {
+                        node.children()
+                            .iter()
+                            .filter(|child| child.is_attr())
+                            .map(|child| (child.tag_name().to_string(), child.value().to_string()))
+                            .collect::<BTreeMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                properties.insert("style".to_string(), renderer.style.clone());
+                properties.insert("material".to_string(), renderer.material.clone());
+                properties.insert("egtype".to_string(), renderer.edge_type.clone());
+                properties.insert("eglinew".to_string(), renderer.edge_width.to_string());
+                properties.insert("egcolor".to_string(), renderer.edge_color.clone());
+                let renderer_xform = object
+                    .renderers
+                    .get(index)
+                    .map(|renderer| renderer.xform)
+                    .unwrap_or(Matrix4::IDENTITY);
+                runtime_object.attach_renderer(animation_runtime_renderer(
+                    renderer.uid,
+                    &renderer.renderer_type,
+                    &renderer.name,
+                    renderer.visible,
+                    renderer.alpha,
+                    renderer_xform,
+                    &properties,
+                ));
+            }
+            runtime.insert_object(runtime_object);
+        }
+        for map in &density_maps {
+            let summary = density_map_summary(map, &styles);
+            let mut runtime_object = cuemol_qsys::SceneObject::new(map.uid, ());
+            runtime_object.set_class_name(&summary.class_name);
+            runtime_object.set_name(&summary.name);
+            runtime_object.set_visible(summary.visible);
+            runtime_object.set_xform_matrix(map.xform);
+            for renderer in &summary.renderers {
+                let renderer_xform = renderer
+                    .specific
+                    .get("xformMat")
+                    .and_then(|value| Matrix4::from_script_string(value).ok())
+                    .unwrap_or(Matrix4::IDENTITY);
+                runtime_object.attach_renderer(animation_runtime_renderer(
+                    renderer.uid,
+                    &renderer.renderer_type,
+                    &renderer.name,
+                    renderer.visible,
+                    renderer.alpha,
+                    renderer_xform,
+                    &renderer.specific,
+                ));
             }
             runtime.insert_object(runtime_object);
         }
@@ -1801,33 +1915,74 @@ impl DesktopAppState {
                 *target = updated;
             }
         }
-        let scene = self
-            .scene_manager_mut()
-            .scene_mut(scene_uid)
-            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        for source_object in &objects {
-            let Some(updated) = runtime.object(source_object.uid()) else {
-                continue;
-            };
-            let Some(target) = scene.object_mut(source_object.uid()) else {
-                continue;
-            };
-            target.set_visible(updated.visible());
-            target.set_xform_matrix(updated.xform_matrix());
-            for (name, value) in updated.properties() {
-                target.set_qsc_extra_attr(name, value);
+        {
+            let scene = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+            for source_object in &objects {
+                let Some(updated) = runtime.object(source_object.uid()) else {
+                    continue;
+                };
+                let Some(target) = scene.object_mut(source_object.uid()) else {
+                    continue;
+                };
+                target.set_visible(updated.visible());
+                target.set_xform_matrix(updated.xform_matrix());
+                for (name, value) in updated.properties() {
+                    target.set_qsc_extra_attr(name, value);
+                }
+                for renderer_uid in updated.renderer_uids() {
+                    let Some(updated_renderer) = updated.renderer(renderer_uid) else {
+                        continue;
+                    };
+                    let Some(target_renderer) = target.renderer_mut(renderer_uid) else {
+                        continue;
+                    };
+                    target_renderer.set_visible(updated_renderer.visible());
+                    target_renderer.set_qsc_attr("alpha", updated_renderer.alpha().to_string());
+                    target_renderer.set_qsc_attr(
+                        "xformMat",
+                        updated_renderer.xform_matrix().to_script_string(),
+                    );
+                    for (name, value) in updated_renderer.properties() {
+                        if matches!(
+                            name.as_str(),
+                            "visible" | "alpha" | "default_alpha" | "xformMat"
+                        ) {
+                            continue;
+                        }
+                        target_renderer.set_qsc_attr(name, value);
+                    }
+                }
             }
+        }
+        for source_map in &density_maps {
+            let Some(updated) = runtime.object(source_map.uid) else {
+                continue;
+            };
+            let Some(target) = self.density_maps.get_mut(&source_map.uid) else {
+                continue;
+            };
+            target.visible = updated.visible();
+            target.xform = updated.xform_matrix();
             for renderer_uid in updated.renderer_uids() {
                 let Some(updated_renderer) = updated.renderer(renderer_uid) else {
                     continue;
                 };
-                let Some(target_renderer) = target.renderer_mut(renderer_uid) else {
+                let Some(target_renderer) = target
+                    .renderers
+                    .iter_mut()
+                    .find(|renderer| renderer.uid == renderer_uid)
+                else {
                     continue;
                 };
-                target_renderer.set_visible(updated_renderer.visible());
-                target_renderer.set_qsc_attr("alpha", updated_renderer.alpha().to_string());
-                target_renderer.set_qsc_attr(
-                    "xformMat",
+                target_renderer.visible = updated_renderer.visible();
+                target_renderer
+                    .attributes
+                    .insert("alpha".to_string(), updated_renderer.alpha().to_string());
+                target_renderer.attributes.insert(
+                    "xformMat".to_string(),
                     updated_renderer.xform_matrix().to_script_string(),
                 );
                 for (name, value) in updated_renderer.properties() {
@@ -1837,8 +1992,125 @@ impl DesktopAppState {
                     ) {
                         continue;
                     }
-                    target_renderer.set_qsc_attr(name, value);
+                    match name.as_str() {
+                        "siglevel" => {
+                            if let Ok(value) = value.parse() {
+                                target_renderer.siglevel = value;
+                            }
+                        }
+                        "extent" => {
+                            if let Ok(value) = value.parse() {
+                                target_renderer.extent = value;
+                            }
+                        }
+                        "width" => {
+                            if let Ok(value) = value.parse() {
+                                target_renderer.width = value;
+                            }
+                        }
+                        "binning" => {
+                            if let Ok(value) = value.parse() {
+                                target_renderer.binning = value;
+                            }
+                        }
+                        "max_grids" => {
+                            if let Ok(value) = value.parse() {
+                                target_renderer.max_grids = value;
+                            }
+                        }
+                        "bndry_rng" => {
+                            if let Ok(value) = value.parse() {
+                                target_renderer.bndry_rng = value;
+                            }
+                        }
+                        _ => {}
+                    }
+                    target_renderer
+                        .attributes
+                        .insert(name.clone(), value.clone());
                 }
+            }
+        }
+        for source_surface in &surfaces {
+            let Some(updated) = runtime.object(source_surface.uid) else {
+                continue;
+            };
+            let Some(target) = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(source_surface.uid))
+            else {
+                continue;
+            };
+            let node = ensure_surface_qsc_node(target);
+            set_qsc_bool_attr(node, "visible", updated.visible(), true);
+            if updated.xform_matrix() == Matrix4::IDENTITY {
+                node.remove_child("xformMat");
+            } else {
+                node.set_str_attr("xformMat", updated.xform_matrix().to_script_string());
+            }
+            for renderer_uid in updated.renderer_uids() {
+                let Some(updated_renderer) = updated.renderer(renderer_uid) else {
+                    continue;
+                };
+                let node = ensure_surface_renderer_node(target, scene_uid, renderer_uid)?;
+                apply_animation_renderer_node(node, updated_renderer);
+            }
+        }
+        for source_object in &lw_objects {
+            let Some(updated) = runtime.object(source_object.uid) else {
+                continue;
+            };
+            let Some(target) = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_lw_object_mut(source_object.uid))
+            else {
+                continue;
+            };
+            target.visible = updated.visible();
+            target.xform = updated.xform_matrix();
+            let node = ensure_lw_qsc_node(target);
+            set_qsc_bool_attr(node, "visible", updated.visible(), true);
+            if updated.xform_matrix() == Matrix4::IDENTITY {
+                node.remove_child("xformMat");
+            } else {
+                node.set_str_attr("xformMat", updated.xform_matrix().to_script_string());
+            }
+            for renderer_uid in updated.renderer_uids() {
+                let Some(updated_renderer) = updated.renderer(renderer_uid) else {
+                    continue;
+                };
+                let Some(renderer_index) = lw_renderer_index(scene_uid, target.uid, renderer_uid)
+                    .filter(|index| *index < target.renderers.len())
+                else {
+                    continue;
+                };
+                let node_index = target
+                    .qsc_node
+                    .as_ref()
+                    .expect("LWObject node was ensured")
+                    .children()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, node)| {
+                        !node.is_attr()
+                            && node.tag_name() == "renderer"
+                            && node.type_name() == "lwrend"
+                    })
+                    .nth(renderer_index)
+                    .map(|(index, _)| index)
+                    .expect("LWObject node contains every renderer");
+                let (renderers, qsc_node) = (&mut target.renderers, &mut target.qsc_node);
+                renderers[renderer_index].visible = updated_renderer.visible();
+                renderers[renderer_index].xform = updated_renderer.xform_matrix();
+                apply_animation_renderer_node(
+                    &mut qsc_node
+                        .as_mut()
+                        .expect("LWObject node was ensured")
+                        .children_mut()[node_index],
+                    updated_renderer,
+                );
             }
         }
         for (object_uid, frame) in morph_frames {
@@ -48905,6 +49177,45 @@ fn set_qsc_f64_attr(node: &mut LDom2Node, name: &str, value: f64, default: f64) 
     }
 }
 
+fn animation_runtime_renderer(
+    uid: Uid,
+    renderer_type: &str,
+    name: &str,
+    visible: bool,
+    alpha: f64,
+    xform: Matrix4,
+    properties: &BTreeMap<String, String>,
+) -> cuemol_qsys::Renderer {
+    let mut renderer = cuemol_qsys::Renderer::with_uid(renderer_type, uid);
+    renderer.set_name(name);
+    renderer.set_visible(visible);
+    renderer.set_alpha(alpha);
+    renderer.set_xform_matrix(xform);
+    for (name, value) in properties {
+        renderer.set_property_str(name, value);
+    }
+    renderer
+}
+
+fn apply_animation_renderer_node(node: &mut LDom2Node, renderer: &cuemol_qsys::Renderer) {
+    set_qsc_bool_attr(node, "visible", renderer.visible(), true);
+    set_qsc_f64_attr(node, "alpha", renderer.alpha(), 1.0);
+    if renderer.xform_matrix() == Matrix4::IDENTITY {
+        node.remove_child("xformMat");
+    } else {
+        node.set_str_attr("xformMat", renderer.xform_matrix().to_script_string());
+    }
+    for (name, value) in renderer.properties() {
+        if matches!(
+            name.as_str(),
+            "visible" | "alpha" | "default_alpha" | "xformMat"
+        ) {
+            continue;
+        }
+        node.set_str_attr(name, value);
+    }
+}
+
 fn surface_summary(
     scene_uid: Uid,
     surface: &LoadedSurface,
@@ -54560,6 +54871,164 @@ end_header
             .renderer(fade_uid)
             .expect("fade renderer remains available")
             .is_visible());
+    }
+
+    #[test]
+    fn apply_scene_animation_time_updates_auxiliary_renderers() {
+        use cuemol_anim::{AnimMotion, RealPropAnim, RendXformAnim, ShowHideAnim};
+
+        let mut app = DesktopAppState::new();
+        let created = app.new_scene("auxiliary-animation-playback", true);
+        let scene_uid = created.result_scene;
+        let view_uid = created.result_view.expect("scene has a view");
+
+        let map_uid = app.add_density_map(scene_uid, "map", DensityMap::new());
+        let map_renderer_uid = app
+            .add_density_renderer(map_uid, "contour")
+            .expect("density renderer is created");
+        app.rename_density_renderer(map_uid, map_renderer_uid, "map-animation")
+            .expect("density renderer is renamed");
+
+        let surface_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .expect("scene exists")
+            .add_loaded_surface(LoadedSurface {
+                uid: Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".to_string(),
+                raw_data: Vec::new(),
+                qsc_node: None,
+            });
+        let surface_renderer_uid = app
+            .surface_summary(surface_uid)
+            .expect("surface exists")
+            .renderers[0]
+            .uid;
+        app.rename_surface_renderer(surface_uid, surface_renderer_uid, "surface-animation")
+            .expect("surface renderer is renamed");
+
+        let lw_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .expect("scene exists")
+            .add_loaded_lw_object(LoadedLWObject {
+                uid: Uid::new(0),
+                name: "lightweight".to_string(),
+                srctype: "qdflwobj".to_string(),
+                raw_data: Vec::new(),
+                visible: true,
+                xform: Matrix4::IDENTITY,
+                renderers: Vec::new(),
+                qsc_node: None,
+            });
+        let lw_renderer_uid = app
+            .add_lw_renderer(lw_uid)
+            .expect("lightweight renderer is created");
+        app.rename_lw_renderer(lw_uid, lw_renderer_uid, "lightweight-animation")
+            .expect("lightweight renderer is renamed");
+
+        let duration = cuemol_core::time_from_milliseconds(1_000.0);
+        let mut show_hide = ShowHideAnim::new();
+        show_hide.set_rend("map-animation,surface-animation,lightweight-animation");
+        show_hide.set_hide(true);
+        show_hide.set_fade(true);
+        show_hide.set_tgt_alpha(0.8);
+        show_hide.base_mut().set_rel_start(0);
+        show_hide.base_mut().set_rel_end(duration);
+
+        let mut map_level = RealPropAnim::new();
+        map_level.set_rend("map-animation");
+        map_level.set_prop("siglevel");
+        map_level.set_start_value(1.0);
+        map_level.set_end_value(3.0);
+        map_level.base_mut().set_rel_start(0);
+        map_level.base_mut().set_rel_end(duration);
+
+        let mut surface_width = RealPropAnim::new();
+        surface_width.set_rend("surface-animation");
+        surface_width.set_prop("width");
+        surface_width.set_start_value(1.2);
+        surface_width.set_end_value(3.2);
+        surface_width.base_mut().set_rel_start(0);
+        surface_width.base_mut().set_rel_end(duration);
+
+        let mut lightweight_edge = RealPropAnim::new();
+        lightweight_edge.set_rend("lightweight-animation");
+        lightweight_edge.set_prop("eglinew");
+        lightweight_edge.set_start_value(0.01);
+        lightweight_edge.set_end_value(0.21);
+        lightweight_edge.base_mut().set_rel_start(0);
+        lightweight_edge.base_mut().set_rel_end(duration);
+
+        let mut transform = RendXformAnim::new();
+        transform.set_rend("map-animation,surface-animation,lightweight-animation");
+        transform.set_start_tran(Vector4::ZERO);
+        transform.set_end_tran(Vector4::new3(10.0, 0.0, 0.0));
+        transform.base_mut().set_rel_start(0);
+        transform.base_mut().set_rel_end(duration);
+
+        let mut animation = AnimMgr::new();
+        animation.set_length(duration);
+        animation.append_motion(AnimMotion::ShowHide(show_hide));
+        animation.append_motion(AnimMotion::RealProperty(map_level));
+        animation.append_motion(AnimMotion::RealProperty(surface_width));
+        animation.append_motion(AnimMotion::RealProperty(lightweight_edge));
+        animation.append_motion(AnimMotion::RendererTransform(transform));
+        app.set_scene_animation(scene_uid, Some(&animation))
+            .expect("animation is persisted");
+
+        app.apply_scene_animation_time(scene_uid, duration / 2, view_uid)
+            .expect("auxiliary renderer animation is applied");
+        let map = app
+            .density_map_summary(map_uid)
+            .expect("map remains available");
+        assert!(map.renderers[0].visible);
+        assert!((map.renderers[0].alpha - 0.4).abs() < 1.0e-12);
+        assert_eq!(map.renderers[0].specific["siglevel"], "2");
+        assert_eq!(
+            Matrix4::from_script_string(&map.renderers[0].specific["xformMat"])
+                .expect("density renderer transform")
+                .get_trans_part(),
+            Vector4::new3(5.0, 0.0, 0.0)
+        );
+        let surface = app
+            .surface_summary(surface_uid)
+            .expect("surface remains available");
+        assert!(surface.renderers[0].visible);
+        assert!((surface.renderers[0].alpha - 0.4).abs() < 1.0e-12);
+        assert_eq!(surface.renderers[0].specific["width"], "2.2");
+        assert_eq!(
+            Matrix4::from_script_string(&surface.renderers[0].specific["xformMat"])
+                .expect("surface renderer transform")
+                .get_trans_part(),
+            Vector4::new3(5.0, 0.0, 0.0)
+        );
+        let lightweight = app
+            .lw_object_summary(lw_uid)
+            .expect("lightweight object remains available");
+        assert!(lightweight.renderers[0].visible);
+        assert!((lightweight.renderers[0].alpha - 0.4).abs() < 1.0e-12);
+        assert!((lightweight.renderers[0].edge_width - 0.11).abs() < 1.0e-12);
+        assert_eq!(
+            app.scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .loaded_lw_object(lw_uid)
+                .unwrap()
+                .renderers[0]
+                .xform
+                .get_trans_part(),
+            Vector4::new3(5.0, 0.0, 0.0)
+        );
+
+        app.apply_scene_animation_time(scene_uid, duration + 1, view_uid)
+            .expect("auxiliary renderer animation end is applied");
+        assert!(!app.density_map_summary(map_uid).unwrap().renderers[0].visible);
+        assert!(!app.surface_summary(surface_uid).unwrap().renderers[0].visible);
+        assert!(!app.lw_object_summary(lw_uid).unwrap().renderers[0].visible);
     }
 
     #[cfg(feature = "scripting")]
