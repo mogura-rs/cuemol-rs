@@ -1239,7 +1239,6 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("case \"densityRenderer\":"));
     assert!(JS.contains("case \"surface\":"));
     assert!(JS.contains("case \"surfaceRenderer\":"));
-    assert!(JS.contains("beginWorkspaceInlineRename(\"object\", object.uid)"));
     assert!(JS.contains("beginWorkspaceInlineRename(\"renderer\", object.uid, renderer.uid)"));
     assert!(JS.contains("input.addEventListener(\"blur\", () => void finish(true))"));
     assert!(JS.contains("event.key === \"Enter\""));
@@ -1250,33 +1249,49 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
         .nth(1)
         .and_then(|source| source.split("function selectWorkspaceAuxItem").next())
         .expect("Tauri object context menu");
+    let mut cursor = 0;
+    for item in [
+        "label: \"Selection\"",
+        "label: \"Paint\"",
+        "label: \"Copy Object\"",
+        "label: \"Paste Renderer\"",
+        "label: \"New Renderer...\"",
+        "label: \"New Group...\"",
+        "label: \"Save As ...\"",
+        "label: \"Delete Object\"",
+        "label: \"Properties...\"",
+    ] {
+        let relative = tauri_object_menu[cursor..]
+            .find(item)
+            .unwrap_or_else(|| panic!("missing object menu item {item}"));
+        cursor += relative + item.len();
+    }
     for item in [
         "label: object.name",
         "object.visible ? \"Hide\" : \"Show\"",
-        "label: \"Selection\"",
-        "object.coloringType === \"PaintColoring\"",
-        "label: \"Around\"",
-        "label: \"Around Byresid\"",
-        "label: \"Ligand\"",
         "label: \"Rename…\"",
-        "label: \"Copy\"",
-        "label: \"New Renderer…\"",
-        "label: \"New Group…\"",
-        "label: \"Save As…\"",
-        "label: \"Delete\"",
-        "label: \"Properties…\"",
+        "if (current && object.coloringType === \"PaintColoring\")",
+    ] {
+        assert!(
+            !tauri_object_menu.contains(item),
+            "unexpected object menu item {item}"
+        );
+    }
+    for item in [
+        "label: \"Invert\"",
+        "label: \"Toggle Sidechain\"",
+        "label: \"Around Byresid\"",
+        "label: \"Around\"",
+        "label: \"Ligand\"",
     ] {
         assert!(
             tauri_object_menu.contains(item),
-            "missing object menu item {item}"
+            "missing object selection item {item}"
         );
     }
     assert!(!tauri_object_menu.contains("Selection ·"));
-    assert!(!tauri_object_menu.contains("Copy Object"));
-    assert!(!tauri_object_menu.contains("Save As ..."));
-    assert!(!tauri_object_menu.contains("Delete Object"));
-    assert!(tauri_object_menu.contains("if (current && object.coloringType === \"PaintColoring\")"));
-    assert!(tauri_object_menu.contains("label: \"Paint\""));
+    assert!(tauri_object_menu.contains("disabled: !workspaceRendererClipboardAvailable"));
+    assert!(NATIVE_GUI_RS.contains("workspace_paint_menu(ui, true"));
     let tauri_renderer_group_menu = JS
         .split("async function workspaceRendererContextItems(scene, object, renderer)")
         .nth(1)

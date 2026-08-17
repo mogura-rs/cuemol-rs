@@ -5913,9 +5913,48 @@ impl GuiApplication {
             .unwrap_or_default()
             .to_string();
         ui.menu_button("Selection", |ui| {
+            for (label, expression) in [("Select All", "*"), ("Unselect", "")] {
+                if ui.button(label).clicked() {
+                    self.apply_molecule_selection(
+                        object_uid,
+                        expression.to_string(),
+                        "Changed molecule selection",
+                    );
+                    ui.close();
+                }
+            }
+            if ui.button("Invert").clicked() {
+                self.apply_molecule_selection(
+                    object_uid,
+                    invert_selection_expression(&current),
+                    "Inverted molecule selection",
+                );
+                ui.close();
+            }
+            if ui.button("Toggle Sidechain").clicked() {
+                self.apply_molecule_selection(
+                    object_uid,
+                    toggle_sidechain_expression(&current),
+                    "Toggled sidechain selection",
+                );
+                ui.close();
+            }
+            for (label, by_residue) in [("Around Byresid", true), ("Around", false)] {
+                ui.menu_button(label, |ui| {
+                    for radius in [3.0_f64, 5.0, 7.0, 10.0] {
+                        if ui.button(format!("{radius:.0} Å")).clicked() {
+                            self.apply_molecule_selection(
+                                object_uid,
+                                around_selection_expression(&current, radius, by_residue),
+                                "Expanded molecule selection",
+                            );
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            ui.separator();
             for (label, expression) in [
-                ("Select All", "*"),
-                ("Unselect", ""),
                 ("Protein", "protein"),
                 ("Nucleic acid", "nucleic"),
                 ("Water", "water"),
@@ -5932,53 +5971,9 @@ impl GuiApplication {
                     ui.close();
                 }
             }
-            ui.separator();
-            if ui.button("Invert").clicked() {
-                self.apply_molecule_selection(
-                    object_uid,
-                    invert_selection_expression(&current),
-                    "Inverted molecule selection",
-                );
-                ui.close();
-            }
-            if ui
-                .add_enabled(!current.is_empty(), egui::Button::new("Toggle Sidechain"))
-                .clicked()
-            {
-                self.apply_molecule_selection(
-                    object_uid,
-                    toggle_sidechain_expression(&current),
-                    "Toggled sidechain selection",
-                );
-                ui.close();
-            }
-            for (label, by_residue) in [("Around Byresid", true), ("Around", false)] {
-                ui.menu_button(label, |ui| {
-                    for radius in [3.0_f64, 5.0, 7.0, 10.0] {
-                        if ui
-                            .add_enabled(
-                                !current.is_empty(),
-                                egui::Button::new(format!("{radius:.0} Å")),
-                            )
-                            .clicked()
-                        {
-                            self.apply_molecule_selection(
-                                object_uid,
-                                around_selection_expression(&current, radius, by_residue),
-                                "Expanded molecule selection",
-                            );
-                            ui.close();
-                        }
-                    }
-                });
-            }
         });
-        let paint_enabled = !current.is_empty()
-            && self
-                .state
-                .object_coloring_type(object_uid)
-                .is_some_and(|coloring| coloring == "PaintColoring");
-        workspace_paint_menu(ui, paint_enabled, |color| {
+        ui.separator();
+        workspace_paint_menu(ui, true, |color| {
             self.insert_workspace_object_paint(scene_uid, object_uid, color);
         });
         ui.separator();
@@ -5997,14 +5992,14 @@ impl GuiApplication {
             ui.close();
         }
         ui.separator();
-        if ui.button("New Group...").clicked() {
-            self.activate_workspace_scene(scene_uid, camera);
-            self.open_renderer_group_dialog(NativePropertyObject::Molecule(object_uid));
-            ui.close();
-        }
         if ui.button("New Renderer...").clicked() {
             self.activate_workspace_scene(scene_uid, camera);
             self.open_renderer_dialog(object_uid);
+            ui.close();
+        }
+        if ui.button("New Group...").clicked() {
+            self.activate_workspace_scene(scene_uid, camera);
+            self.open_renderer_group_dialog(NativePropertyObject::Molecule(object_uid));
             ui.close();
         }
         if ui.button("Save As ...").clicked() {

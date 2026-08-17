@@ -7456,24 +7456,17 @@ function workspaceObjectContextItems(scene, object) {
     }));
   const items = [
     {
-      label: object.name,
-      disabled: true,
-    },
-    null,
-    {
-      label: object.visible ? "Hide" : "Show",
-      action: () =>
-        mutate("set_workspace_visible", {
-          target: { kind: "object", objectUid: object.uid, rendererUid: null },
-          visible: !object.visible,
-        }),
-    },
-    {
       label: "Selection",
       children: [
         { label: "Select All", action: select("*") },
         { label: "Unselect", action: select("") },
         { label: "Invert", action: select(invertWorkspaceSelection(current)) },
+        {
+          label: "Toggle Sidechain",
+          action: select(toggleWorkspaceSidechain(current)),
+        },
+        { label: "Around Byresid", children: around(true) },
+        { label: "Around", children: around(false) },
         null,
         { label: "Protein", action: select("protein") },
         { label: "Nucleic acid", action: select("nucleic") },
@@ -7481,46 +7474,31 @@ function workspaceObjectContextItems(scene, object) {
         { label: "Ligand", action: select("!protein & !nucleic & !water") },
         { label: "Sugar", action: select("sugar") },
         { label: "Hydrogen", action: select("hydrogen") },
-        null,
-        {
-          label: "Toggle Sidechain",
-          action: select(toggleWorkspaceSidechain(current)),
-        },
-        null,
-        { label: "Around", children: around(false) },
-        { label: "Around Byresid", children: around(true) },
       ],
     },
   ];
-  if (current && object.coloringType === "PaintColoring") {
-    items.push({
+  items.push(
+    null,
+    {
       label: "Paint",
       children: workspacePaintMenuChildren((color) => () =>
         mutate("insert_workspace_object_paint", {
           input: { objectUid: object.uid, color },
         })),
-    });
-  }
-  items.push(
+    },
     null,
     {
-      label: "Rename…",
-      action: () => beginWorkspaceInlineRename("object", object.uid),
-    },
-    {
-      label: "Copy",
+      label: "Copy Object",
       action: () => copyWorkspaceObject(object.uid),
     },
-  );
-  if (workspaceRendererClipboardAvailable) {
-    items.push({
-      label: "Paste Renderer",
-      action: () => pasteWorkspaceRenderers(object.uid),
-    });
-  }
-  items.push(
     {
-      label: "New Renderer…",
+      label: "Paste Renderer",
+      disabled: !workspaceRendererClipboardAvailable,
+      action: () => pasteWorkspaceRenderers(object.uid),
+    },
+    null,
+    {
+      label: "New Renderer...",
       action: async () => {
         if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
         await mutate("add_renderer", {
@@ -7531,7 +7509,7 @@ function workspaceObjectContextItems(scene, object) {
       },
     },
     {
-      label: "New Group…",
+      label: "New Group...",
       action: async () => {
         if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
         const used = new Set(
@@ -7554,7 +7532,7 @@ function workspaceObjectContextItems(scene, object) {
       },
     },
     {
-      label: "Save As…",
+      label: "Save As ...",
       action: async () => {
         if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
         selectedObjectUid = object.uid;
@@ -7563,7 +7541,7 @@ function workspaceObjectContextItems(scene, object) {
       },
     },
     {
-      label: "Delete",
+      label: "Delete Object",
       action: () =>
         mutate("delete_workspace_item", {
           target: { kind: "object", objectUid: object.uid, rendererUid: null },
@@ -7571,7 +7549,7 @@ function workspaceObjectContextItems(scene, object) {
     },
     null,
     {
-      label: "Properties…",
+      label: "Properties...",
       action: async () => {
         if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
         showReferenceDialog("Object Properties");
