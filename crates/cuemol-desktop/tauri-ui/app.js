@@ -25,6 +25,7 @@ const selectionAtomCandidates = document.getElementById("selection-atom-candidat
 const selectionElementCandidates = document.getElementById("selection-element-candidates");
 const statusText = document.getElementById("status-text");
 const statusHistory = document.getElementById("status-history");
+const outputCommand = document.getElementById("output-command");
 const metrics = document.getElementById("scene-metrics");
 const projectionReadout = document.getElementById("projection-readout");
 const inspectorTitle = document.getElementById("inspector-title");
@@ -112,8 +113,10 @@ const dialog = tauri?.dialog;
 const RECENT_STORAGE_KEY = "cuemol2.recentFiles.v1";
 const SELECTION_HISTORY_STORAGE_KEY = "cuemol2.selectionHistory.v1";
 const ANIMATION_RENDER_STORAGE_KEY = "cuemol2.animationRender.v1";
+const COMMAND_HISTORY_STORAGE_KEY = "cuemol2.commandHistory.v1";
 const MAX_RECENT_FILES = 10;
 const MAX_SELECTION_HISTORY = 20;
+const MAX_COMMAND_HISTORY = 100;
 const CAMERA_PREVIEW_SCALE = 0.625;
 const CAMERA_SETTLE_RENDER_DELAY = 72;
 const MOLECULE_RENDERER_TYPES = [
@@ -192,6 +195,8 @@ let viewPanelCamera = null;
 let coloringPaintSelectedIndex = -1;
 let coloringGradientSelectedIndex = -1;
 let selectionHistoryEntries = loadSelectionHistory();
+let commandHistoryEntries = loadCommandHistory();
+let commandHistoryPosition = commandHistoryEntries.length;
 let pdbHistoryEntries = [];
 let pdbHistoryRequest = null;
 let pdbHistoryLoaded = false;
@@ -298,6 +303,44 @@ function saveSelectionHistory() {
   } catch (error) {
     console.warn("Cannot persist selection history:", error);
   }
+}
+
+function loadCommandHistory() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(COMMAND_HISTORY_STORAGE_KEY) || "[]");
+    return Array.isArray(stored)
+      ? stored
+          .filter((entry) => typeof entry === "string" && entry.trim())
+          .slice(-MAX_COMMAND_HISTORY)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCommandHistory() {
+  try {
+    localStorage.setItem(COMMAND_HISTORY_STORAGE_KEY, JSON.stringify(commandHistoryEntries));
+  } catch (error) {
+    console.warn("Cannot persist command history:", error);
+  }
+}
+
+function rememberCommand(command) {
+  if (!command.trim()) return;
+  commandHistoryEntries.push(command);
+  commandHistoryEntries = commandHistoryEntries.slice(-MAX_COMMAND_HISTORY);
+  commandHistoryPosition = commandHistoryEntries.length;
+  saveCommandHistory();
+}
+
+function recallCommand(position) {
+  commandHistoryPosition = Math.max(0, Math.min(commandHistoryEntries.length, position));
+  outputCommand.value = commandHistoryEntries[commandHistoryPosition] || "";
+  requestAnimationFrame(() => {
+    const end = outputCommand.value.length;
+    outputCommand.setSelectionRange(end, end);
+  });
 }
 
 function rememberSelection(selection) {
@@ -8223,6 +8266,14 @@ async function chooseExecuteScriptFile() {
   if (await mutate("execute_script_file", { path })) {
     showBottomPanel("output");
   }
+}
+
+async function executeOutputCommand() {
+  const script = outputCommand.value;
+  if (!script.trim()) return;
+  rememberCommand(script);
+  outputCommand.value = "";
+  await mutate("execute_script", { script });
 }
 
 function applyCenterMark(value) {
@@ -16264,6 +16315,21 @@ coloringType.addEventListener("change", () => {
   coloringPaintSelectedIndex = -1;
   coloringGradientSelectedIndex = -1;
   commitColoring(target, coloringType.value, defaultColoringState(coloringType.value, target));
+});
+
+outputCommand.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void executeOutputCommand();
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (commandHistoryPosition > 0) recallCommand(commandHistoryPosition - 1);
+  } else if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (commandHistoryPosition < commandHistoryEntries.length) {
+      recallCommand(commandHistoryPosition + 1);
+    }
+  }
 });
 
 animationPlay.addEventListener("click", () => {

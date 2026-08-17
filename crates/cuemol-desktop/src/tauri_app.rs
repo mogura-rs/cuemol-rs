@@ -7959,6 +7959,7 @@ enum ModelRequest {
         height: u32,
     },
     ClearLog,
+    ExecuteScript(String),
     ExecuteScriptFile(String),
     ExportPov {
         path: String,
@@ -12007,6 +12008,36 @@ fn handle_model_request(
             model.status = "Output log cleared".to_string();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::ExecuteScript(script) => {
+            let script = script.trim();
+            if script.is_empty() {
+                return Ok(ModelResponse::Snapshot(Box::new(model.snapshot())));
+            }
+            let undo = model.capture_undo();
+            model.log_lines.push(format!("> {script}"));
+            match model.desktop.run_script_js(script) {
+                Ok((log, selection)) => {
+                    model
+                        .log_lines
+                        .extend(log.lines().map(|line| line.to_string()));
+                    if let Some(selection) = selection {
+                        model.selection = selection;
+                    }
+                    model.status = "Script executed".to_string();
+                }
+                Err(error) => {
+                    model.log_lines.push(error.to_string());
+                    model.status = "Script error".to_string();
+                }
+            }
+            if let Some(scene_uid) = model.desktop.active_scene() {
+                model.modified_scenes.insert(scene_uid);
+            }
+            model.invalidate_mesh(false);
+            model.push_undo(undo);
+            model.touch_structure_details();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::ExecuteScriptFile(path) => {
             let script = fs::read_to_string(&path).map_err(|error| error.to_string())?;
             if script.trim().is_empty() {
@@ -15298,6 +15329,11 @@ fn clear_log(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
+fn execute_script(script: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::ExecuteScript(script))?)
+}
+
+#[tauri::command]
 fn execute_script_file(
     path: String,
     state: State<'_, ManagedState>,
@@ -15827,6 +15863,7 @@ pub fn run() -> Result<(), tauri::Error> {
             tick_animation,
             tick_animation_frame,
             clear_log,
+            execute_script,
             execute_script_file,
             export_pov,
             start_pov_render,
@@ -23067,6 +23104,36 @@ mod tests {
         );
         assert_eq!(snapshot.status, "Script executed");
         let _ = std::fs::remove_file(script_path);
+    }
+
+    #[test]
+    fn output_command_prompt_executes_javascript_and_logs_errors() {
+        let mut model = model_without_gpu();
+        let script = "print('prompt-script'); cuemol.select('resid 2');";
+        let response =
+            handle_model_request(&mut model, ModelRequest::ExecuteScript(script.to_string()))
+                .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.log_lines[0], format!("> {script}"));
+        assert_eq!(snapshot.log_lines[1], "prompt-script");
+        assert_eq!(snapshot.selection, "resid 2");
+        assert_eq!(snapshot.status, "Script executed");
+        assert!(snapshot.scenes[0].modified);
+        assert!(snapshot.can_undo);
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::ExecuteScript("this is not js (((".to_string()),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.status, "Script error");
+        assert_eq!(snapshot.log_lines[2], "> this is not js (((");
+        assert!(snapshot.log_lines[3].contains("SyntaxError"));
     }
 
     #[test]

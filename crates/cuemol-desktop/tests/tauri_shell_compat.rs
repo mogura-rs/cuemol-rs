@@ -336,6 +336,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "remove_morph_frame",
         "apply_morph_frame",
         "clear_log",
+        "execute_script",
         "execute_script_file",
         "export_pov",
         "start_animation_render",
@@ -551,6 +552,23 @@ fn tauri_workspace_exposes_lightweight_objects_and_renderers() {
             "missing lightweight backend {binding}"
         );
     }
+}
+
+#[test]
+fn tauri_output_prompt_executes_javascript_with_reference_history() {
+    assert!(HTML.contains("id=\"output-command\""));
+    assert!(HTML.contains("Js&gt;"));
+    assert!(HTML.contains("aria-label=\"JavaScript command\""));
+    assert!(JS.contains("COMMAND_HISTORY_STORAGE_KEY"));
+    assert!(JS.contains("MAX_COMMAND_HISTORY = 100"));
+    assert!(JS.contains("function executeOutputCommand()"));
+    assert!(JS.contains("mutate(\"execute_script\", { script })"));
+    assert!(JS.contains("event.key === \"Enter\""));
+    assert!(JS.contains("event.key === \"ArrowUp\""));
+    assert!(JS.contains("event.key === \"ArrowDown\""));
+    assert!(TAURI_APP_RS.contains("ModelRequest::ExecuteScript(script)"));
+    assert!(TAURI_APP_RS.contains("model.log_lines.push(format!(\"> {script}\"))"));
+    assert!(CSS.contains("grid-template-columns: 24px 1fr"));
 }
 
 #[test]
