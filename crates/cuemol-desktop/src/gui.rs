@@ -1,10 +1,11 @@
 // AnimKind/AnimObject + the `anim_spin_direction` timeline stepper are shared via core
 // so both desktop front ends drive the animation timeline identically.
 use crate::{
-    anim_step, create_apbs_work_dir, run_apbs_process, AnimKind, AnimObject, ApbsProcessOutput,
-    ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths,
-    GuiAtomLabel, GuiLoadedPath, GuiSequenceSummary, GuiStructObject, WorkspaceCameraClipboard,
-    WorkspaceObjectClipboard, WorkspaceRendererClipboard, WorkspaceStyleClipboard,
+    anim_step, create_apbs_work_dir, run_apbs_process, run_pov_process_with_poll, AnimKind,
+    AnimObject, ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod,
+    GuiApbsOptions, GuiApbsPaths, GuiAtomLabel, GuiLoadedPath, GuiSequenceSummary, GuiStructObject,
+    PovProcessOptions, PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
+    WorkspaceRendererClipboard, WorkspaceStyleClipboard,
 };
 use ab_glyph::{point, Font, FontRef, ScaleFont};
 use cuemol_core::{parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Node, Result, Vector4};
@@ -25213,77 +25214,62 @@ fn render_pov_animation_frame(
         return Err("cancelled".to_string());
     }
     update_animation_render_progress(task, 0.25);
-
-    let mut child = Command::new(task.settings.povray_executable.trim())
-        .args(animation_povray_args(&task.settings, &pov_path, &png_path))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("failed to start POV-Ray: {error}"))?;
-    let status = loop {
-        if task.cancel.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("cancelled".to_string());
+    let process_task = animation_pov_process_task(&task.settings, &pov_path, &png_path);
+    let output = run_pov_process_with_poll(process_task, Arc::clone(&task.cancel), || {
+        update_animation_render_progress(task, 0.5)
+    })
+    .map_err(|error| {
+        if error == "POV-Ray rendering cancelled" {
+            "cancelled".to_string()
+        } else {
+            error
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {
-                std::thread::sleep(Duration::from_millis(25));
-                update_animation_render_progress(task, 0.5);
-            }
-            Err(error) => return Err(format!("POV-Ray wait failed: {error}")),
-        }
-    };
-    if !status.success() {
-        return Err(format!("POV-Ray exited with {status}"));
-    }
-    if !png_path.is_file() {
-        return Err(format!(
-            "POV-Ray did not create {}",
-            png_path.to_string_lossy()
-        ));
-    }
+    })?;
     if task.settings.pov_labels && !task.labels.is_empty() {
-        overlay_animation_labels(&png_path, &task.labels)?;
+        overlay_animation_labels(&output.output_path, &task.labels)?;
     }
     update_animation_render_progress(task, 1.0);
     Ok(AnimationTaskOutput::Frame {
         index: task.index,
-        path: png_path,
-        log: format!("POV-Ray exited with {status}"),
+        path: output.output_path,
+        log: if output.log.trim().is_empty() {
+            "POV-Ray rendering complete".to_string()
+        } else {
+            output.log
+        },
     })
 }
 
+fn animation_pov_process_task(
+    settings: &AnimationRenderSettings,
+    pov_path: &Path,
+    png_path: &Path,
+) -> PovProcessTask {
+    PovProcessTask {
+        executable: settings.povray_executable.clone(),
+        include_dir: settings.povray_include_dir.clone(),
+        input_path: pov_path.to_path_buf(),
+        output_path: png_path.to_path_buf(),
+        options: PovProcessOptions {
+            width: settings.width,
+            height: settings.height,
+            threads: 1,
+            perspective: settings.perspective,
+            transparent: true,
+            shadow: settings.pov_shadow,
+            radiosity: settings.pov_radiosity,
+            ..PovProcessOptions::default()
+        },
+    }
+}
+
+#[cfg(test)]
 fn animation_povray_args(
     settings: &AnimationRenderSettings,
     pov_path: &Path,
     png_path: &Path,
 ) -> Vec<String> {
-    let mut args = vec![
-        format!("+I{}", pov_path.to_string_lossy()),
-        format!("+O{}", png_path.to_string_lossy()),
-        format!("+W{}", settings.width),
-        format!("+H{}", settings.height),
-        "+FN8".to_string(),
-        "+UA".to_string(),
-        "-D".to_string(),
-        "+WT1".to_string(),
-        "Quality=11".to_string(),
-        "Antialias=On".to_string(),
-        "Antialias_Depth=3".to_string(),
-        "Antialias_Threshold=0.1".to_string(),
-        "Jitter=Off".to_string(),
-        "File_Gamma=1".to_string(),
-        format!("Declare=_shadow={}", u8::from(settings.pov_shadow)),
-    ];
-    if !settings.povray_include_dir.trim().is_empty() {
-        args.push(format!("+L{}", settings.povray_include_dir.trim()));
-    }
-    if settings.pov_radiosity >= 0 {
-        args.push(format!("Declare=_radiosity={}", settings.pov_radiosity));
-    }
-    args
+    crate::pov_job::povray_args(&animation_pov_process_task(settings, pov_path, png_path))
 }
 
 fn spawn_animation_movie_task(
