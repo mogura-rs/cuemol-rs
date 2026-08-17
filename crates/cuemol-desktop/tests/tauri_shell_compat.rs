@@ -160,6 +160,10 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "start_apbs_calculation",
         "poll_apbs_calculation",
         "cancel_apbs_calculation",
+        "start_pov_render",
+        "poll_pov_render",
+        "cancel_pov_render",
+        "save_pov_render_image",
         "append_morph_frame",
         "remove_morph_frame",
         "apply_morph_frame",
@@ -853,11 +857,49 @@ fn png_export_matches_the_reference_options_dialog() {
     for value in ["[72, 150, 300, 600]", "resolutionDpi", "transparent"] {
         assert!(JS.contains(value), "missing PNG option binding {value}");
     }
-    assert_eq!(JS.matches("await showPngExportOptions(").count(), 2);
+    assert_eq!(JS.matches("await showPngExportOptions(").count(), 1);
     assert!(CSS.contains(".reference-dialog.png-options-dialog"));
     assert!(CSS.contains("width: min(360px, calc(100vw - 48px))"));
     assert!(TAURI_APP_RS.contains("export_active_scene_png_with_options"));
     assert!(TAURI_APP_RS.contains("GuiPngExportOptions"));
+}
+
+#[test]
+fn pov_render_matches_the_reference_options_and_cancellable_flow() {
+    for label in [
+        "Main options",
+        "Projection",
+        "Stereo depth",
+        "Transp background",
+        "Clipping plane",
+        "Post-render alpha blending",
+        "Edge lines",
+        "Pix labels",
+        "POV-Ray options",
+        "Povray-exe-path",
+        "Povray-inc-path",
+        "Radiosity",
+        "Use default settings",
+        "Save image…",
+        "Copy to clipboard",
+    ] {
+        assert!(JS.contains(label), "missing POV-Ray option {label}");
+    }
+    for command in [
+        "start_pov_render",
+        "poll_pov_render",
+        "cancel_pov_render",
+        "save_pov_render_image",
+    ] {
+        assert!(JS.contains(command), "missing POV-Ray flow {command}");
+        assert!(
+            TAURI_APP_RS.contains(command),
+            "missing POV-Ray command {command}"
+        );
+    }
+    assert!(NATIVE_GUI_RS.contains("fn start_pov_render"));
+    assert!(NATIVE_GUI_RS.contains("fn poll_pov_render"));
+    assert!(DESKTOP_LIB_RS.contains("run_pov_process"));
 }
 
 #[test]

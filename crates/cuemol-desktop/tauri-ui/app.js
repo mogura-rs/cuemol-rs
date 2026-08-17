@@ -6012,49 +6012,360 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       scene ? [[scene.uid, scene.name]] : [],
       scene?.uid ?? "",
     );
-    const width = dialogField("Image width (px)", "1000", "number");
+    const mainGroup = dialogGroup("Main options");
+    const width = dialogField("W", "1000", "number", mainGroup);
     width.min = "1";
     width.max = "10000";
-    const height = dialogField("Image height (px)", "1000", "number");
+    const height = dialogField("H", "1000", "number", mainGroup);
     height.min = "1";
     height.max = "10000";
-    dialogSelect(
+    const unit = dialogSelect(
+      "Unit",
+      [
+        ["px", "pixel"],
+        ["in", "inch"],
+        ["mm", "mm"],
+        ["cm", "cm"],
+      ],
+      localStorage.getItem("cuemol.povUnit") || "px",
+      mainGroup,
+    );
+    const dpi = dialogSelect(
+      "DPI",
+      [72, 150, 300, 600].map((value) => [value, String(value)]),
+      Number(localStorage.getItem("cuemol.povDpi") || 600),
+      mainGroup,
+    );
+    const projection = dialogSelect(
       "Projection",
       [
-        ["perspective", "Perspective"],
-        ["orthographic", "Orthographic"],
+        ["perspec", "Perspective"],
+        ["ortho", "Orthographic"],
       ],
-      snapshot.perspective ? "perspective" : "orthographic",
+      localStorage.getItem("cuemol.povProjection") || "perspec",
+      mainGroup,
     );
-    dialogCheckbox("Clipping plane", true);
-    dialogCheckbox("Post-render alpha blending", true);
-    dialogCheckbox("Edge lines", true);
-    dialogCheckbox("Pix labels", false);
+    const stereo = dialogSelect(
+      "Stereo",
+      [
+        [0, "None"],
+        [1, "Right eye"],
+        [-1, "Left eye"],
+      ],
+      Number(localStorage.getItem("cuemol.povStereo") || 0),
+      mainGroup,
+    );
+    const stereoDepth = dialogField(
+      "Stereo depth",
+      localStorage.getItem("cuemol.povStereoDepth") || "0.03",
+      "number",
+      mainGroup,
+    );
+    stereoDepth.min = "0";
+    stereoDepth.max = "1";
+    stereoDepth.step = "0.01";
+    const threads = dialogField(
+      "CPU",
+      localStorage.getItem("cuemol.povThreads") || "2",
+      "number",
+      mainGroup,
+    );
+    threads.min = "1";
+    threads.max = "32";
+    const transparent = dialogCheckbox("Transp background", false, mainGroup);
+    const clipPlane = dialogCheckbox("Clipping plane", true, mainGroup);
+    const postBlend = dialogCheckbox(
+      "Post-render alpha blending",
+      true,
+      mainGroup,
+    );
+    const edgeLines = dialogCheckbox("Edge lines", true, mainGroup);
+    const pixelLabels = dialogCheckbox("Pix labels", false, mainGroup);
+
+    const optionsGroup = dialogGroup("POV-Ray options");
+    const executable = dialogField(
+      "Povray-exe-path",
+      localStorage.getItem("cuemol.povExecutable") || "povray",
+      "text",
+      optionsGroup,
+    );
+    const includeDir = dialogField(
+      "Povray-inc-path",
+      localStorage.getItem("cuemol.povIncludeDir") || "",
+      "text",
+      optionsGroup,
+    );
+    const radiosity = dialogSelect(
+      "Radiosity",
+      [
+        [-1, "Disable"],
+        [2, "Fast"],
+        [6, "OutdoorLQ"],
+        [7, "OutdoorHQ"],
+        [0, "Default"],
+        [1, "Debug"],
+        [3, "Normal"],
+        [4, "2Bounce"],
+        [5, "Final"],
+        [8, "OutdoorLight"],
+        [9, "IndoorLQ"],
+        [10, "IndoorHQ"],
+      ],
+      Number(localStorage.getItem("cuemol.povRadiosity") || -1),
+      optionsGroup,
+    );
+    const shadow = dialogCheckbox("Shadow", false, optionsGroup);
+    const defaultLighting = dialogCheckbox(
+      "Use default settings",
+      true,
+      optionsGroup,
+    );
+    const lightSpread = dialogField("Spread", "1", "number", optionsGroup);
+    lightSpread.min = "1";
+    lightSpread.max = "10";
+    const lightIntensity = dialogField("Intensity", "1.3", "number", optionsGroup);
+    lightIntensity.min = "0";
+    lightIntensity.max = "2";
+    lightIntensity.step = "0.1";
+    const flashFraction = dialogField(
+      "Flash fraction",
+      String(0.8 / 1.3),
+      "number",
+      optionsGroup,
+    );
+    flashFraction.min = "0";
+    flashFraction.max = "1";
+    flashFraction.step = "0.1";
+    const ambientFraction = dialogField(
+      "Ambient fraction",
+      "0",
+      "number",
+      optionsGroup,
+    );
+    ambientFraction.min = "0";
+    ambientFraction.max = "1";
+    ambientFraction.step = "0.1";
+    const syncLighting = () => {
+      const useDefaults = defaultLighting.checked;
+      for (const control of [
+        lightSpread,
+        lightIntensity,
+        flashFraction,
+        ambientFraction,
+      ]) control.disabled = useDefaults;
+      if (useDefaults) {
+        lightSpread.value = "1";
+        if (Number(radiosity.value) < 0) {
+          lightIntensity.value = "1.3";
+          flashFraction.value = String(0.8 / 1.3);
+          ambientFraction.value = "0";
+        } else {
+          lightIntensity.value = "1.6";
+          flashFraction.value = "0";
+          ambientFraction.value = "0.7";
+        }
+      }
+    };
+    defaultLighting.addEventListener("change", syncLighting);
+    radiosity.addEventListener("change", syncLighting);
+    syncLighting();
+
+    const resultGroup = dialogGroup("Result");
+    const progress = dialogParagraph("No rendered image.");
+    progress.className = "dialog-hint";
+    resultGroup.append(progress);
+    const preview = document.createElement("img");
+    preview.alt = "POV-Ray result";
+    preview.hidden = true;
+    preview.style.maxWidth = "100%";
+    preview.style.maxHeight = "360px";
+    preview.style.objectFit = "contain";
+    resultGroup.append(preview);
+
+    const controls = [
+      width,
+      height,
+      unit,
+      dpi,
+      projection,
+      stereo,
+      stereoDepth,
+      threads,
+      transparent,
+      clipPlane,
+      postBlend,
+      edgeLines,
+      pixelLabels,
+      executable,
+      includeDir,
+      radiosity,
+      shadow,
+      defaultLighting,
+      lightSpread,
+      lightIntensity,
+      flashFraction,
+      ambientFraction,
+    ];
+    let running = false;
+    let stopping = false;
+    let pollTimer = null;
+    let pollPending = false;
+    let renderedImage = "";
+    const headerClose = referenceDialog.querySelector('button[aria-label="Close"]');
+    const close = button("Close", "", () => referenceDialog.close());
     const savePov = button("Save POV scene…", "", async () => {
       const path = await chooseOutputPath("cuemol.pov", "POV-Ray scene", ["pov"]);
       if (!path) return;
       await mutateWithoutViewport("export_pov", { path }, renderStatusAndLog);
-      referenceDialog.close();
     });
-    const saveImage = button("Save image…", "dialog-primary", async () => {
-      const options = await showPngExportOptions(
-        Number(width.value),
-        Number(height.value),
-      );
-      if (!options) return;
+    const saveImage = button("Save image…", "", async () => {
       const path = await chooseOutputPath("cuemol.png", "PNG image", ["png"]);
       if (!path) return;
-      await mutateWithoutViewport(
-        "export_png",
-        {
-          path,
-          ...options,
-        },
-        renderStatusAndLog,
-      );
-      referenceDialog.close();
+      try {
+        await invoke("save_pov_render_image", { path });
+        progress.textContent = `Saved: ${path}`;
+      } catch (error) {
+        showError(error);
+      }
     });
-    dialogActions(savePov, saveImage);
+    saveImage.disabled = true;
+    const copyImage = button("Copy to clipboard", "", async () => {
+      try {
+        const blob = await (await fetch(renderedImage)).blob();
+        await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+        progress.textContent = "Copied rendered image to clipboard.";
+      } catch (error) {
+        showError(error);
+      }
+    });
+    copyImage.disabled = true;
+    const render = button("Render", "dialog-primary", async () => {
+      if (running) {
+        stopping = true;
+        render.disabled = true;
+        progress.textContent = "Stopping POV-Ray rendering...";
+        try {
+          await invoke("cancel_pov_render");
+        } catch (error) {
+          showError(error);
+        }
+        return;
+      }
+      const pixels = (value, selectedUnit, selectedDpi) => {
+        const numeric = Number(value);
+        if (selectedUnit === "in") return Math.round(numeric * selectedDpi);
+        if (selectedUnit === "mm") return Math.round((numeric / 25.4) * selectedDpi);
+        if (selectedUnit === "cm") return Math.round((numeric / 2.54) * selectedDpi);
+        return Math.round(numeric);
+      };
+      const widthPixels = pixels(width.value, unit.value, Number(dpi.value));
+      const heightPixels = pixels(height.value, unit.value, Number(dpi.value));
+      localStorage.setItem("cuemol.povExecutable", executable.value.trim());
+      localStorage.setItem("cuemol.povIncludeDir", includeDir.value.trim());
+      localStorage.setItem("cuemol.povUnit", unit.value);
+      localStorage.setItem("cuemol.povDpi", dpi.value);
+      localStorage.setItem("cuemol.povThreads", threads.value);
+      localStorage.setItem("cuemol.povProjection", projection.value);
+      localStorage.setItem("cuemol.povStereo", stereo.value);
+      localStorage.setItem("cuemol.povStereoDepth", stereoDepth.value);
+      localStorage.setItem("cuemol.povRadiosity", radiosity.value);
+      try {
+        const state = await invoke("start_pov_render", {
+          input: {
+            width: widthPixels,
+            height: heightPixels,
+            threads: Number(threads.value),
+            perspective: projection.value === "perspec",
+            stereo: Number(stereo.value),
+            stereoDepth: Number(stereoDepth.value),
+            transparent: transparent.checked,
+            clipPlane: clipPlane.checked,
+            postBlend: postBlend.checked,
+            edgeLines: edgeLines.checked,
+            pixelLabels: pixelLabels.checked,
+            executable: executable.value.trim(),
+            includeDir: includeDir.value.trim(),
+            radiosity: Number(radiosity.value),
+            shadow: shadow.checked,
+            defaultLighting: defaultLighting.checked,
+            lightSpread: Number(lightSpread.value),
+            lightIntensity: Number(lightIntensity.value),
+            flashFraction: Number(flashFraction.value),
+            ambientFraction: Number(ambientFraction.value),
+          },
+        });
+        if (state !== "running") throw new Error(`Unexpected POV-Ray state: ${state}`);
+        running = true;
+        stopping = false;
+        controls.forEach((control) => { control.disabled = true; });
+        close.disabled = true;
+        savePov.disabled = true;
+        saveImage.disabled = true;
+        copyImage.disabled = true;
+        if (headerClose) headerClose.disabled = true;
+        render.textContent = "Stop";
+        progress.textContent = "Rendering with POV-Ray...";
+        pollTimer = setInterval(poll, 150);
+      } catch (error) {
+        showError(error);
+      }
+    });
+    const finishPolling = () => {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      pollPending = false;
+      running = false;
+      controls.forEach((control) => { control.disabled = false; });
+      syncLighting();
+      close.disabled = false;
+      savePov.disabled = false;
+      if (headerClose) headerClose.disabled = false;
+      render.disabled = false;
+      render.textContent = "Render";
+    };
+    const poll = async () => {
+      if (!running || pollPending) return;
+      pollPending = true;
+      try {
+        const state = await invoke("poll_pov_render");
+        if (state === "running" || state === "stopping") return;
+        finishPolling();
+        if (state.startsWith("complete:")) {
+          renderedImage = state.slice("complete:".length);
+          preview.src = renderedImage;
+          preview.hidden = false;
+          saveImage.disabled = false;
+          copyImage.disabled = !navigator.clipboard?.write || !globalThis.ClipboardItem;
+          progress.textContent = "POV-Ray rendering complete.";
+          const completedSnapshot = await invoke("get_snapshot");
+          snapshot = completedSnapshot;
+          renderShell();
+        } else if (state.startsWith("error:")) {
+          const message = state.slice("error:".length);
+          progress.textContent = stopping ? "POV-Ray rendering stopped." : message;
+          if (!stopping) showError(message);
+          stopping = false;
+        }
+      } catch (error) {
+        finishPolling();
+        showError(error);
+      } finally {
+        pollPending = false;
+      }
+    };
+    const preventCloseWhileRunning = (event) => {
+      if (running) event.preventDefault();
+    };
+    referenceDialog.addEventListener("cancel", preventCloseWhileRunning);
+    referenceDialog.addEventListener(
+      "close",
+      () => {
+        clearInterval(pollTimer);
+        referenceDialog.removeEventListener("cancel", preventCloseWhileRunning);
+      },
+      { once: true },
+    );
+    dialogActions(savePov, saveImage, copyImage, close, render);
   } else if (title === "Animation rendering") {
     const scene = snapshot?.scenes.find((item) => item.active);
     dialogSelect(

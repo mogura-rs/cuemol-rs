@@ -1,10 +1,11 @@
 // AnimKind/AnimObject + the `anim_spin_direction` timeline stepper are shared via core
 // so both desktop front ends drive the animation timeline identically.
 use crate::{
-    anim_step, create_apbs_work_dir, run_apbs_process, run_pov_process_with_poll, AnimKind,
-    AnimObject, ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod,
-    GuiApbsOptions, GuiApbsPaths, GuiAtomLabel, GuiLoadedPath, GuiSequenceSummary, GuiStructObject,
-    PovProcessOptions, PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
+    anim_step, create_apbs_work_dir, create_pov_work_dir, run_apbs_process, run_pov_process,
+    run_pov_process_with_poll, AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask,
+    DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths, GuiAtomLabel,
+    GuiLoadedPath, GuiPovSceneOptions, GuiSequenceSummary, GuiStructObject, PovProcessOptions,
+    PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
     WorkspaceRendererClipboard, WorkspaceStyleClipboard,
 };
 use ab_glyph::{point, Font, FontRef, ScaleFont};
@@ -741,6 +742,61 @@ fn png_unit_to_pixels(value: f64, unit: NativePngUnit, dpi: u32) -> u32 {
 }
 
 #[derive(Debug, Clone)]
+struct NativePovRenderSettings {
+    width: u32,
+    height: u32,
+    unit: NativePngUnit,
+    dpi: u32,
+    threads: u32,
+    perspective: bool,
+    stereo: i32,
+    stereo_depth: f64,
+    transparent: bool,
+    clip_plane: bool,
+    post_blend: bool,
+    edge_lines: bool,
+    pixel_labels: bool,
+    executable: String,
+    include_dir: String,
+    radiosity: i32,
+    shadow: bool,
+    default_lighting: bool,
+    light_spread: u32,
+    light_intensity: f64,
+    flash_fraction: f64,
+    ambient_fraction: f64,
+}
+
+impl Default for NativePovRenderSettings {
+    fn default() -> Self {
+        Self {
+            width: 1_000,
+            height: 1_000,
+            unit: NativePngUnit::Pixel,
+            dpi: 600,
+            threads: 2,
+            perspective: true,
+            stereo: 0,
+            stereo_depth: 0.03,
+            transparent: false,
+            clip_plane: true,
+            post_blend: true,
+            edge_lines: true,
+            pixel_labels: false,
+            executable: "povray".to_string(),
+            include_dir: String::new(),
+            radiosity: -1,
+            shadow: false,
+            default_lighting: true,
+            light_spread: 1,
+            light_intensity: 1.3,
+            flash_fraction: 0.8 / 1.3,
+            ambient_fraction: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct NativePngExportDraft {
     path: PathBuf,
     width: u32,
@@ -1037,6 +1093,10 @@ struct GuiApplication {
     render_preset: String,
     render_backend: String,
     umbreon_denoise: UmbreonDenoiseMode,
+    pov_render_settings: NativePovRenderSettings,
+    pov_render_job: Option<NativePovRenderJob>,
+    pov_render_result: Option<NativePovRenderResult>,
+    pov_preview_texture: Option<AnimationPreviewTexture>,
     ribbon_tab: RibbonTab,
     interaction_mode: InteractionMode,
     measure_mode: MeasureMode,
@@ -1309,6 +1369,21 @@ struct NativeApbsJob {
     potential_name: String,
 }
 
+#[derive(Debug)]
+struct NativePovRenderJob {
+    receiver: mpsc::Receiver<std::result::Result<PovProcessOutput, String>>,
+    cancel: Arc<AtomicBool>,
+    work_dir: PathBuf,
+    labels: Vec<GuiAtomLabel>,
+}
+
+#[derive(Debug)]
+struct NativePovRenderResult {
+    work_dir: PathBuf,
+    image_path: PathBuf,
+    saved: bool,
+}
+
 struct AnimationPreviewTexture {
     path: PathBuf,
     texture: egui::TextureHandle,
@@ -1459,6 +1534,7 @@ enum NativeFileDialog {
     SaveView,
     SaveCamera,
     SaveStyle,
+    SaveRenderedImage,
     ExportScene,
     OpenScript,
     SaveLog,
@@ -3364,6 +3440,10 @@ impl GuiApplication {
             render_preset: RENDER_PRESETS[1].0.to_string(),
             render_backend: "POV-Ray".to_string(),
             umbreon_denoise: UmbreonDenoiseMode::default(),
+            pov_render_settings: NativePovRenderSettings::default(),
+            pov_render_job: None,
+            pov_render_result: None,
+            pov_preview_texture: None,
             ribbon_tab: RibbonTab::Home,
             interaction_mode: InteractionMode::Rotate,
             measure_mode: MeasureMode::Distance,
@@ -3518,6 +3598,7 @@ impl GuiApplication {
         self.poll_url_download(camera);
         self.poll_animation_render(camera);
         self.poll_apbs_calculation();
+        self.poll_pov_render();
         self.pixels_per_point = ctx.pixels_per_point();
         // UI theme (View menu): CueMol2's native XUL look is light by default.
         ctx.set_visuals(if self.light_theme {
@@ -3565,6 +3646,7 @@ impl GuiApplication {
             || self.url_download_receiver.is_some()
             || self.animation_render_job.is_some()
             || self.apbs_job.is_some()
+            || self.pov_render_job.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -4049,8 +4131,7 @@ impl GuiApplication {
                 });
                 ui.menu_button("Rendering", |ui| {
                     if ui.button("POV-Ray rendering...").clicked() {
-                        self.render_backend = "POV-Ray".to_string();
-                        self.tool_dialog = Some("POV-Ray rendering".to_string());
+                        self.open_pov_render_tool();
                         ui.close();
                     }
                     if ui.button("Animation rendering...").clicked() {
@@ -11141,48 +11222,509 @@ impl GuiApplication {
         Ok(())
     }
 
+    fn open_pov_render_tool(&mut self) {
+        self.render_backend = "POV-Ray".to_string();
+        if self.pov_render_result.is_none() && self.pov_render_job.is_none() {
+            if let Some(rect) = self.viewport_rect {
+                self.pov_render_settings.width = rect.width().round().max(1.0) as u32;
+                self.pov_render_settings.height = rect.height().round().max(1.0) as u32;
+                self.pov_render_settings.dpi = 72;
+                self.pov_render_settings.unit = NativePngUnit::Pixel;
+            }
+        }
+        self.tool_dialog = Some("POV-Ray rendering".to_string());
+    }
+
     fn render_tab(&mut self, ui: &mut egui::Ui, camera: &CameraController) {
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_label("Backend")
-                .selected_text(&self.render_backend)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.render_backend, "POV-Ray".to_string(), "POV-Ray");
-                    ui.selectable_value(&mut self.render_backend, "Umbreon".to_string(), "Umbreon");
+        let running = self.pov_render_job.is_some();
+        let scene_name = self
+            .state
+            .active_scene_summary()
+            .map_or_else(|| "(none)".to_string(), |scene| scene.name);
+        let view_name = self
+            .state
+            .active_view_summary()
+            .map_or_else(|| "(none)".to_string(), |view| view.name);
+        ui.label(format!("Target: {scene_name}:{view_name}"));
+        ui.add_enabled_ui(!running, |ui| {
+            ui.separator();
+            ui.strong("Main options");
+            egui::Grid::new("native_pov_main_options")
+                .num_columns(4)
+                .spacing([10.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("W:");
+                    let mut width = png_pixels_to_unit(
+                        self.pov_render_settings.width,
+                        self.pov_render_settings.unit,
+                        self.pov_render_settings.dpi,
+                    );
+                    if ui
+                        .add(egui::DragValue::new(&mut width).range(0.01..=100_000.0))
+                        .changed()
+                    {
+                        self.pov_render_settings.width = png_unit_to_pixels(
+                            width,
+                            self.pov_render_settings.unit,
+                            self.pov_render_settings.dpi,
+                        )
+                        .max(1);
+                    }
+                    ui.label("H:");
+                    let mut height = png_pixels_to_unit(
+                        self.pov_render_settings.height,
+                        self.pov_render_settings.unit,
+                        self.pov_render_settings.dpi,
+                    );
+                    if ui
+                        .add(egui::DragValue::new(&mut height).range(0.01..=100_000.0))
+                        .changed()
+                    {
+                        self.pov_render_settings.height = png_unit_to_pixels(
+                            height,
+                            self.pov_render_settings.unit,
+                            self.pov_render_settings.dpi,
+                        )
+                        .max(1);
+                    }
+                    ui.end_row();
+
+                    ui.label("Unit:");
+                    egui::ComboBox::from_id_salt("native_pov_unit")
+                        .selected_text(self.pov_render_settings.unit.label())
+                        .show_ui(ui, |ui| {
+                            for unit in NativePngUnit::ALL {
+                                ui.selectable_value(
+                                    &mut self.pov_render_settings.unit,
+                                    unit,
+                                    unit.label(),
+                                );
+                            }
+                        });
+                    ui.label("DPI:");
+                    egui::ComboBox::from_id_salt("native_pov_dpi")
+                        .selected_text(self.pov_render_settings.dpi.to_string())
+                        .show_ui(ui, |ui| {
+                            for dpi in [72, 150, 300, 600] {
+                                ui.selectable_value(
+                                    &mut self.pov_render_settings.dpi,
+                                    dpi,
+                                    dpi.to_string(),
+                                );
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("Projection:");
+                    egui::ComboBox::from_id_salt("native_pov_projection")
+                        .selected_text(if self.pov_render_settings.perspective {
+                            "Perspective"
+                        } else {
+                            "Orthographic"
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.pov_render_settings.perspective,
+                                true,
+                                "Perspective",
+                            );
+                            ui.selectable_value(
+                                &mut self.pov_render_settings.perspective,
+                                false,
+                                "Orthographic",
+                            );
+                        });
+                    ui.label("Stereo:");
+                    egui::ComboBox::from_id_salt("native_pov_stereo")
+                        .selected_text(match self.pov_render_settings.stereo {
+                            1 => "Right eye",
+                            -1 => "Left eye",
+                            _ => "None",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.pov_render_settings.stereo, 0, "None");
+                            ui.selectable_value(
+                                &mut self.pov_render_settings.stereo,
+                                1,
+                                "Right eye",
+                            );
+                            ui.selectable_value(
+                                &mut self.pov_render_settings.stereo,
+                                -1,
+                                "Left eye",
+                            );
+                        });
+                    ui.end_row();
+
+                    ui.label("Stereo depth:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.pov_render_settings.stereo_depth)
+                            .range(0.0..=1.0)
+                            .speed(0.01),
+                    );
+                    ui.label("CPU:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.pov_render_settings.threads).range(1..=32),
+                    );
+                    ui.end_row();
                 });
-            egui::ComboBox::from_label("Size")
-                .selected_text(&self.render_preset)
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(
+                    &mut self.pov_render_settings.transparent,
+                    "Transp background",
+                );
+                ui.checkbox(&mut self.pov_render_settings.clip_plane, "Clipping plane");
+                ui.checkbox(
+                    &mut self.pov_render_settings.post_blend,
+                    "Post-render alpha blending",
+                );
+                ui.checkbox(&mut self.pov_render_settings.edge_lines, "Edge lines");
+                ui.checkbox(&mut self.pov_render_settings.pixel_labels, "Pix labels");
+            });
+
+            ui.separator();
+            ui.strong("POV-Ray options");
+            ui.horizontal(|ui| {
+                ui.label("Povray-exe-path:");
+                ui.text_edit_singleline(&mut self.pov_render_settings.executable);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Povray-inc-path:");
+                ui.text_edit_singleline(&mut self.pov_render_settings.include_dir);
+            });
+            egui::ComboBox::from_label("Radiosity")
+                .selected_text(pov_radiosity_label(self.pov_render_settings.radiosity))
                 .show_ui(ui, |ui| {
-                    for (label, width, height) in RENDER_PRESETS {
+                    for (value, label) in POV_RADIOSITY_MODES {
                         ui.selectable_value(
-                            &mut self.render_preset,
-                            (*label).to_string(),
-                            format!("{label} ({width}x{height})"),
+                            &mut self.pov_render_settings.radiosity,
+                            *value,
+                            *label,
                         );
                     }
                 });
-            if ui.button("Settings").clicked() {
-                self.open_options_dialog();
-            }
-            if ui.button("Render").clicked() {
-                self.export_current_scene(camera);
-            }
-            if ui.button("Cancel").clicked() {
-                self.set_status("No render job is running");
-            }
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.pov_render_settings.shadow, "Shadow");
+                ui.checkbox(
+                    &mut self.pov_render_settings.default_lighting,
+                    "Use default settings",
+                );
+            });
+            ui.add_enabled_ui(!self.pov_render_settings.default_lighting, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Spread:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.pov_render_settings.light_spread)
+                            .range(1..=10),
+                    );
+                    ui.label("Intensity:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.pov_render_settings.light_intensity)
+                            .range(0.0..=2.0)
+                            .speed(0.1),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Flash fraction:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.pov_render_settings.flash_fraction)
+                            .range(0.0..=1.0)
+                            .speed(0.1),
+                    );
+                    ui.label("Ambient fraction:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.pov_render_settings.ambient_fraction)
+                            .range(0.0..=1.0)
+                            .speed(0.1),
+                    );
+                });
+            });
         });
+
+        ui.separator();
+        ui.strong("Result");
+        if running {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Rendering with POV-Ray...");
+            });
+        }
+        let preview_path = self
+            .pov_render_result
+            .as_ref()
+            .map(|result| result.image_path.clone());
+        if let Some(path) = preview_path {
+            if let Err(error) = self.load_pov_preview_texture(ui.ctx(), &path) {
+                ui.colored_label(egui::Color32::DARK_RED, error);
+            } else if let Some(preview) = &self.pov_preview_texture {
+                let max_size = egui::vec2(ui.available_width(), 360.0);
+                let scale = (max_size.x / preview.size.x)
+                    .min(max_size.y / preview.size.y)
+                    .clamp(0.01, 1.0);
+                ui.vertical_centered(|ui| {
+                    ui.add(egui::Image::new((
+                        preview.texture.id(),
+                        preview.size * scale,
+                    )));
+                });
+            }
+        } else if !running {
+            ui.weak("No rendered image.");
+        }
+
         ui.horizontal(|ui| {
-            ui.label("Output");
-            ui.text_edit_singleline(&mut self.export_path);
-            if self.render_backend == "Umbreon" {
-                egui::ComboBox::from_label("Denoise")
-                    .selected_text(self.umbreon_denoise.label())
-                    .show_ui(ui, |ui| {
-                        for mode in UmbreonDenoiseMode::ALL {
-                            ui.selectable_value(&mut self.umbreon_denoise, mode, mode.label());
-                        }
-                    });
+            if ui
+                .add_enabled(
+                    self.pov_render_result.is_some() && !running,
+                    egui::Button::new("Save image ..."),
+                )
+                .clicked()
+            {
+                self.save_pov_rendered_image();
+            }
+            if running {
+                if ui.button("Stop").clicked() {
+                    self.cancel_pov_render();
+                }
+            } else if ui
+                .add_enabled(
+                    !self.pov_render_settings.executable.trim().is_empty(),
+                    egui::Button::new("Render"),
+                )
+                .clicked()
+            {
+                self.start_pov_render(camera);
             }
         });
+    }
+
+    fn start_pov_render(&mut self, camera: &CameraController) {
+        if self.pov_render_job.is_some() {
+            return;
+        }
+        let settings = self.pov_render_settings.clone();
+        if settings.executable.trim().is_empty() {
+            self.set_status("POV-Ray executable is required");
+            return;
+        }
+        if !settings.include_dir.trim().is_empty()
+            && !Path::new(settings.include_dir.trim()).is_dir()
+        {
+            self.set_status("POV-Ray include directory does not exist");
+            return;
+        }
+        self.clear_pov_render_result();
+        let work_dir = match create_pov_work_dir() {
+            Ok(path) => path,
+            Err(error) => {
+                self.set_status(error);
+                return;
+            }
+        };
+        let pov_path = work_dir.join("render.pov");
+        let image_path = work_dir.join("render.png");
+        let qsys_camera = camera.to_qsys_camera("__pov_render");
+        let scene_options = GuiPovSceneOptions {
+            perspective: Some(settings.perspective),
+            use_clip_z: settings.clip_plane,
+            use_post_blend: settings.post_blend,
+            show_edge_lines: settings.edge_lines,
+            use_pixel_labels: settings.pixel_labels,
+        };
+        if let Err(error) = self.state.export_active_scene_pov_with_camera(
+            &pov_path,
+            &self.selection_text,
+            &qsys_camera,
+            scene_options,
+        ) {
+            let _ = fs::remove_dir_all(work_dir);
+            self.set_error(error);
+            return;
+        }
+        let (light_spread, light_intensity, flash_fraction, ambient_fraction) =
+            pov_lighting_values(&settings);
+        let task = PovProcessTask {
+            executable: settings.executable.clone(),
+            include_dir: settings.include_dir.clone(),
+            input_path: pov_path,
+            output_path: image_path,
+            options: PovProcessOptions {
+                width: settings.width.clamp(1, 10_000),
+                height: settings.height.clamp(1, 10_000),
+                threads: settings.threads,
+                stereo: settings.stereo,
+                stereo_depth: settings.stereo_depth,
+                perspective: settings.perspective,
+                transparent: settings.transparent,
+                shadow: settings.shadow,
+                light_spread,
+                light_intensity,
+                flash_fraction,
+                ambient_fraction,
+                radiosity: settings.radiosity,
+                verbose: true,
+            },
+        };
+        let label_settings = AnimationRenderSettings {
+            width: task.options.width,
+            height: task.options.height,
+            pov_labels: settings.pixel_labels,
+            ..AnimationRenderSettings::default()
+        };
+        let labels = animation_frame_labels(&self.state, &label_settings, &qsys_camera);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let (sender, receiver) = mpsc::channel();
+        let failure_work_dir = work_dir.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("cuemol-pov-render".to_string())
+            .spawn(move || {
+                let _ = sender.send(run_pov_process(task, worker_cancel));
+            })
+        {
+            let _ = fs::remove_dir_all(failure_work_dir);
+            self.set_status(format!("Failed to start POV-Ray worker: {error}"));
+            return;
+        }
+        self.state.put_config_value(
+            "cuemol2.ui.render.pov-exe-path",
+            settings.executable.trim().to_string(),
+        );
+        self.state.put_config_value(
+            "cuemol2.ui.render.pov-inc-path",
+            settings.include_dir.trim().to_string(),
+        );
+        let config_path = PathBuf::from(self.config_path.trim());
+        if config_path.is_absolute() {
+            let _ = self.state.save_config_file(config_path);
+        }
+        self.pov_render_job = Some(NativePovRenderJob {
+            receiver,
+            cancel,
+            work_dir,
+            labels,
+        });
+        self.set_status(format!(
+            "POV-Ray rendering started: {}x{}",
+            settings.width, settings.height
+        ));
+    }
+
+    fn cancel_pov_render(&mut self) {
+        if let Some(job) = &self.pov_render_job {
+            job.cancel.store(true, Ordering::Relaxed);
+            self.set_status("Stopping POV-Ray rendering...");
+        }
+    }
+
+    fn poll_pov_render(&mut self) {
+        let Some(job) = self.pov_render_job.take() else {
+            return;
+        };
+        match job.receiver.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => self.pov_render_job = Some(job),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let _ = fs::remove_dir_all(job.work_dir);
+                self.set_status("POV-Ray worker disconnected");
+            }
+            Ok(Err(error)) => {
+                let _ = fs::remove_dir_all(job.work_dir);
+                self.set_status(error);
+            }
+            Ok(Ok(output)) => {
+                if !job.labels.is_empty() {
+                    if let Err(error) = overlay_animation_labels(&output.output_path, &job.labels) {
+                        let _ = fs::remove_dir_all(job.work_dir);
+                        self.set_status(error);
+                        return;
+                    }
+                }
+                if !output.log.trim().is_empty() {
+                    self.log_lines.extend(
+                        output
+                            .log
+                            .lines()
+                            .filter(|line| !line.trim().is_empty())
+                            .map(|line| format!("POV-Ray> {line}")),
+                    );
+                }
+                self.pov_render_result = Some(NativePovRenderResult {
+                    work_dir: job.work_dir,
+                    image_path: output.output_path,
+                    saved: false,
+                });
+                self.pov_preview_texture = None;
+                self.set_status("POV-Ray rendering complete");
+            }
+        }
+    }
+
+    fn clear_pov_render_result(&mut self) {
+        if let Some(result) = self.pov_render_result.take() {
+            let _ = fs::remove_dir_all(result.work_dir);
+        }
+        self.pov_preview_texture = None;
+    }
+
+    fn save_pov_rendered_image(&mut self) {
+        let Some(source) = self
+            .pov_render_result
+            .as_ref()
+            .map(|result| result.image_path.clone())
+        else {
+            return;
+        };
+        let initial = self.state.active_scene_summary().map_or_else(
+            || "cuemol.png".to_string(),
+            |scene| format!("{}.png", scene.name),
+        );
+        let Some(path) = native_file_dialog(NativeFileDialog::SaveRenderedImage, &initial) else {
+            return;
+        };
+        let result = if path == source {
+            Ok(0)
+        } else {
+            fs::copy(&source, &path)
+        };
+        match result {
+            Ok(_) => {
+                if let Some(result) = &mut self.pov_render_result {
+                    result.saved = true;
+                }
+                self.set_status(format!("Saved rendered image {}", path.display()));
+            }
+            Err(error) => self.set_status(format!("Failed to save rendered image: {error}")),
+        }
+    }
+
+    fn load_pov_preview_texture(
+        &mut self,
+        ctx: &egui::Context,
+        path: &Path,
+    ) -> std::result::Result<(), String> {
+        if self
+            .pov_preview_texture
+            .as_ref()
+            .is_some_and(|preview| preview.path == path)
+        {
+            return Ok(());
+        }
+        let frame = image::open(path)
+            .map_err(|error| format!("Failed to decode POV-Ray image: {error}"))?
+            .to_rgba8();
+        let size = [frame.width() as usize, frame.height() as usize];
+        let image = egui::ColorImage::from_rgba_unmultiplied(size, frame.as_raw());
+        let texture = ctx.load_texture(
+            format!("pov-preview:{}", path.display()),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.pov_preview_texture = Some(AnimationPreviewTexture {
+            path: path.to_path_buf(),
+            texture,
+            size: egui::vec2(size[0] as f32, size[1] as f32),
+        });
+        Ok(())
     }
 
     fn choose_open_file(&mut self, camera: &mut CameraController) {
@@ -14063,6 +14605,14 @@ impl GuiApplication {
         let pdb2pqr_executable = self.state.config_value("cuemol2.ui.pdb2pqr-py-path");
         if !pdb2pqr_executable.trim().is_empty() {
             self.pdb2pqr_executable = pdb2pqr_executable;
+        }
+        let povray_executable = self.state.config_value("cuemol2.ui.render.pov-exe-path");
+        if !povray_executable.trim().is_empty() {
+            self.pov_render_settings.executable = povray_executable;
+        }
+        let povray_include_dir = self.state.config_value("cuemol2.ui.render.pov-inc-path");
+        if !povray_include_dir.trim().is_empty() {
+            self.pov_render_settings.include_dir = povray_include_dir;
         }
     }
 
@@ -18866,7 +19416,11 @@ impl GuiApplication {
                         ui.label(tool_status_text(&title));
                     }
                 }
-                let close_enabled = title != "APBS elepot calculation" || self.apbs_job.is_none();
+                let close_enabled = match title.as_str() {
+                    "APBS elepot calculation" => self.apbs_job.is_none(),
+                    "POV-Ray rendering" => self.pov_render_job.is_none(),
+                    _ => true,
+                };
                 if ui
                     .add_enabled(close_enabled, egui::Button::new("Close"))
                     .clicked()
@@ -18874,8 +19428,9 @@ impl GuiApplication {
                     close = true;
                 }
             });
-        let apbs_running = title == "APBS elepot calculation" && self.apbs_job.is_some();
-        if (!open || close) && !apbs_running {
+        let blocking_job = (title == "APBS elepot calculation" && self.apbs_job.is_some())
+            || (title == "POV-Ray rendering" && self.pov_render_job.is_some());
+        if (!open || close) && !blocking_job {
             if title == "Mol bond editor" {
                 self.bond_picker_target = None;
             }
@@ -24660,6 +25215,10 @@ const EXPORT_FILTERS: &[NativeFileFilter] = &[
         extensions: &["png"],
     },
 ];
+const RENDERED_IMAGE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "PNG image",
+    extensions: &["png"],
+}];
 const SCRIPT_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "Internal JavaScript",
     extensions: &["js"],
@@ -24771,6 +25330,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             title: "Save style to file",
             filters: STYLE_FILE_FILTERS,
             default_extension: Some("xml"),
+            save: true,
+        },
+        NativeFileDialog::SaveRenderedImage => NativeFileDialogSpec {
+            title: "Save rendered image",
+            filters: RENDERED_IMAGE_SAVE_FILTERS,
+            default_extension: Some("png"),
             save: true,
         },
         NativeFileDialog::ExportScene => NativeFileDialogSpec {
@@ -24970,6 +25535,29 @@ fn animation_movie_format_label(format: &str) -> &str {
         .iter()
         .find(|(value, _)| *value == format)
         .map_or(format, |(_, label)| *label)
+}
+
+fn pov_radiosity_label(value: i32) -> &'static str {
+    POV_RADIOSITY_MODES
+        .iter()
+        .find(|(mode, _)| *mode == value)
+        .map_or("Disable", |(_, label)| *label)
+}
+
+fn pov_lighting_values(settings: &NativePovRenderSettings) -> (u32, f64, f64, f64) {
+    if !settings.default_lighting {
+        return (
+            settings.light_spread,
+            settings.light_intensity,
+            settings.flash_fraction,
+            settings.ambient_fraction,
+        );
+    }
+    if settings.radiosity < 0 {
+        (1, 1.3, 0.8 / 1.3, 0.0)
+    } else {
+        (1, 1.6, 0.0, 0.7)
+    }
 }
 
 fn animation_movie_extension(format: &str) -> &'static str {
@@ -29714,6 +30302,45 @@ mod tests {
         assert_eq!(maps[0].class_name, "ElePotMap");
         assert_eq!(maps[0].renderers[0].renderer_type, "*unitcell");
         assert!(app.tool_dialog.is_none());
+        fs::remove_file(script).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_pov_tool_runs_cancellable_renderer_with_reference_options() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut app = GuiApplication::new();
+        let script =
+            std::env::temp_dir().join(format!("cuemol-native-pov-test-{}.sh", std::process::id()));
+        fs::write(
+            &script,
+            "#!/bin/sh\nout=''\nfor arg in \"$@\"; do\n  case \"$arg\" in +O*) out=${arg#\"+O\"};; esac\ndone\nprintf 'PNG' > \"$out\"\nprintf 'render complete\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        app.pov_render_settings.executable = script.to_string_lossy().into_owned();
+        app.pov_render_settings.width = 800;
+        app.pov_render_settings.height = 600;
+        app.pov_render_settings.stereo = 1;
+        app.pov_render_settings.radiosity = 7;
+        app.start_pov_render(&CameraController::default());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.pov_render_job.is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            app.poll_pov_render();
+        }
+        assert!(app.pov_render_job.is_none(), "{}", app.status);
+        let result = app.pov_render_result.as_ref().expect("rendered image");
+        assert_eq!(fs::read(&result.image_path).unwrap(), b"PNG");
+        assert!(app
+            .log_lines
+            .iter()
+            .any(|line| line.contains("POV-Ray> render complete")));
+        app.clear_pov_render_result();
         fs::remove_file(script).unwrap();
     }
 

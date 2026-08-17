@@ -16,10 +16,12 @@ use tauri::State;
 
 use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
-    anim_step, atoms_in_screen_rect, create_apbs_work_dir, pick_atom_screen, run_apbs_process,
-    AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod,
-    GuiApbsOptions, GuiApbsPaths, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
-    WorkspaceRendererClipboard, WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
+    anim_step, atoms_in_screen_rect, create_apbs_work_dir, create_pov_work_dir, pick_atom_screen,
+    run_apbs_process, run_pov_process, AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask,
+    DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths, GuiPovSceneOptions,
+    PovProcessOptions, PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard,
+    WorkspaceObjectClipboard, WorkspaceRendererClipboard, WorkspaceStyleClipboard,
+    MOLECULE_RENDERER_TYPES,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
@@ -1398,6 +1400,31 @@ struct ApbsCalculationInput {
     pdb2pqr_executable: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PovRenderInput {
+    width: u32,
+    height: u32,
+    threads: u32,
+    perspective: bool,
+    stereo: i32,
+    stereo_depth: f64,
+    transparent: bool,
+    clip_plane: bool,
+    post_blend: bool,
+    edge_lines: bool,
+    pixel_labels: bool,
+    executable: String,
+    include_dir: String,
+    radiosity: i32,
+    shadow: bool,
+    default_lighting: bool,
+    light_spread: u32,
+    light_intensity: f64,
+    flash_fraction: f64,
+    ambient_fraction: f64,
+}
+
 struct AppModel {
     desktop: DesktopAppState,
     config_path: Option<PathBuf>,
@@ -1435,6 +1462,8 @@ struct AppModel {
     undo_stack: Vec<AppModelUndoEntry>,
     redo_stack: Vec<AppModelUndoEntry>,
     apbs_job: Option<TauriApbsJob>,
+    pov_render_job: Option<TauriPovRenderJob>,
+    pov_render_result: Option<TauriPovRenderResult>,
     log_lines: Vec<String>,
     status: String,
 }
@@ -1443,6 +1472,17 @@ struct TauriApbsJob {
     receiver: mpsc::Receiver<Result<ApbsProcessOutput, String>>,
     cancel: Arc<AtomicBool>,
     potential_name: String,
+}
+
+struct TauriPovRenderJob {
+    receiver: mpsc::Receiver<Result<PovProcessOutput, String>>,
+    cancel: Arc<AtomicBool>,
+    work_dir: PathBuf,
+}
+
+struct TauriPovRenderResult {
+    work_dir: PathBuf,
+    image_path: PathBuf,
 }
 
 #[derive(Clone)]
@@ -1569,6 +1609,8 @@ impl AppModel {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             apbs_job: None,
+            pov_render_job: None,
+            pov_render_result: None,
             log_lines: Vec::new(),
             status,
         };
@@ -7112,6 +7154,12 @@ enum ModelRequest {
     ExportPov {
         path: String,
     },
+    StartPovRender(PovRenderInput),
+    PollPovRender,
+    CancelPovRender,
+    SavePovRenderImage {
+        path: String,
+    },
     RenderAnimation {
         output_dir: String,
         base_name: String,
@@ -10531,6 +10579,194 @@ fn handle_model_request(
             model.log_lines.push(format!("POV-Ray scene: {path}"));
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::StartPovRender(input) => {
+            if model.pov_render_job.is_some() {
+                return Err("a POV-Ray rendering job is already running".to_string());
+            }
+            if input.width == 0
+                || input.height == 0
+                || input.width > 10_000
+                || input.height > 10_000
+            {
+                return Err("POV-Ray image dimensions must be between 1 and 10000".to_string());
+            }
+            if input.executable.trim().is_empty() {
+                return Err("POV-Ray executable path is required".to_string());
+            }
+            if !input.include_dir.trim().is_empty() && !Path::new(&input.include_dir).is_dir() {
+                return Err("POV-Ray include directory does not exist".to_string());
+            }
+            if let Some(result) = model.pov_render_result.take() {
+                let _ = fs::remove_dir_all(result.work_dir);
+            }
+            let work_dir = create_pov_work_dir()?;
+            let input_path = work_dir.join("render.pov");
+            let output_path = work_dir.join("render.png");
+            let scene_options = GuiPovSceneOptions {
+                perspective: Some(input.perspective),
+                use_clip_z: input.clip_plane,
+                use_post_blend: input.post_blend,
+                show_edge_lines: input.edge_lines,
+                use_pixel_labels: input.pixel_labels,
+            };
+            if let Err(error) = model.desktop.export_active_scene_pov_with_camera(
+                &input_path,
+                &model.selection,
+                &model.camera,
+                scene_options,
+            ) {
+                let _ = fs::remove_dir_all(work_dir);
+                return Err(error.to_string());
+            }
+            let (light_spread, light_intensity, flash_fraction, ambient_fraction) =
+                if input.default_lighting {
+                    if input.radiosity < 0 {
+                        (1, 1.3, 0.8 / 1.3, 0.0)
+                    } else {
+                        (1, 1.6, 0.0, 0.7)
+                    }
+                } else {
+                    (
+                        input.light_spread,
+                        input.light_intensity,
+                        input.flash_fraction,
+                        input.ambient_fraction,
+                    )
+                };
+            let task = PovProcessTask {
+                executable: input.executable.clone(),
+                include_dir: input.include_dir.clone(),
+                input_path,
+                output_path,
+                options: PovProcessOptions {
+                    width: input.width,
+                    height: input.height,
+                    threads: input.threads,
+                    stereo: input.stereo,
+                    stereo_depth: input.stereo_depth,
+                    perspective: input.perspective,
+                    transparent: input.transparent,
+                    shadow: input.shadow,
+                    light_spread,
+                    light_intensity,
+                    flash_fraction,
+                    ambient_fraction,
+                    radiosity: input.radiosity,
+                    verbose: true,
+                },
+            };
+            let cancel = Arc::new(AtomicBool::new(false));
+            let worker_cancel = Arc::clone(&cancel);
+            let (sender, receiver) = mpsc::channel();
+            let failure_work_dir = work_dir.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name("cuemol-tauri-pov".to_string())
+                .spawn(move || {
+                    let _ = sender.send(run_pov_process(task, worker_cancel));
+                })
+            {
+                let _ = fs::remove_dir_all(failure_work_dir);
+                return Err(format!("failed to start POV-Ray worker: {error}"));
+            }
+            model.desktop.put_config_value(
+                "cuemol2.ui.render.pov-exe-path",
+                input.executable.trim().to_string(),
+            );
+            model.desktop.put_config_value(
+                "cuemol2.ui.render.pov-inc-path",
+                input.include_dir.trim().to_string(),
+            );
+            if let Err(error) = model.save_config() {
+                model.log_lines.push(format!("WARNING: {error}"));
+            }
+            model.pov_render_job = Some(TauriPovRenderJob {
+                receiver,
+                cancel,
+                work_dir,
+            });
+            model.status = format!(
+                "POV-Ray rendering started: {}x{}",
+                input.width, input.height
+            );
+            Ok(ModelResponse::Message("running".to_string()))
+        }
+        ModelRequest::PollPovRender => {
+            let Some(job) = model.pov_render_job.take() else {
+                return Ok(ModelResponse::Message("idle".to_string()));
+            };
+            match job.receiver.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => {
+                    model.pov_render_job = Some(job);
+                    Ok(ModelResponse::Message("running".to_string()))
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let _ = fs::remove_dir_all(job.work_dir);
+                    model.status = "POV-Ray worker disconnected".to_string();
+                    Ok(ModelResponse::Message(
+                        "error:POV-Ray worker disconnected".to_string(),
+                    ))
+                }
+                Ok(Err(error)) => {
+                    let _ = fs::remove_dir_all(job.work_dir);
+                    model.status = error.clone();
+                    Ok(ModelResponse::Message(format!("error:{error}")))
+                }
+                Ok(Ok(output)) => {
+                    let image = match fs::read(&output.output_path) {
+                        Ok(image) => image,
+                        Err(error) => {
+                            let _ = fs::remove_dir_all(job.work_dir);
+                            return Err(format!("failed to read POV-Ray result: {error}"));
+                        }
+                    };
+                    if !output.log.trim().is_empty() {
+                        model.log_lines.extend(
+                            output
+                                .log
+                                .lines()
+                                .filter(|line| !line.trim().is_empty())
+                                .map(|line| format!("POV-Ray> {line}")),
+                        );
+                    }
+                    let data_uri = format!("data:image/png;base64,{}", base64_encode(&image));
+                    model.pov_render_result = Some(TauriPovRenderResult {
+                        work_dir: job.work_dir,
+                        image_path: output.output_path,
+                    });
+                    model.status = "POV-Ray rendering complete".to_string();
+                    Ok(ModelResponse::Message(format!("complete:{data_uri}")))
+                }
+            }
+        }
+        ModelRequest::CancelPovRender => {
+            let running = if let Some(job) = &model.pov_render_job {
+                job.cancel.store(true, Ordering::Relaxed);
+                model.status = "Stopping POV-Ray rendering...".to_string();
+                true
+            } else {
+                false
+            };
+            Ok(ModelResponse::Message(if running {
+                "stopping".to_string()
+            } else {
+                "idle".to_string()
+            }))
+        }
+        ModelRequest::SavePovRenderImage { path } => {
+            if path.trim().is_empty() {
+                return Err("a POV-Ray image output path is required".to_string());
+            }
+            let result = model
+                .pov_render_result
+                .as_ref()
+                .ok_or_else(|| "no POV-Ray image is available".to_string())?;
+            if result.image_path != Path::new(&path) {
+                fs::copy(&result.image_path, &path)
+                    .map_err(|error| format!("failed to save rendered image: {error}"))?;
+            }
+            model.status = format!("Saved rendered image: {path}");
+            Ok(ModelResponse::Message("saved".to_string()))
+        }
         ModelRequest::RenderAnimation {
             output_dir,
             base_name,
@@ -13153,6 +13389,32 @@ fn export_pov(path: String, state: State<'_, ManagedState>) -> Result<AppSnapsho
 }
 
 #[tauri::command]
+fn start_pov_render(
+    input: PovRenderInput,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(&state, ModelRequest::StartPovRender(input))?)
+}
+
+#[tauri::command]
+fn poll_pov_render(state: State<'_, ManagedState>) -> Result<String, String> {
+    message_response(request_model(&state, ModelRequest::PollPovRender)?)
+}
+
+#[tauri::command]
+fn cancel_pov_render(state: State<'_, ManagedState>) -> Result<String, String> {
+    message_response(request_model(&state, ModelRequest::CancelPovRender)?)
+}
+
+#[tauri::command]
+fn save_pov_render_image(path: String, state: State<'_, ManagedState>) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::SavePovRenderImage { path },
+    )?)
+}
+
+#[tauri::command]
 fn render_animation(
     output_dir: String,
     base_name: String,
@@ -13596,6 +13858,10 @@ pub fn run() -> Result<(), tauri::Error> {
             clear_log,
             execute_script,
             export_pov,
+            start_pov_render,
+            poll_pov_render,
+            cancel_pov_render,
+            save_pov_render_image,
             render_animation,
             render_viewport,
             update_camera,
@@ -13698,6 +13964,8 @@ mod tests {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             apbs_job: None,
+            pov_render_job: None,
+            pov_render_result: None,
             log_lines: Vec::new(),
             status: "Ready".to_string(),
         }
@@ -19851,6 +20119,90 @@ mod tests {
         assert_eq!(map.class_name, "ElePotMap");
         assert_eq!(map.renderers[0].renderer_type, "*unitcell");
         assert!(model.apbs_job.is_none());
+        fs::remove_file(script).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pov_render_request_runs_previews_and_saves_image() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut model = model_without_gpu();
+        let script =
+            std::env::temp_dir().join(format!("cuemol-tauri-pov-test-{}.sh", std::process::id()));
+        let saved =
+            std::env::temp_dir().join(format!("cuemol-tauri-pov-test-{}.png", std::process::id()));
+        fs::write(
+            &script,
+            "#!/bin/sh\nout=''\nfor arg in \"$@\"; do\n  case \"$arg\" in +O*) out=${arg#\"+O\"};; esac\ndone\nprintf 'PNG' > \"$out\"\nprintf 'render complete\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::StartPovRender(PovRenderInput {
+                width: 800,
+                height: 600,
+                threads: 4,
+                perspective: true,
+                stereo: -1,
+                stereo_depth: 0.05,
+                transparent: true,
+                clip_plane: true,
+                post_blend: true,
+                edge_lines: true,
+                pixel_labels: false,
+                executable: script.to_string_lossy().into_owned(),
+                include_dir: String::new(),
+                radiosity: 7,
+                shadow: true,
+                default_lighting: true,
+                light_spread: 1,
+                light_intensity: 1.3,
+                flash_fraction: 0.8 / 1.3,
+                ambient_fraction: 0.0,
+            }),
+        )
+        .unwrap();
+        assert!(matches!(response, ModelResponse::Message(ref value) if value == "running"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let preview = loop {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let ModelResponse::Message(state) =
+                handle_model_request(&mut model, ModelRequest::PollPovRender).unwrap()
+            else {
+                panic!("expected POV-Ray job state");
+            };
+            if let Some(preview) = state.strip_prefix("complete:") {
+                break preview.to_string();
+            }
+            assert_eq!(state, "running");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "POV-Ray worker timed out"
+            );
+        };
+        assert_eq!(preview, "data:image/png;base64,UE5H");
+        assert!(model
+            .log_lines
+            .iter()
+            .any(|line| line.contains("POV-Ray> render complete")));
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::SavePovRenderImage {
+                path: saved.to_string_lossy().into_owned(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(response, ModelResponse::Message(ref value) if value == "saved"));
+        assert_eq!(fs::read(&saved).unwrap(), b"PNG");
+        if let Some(result) = model.pov_render_result.take() {
+            fs::remove_dir_all(result.work_dir).unwrap();
+        }
+        fs::remove_file(saved).unwrap();
         fs::remove_file(script).unwrap();
     }
 

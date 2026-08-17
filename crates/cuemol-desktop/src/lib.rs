@@ -21,7 +21,10 @@ pub(crate) use apbs_job::{
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 mod pov_job;
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-pub(crate) use pov_job::{run_pov_process_with_poll, PovProcessOptions, PovProcessTask};
+pub(crate) use pov_job::{
+    create_pov_work_dir, run_pov_process, run_pov_process_with_poll, PovProcessOptions,
+    PovProcessOutput, PovProcessTask,
+};
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 use std::collections::{BTreeMap, HashMap};

@@ -33,7 +33,7 @@ use cuemol_molvis::{
 };
 #[cfg(test)]
 use cuemol_molvis::{default_style_manager, disorder_lines_snapshot};
-use cuemol_qsys::{MultiGradient, ScalarObject, StyleManager, View};
+use cuemol_qsys::{Camera, MultiGradient, ScalarObject, StyleManager, View};
 #[cfg(any(feature = "offscreen", feature = "scripting"))]
 use cuemol_render::PngSceneExporter;
 use cuemol_render::{PovSceneExporter, RenderSceneSnapshot, UmbreonFrame, UmbreonSceneExporter};
@@ -1618,6 +1618,27 @@ pub struct GuiApbsPaths {
     pub pqr_path: PathBuf,
     pub input_path: PathBuf,
     pub dx_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuiPovSceneOptions {
+    pub perspective: Option<bool>,
+    pub use_clip_z: bool,
+    pub use_post_blend: bool,
+    pub show_edge_lines: bool,
+    pub use_pixel_labels: bool,
+}
+
+impl Default for GuiPovSceneOptions {
+    fn default() -> Self {
+        Self {
+            perspective: None,
+            use_clip_z: false,
+            use_post_blend: false,
+            show_edge_lines: true,
+            use_pixel_labels: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12531,11 +12552,35 @@ impl DesktopAppState {
         selection_text: &str,
     ) -> Result<usize> {
         let snapshot = self.active_render_snapshot(selection_text)?;
-        let mesh = cuemol_render::tessellate_snapshot(&snapshot);
         let camera = self
             .active_scene_saved_camera()
             .unwrap_or_else(|| auto_frame_camera(&snapshot));
+        self.export_active_scene_pov_with_camera(
+            path,
+            selection_text,
+            &camera,
+            GuiPovSceneOptions::default(),
+        )
+    }
+
+    pub fn export_active_scene_pov_with_camera(
+        &self,
+        path: impl AsRef<Path>,
+        selection_text: &str,
+        camera: &Camera,
+        options: GuiPovSceneOptions,
+    ) -> Result<usize> {
+        let snapshot = self.active_render_snapshot(selection_text)?;
+        let mesh = cuemol_render::tessellate_snapshot(&snapshot);
+        let mut camera = camera.clone();
+        if let Some(perspective) = options.perspective {
+            camera.set_perspective(perspective);
+        }
         let mut exporter = PovSceneExporter::new();
+        exporter.set_use_clip_z(options.use_clip_z);
+        exporter.set_use_post_blend(options.use_post_blend);
+        exporter.set_show_edge_lines(options.show_edge_lines);
+        exporter.set_use_pix_imgs(options.use_pixel_labels);
         exporter
             .handler_mut()
             .set_path(path.as_ref().to_string_lossy().into_owned());
@@ -63937,7 +63982,7 @@ attribute \"dep\" string \"positions\"
         let mut camera = cuemol_qsys::Camera::new();
         camera.set_name("__current");
         camera.set_cam_dist(123.0);
-        app.set_active_scene_camera(camera).unwrap();
+        app.set_active_scene_camera(camera.clone()).unwrap();
         app.save_active_scene_qsc_with_options(&linked_path, GuiSceneSaveOptions::default())
             .unwrap();
         assert_eq!(
@@ -64095,7 +64140,7 @@ attribute \"dep\" string \"positions\"
         camera.set_cam_dist(10.0);
         camera.set_zoom(20.0);
         camera.set_perspective(false);
-        app.set_active_scene_camera(camera).unwrap();
+        app.set_active_scene_camera(camera.clone()).unwrap();
         let exported_atoms = app.export_active_scene_pov(&pov_path, "name CA").unwrap();
         assert_eq!(exported_atoms, 0);
         let pov = std::fs::read_to_string(&pov_path).unwrap();
@@ -64103,6 +64148,24 @@ attribute \"dep\" string \"positions\"
         assert!(pov.contains("mesh2 {"));
         assert!(pov.contains("#declare _camera_pos = <1.000000,2.000000,13.000000>"));
         assert!(pov.contains("orthographic"));
+
+        app.export_active_scene_pov_with_camera(
+            &pov_path,
+            "name CA",
+            &camera,
+            GuiPovSceneOptions {
+                perspective: Some(true),
+                use_clip_z: true,
+                use_post_blend: true,
+                show_edge_lines: false,
+                use_pixel_labels: true,
+            },
+        )
+        .unwrap();
+        let configured_pov = std::fs::read_to_string(&pov_path).unwrap();
+        assert!(configured_pov.contains("#declare _perspective = 1;"));
+        assert!(configured_pov.contains("clipped_by { plane"));
+        assert!(!configured_pov.contains("edge lines"));
 
         let rows = app.active_sequence_summaries();
         assert_eq!(rows.len(), 1);

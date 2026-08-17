@@ -2,10 +2,20 @@ use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
+static NEXT_POV_JOB_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn create_pov_work_dir() -> Result<PathBuf, String> {
+    let serial = NEXT_POV_JOB_ID.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("cuemol-pov-{}-{serial}", std::process::id()));
+    fs::create_dir(&path)
+        .map_err(|error| format!("failed to create POV-Ray working directory: {error}"))?;
+    Ok(path)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PovProcessOptions {
@@ -109,7 +119,6 @@ pub(crate) fn povray_args(task: &PovProcessTask) -> Vec<String> {
     args
 }
 
-#[cfg(test)]
 pub(crate) fn run_pov_process(
     task: PovProcessTask,
     cancel: Arc<AtomicBool>,
