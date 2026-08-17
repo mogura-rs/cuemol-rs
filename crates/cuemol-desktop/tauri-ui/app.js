@@ -5728,6 +5728,26 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       dialogContent.append(
         dialogParagraph("Calculate electrostatic potential by APBS:"),
       );
+      const usedNames = new Set([
+        ...snapshot.objects,
+        ...snapshot.densityMaps,
+        ...snapshot.surfaces,
+        ...(snapshot.lwObjects || []),
+      ].map((item) => item.name));
+      const suggestedName = (uid) => {
+        const molecule = objects.find((item) => item.uid === Number(uid));
+        const base = `pot_${molecule?.name || "mol"}`;
+        if (!usedNames.has(base)) return base;
+        for (let index = 1; index < 10000; index += 1) {
+          const candidate = `${base}(${index})`;
+          if (!usedNames.has(candidate)) return candidate;
+        }
+        return base;
+      };
+      const apbsExecutable = dialogField(
+        "APBS exe path",
+        localStorage.getItem("cuemol.apbsExecutable") || "apbs",
+      );
       const objectOptions = objects.map((object) => [object.uid, object.name]);
       const object = dialogSelect(
         "Target molecule",
@@ -5740,30 +5760,182 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       useSelection.addEventListener("change", () => {
         selection.disabled = !useSelection.checked;
       });
-      const name = dialogField("Elepot name", "apbs");
-      dialogSelect(
-        "Charge calculation",
+      const name = dialogField("Elepot name", suggestedName(object.value));
+      object.addEventListener("change", () => {
+        name.value = suggestedName(object.value);
+      });
+      const chargeGroup = dialogGroup("Charge calculation method");
+      const chargeMethod = dialogSelect(
+        "Method",
         [
           ["pdb2pqr", "Use PDB2PQR"],
           ["internal", "Use internal method"],
         ],
-        "internal",
+        "pdb2pqr",
+        chargeGroup,
       );
-      dialogCheckbox("Use hydrogen atoms", true);
-      const write = button("Write input files", "dialog-primary", async () => {
-        const baseName = name.value.trim() || "apbs";
-        const inputPath = await chooseOutputPath(`${baseName}.in`, "APBS input", ["in"]);
-        if (!inputPath) return;
-        await mutate("write_apbs_files", {
-          objectUid: Number(object.value),
-          selection: useSelection.checked ? selection.value : "",
-          pqrPath: replaceFileExtension(inputPath, ".pqr"),
-          inputPath,
-          dxPath: replaceFileExtension(inputPath, ".dx"),
-        });
-        referenceDialog.close();
+      const pdb2pqrExecutable = dialogField(
+        "pdb2pqr.py path",
+        localStorage.getItem("cuemol.pdb2pqrExecutable") || "pdb2pqr",
+        "text",
+        chargeGroup,
+      );
+      const forceField = dialogSelect(
+        "Force field",
+        ["charmm", "amber", "tyl06", "peoepb", "swanson"].map((value) => [value, value]),
+        "charmm",
+        chargeGroup,
+      );
+      const useHydrogen = dialogCheckbox("Use hydrogen atoms", false, chargeGroup);
+      const optionsGroup = dialogGroup("APBS Options");
+      const useNpbe = dialogCheckbox("Solve non-linear PBE", false, optionsGroup);
+      const temperature = dialogField("Temperature (K)", "298.15", "number", optionsGroup);
+      temperature.min = "0.1";
+      temperature.step = "0.1";
+      const gridSpacing = dialogField("Max grid size (Å)", "1.0", "number", optionsGroup);
+      gridSpacing.min = "0.1";
+      gridSpacing.step = "0.1";
+      const waterDielectric = dialogField("Water dielectric", "78.54", "number", optionsGroup);
+      waterDielectric.min = "0.1";
+      waterDielectric.step = "0.1";
+      const proteinDielectric = dialogField("Protein dielectric", "2.0", "number", optionsGroup);
+      proteinDielectric.min = "0.1";
+      proteinDielectric.step = "0.1";
+      const progress = dialogParagraph("");
+      progress.className = "dialog-hint";
+      dialogContent.append(progress);
+      const controls = [
+        apbsExecutable,
+        object,
+        useSelection,
+        selection,
+        name,
+        chargeMethod,
+        pdb2pqrExecutable,
+        forceField,
+        useHydrogen,
+        useNpbe,
+        temperature,
+        gridSpacing,
+        waterDielectric,
+        proteinDielectric,
+      ];
+      const syncChargeMethod = () => {
+        const external = chargeMethod.value === "pdb2pqr";
+        pdb2pqrExecutable.disabled = !external;
+        forceField.disabled = !external;
+        useHydrogen.disabled = external;
+      };
+      chargeMethod.addEventListener("change", syncChargeMethod);
+      syncChargeMethod();
+      let running = false;
+      let stopping = false;
+      let pollTimer = null;
+      let pollPending = false;
+      const headerClose = referenceDialog.querySelector('button[aria-label="Close"]');
+      const close = button("Close", "", () => referenceDialog.close());
+      const startStop = button("Start", "dialog-primary", async () => {
+        if (running) {
+          stopping = true;
+          startStop.disabled = true;
+          progress.textContent = "Stopping APBS calculation...";
+          try {
+            await invoke("cancel_apbs_calculation");
+          } catch (error) {
+            showError(error);
+          }
+          return;
+        }
+        localStorage.setItem("cuemol.apbsExecutable", apbsExecutable.value.trim());
+        localStorage.setItem("cuemol.pdb2pqrExecutable", pdb2pqrExecutable.value.trim());
+        try {
+          const state = await invoke("start_apbs_calculation", {
+            input: {
+              objectUid: Number(object.value),
+              selection: useSelection.checked ? selection.value : "",
+              potentialName: name.value.trim(),
+              chargeMethod: chargeMethod.value,
+              forceField: forceField.value,
+              useHydrogen: useHydrogen.checked,
+              useNpbe: useNpbe.checked,
+              temperature: Number(temperature.value),
+              gridSpacing: Number(gridSpacing.value),
+              waterDielectric: Number(waterDielectric.value),
+              proteinDielectric: Number(proteinDielectric.value),
+              apbsExecutable: apbsExecutable.value.trim(),
+              pdb2pqrExecutable: pdb2pqrExecutable.value.trim(),
+            },
+          });
+          if (state !== "running") throw new Error(`Unexpected APBS state: ${state}`);
+          running = true;
+          stopping = false;
+          controls.forEach((control) => { control.disabled = true; });
+          close.disabled = true;
+          if (headerClose) headerClose.disabled = true;
+          startStop.textContent = "Stop";
+          progress.textContent = chargeMethod.value === "pdb2pqr"
+            ? "Running pdb2pqr..."
+            : "Running APBS...";
+          pollTimer = setInterval(poll, 150);
+        } catch (error) {
+          showError(error);
+        }
       });
-      dialogActions(write);
+      const finishPolling = () => {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        pollPending = false;
+        running = false;
+        controls.forEach((control) => { control.disabled = false; });
+        selection.disabled = !useSelection.checked;
+        syncChargeMethod();
+        close.disabled = false;
+        if (headerClose) headerClose.disabled = false;
+        startStop.disabled = false;
+        startStop.textContent = "Start";
+      };
+      const poll = async () => {
+        if (!running || pollPending) return;
+        pollPending = true;
+        try {
+          const state = await invoke("poll_apbs_calculation");
+          if (state === "running" || state === "stopping") return;
+          finishPolling();
+          if (state.startsWith("complete:")) {
+            const mapUid = Number(state.slice("complete:".length));
+            const completedSnapshot = await invoke("get_snapshot");
+            snapshot = completedSnapshot;
+            selectedObjectUid = mapUid;
+            selectedRendererUid = null;
+            workspaceSelectionKind = "density";
+            syncEmptyMoleculeDetails();
+            renderShell();
+            scheduleMoleculeDetailsRefresh();
+            void renderViewport();
+            referenceDialog.close();
+          } else if (state.startsWith("error:")) {
+            const message = state.slice("error:".length);
+            progress.textContent = stopping ? "APBS calculation stopped." : message;
+            if (!stopping) showError(message);
+            stopping = false;
+          }
+        } catch (error) {
+          finishPolling();
+          showError(error);
+        } finally {
+          pollPending = false;
+        }
+      };
+      const preventCloseWhileRunning = (event) => {
+        if (running) event.preventDefault();
+      };
+      const cleanup = () => {
+        clearInterval(pollTimer);
+        referenceDialog.removeEventListener("cancel", preventCloseWhileRunning);
+      };
+      referenceDialog.addEventListener("cancel", preventCloseWhileRunning);
+      referenceDialog.addEventListener("close", cleanup, { once: true });
+      dialogActions(close, startStop);
     }
   } else if (title === "Mol morphing animation") {
     dialogTitle.textContent = "Morph animation tool";

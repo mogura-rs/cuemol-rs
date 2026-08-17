@@ -3,7 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex, OnceLock,
+};
 
 use cuemol_core::{LDom2Node, Quat, Uid, Vector4};
 use cuemol_qsys::{Camera, CenterMark, StereoMode, View};
@@ -13,9 +16,10 @@ use tauri::State;
 
 use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
-    anim_step, atoms_in_screen_rect, pick_atom_screen, AnimKind, AnimObject, DesktopAppState,
-    WorkspaceCameraClipboard, WorkspaceObjectClipboard, WorkspaceRendererClipboard,
-    WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
+    anim_step, atoms_in_screen_rect, create_apbs_work_dir, pick_atom_screen, run_apbs_process,
+    AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod,
+    GuiApbsOptions, GuiApbsPaths, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
+    WorkspaceRendererClipboard, WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
@@ -1376,6 +1380,24 @@ struct PreferencesUpdateDto {
     status: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApbsCalculationInput {
+    object_uid: u64,
+    selection: String,
+    potential_name: String,
+    charge_method: String,
+    force_field: String,
+    use_hydrogen: bool,
+    use_npbe: bool,
+    temperature: f64,
+    grid_spacing: f64,
+    water_dielectric: f64,
+    protein_dielectric: f64,
+    apbs_executable: String,
+    pdb2pqr_executable: String,
+}
+
 struct AppModel {
     desktop: DesktopAppState,
     config_path: Option<PathBuf>,
@@ -1412,8 +1434,15 @@ struct AppModel {
     workspace_style_clipboard: Option<WorkspaceStyleClipboard>,
     undo_stack: Vec<AppModelUndoEntry>,
     redo_stack: Vec<AppModelUndoEntry>,
+    apbs_job: Option<TauriApbsJob>,
     log_lines: Vec<String>,
     status: String,
+}
+
+struct TauriApbsJob {
+    receiver: mpsc::Receiver<Result<ApbsProcessOutput, String>>,
+    cancel: Arc<AtomicBool>,
+    potential_name: String,
 }
 
 #[derive(Clone)]
@@ -1539,6 +1568,7 @@ impl AppModel {
             workspace_style_clipboard: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            apbs_job: None,
             log_lines: Vec::new(),
             status,
         };
@@ -7016,6 +7046,9 @@ enum ModelRequest {
         input_path: String,
         dx_path: String,
     },
+    StartApbsCalculation(ApbsCalculationInput),
+    PollApbsCalculation,
+    CancelApbsCalculation,
     AppendMorphFrame {
         target_object_uid: u64,
         source_object_uid: u64,
@@ -10063,6 +10096,138 @@ fn handle_model_request(
             model.status = format!("APBS files written for {} atom(s)", summary.atom_count);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::StartApbsCalculation(input) => {
+            if model.apbs_job.is_some() {
+                return Err("an APBS calculation is already running".to_string());
+            }
+            let charge_method = match input.charge_method.as_str() {
+                "pdb2pqr" => GuiApbsChargeMethod::Pdb2pqr,
+                "internal" => GuiApbsChargeMethod::Internal,
+                value => return Err(format!("unsupported APBS charge method: {value}")),
+            };
+            let object_uid = Uid::new(input.object_uid);
+            let potential_name = if input.potential_name.trim().is_empty() {
+                model
+                    .desktop
+                    .suggested_apbs_potential_name(object_uid)
+                    .map_err(|error| error.to_string())?
+            } else {
+                input.potential_name.trim().to_string()
+            };
+            let work_dir = create_apbs_work_dir()?;
+            let paths = GuiApbsPaths {
+                pdb_path: work_dir.join("apbs_tmp.pdb"),
+                pqr_path: work_dir.join("apbs_tmp.pqr"),
+                input_path: work_dir.join("apbs_tmp.in"),
+                dx_path: work_dir.join("apbs_pot.dx"),
+            };
+            let options = GuiApbsOptions {
+                charge_method,
+                use_hydrogen: input.use_hydrogen,
+                use_npbe: input.use_npbe,
+                temperature: input.temperature,
+                grid_spacing: input.grid_spacing,
+                solvent_dielectric: input.water_dielectric,
+                solute_dielectric: input.protein_dielectric,
+            };
+            let summary = match model.desktop.prepare_apbs_files(
+                object_uid,
+                &input.selection,
+                &options,
+                &paths,
+            ) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&work_dir);
+                    return Err(error.to_string());
+                }
+            };
+            let task = ApbsProcessTask {
+                apbs_executable: input.apbs_executable,
+                pdb2pqr_executable: input.pdb2pqr_executable,
+                force_field: input.force_field,
+                charge_method,
+                paths,
+                work_dir: work_dir.clone(),
+            };
+            let cancel = Arc::new(AtomicBool::new(false));
+            let worker_cancel = Arc::clone(&cancel);
+            let (sender, receiver) = mpsc::channel();
+            if let Err(error) = std::thread::Builder::new()
+                .name("cuemol-tauri-apbs".to_string())
+                .spawn(move || {
+                    let _ = sender.send(run_apbs_process(task, worker_cancel));
+                })
+            {
+                let _ = fs::remove_dir_all(work_dir);
+                return Err(format!("failed to start APBS worker: {error}"));
+            }
+            model.apbs_job = Some(TauriApbsJob {
+                receiver,
+                cancel,
+                potential_name,
+            });
+            model.status = format!(
+                "APBS calculation started for {} atom(s)",
+                summary.atom_count
+            );
+            Ok(ModelResponse::Message("running".to_string()))
+        }
+        ModelRequest::PollApbsCalculation => {
+            let Some(job) = model.apbs_job.take() else {
+                return Ok(ModelResponse::Message("idle".to_string()));
+            };
+            match job.receiver.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => {
+                    model.apbs_job = Some(job);
+                    Ok(ModelResponse::Message("running".to_string()))
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    model.status = "APBS worker disconnected".to_string();
+                    Ok(ModelResponse::Message(
+                        "error:APBS worker disconnected".to_string(),
+                    ))
+                }
+                Ok(Err(error)) => {
+                    model.status = error.clone();
+                    Ok(ModelResponse::Message(format!("error:{error}")))
+                }
+                Ok(Ok(output)) => {
+                    let undo = model.capture_undo();
+                    let result = model
+                        .desktop
+                        .open_apbs_potential_path(&output.dx_path, &job.potential_name);
+                    let _ = fs::remove_dir_all(output.work_dir);
+                    let map_uid = result.map_err(|error| error.to_string())?;
+                    if !output.log.trim().is_empty() {
+                        model
+                            .log_lines
+                            .extend(output.log.lines().map(|line| format!("APBS> {line}")));
+                    }
+                    model.status = format!("APBS calculation complete: {}", job.potential_name);
+                    model.invalidate_mesh(false);
+                    model.push_undo(undo);
+                    Ok(ModelResponse::Message(format!(
+                        "complete:{}",
+                        map_uid.get()
+                    )))
+                }
+            }
+        }
+        ModelRequest::CancelApbsCalculation => {
+            let running = if let Some(job) = &model.apbs_job {
+                job.cancel.store(true, Ordering::Relaxed);
+                model.status = "Stopping APBS calculation...".to_string();
+                true
+            } else {
+                false
+            };
+            Ok(ModelResponse::Message(if running {
+                "stopping".to_string()
+            } else {
+                "idle".to_string()
+            }))
+        }
         ModelRequest::AppendMorphFrame {
             target_object_uid,
             source_object_uid,
@@ -12734,6 +12899,27 @@ fn write_apbs_files(
 }
 
 #[tauri::command]
+fn start_apbs_calculation(
+    input: ApbsCalculationInput,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::StartApbsCalculation(input),
+    )?)
+}
+
+#[tauri::command]
+fn poll_apbs_calculation(state: State<'_, ManagedState>) -> Result<String, String> {
+    message_response(request_model(&state, ModelRequest::PollApbsCalculation)?)
+}
+
+#[tauri::command]
+fn cancel_apbs_calculation(state: State<'_, ManagedState>) -> Result<String, String> {
+    message_response(request_model(&state, ModelRequest::CancelApbsCalculation)?)
+}
+
+#[tauri::command]
 fn append_morph_frame(
     target_object_uid: u64,
     source_object_uid: u64,
@@ -13386,6 +13572,9 @@ pub fn run() -> Result<(), tauri::Error> {
             write_cut_surface,
             cut_surface,
             write_apbs_files,
+            start_apbs_calculation,
+            poll_apbs_calculation,
+            cancel_apbs_calculation,
             append_morph_frame,
             remove_morph_frame,
             apply_morph_frame,
@@ -13508,6 +13697,7 @@ mod tests {
             workspace_style_clipboard: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            apbs_job: None,
             log_lines: Vec::new(),
             status: "Ready".to_string(),
         }
@@ -19538,7 +19728,7 @@ mod tests {
             &mut model,
             ModelRequest::WriteApbsFiles {
                 object_uid: first,
-                selection: "aid 1".to_string(),
+                selection: "name CA".to_string(),
                 pqr_path: pqr_path.to_string_lossy().to_string(),
                 input_path: input_path.to_string_lossy().to_string(),
                 dx_path: dx_path.to_string_lossy().to_string(),
@@ -19584,6 +19774,84 @@ mod tests {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(output_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apbs_job_request_runs_and_loads_electrostatic_map() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      2  CB  ALA A   1       2.000   3.000   4.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("source", molecule);
+        let script =
+            std::env::temp_dir().join(format!("cuemol-tauri-apbs-test-{}.sh", std::process::id()));
+        fs::write(
+            &script,
+            "#!/bin/sh\nbase=$(awk '/write pot dx/{print $4}' \"$1\")\n\
+             printf 'object 1 class gridpositions counts 1 1 2\\norigin 0 0 0\\ndelta 1 0 0\\ndelta 0 1 0\\ndelta 0 0 1\\nobject 2 class gridconnections counts 1 1 2\\nobject 3 class array type double rank 0 items 2 data follows\\n-1 1\\n' > \"${base}.dx\"\nprintf 'complete\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::StartApbsCalculation(ApbsCalculationInput {
+                object_uid: object_uid.get(),
+                selection: String::new(),
+                potential_name: "pot_source".to_string(),
+                charge_method: "internal".to_string(),
+                force_field: "charmm".to_string(),
+                use_hydrogen: false,
+                use_npbe: false,
+                temperature: 298.15,
+                grid_spacing: 1.0,
+                water_dielectric: 78.54,
+                protein_dielectric: 2.0,
+                apbs_executable: script.to_string_lossy().into_owned(),
+                pdb2pqr_executable: String::new(),
+            }),
+        )
+        .unwrap();
+        assert!(matches!(response, ModelResponse::Message(ref value) if value == "running"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let completed = loop {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let response =
+                handle_model_request(&mut model, ModelRequest::PollApbsCalculation).unwrap();
+            let ModelResponse::Message(state) = response else {
+                panic!("expected APBS job state");
+            };
+            if let Some(uid) = state.strip_prefix("complete:") {
+                break uid.parse::<u64>().unwrap();
+            }
+            assert_eq!(state, "running");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "APBS worker timed out"
+            );
+        };
+        let map = model
+            .desktop
+            .density_map_summary(Uid::new(completed))
+            .unwrap();
+        assert_eq!(map.name, "pot_source");
+        assert_eq!(map.class_name, "ElePotMap");
+        assert_eq!(map.renderers[0].renderer_type, "*unitcell");
+        assert!(model.apbs_job.is_none());
+        fs::remove_file(script).unwrap();
     }
 
     #[test]

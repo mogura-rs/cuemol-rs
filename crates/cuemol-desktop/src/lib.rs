@@ -12,6 +12,13 @@
 pub use cuemol_desktop_core::*;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+mod apbs_job;
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+pub(crate) use apbs_job::{
+    create_apbs_work_dir, run_apbs_process, ApbsProcessOutput, ApbsProcessTask,
+};
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 use std::collections::{BTreeMap, HashMap};
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 use std::io::Read;

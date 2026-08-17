@@ -1,9 +1,10 @@
 // AnimKind/AnimObject + the `anim_spin_direction` timeline stepper are shared via core
 // so both desktop front ends drive the animation timeline identically.
 use crate::{
-    anim_step, AnimKind, AnimObject, DesktopAppState, GuiAtomLabel, GuiLoadedPath,
-    GuiSequenceSummary, GuiStructObject, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
-    WorkspaceRendererClipboard, WorkspaceStyleClipboard,
+    anim_step, create_apbs_work_dir, run_apbs_process, AnimKind, AnimObject, ApbsProcessOutput,
+    ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths,
+    GuiAtomLabel, GuiLoadedPath, GuiSequenceSummary, GuiStructObject, WorkspaceCameraClipboard,
+    WorkspaceObjectClipboard, WorkspaceRendererClipboard, WorkspaceStyleClipboard,
 };
 use ab_glyph::{point, Font, FontRef, ScaleFont};
 use cuemol_core::{parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Node, Result, Vector4};
@@ -1130,9 +1131,21 @@ struct GuiApplication {
     cut_surface_target: Option<cuemol_core::Uid>,
     cut_surface_mode: String,
     cut_surface_density: f64,
-    apbs_pqr_path: String,
-    apbs_input_path: String,
-    apbs_dx_path: String,
+    apbs_target: Option<cuemol_core::Uid>,
+    apbs_use_selection: bool,
+    apbs_selection: String,
+    apbs_name: String,
+    apbs_charge_method: GuiApbsChargeMethod,
+    apbs_force_field: String,
+    apbs_use_hydrogen: bool,
+    apbs_use_npbe: bool,
+    apbs_temperature: f64,
+    apbs_grid_spacing: f64,
+    apbs_water_dielectric: f64,
+    apbs_protein_dielectric: f64,
+    apbs_executable: String,
+    pdb2pqr_executable: String,
+    apbs_job: Option<NativeApbsJob>,
     morph_target: Option<cuemol_core::Uid>,
     morph_source: Option<cuemol_core::Uid>,
     morph_frame_name: String,
@@ -1286,6 +1299,13 @@ struct AnimationMovieTask {
     settings: AnimationRenderSettings,
     cancel: Arc<AtomicBool>,
     progress: Arc<AtomicU32>,
+}
+
+#[derive(Debug)]
+struct NativeApbsJob {
+    receiver: mpsc::Receiver<std::result::Result<ApbsProcessOutput, String>>,
+    cancel: Arc<AtomicBool>,
+    potential_name: String,
 }
 
 struct AnimationPreviewTexture {
@@ -3437,9 +3457,21 @@ impl GuiApplication {
             cut_surface_target: None,
             cut_surface_mode: "full".to_string(),
             cut_surface_density: 1.0,
-            apbs_pqr_path: "apbs.pqr".to_string(),
-            apbs_input_path: "apbs.in".to_string(),
-            apbs_dx_path: "apbs.dx".to_string(),
+            apbs_target: None,
+            apbs_use_selection: false,
+            apbs_selection: String::new(),
+            apbs_name: String::new(),
+            apbs_charge_method: GuiApbsChargeMethod::Pdb2pqr,
+            apbs_force_field: "charmm".to_string(),
+            apbs_use_hydrogen: false,
+            apbs_use_npbe: false,
+            apbs_temperature: 298.15,
+            apbs_grid_spacing: 1.0,
+            apbs_water_dielectric: 78.54,
+            apbs_protein_dielectric: 2.0,
+            apbs_executable: "apbs".to_string(),
+            pdb2pqr_executable: "pdb2pqr".to_string(),
+            apbs_job: None,
             morph_target: None,
             morph_source: None,
             morph_frame_name: "frame".to_string(),
@@ -3484,6 +3516,7 @@ impl GuiApplication {
         self.poll_pdb_download(camera);
         self.poll_url_download(camera);
         self.poll_animation_render(camera);
+        self.poll_apbs_calculation();
         self.pixels_per_point = ctx.pixels_per_point();
         // UI theme (View menu): CueMol2's native XUL look is light by default.
         ctx.set_visuals(if self.light_theme {
@@ -3530,6 +3563,7 @@ impl GuiApplication {
         if self.pdb_download_receiver.is_some()
             || self.url_download_receiver.is_some()
             || self.animation_render_job.is_some()
+            || self.apbs_job.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -4100,6 +4134,7 @@ impl GuiApplication {
                             match label {
                                 "Execute script..." => self.choose_execute_script(),
                                 "Mol surface generation..." => self.open_surface_generation_tool(),
+                                "APBS elepot calculation..." => self.open_apbs_tool(),
                                 "Performance measure" => {
                                     self.perf_measure = !self.perf_measure;
                                     self.set_status(format!(
@@ -12751,23 +12786,182 @@ impl GuiApplication {
         }
     }
 
-    fn write_apbs_files(&mut self) {
-        let Some(object_uid) = self.target_object_uid() else {
-            self.set_status("No object selected");
+    fn start_apbs_calculation(&mut self) {
+        if self.apbs_job.is_some() {
+            return;
+        }
+        let Some(object_uid) = self.apbs_target else {
+            self.set_status("No APBS target selected");
             return;
         };
-        match self.state.write_apbs_files(
-            object_uid,
-            &self.selection_text,
-            self.apbs_pqr_path.trim(),
-            self.apbs_input_path.trim(),
-            self.apbs_dx_path.trim(),
-        ) {
-            Ok(summary) => self.set_status(format!(
-                "APBS files written for {} atoms: {}, {}",
-                summary.atom_count, summary.pqr_path, summary.input_path
-            )),
-            Err(error) => self.set_error(error),
+        self.state.put_config_value(
+            "cuemol2.ui.apbs-exe-path",
+            self.apbs_executable.trim().to_string(),
+        );
+        self.state.put_config_value(
+            "cuemol2.ui.pdb2pqr-py-path",
+            self.pdb2pqr_executable.trim().to_string(),
+        );
+        let config_path = PathBuf::from(self.config_path.trim());
+        if config_path.is_absolute() {
+            let _ = self.state.save_config_file(config_path);
+        }
+        let potential_name = if self.apbs_name.trim().is_empty() {
+            match self.state.suggested_apbs_potential_name(object_uid) {
+                Ok(name) => name,
+                Err(error) => {
+                    self.set_error(error);
+                    return;
+                }
+            }
+        } else {
+            self.apbs_name.trim().to_string()
+        };
+        let work_dir = match create_apbs_work_dir() {
+            Ok(path) => path,
+            Err(error) => {
+                self.set_status(error);
+                return;
+            }
+        };
+        let paths = GuiApbsPaths {
+            pdb_path: work_dir.join("apbs_tmp.pdb"),
+            pqr_path: work_dir.join("apbs_tmp.pqr"),
+            input_path: work_dir.join("apbs_tmp.in"),
+            dx_path: work_dir.join("apbs_pot.dx"),
+        };
+        let selection = if self.apbs_use_selection {
+            self.apbs_selection.trim()
+        } else {
+            ""
+        };
+        let options = GuiApbsOptions {
+            charge_method: self.apbs_charge_method,
+            use_hydrogen: self.apbs_use_hydrogen,
+            use_npbe: self.apbs_use_npbe,
+            temperature: self.apbs_temperature,
+            grid_spacing: self.apbs_grid_spacing,
+            solvent_dielectric: self.apbs_water_dielectric,
+            solute_dielectric: self.apbs_protein_dielectric,
+        };
+        let summary = match self
+            .state
+            .prepare_apbs_files(object_uid, selection, &options, &paths)
+        {
+            Ok(summary) => summary,
+            Err(error) => {
+                let _ = fs::remove_dir_all(work_dir);
+                self.set_error(error);
+                return;
+            }
+        };
+        let task = ApbsProcessTask {
+            apbs_executable: self.apbs_executable.clone(),
+            pdb2pqr_executable: self.pdb2pqr_executable.clone(),
+            force_field: self.apbs_force_field.clone(),
+            charge_method: self.apbs_charge_method,
+            paths,
+            work_dir,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let (sender, receiver) = mpsc::channel();
+        let failure_work_dir = task.work_dir.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("cuemol-apbs".to_string())
+            .spawn(move || {
+                let _ = sender.send(run_apbs_process(task, worker_cancel));
+            })
+        {
+            let _ = fs::remove_dir_all(failure_work_dir);
+            self.set_status(format!("Failed to start APBS worker: {error}"));
+            return;
+        }
+        if self.apbs_use_selection && !selection.is_empty() {
+            self.selection_history.retain(|entry| entry != selection);
+            self.selection_history.insert(0, selection.to_string());
+        }
+        self.apbs_job = Some(NativeApbsJob {
+            receiver,
+            cancel,
+            potential_name,
+        });
+        self.set_status(format!(
+            "APBS calculation started for {} atom(s)",
+            summary.atom_count
+        ));
+    }
+
+    fn open_apbs_tool(&mut self) {
+        let objects = self.state.active_object_summaries();
+        self.apbs_target = self
+            .selected_object
+            .filter(|uid| objects.iter().any(|object| object.uid == *uid))
+            .or_else(|| objects.first().map(|object| object.uid));
+        if let Some(target) = self.apbs_target {
+            self.apbs_selection = self.selection_text.clone();
+            self.apbs_use_selection = !self.apbs_selection.trim().is_empty();
+            self.apbs_name = self
+                .state
+                .suggested_apbs_potential_name(target)
+                .unwrap_or_default();
+        }
+        self.tool_dialog = Some("APBS elepot calculation".to_string());
+    }
+
+    fn cancel_apbs_calculation(&mut self) {
+        if let Some(job) = &self.apbs_job {
+            job.cancel.store(true, Ordering::Relaxed);
+            self.set_status("Stopping APBS calculation...");
+        }
+    }
+
+    fn poll_apbs_calculation(&mut self) {
+        let Some(job) = self.apbs_job.take() else {
+            return;
+        };
+        match job.receiver.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => self.apbs_job = Some(job),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.set_status("APBS worker disconnected");
+            }
+            Ok(Err(error)) => self.set_status(error),
+            Ok(Ok(output)) => {
+                let undo = self.capture_undo();
+                let result = self
+                    .state
+                    .open_apbs_potential_path(&output.dx_path, &job.potential_name);
+                let _ = fs::remove_dir_all(&output.work_dir);
+                match result {
+                    Ok(map_uid) => {
+                        if !output.log.trim().is_empty() {
+                            self.log_lines
+                                .extend(output.log.lines().map(|line| format!("APBS> {line}")));
+                        }
+                        let scene_uid = self
+                            .state
+                            .density_map_summary(map_uid)
+                            .expect("APBS potential was just inserted")
+                            .scene_uid;
+                        self.push_undo_snapshot(undo);
+                        self.modified_scenes.insert(scene_uid);
+                        self.selected_object = None;
+                        self.selected_renderer = None;
+                        self.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
+                            scene_uid,
+                            map_uid,
+                            renderer_uid: None,
+                        });
+                        self.tool_dialog = None;
+                        self.rebuild_snapshot();
+                        self.set_status(format!(
+                            "APBS calculation complete: {}",
+                            job.potential_name
+                        ));
+                    }
+                    Err(error) => self.set_error(error),
+                }
+            }
         }
     }
 
@@ -13835,6 +14029,14 @@ impl GuiApplication {
         input.set_style(style);
         input.set_tbrad(tbrad);
         input.set_hitprec(hitprec);
+        let apbs_executable = self.state.config_value("cuemol2.ui.apbs-exe-path");
+        if !apbs_executable.trim().is_empty() {
+            self.apbs_executable = apbs_executable;
+        }
+        let pdb2pqr_executable = self.state.config_value("cuemol2.ui.pdb2pqr-py-path");
+        if !pdb2pqr_executable.trim().is_empty() {
+            self.pdb2pqr_executable = pdb2pqr_executable;
+        }
     }
 
     fn open_object_properties(&mut self, object_uid: cuemol_core::Uid) {
@@ -18637,11 +18839,16 @@ impl GuiApplication {
                         ui.label(tool_status_text(&title));
                     }
                 }
-                if ui.button("Close").clicked() {
+                let close_enabled = title != "APBS elepot calculation" || self.apbs_job.is_none();
+                if ui
+                    .add_enabled(close_enabled, egui::Button::new("Close"))
+                    .clicked()
+                {
                     close = true;
                 }
             });
-        if !open || close {
+        let apbs_running = title == "APBS elepot calculation" && self.apbs_job.is_some();
+        if (!open || close) && !apbs_running {
             if title == "Mol bond editor" {
                 self.bond_picker_target = None;
             }
@@ -19057,23 +19264,156 @@ impl GuiApplication {
     }
 
     fn apbs_tool_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("PQR");
-        ui.add_sized(
-            [ui.available_width(), 22.0],
-            egui::TextEdit::singleline(&mut self.apbs_pqr_path),
-        );
-        ui.label("Input");
-        ui.add_sized(
-            [ui.available_width(), 22.0],
-            egui::TextEdit::singleline(&mut self.apbs_input_path),
-        );
-        ui.label("DX output");
-        ui.add_sized(
-            [ui.available_width(), 22.0],
-            egui::TextEdit::singleline(&mut self.apbs_dx_path),
-        );
-        if ui.button("Write APBS Files").clicked() {
-            self.write_apbs_files();
+        ui.label("Calculate electrostatic potential by APBS:");
+        let objects = self.state.active_object_summaries();
+        if objects.is_empty() {
+            ui.weak("No molecular object is loaded.");
+            return;
+        }
+        if !objects
+            .iter()
+            .any(|object| Some(object.uid) == self.apbs_target)
+        {
+            self.apbs_target = self
+                .selected_object
+                .filter(|uid| objects.iter().any(|object| object.uid == *uid))
+                .or_else(|| objects.first().map(|object| object.uid));
+            if let Some(target) = self.apbs_target {
+                self.apbs_name = self
+                    .state
+                    .suggested_apbs_potential_name(target)
+                    .unwrap_or_default();
+            }
+        }
+        let running = self.apbs_job.is_some();
+        ui.add_enabled_ui(!running, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("APBS exe path:");
+                ui.text_edit_singleline(&mut self.apbs_executable);
+            });
+            let previous_target = self.apbs_target;
+            let selected_name = objects
+                .iter()
+                .find(|object| Some(object.uid) == self.apbs_target)
+                .map_or("(none)", |object| object.name.as_str());
+            egui::ComboBox::from_label("Target molecule:")
+                .selected_text(selected_name)
+                .show_ui(ui, |ui| {
+                    for object in &objects {
+                        ui.selectable_value(&mut self.apbs_target, Some(object.uid), &object.name);
+                    }
+                });
+            if self.apbs_target != previous_target {
+                if let Some(target) = self.apbs_target {
+                    self.apbs_selection = self
+                        .state
+                        .molecule_selection_text(target)
+                        .unwrap_or_default()
+                        .to_string();
+                    self.apbs_name = self
+                        .state
+                        .suggested_apbs_potential_name(target)
+                        .unwrap_or_default();
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.apbs_use_selection, "Selection:");
+                ui.add_enabled(
+                    self.apbs_use_selection,
+                    egui::TextEdit::singleline(&mut self.apbs_selection)
+                        .desired_width(ui.available_width()),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Elepot name:");
+                ui.text_edit_singleline(&mut self.apbs_name);
+            });
+            ui.separator();
+            ui.label("Charge calculation method");
+            ui.radio_value(
+                &mut self.apbs_charge_method,
+                GuiApbsChargeMethod::Pdb2pqr,
+                "Use PDB2PQR",
+            );
+            ui.add_enabled_ui(
+                self.apbs_charge_method == GuiApbsChargeMethod::Pdb2pqr,
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("pdb2pqr.py path:");
+                        ui.text_edit_singleline(&mut self.pdb2pqr_executable);
+                    });
+                    egui::ComboBox::from_label("Force field:")
+                        .selected_text(&self.apbs_force_field)
+                        .show_ui(ui, |ui| {
+                            for force_field in ["charmm", "amber", "tyl06", "peoepb", "swanson"] {
+                                ui.selectable_value(
+                                    &mut self.apbs_force_field,
+                                    force_field.to_string(),
+                                    force_field,
+                                );
+                            }
+                        });
+                },
+            );
+            ui.radio_value(
+                &mut self.apbs_charge_method,
+                GuiApbsChargeMethod::Internal,
+                "Use internal method",
+            );
+            ui.add_enabled(
+                self.apbs_charge_method == GuiApbsChargeMethod::Internal,
+                egui::Checkbox::new(&mut self.apbs_use_hydrogen, "Use hydrogen atoms"),
+            );
+            ui.separator();
+            ui.label("APBS Options");
+            ui.checkbox(&mut self.apbs_use_npbe, "Solve non-linear PBE");
+            ui.horizontal(|ui| {
+                ui.label("Temperature (K)");
+                ui.add(
+                    egui::DragValue::new(&mut self.apbs_temperature)
+                        .range(0.1..=1000.0)
+                        .speed(0.1),
+                );
+                ui.label("Max grid size (Å)");
+                ui.add(
+                    egui::DragValue::new(&mut self.apbs_grid_spacing)
+                        .range(0.1..=10.0)
+                        .speed(0.1),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Water dielectric");
+                ui.add(
+                    egui::DragValue::new(&mut self.apbs_water_dielectric)
+                        .range(0.1..=200.0)
+                        .speed(0.1),
+                );
+                ui.label("Protein dielectric");
+                ui.add(
+                    egui::DragValue::new(&mut self.apbs_protein_dielectric)
+                        .range(0.1..=200.0)
+                        .speed(0.1),
+                );
+            });
+        });
+        if running {
+            ui.spinner();
+            ui.label("Running APBS...");
+            if ui.button("Stop").clicked() {
+                self.cancel_apbs_calculation();
+            }
+        } else if ui
+            .add_enabled(
+                self.apbs_target.is_some()
+                    && !self.apbs_name.trim().is_empty()
+                    && !self.apbs_executable.trim().is_empty()
+                    && (self.apbs_charge_method == GuiApbsChargeMethod::Internal
+                        || !self.pdb2pqr_executable.trim().is_empty()),
+                egui::Button::new("Start"),
+            )
+            .clicked()
+        {
+            self.start_apbs_calculation();
         }
     }
 
@@ -29313,6 +29653,56 @@ mod tests {
             }) if surface_uid == surface.uid
         ));
         assert!(app.tool_dialog.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_apbs_tool_runs_and_loads_potential_object() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      2  CB  ALA A   1       2.000   3.000   4.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("source", molecule);
+        let script =
+            std::env::temp_dir().join(format!("cuemol-native-apbs-test-{}.sh", std::process::id()));
+        fs::write(
+            &script,
+            "#!/bin/sh\nbase=$(awk '/write pot dx/{print $4}' \"$1\")\n\
+             printf 'object 1 class gridpositions counts 1 1 2\\norigin 0 0 0\\ndelta 1 0 0\\ndelta 0 1 0\\ndelta 0 0 1\\nobject 2 class gridconnections counts 1 1 2\\nobject 3 class array type double rank 0 items 2 data follows\\n-1 1\\n' > \"${base}.dx\"\nprintf 'complete\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        app.apbs_target = Some(object_uid);
+        app.apbs_name = "pot_source".to_string();
+        app.apbs_charge_method = GuiApbsChargeMethod::Internal;
+        app.apbs_executable = script.to_string_lossy().into_owned();
+        app.start_apbs_calculation();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.apbs_job.is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            app.poll_apbs_calculation();
+        }
+        assert!(app.apbs_job.is_none());
+        let maps = app.state.active_density_map_summaries();
+        assert_eq!(maps.len(), 1, "{}", app.status);
+        assert_eq!(maps[0].name, "pot_source");
+        assert_eq!(maps[0].class_name, "ElePotMap");
+        assert_eq!(maps[0].renderers[0].renderer_type, "*unitcell");
+        assert!(app.tool_dialog.is_none());
+        fs::remove_file(script).unwrap();
     }
 
     #[test]

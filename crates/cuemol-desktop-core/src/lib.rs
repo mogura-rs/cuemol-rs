@@ -13,7 +13,6 @@ use cuemol_core::{
 use cuemol_importers::{PseFileReader, PseMeasurementKind, PseRepresentation};
 use cuemol_mdtools::{read_amber_prmtop_file, read_gro_file, read_psf_file};
 use cuemol_molanl::MolAnlManager;
-#[cfg(feature = "scripting")]
 use cuemol_molstr::write_pdb_string_with_selection;
 use cuemol_molstr::{
     parse_selector, read_mmcif_str, read_mol2_file, read_mol2_str, read_pdb_str,
@@ -38,7 +37,7 @@ use cuemol_qsys::{MultiGradient, ScalarObject, StyleManager, View};
 #[cfg(any(feature = "offscreen", feature = "scripting"))]
 use cuemol_render::PngSceneExporter;
 use cuemol_render::{PovSceneExporter, RenderSceneSnapshot, UmbreonFrame, UmbreonSceneExporter};
-use cuemol_surface::{ApbsInputConfig, MolSurfObj, PqrFileWriter, XyzrFileWriter};
+use cuemol_surface::{MolSurfObj, PqrFileWriter, XyzrFileWriter};
 use cuemol_xtal::{
     density_map_from_cif, read_mmcif_map_file, read_mtz_metadata_file, read_opendx_file,
     read_opendx_str, BrixMapReader, Ccp4MapReader, MapColorMode, MapMeshRenderer, MapSurfRenderer,
@@ -1580,6 +1579,45 @@ struct GuiDensityRenderer {
 pub struct GuiConfigEntry {
     pub key: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuiApbsChargeMethod {
+    Pdb2pqr,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuiApbsOptions {
+    pub charge_method: GuiApbsChargeMethod,
+    pub use_hydrogen: bool,
+    pub use_npbe: bool,
+    pub temperature: f64,
+    pub grid_spacing: f64,
+    pub solvent_dielectric: f64,
+    pub solute_dielectric: f64,
+}
+
+impl Default for GuiApbsOptions {
+    fn default() -> Self {
+        Self {
+            charge_method: GuiApbsChargeMethod::Pdb2pqr,
+            use_hydrogen: false,
+            use_npbe: false,
+            temperature: 298.15,
+            grid_spacing: 1.0,
+            solvent_dielectric: 78.54,
+            solute_dielectric: 2.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiApbsPaths {
+    pub pdb_path: PathBuf,
+    pub pqr_path: PathBuf,
+    pub input_path: PathBuf,
+    pub dx_path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13971,34 +14009,127 @@ impl DesktopAppState {
         input_path: impl AsRef<Path>,
         dx_path: impl AsRef<Path>,
     ) -> Result<GuiApbsSummary> {
+        let paths = GuiApbsPaths {
+            pdb_path: input_path.as_ref().with_extension("pdb"),
+            pqr_path: pqr_path.as_ref().to_path_buf(),
+            input_path: input_path.as_ref().to_path_buf(),
+            dx_path: dx_path.as_ref().to_path_buf(),
+        };
+        self.prepare_apbs_files(
+            object_uid,
+            selection_text,
+            &GuiApbsOptions {
+                charge_method: GuiApbsChargeMethod::Internal,
+                use_hydrogen: true,
+                ..GuiApbsOptions::default()
+            },
+            &paths,
+        )
+    }
+
+    pub fn prepare_apbs_files(
+        &self,
+        object_uid: Uid,
+        selection_text: &str,
+        options: &GuiApbsOptions,
+        paths: &GuiApbsPaths,
+    ) -> Result<GuiApbsSummary> {
+        validate_apbs_options(options)?;
         let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
         let object = self
             .scene_manager()
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        let mut writer = PqrFileWriter::new();
-        writer.set_selection(Some(selector.clone()));
-        writer.set_use_h(true);
-        fs::write(&pqr_path, writer.write_pqr_string(object.mol()))?;
+        match options.charge_method {
+            GuiApbsChargeMethod::Pdb2pqr => fs::write(
+                &paths.pdb_path,
+                write_pdb_string_with_selection(object.mol(), Some(&selector)),
+            )?,
+            GuiApbsChargeMethod::Internal => {
+                let mut writer = PqrFileWriter::new();
+                writer.set_selection(Some(selector.clone()));
+                writer.set_use_h(options.use_hydrogen);
+                fs::write(&paths.pqr_path, writer.write_pqr_string(object.mol()))?;
+            }
+        }
 
-        let (center, length) = selection_center_and_length(object.mol(), &selector)
-            .unwrap_or((cuemol_core::Vector4::ZERO, 60.0));
-        let mut config = ApbsInputConfig::new(
-            object.name(),
-            pqr_path.as_ref().to_string_lossy(),
-            dx_path.as_ref().to_string_lossy(),
+        let (min, max) = selection_bounds(object.mol(), &selector)
+            .ok_or_else(|| CueMolError::invalid_argument("no atoms selected for APBS"))?;
+        let dimensions = [max.x - min.x, max.y - min.y, max.z - min.z];
+        if dimensions.iter().all(|dimension| dimension.abs() < 1.0e-9) {
+            return Err(CueMolError::invalid_argument(
+                "the selected molecule has an empty bounding box",
+            ));
+        }
+        let coarse = dimensions.map(|dimension| dimension * 1.7);
+        let fine: [f64; 3] =
+            std::array::from_fn(|index| coarse[index].min(dimensions[index] + 20.0));
+        let grid =
+            fine.map(|length| 32 * (length / options.grid_spacing / 32.0).ceil() as usize + 1);
+        let has_dx_extension = paths
+            .dx_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("dx"));
+        let dx_base = if has_dx_extension {
+            paths.dx_path.with_extension("")
+        } else {
+            paths.dx_path.clone()
+        };
+        let equation = if options.use_npbe { "npbe" } else { "lpbe" };
+        let input = format!(
+            concat!(
+                "read\n",
+                "  mol pqr {}\n",
+                "end\n",
+                "elec\n",
+                "  mg-auto\n",
+                "  dime {} {} {}\n",
+                "  cglen {} {} {}\n",
+                "  fglen {} {} {}\n",
+                "  mol 1\n",
+                "  cgcent mol 1\n",
+                "  fgcent mol 1\n",
+                "  {}\n",
+                "  bcfl sdh\n",
+                "  pdie {}\n",
+                "  sdie {}\n",
+                "  temp {}\n",
+                "  chgm spl2\n",
+                "  srad 1.4\n",
+                "  swin 0.3\n",
+                "  sdens 10.0\n",
+                "  srfm smol\n",
+                "  calcenergy no\n",
+                "  calcforce no\n",
+                "  write pot dx {}\n",
+                "end\n",
+                "quit\n",
+            ),
+            paths.pqr_path.to_string_lossy(),
+            grid[0],
+            grid[1],
+            grid[2],
+            coarse[0],
+            coarse[1],
+            coarse[2],
+            fine[0],
+            fine[1],
+            fine[2],
+            equation,
+            options.solute_dielectric,
+            options.solvent_dielectric,
+            options.temperature,
+            dx_base.to_string_lossy(),
         );
-        config.center = center;
-        config.coarse_length = [length * 1.4, length * 1.4, length * 1.4];
-        config.fine_length = [length, length, length];
-        fs::write(&input_path, config.to_input_string())?;
+        fs::write(&paths.input_path, input)?;
 
         Ok(GuiApbsSummary {
             object_uid,
             atom_count: object.mol().atom_sel_count(&selector),
-            pqr_path: pqr_path.as_ref().to_string_lossy().to_string(),
-            input_path: input_path.as_ref().to_string_lossy().to_string(),
-            dx_path: dx_path.as_ref().to_string_lossy().to_string(),
+            pqr_path: paths.pqr_path.to_string_lossy().into_owned(),
+            input_path: paths.input_path.to_string_lossy().into_owned(),
+            dx_path: paths.dx_path.to_string_lossy().into_owned(),
         })
     }
 
@@ -14032,6 +14163,30 @@ impl DesktopAppState {
         renderer.name = "unitcell".to_string();
         map.modified = false;
         Ok(map_uid)
+    }
+
+    pub fn suggested_apbs_potential_name(&self, object_uid: Uid) -> Result<String> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .expect("the object was resolved from the scene manager");
+        let base = format!("pot_{}", object.name());
+        if !self.workspace_object_name_exists(scene_uid, &base) {
+            return Ok(base);
+        }
+        for serial in 1..10_000 {
+            let candidate = format!("{base}({serial})");
+            if !self.workspace_object_name_exists(scene_uid, &candidate) {
+                return Ok(candidate);
+            }
+        }
+        Err(CueMolError::invalid_argument(
+            "could not allocate an electrostatic-potential object name",
+        ))
     }
 
     pub fn append_morph_frame_from_object(
@@ -47945,10 +48100,10 @@ fn nonempty_selection(selection_text: &str) -> &str {
     }
 }
 
-fn selection_center_and_length(
+fn selection_bounds(
     molecule: &cuemol_molstr::MolCoord,
     selector: &Selector,
-) -> Option<(cuemol_core::Vector4, f64)> {
+) -> Option<(cuemol_core::Vector4, cuemol_core::Vector4)> {
     let mut iter = molecule
         .atoms()
         .iter()
@@ -47965,9 +48120,23 @@ fn selection_center_and_length(
         max.y = max.y.max(pos.y);
         max.z = max.z.max(pos.z);
     }
-    let center = (min + max).scale(0.5);
-    let span = (max - min).length3d().max(20.0);
-    Some((center, span + 20.0))
+    Some((min, max))
+}
+
+fn validate_apbs_options(options: &GuiApbsOptions) -> Result<()> {
+    for (name, value) in [
+        ("temperature", options.temperature),
+        ("grid spacing", options.grid_spacing),
+        ("solvent dielectric", options.solvent_dielectric),
+        ("solute dielectric", options.solute_dielectric),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(CueMolError::invalid_argument(format!(
+                "APBS {name} must be positive and finite"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn density_map_summary(
@@ -64445,6 +64614,37 @@ attribute \"dep\" string \"positions\"
             .unwrap()
             .contains("write pot dx"));
 
+        let prepared = GuiApbsPaths {
+            pdb_path: dir.join("pdb2pqr-input.pdb"),
+            pqr_path: dir.join("pdb2pqr-output.pqr"),
+            input_path: dir.join("pdb2pqr-apbs.in"),
+            dx_path: dir.join("pdb2pqr-result.dx"),
+        };
+        app.prepare_apbs_files(
+            first,
+            "name CA",
+            &GuiApbsOptions {
+                use_npbe: true,
+                temperature: 300.0,
+                grid_spacing: 0.5,
+                solvent_dielectric: 80.0,
+                solute_dielectric: 4.0,
+                ..GuiApbsOptions::default()
+            },
+            &prepared,
+        )
+        .unwrap();
+        assert!(std::fs::read_to_string(&prepared.pdb_path)
+            .unwrap()
+            .contains("ATOM"));
+        assert!(!prepared.pqr_path.exists());
+        let prepared_input = std::fs::read_to_string(&prepared.input_path).unwrap();
+        assert!(prepared_input.contains("  npbe\n"));
+        assert!(prepared_input.contains("  pdie 4\n"));
+        assert!(prepared_input.contains("  sdie 80\n"));
+        assert!(prepared_input.contains("  temp 300\n"));
+        assert!(prepared_input.contains("  write pot dx"));
+
         let morph = app
             .append_morph_frame_from_object(first, first, "start")
             .unwrap();
@@ -64461,7 +64661,14 @@ attribute \"dep\" string \"positions\"
         assert_eq!(app.morph_frame_value(first), Some(0.5));
         assert_eq!(app.remove_morph_frame(first, 1).unwrap().frame_count, 1);
 
-        for path in [surface_path, cut_path, pqr_path, input_path] {
+        for path in [
+            surface_path,
+            cut_path,
+            pqr_path,
+            input_path,
+            prepared.pdb_path,
+            prepared.input_path,
+        ] {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(dir);
