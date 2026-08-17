@@ -70,7 +70,6 @@ const animationTime = document.getElementById("animation-time");
 const animationDuration = document.getElementById("animation-duration");
 const animationStartCamera = document.getElementById("animation-start-camera");
 const animationList = document.getElementById("animation-list");
-const animationKind = document.getElementById("animation-kind");
 const animationAdd = document.getElementById("animation-add");
 const animationDelete = document.getElementById("animation-delete");
 const animationChange = document.getElementById("animation-change");
@@ -14034,7 +14033,7 @@ function newAnimationObjectDraft(kind, index) {
   return object;
 }
 
-async function addAnimationObject(kind = animationKind.value) {
+async function addAnimationObject(kind = "simple-spin") {
   const insertionIndex = selectedAnimationIndex === null
     ? snapshot.animationObjects.length
     : selectedAnimationIndex + 1;
@@ -15573,7 +15572,12 @@ animationSlider.addEventListener("change", () => {
   mutate("seek_animation", { elapsed: Number(animationSlider.value) });
 });
 
-animationAdd.addEventListener("click", () => addAnimationObject());
+animationAdd.addEventListener("click", (event) => {
+  showWorkspaceContextMenu(event, animationAddKinds.map(([label, kind]) => ({
+    label,
+    action: () => addAnimationObject(kind),
+  })));
+});
 
 animationDelete.addEventListener("click", deleteSelectedAnimationObjects);
 

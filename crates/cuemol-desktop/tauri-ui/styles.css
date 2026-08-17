@@ -1413,7 +1413,7 @@ summary:focus-visible {
 
 .animation-tools {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) repeat(5, 25px);
+  grid-template-columns: repeat(5, 25px);
   gap: 3px;
   margin-top: 5px;
 }

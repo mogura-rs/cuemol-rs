@@ -998,6 +998,11 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(JS.contains("button(\"Reset all to default\""));
     assert!(JS.contains("function defaultAnimationObjectProperties(object)"));
     assert!(JS.contains("function newAnimationObjectDraft(kind, index)"));
+    assert!(HTML.contains("id=\"animation-add\""));
+    assert!(HTML.contains("aria-haspopup=\"menu\""));
+    assert!(!HTML.contains("id=\"animation-kind\""));
+    assert!(!JS.contains("const animationKind"));
+    assert!(JS.contains("showWorkspaceContextMenu(event, animationAddKinds.map"));
     assert!(JS.contains("pendingAnimationAdd = {"));
     assert!(JS.contains("await showReferenceDialog(\"Animation object properties\")"));
     assert!(JS.contains("optional.reset(defaults)"));
