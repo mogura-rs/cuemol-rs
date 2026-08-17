@@ -726,7 +726,7 @@ function showBottomPanel(name) {
   document.querySelectorAll("[data-bottom-panel]").forEach((panel) => {
     panel.classList.toggle("active", panel.dataset.bottomPanel === name);
   });
-  setBottomPanelHeight(bottomPanelHeight);
+  setBottomPanelHeight(bottomPanelHeight === 0 ? expandedBottomPanelHeight : bottomPanelHeight);
   if (name === "sequence") {
     renderSequence();
     scheduleMoleculeDetailsRefresh(0);
