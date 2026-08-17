@@ -8175,7 +8175,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     } else {
       const selection = dialogField("Selection", snapshot.selection);
       const chainName = dialogField("New chain ID", "A");
-      const apply = button("Apply", "dialog-primary", async () => {
+      const apply = button("OK", "dialog-primary", async () => {
         await mutate("change_chain", {
           objectUid: object.uid,
           selection: selection.value,
@@ -8186,17 +8186,53 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       dialogActions(apply);
     }
   } else if (title === "Change residue number") {
-    const object = selectedObject();
-    if (!object) {
+    dialogTitle.textContent = "Change residue index";
+    const objects = activeObjects();
+    if (objects.length === 0) {
       dialogContent.append(dialogParagraph("Select a molecular object first."));
     } else {
+      const object = dialogSelect(
+        "Molecule",
+        objects.map((candidate) => [candidate.uid, candidate.name]),
+        selectedObjectUid ?? objects[0].uid,
+      );
       const selection = dialogField("Selection", snapshot.selection);
-      const start = dialogField("Start residue number", "1", "number");
-      const apply = button("Apply", "dialog-primary", async () => {
+      const modeField = (label, checked, initialValue) => {
+        const wrapper = document.createElement("label");
+        wrapper.className = "dialog-field";
+        const caption = document.createElement("span");
+        const mode = document.createElement("input");
+        mode.type = "radio";
+        mode.name = "residue-index-mode";
+        mode.checked = checked;
+        caption.append(mode, document.createTextNode(label));
+        const input = document.createElement("input");
+        input.type = "number";
+        input.value = initialValue;
+        wrapper.append(caption, input);
+        dialogContent.append(wrapper);
+        return { mode, input };
+      };
+      const shift = modeField("Shift by:", true, "1");
+      const start = modeField("Start from:", false, "1");
+      const renumber = dialogCheckbox("Renumber", false);
+      const syncMode = () => {
+        shift.input.disabled = !shift.mode.checked;
+        start.input.disabled = !start.mode.checked;
+      };
+      shift.mode.addEventListener("change", syncMode);
+      start.mode.addEventListener("change", syncMode);
+      syncMode();
+      const apply = button("OK", "dialog-primary", async () => {
+        const shiftMode = shift.mode.checked;
+        const value = Number(shiftMode ? shift.input.value : start.input.value);
+        if (!Number.isInteger(value) || (shiftMode && value === 0)) return;
         await mutate("renumber_residues", {
-          objectUid: object.uid,
+          objectUid: Number(object.value),
           selection: selection.value,
-          start: Number(start.value),
+          shiftMode,
+          value,
+          renumber: renumber.checked,
         });
         referenceDialog.close();
       });

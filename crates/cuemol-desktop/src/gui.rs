@@ -1310,7 +1310,11 @@ struct GuiApplication {
     new_renderer_recenter: bool,
     new_renderer_density_move_view: bool,
     chain_edit_value: String,
+    residue_object: Option<cuemol_core::Uid>,
+    residue_shift_mode: bool,
+    residue_shift_value: String,
     residue_start_value: String,
+    residue_renumber: bool,
     tool_dialog: Option<String>,
     show_get_pdb: bool,
     show_console: bool,
@@ -4914,7 +4918,11 @@ impl GuiApplication {
             new_renderer_recenter: true,
             new_renderer_density_move_view: false,
             chain_edit_value: "A".to_string(),
+            residue_object: None,
+            residue_shift_mode: true,
+            residue_shift_value: "1".to_string(),
             residue_start_value: "1".to_string(),
+            residue_renumber: false,
             tool_dialog: None,
             show_get_pdb: false,
             show_console: false,
@@ -5617,6 +5625,7 @@ impl GuiApplication {
                         ui.close();
                     }
                     if ui.button("Change residue number...").clicked() {
+                        self.residue_object = self.selected_object;
                         self.show_residue_dialog = true;
                         ui.close();
                     }
@@ -25872,18 +25881,60 @@ impl GuiApplication {
         if !self.show_residue_dialog {
             return;
         }
+        let objects = self.state.active_object_summaries();
+        if self
+            .residue_object
+            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
+        {
+            self.residue_object = objects.first().map(|object| object.uid);
+        }
         let mut open = self.show_residue_dialog;
         let mut apply = false;
-        egui::Window::new("Change Residue Number")
+        egui::Window::new("Change residue index")
             .open(&mut open)
             .collapsible(false)
             .show(ctx, |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 22.0],
-                    egui::TextEdit::singleline(&mut self.residue_start_value),
-                );
+                egui::Grid::new("change-residue-index-fields")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Molecule:");
+                        egui::ComboBox::from_id_salt("change-residue-index-molecule")
+                            .selected_text(object_combo_label(&objects, self.residue_object))
+                            .show_ui(ui, |ui| {
+                                for object in &objects {
+                                    ui.selectable_value(
+                                        &mut self.residue_object,
+                                        Some(object.uid),
+                                        object.name.as_str(),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Selection:");
+                        ui.add_sized(
+                            [240.0, 22.0],
+                            egui::TextEdit::singleline(&mut self.selection_text),
+                        );
+                        ui.end_row();
+                        ui.radio_value(&mut self.residue_shift_mode, true, "Shift by:");
+                        ui.add_enabled(
+                            self.residue_shift_mode,
+                            egui::TextEdit::singleline(&mut self.residue_shift_value)
+                                .desired_width(100.0),
+                        );
+                        ui.end_row();
+                        ui.radio_value(&mut self.residue_shift_mode, false, "Start from:");
+                        ui.add_enabled(
+                            !self.residue_shift_mode,
+                            egui::TextEdit::singleline(&mut self.residue_start_value)
+                                .desired_width(100.0),
+                        );
+                        ui.end_row();
+                    });
+                ui.checkbox(&mut self.residue_renumber, "Renumber");
                 ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
+                    if ui.button("OK").clicked() {
                         apply = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -30573,29 +30624,53 @@ impl GuiApplication {
         if !self.require_selection_for_edit() {
             return;
         }
-        let Some(object_uid) = self.target_object_uid() else {
+        let Some(object_uid) = self
+            .residue_object
+            .filter(|uid| self.state.scene_manager().object(*uid).is_some())
+            .or_else(|| self.target_object_uid())
+        else {
             self.set_status("No object selected");
             return;
         };
-        let start = match self.residue_start_value.trim().parse::<i32>() {
+        let value_text = if self.residue_shift_mode {
+            &self.residue_shift_value
+        } else {
+            &self.residue_start_value
+        };
+        let value = match value_text.trim().parse::<i32>() {
             Ok(value) => value,
             Err(_) => {
                 self.set_status("Invalid residue number");
                 return;
             }
         };
+        if self.residue_shift_mode && value == 0 {
+            self.set_status("Residue shift must not be zero");
+            return;
+        }
         let undo = self.capture_undo();
-        match self
-            .state
-            .renumber_residues_in_object(object_uid, &self.selection_text, start)
-        {
-            Ok(count) => {
+        match self.state.change_residue_indices_in_object(
+            object_uid,
+            &self.selection_text,
+            self.residue_shift_mode,
+            value,
+            self.residue_renumber,
+        ) {
+            Ok(count) if count > 0 => {
                 self.push_undo_snapshot(undo);
                 self.show_residue_dialog = false;
                 self.invalidate_molecule_panel_caches();
                 self.rebuild_snapshot();
-                self.set_status(format!("Renumbered residues for {count} atoms"));
+                self.set_status(format!(
+                    "{} residues for {count} atoms",
+                    if self.residue_renumber {
+                        "Renumbered"
+                    } else {
+                        "Shifted"
+                    }
+                ));
             }
+            Ok(_) => self.set_status("No residues matched the selection"),
             Err(error) => self.set_error(error),
         }
     }

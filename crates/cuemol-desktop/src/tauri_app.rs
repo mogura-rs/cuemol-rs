@@ -7958,7 +7958,9 @@ enum ModelRequest {
     RenumberResidues {
         object_uid: u64,
         selection: String,
-        start: i32,
+        shift_mode: bool,
+        value: i32,
+        renumber: bool,
     },
     MergeMolecules {
         source_object_uid: u64,
@@ -11343,18 +11345,32 @@ fn handle_model_request(
         ModelRequest::RenumberResidues {
             object_uid,
             selection,
-            start,
+            shift_mode,
+            value,
+            renumber,
         } => {
             let selection = selection.trim();
             if selection.is_empty() {
                 return Err("an atom selection is required".to_string());
             }
+            if shift_mode && value == 0 {
+                return Err("residue shift must not be zero".to_string());
+            }
             let undo = model.capture_undo();
             let count = model
                 .desktop
-                .renumber_residues_in_object(Uid::new(object_uid), selection, start)
+                .change_residue_indices_in_object(
+                    Uid::new(object_uid),
+                    selection,
+                    shift_mode,
+                    value,
+                    renumber,
+                )
                 .map_err(|error| error.to_string())?;
-            model.status = format!("Renumbered residues for {count} atom(s)");
+            model.status = format!(
+                "{} residues for {count} atom(s)",
+                if renumber { "Renumbered" } else { "Shifted" }
+            );
             if count > 0 {
                 model.invalidate_mesh(false);
                 model.push_undo(undo);
@@ -15095,15 +15111,22 @@ fn change_chain(
 fn renumber_residues(
     object_uid: u64,
     selection: String,
-    start: i32,
+    start: Option<i32>,
+    shift_mode: Option<bool>,
+    value: Option<i32>,
+    renumber: Option<bool>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
+    let shift_mode = shift_mode.unwrap_or(false);
+    let value = value.or(start).unwrap_or(1);
     snapshot_response(request_model(
         &state,
         ModelRequest::RenumberResidues {
             object_uid,
             selection,
-            start,
+            shift_mode,
+            value,
+            renumber: renumber.unwrap_or(true),
         },
     )?)
 }
@@ -23293,6 +23316,46 @@ mod tests {
             .active_object_summaries()
             .iter()
             .any(|object| object.name == "ethanol" && object.atom_count == 3));
+    }
+
+    #[test]
+    fn residue_index_request_shifts_selected_residues() {
+        let root = option_env!("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let pdb = root.join("tests/test_data/1CRN.pdb");
+        if !pdb.exists() {
+            return;
+        }
+        let mut model = model_without_gpu();
+        model.desktop.open_path(&pdb).unwrap();
+        let object_uid = model.desktop.active_object_summaries()[0].uid.get();
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::RenumberResidues {
+                object_uid,
+                selection: "chain A".to_string(),
+                shift_mode: true,
+                value: 5,
+                renumber: false,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.status, "Shifted residues for 327 atom(s)");
+        assert!(model
+            .desktop
+            .scene_manager()
+            .object(Uid::new(object_uid))
+            .unwrap()
+            .mol()
+            .atoms()
+            .iter()
+            .filter(|atom| atom.serial <= 7)
+            .all(|atom| atom.res_id == 6));
     }
 
     #[test]

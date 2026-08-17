@@ -443,6 +443,17 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     assert!(JS.contains("rendererSetup: result.rendererSetup"));
     assert!(TAURI_APP_RS.contains("CreateMoleculeFromSmiles"));
     assert_eq!(NATIVE_GUI_RS.matches("Paint (Secondary str.)").count(), 2);
+    for label in ["Shift by:", "Start from:", "Renumber"] {
+        assert!(JS.contains(label), "missing residue index control {label}");
+        assert!(
+            NATIVE_GUI_RS.contains(label),
+            "missing native residue index control {label}"
+        );
+    }
+    assert!(JS.contains("shiftMode,"));
+    assert!(JS.contains("renumber: renumber.checked"));
+    assert!(TAURI_APP_RS.contains("shift_mode: bool"));
+    assert!(TAURI_APP_RS.contains("renumber: bool"));
     assert!(CSS.contains(".bond-list-row"));
     assert!(CSS.contains(".bond-list-columns"));
     assert!(CSS.contains(".bond-column-splitter"));

@@ -394,12 +394,37 @@ impl MolAnlManager {
         &self,
         molecule: &mut MolCoord,
         selector: &Selector,
-        shift_selected: bool,
+        shift_mode: bool,
         value: i32,
     ) -> bool {
+        let mut selected = BTreeSet::new();
+        let mut ordered = Vec::new();
+        for atom in molecule
+            .atoms()
+            .iter()
+            .filter(|atom| selector.matches(atom))
+        {
+            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
+            if selected.insert(key.clone()) {
+                ordered.push(key);
+            }
+        }
+        let Some(first) = ordered.first() else {
+            return false;
+        };
+        let shift = if shift_mode {
+            value
+        } else {
+            value - first.res_id
+        };
+        if shift == 0 {
+            return false;
+        }
         molecule.relabel_residue_keys(|atom| {
-            (selector.matches(atom) == shift_selected)
-                .then(|| ResidueKey::new(atom.chain_id.clone(), atom.res_id + value, atom.ins_code))
+            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
+            selected
+                .contains(&key)
+                .then(|| ResidueKey::new(atom.chain_id.clone(), atom.res_id + shift, atom.ins_code))
         })
     }
 
@@ -407,28 +432,38 @@ impl MolAnlManager {
         &self,
         molecule: &mut MolCoord,
         selector: &Selector,
-        shift_selected: bool,
-        start: i32,
+        shift_mode: bool,
+        value: i32,
     ) -> bool {
-        // Sequential renumber depends on residue ORDER, so precompute each affected
-        // residue's new resid (in atom order) before delegating the relabel.
-        let mut mapping: BTreeMap<ResidueKey, i32> = BTreeMap::new();
-        let mut next = start;
-        for atom in molecule.atoms() {
-            if selector.matches(atom) == shift_selected {
-                let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
-                mapping.entry(key).or_insert_with(|| {
-                    let assigned = next;
-                    next += 1;
-                    assigned
-                });
+        let mut selected = BTreeSet::new();
+        let mut ordered = Vec::new();
+        for atom in molecule
+            .atoms()
+            .iter()
+            .filter(|atom| selector.matches(atom))
+        {
+            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
+            if selected.insert(key.clone()) {
+                ordered.push(key);
             }
+        }
+        let Some(first) = ordered.first() else {
+            return false;
+        };
+        let start = if shift_mode {
+            first.res_id + value
+        } else {
+            value
+        };
+        let mut mapping: BTreeMap<ResidueKey, i32> = BTreeMap::new();
+        for (offset, key) in ordered.into_iter().enumerate() {
+            mapping.insert(key, start + offset as i32);
         }
         molecule.relabel_residue_keys(|atom| {
             let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
             mapping
                 .get(&key)
-                .map(|&resid| ResidueKey::new(atom.chain_id.clone(), resid, atom.ins_code))
+                .map(|&resid| ResidueKey::new(atom.chain_id.clone(), resid, None))
         })
     }
 
@@ -1191,10 +1226,57 @@ mod tests {
         assert!(target.atoms().iter().all(|atom| atom.chain_id == "Z"));
         assert!(manager.shift_res_index(&mut target, &Selector::All, true, 10));
         assert_eq!(target.atoms()[0].res_id, 11);
-        assert!(manager.renum_res_index(&mut target, &Selector::All, true, 1));
+        assert!(manager.renum_res_index(&mut target, &Selector::All, false, 1));
         assert_eq!(target.atoms()[0].res_id, 1);
         assert!(manager.delete_atoms(&mut target, &Selector::All));
         assert_eq!(target.atom_count(), 0);
+    }
+
+    #[test]
+    fn residue_index_modes_match_the_reference_manager() {
+        let manager = MolAnlManager::new();
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1, "N", "A", 10, "N", 0.0));
+        molecule.push_atom(atom(2, "CA", "A", 10, "C", 1.0));
+        molecule.push_atom(atom(3, "CA", "A", 20, "C", 2.0));
+        let carbon_alpha = parse_selector("name CA").unwrap();
+
+        assert!(manager.shift_res_index(&mut molecule, &carbon_alpha, true, 5));
+        assert_eq!(
+            molecule
+                .atoms()
+                .iter()
+                .map(|atom| atom.res_id)
+                .collect::<Vec<_>>(),
+            vec![15, 15, 25]
+        );
+        assert!(manager.shift_res_index(&mut molecule, &Selector::All, false, 100));
+        assert_eq!(
+            molecule
+                .atoms()
+                .iter()
+                .map(|atom| atom.res_id)
+                .collect::<Vec<_>>(),
+            vec![100, 100, 110]
+        );
+        assert!(manager.renum_res_index(&mut molecule, &Selector::All, false, 1));
+        assert_eq!(
+            molecule
+                .atoms()
+                .iter()
+                .map(|atom| atom.res_id)
+                .collect::<Vec<_>>(),
+            vec![1, 1, 2]
+        );
+        assert!(manager.renum_res_index(&mut molecule, &Selector::All, true, 10));
+        assert_eq!(
+            molecule
+                .atoms()
+                .iter()
+                .map(|atom| atom.res_id)
+                .collect::<Vec<_>>(),
+            vec![11, 11, 12]
+        );
     }
 
     #[test]

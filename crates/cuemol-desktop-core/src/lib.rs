@@ -14242,14 +14242,29 @@ impl DesktopAppState {
         selection_text: &str,
         start: i32,
     ) -> Result<usize> {
+        self.change_residue_indices_in_object(object_uid, selection_text, false, start, true)
+    }
+
+    pub fn change_residue_indices_in_object(
+        &mut self,
+        object_uid: Uid,
+        selection_text: &str,
+        shift_mode: bool,
+        value: i32,
+        renumber: bool,
+    ) -> Result<usize> {
         let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         let count = object.mol().atom_sel_count(&selector);
-        let changed =
-            MolAnlManager::new().renum_res_index(object.mol_mut(), &selector, true, start);
+        let manager = MolAnlManager::new();
+        let changed = if renumber {
+            manager.renum_res_index(object.mol_mut(), &selector, shift_mode, value)
+        } else {
+            manager.shift_res_index(object.mol_mut(), &selector, shift_mode, value)
+        };
         Ok(if changed { count } else { 0 })
     }
 
@@ -40629,7 +40644,7 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
-            let shift_selected = args.get(2).is_some_and(JsValue::to_boolean);
+            let shift_mode = args.get(2).is_some_and(JsValue::to_boolean);
             let value = args
                 .get(3)
                 .cloned()
@@ -40638,15 +40653,15 @@ impl DesktopAppState {
             let mut copy = molecule.molecule.clone();
             let manager = MolAnlManager::new();
             let changed = if renumber {
-                manager.renum_res_index(&mut copy, &selector, shift_selected, value)
+                manager.renum_res_index(&mut copy, &selector, shift_mode, value)
             } else {
-                manager.shift_res_index(&mut copy, &selector, shift_selected, value)
+                manager.shift_res_index(&mut copy, &selector, shift_mode, value)
             };
             if changed {
                 script_cmds::push(ScriptCmd::ChangeResidueIndex {
                     object_uid: molecule.uid,
                     selection: selector.to_string(),
-                    shift_selected,
+                    shift_mode,
                     value,
                     renumber,
                 });
@@ -44831,7 +44846,7 @@ impl DesktopAppState {
                 ScriptCmd::ChangeResidueIndex {
                     object_uid,
                     selection,
-                    shift_selected,
+                    shift_mode,
                     value,
                     renumber,
                 } => {
@@ -44843,14 +44858,14 @@ impl DesktopAppState {
                             MolAnlManager::new().renum_res_index(
                                 object.mol_mut(),
                                 &selector,
-                                shift_selected,
+                                shift_mode,
                                 value,
                             );
                         } else {
                             MolAnlManager::new().shift_res_index(
                                 object.mol_mut(),
                                 &selector,
-                                shift_selected,
+                                shift_mode,
                                 value,
                             );
                         }
@@ -45794,7 +45809,7 @@ enum ScriptCmd {
     ChangeResidueIndex {
         object_uid: u64,
         selection: String,
-        shift_selected: bool,
+        shift_mode: bool,
         value: i32,
         renumber: bool,
     },
