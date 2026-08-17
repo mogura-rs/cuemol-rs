@@ -1481,6 +1481,7 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(CSS.contains(".visibility-flag-editor"));
     assert!(CSS.contains("width: min(420px, calc(100vw - 48px))"));
     assert!(JS.contains("function showTextPromptDialog({"));
+    assert!(JS.contains("function showConfirmationDialog({"));
     assert!(JS.contains("async function openNewCameraFlow()"));
     assert!(JS.contains("title: \"New Camera\""));
     assert!(JS.contains("label: \"Name for new camera:\""));
@@ -1488,7 +1489,10 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("confirmLabel: \"Create\""));
     assert!(JS.contains("mutateWithoutViewport(\"create_camera\", { name }, () => {})"));
     assert!(JS.contains("function workspaceCameraInlineRenameInput(scene, camera)"));
-    assert!(JS.contains("beginWorkspaceInlineRename(\"camera\", scene.uid, camera.name)"));
+    assert!(JS.contains("async function renameWorkspaceCamera(scene, camera)"));
+    assert!(JS.contains("label: `Rename camera \"${camera.name}\":`"));
+    assert!(JS.contains("async function deleteWorkspaceCamera(scene, camera)"));
+    assert!(JS.contains("message: `Delete camera: ${camera.name}`"));
     assert!(JS.contains("\"rename_workspace_camera\""));
     assert!(!JS.contains("globalThis.prompt?.(\"Camera name\""));
     assert!(CSS.contains(".reference-dialog.text-prompt-dialog"));
@@ -1500,6 +1504,10 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(NATIVE_GUI_RS.contains("fn new_camera_dialog("));
     assert!(NATIVE_GUI_RS.contains("ui.label(\"Name for new camera:\")"));
     assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Create\")"));
+    assert!(NATIVE_GUI_RS.contains("fn camera_rename_dialog("));
+    assert!(NATIVE_GUI_RS.contains("Rename camera \\\"{}\\\":"));
+    assert!(NATIVE_GUI_RS.contains("fn camera_delete_dialog("));
+    assert!(NATIVE_GUI_RS.contains("Delete camera: {}"));
     assert!(!NATIVE_GUI_RS.contains("open_new_camera_properties"));
 
     let tauri_editor = JS

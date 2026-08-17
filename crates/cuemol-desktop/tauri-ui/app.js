@@ -4608,6 +4608,41 @@ function showTextPromptDialog({ title, label, defaultValue = "", confirmLabel = 
   });
 }
 
+function showConfirmationDialog({ title, message, confirmLabel = "OK" }) {
+  if (referenceDialog.open) referenceDialog.close();
+  dialogTitle.textContent = title;
+  dialogContent.replaceChildren(dialogParagraph(message));
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog confirmation-dialog";
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      referenceDialog.removeEventListener("close", onClose);
+      resolve(value);
+    };
+    const onClose = () => {
+      if (!referenceDialog.open) finish(false);
+    };
+    referenceDialog.addEventListener("close", onClose);
+    const cancel = button("Cancel", "", () => {
+      finish(false);
+      referenceDialog.close();
+    });
+    const confirm = button(confirmLabel, "dialog-primary", () => {
+      finish(true);
+      referenceDialog.close();
+    });
+    dialogActions(cancel, confirm);
+    if (!referenceDialog.open && referenceDialog.showModal) {
+      referenceDialog.showModal();
+    }
+    setTimeout(() => confirm.focus(), 0);
+  });
+}
+
 function showNewTabDialog() {
   if (referenceDialog.open) referenceDialog.close();
   dialogTitle.textContent = "New Tab/Window";
@@ -7053,6 +7088,54 @@ async function openNewCameraFlow() {
   return true;
 }
 
+async function renameWorkspaceCamera(scene, camera) {
+  if (
+    snapshot.activeSceneUid !== scene.uid &&
+    !(await mutate("activate_scene", { sceneUid: scene.uid }))
+  ) {
+    return false;
+  }
+  const name = await showTextPromptDialog({
+    title: "Rename Camera",
+    label: `Rename camera "${camera.name}":`,
+    defaultValue: camera.name,
+  });
+  if (name === null || name === camera.name) return false;
+  const changed = await mutateWithoutViewport(
+    "rename_workspace_camera",
+    {
+      input: { sceneUid: scene.uid, oldName: camera.name, newName: name },
+    },
+    () => {},
+  );
+  if (!changed) return false;
+  selectedCameraName = name;
+  workspaceSelectionKind = "camera";
+  renderShell();
+  return true;
+}
+
+async function deleteWorkspaceCamera(scene, camera) {
+  if (
+    snapshot.activeSceneUid !== scene.uid &&
+    !(await mutate("activate_scene", { sceneUid: scene.uid }))
+  ) {
+    return false;
+  }
+  const confirmed = await showConfirmationDialog({
+    title: "Delete Camera",
+    message: `Delete camera: ${camera.name}`,
+    confirmLabel: "Delete",
+  });
+  if (!confirmed) return false;
+  const changed = await mutate("destroy_camera", { name: camera.name });
+  if (!changed) return false;
+  selectedCameraName = null;
+  workspaceSelectionKind = "cameraRoot";
+  renderShell();
+  return true;
+}
+
 function workspaceCameraContextItems(scene, camera = null) {
   const activate = async () => {
     if (snapshot.activeSceneUid === scene.uid) return true;
@@ -7077,10 +7160,7 @@ function workspaceCameraContextItems(scene, camera = null) {
     {
       label: "Delete",
       disabled: !camera,
-      action: async () => {
-        if (!(await activate())) return;
-        await mutate("destroy_camera", { name: camera.name });
-      },
+      action: () => deleteWorkspaceCamera(scene, camera),
     },
     {
       label: "Copy",
@@ -7183,12 +7263,7 @@ function workspaceCameraContextItems(scene, camera = null) {
     {
       label: "Rename...",
       disabled: !camera,
-      action: async () => {
-        if (!(await activate())) return;
-        selectedCameraName = camera.name;
-        workspaceSelectionKind = "camera";
-        beginWorkspaceInlineRename("camera", scene.uid, camera.name);
-      },
+      action: () => renameWorkspaceCamera(scene, camera),
     },
     {
       label: "Properties...",
@@ -13000,11 +13075,9 @@ async function handleAction(action, depth = 0) {
         break;
       }
       if (workspaceSelectionKind === "camera" && selectedCamera()) {
-        const name = selectedCameraName;
-        await mutate("destroy_camera", { name });
-        selectedCameraName = null;
-        workspaceSelectionKind = "cameraRoot";
-        renderShell();
+        const scene = snapshot.scenes.find((candidate) => candidate.active);
+        const camera = selectedCamera();
+        if (scene && camera) await deleteWorkspaceCamera(scene, camera);
         break;
       }
       const target = selectedWorkspaceTarget();

@@ -3986,7 +3986,7 @@ impl AppModel {
             return Ok(false);
         };
         if scene.camera_by_name(new_name).is_some() {
-            return Ok(false);
+            return Err(format!("camera already exists: {new_name}"));
         }
         let Some(mut camera) = scene.camera_by_name(&input.old_name).cloned() else {
             return Ok(false);
@@ -18124,6 +18124,18 @@ mod tests {
             .cameras
             .iter()
             .any(|camera| camera.name == "copy1_camera_renamed"));
+        let duplicate_rename = handle_model_request(
+            &mut model,
+            ModelRequest::RenameWorkspaceCamera(WorkspaceCameraRenameInput {
+                scene_uid: scene_uid.get(),
+                old_name: "camera_renamed".to_string(),
+                new_name: "copy1_camera_renamed".to_string(),
+            }),
+        );
+        assert_eq!(
+            duplicate_rename.err().as_deref(),
+            Some("camera already exists: copy1_camera_renamed")
+        );
         assert_eq!(
             model.undo_stack.last().unwrap().description,
             "Pasted camera copy1_camera_renamed"

@@ -782,6 +782,19 @@ struct NativeNewCameraDraft {
 }
 
 #[derive(Debug, Clone)]
+struct NativeCameraRenameDraft {
+    scene_uid: cuemol_core::Uid,
+    original_name: String,
+    name: String,
+}
+
+#[derive(Debug, Clone)]
+struct NativeCameraDeleteDraft {
+    scene_uid: cuemol_core::Uid,
+    name: String,
+}
+
+#[derive(Debug, Clone)]
 struct NativeCloseTabDraft {
     scene_name: String,
 }
@@ -885,6 +898,8 @@ struct GuiApplication {
     scene_save_draft: Option<NativeSceneSaveDraft>,
     new_tab_draft: Option<NativeNewTabDraft>,
     new_camera_draft: Option<NativeNewCameraDraft>,
+    camera_rename_draft: Option<NativeCameraRenameDraft>,
+    camera_delete_draft: Option<NativeCameraDeleteDraft>,
     close_tab_draft: Option<NativeCloseTabDraft>,
     close_after_scene_save: bool,
     reload_scene_draft: Option<NativeReloadSceneDraft>,
@@ -3217,6 +3232,8 @@ impl GuiApplication {
             scene_save_draft: None,
             new_tab_draft: None,
             new_camera_draft: None,
+            camera_rename_draft: None,
+            camera_delete_draft: None,
             close_tab_draft: None,
             close_after_scene_save: false,
             reload_scene_draft: None,
@@ -5449,7 +5466,7 @@ impl GuiApplication {
                                 ui.close();
                             }
                             if ui.button("Delete").clicked() {
-                                self.delete_aux_selection(selection);
+                                self.request_delete_aux_selection(selection);
                                 ui.close();
                             }
                             if ui.button("Copy").clicked() {
@@ -5525,7 +5542,7 @@ impl GuiApplication {
                             }
                             ui.separator();
                             if ui.button("Rename...").clicked() {
-                                self.open_camera_properties(selection);
+                                self.open_camera_rename_dialog(selection);
                                 ui.close();
                             }
                             if ui.button("Properties...").clicked() {
@@ -5664,7 +5681,7 @@ impl GuiApplication {
                                 )
                                 .clicked()
                             {
-                                self.delete_aux_selection(selection);
+                                self.request_delete_aux_selection(selection);
                                 ui.close();
                             }
                             ui.separator();
@@ -5819,7 +5836,7 @@ impl GuiApplication {
                         self.delete_workspace_object(NativePropertyObject::Molecule(object_uid));
                     }
                 } else if let Some(selection) = self.workspace_aux_selection {
-                    self.delete_aux_selection(selection);
+                    self.request_delete_aux_selection(selection);
                 }
             }
             let property_enabled = !multiple_selected
@@ -6213,7 +6230,7 @@ impl GuiApplication {
                 ui.close();
             }
             if ui.button("Delete").clicked() {
-                self.delete_aux_selection(selection);
+                self.request_delete_aux_selection(selection);
                 ui.close();
             }
             return;
@@ -6316,7 +6333,7 @@ impl GuiApplication {
                     ui.close();
                 }
                 if ui.button("Delete").clicked() {
-                    self.delete_aux_selection(selection);
+                    self.request_delete_aux_selection(selection);
                     ui.close();
                 }
                 ui.separator();
@@ -13016,6 +13033,8 @@ impl GuiApplication {
         self.scene_save_options_dialog(ctx, camera);
         self.new_tab_dialog(ctx, camera);
         self.new_camera_dialog(ctx, camera);
+        self.camera_rename_dialog(ctx);
+        self.camera_delete_dialog(ctx);
         self.close_tab_dialog(ctx, camera);
         self.reload_scene_dialog(ctx, camera);
         self.atom_intr_edit_dialog(ctx);
@@ -16235,6 +16254,73 @@ impl GuiApplication {
             }
             Err(_) => self.set_status("Cannot create camera without a scene"),
         }
+    }
+
+    fn open_camera_rename_dialog(&mut self, selection: WorkspaceAuxSelection) {
+        let Some(summary) = self.camera_summary_for_selection(selection) else {
+            self.set_status("Camera not found");
+            return;
+        };
+        self.camera_rename_draft = Some(NativeCameraRenameDraft {
+            scene_uid: summary.scene_uid,
+            original_name: summary.name.clone(),
+            name: summary.name,
+        });
+    }
+
+    fn apply_camera_rename(
+        &mut self,
+        draft: NativeCameraRenameDraft,
+    ) -> std::result::Result<(), String> {
+        let name = draft.name.trim();
+        if name.is_empty() {
+            return Err("camera name is required".to_string());
+        }
+        if name == draft.original_name {
+            return Ok(());
+        }
+        let scene = self
+            .state
+            .scene_manager()
+            .scene(draft.scene_uid)
+            .ok_or_else(|| "scene not found".to_string())?;
+        if scene.camera_by_name(name).is_some() {
+            return Err(format!("camera already exists: {name}"));
+        }
+        let original = scene
+            .camera_by_name(&draft.original_name)
+            .cloned()
+            .ok_or_else(|| format!("camera not found: {}", draft.original_name))?;
+        let mut renamed = original.clone();
+        renamed.set_name(name);
+        let undo = self.capture_undo();
+        self.state
+            .destroy_scene_camera(draft.scene_uid, &draft.original_name)
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = self
+            .state
+            .save_scene_camera(draft.scene_uid, renamed, false)
+        {
+            let _ = self
+                .state
+                .save_scene_camera(draft.scene_uid, original, false);
+            return Err(error.to_string());
+        }
+        self.push_undo_snapshot(undo);
+        self.modified_scenes.insert(draft.scene_uid);
+        self.rebuild_snapshot();
+        let camera_index = self
+            .state
+            .camera_summaries(draft.scene_uid)
+            .iter()
+            .position(|camera| camera.name == name)
+            .unwrap_or(0);
+        self.workspace_aux_selection = Some(WorkspaceAuxSelection::Camera {
+            scene_uid: draft.scene_uid,
+            camera_index,
+        });
+        self.set_status(format!("Rename to {name}"));
+        Ok(())
     }
 
     fn create_workspace_camera(
@@ -19504,6 +19590,86 @@ impl GuiApplication {
         }
     }
 
+    fn camera_rename_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.camera_rename_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Rename Camera")
+            .default_width(360.0)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Rename camera \"{}\":", draft.original_name));
+                let input = ui.add(
+                    egui::TextEdit::singleline(&mut draft.name)
+                        .desired_width(f32::INFINITY)
+                        .id_source("rename-camera-name"),
+                );
+                if input.lost_focus()
+                    && ui.input(|state| state.key_pressed(egui::Key::Enter))
+                    && !draft.name.trim().is_empty()
+                {
+                    accept = true;
+                }
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(!draft.name.trim().is_empty(), egui::Button::new("OK"))
+                        .clicked()
+                    {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+                input.request_focus();
+            });
+        if accept {
+            if let Err(error) = self.apply_camera_rename(draft.clone()) {
+                self.set_status(format!("Camera rename error: {error}"));
+                self.camera_rename_draft = Some(draft);
+            }
+        } else if open && !cancel {
+            self.camera_rename_draft = Some(draft);
+        }
+    }
+
+    fn camera_delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(draft) = self.camera_delete_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Delete Camera")
+            .default_width(360.0)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Delete camera: {}", draft.name));
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Delete").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if confirm {
+            self.delete_workspace_camera(draft.scene_uid, &draft.name);
+        } else if open && !cancel {
+            self.camera_delete_draft = Some(draft);
+        }
+    }
+
     fn close_tab_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         let Some(draft) = self.close_tab_draft.take() else {
             return;
@@ -21181,6 +21347,37 @@ impl GuiApplication {
                 ..
             } => self.open_lw_object_properties(object_uid),
         }
+    }
+
+    fn request_delete_aux_selection(&mut self, selection: WorkspaceAuxSelection) {
+        if let WorkspaceAuxSelection::Camera { .. } = selection {
+            let Some(summary) = self.camera_summary_for_selection(selection) else {
+                self.set_status("Camera not found");
+                return;
+            };
+            self.camera_delete_draft = Some(NativeCameraDeleteDraft {
+                scene_uid: summary.scene_uid,
+                name: summary.name,
+            });
+            return;
+        }
+        self.delete_aux_selection(selection);
+    }
+
+    fn delete_workspace_camera(&mut self, scene_uid: cuemol_core::Uid, name: &str) {
+        let Some(camera_index) = self
+            .state
+            .camera_summaries(scene_uid)
+            .iter()
+            .position(|camera| camera.name == name)
+        else {
+            self.set_status("Camera not found");
+            return;
+        };
+        self.delete_aux_selection(WorkspaceAuxSelection::Camera {
+            scene_uid,
+            camera_index,
+        });
     }
 
     fn delete_aux_selection(&mut self, selection: WorkspaceAuxSelection) {
@@ -27290,7 +27487,25 @@ mod tests {
         assert_eq!(app.state.camera_summaries(scene_uid).len(), 1);
         assert!(app.workspace_camera_clipboard.is_some());
 
-        app.delete_aux_selection(selection);
+        app.open_camera_rename_dialog(selection);
+        let mut rename = app.camera_rename_draft.take().unwrap();
+        assert_eq!(rename.original_name, "camera_0");
+        assert_eq!(rename.name, "camera_0");
+        rename.name = "camera_renamed".to_string();
+        app.apply_camera_rename(rename).unwrap();
+        assert_eq!(
+            app.state.camera_summaries(scene_uid)[0].name,
+            "camera_renamed"
+        );
+        app.undo(&mut camera);
+        assert_eq!(app.state.camera_summaries(scene_uid)[0].name, "camera_0");
+
+        app.request_delete_aux_selection(selection);
+        let delete = app.camera_delete_draft.take().unwrap();
+        assert_eq!(delete.scene_uid, scene_uid);
+        assert_eq!(delete.name, "camera_0");
+
+        app.delete_workspace_camera(delete.scene_uid, &delete.name);
         assert!(app.state.camera_summaries(scene_uid).is_empty());
         assert_eq!(
             app.workspace_aux_selection,
