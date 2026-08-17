@@ -8134,7 +8134,7 @@ async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = n
   dialogFooter.hidden = false;
   referenceDialog.className = "reference-dialog renderer-setup-dialog";
 
-  const compatibleTypes =
+  const fallbackTypes =
     kind === "renderer"
       ? MOLECULE_RENDERER_TYPES
       : kind === "densityRenderer"
@@ -8142,6 +8142,20 @@ async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = n
         : kind === "surfaceRenderer"
           ? SURFACE_RENDERER_TYPES
           : LIGHTWEIGHT_RENDERER_TYPES;
+  let compatibleOptions;
+  try {
+    compatibleOptions = await invoke("get_workspace_renderer_setup_options", {
+      sceneUid: scene.uid,
+      kind,
+    });
+  } catch (error) {
+    showError(error);
+    return;
+  }
+  if (!Array.isArray(compatibleOptions) || compatibleOptions.length === 0) {
+    compatibleOptions = fallbackTypes.map((name) => ({ name, description: name }));
+  }
+  const compatibleTypes = compatibleOptions.map((option) => option.name);
   const selectedType = compatibleTypes.includes(rendererType.value)
     ? rendererType.value
     : compatibleTypes[0];
@@ -8149,7 +8163,7 @@ async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = n
   objectName.disabled = true;
   const type = dialogSelect(
     "Renderer type:",
-    compatibleTypes.map((value) => [value, value]),
+    compatibleOptions.map((option) => [option.name, option.description || option.name]),
     selectedType,
   );
   const existingNames = new Set(

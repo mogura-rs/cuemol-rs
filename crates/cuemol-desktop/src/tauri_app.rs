@@ -3523,9 +3523,6 @@ impl AppModel {
 
         let _renderer_uid = match input.kind.as_str() {
             "renderer" => {
-                if !MOLECULE_RENDERER_TYPES.contains(&renderer_type) {
-                    return Err(format!("unsupported renderer type: {renderer_type}"));
-                }
                 let scene_uid = self
                     .desktop
                     .scene_manager()
@@ -3533,14 +3530,14 @@ impl AppModel {
                     .ok_or_else(|| format!("object {} not found", input.object_uid))?;
                 let renderer_uid = self
                     .desktop
-                    .new_renderer(scene_uid, object_uid, renderer_type, renderer_name)
-                    .map_err(|error| error.to_string())?
-                    .result_renderer;
-                if let Some(selection) = input.selection.as_deref() {
-                    self.desktop
-                        .set_renderer_selection_text(object_uid, renderer_uid, selection)
-                        .map_err(|error| error.to_string())?;
-                }
+                    .new_renderer_from_setup(
+                        scene_uid,
+                        object_uid,
+                        renderer_type,
+                        renderer_name,
+                        input.selection.as_deref(),
+                    )
+                    .map_err(|error| error.to_string())?;
                 if let Some(group_name) = input.group_name.as_deref() {
                     self.desktop
                         .set_renderer_property(object_uid, renderer_uid, "group", group_name)
@@ -6732,6 +6729,10 @@ enum ModelRequest {
         scene_uid: u64,
         renderer_type: String,
     },
+    GetWorkspaceRendererSetupOptions {
+        scene_uid: u64,
+        kind: String,
+    },
     GetAtomIntrDefs {
         object_uid: u64,
         renderer_uid: u64,
@@ -8627,6 +8628,31 @@ fn handle_model_request(
                 })
                 .collect(),
         )),
+        ModelRequest::GetWorkspaceRendererSetupOptions { scene_uid, kind } => {
+            let options = match kind.as_str() {
+                "renderer" => model
+                    .desktop
+                    .molecule_renderer_setup_options(Uid::new(scene_uid))
+                    .map_err(|error| error.to_string())?,
+                "densityRenderer" => model.desktop.density_map_renderer_setup_options(),
+                "surfaceRenderer" => model.desktop.surface_renderer_setup_options(),
+                "lwRenderer" => vec![crate::GuiRendererSetupOption {
+                    name: "lwrend".to_string(),
+                    description: "lwrend".to_string(),
+                    preset: false,
+                }],
+                _ => return Err(format!("unsupported renderer target: {kind}")),
+            };
+            Ok(ModelResponse::RendererStyleOptions(
+                options
+                    .into_iter()
+                    .map(|option| RendererStyleOptionDto {
+                        name: option.name,
+                        description: option.description,
+                    })
+                    .collect(),
+            ))
+        }
         ModelRequest::GetAtomIntrDefs {
             object_uid,
             renderer_uid,
@@ -11303,6 +11329,18 @@ fn get_renderer_style_options(
 }
 
 #[tauri::command]
+fn get_workspace_renderer_setup_options(
+    scene_uid: u64,
+    kind: String,
+    state: State<'_, ManagedState>,
+) -> Result<Vec<RendererStyleOptionDto>, String> {
+    renderer_style_options_response(request_model(
+        &state,
+        ModelRequest::GetWorkspaceRendererSetupOptions { scene_uid, kind },
+    )?)
+}
+
+#[tauri::command]
 fn get_atom_intr_defs(
     object_uid: u64,
     renderer_uid: u64,
@@ -13177,6 +13215,7 @@ pub fn run() -> Result<(), tauri::Error> {
             create_renderer_style,
             get_style_properties,
             get_renderer_style_options,
+            get_workspace_renderer_setup_options,
             get_atom_intr_defs,
             remove_atom_intr_defs,
             set_style_properties,
@@ -15509,6 +15548,44 @@ mod tests {
         assert_eq!(model.snapshot().objects[0].renderers.len(), initial_count);
 
         let scene_uid = model.desktop.active_scene().unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::GetWorkspaceRendererSetupOptions {
+                scene_uid: scene_uid.get(),
+                kind: "renderer".to_string(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::RendererStyleOptions(options) = response else {
+            panic!("expected renderer setup options");
+        };
+        assert!(options
+            .iter()
+            .any(|option| option.name == "Default1RendPreset"));
+
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CreateWorkspaceRenderer(WorkspaceNewRendererInput {
+                kind: "renderer".to_string(),
+                object_uid: object_uid.get(),
+                renderer_type: "Default1RendPreset".to_string(),
+                renderer_name: "preset".to_string(),
+                selection: None,
+                group_name: None,
+                density_centering: None,
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert!(snapshot.objects[0]
+            .renderers
+            .iter()
+            .any(|renderer| { renderer.renderer_type == "*group" && renderer.name == "preset" }));
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().objects[0].renderers.len(), initial_count);
+
         let map_uid =
             model
                 .desktop

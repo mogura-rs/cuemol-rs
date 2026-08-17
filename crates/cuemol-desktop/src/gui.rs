@@ -17955,6 +17955,28 @@ impl GuiApplication {
             .new_renderer_owner
             .and_then(|owner| self.workspace_owner_name(owner))
             .unwrap_or_default();
+        let renderer_options = match self.new_renderer_owner {
+            Some(NativePropertyObject::Molecule(_)) => self
+                .workspace_owner_scene_uid(self.new_renderer_owner.unwrap())
+                .and_then(|scene_uid| self.state.molecule_renderer_setup_options(scene_uid).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|option| (option.name, option.description))
+                .collect::<Vec<_>>(),
+            Some(NativePropertyObject::DensityMap(_)) => DENSITY_RENDERER_TYPES
+                .iter()
+                .map(|renderer_type| ((*renderer_type).to_string(), (*renderer_type).to_string()))
+                .collect(),
+            Some(NativePropertyObject::Surface(_)) => SURFACE_RENDERER_TYPES
+                .iter()
+                .map(|renderer_type| ((*renderer_type).to_string(), (*renderer_type).to_string()))
+                .collect(),
+            Some(NativePropertyObject::Lightweight(_)) => LIGHTWEIGHT_RENDERER_TYPES
+                .iter()
+                .map(|renderer_type| ((*renderer_type).to_string(), (*renderer_type).to_string()))
+                .collect(),
+            None => Vec::new(),
+        };
         let mut open = self.show_renderer_dialog;
         let mut create = false;
         let mut cancel = false;
@@ -17973,23 +17995,17 @@ impl GuiApplication {
                             .desired_width(ui.available_width()),
                     );
                 });
-                let renderer_types = match self.new_renderer_owner {
-                    Some(NativePropertyObject::DensityMap(_)) => DENSITY_RENDERER_TYPES,
-                    Some(NativePropertyObject::Surface(_)) => SURFACE_RENDERER_TYPES,
-                    Some(NativePropertyObject::Lightweight(_)) => LIGHTWEIGHT_RENDERER_TYPES,
-                    Some(NativePropertyObject::Molecule(_)) | None => RENDERER_TYPES,
-                };
                 if is_group {
                     ui.label("Type: Renderer group");
                 } else {
                     egui::ComboBox::from_label("Renderer type:")
                         .selected_text(renderer_type_label(&self.new_renderer_type))
                         .show_ui(ui, |ui| {
-                            for renderer_type in renderer_types {
+                            for (renderer_type, description) in &renderer_options {
                                 ui.selectable_value(
                                     &mut self.new_renderer_type,
-                                    (*renderer_type).to_string(),
-                                    *renderer_type,
+                                    renderer_type.clone(),
+                                    description,
                                 );
                             }
                         });
@@ -20313,8 +20329,24 @@ impl GuiApplication {
     ) {
         self.new_renderer_owner = Some(NativePropertyObject::Molecule(object_uid));
         self.new_renderer_group = group;
-        if !RENDERER_TYPES.contains(&self.new_renderer_type.as_str()) {
-            self.new_renderer_type = "simple".to_string();
+        let scene_uid = self
+            .state
+            .active_scene()
+            .unwrap_or(cuemol_core::Uid::new(0));
+        let options = self
+            .state
+            .molecule_renderer_setup_options(scene_uid)
+            .unwrap_or_default();
+        if !options
+            .iter()
+            .any(|option| option.name == self.new_renderer_type)
+        {
+            let preferences = crate::load_renderer_setup_preferences();
+            self.new_renderer_type = preferences
+                .renderer_type
+                .filter(|renderer_type| options.iter().any(|option| option.name == *renderer_type))
+                .or_else(|| options.first().map(|option| option.name.clone()))
+                .unwrap_or_else(|| "simple".to_string());
         }
         self.new_renderer_name = self
             .state
@@ -20418,17 +20450,24 @@ impl GuiApplication {
                     self.state
                         .create_renderer_group(object_uid, renderer_name)?
                 } else {
-                    self.state
-                        .new_renderer_in_active_scene(object_uid, &renderer_type, renderer_name)?
-                        .result_renderer
+                    let scene_uid = self
+                        .state
+                        .scene_manager()
+                        .scene_uid_for_object(object_uid)
+                        .ok_or_else(|| {
+                            CueMolError::NotFound(format!("object {}", object_uid.get()))
+                        })?;
+                    self.state.new_renderer_from_setup(
+                        scene_uid,
+                        object_uid,
+                        &renderer_type,
+                        &renderer_name,
+                        renderer_selection.as_deref(),
+                    )?
                 };
                 if let Some(group) = renderer_group.as_deref() {
                     self.state
                         .set_renderer_property(object_uid, renderer_uid, "group", group)?;
-                }
-                if let Some(selection) = renderer_selection.as_deref() {
-                    self.state
-                        .set_renderer_selection_text(object_uid, renderer_uid, selection)?;
                 }
                 Ok(renderer_uid)
             })(),

@@ -6817,6 +6817,61 @@ impl DesktopAppState {
         self.new_renderer(scene_uid, target_object, renderer_type, renderer_name)
     }
 
+    pub fn new_renderer_from_setup(
+        &mut self,
+        scene_uid: Uid,
+        object_uid: Uid,
+        renderer_type: &str,
+        renderer_name: &str,
+        selection: Option<&str>,
+    ) -> Result<Uid> {
+        let option = self
+            .molecule_renderer_setup_options(scene_uid)?
+            .into_iter()
+            .find(|option| option.name == renderer_type)
+            .ok_or_else(|| {
+                CueMolError::invalid_argument(format!(
+                    "unsupported renderer setup type: {renderer_type}"
+                ))
+            })?;
+        if option.preset {
+            let styles = {
+                let scene = self
+                    .scene_manager()
+                    .scene(scene_uid)
+                    .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+                scene_style_manager(scene)
+            };
+            let object = self
+                .scene_manager_mut()
+                .object_mut(object_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+            let renderer_uid = object.create_preset_renderer_with_style(
+                &styles,
+                scene_uid.get(),
+                renderer_type,
+                renderer_name,
+                renderer_name,
+            )?;
+            if !object
+                .renderers()
+                .iter()
+                .any(|renderer| matches!(renderer.renderer_type(), "*selection" | "selection"))
+            {
+                object.add_renderer("*selection", "");
+            }
+            Ok(renderer_uid)
+        } else {
+            let renderer_uid = self
+                .new_renderer(scene_uid, object_uid, renderer_type, renderer_name)?
+                .result_renderer;
+            if let Some(selection) = selection {
+                self.set_renderer_selection_text(object_uid, renderer_uid, selection)?;
+            }
+            Ok(renderer_uid)
+        }
+    }
+
     /// Change a Workspace renderer to another compatible type.
     /// Compatible renderers are replaced with a new UID. `*selection` is kept
     /// and converted into an additional molecular renderer.
@@ -11087,15 +11142,6 @@ impl DesktopAppState {
                 "object, renderer type, and renderer name are required",
             ));
         }
-        let option = self
-            .molecule_renderer_setup_options(scene_uid)?
-            .into_iter()
-            .find(|option| option.name == renderer_type)
-            .ok_or_else(|| {
-                CueMolError::invalid_argument(format!(
-                    "unsupported renderer setup type: {renderer_type}"
-                ))
-            })?;
         let renderer_uids = self
             .renderer_summaries(object_uid)
             .into_iter()
@@ -11116,45 +11162,17 @@ impl DesktopAppState {
             ],
             None,
         )?;
-        if option.preset {
-            let styles = {
-                let scene = self
-                    .scene_manager()
-                    .scene(scene_uid)
-                    .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-                scene_style_manager(scene)
-            };
-            let object = self
-                .scene_manager_mut()
-                .object_mut(object_uid)
-                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-            object.create_preset_renderer_with_style(
-                &styles,
-                scene_uid.get(),
-                renderer_type,
-                renderer_name,
-                renderer_name,
-            )?;
-            if !object
-                .renderers()
-                .iter()
-                .any(|renderer| matches!(renderer.renderer_type(), "*selection" | "selection"))
-            {
-                object.add_renderer("*selection", "");
-            }
-        } else {
-            let renderer_uid = self
-                .new_renderer(scene_uid, object_uid, renderer_type, renderer_name)?
-                .result_renderer;
-            if let Some(selection) = setup
+        self.new_renderer_from_setup(
+            scene_uid,
+            object_uid,
+            renderer_type,
+            renderer_name,
+            setup
                 .selection
                 .as_deref()
                 .map(str::trim)
-                .filter(|selection| !selection.is_empty())
-            {
-                self.set_renderer_selection_text(object_uid, renderer_uid, selection)?;
-            }
-        }
+                .filter(|selection| !selection.is_empty()),
+        )?;
         Ok(())
     }
 
