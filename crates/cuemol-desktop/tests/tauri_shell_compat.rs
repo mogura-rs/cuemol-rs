@@ -433,7 +433,18 @@ fn tauri_window_menu_toggles_reference_panels_and_lists_windows() {
     assert!(NATIVE_GUI_RS.contains("Close panel"));
     assert!(JS.contains("getAllWebviewWindows"));
     assert!(JS.contains("await appWindow.setFocus()"));
+    assert!(JS.contains("WINDOW_GEOMETRY_STORAGE_KEY"));
+    assert!(JS.contains("function setupWindowGeometryPersistence()"));
+    assert!(JS.contains("await appWindow.setSize("));
+    assert!(JS.contains("await appWindow.setPosition("));
+    assert!(JS.contains("await persistWindowGeometry(appWindow)"));
+    assert!(NATIVE_GUI_RS.contains("fn load_native_window_geometry"));
+    assert!(NATIVE_GUI_RS.contains("fn record_native_window_geometry"));
+    assert!(NATIVE_GUI_RS.contains("WindowEvent::Moved(_)"));
     assert!(CAPABILITIES.contains(r#""cuemol-*""#));
+    assert!(CAPABILITIES.contains("core:webview:allow-create-webview-window"));
+    assert!(CAPABILITIES.contains("core:window:allow-set-position"));
+    assert!(CAPABILITIES.contains("core:window:allow-set-size"));
 }
 
 #[test]

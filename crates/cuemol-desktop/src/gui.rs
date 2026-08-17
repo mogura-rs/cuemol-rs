@@ -32,7 +32,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
@@ -188,6 +188,52 @@ fn load_native_config_source() -> NativeConfigSource {
     NativeConfigSource {
         path: Some(path),
         input,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeWindowGeometry {
+    position: Option<PhysicalPosition<i32>>,
+    size: PhysicalSize<u32>,
+}
+
+fn load_native_window_geometry(state: &DesktopAppState) -> NativeWindowGeometry {
+    let width = state
+        .config_value("window:width")
+        .parse::<u32>()
+        .unwrap_or(1024)
+        .clamp(320, 8192);
+    let height = state
+        .config_value("window:height")
+        .parse::<u32>()
+        .unwrap_or(768)
+        .clamp(240, 8192);
+    let position = state
+        .config_value("window:x")
+        .parse::<i32>()
+        .ok()
+        .zip(state.config_value("window:y").parse::<i32>().ok())
+        .map(|(x, y)| PhysicalPosition::new(x, y));
+    NativeWindowGeometry {
+        position,
+        size: PhysicalSize::new(width, height),
+    }
+}
+
+fn apply_native_window_geometry(window: &Window, geometry: NativeWindowGeometry) {
+    let _ = window.request_inner_size(geometry.size);
+    if let Some(position) = geometry.position {
+        window.set_outer_position(position);
+    }
+}
+
+fn record_native_window_geometry(state: &mut DesktopAppState, window: &Window) {
+    let size = window.inner_size();
+    state.put_config_value("window:width", size.width.to_string());
+    state.put_config_value("window:height", size.height.to_string());
+    if let Ok(position) = window.outer_position() {
+        state.put_config_value("window:x", position.x.to_string());
+        state.put_config_value("window:y", position.y.to_string());
     }
 }
 
@@ -390,7 +436,8 @@ impl NativeRunner {
             Some(Ok(config)) => {
                 self.config_init_receiver = None;
                 self.app = Some(GuiApplication::new_with_config_source(config));
-                if let Some(window) = &self.window {
+                if let (Some(window), Some(app)) = (&self.window, &self.app) {
+                    apply_native_window_geometry(window, load_native_window_geometry(&app.state));
                     window.request_redraw();
                 }
             }
@@ -419,6 +466,7 @@ impl NativeRunner {
         }
         if matches!(event, WindowEvent::CloseRequested) {
             if let Some(app) = self.app.as_mut() {
+                record_native_window_geometry(&mut app.state, window.as_ref());
                 app.request_application_exit();
                 window.request_redraw();
             } else {
@@ -447,6 +495,11 @@ impl NativeRunner {
         match event {
             WindowEvent::Resized(size) => {
                 gpu.resize(size);
+                record_native_window_geometry(&mut app.state, window.as_ref());
+                needs_redraw = true;
+            }
+            WindowEvent::Moved(_) => {
+                record_native_window_geometry(&mut app.state, window.as_ref());
                 needs_redraw = true;
             }
             WindowEvent::RedrawRequested => {
@@ -32793,6 +32846,45 @@ mod tests {
         assert!(command.get_envs().any(|(key, value)| {
             key == std::ffi::OsStr::new("CUEMOL_DESKTOP_EXIT_AFTER_MS") && value.is_none()
         }));
+    }
+
+    #[test]
+    fn native_window_geometry_uses_saved_reference_dimensions() {
+        let mut state = DesktopAppState::new();
+        assert_eq!(
+            load_native_window_geometry(&state),
+            NativeWindowGeometry {
+                position: None,
+                size: PhysicalSize::new(1024, 768),
+            }
+        );
+
+        for (key, value) in [
+            ("window:x", "-120"),
+            ("window:y", "45"),
+            ("window:width", "1440"),
+            ("window:height", "900"),
+        ] {
+            state.put_config_value(key, value.to_string());
+        }
+        assert_eq!(
+            load_native_window_geometry(&state),
+            NativeWindowGeometry {
+                position: Some(PhysicalPosition::new(-120, 45)),
+                size: PhysicalSize::new(1440, 900),
+            }
+        );
+
+        state.put_config_value("window:y", String::new());
+        state.put_config_value("window:width", "1".to_string());
+        state.put_config_value("window:height", "99999".to_string());
+        assert_eq!(
+            load_native_window_geometry(&state),
+            NativeWindowGeometry {
+                position: None,
+                size: PhysicalSize::new(320, 8192),
+            }
+        );
     }
 
     #[test]

@@ -3,5 +3,12 @@
   "identifier": "main-capability",
   "description": "Permissions for the local CueMol2 desktop window",
   "windows": ["main", "cuemol-*"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-close",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "dialog:default"
+  ]
 }

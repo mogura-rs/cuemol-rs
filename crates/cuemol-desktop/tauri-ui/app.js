@@ -124,6 +124,7 @@ const BOTTOM_PANEL_HEIGHT_STORAGE_KEY = "cuemol2.bottomPanelHeight.v1";
 const SIDE_PANEL_WIDTH_STORAGE_KEY = "cuemol2.sidePanelWidth.v1";
 const SIDE_PANEL_STATE_STORAGE_KEY = "cuemol2.sidePanelState.v1";
 const RIBBON_COLLAPSED_STORAGE_KEY = "cuemol2.ribbonCollapsed.v1";
+const WINDOW_GEOMETRY_STORAGE_KEY = "cuemol2.windowGeometry.v1";
 const SIDE_PANEL_DEFAULT_ORDER = [
   "Workspace",
   "MolStruct",
@@ -16610,6 +16611,79 @@ async function closeActiveTab() {
 
 let applicationCloseAllowed = false;
 let applicationClosePending = false;
+let windowGeometrySaveTimer = null;
+
+async function persistWindowGeometry(appWindow) {
+  if (!appWindow?.innerSize || !appWindow?.outerPosition) return;
+  try {
+    const [size, position] = await Promise.all([
+      appWindow.innerSize(),
+      appWindow.outerPosition(),
+    ]);
+    localStorage.setItem(
+      WINDOW_GEOMETRY_STORAGE_KEY,
+      JSON.stringify({
+        x: Math.round(position.x),
+        y: Math.round(position.y),
+        width: Math.round(size.width),
+        height: Math.round(size.height),
+      }),
+    );
+  } catch (error) {
+    console.warn("Cannot save CueMol2 window geometry:", error);
+  }
+}
+
+async function setupWindowGeometryPersistence() {
+  const getCurrent =
+    tauri?.webviewWindow?.getCurrentWebviewWindow || tauri?.window?.getCurrentWindow;
+  if (!getCurrent) return;
+  const appWindow = await getCurrent();
+  if (!appWindow) return;
+  let geometry = null;
+  try {
+    geometry = JSON.parse(localStorage.getItem(WINDOW_GEOMETRY_STORAGE_KEY) || "null");
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+  try {
+    const PhysicalSize = tauri?.dpi?.PhysicalSize || tauri?.window?.PhysicalSize;
+    const PhysicalPosition = tauri?.dpi?.PhysicalPosition || tauri?.window?.PhysicalPosition;
+    if (
+      geometry &&
+      Number.isFinite(geometry.width) &&
+      Number.isFinite(geometry.height) &&
+      PhysicalSize &&
+      appWindow.setSize
+    ) {
+      await appWindow.setSize(
+        new PhysicalSize(
+          Math.min(8192, Math.max(760, Math.round(geometry.width))),
+          Math.min(8192, Math.max(520, Math.round(geometry.height))),
+        ),
+      );
+    }
+    if (
+      geometry &&
+      Number.isFinite(geometry.x) &&
+      Number.isFinite(geometry.y) &&
+      PhysicalPosition &&
+      appWindow.setPosition
+    ) {
+      await appWindow.setPosition(
+        new PhysicalPosition(Math.round(geometry.x), Math.round(geometry.y)),
+      );
+    }
+  } catch (error) {
+    console.warn("Cannot restore CueMol2 window geometry:", error);
+  }
+  const scheduleSave = () => {
+    clearTimeout(windowGeometrySaveTimer);
+    windowGeometrySaveTimer = setTimeout(() => void persistWindowGeometry(appWindow), 200);
+  };
+  await appWindow.onResized?.(scheduleSave);
+  await appWindow.onMoved?.(scheduleSave);
+}
 
 async function confirmApplicationExit() {
   const modifiedScenes = (snapshot?.scenes || []).filter((scene) => scene.modified);
@@ -16644,6 +16718,7 @@ async function setupApplicationCloseGuard() {
     applicationClosePending = true;
     try {
       if (!(await confirmApplicationExit())) return;
+      await persistWindowGeometry(appWindow);
       applicationCloseAllowed = true;
       await appWindow.close();
     } finally {
@@ -17594,6 +17669,7 @@ async function start() {
   }
   try {
     renderRecentMenu();
+    await setupWindowGeometryPersistence();
     const sequence = ++requestSequence;
     const initial = await invoke("get_initial_state", viewportDimensions());
     preferences = initial.preferences;
