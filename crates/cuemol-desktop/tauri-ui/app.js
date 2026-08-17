@@ -122,6 +122,7 @@ const RECENT_STORAGE_KEY = "cuemol2.recentFiles.v1";
 const SELECTION_HISTORY_STORAGE_KEY = "cuemol2.selectionHistory.v1";
 const ANIMATION_RENDER_STORAGE_KEY = "cuemol2.animationRender.v1";
 const ANIMATION_COLUMN_WIDTHS_STORAGE_KEY = "cuemol2.animationColumnWidths.v1";
+const COLORING_PAINT_COLUMN_WIDTH_STORAGE_KEY = "cuemol2.coloringPaintColumnWidth.v1";
 const COMMAND_HISTORY_STORAGE_KEY = "cuemol2.commandHistory.v1";
 const BOTTOM_PANEL_HEIGHT_STORAGE_KEY = "cuemol2.bottomPanelHeight.v1";
 const SIDE_PANEL_WIDTH_STORAGE_KEY = "cuemol2.sidePanelWidth.v1";
@@ -218,6 +219,7 @@ let densityPanelTargetKey = null;
 let viewPanelCamera = null;
 let coloringPaintSelectedIndex = -1;
 let coloringGradientSelectedIndex = -1;
+let coloringPaintSelectionColumnWidth = null;
 let selectionHistoryEntries = loadSelectionHistory();
 let commandHistoryEntries = loadCommandHistory();
 let commandHistoryPosition = commandHistoryEntries.length;
@@ -13974,10 +13976,115 @@ function coloringInput(id, value, type, onChange) {
   return input;
 }
 
+function setColoringPaintSelectionColumnWidth(width, persist = false) {
+  let nextWidth = Math.min(400, Math.max(60, Number(width) || 105));
+  const availableWidth = coloringDeck?.clientWidth || 0;
+  if (availableWidth >= 125) {
+    nextWidth = Math.min(nextWidth, availableWidth - 65);
+    nextWidth = Math.max(60, nextWidth);
+  }
+  coloringPaintSelectionColumnWidth = nextWidth;
+  coloringDeck?.style.setProperty("--coloring-paint-selection-width", `${nextWidth}px`);
+  coloringDeck
+    ?.querySelector("[data-coloring-paint-column-splitter]")
+    ?.setAttribute("aria-valuenow", String(Math.round(nextWidth)));
+  if (!persist) return;
+  try {
+    localStorage.setItem(COLORING_PAINT_COLUMN_WIDTH_STORAGE_KEY, String(nextWidth));
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+}
+
+function restoreColoringPaintSelectionColumnWidth() {
+  let width;
+  try {
+    width = Number(localStorage.getItem(COLORING_PAINT_COLUMN_WIDTH_STORAGE_KEY));
+  } catch {
+    return;
+  }
+  if (Number.isFinite(width) && width > 0) {
+    setColoringPaintSelectionColumnWidth(width);
+  }
+}
+
+function resetColoringPaintSelectionColumnWidth() {
+  coloringPaintSelectionColumnWidth = null;
+  coloringDeck?.style.removeProperty("--coloring-paint-selection-width");
+  try {
+    localStorage.removeItem(COLORING_PAINT_COLUMN_WIDTH_STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+}
+
+function coloringPaintColumnHeader() {
+  const header = document.createElement("div");
+  header.className = "coloring-paint-columns";
+  const selection = document.createElement("span");
+  selection.textContent = "Selection";
+  const splitter = document.createElement("div");
+  splitter.className = "coloring-paint-column-splitter";
+  splitter.dataset.coloringPaintColumnSplitter = "selection";
+  splitter.tabIndex = 0;
+  splitter.setAttribute("role", "separator");
+  splitter.setAttribute("aria-orientation", "vertical");
+  splitter.setAttribute("aria-label", "Selection column width");
+  splitter.setAttribute("aria-valuemin", "60");
+  splitter.setAttribute("aria-valuemax", "400");
+  splitter.title = "Drag to resize; double-click to reset";
+  const color = document.createElement("span");
+  color.textContent = "Color";
+  splitter.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = selection.getBoundingClientRect().width || 105;
+    splitter.setPointerCapture(event.pointerId);
+    splitter.classList.add("dragging");
+    const resize = (moveEvent) => {
+      setColoringPaintSelectionColumnWidth(startWidth + moveEvent.clientX - startX);
+    };
+    const finish = (finishEvent) => {
+      if (finishEvent.type !== "pointercancel") resize(finishEvent);
+      setColoringPaintSelectionColumnWidth(
+        coloringPaintSelectionColumnWidth || selection.getBoundingClientRect().width,
+        true,
+      );
+      splitter.classList.remove("dragging");
+      splitter.removeEventListener("pointermove", resize);
+      splitter.removeEventListener("pointerup", finish);
+      splitter.removeEventListener("pointercancel", finish);
+    };
+    splitter.addEventListener("pointermove", resize);
+    splitter.addEventListener("pointerup", finish);
+    splitter.addEventListener("pointercancel", finish);
+  });
+  splitter.addEventListener("dblclick", resetColoringPaintSelectionColumnWidth);
+  splitter.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+    event.preventDefault();
+    const current = selection.getBoundingClientRect().width || 105;
+    setColoringPaintSelectionColumnWidth(
+      current + (event.key === "ArrowRight" ? 10 : -10),
+      true,
+    );
+  });
+  header.append(selection, splitter, color);
+  if (coloringPaintSelectionColumnWidth !== null) {
+    splitter.setAttribute(
+      "aria-valuenow",
+      String(Math.round(coloringPaintSelectionColumnWidth)),
+    );
+  }
+  return header;
+}
+
 function renderPaintColoring(target, state) {
   const list = document.createElement("div");
   list.id = "coloring-paint-list";
   list.className = "coloring-paint-list";
+  list.append(coloringPaintColumnHeader());
   if (coloringPaintSelectedIndex >= state.paintEntries.length) {
     coloringPaintSelectedIndex = state.paintEntries.length - 1;
   }
@@ -13994,7 +14101,10 @@ function renderPaintColoring(target, state) {
     selection.textContent = entry.selection;
     const color = document.createElement("code");
     color.textContent = entry.color;
-    row.append(swatch, selection, color);
+    const colorCell = document.createElement("span");
+    colorCell.className = "coloring-paint-color-cell";
+    colorCell.append(swatch, color);
+    row.append(selection, colorCell);
     row.addEventListener("click", () => {
       coloringPaintSelectedIndex = index;
       renderColoring();
@@ -17788,6 +17898,7 @@ window.addEventListener("drop", (event) => {
 
 restoreSidePanelState();
 setupAnimationColumnSplitters();
+restoreColoringPaintSelectionColumnWidth();
 setupSidePanelReordering();
 setupSidePanelHeightSplitters();
 setupSidePanelSplitter();

@@ -747,6 +747,36 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
 }
 
 #[test]
+fn paint_coloring_columns_are_resizable_and_persistent() {
+    for binding in [
+        "COLORING_PAINT_COLUMN_WIDTH_STORAGE_KEY",
+        "function coloringPaintColumnHeader()",
+        "setColoringPaintSelectionColumnWidth(",
+        "resetColoringPaintSelectionColumnWidth",
+        "splitter.setPointerCapture(event.pointerId)",
+        "colorCell.append(swatch, color)",
+    ] {
+        assert!(
+            JS.contains(binding),
+            "missing Paint column binding {binding}"
+        );
+    }
+    assert!(CSS.contains("var(--coloring-paint-selection-width, minmax(60px, 1fr))"));
+    assert!(CSS.contains(".coloring-paint-column-splitter"));
+    assert!(CSS.contains(".coloring-paint-color-cell"));
+    let native_paint = NATIVE_GUI_RS
+        .split("fn object_paint_coloring_ui(")
+        .nth(1)
+        .and_then(|source| source.split("fn electrostatic_coloring_ui(").next())
+        .expect("native Paint coloring panel");
+    assert!(native_paint.contains("RichText::new(\"Selection\").strong()"));
+    assert!(native_paint.contains("RichText::new(\"Color\").strong()"));
+    assert!(native_paint.contains("coloring_paint:selection_width"));
+    assert!(native_paint.contains("splitter.drag_delta().x"));
+    assert!(native_paint.contains("ui.monospace(color)"));
+}
+
+#[test]
 fn tauri_file_and_scene_open_use_reference_reader_categories() {
     assert_eq!(HTML.matches("data-action=\"open-scene\"").count(), 2);
 
