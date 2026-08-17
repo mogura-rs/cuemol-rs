@@ -111,6 +111,45 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
             "missing native Coloring action {label}"
         );
     }
+    for label in [
+        "Use sigma contour level",
+        "Use absolute contour level",
+        "Solid coloring",
+        "Multi gradient",
+        "Redraw",
+        "Cell",
+        "Transp:",
+        "Level:",
+        "Extent:",
+    ] {
+        assert!(
+            NATIVE_GUI_RS.contains(label),
+            "missing native Density map control {label}"
+        );
+    }
+    for label in [
+        "Rotation",
+        "RotX:",
+        "RotY:",
+        "RotZ:",
+        "Translation",
+        "TraX:",
+        "TraY:",
+        "TraZ:",
+        "Zoom / Slab",
+        "Zoom:",
+        "Slab:",
+        "Dist:",
+        "Projection",
+        "Perspective:",
+        "Center mark:",
+        "Crosshair",
+    ] {
+        assert!(
+            NATIVE_GUI_RS.contains(label),
+            "missing native View fake-dial control {label}"
+        );
+    }
     assert!(!NATIVE_GUI_RS.contains(".button(surface_label)"));
     assert!(!NATIVE_GUI_RS.contains(".button(clip_label)"));
     assert!(!CSS.contains("#selection-editor-add-kind"));

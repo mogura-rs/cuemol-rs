@@ -1081,6 +1081,8 @@ struct GuiApplication {
     density_solid_mesh: Option<cuemol_render::RenderMesh>,
     /// Renderer chosen independently in the Density map panel.
     densitymap_target: Option<(cuemol_core::Uid, cuemol_core::Uid)>,
+    /// Relative degree accumulators shown by the View panel rotation fake-dials.
+    view_rotation_delta: Vec3,
     /// Molecular-surface (SES) display: the toggle + a cached mesh (the SES is
     /// expensive, so it is computed once on enable, not every rebuild).
     show_surface: bool,
@@ -4035,6 +4037,7 @@ impl GuiApplication {
             show_density_solid: false,
             density_solid_mesh: None,
             densitymap_target: None,
+            view_rotation_delta: Vec3::ZERO,
             show_surface: false,
             surface_mesh: None,
             clip_surface: false,
@@ -11308,61 +11311,146 @@ impl GuiApplication {
         }
     }
 
-    /// View section — fake-dial style camera controls (CueMol2 `fakedial-panel.xul`).
-    /// Rotation is relative-delta (ADR-0025); translation / zoom / slab are absolute.
+    /// View section — unbounded fake-dial camera controls (`fakedial-panel.xul`).
     fn view_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
-        ui.horizontal(|ui| {
-            ui.radio_value(&mut camera.perspective, false, "Ortho");
-            ui.radio_value(&mut camera.perspective, true, "Persp");
-        });
-        ui.separator();
-        ui.label("Rotation");
-        for (axis, label) in [(Vec3::X, "Rot X"), (Vec3::Y, "Rot Y"), (Vec3::Z, "Rot Z")] {
-            ui.horizontal(|ui| {
-                ui.label(label);
-                if ui.small_button("−15°").clicked() {
-                    camera.orientation =
-                        Quat::from_axis_angle(axis, -15.0_f32.to_radians()) * camera.orientation;
-                }
-                if ui.small_button("+15°").clicked() {
-                    camera.orientation =
-                        Quat::from_axis_angle(axis, 15.0_f32.to_radians()) * camera.orientation;
+        ui.label(egui::RichText::new("Rotation").strong());
+        egui::Grid::new("view-fakedial-rotation")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                for (index, (axis, label)) in
+                    [(Vec3::X, "RotX:"), (Vec3::Y, "RotY:"), (Vec3::Z, "RotZ:")]
+                        .into_iter()
+                        .enumerate()
+                {
+                    ui.label(label);
+                    let previous = self.view_rotation_delta[index];
+                    let response = ui.add(
+                        egui::DragValue::new(&mut self.view_rotation_delta[index])
+                            .speed(1.0)
+                            .fixed_decimals(0)
+                            .suffix(" °"),
+                    );
+                    if response.changed() {
+                        camera.rotate_view(axis, self.view_rotation_delta[index] - previous);
+                    }
+                    if response.drag_stopped() || response.lost_focus() {
+                        self.view_rotation_delta[index] = 0.0;
+                    }
+                    ui.end_row();
                 }
             });
-        }
+
         ui.separator();
-        ui.label("Translation (Å)");
-        ui.add(
-            egui::DragValue::new(&mut camera.target.x)
-                .prefix("X ")
-                .speed(0.2),
-        );
-        ui.add(
-            egui::DragValue::new(&mut camera.target.y)
-                .prefix("Y ")
-                .speed(0.2),
-        );
-        ui.add(
-            egui::DragValue::new(&mut camera.target.z)
-                .prefix("Z ")
-                .speed(0.2),
-        );
+        ui.label(egui::RichText::new("Translation").strong());
+        let viewport_height = self
+            .viewport_rect
+            .map(|rect| rect.height())
+            .unwrap_or(100.0)
+            .max(1.0);
+        egui::Grid::new("view-fakedial-translation")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                for (index, label) in ["TraX:", "TraY:", "TraZ:"].into_iter().enumerate() {
+                    ui.label(label);
+                    let mut value = camera.target[index];
+                    let response = ui.add(
+                        egui::DragValue::new(&mut value)
+                            .speed(1.0)
+                            .fixed_decimals(2)
+                            .suffix(" Å"),
+                    );
+                    if response.dragged() {
+                        let delta = ui.input(|input| input.pointer.delta().x);
+                        camera.translate_view(index, delta, viewport_height);
+                    } else if response.changed() {
+                        camera.target[index] = value;
+                    }
+                    ui.end_row();
+                }
+            });
+
         ui.separator();
-        ui.label("Zoom / Slab");
-        ui.add(
-            egui::DragValue::new(&mut camera.ortho_scale)
-                .prefix("Zoom ")
-                .speed(1.0),
-        );
-        camera.ortho_scale = camera.ortho_scale.max(1.0);
-        ui.add(
-            egui::DragValue::new(&mut camera.distance)
-                .prefix("Dist ")
-                .speed(1.0),
-        );
-        if ui.button("Fit").clicked() {
-            camera.fit_snapshot(&self.snapshot);
-        }
+        ui.label(egui::RichText::new("Zoom / Slab").strong());
+        egui::Grid::new("view-fakedial-zoom-slab")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Zoom:");
+                let mut zoom = camera.zoom();
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut zoom)
+                            .speed(1.0)
+                            .fixed_decimals(0)
+                            .suffix(" Å"),
+                    )
+                    .changed()
+                {
+                    camera.set_zoom(zoom);
+                }
+                ui.end_row();
+
+                ui.label("Slab:");
+                let mut slab = camera.slab_depth;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut slab)
+                            .speed(1.0)
+                            .fixed_decimals(0)
+                            .suffix(" Å"),
+                    )
+                    .changed()
+                {
+                    camera.set_slab(slab);
+                }
+                ui.end_row();
+
+                ui.label("Dist:");
+                let mut distance = camera.distance;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut distance)
+                            .speed(1.0)
+                            .fixed_decimals(0)
+                            .suffix(" Å"),
+                    )
+                    .changed()
+                {
+                    camera.set_distance(distance);
+                }
+                ui.end_row();
+            });
+
+        ui.separator();
+        ui.label(egui::RichText::new("Projection").strong());
+        egui::Grid::new("view-fakedial-projection")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Perspective:");
+                ui.checkbox(&mut camera.perspective, "");
+                ui.end_row();
+
+                ui.label("Center mark:");
+                egui::ComboBox::from_id_salt("view-fakedial-center-mark")
+                    .selected_text(match camera.center_mark {
+                        CenterMark::None => "None",
+                        CenterMark::Cross => "Crosshair",
+                        CenterMark::Axis => "Axis",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut camera.center_mark, CenterMark::None, "None");
+                        ui.selectable_value(
+                            &mut camera.center_mark,
+                            CenterMark::Cross,
+                            "Crosshair",
+                        );
+                        ui.selectable_value(&mut camera.center_mark, CenterMark::Axis, "Axis");
+                    });
+                ui.end_row();
+            });
     }
 
     fn active_animation_manager(&self) -> std::result::Result<AnimMgr, String> {
@@ -27596,6 +27684,50 @@ impl CameraController {
         self.ortho_scale = (self.ortho_scale * factor).clamp(0.2, 10000.0);
     }
 
+    fn zoom(&self) -> f32 {
+        1000.0 / self.ortho_scale.max(0.1)
+    }
+
+    fn set_zoom(&mut self, zoom: f32) {
+        self.ortho_scale = 1000.0 / zoom.max(0.01);
+    }
+
+    fn set_slab(&mut self, slab: f32) {
+        self.slab_depth = slab.clamp(0.1, (self.distance * 2.0).max(0.1));
+    }
+
+    fn set_distance(&mut self, distance: f32) {
+        self.distance = distance.clamp(0.1, 10_000.0);
+        self.slab_depth = self.slab_depth.clamp(0.1, self.distance * 2.0);
+    }
+
+    fn rotate_view(&mut self, axis: Vec3, delta_degrees: f32) {
+        if !delta_degrees.is_finite() || delta_degrees == 0.0 {
+            return;
+        }
+        let delta = Quat::from_axis_angle(axis, delta_degrees.to_radians());
+        self.orientation = (delta * self.orientation).normalize();
+    }
+
+    fn translate_view(&mut self, axis: usize, delta: f32, viewport_height: f32) {
+        if !delta.is_finite() || delta == 0.0 {
+            return;
+        }
+        let rotation = self.rotation();
+        match axis {
+            0 => {
+                let scale = self.zoom() / viewport_height.max(1.0);
+                self.target -= rotation * Vec3::X * delta * scale;
+            }
+            1 => {
+                let scale = self.zoom() / viewport_height.max(1.0);
+                self.target += rotation * Vec3::Y * delta * scale;
+            }
+            2 => self.target -= rotation * -Vec3::Z * delta / 4.0,
+            _ => {}
+        }
+    }
+
     fn rotation(&self) -> Quat {
         self.orientation
     }
@@ -32252,6 +32384,43 @@ mod tests {
             CameraDragMode::from_button(MouseButton::Right),
             Some(CameraDragMode::Pan)
         );
+    }
+
+    #[test]
+    fn native_view_fakedials_use_reference_relative_and_absolute_semantics() {
+        let mut camera = CameraController::default();
+        assert!((camera.zoom() - 25.0).abs() < 1.0e-5);
+        camera.set_zoom(50.0);
+        assert!((camera.ortho_scale - 20.0).abs() < 1.0e-5);
+        camera.set_slab(500.0);
+        assert_eq!(camera.slab_depth, 240.0);
+        camera.set_distance(10.0);
+        assert_eq!(camera.distance, 10.0);
+        assert_eq!(camera.slab_depth, 20.0);
+
+        camera.translate_view(0, 4.0, 100.0);
+        camera.translate_view(1, 2.0, 100.0);
+        camera.translate_view(2, 4.0, 100.0);
+        assert!(camera.target.abs_diff_eq(Vec3::new(-2.0, 1.0, 1.0), 1.0e-5));
+
+        camera.rotate_view(Vec3::X, 90.0);
+        assert!((camera.orientation * Vec3::Y).abs_diff_eq(Vec3::Z, 1.0e-5));
+
+        camera.perspective = false;
+        camera.center_mark = CenterMark::Axis;
+        let mut app = GuiApplication::new();
+        let ctx = egui::Context::default();
+        let before = camera.clone();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                app.view_section(ui, &mut camera);
+            });
+        });
+        assert_eq!(app.view_rotation_delta, Vec3::ZERO);
+        assert_eq!(camera.target, before.target);
+        assert_eq!(camera.orientation, before.orientation);
+        assert_eq!(camera.perspective, before.perspective);
+        assert_eq!(camera.center_mark, before.center_mark);
     }
 
     #[test]
