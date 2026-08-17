@@ -165,6 +165,7 @@ const LEGACY_MENU_SURFACES: &[&str] = &[
     "APBS elepot calculation...",
     "Execute script...",
     "Performance measure",
+    "Mol clinet tools ...",
     "Show/Hide Topbar",
     "Clear log contents",
     "Restore default panel location",
@@ -758,6 +759,13 @@ enum NativeRendererSetupAction {
     PdbDownload,
     OpenPath(PathBuf),
     OpenTrajectory(NativeTrajectoryLoadRequest),
+    MolClient(NativeMolClientRequest),
+}
+
+#[derive(Debug, Clone)]
+struct NativeMolClientRequest {
+    endpoint: String,
+    smiles: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1369,6 +1377,9 @@ struct GuiApplication {
     secondary_ignore_breaks: bool,
     secondary_gap_fill: bool,
     secondary_angle: f64,
+    mol_client_url: String,
+    mol_client_smiles: String,
+    mol_client_name: String,
     surface_target: Option<cuemol_core::Uid>,
     surface_use_selection: bool,
     surface_selection: String,
@@ -4970,6 +4981,9 @@ impl GuiApplication {
             secondary_ignore_breaks: false,
             secondary_gap_fill: false,
             secondary_angle: 120.0,
+            mol_client_url: "http://127.0.0.1:8000/RPC2".to_string(),
+            mol_client_smiles: String::new(),
+            mol_client_name: String::new(),
             surface_target: None,
             surface_use_selection: false,
             surface_selection: String::new(),
@@ -5694,7 +5708,17 @@ impl GuiApplication {
                         "APBS elepot calculation...",
                         "Execute script...",
                         "Performance measure",
+                        "Mol clinet tools ...",
                     ] {
+                        if matches!(
+                            label,
+                            "Mol surface generation..."
+                                | "APBS elepot calculation..."
+                                | "Execute script..."
+                                | "Mol clinet tools ..."
+                        ) {
+                            ui.separator();
+                        }
                         if ui.button(label).clicked() {
                             match label {
                                 "Execute script..." => self.choose_execute_script(),
@@ -5712,6 +5736,9 @@ impl GuiApplication {
                                         "Performance measure: {}",
                                         self.perf_measure
                                     ));
+                                }
+                                "Mol clinet tools ..." => {
+                                    self.tool_dialog = Some("MolClient tools".to_string());
                                 }
                                 _ => {
                                     self.tool_dialog =
@@ -26039,6 +26066,7 @@ impl GuiApplication {
                     "Change symmetry" => self.crystal_tool_ui(ui),
                     "Reassign secondary str" => self.secondary_structure_tool_ui(ui),
                     "Mol morphing animation" => self.morph_tool_ui(ui),
+                    "MolClient tools" => self.mol_client_tool_ui(ui),
                     "Mol surface generation" => self.surface_tool_ui(ui),
                     "Mol surface cutter" => self.surface_cutter_tool_ui(ui, camera),
                     "APBS elepot calculation" => self.apbs_tool_ui(ui),
@@ -26508,6 +26536,54 @@ impl GuiApplication {
         });
         if ui.button("Assign").clicked() {
             self.assign_secondary_structure();
+        }
+    }
+
+    fn mol_client_tool_ui(&mut self, ui: &mut egui::Ui) {
+        egui::Grid::new("mol-client-fields")
+            .num_columns(2)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("MolServer URL:");
+                ui.add_sized(
+                    [280.0, 22.0],
+                    egui::TextEdit::singleline(&mut self.mol_client_url),
+                );
+                ui.end_row();
+                ui.label("SMILES:");
+                ui.add_sized(
+                    [280.0, 22.0],
+                    egui::TextEdit::singleline(&mut self.mol_client_smiles),
+                );
+                ui.end_row();
+                ui.label("Mol name:");
+                ui.add_sized(
+                    [280.0, 22.0],
+                    egui::TextEdit::singleline(&mut self.mol_client_name),
+                );
+                ui.end_row();
+            });
+        if ui
+            .add_enabled(
+                !self.mol_client_url.trim().is_empty()
+                    && !self.mol_client_smiles.trim().is_empty()
+                    && !self.mol_client_name.trim().is_empty(),
+                egui::Button::new("OK"),
+            )
+            .clicked()
+        {
+            let request = NativeMolClientRequest {
+                endpoint: self.mol_client_url.trim().to_string(),
+                smiles: self.mol_client_smiles.trim().to_string(),
+            };
+            let object_name = self.mol_client_name.trim().to_string();
+            self.open_renderer_setup(
+                &object_name,
+                NativeRendererSetupAction::MolClient(request),
+                crate::GuiFileRendererTarget::Molecule,
+                NativeRendererReaderOptions::default(),
+            );
+            self.tool_dialog = None;
         }
     }
 
@@ -28977,6 +29053,9 @@ impl GuiApplication {
                 NativeRendererSetupAction::OpenTrajectory(request) => {
                     self.load_md_trajectory_with_renderer_setup(request, setup, camera);
                 }
+                NativeRendererSetupAction::MolClient(request) => {
+                    self.create_mol_client_object(request, setup, camera);
+                }
             }
         } else if open && !cancel {
             self.renderer_setup_draft = Some(draft);
@@ -29024,6 +29103,38 @@ impl GuiApplication {
                 self.set_status(format!(
                     "Loaded trajectory {}: {} frame(s)",
                     summary.object_name, summary.frame_count
+                ));
+            }
+            Err(error) => self.set_error(error),
+        }
+    }
+
+    fn create_mol_client_object(
+        &mut self,
+        request: NativeMolClientRequest,
+        setup: crate::GuiRendererSetup,
+        camera: &mut CameraController,
+    ) {
+        let undo = self.capture_undo();
+        match self
+            .state
+            .create_molecule_from_smiles(&request.endpoint, &request.smiles, &setup)
+        {
+            Ok((scene_uid, object_uid)) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.selected_object = Some(object_uid);
+                self.selected_renderer = None;
+                self.workspace_aux_selection = None;
+                self.molstruct_object = Some(object_uid);
+                self.sync_active_scene_properties();
+                self.rebuild_snapshot();
+                if setup.recenter {
+                    camera.fit_snapshot(&self.snapshot);
+                }
+                self.set_status(format!(
+                    "Created molecule {} from SMILES",
+                    setup.object_name
                 ));
             }
             Err(error) => self.set_error(error),

@@ -323,6 +323,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "Interaction",
         "Mol surface generation",
         "APBS elepot calculation",
+        "Mol clinet tools ...",
         "Restore default panel location",
         "Check for updates",
     ] {
@@ -350,6 +351,8 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "remove_nonstandard_bonds",
         "calculate_contacts",
         "assign_secondary_structure",
+        "get_molclient_renderer_setup",
+        "create_molecule_from_smiles",
         "create_molecular_surface",
         "cut_surface",
         "start_apbs_calculation",
@@ -429,6 +432,16 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     assert!(JS.contains("secondaryType: Number(secondaryType.value)"));
     assert!(TAURI_APP_RS.contains("secondary_type: i32"));
     assert!(NATIVE_GUI_RS.contains("set_secondary_structure_in_object"));
+    for label in ["MolClient tools", "MolServer URL:", "SMILES:", "Mol name:"] {
+        assert!(
+            NATIVE_GUI_RS.contains(label),
+            "missing native MolClient {label}"
+        );
+    }
+    assert!(HTML.contains("Mol clinet tools ..."));
+    assert!(JS.contains("get_molclient_renderer_setup"));
+    assert!(JS.contains("rendererSetup: result.rendererSetup"));
+    assert!(TAURI_APP_RS.contains("CreateMoleculeFromSmiles"));
     assert!(CSS.contains(".bond-list-row"));
     assert!(CSS.contains(".bond-list-columns"));
     assert!(CSS.contains(".bond-column-splitter"));

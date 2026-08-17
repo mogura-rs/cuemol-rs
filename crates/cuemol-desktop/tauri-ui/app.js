@@ -5731,6 +5731,56 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     } else {
       dialogContent.append(dialogParagraph("Camera properties are unavailable."));
     }
+  } else if (title === "MolClient tools") {
+    dialogTitle.textContent = "MolClient tools";
+    const endpoint = dialogField("MolServer URL", "http://127.0.0.1:8000/RPC2");
+    const smiles = dialogField("SMILES", "");
+    const moleculeName = dialogField("Mol name", "");
+    const open = button("OK", "dialog-primary", async () => {
+      if (
+        !endpoint.value.trim() ||
+        !smiles.value.trim() ||
+        !moleculeName.value.trim()
+      ) {
+        return;
+      }
+      let defaults;
+      try {
+        defaults = await invoke("get_molclient_renderer_setup", {
+          objectName: moleculeName.value.trim(),
+        });
+      } catch (error) {
+        showError(error);
+        return;
+      }
+      const result = await showRendererSetup(defaults);
+      if (!result) return;
+      const previous = new Set(snapshot.objects.map((object) => object.uid));
+      const changed = await mutate("create_molecule_from_smiles", {
+        endpoint: endpoint.value.trim(),
+        smiles: smiles.value.trim(),
+        rendererSetup: result.rendererSetup,
+      });
+      if (!changed) return;
+      const created = snapshot.objects.find((object) => !previous.has(object.uid));
+      if (created) {
+        selectedObjectUid = created.uid;
+        selectedRendererUid = null;
+        selectedSurfaceUid = null;
+        selectedSurfaceRendererUid = null;
+        workspaceSelectionKind = "object";
+        renderShell();
+      }
+    });
+    const syncReady = () => {
+      open.disabled =
+        !endpoint.value.trim() || !smiles.value.trim() || !moleculeName.value.trim();
+    };
+    endpoint.addEventListener("input", syncReady);
+    smiles.addEventListener("input", syncReady);
+    moleculeName.addEventListener("input", syncReady);
+    syncReady();
+    dialogActions(open);
   } else if (title === "Molecular superposition") {
     const objects = activeObjects();
     if (objects.length < 2) {

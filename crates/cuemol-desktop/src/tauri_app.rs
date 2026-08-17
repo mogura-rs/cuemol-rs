@@ -7860,6 +7860,14 @@ enum ModelRequest {
     GetPdbRendererSetup {
         pdb_id: String,
     },
+    GetMolClientRendererSetup {
+        object_name: String,
+    },
+    CreateMoleculeFromSmiles {
+        endpoint: String,
+        smiles: String,
+        renderer_setup: crate::GuiRendererSetup,
+    },
     OpenPdb {
         pdb_id: String,
         files: Vec<crate::PdbDownloadedFile>,
@@ -10718,6 +10726,33 @@ fn handle_model_request(
         ModelRequest::GetPdbRendererSetup { pdb_id } => Ok(ModelResponse::PdbRendererSetup(
             renderer_setup_defaults(model, &pdb_id.to_ascii_lowercase(), None, None)?,
         )),
+        ModelRequest::GetMolClientRendererSetup { object_name } => {
+            Ok(ModelResponse::PdbRendererSetup(renderer_setup_defaults(
+                model,
+                object_name.trim(),
+                None,
+                None,
+            )?))
+        }
+        ModelRequest::CreateMoleculeFromSmiles {
+            endpoint,
+            smiles,
+            renderer_setup,
+        } => {
+            let recenter = renderer_setup.recenter;
+            let object_name = renderer_setup.object_name.clone();
+            let undo = model.capture_undo();
+            let (scene_uid, _) = model
+                .desktop
+                .create_molecule_from_smiles(&endpoint, &smiles, &renderer_setup)
+                .map_err(|error| error.to_string())?;
+            model.modified_scenes.insert(scene_uid);
+            model.status = format!("Created molecule {object_name} from SMILES");
+            model.invalidate_mesh(recenter);
+            model.push_undo(undo);
+            model.touch_structure_details();
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::OpenPdb {
             pdb_id,
             files,
@@ -14582,6 +14617,37 @@ fn get_pdb_renderer_setup(
     }
 }
 
+#[tauri::command]
+fn get_molclient_renderer_setup(
+    object_name: String,
+    state: State<'_, ManagedState>,
+) -> Result<RendererSetupDto, String> {
+    match request_model(
+        &state,
+        ModelRequest::GetMolClientRendererSetup { object_name },
+    )? {
+        ModelResponse::PdbRendererSetup(setup) => Ok(setup),
+        _ => Err("unexpected MolClient renderer setup response".to_string()),
+    }
+}
+
+#[tauri::command]
+fn create_molecule_from_smiles(
+    endpoint: String,
+    smiles: String,
+    renderer_setup: RendererSetupInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::CreateMoleculeFromSmiles {
+            endpoint,
+            smiles,
+            renderer_setup: renderer_setup.into(),
+        },
+    )?)
+}
+
 fn pdb_fetch_options(
     pdb_id: String,
     fetch_coordinates: bool,
@@ -16161,6 +16227,8 @@ pub fn run() -> Result<(), tauri::Error> {
             get_file_renderer_setup,
             open_path_with_renderer_setup,
             get_pdb_renderer_setup,
+            get_molclient_renderer_setup,
+            create_molecule_from_smiles,
             check_pdb_availability,
             prefetch_pdb,
             get_pdb_download_progress,
@@ -23190,6 +23258,41 @@ mod tests {
                 .unwrap(),
             Some("Hs")
         );
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::GetMolClientRendererSetup {
+                object_name: "ethanol".to_string(),
+            },
+        )
+        .unwrap();
+        let ModelResponse::PdbRendererSetup(setup) = response else {
+            panic!("expected MolClient renderer setup");
+        };
+        assert_eq!(setup.object_name, "ethanol");
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CreateMoleculeFromSmiles {
+                endpoint: "offline".to_string(),
+                smiles: "CCO".to_string(),
+                renderer_setup: crate::GuiRendererSetup {
+                    object_name: "ethanol".to_string(),
+                    renderer_type: "simple".to_string(),
+                    renderer_name: "simple-smiles".to_string(),
+                    selection: None,
+                    recenter: true,
+                },
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.status, "Created molecule ethanol from SMILES");
+        assert!(model
+            .desktop
+            .active_object_summaries()
+            .iter()
+            .any(|object| object.name == "ethanol" && object.atom_count == 3));
     }
 
     #[test]

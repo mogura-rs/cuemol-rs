@@ -14403,6 +14403,51 @@ impl DesktopAppState {
         Ok(count)
     }
 
+    #[cfg(feature = "scripting")]
+    pub fn create_molecule_from_smiles(
+        &mut self,
+        endpoint: &str,
+        smiles: &str,
+        setup: &GuiRendererSetup,
+    ) -> Result<(Uid, Uid)> {
+        if endpoint.trim().is_empty() {
+            return Err(CueMolError::invalid_argument("MolServer URL is required"));
+        }
+        if smiles.trim().is_empty() {
+            return Err(CueMolError::invalid_argument("SMILES is required"));
+        }
+        if setup.object_name.trim().is_empty() {
+            return Err(CueMolError::invalid_argument("molecule name is required"));
+        }
+        let backup = self.clone();
+        let result = (|| {
+            let scene_uid = self.ensure_active_scene();
+            if !self
+                .molecule_renderer_setup_options(scene_uid)?
+                .iter()
+                .any(|option| option.name == setup.renderer_type.trim())
+            {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unsupported renderer setup type: {}",
+                    setup.renderer_type.trim()
+                )));
+            }
+            let molecule = cuemol_molclient::XmlRpcConn::new(endpoint.trim())
+                .mol_from_smiles(smiles.trim())?;
+            let object_uid = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?
+                .add_molecule(setup.object_name.trim(), molecule);
+            self.configure_molecule_renderer(scene_uid, object_uid, setup)?;
+            Ok((scene_uid, object_uid))
+        })();
+        if result.is_err() {
+            *self = backup;
+        }
+        result
+    }
+
     pub fn calc_atom_contacts_in_object(
         &self,
         object_uid: Uid,
@@ -66105,6 +66150,30 @@ attribute \"dep\" string \"positions\"
                 .unwrap(),
             Some("Hs")
         );
+        #[cfg(feature = "scripting")]
+        {
+            let (scene_uid, smiles_uid) = app
+                .create_molecule_from_smiles(
+                    "offline",
+                    "CCO",
+                    &GuiRendererSetup {
+                        object_name: "ethanol".to_string(),
+                        renderer_type: "simple".to_string(),
+                        renderer_name: "simple-smiles".to_string(),
+                        selection: None,
+                        recenter: true,
+                    },
+                )
+                .unwrap();
+            assert_eq!(scene_uid, app.active_scene().unwrap());
+            let smiles = app.scene_manager().object(smiles_uid).unwrap();
+            assert_eq!(smiles.name(), "ethanol");
+            assert_eq!(smiles.mol().atom_count(), 3);
+            assert!(smiles
+                .renderers()
+                .iter()
+                .any(|renderer| renderer.name() == "simple-smiles"));
+        }
     }
 
     #[test]
