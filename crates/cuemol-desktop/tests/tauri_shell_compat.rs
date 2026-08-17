@@ -2552,6 +2552,16 @@ fn tauri_workspace_exposes_reference_visibility_and_lock_columns() {
     assert!(CSS.contains("var(--workspace-state-column-width, 34px)"));
     assert!(CSS.contains(".workspace-column-splitter"));
     assert!(CSS.contains("position: absolute;"));
+    let native_workspace = NATIVE_GUI_RS
+        .split("fn workspace_section(")
+        .nth(1)
+        .and_then(|source| source.split("fn workspace_aux_renderer_group_name(").next())
+        .expect("native Workspace panel");
+    assert!(native_workspace.contains("RichText::new(\"V\").strong()"));
+    assert!(native_workspace.contains("RichText::new(\"Name\").strong()"));
+    assert!(native_workspace.contains("workspace_panel:state_width"));
+    assert!(native_workspace.contains("splitter.drag_delta().x"));
+    assert!(native_workspace.contains("egui::vec2(state_width, ui.spacing().interact_size.y)"));
 }
 
 #[test]

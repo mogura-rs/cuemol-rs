@@ -49,6 +49,9 @@ const COLORING_PAINT_SELECTION_COLUMN_DEFAULT_WIDTH: f32 = 105.0;
 const COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH: f32 = 60.0;
 const COLORING_PAINT_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const COLORING_GRADIENT_PARAM_COLUMN_DEFAULT_WIDTH: f32 = 105.0;
+const WORKSPACE_STATE_COLUMN_DEFAULT_WIDTH: f32 = 44.0;
+const WORKSPACE_STATE_COLUMN_MIN_WIDTH: f32 = 36.0;
+const WORKSPACE_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("HD 720", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -1125,6 +1128,8 @@ struct GuiApplication {
     workspace_aux_selection: Option<WorkspaceAuxSelection>,
     workspace_multiple_selection: Vec<NativeWorkspaceTarget>,
     workspace_selection_order: Vec<NativeWorkspaceTarget>,
+    workspace_state_column_width: f32,
+    workspace_state_column_drag_start_width: Option<f32>,
     editing_saved_camera: Option<(cuemol_core::Uid, String)>,
     camera_visibility_draft: Option<NativeCameraVisibilityDraft>,
     style_properties_draft: Option<NativeStyleProperties>,
@@ -4510,6 +4515,11 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(COLORING_GRADIENT_PARAM_COLUMN_DEFAULT_WIDTH)
             .clamp(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH, 400.0);
+        let workspace_state_column_width = state
+            .config_value("workspace_panel:state_width")
+            .parse::<f32>()
+            .unwrap_or(WORKSPACE_STATE_COLUMN_DEFAULT_WIDTH)
+            .clamp(WORKSPACE_STATE_COLUMN_MIN_WIDTH, 100.0);
         Self {
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
@@ -4562,6 +4572,8 @@ impl GuiApplication {
             workspace_aux_selection: None,
             workspace_multiple_selection: Vec::new(),
             workspace_selection_order: Vec::new(),
+            workspace_state_column_width,
+            workspace_state_column_drag_start_width: None,
             editing_saved_camera: None,
             camera_visibility_draft: None,
             style_properties_draft: None,
@@ -6401,6 +6413,76 @@ impl GuiApplication {
     /// Workspace section — the scene/object/renderer tree (CueMol2 `objectTree`).
     fn workspace_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         self.workspace_selection_order = self.workspace_targets_in_tree_order();
+        let available_width = ui
+            .available_width()
+            .max(WORKSPACE_STATE_COLUMN_MIN_WIDTH + WORKSPACE_COLUMN_SPLITTER_WIDTH + 80.0);
+        let state_width = self.workspace_state_column_width.clamp(
+            WORKSPACE_STATE_COLUMN_MIN_WIDTH,
+            (available_width - WORKSPACE_COLUMN_SPLITTER_WIDTH - 80.0)
+                .max(WORKSPACE_STATE_COLUMN_MIN_WIDTH),
+        );
+        let name_width =
+            (available_width - state_width - WORKSPACE_COLUMN_SPLITTER_WIDTH).max(80.0);
+        let header_height = ui.spacing().interact_size.y;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_sized(
+                [state_width, header_height],
+                egui::Label::new(egui::RichText::new("V").strong()),
+            );
+            let (splitter_rect, splitter) = ui.allocate_exact_size(
+                egui::vec2(WORKSPACE_COLUMN_SPLITTER_WIDTH, header_height),
+                egui::Sense::drag(),
+            );
+            let splitter = splitter
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                .on_hover_text("Resize visibility column; double-click to reset");
+            ui.painter().line_segment(
+                [splitter_rect.center_top(), splitter_rect.center_bottom()],
+                egui::Stroke::new(
+                    1.0,
+                    if splitter.hovered() || splitter.dragged() {
+                        ui.visuals().text_color()
+                    } else {
+                        ui.visuals().widgets.noninteractive.bg_stroke.color
+                    },
+                ),
+            );
+            if splitter.double_clicked() {
+                self.workspace_state_column_width = WORKSPACE_STATE_COLUMN_DEFAULT_WIDTH;
+                self.workspace_state_column_drag_start_width = None;
+                self.state.put_config_value(
+                    "workspace_panel:state_width",
+                    self.workspace_state_column_width.to_string(),
+                );
+            } else {
+                if splitter.drag_started() {
+                    self.workspace_state_column_drag_start_width = Some(state_width);
+                }
+                if splitter.dragged() {
+                    if let Some(initial_width) = self.workspace_state_column_drag_start_width {
+                        let maximum = (available_width - WORKSPACE_COLUMN_SPLITTER_WIDTH - 80.0)
+                            .max(WORKSPACE_STATE_COLUMN_MIN_WIDTH);
+                        self.workspace_state_column_width = (initial_width
+                            + splitter.drag_delta().x)
+                            .clamp(WORKSPACE_STATE_COLUMN_MIN_WIDTH, maximum);
+                        ui.ctx().request_repaint();
+                    }
+                }
+                if splitter.drag_stopped() {
+                    self.workspace_state_column_drag_start_width = None;
+                    self.state.put_config_value(
+                        "workspace_panel:state_width",
+                        self.workspace_state_column_width.to_string(),
+                    );
+                }
+            }
+            ui.add_sized(
+                [name_width, header_height],
+                egui::Label::new(egui::RichText::new("Name").strong()),
+            );
+        });
+        ui.separator();
         for scene in self.state.scene_summaries() {
             let objects = self.state.object_summaries(scene.uid);
             let density_maps = self.state.density_map_summaries(scene.uid);
@@ -6532,6 +6614,31 @@ impl GuiApplication {
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(state_width, ui.spacing().interact_size.y),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                ui.spacing_mut().item_spacing.x = 0.0;
+                                                if ui
+                                                    .checkbox(&mut visible, "")
+                                                    .on_hover_text("Visible")
+                                                    .changed()
+                                                {
+                                                    self.set_workspace_object_visibility(
+                                                        NativePropertyObject::Molecule(object.uid),
+                                                        visible,
+                                                    );
+                                                }
+                                                if let Some(locked) =
+                                                    workspace_lock_toggle(ui, object.locked, true)
+                                                {
+                                                    self.set_workspace_object_locked(
+                                                        NativePropertyObject::Molecule(object.uid),
+                                                        locked,
+                                                    );
+                                                }
+                                            },
+                                        );
                                         if let Some(collapsed) = workspace_collapse_toggle(
                                             ui,
                                             object.ui_collapsed,
@@ -6539,24 +6646,6 @@ impl GuiApplication {
                                         ) {
                                             self.set_workspace_object_collapsed(
                                                 scene.uid, owner, collapsed,
-                                            );
-                                        }
-                                        if ui
-                                            .checkbox(&mut visible, "")
-                                            .on_hover_text("Visible")
-                                            .changed()
-                                        {
-                                            self.set_workspace_object_visibility(
-                                                NativePropertyObject::Molecule(object.uid),
-                                                visible,
-                                            );
-                                        }
-                                        if let Some(locked) =
-                                            workspace_lock_toggle(ui, object.locked, true)
-                                        {
-                                            self.set_workspace_object_locked(
-                                                NativePropertyObject::Molecule(object.uid),
-                                                locked,
                                             );
                                         }
                                         let response = ui.selectable_label(selected, label);
@@ -6652,6 +6741,30 @@ impl GuiApplication {
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(state_width, ui.spacing().interact_size.y),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                ui.spacing_mut().item_spacing.x = 0.0;
+                                                if ui
+                                                    .checkbox(&mut visible, "")
+                                                    .on_hover_text("Visible")
+                                                    .changed()
+                                                {
+                                                    self.set_density_map_visibility(
+                                                        map.uid, visible,
+                                                    );
+                                                }
+                                                if let Some(locked) =
+                                                    workspace_lock_toggle(ui, map.locked, true)
+                                                {
+                                                    self.set_workspace_object_locked(
+                                                        NativePropertyObject::DensityMap(map.uid),
+                                                        locked,
+                                                    );
+                                                }
+                                            },
+                                        );
                                         if let Some(collapsed) = workspace_collapse_toggle(
                                             ui,
                                             map.ui_collapsed,
@@ -6660,21 +6773,6 @@ impl GuiApplication {
                                         ) {
                                             self.set_workspace_object_collapsed(
                                                 scene.uid, owner, collapsed,
-                                            );
-                                        }
-                                        if ui
-                                            .checkbox(&mut visible, "")
-                                            .on_hover_text("Visible")
-                                            .changed()
-                                        {
-                                            self.set_density_map_visibility(map.uid, visible);
-                                        }
-                                        if let Some(locked) =
-                                            workspace_lock_toggle(ui, map.locked, true)
-                                        {
-                                            self.set_workspace_object_locked(
-                                                NativePropertyObject::DensityMap(map.uid),
-                                                locked,
                                             );
                                         }
                                         let label = format!("{} ({})", map.name, map.class_name);
@@ -6771,6 +6869,31 @@ impl GuiApplication {
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(state_width, ui.spacing().interact_size.y),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                ui.spacing_mut().item_spacing.x = 0.0;
+                                                if ui
+                                                    .checkbox(&mut visible, "")
+                                                    .on_hover_text("Visible")
+                                                    .changed()
+                                                {
+                                                    self.set_surface_visibility(
+                                                        surface.uid,
+                                                        visible,
+                                                    );
+                                                }
+                                                if let Some(locked) =
+                                                    workspace_lock_toggle(ui, surface.locked, true)
+                                                {
+                                                    self.set_workspace_object_locked(
+                                                        NativePropertyObject::Surface(surface.uid),
+                                                        locked,
+                                                    );
+                                                }
+                                            },
+                                        );
                                         if let Some(collapsed) = workspace_collapse_toggle(
                                             ui,
                                             surface.ui_collapsed,
@@ -6779,21 +6902,6 @@ impl GuiApplication {
                                         ) {
                                             self.set_workspace_object_collapsed(
                                                 scene.uid, owner, collapsed,
-                                            );
-                                        }
-                                        if ui
-                                            .checkbox(&mut visible, "")
-                                            .on_hover_text("Visible")
-                                            .changed()
-                                        {
-                                            self.set_surface_visibility(surface.uid, visible);
-                                        }
-                                        if let Some(locked) =
-                                            workspace_lock_toggle(ui, surface.locked, true)
-                                        {
-                                            self.set_workspace_object_locked(
-                                                NativePropertyObject::Surface(surface.uid),
-                                                locked,
                                             );
                                         }
                                         let label =
@@ -6891,6 +6999,27 @@ impl GuiApplication {
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(state_width, ui.spacing().interact_size.y),
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                ui.spacing_mut().item_spacing.x = 0.0;
+                                                if ui
+                                                    .checkbox(&mut visible, "")
+                                                    .on_hover_text("Visible")
+                                                    .changed()
+                                                {
+                                                    self.set_workspace_object_visibility(
+                                                        owner, visible,
+                                                    );
+                                                }
+                                                if let Some(locked) =
+                                                    workspace_lock_toggle(ui, object.locked, true)
+                                                {
+                                                    self.set_workspace_object_locked(owner, locked);
+                                                }
+                                            },
+                                        );
                                         if let Some(collapsed) = workspace_collapse_toggle(
                                             ui,
                                             object.ui_collapsed,
@@ -6900,18 +7029,6 @@ impl GuiApplication {
                                             self.set_workspace_object_collapsed(
                                                 scene.uid, owner, collapsed,
                                             );
-                                        }
-                                        if ui
-                                            .checkbox(&mut visible, "")
-                                            .on_hover_text("Visible")
-                                            .changed()
-                                        {
-                                            self.set_workspace_object_visibility(owner, visible);
-                                        }
-                                        if let Some(locked) =
-                                            workspace_lock_toggle(ui, object.locked, true)
-                                        {
-                                            self.set_workspace_object_locked(owner, locked);
                                         }
                                         let label =
                                             format!("{} ({})", object.name, object.class_name);
@@ -8243,12 +8360,41 @@ impl GuiApplication {
             self.selected_object.is_none() && self.workspace_aux_selection == Some(selection),
         );
         let payload = self.workspace_renderer_drag_payload(target, owner, renderer.uid, is_group);
+        let state_width = self.workspace_state_column_width;
         let drag_source = ui.dnd_drag_source(
             egui::Id::new(("workspace-aux-renderer-drag", renderer.uid.get())),
             payload,
             |ui| {
                 let mut visible = renderer.visible;
                 ui.horizontal(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(state_width, ui.spacing().interact_size.y),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            if ui
+                                .checkbox(&mut visible, "")
+                                .on_hover_text(if is_group {
+                                    "Toggle all renderers in this group"
+                                } else {
+                                    "Visible"
+                                })
+                                .changed()
+                            {
+                                self.set_workspace_aux_renderer_visibility(
+                                    owner,
+                                    renderer.uid,
+                                    is_group,
+                                    visible,
+                                );
+                            }
+                            if let Some(locked) =
+                                workspace_lock_toggle(ui, renderer.locked, !is_group)
+                            {
+                                self.set_workspace_renderer_locked(owner, renderer.uid, locked);
+                            }
+                        },
+                    );
                     if is_group
                         && ui
                             .small_button(if renderer.ui_collapsed { "▶" } else { "▼" })
@@ -8265,25 +8411,6 @@ impl GuiApplication {
                             renderer.uid,
                             !renderer.ui_collapsed,
                         );
-                    }
-                    if ui
-                        .checkbox(&mut visible, "")
-                        .on_hover_text(if is_group {
-                            "Toggle all renderers in this group"
-                        } else {
-                            "Visible"
-                        })
-                        .changed()
-                    {
-                        self.set_workspace_aux_renderer_visibility(
-                            owner,
-                            renderer.uid,
-                            is_group,
-                            visible,
-                        );
-                    }
-                    if let Some(locked) = workspace_lock_toggle(ui, renderer.locked, !is_group) {
-                        self.set_workspace_renderer_locked(owner, renderer.uid, locked);
                     }
                     let label = if is_group {
                         format!("{} (group)", renderer.name)
@@ -8408,12 +8535,44 @@ impl GuiApplication {
                 && self.selected_renderer == Some(renderer.uid),
         );
         let payload = self.workspace_renderer_drag_payload(target, owner, renderer.uid, is_group);
+        let state_width = self.workspace_state_column_width;
         let drag_source = ui.dnd_drag_source(
             egui::Id::new(("workspace-renderer-drag", renderer.uid.get())),
             payload,
             |ui| {
                 let mut visible = renderer.visible;
                 ui.horizontal(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(state_width, ui.spacing().interact_size.y),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            if ui
+                                .checkbox(&mut visible, "")
+                                .on_hover_text(if is_group {
+                                    "Toggle all renderers in this group"
+                                } else {
+                                    "Visible"
+                                })
+                                .changed()
+                            {
+                                if is_group {
+                                    self.set_renderer_group_visibility(
+                                        object_uid,
+                                        renderer.uid,
+                                        visible,
+                                    );
+                                } else {
+                                    self.set_renderer_visibility(object_uid, renderer.uid, visible);
+                                }
+                            }
+                            if let Some(locked) =
+                                workspace_lock_toggle(ui, renderer.locked, !is_group)
+                            {
+                                self.set_workspace_renderer_locked(owner, renderer.uid, locked);
+                            }
+                        },
+                    );
                     if is_group
                         && ui
                             .small_button(if renderer.ui_collapsed { "▶" } else { "▼" })
@@ -8430,24 +8589,6 @@ impl GuiApplication {
                             renderer.uid,
                             !renderer.ui_collapsed,
                         );
-                    }
-                    if ui
-                        .checkbox(&mut visible, "")
-                        .on_hover_text(if is_group {
-                            "Toggle all renderers in this group"
-                        } else {
-                            "Visible"
-                        })
-                        .changed()
-                    {
-                        if is_group {
-                            self.set_renderer_group_visibility(object_uid, renderer.uid, visible);
-                        } else {
-                            self.set_renderer_visibility(object_uid, renderer.uid, visible);
-                        }
-                    }
-                    if let Some(locked) = workspace_lock_toggle(ui, renderer.locked, !is_group) {
-                        self.set_workspace_renderer_locked(owner, renderer.uid, locked);
                     }
                     let label = if is_group {
                         format!("{} (group)", renderer.name)
@@ -20451,6 +20592,13 @@ impl GuiApplication {
             .unwrap_or(COLORING_GRADIENT_PARAM_COLUMN_DEFAULT_WIDTH)
             .clamp(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH, 400.0);
         self.coloring_gradient_param_column_drag_start_width = None;
+        self.workspace_state_column_width = self
+            .state
+            .config_value("workspace_panel:state_width")
+            .parse::<f32>()
+            .unwrap_or(WORKSPACE_STATE_COLUMN_DEFAULT_WIDTH)
+            .clamp(WORKSPACE_STATE_COLUMN_MIN_WIDTH, 100.0);
+        self.workspace_state_column_drag_start_width = None;
         for (style_key, config_key) in [
             ("DefaultLabel.font_name", "style:DefaultLabel.font_name"),
             ("DefaultLabel.font_size", "style:DefaultLabel.font_size"),
@@ -34209,7 +34357,7 @@ mod tests {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
             input: Ok(Some(
-                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\ncoloring_paint:selection_width\t165\ncoloring_gradient:param_width\t155\nanimation_render:height\t720\nanimation_render:concurrency\t6\nanimation_render:duplicate_last_frame\ttrue\nanimation_render:backend\tUmbreon\nanimation_render:pov_shadow\ttrue\nanimation_render:make_movie\ttrue\nanimation_render:movie_format\tgifanim\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nworkspace_panel:state_width\t58\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\ncoloring_paint:selection_width\t165\ncoloring_gradient:param_width\t155\nanimation_render:height\t720\nanimation_render:concurrency\t6\nanimation_render:duplicate_last_frame\ttrue\nanimation_render:backend\tUmbreon\nanimation_render:pov_shadow\ttrue\nanimation_render:make_movie\ttrue\nanimation_render:movie_format\tgifanim\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
                     .to_string(),
             )),
         });
@@ -34224,6 +34372,7 @@ mod tests {
         );
         assert_eq!(app.left_panel_order[0], LeftPanel::Animation);
         assert_eq!(app.left_panel_width, 310.0);
+        assert_eq!(app.workspace_state_column_width, 58.0);
         assert!(!app.show_bottom_panel);
         assert_eq!(app.bottom_tab, BottomTab::Sequence);
         assert_eq!(app.bottom_panel_height, 240.0);
