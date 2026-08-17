@@ -975,8 +975,10 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(TAURI_APP_RS.contains("set_scene_animation(scene_uid, Some(animation))"));
     assert!(TAURI_APP_RS.contains("animation.motions()"));
     assert!(!TAURI_APP_RS.contains("animation_objects: Vec<AnimObject>"));
+    assert!(JS.contains("workspacePropertyPage([\"Common\"])"));
+    assert!(JS.contains("dialogGroup(\"Common settings\", commonPage)"));
+    assert!(!JS.contains("workspacePropertyPage([\"Common settings\", object.typeName])"));
     for label in [
-        "Common settings",
         "Relative to",
         "Start time",
         "Duration",

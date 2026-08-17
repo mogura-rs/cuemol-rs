@@ -643,13 +643,13 @@ function dialogOptionalField(label, value, options = [], parent = dialogContent)
   return { enabled, input };
 }
 
-function dialogGroup(title) {
+function dialogGroup(title, parent = dialogContent) {
   const group = document.createElement("fieldset");
   group.className = "property-common-group";
   const legend = document.createElement("legend");
   legend.textContent = title;
   group.append(legend);
-  dialogContent.append(group);
+  parent.append(group);
   return group;
 }
 
@@ -7345,11 +7345,24 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       dialogContent.append(dialogParagraph("Select an animation object first."));
     } else {
       referenceDialog.classList.add("wide-dialog");
-      const pages = workspacePropertyPage(["Common settings", object.typeName]);
+      const pages = workspacePropertyPage(["Common"]);
       dialogContent.append(pages.editor);
-      const [commonPage, typePage] = pages.panes;
-      const name = dialogField("Name", object.name, "text", commonPage);
-      const disabled = dialogCheckbox("Disabled", object.disabled, commonPage);
+      const [commonPage] = pages.panes;
+      const commonGroup = dialogGroup("Common settings", commonPage);
+      const typeGroupTitles = {
+        SimpleSpin: "SimpleSpin settings",
+        CamMotion: "CamMotion settings",
+        ShowHideAnim: "Show/Hide settings",
+        SlideInOutAnim: "Slide in/out settings",
+        MolAnim: "MolAnim settings",
+        RealPropAnim: "RealPropAnim settings",
+        RendXformAnim: "RendXformAnim settings",
+      };
+      const typePage = typeGroupTitles[object.typeName]
+        ? dialogGroup(typeGroupTitles[object.typeName], commonPage)
+        : commonPage;
+      const name = dialogField("Name", object.name, "text", commonGroup);
+      const disabled = dialogCheckbox("Disabled", object.disabled, commonGroup);
       const referenceOptions = snapshot.animationObjects
         .filter((item) => (pending || item.index !== object.index) && item.name)
         .map((item) => [item.name, `${item.name} (${item.typeName})`]);
@@ -7363,25 +7376,25 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         "Start time",
         formatAnimationObjectTime(object.relativeStart),
         "text",
-        commonPage,
+        commonGroup,
       );
       const timeReference = dialogSelect(
         "Relative to",
         [["", "(absolute)"], ...referenceOptions],
         object.timeRefName || "",
-        commonPage,
+        commonGroup,
       );
       const duration = dialogField(
         "Duration",
         formatAnimationObjectTime(object.duration),
         "text",
-        commonPage,
+        commonGroup,
       );
       const quadric = dialogField(
         "Quadric (%)",
         String(object.quadric * 100),
         "number",
-        commonPage,
+        commonGroup,
       );
       quadric.min = "0";
       quadric.max = "50";
@@ -7694,7 +7707,6 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         });
         optional.reset = () => {};
       } else {
-        typePage.append(dialogParagraph("This animation type has no dedicated settings."));
         optional.read = () => ({});
         optional.reset = () => {};
       }
