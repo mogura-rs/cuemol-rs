@@ -14018,11 +14018,11 @@ function resetColoringPaintSelectionColumnWidth() {
   }
 }
 
-function coloringPaintColumnHeader() {
+function coloringPaintColumnHeader(primaryLabel = "Selection") {
   const header = document.createElement("div");
   header.className = "coloring-paint-columns";
   const selection = document.createElement("span");
-  selection.textContent = "Selection";
+  selection.textContent = primaryLabel;
   const splitter = document.createElement("div");
   splitter.className = "coloring-paint-column-splitter";
   splitter.dataset.coloringPaintColumnSplitter = "selection";
@@ -14263,6 +14263,7 @@ function renderMultiGradientColoring(target, state) {
   const list = document.createElement("div");
   list.id = "coloring-gradient-list";
   list.className = "coloring-paint-list";
+  list.append(coloringPaintColumnHeader("Param"));
   state.gradientEntries.forEach((entry, index) => {
     const row = document.createElement("button");
     row.type = "button";
@@ -14276,7 +14277,10 @@ function renderMultiGradientColoring(target, state) {
     value.textContent = Number(entry.value).toPrecision(6);
     const color = document.createElement("code");
     color.textContent = entry.color;
-    row.append(swatch, value, color);
+    const colorCell = document.createElement("span");
+    colorCell.className = "coloring-paint-color-cell";
+    colorCell.append(swatch, color);
+    row.append(value, colorCell);
     row.addEventListener("click", () => {
       coloringGradientSelectedIndex = index;
       renderColoring();

@@ -750,7 +750,7 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
 fn paint_coloring_columns_are_resizable_and_persistent() {
     for binding in [
         "COLORING_PAINT_COLUMN_WIDTH_STORAGE_KEY",
-        "function coloringPaintColumnHeader()",
+        "function coloringPaintColumnHeader(primaryLabel = \"Selection\")",
         "setColoringPaintSelectionColumnWidth(",
         "resetColoringPaintSelectionColumnWidth",
         "splitter.setPointerCapture(event.pointerId)",
@@ -764,6 +764,8 @@ fn paint_coloring_columns_are_resizable_and_persistent() {
     assert!(CSS.contains("var(--coloring-paint-selection-width, minmax(60px, 1fr))"));
     assert!(CSS.contains(".coloring-paint-column-splitter"));
     assert!(CSS.contains(".coloring-paint-color-cell"));
+    assert!(JS.contains("list.append(coloringPaintColumnHeader(\"Param\"))"));
+    assert_eq!(JS.matches("colorCell.append(swatch, color)").count(), 2);
     let native_paint = NATIVE_GUI_RS
         .split("fn object_paint_coloring_ui(")
         .nth(1)
