@@ -14861,6 +14861,30 @@ impl DesktopAppState {
         self.insert_morph_frame_from_object(target_object, source_object, frame_name, None)
     }
 
+    pub fn initialize_morph_object(&mut self, object_uid: Uid) -> Result<(GuiMorphSummary, bool)> {
+        let molecule = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?
+            .mol()
+            .clone();
+        let atom_count = molecule.atom_count();
+        let already_initialized = self.morphs.contains_key(&object_uid);
+        let morph = self.morphs.entry(object_uid).or_default();
+        if !already_initialized {
+            *morph.molecule_mut() = molecule;
+            morph.append_this_frame();
+        }
+        Ok((
+            GuiMorphSummary {
+                object_uid,
+                frame_count: morph.frame_size(),
+                atom_count,
+            },
+            !already_initialized,
+        ))
+    }
+
     pub fn insert_morph_frame_from_object(
         &mut self,
         target_object: Uid,
@@ -66031,28 +66055,35 @@ attribute \"dep\" string \"positions\"
         assert!(prepared_input.contains("  temp 300\n"));
         assert!(prepared_input.contains("  write pot dx"));
 
+        let (morph, initialized) = app.initialize_morph_object(first).unwrap();
+        assert!(initialized);
+        assert_eq!(morph.frame_count, 1);
+        assert_eq!(app.morph_frame_summaries(first)[0].name, "(this)");
+        assert!(!app.initialize_morph_object(first).unwrap().1);
         let morph = app
             .append_morph_frame_from_object(first, first, "start")
             .unwrap();
-        assert_eq!(morph.frame_count, 1);
+        assert_eq!(morph.frame_count, 2);
         let morph = app
             .append_morph_frame_from_object(first, second, "second")
             .unwrap();
-        assert_eq!(morph.frame_count, 2);
-        let morph = app
-            .insert_morph_frame_from_path(first, root.join("1CRN.pdb"), "file-frame", Some(1))
-            .unwrap();
         assert_eq!(morph.frame_count, 3);
+        let morph = app
+            .insert_morph_frame_from_path(first, root.join("1CRN.pdb"), "file-frame", Some(2))
+            .unwrap();
+        assert_eq!(morph.frame_count, 4);
         let frames = app.morph_frame_summaries(first);
-        assert_eq!(frames[0].name, "start");
-        assert_eq!(frames[1].name, "file-frame");
-        assert!(frames[1].source.ends_with("1CRN.pdb"));
-        assert_eq!(frames[1].source_type, "pdb");
-        assert_eq!(frames[2].name, "second");
+        assert_eq!(frames[0].name, "(this)");
+        assert_eq!(frames[1].name, "start");
+        assert_eq!(frames[2].name, "file-frame");
+        assert!(frames[2].source.ends_with("1CRN.pdb"));
+        assert_eq!(frames[2].source_type, "pdb");
+        assert_eq!(frames[3].name, "second");
         let applied = app.apply_morph_frame(first, 0.5).unwrap();
         assert_eq!(applied.atom_count, 327);
         assert_eq!(app.morph_frame_value(first), Some(0.5));
-        assert_eq!(app.remove_morph_frame(first, 1).unwrap().frame_count, 2);
+        assert!(app.remove_morph_frame(first, 0).is_err());
+        assert_eq!(app.remove_morph_frame(first, 2).unwrap().frame_count, 3);
 
         for path in [
             surface_path,

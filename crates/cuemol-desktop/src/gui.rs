@@ -19363,6 +19363,33 @@ impl GuiApplication {
         }
     }
 
+    fn initialize_morph_target(&mut self, target: cuemol_core::Uid) {
+        if self.state.morph_frame_value(target).is_some() {
+            return;
+        }
+        let scene_uid = self.state.scene_manager().scene_uid_for_object(target);
+        let undo = self.capture_undo();
+        match self.state.initialize_morph_object(target) {
+            Ok((summary, changed)) => {
+                if changed {
+                    self.push_undo_snapshot(undo);
+                    if let Some(scene_uid) = scene_uid {
+                        self.modified_scenes.insert(scene_uid);
+                    }
+                    self.rebuild_snapshot();
+                    self.set_status(format!(
+                        "Converted molecule to MorphMol: {} frame / {} atoms",
+                        summary.frame_count, summary.atom_count
+                    ));
+                }
+            }
+            Err(error) => {
+                self.state = undo.state;
+                self.set_error(error);
+            }
+        }
+    }
+
     fn insert_morph_frame_from_pdb_path(&mut self, path: &Path) {
         let Some(target) = self.morph_target else {
             self.set_status("No morph target selected");
@@ -26643,6 +26670,9 @@ impl GuiApplication {
         {
             self.morph_source = Some(objects[0].uid);
         }
+        if let Some(target) = self.morph_target {
+            self.initialize_morph_target(target);
+        }
         let previous_target = self.morph_target;
         egui::ComboBox::from_label("Target")
             .selected_text(object_combo_label(&objects, self.morph_target))
@@ -26657,6 +26687,9 @@ impl GuiApplication {
             });
         if self.morph_target != previous_target {
             self.morph_selected_frame = None;
+            if let Some(target) = self.morph_target {
+                self.initialize_morph_target(target);
+            }
             self.morph_frame_value = self
                 .morph_target
                 .and_then(|uid| self.state.morph_frame_value(uid))

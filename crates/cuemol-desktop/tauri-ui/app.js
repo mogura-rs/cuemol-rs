@@ -6549,11 +6549,15 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     if (objects.length === 0) {
       dialogContent.append(dialogParagraph("No molecular object is loaded."));
     } else {
+      const initialTargetUid = selectedObjectUid ?? objects[0].uid;
+      await mutate("initialize_morph_object", {
+        objectUid: Number(initialTargetUid),
+      }, () => {}, false);
       const objectOptions = objects.map((object) => [object.uid, object.name]);
       const target = dialogSelect(
         "Target",
         objectOptions,
-        selectedObjectUid ?? objects[0].uid,
+        initialTargetUid,
       );
       const source = dialogSelect("Source frame", objectOptions, objects[0].uid);
       const frameName = dialogField("Frame name", "frame");
@@ -6746,8 +6750,12 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           frame.value = String(morph?.frame ?? 0);
         }
       };
-      target.addEventListener("change", () => {
+      target.addEventListener("change", async () => {
         selectedMorphFrameIndex = null;
+        const initialized = await mutate("initialize_morph_object", {
+          objectUid: Number(target.value),
+        }, () => {}, false);
+        if (!initialized) return;
         frame.value = String(selectedMorph()?.frame ?? 0);
         renderMorphFrames();
       });

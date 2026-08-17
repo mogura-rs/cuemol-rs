@@ -359,6 +359,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "cancel_pov_render",
         "save_pov_render_image",
         "clear_pov_render_result",
+        "initialize_morph_object",
         "append_morph_frame",
         "insert_morph_frame_from_file",
         "remove_morph_frame",
@@ -1237,6 +1238,7 @@ fn morph_animation_tool_uses_the_reference_frame_columns() {
     assert!(JS.contains("morph-frame-columns"));
     assert!(JS.contains("morph-column-splitter"));
     assert!(JS.contains("morphFrame.source || morphFrame.sourceType"));
+    assert!(JS.contains("initialize_morph_object"));
     assert!(JS.contains("insert_morph_frame_from_file"));
     assert!(JS.contains("insertBefore"));
     assert!(CSS.contains("var(--morph-name-width"));
@@ -1245,9 +1247,11 @@ fn morph_animation_tool_uses_the_reference_frame_columns() {
     assert!(NATIVE_GUI_RS.contains("morph_editor:name_width"));
     assert!(NATIVE_GUI_RS.contains("MORPH_COLUMN_SPLITTER_WIDTH"));
     assert!(NATIVE_GUI_RS.contains("morph_frame_summaries"));
+    assert!(NATIVE_GUI_RS.contains("initialize_morph_target"));
     assert!(NATIVE_GUI_RS.contains("NativeFileDialog::OpenMorphPdb"));
     assert!(NATIVE_GUI_RS.contains("insert_morph_frame_from_pdb_path"));
     assert!(TAURI_APP_RS.contains("InsertMorphFrameFromFile"));
+    assert!(TAURI_APP_RS.contains("InitializeMorphObject"));
 }
 
 #[test]

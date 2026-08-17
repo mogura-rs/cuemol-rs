@@ -8049,6 +8049,9 @@ enum ModelRequest {
     StartApbsCalculation(ApbsCalculationInput),
     PollApbsCalculation,
     CancelApbsCalculation,
+    InitializeMorphObject {
+        object_uid: u64,
+    },
     AppendMorphFrame {
         target_object_uid: u64,
         source_object_uid: u64,
@@ -11889,6 +11892,21 @@ fn handle_model_request(
                 "idle".to_string()
             }))
         }
+        ModelRequest::InitializeMorphObject { object_uid } => {
+            let undo = model.capture_undo();
+            let (summary, changed) = model
+                .desktop
+                .initialize_morph_object(Uid::new(object_uid))
+                .map_err(|error| error.to_string())?;
+            if changed {
+                model.status = format!(
+                    "Converted molecule to MorphMol: {} frame / {} atoms",
+                    summary.frame_count, summary.atom_count
+                );
+                model.push_undo(undo);
+            }
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::AppendMorphFrame {
             target_object_uid,
             source_object_uid,
@@ -15271,6 +15289,17 @@ fn cancel_apbs_calculation(state: State<'_, ManagedState>) -> Result<String, Str
 }
 
 #[tauri::command]
+fn initialize_morph_object(
+    object_uid: u64,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::InitializeMorphObject { object_uid },
+    )?)
+}
+
+#[tauri::command]
 fn append_morph_frame(
     target_object_uid: u64,
     source_object_uid: u64,
@@ -16089,6 +16118,7 @@ pub fn run() -> Result<(), tauri::Error> {
             start_apbs_calculation,
             poll_apbs_calculation,
             cancel_apbs_calculation,
+            initialize_morph_object,
             append_morph_frame,
             insert_morph_frame_from_file,
             remove_morph_frame,
@@ -23136,6 +23166,16 @@ mod tests {
         .unwrap();
         assert!(pqr_path.exists() && input_path.exists());
 
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::InitializeMorphObject { object_uid: first },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected an initialized morph snapshot");
+        };
+        assert_eq!(snapshot.morphs[0].frames[0].name, "(this)");
+
         for (source, name) in [(first, "start"), (second, "end")] {
             handle_model_request(
                 &mut model,
@@ -23154,16 +23194,16 @@ mod tests {
                 target_object_uid: first,
                 path: pdb.to_string_lossy().to_string(),
                 frame_name: "file-frame".to_string(),
-                insert_before: Some(1),
+                insert_before: Some(2),
             },
         )
         .unwrap();
         let ModelResponse::Snapshot(snapshot) = response else {
             panic!("expected a morph-frame snapshot");
         };
-        assert_eq!(snapshot.morphs[0].frames.len(), 3);
-        assert_eq!(snapshot.morphs[0].frames[1].name, "file-frame");
-        assert_eq!(snapshot.morphs[0].frames[1].source_type, "pdb");
+        assert_eq!(snapshot.morphs[0].frames.len(), 4);
+        assert_eq!(snapshot.morphs[0].frames[2].name, "file-frame");
+        assert_eq!(snapshot.morphs[0].frames[2].source_type, "pdb");
         handle_model_request(
             &mut model,
             ModelRequest::ApplyMorphFrame {
@@ -23176,7 +23216,7 @@ mod tests {
             &mut model,
             ModelRequest::RemoveMorphFrame {
                 object_uid: first,
-                index: 1,
+                index: 2,
             },
         )
         .unwrap();
@@ -23184,7 +23224,7 @@ mod tests {
             panic!("expected a snapshot");
         };
         assert_eq!(snapshot.morphs.len(), 1);
-        assert_eq!(snapshot.morphs[0].frames.len(), 2);
+        assert_eq!(snapshot.morphs[0].frames.len(), 3);
 
         for path in [surface_path, cut_path, pqr_path, input_path] {
             let _ = std::fs::remove_file(path);
