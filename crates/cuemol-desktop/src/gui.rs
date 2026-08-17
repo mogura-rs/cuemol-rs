@@ -1179,6 +1179,8 @@ struct GuiApplication {
     animation_playing: bool,
     animation_elapsed: f32,
     animation_selected: Option<usize>,
+    animation_selection: std::collections::BTreeSet<usize>,
+    animation_selection_anchor: Option<usize>,
     animation_properties_draft: Option<NativeAnimationProperties>,
     animation_start_camera: Option<CameraController>,
     animation_start_state: Option<DesktopAppState>,
@@ -3646,6 +3648,8 @@ impl GuiApplication {
             animation_playing: false,
             animation_elapsed: 0.0,
             animation_selected: None,
+            animation_selection: std::collections::BTreeSet::new(),
+            animation_selection_anchor: None,
             animation_properties_draft: None,
             animation_start_camera: None,
             animation_start_state: None,
@@ -4147,6 +4151,8 @@ impl GuiApplication {
                         self.selected_renderer = None;
                         self.workspace_aux_selection = None;
                         self.animation_selected = None;
+                        self.animation_selection.clear();
+                        self.animation_selection_anchor = None;
                         self.animation_elapsed = 0.0;
                         self.sync_active_scene_properties();
                         self.rebuild_snapshot();
@@ -8315,6 +8321,8 @@ impl GuiApplication {
             return;
         }
         self.animation_selected = None;
+        self.animation_selection.clear();
+        self.animation_selection_anchor = None;
         self.animation_elapsed = 0.0;
         self.sync_active_scene_properties();
         self.rebuild_snapshot();
@@ -9922,6 +9930,45 @@ impl GuiApplication {
         self.set_status(status);
     }
 
+    fn clear_animation_selection(&mut self) {
+        self.animation_selected = None;
+        self.animation_selection.clear();
+        self.animation_selection_anchor = None;
+    }
+
+    fn set_animation_selection(&mut self, index: usize) {
+        self.animation_selected = Some(index);
+        self.animation_selection.clear();
+        self.animation_selection.insert(index);
+        self.animation_selection_anchor = Some(index);
+    }
+
+    fn update_animation_selection(&mut self, index: usize, shift: bool, toggle: bool) {
+        if shift {
+            if let Some(anchor) = self.animation_selection_anchor {
+                let first = anchor.min(index);
+                let last = anchor.max(index);
+                self.animation_selection = (first..=last).collect();
+            } else {
+                self.set_animation_selection(index);
+                return;
+            }
+        } else if toggle {
+            if !self.animation_selection.remove(&index) {
+                self.animation_selection.insert(index);
+            }
+            self.animation_selection_anchor = Some(index);
+        } else {
+            self.set_animation_selection(index);
+            return;
+        }
+        self.animation_selected = if self.animation_selection.contains(&index) {
+            Some(index)
+        } else {
+            self.animation_selection.first().copied()
+        };
+    }
+
     fn add_animation_motion(
         &mut self,
         kind: AnimKind,
@@ -9948,7 +9995,7 @@ impl GuiApplication {
             animation.insert_motion_before(insertion_index, motion);
         }
         self.set_active_animation_manager(&animation)?;
-        self.animation_selected = Some(insertion_index);
+        self.set_animation_selection(insertion_index);
         self.animation_elapsed = 0.0;
         self.push_undo_snapshot(undo);
         self.set_status(format!("Added {} animation", kind.label()));
@@ -9989,37 +10036,82 @@ impl GuiApplication {
         index: usize,
         camera: &mut CameraController,
     ) -> std::result::Result<(), String> {
+        self.delete_animation_motions(&[index], camera)
+    }
+
+    fn delete_animation_motions(
+        &mut self,
+        indices: &[usize],
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
         self.restore_animation_playback(camera, false)?;
         let mut animation = self.active_animation_manager()?;
-        let Some(deleted) = animation.motions().get(index) else {
+        let mut indices = indices.to_vec();
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty() {
+            return Err("no animation objects are selected".to_string());
+        }
+        if let Some(index) = indices.iter().find(|index| **index >= animation.size()) {
             return Err(format!("animation object {index} was not found"));
-        };
-        let deleted_name = deleted.base().name().to_string();
-        let replacement_reference = deleted.base().time_ref_name().to_string();
-        let referencing = animation
+        }
+        let deleted_names = indices
+            .iter()
+            .filter_map(|index| animation.motions().get(*index))
+            .map(|motion| motion.base().name().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        let deleted_references = indices
+            .iter()
+            .filter_map(|index| animation.motions().get(*index))
+            .map(|motion| {
+                (
+                    motion.base().name().to_string(),
+                    motion.base().time_ref_name().to_string(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let rewrites = animation
             .motions()
             .iter()
-            .filter(|motion| motion.base().time_ref_name() == deleted_name)
-            .map(|motion| motion.base().uid())
+            .filter(|motion| !deleted_names.contains(motion.base().name()))
+            .filter_map(|motion| {
+                let original = motion.base().time_ref_name();
+                if !deleted_names.contains(original) {
+                    return None;
+                }
+                let mut reference = original.to_string();
+                let mut visited = std::collections::BTreeSet::new();
+                while deleted_names.contains(&reference) && visited.insert(reference.clone()) {
+                    reference = deleted_references
+                        .get(&reference)
+                        .cloned()
+                        .unwrap_or_default();
+                }
+                Some((motion.base().uid(), reference))
+            })
             .collect::<Vec<_>>();
         let undo = self.capture_undo();
-        for uid in referencing {
+        for (uid, reference) in rewrites {
             animation.edit_motion_by_uid(uid, "timeRefName", "", |motion| {
-                motion
-                    .base_mut()
-                    .set_time_ref_name(replacement_reference.clone());
+                motion.base_mut().set_time_ref_name(reference);
             });
         }
-        animation.remove_at(index);
+        for index in indices.iter().rev() {
+            animation.remove_at(*index);
+        }
         self.set_active_animation_manager(&animation)?;
-        self.animation_selected = if animation.size() == 0 {
-            None
+        if animation.size() == 0 {
+            self.clear_animation_selection();
         } else {
-            Some(index.min(animation.size() - 1))
-        };
+            self.set_animation_selection(indices[0].min(animation.size() - 1));
+        }
         self.animation_elapsed = 0.0;
         self.push_undo_snapshot(undo);
-        self.set_status("Animation object deleted");
+        self.set_status(if indices.len() == 1 {
+            "Animation object deleted".to_string()
+        } else {
+            format!("Deleted {} animation objects", indices.len())
+        });
         Ok(())
     }
 
@@ -10029,31 +10121,80 @@ impl GuiApplication {
         direction: i32,
         camera: &mut CameraController,
     ) -> std::result::Result<(), String> {
+        self.move_animation_motions(&[index], direction, camera)
+    }
+
+    fn move_animation_motions(
+        &mut self,
+        indices: &[usize],
+        direction: i32,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
         self.restore_animation_playback(camera, false)?;
         let mut animation = self.active_animation_manager()?;
-        if index >= animation.size() {
+        if direction == 0 {
+            return Err("animation move direction must be non-zero".to_string());
+        }
+        let mut indices = indices.to_vec();
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty() {
+            return Err("no animation objects are selected".to_string());
+        }
+        if let Some(index) = indices.iter().find(|index| **index >= animation.size()) {
             return Err(format!("animation object {index} was not found"));
         }
-        let target = if direction < 0 {
-            index.checked_sub(1)
-        } else {
-            index
-                .checked_add(1)
-                .filter(|target| *target < animation.size())
+        if (direction < 0 && indices[0] == 0)
+            || (direction > 0 && indices[indices.len() - 1] + 1 == animation.size())
+        {
+            return Err("animation objects cannot move farther".to_string());
         }
-        .ok_or_else(|| "animation object cannot move farther".to_string())?;
+        let primary_uid = self
+            .animation_selected
+            .and_then(|index| animation.motions().get(index))
+            .map(|motion| motion.base().uid());
         let undo = self.capture_undo();
         let mut motions = animation.motions().to_vec();
-        motions.swap(index, target);
+        let mut selected = vec![false; motions.len()];
+        for index in &indices {
+            selected[*index] = true;
+        }
+        if direction < 0 {
+            for index in 1..motions.len() {
+                if selected[index] && !selected[index - 1] {
+                    motions.swap(index, index - 1);
+                    selected.swap(index, index - 1);
+                }
+            }
+        } else {
+            for index in (0..motions.len().saturating_sub(1)).rev() {
+                if selected[index] && !selected[index + 1] {
+                    motions.swap(index, index + 1);
+                    selected.swap(index, index + 1);
+                }
+            }
+        }
+        let primary = primary_uid
+            .and_then(|uid| motions.iter().position(|motion| motion.base().uid() == uid));
         animation.clear();
         for motion in motions {
             animation.append_motion(motion);
         }
         self.set_active_animation_manager(&animation)?;
-        self.animation_selected = Some(target);
+        self.animation_selection = selected
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, selected)| selected.then_some(index))
+            .collect();
+        self.animation_selected = primary.or_else(|| self.animation_selection.first().copied());
+        self.animation_selection_anchor = self.animation_selected;
         self.animation_elapsed = 0.0;
         self.push_undo_snapshot(undo);
-        self.set_status("Animation object moved");
+        self.set_status(if indices.len() == 1 {
+            "Animation object moved".to_string()
+        } else {
+            format!("Moved {} animation objects", indices.len())
+        });
         Ok(())
     }
 
@@ -10063,9 +10204,9 @@ impl GuiApplication {
             .motions()
             .get(index)
             .ok_or_else(|| format!("animation object {index} was not found"))?;
-        self.animation_selected = Some(index);
-        self.animation_properties_draft =
-            Some(NativeAnimationProperties::from_motion(index, motion));
+        let draft = NativeAnimationProperties::from_motion(index, motion);
+        self.set_animation_selection(index);
+        self.animation_properties_draft = Some(draft);
         Ok(())
     }
 
@@ -10297,70 +10438,48 @@ impl GuiApplication {
         Ok(())
     }
 
-    fn set_animation_motion_duration(
-        &mut self,
-        index: usize,
-        duration: f64,
-        camera: &mut CameraController,
-    ) -> std::result::Result<(), String> {
-        if !duration.is_finite() || duration < 0.0 {
-            return Err("animation duration must be non-negative".to_string());
-        }
-        self.restore_animation_playback(camera, false)?;
-        let mut animation = self.active_animation_manager()?;
-        let uid = animation
-            .motions()
-            .get(index)
-            .map(|motion| motion.base().uid())
-            .ok_or_else(|| format!("animation object {index} was not found"))?;
-        let undo = self.capture_undo();
-        animation.edit_motion_by_uid(uid, "end", "", |motion| {
-            let start = motion.base().rel_start();
-            motion
-                .base_mut()
-                .set_rel_end(start.saturating_add(time_from_seconds(duration)));
-        });
-        animation
-            .try_resolve_rel_time()
-            .map_err(|error| error.to_string())?;
-        self.set_active_animation_manager(&animation)?;
-        self.animation_elapsed = 0.0;
-        self.push_undo_snapshot(undo);
-        self.set_status("Animation duration changed");
-        Ok(())
-    }
-
     /// Animation panel backed by the active scene's serialized `AnimMgr`.
     fn animation_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         let animation = self.active_animation_manager().unwrap_or_default();
+        self.animation_selection
+            .retain(|index| *index < animation.size());
         if self
             .animation_selected
             .is_some_and(|index| index >= animation.size())
         {
-            self.animation_selected = None;
+            self.clear_animation_selection();
+        } else if let Some(index) = self.animation_selected {
+            if self.animation_selection.is_empty() {
+                self.animation_selection.insert(index);
+                self.animation_selection_anchor = Some(index);
+            }
         }
         let mut add = None;
         let mut edit = None;
-        let mut delete = None;
-        let mut move_by = None;
-        let mut duration_edit = None;
+        let mut delete = None::<Vec<usize>>;
+        let mut move_by = None::<(Vec<usize>, i32)>;
         let mut start_camera = animation.startcam().to_string();
         if start_camera.is_empty() {
             start_camera = "__current".to_string();
         }
         let original_start_camera = start_camera.clone();
+        let selected_indices = self.animation_selection.iter().copied().collect::<Vec<_>>();
+        let selection_count = selected_indices.len();
+        let can_move_up = selected_indices.first().is_some_and(|index| *index > 0);
+        let can_move_down = selected_indices
+            .last()
+            .is_some_and(|index| index + 1 < animation.size());
         ui.horizontal(|ui| {
             ui.menu_button("Add", |ui| {
                 for kind in [
                     AnimKind::Spin,
                     AnimKind::CameraMotion,
-                    AnimKind::Rock,
-                    AnimKind::Pause,
-                    AnimKind::SlideIn,
-                    AnimKind::SlideOut,
                     AnimKind::ShowAnim,
                     AnimKind::HideAnim,
+                    AnimKind::SlideIn,
+                    AnimKind::SlideOut,
                     AnimKind::MolAnim,
+                    AnimKind::Pause,
                 ] {
                     if ui.button(kind.label()).clicked() {
                         add = Some(kind);
@@ -10369,14 +10488,31 @@ impl GuiApplication {
                 }
             });
             if ui
-                .add_enabled(
-                    self.animation_selected.is_some(),
-                    egui::Button::new("Change"),
-                )
+                .add_enabled(selection_count > 0, egui::Button::new("Delete"))
+                .clicked()
+            {
+                delete = Some(selected_indices.clone());
+            }
+            if ui
+                .add_enabled(selection_count == 1, egui::Button::new("Change"))
                 .clicked()
             {
                 edit = self.animation_selected;
             }
+            if ui
+                .add_enabled(can_move_up, egui::Button::new("Move up"))
+                .clicked()
+            {
+                move_by = Some((selected_indices.clone(), -1));
+            }
+            if ui
+                .add_enabled(can_move_down, egui::Button::new("Move down"))
+                .clicked()
+            {
+                move_by = Some((selected_indices.clone(), 1));
+            }
+        });
+        ui.horizontal(|ui| {
             let play = if self.animation_playing {
                 "⏸ Pause"
             } else {
@@ -10419,42 +10555,94 @@ impl GuiApplication {
         if animation.size() == 0 {
             ui.weak("No animation objects");
         }
-        for (index, motion) in animation.motions().iter().enumerate() {
-            let base = motion.base();
-            let mut duration = time_to_seconds(base.rel_end() - base.rel_start()).max(0.0);
-            ui.horizontal(|ui| {
-                let response = ui.selectable_label(
-                    self.animation_selected == Some(index),
-                    format!("{}. {} ({})", index + 1, base.name(), motion.type_name()),
-                );
-                if response.clicked() {
-                    self.animation_selected = Some(index);
-                }
-                if response.double_clicked() {
-                    edit = Some(index);
-                }
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut duration)
-                            .speed(0.1)
-                            .range(0.0..=86_400.0)
-                            .suffix(" s"),
-                    )
-                    .changed()
-                {
-                    duration_edit = Some((index, duration));
-                }
-                if index > 0 && ui.small_button("↑").clicked() {
-                    move_by = Some((index, -1));
-                }
-                if index + 1 < animation.size() && ui.small_button("↓").clicked() {
-                    move_by = Some((index, 1));
-                }
-                if ui.small_button("🗑").on_hover_text("Delete").clicked() {
-                    delete = Some(index);
+        egui::Grid::new("native_animation_list")
+            .num_columns(3)
+            .striped(true)
+            .min_col_width(64.0)
+            .show(ui, |ui| {
+                ui.strong("Name");
+                ui.strong("Start");
+                ui.strong("End");
+                ui.end_row();
+                for (index, motion) in animation.motions().iter().enumerate() {
+                    let base = motion.base();
+                    let response = ui.selectable_label(
+                        self.animation_selection.contains(&index),
+                        format!("{} ({})", base.name(), motion.type_name()),
+                    );
+                    if response.clicked() {
+                        let modifiers = ui.input(|input| input.modifiers);
+                        self.update_animation_selection(
+                            index,
+                            modifiers.shift,
+                            modifiers.command || modifiers.ctrl,
+                        );
+                    }
+                    if response.double_clicked() {
+                        edit = Some(index);
+                    }
+                    response.context_menu(|ui| {
+                        if !self.animation_selection.contains(&index) {
+                            self.set_animation_selection(index);
+                        }
+                        let context_indices =
+                            self.animation_selection.iter().copied().collect::<Vec<_>>();
+                        if ui
+                            .add_enabled(context_indices.len() == 1, egui::Button::new("Change..."))
+                            .clicked()
+                        {
+                            edit = self.animation_selected;
+                            ui.close();
+                        }
+                        if ui.button("Delete").clicked() {
+                            delete = Some(context_indices.clone());
+                            ui.close();
+                        }
+                        ui.menu_button("Add...", |ui| {
+                            for kind in [
+                                AnimKind::Spin,
+                                AnimKind::CameraMotion,
+                                AnimKind::ShowAnim,
+                                AnimKind::HideAnim,
+                                AnimKind::SlideIn,
+                                AnimKind::SlideOut,
+                                AnimKind::MolAnim,
+                                AnimKind::Pause,
+                            ] {
+                                if ui.button(kind.label()).clicked() {
+                                    add = Some(kind);
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if ui
+                            .add_enabled(
+                                context_indices.first().is_some_and(|value| *value > 0),
+                                egui::Button::new("Move up"),
+                            )
+                            .clicked()
+                        {
+                            move_by = Some((context_indices.clone(), -1));
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                context_indices
+                                    .last()
+                                    .is_some_and(|value| value + 1 < animation.size()),
+                                egui::Button::new("Move down"),
+                            )
+                            .clicked()
+                        {
+                            move_by = Some((context_indices, 1));
+                            ui.close();
+                        }
+                    });
+                    ui.label(format_native_animation_time(base.abs_start()));
+                    ui.label(format_native_animation_time(base.abs_end()));
+                    ui.end_row();
                 }
             });
-        }
         if let Some(kind) = add {
             if let Err(error) = self.add_animation_motion(kind, camera) {
                 self.set_status(format!("Error: {error}"));
@@ -10470,18 +10658,23 @@ impl GuiApplication {
                 self.set_status(format!("Error: {error}"));
             }
         }
-        if let Some(index) = delete {
-            if let Err(error) = self.delete_animation_motion(index, camera) {
+        if let Some(indices) = delete {
+            let result = if indices.len() == 1 {
+                self.delete_animation_motion(indices[0], camera)
+            } else {
+                self.delete_animation_motions(&indices, camera)
+            };
+            if let Err(error) = result {
                 self.set_status(format!("Error: {error}"));
             }
         }
-        if let Some((index, direction)) = move_by {
-            if let Err(error) = self.move_animation_motion(index, direction, camera) {
-                self.set_status(format!("Error: {error}"));
-            }
-        }
-        if let Some((index, duration)) = duration_edit {
-            if let Err(error) = self.set_animation_motion_duration(index, duration, camera) {
+        if let Some((indices, direction)) = move_by {
+            let result = if indices.len() == 1 {
+                self.move_animation_motion(indices[0], direction, camera)
+            } else {
+                self.move_animation_motions(&indices, direction, camera)
+            };
+            if let Err(error) = result {
                 self.set_status(format!("Error: {error}"));
             }
         }
@@ -27023,6 +27216,30 @@ fn native_animation_name_prefix(kind: AnimKind) -> &'static str {
     }
 }
 
+fn format_native_animation_time(value: i64) -> String {
+    let total_millis = (time_to_seconds(value) * 1_000.0).round() as i64;
+    let sign = if total_millis < 0 { "-" } else { "" };
+    let total_millis = total_millis.unsigned_abs();
+    let total_seconds = total_millis / 1_000;
+    let millis = total_millis % 1_000;
+    let hours = total_seconds / 3_600;
+    let total_minutes = total_seconds / 60;
+    let minutes = total_minutes % 60;
+    let seconds = total_seconds % 60;
+    let fraction = if millis == 0 {
+        String::new()
+    } else {
+        format!(".{millis:03}").trim_end_matches('0').to_string()
+    };
+    if hours > 0 {
+        format!("{sign}{hours}:{minutes}:{seconds}{fraction}")
+    } else if total_minutes > 0 {
+        format!("{sign}{total_minutes}:{seconds}{fraction}")
+    } else {
+        format!("{sign}{seconds}{fraction}")
+    }
+}
+
 fn unique_native_animation_name(animation: &AnimMgr, prefix: &str) -> String {
     (1_u32..)
         .map(|index| format!("{prefix}{index}"))
@@ -34074,14 +34291,6 @@ mod tests {
             animation.motions()[0].base().name()
         );
 
-        app.set_animation_motion_duration(0, 2.5, &mut camera)
-            .unwrap();
-        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
-        assert_eq!(
-            animation.motions()[0].base().rel_end(),
-            time_from_seconds(2.5)
-        );
-
         app.move_animation_motion(1, -1, &mut camera).unwrap();
         let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
         assert_eq!(animation.motions()[0].type_name(), "NoopAnimObj");
@@ -34098,6 +34307,82 @@ mod tests {
                 .unwrap()
                 .size(),
             2
+        );
+    }
+
+    #[test]
+    fn native_animation_multiple_selection_moves_and_deletes_in_one_undo_step() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        for kind in [
+            AnimKind::Spin,
+            AnimKind::Pause,
+            AnimKind::ShowAnim,
+            AnimKind::HideAnim,
+        ] {
+            app.add_animation_motion(kind, &mut camera).unwrap();
+        }
+        let scene_uid = app.state.active_scene().unwrap();
+
+        app.update_animation_selection(1, false, false);
+        app.update_animation_selection(2, false, true);
+        assert_eq!(
+            app.animation_selection.iter().copied().collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let undo_count = app.undo_stack.len();
+        app.move_animation_motions(&[1, 2], -1, &mut camera)
+            .unwrap();
+        assert_eq!(app.undo_stack.len(), undo_count + 1);
+        assert_eq!(
+            app.animation_selection.iter().copied().collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
+        assert_eq!(
+            animation
+                .motions()
+                .iter()
+                .map(AnimMotion::type_name)
+                .collect::<Vec<_>>(),
+            ["NoopAnimObj", "ShowHideAnim", "SimpleSpin", "ShowHideAnim"]
+        );
+
+        let undo_count = app.undo_stack.len();
+        app.delete_animation_motions(&[0, 1], &mut camera).unwrap();
+        assert_eq!(app.undo_stack.len(), undo_count + 1);
+        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
+        assert_eq!(animation.size(), 2);
+        assert_eq!(animation.motions()[1].base().time_ref_name(), "SimpleSpin1");
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_animation(scene_uid)
+                .unwrap()
+                .unwrap()
+                .size(),
+            4
+        );
+    }
+
+    #[test]
+    fn native_animation_time_text_matches_time_value_rows() {
+        assert_eq!(format_native_animation_time(time_from_seconds(0.0)), "0");
+        assert_eq!(
+            format_native_animation_time(time_from_seconds(1.25)),
+            "1.25"
+        );
+        assert_eq!(
+            format_native_animation_time(time_from_seconds(61.005)),
+            "1:1.005"
+        );
+        assert_eq!(
+            format_native_animation_time(time_from_seconds(3_661.5)),
+            "1:1:1.5"
+        );
+        assert_eq!(
+            format_native_animation_time(time_from_seconds(-1.25)),
+            "-1.25"
         );
     }
 

@@ -1400,6 +1400,12 @@ summary:focus-visible {
   font-size: 10px;
 }
 
+.animation-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .animation-row.selected {
   background: var(--selection);
   color: var(--selection-text);

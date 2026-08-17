@@ -1001,12 +1001,24 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(JS.contains("event.shiftKey && selectedAnimationAnchor !== null"));
     assert!(JS.contains("mutate(\"delete_animation_objects\""));
     assert!(JS.contains("mutate(\"move_animation_objects\""));
+    assert!(JS.contains("function animationContextItems()"));
+    assert!(JS.contains("row.addEventListener(\"contextmenu\""));
+    for label in ["Change...", "Delete", "Add...", "Move up", "Move down"] {
+        assert!(JS.contains(&format!("label: \"{label}\"")));
+    }
     assert!(TAURI_APP_RS.contains("fn set_animation_object_properties("));
     assert!(TAURI_APP_RS.contains("animation.insert_motion_before(insertion_index, motion)"));
     assert!(TAURI_APP_RS.contains("fn delete_animation_objects("));
     assert!(TAURI_APP_RS.contains("fn move_animation_objects("));
     assert!(TAURI_APP_RS.contains("animation.edit_motion_by_uid"));
     assert!(TAURI_APP_RS.contains("motion.base_mut().set_time_ref_name(name.clone())"));
+    assert!(NATIVE_GUI_RS.contains("animation_selection: std::collections::BTreeSet<usize>"));
+    assert!(NATIVE_GUI_RS.contains("fn delete_animation_motions("));
+    assert!(NATIVE_GUI_RS.contains("fn move_animation_motions("));
+    assert!(NATIVE_GUI_RS.contains("response.context_menu(|ui|"));
+    assert!(NATIVE_GUI_RS.contains("ui.strong(\"Name\")"));
+    assert!(NATIVE_GUI_RS.contains("ui.strong(\"Start\")"));
+    assert!(NATIVE_GUI_RS.contains("ui.strong(\"End\")"));
 }
 
 #[test]

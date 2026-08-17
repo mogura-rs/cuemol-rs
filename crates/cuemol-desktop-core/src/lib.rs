@@ -875,15 +875,15 @@ pub enum AnimKind {
 impl AnimKind {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Spin => "Spin",
+            Self::Spin => "Simple spin",
             Self::CameraMotion => "Camera motion",
             Self::Rock => "Rock",
             Self::Pause => "No operation",
-            Self::SlideIn => "SlideIn",
-            Self::SlideOut => "SlideOut",
+            Self::SlideIn => "Slide In",
+            Self::SlideOut => "Slide Out",
             Self::ShowAnim => "Show",
             Self::HideAnim => "Hide",
-            Self::MolAnim => "MolAnim",
+            Self::MolAnim => "Mol Morphing",
         }
     }
 }

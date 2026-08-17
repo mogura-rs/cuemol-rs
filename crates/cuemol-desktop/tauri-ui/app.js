@@ -13750,6 +13750,90 @@ function formatAnimationObjectTime(seconds) {
   return secondsText;
 }
 
+const animationAddKinds = [
+  ["Simple spin", "simple-spin"],
+  ["Camera motion", "camera-motion"],
+  ["Show", "show"],
+  ["Hide", "hide"],
+  ["Slide In", "slide-in"],
+  ["Slide Out", "slide-out"],
+  ["Mol Morphing", "mol-anim"],
+  ["No operation", "noop"],
+];
+
+async function addAnimationObject(kind = animationKind.value) {
+  const insertionIndex = selectedAnimationIndex === null
+    ? snapshot.animationObjects.length
+    : selectedAnimationIndex + 1;
+  await mutate("add_animation_object", {
+    kind,
+    afterIndex: selectedAnimationIndex,
+  });
+  selectedAnimationIndex = Math.min(insertionIndex, snapshot.animationObjects.length - 1);
+  selectedAnimationIndices = new Set([selectedAnimationIndex]);
+  selectedAnimationAnchor = selectedAnimationIndex;
+  renderAnimation();
+}
+
+async function deleteSelectedAnimationObjects() {
+  if (selectedAnimationIndices.size === 0) return;
+  await mutate("delete_animation_objects", {
+    indices: [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs),
+  });
+  selectedAnimationIndex = null;
+  selectedAnimationIndices = new Set();
+  selectedAnimationAnchor = null;
+  renderAnimation();
+}
+
+async function moveSelectedAnimationObjects(direction) {
+  if (selectedAnimationIndices.size === 0) return;
+  const indices = [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs);
+  await mutate("move_animation_objects", { indices, direction });
+  selectedAnimationIndices = new Set(indices.map((index) => index + direction));
+  selectedAnimationIndex = selectedAnimationIndex === null
+    ? null
+    : selectedAnimationIndex + direction;
+  selectedAnimationAnchor = selectedAnimationAnchor === null
+    ? null
+    : selectedAnimationAnchor + direction;
+  renderAnimation();
+}
+
+function animationContextItems() {
+  const indices = [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs);
+  const size = snapshot.animationObjects.length;
+  return [
+    {
+      label: "Change...",
+      disabled: indices.length !== 1,
+      action: () => showReferenceDialog("Animation object properties"),
+    },
+    {
+      label: "Delete",
+      disabled: indices.length === 0,
+      action: deleteSelectedAnimationObjects,
+    },
+    {
+      label: "Add...",
+      children: animationAddKinds.map(([label, kind]) => ({
+        label,
+        action: () => addAnimationObject(kind),
+      })),
+    },
+    {
+      label: "Move up",
+      disabled: indices.length === 0 || indices[0] === 0,
+      action: () => moveSelectedAnimationObjects(-1),
+    },
+    {
+      label: "Move down",
+      disabled: indices.length === 0 || indices[indices.length - 1] + 1 === size,
+      action: () => moveSelectedAnimationObjects(1),
+    },
+  ];
+}
+
 function syncAnimationTimer() {
   if (snapshot?.animationPlaying && invoke) {
     if (animationTimer) return;
@@ -13845,6 +13929,15 @@ function renderAnimation() {
         selectedAnimationIndex = object.index;
         selectedAnimationAnchor = object.index;
         showReferenceDialog("Animation object properties");
+      });
+      row.addEventListener("contextmenu", (event) => {
+        if (!selectedAnimationIndices.has(object.index)) {
+          selectedAnimationIndices = new Set([object.index]);
+          selectedAnimationIndex = object.index;
+          selectedAnimationAnchor = object.index;
+          renderAnimation();
+        }
+        showWorkspaceContextMenu(event, animationContextItems());
       });
       animationList.append(row);
     }
@@ -15208,54 +15301,17 @@ animationSlider.addEventListener("change", () => {
   mutate("seek_animation", { elapsed: Number(animationSlider.value) });
 });
 
-animationAdd.addEventListener("click", async () => {
-  const insertionIndex = selectedAnimationIndex === null
-    ? snapshot.animationObjects.length
-    : selectedAnimationIndex + 1;
-  await mutate("add_animation_object", {
-    kind: animationKind.value,
-    afterIndex: selectedAnimationIndex,
-  });
-  selectedAnimationIndex = Math.min(insertionIndex, snapshot.animationObjects.length - 1);
-  selectedAnimationIndices = new Set([selectedAnimationIndex]);
-  selectedAnimationAnchor = selectedAnimationIndex;
-  renderAnimation();
-});
+animationAdd.addEventListener("click", () => addAnimationObject());
 
-animationDelete.addEventListener("click", async () => {
-  if (selectedAnimationIndices.size === 0) return;
-  await mutate("delete_animation_objects", {
-    indices: [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs),
-  });
-  selectedAnimationIndex = null;
-  selectedAnimationIndices = new Set();
-  selectedAnimationAnchor = null;
-  renderAnimation();
-});
+animationDelete.addEventListener("click", deleteSelectedAnimationObjects);
 
 animationChange.addEventListener("click", () => {
   showReferenceDialog("Animation object properties");
 });
 
-animationUp.addEventListener("click", async () => {
-  if (selectedAnimationIndices.size === 0) return;
-  const indices = [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs);
-  await mutate("move_animation_objects", { indices, direction: -1 });
-  selectedAnimationIndices = new Set(indices.map((index) => index - 1));
-  selectedAnimationIndex = selectedAnimationIndex === null ? null : selectedAnimationIndex - 1;
-  selectedAnimationAnchor = selectedAnimationAnchor === null ? null : selectedAnimationAnchor - 1;
-  renderAnimation();
-});
+animationUp.addEventListener("click", () => moveSelectedAnimationObjects(-1));
 
-animationDown.addEventListener("click", async () => {
-  if (selectedAnimationIndices.size === 0) return;
-  const indices = [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs);
-  await mutate("move_animation_objects", { indices, direction: 1 });
-  selectedAnimationIndices = new Set(indices.map((index) => index + 1));
-  selectedAnimationIndex = selectedAnimationIndex === null ? null : selectedAnimationIndex + 1;
-  selectedAnimationAnchor = selectedAnimationAnchor === null ? null : selectedAnimationAnchor + 1;
-  renderAnimation();
-});
+animationDown.addEventListener("click", () => moveSelectedAnimationObjects(1));
 
 trajectoryObject.addEventListener("change", () => {
   selectedTrajectoryUid = Number(trajectoryObject.value) || null;
