@@ -6,6 +6,7 @@ use cuemol_gfx::Rgba8;
 
 use crate::{DesktopAppState, GuiAtomLabel};
 
+#[cfg(feature = "egui-gui")]
 pub(crate) fn collect_pov_labels(
     state: &DesktopAppState,
     camera: &cuemol_qsys::Camera,

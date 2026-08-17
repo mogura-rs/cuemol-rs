@@ -109,6 +109,7 @@ const dialog = tauri?.dialog;
 
 const RECENT_STORAGE_KEY = "cuemol2.recentFiles.v1";
 const SELECTION_HISTORY_STORAGE_KEY = "cuemol2.selectionHistory.v1";
+const ANIMATION_RENDER_STORAGE_KEY = "cuemol2.animationRender.v1";
 const MAX_RECENT_FILES = 10;
 const MAX_SELECTION_HISTORY = 20;
 const CAMERA_PREVIEW_SCALE = 0.625;
@@ -5015,6 +5016,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     usesViewProperties || usesCameraProperties || title === "Scene Properties";
   const usesPreferences = title === "Options";
   const usesPovRender = title === "POV-Ray rendering";
+  const usesAnimationRender = title === "Animation rendering";
   const usesWorkspaceProperties = ["Object Properties", "Renderer Properties"].includes(title);
   const usesBondPicker = title === "Mol bond editor";
   referenceDialog.classList.toggle("property-editor", usesGenericProperties);
@@ -5022,11 +5024,13 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
   referenceDialog.classList.toggle("workspace-property-dialog", usesWorkspaceProperties);
   referenceDialog.classList.toggle("bond-picker-dialog", usesBondPicker);
   referenceDialog.classList.toggle("pov-render-dialog", usesPovRender);
+  referenceDialog.classList.toggle("animation-render-dialog", usesAnimationRender);
   referenceDialog.classList.toggle(
     "wide",
     usesGenericProperties ||
       usesPreferences ||
       usesPovRender ||
+      usesAnimationRender ||
       (usesApplicationInfo && title !== "About CueMol2"),
   );
   let applicationInfo = null;
@@ -6635,34 +6639,100 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
   } else if (title === "Animation rendering") {
     const scenes = snapshot?.scenes || [];
     const scene = scenes.find((item) => item.active) || scenes[0];
+    let saved = {};
+    try {
+      saved = JSON.parse(localStorage.getItem(ANIMATION_RENDER_STORAGE_KEY) || "{}");
+    } catch {
+      saved = {};
+    }
     const targetScene = dialogSelect(
       "Target scene",
       scenes.map((item) => [item.uid, item.name]),
       scene?.uid ?? "",
     );
-    const outputDir = dialogField("Output dir", "");
-    const baseName = dialogField("Output base name", "frame");
-    const width = dialogField("Width (px)", "640", "number");
+    const pages = workspacePropertyPage([
+      "Main options",
+      "Render options",
+      "Movie options",
+      "Preview",
+    ]);
+    pages.editor.classList.add("animation-render-editor");
+    dialogContent.append(pages.editor);
+    const [mainPage, renderPage, moviePage, previewPage] = pages.panes;
+    const outputDir = dialogField("Output dir", saved.outputDir || ".", "text", mainPage);
+    const baseName = dialogField("Output base name", saved.baseName || "output", "text", mainPage);
+    const width = dialogField("Width (px)", String(saved.width || 640), "number", mainPage);
     width.min = "100";
-    const height = dialogField("Height (px)", "480", "number");
+    width.max = "10000";
+    width.step = "100";
+    const height = dialogField("Height (px)", String(saved.height || 480), "number", mainPage);
     height.min = "100";
-    const frameRate = dialogSelect(
-      "Frame rate (fps)",
+    height.max = "10000";
+    height.step = "100";
+    const preset = dialogSelect(
+      "Preset size",
       [
-        [24, "24"],
-        [30, "30"],
-        [60, "60"],
+        ["custom", "Preset size"],
+        ["320,240", "QVGA (320x240)"],
+        ["640,480", "VGA (640x480)"],
+        ["800,600", "SVGA (800x600)"],
+        ["1024,768", "XGA (1024x768)"],
+        ["1280,720", "HD720 (1280x720)"],
+        ["1920,1080", "HD1080 (1920x1080)"],
       ],
-      30,
+      "custom",
+      mainPage,
     );
-    const loop = dialogCheckbox("Loop", false);
+    preset.addEventListener("change", () => {
+      if (preset.value === "custom") return;
+      const [presetWidth, presetHeight] = preset.value.split(",");
+      width.value = presetWidth;
+      height.value = presetHeight;
+    });
+    const frameRate = dialogField(
+      "Frame rate (fps)",
+      String(saved.frameRate || 30),
+      "number",
+      mainPage,
+    );
+    frameRate.min = "1";
+    frameRate.max = "240";
+    frameRate.step = "1";
+    const frameRateOptions = document.createElement("datalist");
+    frameRateOptions.id = "animation-frame-rate-options";
+    for (const value of [24, 30, 60]) {
+      const option = document.createElement("option");
+      option.value = String(value);
+      frameRateOptions.append(option);
+    }
+    frameRate.setAttribute("list", frameRateOptions.id);
+    mainPage.append(frameRateOptions);
+    const concurrency = dialogField(
+      "NCPU",
+      String(saved.concurrency || Math.min(8, Math.max(1, navigator.hardwareConcurrency || 2))),
+      "number",
+      mainPage,
+    );
+    concurrency.min = "1";
+    concurrency.max = "32";
+    const loop = dialogCheckbox("Loop", Boolean(saved.duplicateLastFrame), mainPage);
     const projection = dialogSelect(
       "Projection",
       [
         ["perspec", "Perspective"],
         ["ortho", "Orthographic"],
       ],
-      snapshot?.perspective === false ? "ortho" : "perspec",
+      saved.projection || (snapshot?.perspective === false ? "ortho" : "perspec"),
+      mainPage,
+    );
+    const backend = dialogSelect(
+      "Backend",
+      [
+        ["povray", "POV-Ray"],
+        ["umbreon", "Umbreon"],
+      ],
+      saved.backend || "povray",
+      mainPage,
     );
     const progress = document.createElement("progress");
     progress.max = 1;
@@ -6670,8 +6740,22 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     progress.setAttribute("aria-label", "Progress");
     const progressText = dialogParagraph("Ready");
     progressText.className = "dialog-hint";
-    dialogContent.append(progress, progressText);
-    const chooseDir = button("Change output dir…", "", async () => {
+    const progressField = document.createElement("label");
+    progressField.className = "dialog-field animation-render-progress";
+    const progressLabel = document.createElement("span");
+    progressLabel.textContent = "Progress";
+    progressField.append(progressLabel, progress);
+    const logField = document.createElement("label");
+    logField.className = "dialog-field dialog-textarea animation-render-log-field";
+    const logLabel = document.createElement("span");
+    logLabel.textContent = "Log";
+    const log = document.createElement("textarea");
+    log.className = "animation-render-log";
+    log.readOnly = true;
+    log.spellcheck = false;
+    logField.append(logLabel, log);
+    mainPage.append(progressField, progressText, logField);
+    const chooseDir = button("Change ...", "", async () => {
       if (!dialog?.open) {
         showError("The Tauri dialog plugin is unavailable.");
         return;
@@ -6679,6 +6763,149 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       const path = await dialog.open({ directory: true, multiple: false });
       if (path) outputDir.value = path;
     });
+    chooseDir.setAttribute("aria-label", "Change output dir");
+    const outputPathControls = document.createElement("span");
+    outputPathControls.className = "animation-render-path-controls";
+    outputDir.setAttribute("aria-label", "Output dir");
+    outputDir.replaceWith(outputPathControls);
+    outputPathControls.append(outputDir, chooseDir);
+
+    const pickFile = async (input) => {
+      if (!dialog?.open) {
+        showError("The Tauri dialog plugin is unavailable.");
+        return;
+      }
+      const path = await dialog.open({ directory: false, multiple: false });
+      if (path) input.value = path;
+    };
+    const pickDirectory = async (input) => {
+      if (!dialog?.open) {
+        showError("The Tauri dialog plugin is unavailable.");
+        return;
+      }
+      const path = await dialog.open({ directory: true, multiple: false });
+      if (path) input.value = path;
+    };
+    const pathField = (label, value, parent, picker) => {
+      const wrapper = document.createElement("label");
+      wrapper.className = "dialog-field animation-render-path-field";
+      const caption = document.createElement("span");
+      caption.textContent = label;
+      const pathControls = document.createElement("span");
+      pathControls.className = "animation-render-path-controls";
+      const input = document.createElement("input");
+      input.value = value;
+      const choose = button("Change ...", "", () => picker(input));
+      input.setAttribute("aria-label", label);
+      choose.setAttribute("aria-label", `Change ${label}`);
+      pathControls.append(input, choose);
+      wrapper.append(caption, pathControls);
+      parent.append(wrapper);
+      return { input, choose };
+    };
+    const povrayExecutableField = pathField(
+      "Povray exe file",
+      saved.povrayExecutable || localStorage.getItem("cuemol.povExecutable") || "povray",
+      renderPage,
+      pickFile,
+    );
+    const povrayIncludeField = pathField(
+      "Povray inc dir",
+      saved.povrayIncludeDir || localStorage.getItem("cuemol.povIncludeDir") || "",
+      renderPage,
+      pickDirectory,
+    );
+    const povClipPlane = dialogCheckbox(
+      "Clipping plane",
+      saved.povClipPlane !== false,
+      renderPage,
+    );
+    const povPostBlend = dialogCheckbox(
+      "Post-render alpha blending",
+      saved.povPostBlend !== false,
+      renderPage,
+    );
+    const povShadow = dialogCheckbox("Shadow", Boolean(saved.povShadow), renderPage);
+    const povEdgeLines = dialogCheckbox(
+      "Edge lines",
+      saved.povEdgeLines !== false,
+      renderPage,
+    );
+    const povLabels = dialogCheckbox("Labels", Boolean(saved.povLabels), renderPage);
+    const povRadiosity = dialogSelect(
+      "Radiosity",
+      [
+        [-1, "Disable"], [0, "Default"], [1, "Debug"], [2, "Fast"], [3, "Normal"],
+        [4, "2Bounce"], [5, "Final"], [6, "OutdoorLQ"], [7, "OutdoorHQ"],
+        [8, "OutdoorLight"], [9, "IndoorLQ"], [10, "IndoorHQ"],
+      ],
+      saved.povRadiosity ?? -1,
+      renderPage,
+    );
+    const renderHint = dialogParagraph(
+      "POV-Ray frames use quality 11, PNG alpha, and 3-level antialiasing.",
+    );
+    renderHint.className = "dialog-hint";
+    renderPage.append(renderHint);
+
+    const makeMovie = dialogCheckbox("Make movie", Boolean(saved.makeMovie), moviePage);
+    const ffmpegExecutableField = pathField(
+      "FFmpeg exe file",
+      saved.ffmpegExecutable || "ffmpeg",
+      moviePage,
+      pickFile,
+    );
+    const movieFormat = dialogSelect(
+      "Output format",
+      [
+        ["mov_h264", "QuickTime/H.264"], ["mov_h265", "QuickTime/H.265"],
+        ["mov_raw", "QuickTime/Raw"], ["mp4_h264", "MP4/H.264"],
+        ["mp4_h265", "MP4/H.265"], ["wmv2", "wmv"],
+        ["gifanim", "GIF animation"],
+      ],
+      saved.movieFormat || "mov_h264",
+      moviePage,
+    );
+    const bitrate = dialogField(
+      "Bitrate (kbps)",
+      String(saved.bitrateKbps || 10240),
+      "number",
+      moviePage,
+    );
+    bitrate.min = "1";
+    bitrate.max = "200000";
+    const ffmpegOptions = dialogField("FFmpeg options", "", "text", moviePage);
+    ffmpegOptions.readOnly = true;
+    const reencode = button("Re-encode", "", () => {});
+    moviePage.append(reencode);
+
+    const previewControls = document.createElement("label");
+    previewControls.className = "dialog-field animation-preview-controls";
+    const previewLabel = document.createElement("span");
+    previewLabel.textContent = "Frame";
+    const previewSlider = document.createElement("input");
+    previewSlider.type = "range";
+    previewSlider.min = "0";
+    previewSlider.max = "0";
+    previewSlider.value = "0";
+    previewSlider.disabled = true;
+    previewControls.append(previewLabel, previewSlider);
+    const previewReadout = dialogParagraph("No rendered frames are available.");
+    previewReadout.className = "dialog-hint";
+    const previewImage = document.createElement("img");
+    previewImage.className = "animation-render-preview";
+    previewImage.alt = "Animation frame preview";
+    previewImage.hidden = true;
+    previewPage.append(previewControls, previewReadout, previewImage);
+
+    const povControls = [
+      povrayExecutableField.input, povrayExecutableField.choose,
+      povrayIncludeField.input, povrayIncludeField.choose,
+      povClipPlane, povPostBlend, povShadow, povEdgeLines, povLabels, povRadiosity,
+    ];
+    const movieControls = [
+      ffmpegExecutableField.input, ffmpegExecutableField.choose, movieFormat, bitrate,
+    ];
     const controls = [
       targetScene,
       outputDir,
@@ -6686,22 +6913,115 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       width,
       height,
       frameRate,
+      concurrency,
       loop,
       projection,
+      backend,
+      preset,
       chooseDir,
+      makeMovie,
+      ...povControls,
+      ...movieControls,
     ];
     let running = false;
     let stopping = false;
+    let renderedFrames = 0;
+    let renderComplete = false;
+    let encodingOnlyRun = false;
+    let lastLoggedFrame = 0;
+    let previewSerial = 0;
     let pollTimer = null;
     let pollPending = false;
     const headerClose = referenceDialog.querySelector('button[aria-label="Close"]');
     const close = button("Close", "", () => referenceDialog.close());
+    const appendLog = (message) => {
+      log.value += `${log.value ? "\n" : ""}${message}`;
+      log.scrollTop = log.scrollHeight;
+    };
+    const updateFfmpegOptions = () => {
+      const options = {
+        mov_h264: "-c:v libx264 -f mov",
+        mov_h265: "-c:v libx265 -tag:v hvc1 -f mov",
+        mov_raw: "-c:v rawvideo -f mov",
+        mp4_h264: "-c:v libx264 -f mp4",
+        mp4_h265: "-c:v libx265 -f mp4",
+        wmv2: "-c:v wmv2",
+        gifanim: "",
+      };
+      ffmpegOptions.value = options[movieFormat.value] || "";
+    };
+    const syncBackend = () => {
+      const enabled = backend.value === "povray";
+      povControls.forEach((control) => { control.disabled = !enabled || running; });
+      renderHint.textContent = enabled
+        ? "POV-Ray frames use quality 11, PNG alpha, and 3-level antialiasing."
+        : "Umbreon frames are rendered in-process with cooperative cancellation.";
+    };
+    const syncMovie = () => {
+      movieControls.forEach((control) => { control.disabled = !makeMovie.checked || running; });
+      ffmpegOptions.disabled = !makeMovie.checked || running;
+      reencode.disabled = running || !makeMovie.checked || !renderComplete;
+    };
+    const renderInput = () => ({
+      sceneUid: Number(targetScene.value),
+      outputDir: outputDir.value,
+      baseName: baseName.value,
+      width: Number(width.value),
+      height: Number(height.value),
+      frameRate: Number(frameRate.value),
+      perspective: projection.value === "perspec",
+      duplicateLastFrame: loop.checked,
+      concurrency: Number(concurrency.value),
+      backend: backend.value,
+      povrayExecutable: povrayExecutableField.input.value,
+      povrayIncludeDir: povrayIncludeField.input.value,
+      povClipPlane: povClipPlane.checked,
+      povPostBlend: povPostBlend.checked,
+      povShadow: povShadow.checked,
+      povEdgeLines: povEdgeLines.checked,
+      povLabels: povLabels.checked,
+      povRadiosity: Number(povRadiosity.value),
+      makeMovie: makeMovie.checked,
+      ffmpegExecutable: ffmpegExecutableField.input.value,
+      movieFormat: movieFormat.value,
+      bitrateKbps: Number(bitrate.value),
+    });
+    const persistSettings = () => {
+      localStorage.setItem(
+        ANIMATION_RENDER_STORAGE_KEY,
+        JSON.stringify({ ...renderInput(), projection: projection.value }),
+      );
+    };
+    const refreshPreview = async (frameIndex) => {
+      if (frameIndex < 0) return;
+      const serial = ++previewSerial;
+      try {
+        const image = await invoke("animation_render_preview", {
+          outputDir: outputDir.value,
+          baseName: baseName.value,
+          frameIndex,
+        });
+        if (serial !== previewSerial) return;
+        if (image === "missing") {
+          previewImage.hidden = true;
+          previewReadout.textContent = `Frame is not available yet: ${frameIndex}`;
+          return;
+        }
+        previewImage.src = image;
+        previewImage.hidden = false;
+        previewReadout.textContent = `${frameIndex} / ${Math.max(0, renderedFrames - 1)}`;
+      } catch (error) {
+        if (serial === previewSerial) previewReadout.textContent = String(error);
+      }
+    };
     const finish = () => {
       clearInterval(pollTimer);
       pollTimer = null;
       pollPending = false;
       running = false;
       controls.forEach((control) => { control.disabled = false; });
+      syncBackend();
+      syncMovie();
       close.disabled = false;
       if (headerClose) headerClose.disabled = false;
       startStop.disabled = false;
@@ -6713,25 +7033,55 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       try {
         const state = await invoke("poll_animation_render");
         if (state.startsWith("running:")) {
-          const [, completed, total] = state.split(":");
+          const [, completed, total, rawProgress, phase] = state.split(":");
           const count = Number(completed);
           const frameCount = Math.max(1, Number(total));
-          progress.value = count / frameCount;
-          progressText.textContent = `Rendering frame ${count} / ${frameCount}`;
+          const detailedProgress = Number(rawProgress) / 1000000;
+          progress.value = Number.isFinite(detailedProgress) ? detailedProgress : count / frameCount;
+          progressText.textContent = phase === "movie"
+            ? "Encoding movie with FFmpeg"
+            : `Rendering frame ${count} / ${frameCount}`;
+          renderedFrames = Math.max(renderedFrames, count);
+          previewSlider.max = String(Math.max(0, renderedFrames - 1));
+          previewSlider.disabled = renderedFrames < 1;
+          while (lastLoggedFrame < count) {
+            appendLog(`Frame ${String(lastLoggedFrame).padStart(4, "0")} complete`);
+            lastLoggedFrame += 1;
+          }
+          if (count > 0 && phase !== "movie") {
+            previewSlider.value = String(count - 1);
+            void refreshPreview(count - 1);
+          }
           return;
         }
         if (state === "stopping") return;
         finish();
         if (state.startsWith("complete:")) {
           const count = Number(state.slice("complete:".length));
+          renderedFrames = count;
+          renderComplete = true;
+          syncMovie();
           progress.value = 1;
           progressText.textContent = `Animation rendered: ${count} frame(s)`;
+          previewSlider.max = String(Math.max(0, count - 1));
+          previewSlider.disabled = count < 1;
+          if (count > 0) {
+            previewSlider.value = String(count - 1);
+            void refreshPreview(count - 1);
+          }
           const completedSnapshot = await invoke("get_snapshot");
           snapshot = completedSnapshot;
+          const animationLog = (snapshot.logLines || [])
+            .filter((line) => line.startsWith("Animation"));
+          if (animationLog.length) log.value = animationLog.slice(-200).join("\n");
           renderStatusAndLog();
           showBottomPanel("output");
         } else if (state.startsWith("error:")) {
           const message = state.slice("error:".length);
+          if (!encodingOnlyRun) {
+            renderComplete = false;
+            syncMovie();
+          }
           progressText.textContent = message;
           if (!stopping) showError(message);
         }
@@ -6742,6 +7092,38 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       } finally {
         pollPending = false;
       }
+    };
+    const begin = async (encodingOnly) => {
+      persistSettings();
+      const input = renderInput();
+      const state = encodingOnly
+        ? await invoke("start_animation_movie", { input, totalFrames: renderedFrames })
+        : await invoke("start_animation_render", { input });
+      if (!state.startsWith("running:")) {
+        throw new Error(`Unexpected animation render state: ${state}`);
+      }
+      running = true;
+      stopping = false;
+      encodingOnlyRun = encodingOnly;
+      controls.forEach((control) => { control.disabled = true; });
+      close.disabled = true;
+      reencode.disabled = true;
+      if (headerClose) headerClose.disabled = true;
+      startStop.textContent = "Stop";
+      progress.value = encodingOnly ? 0.95 : 0;
+      progressText.textContent = encodingOnly
+        ? "Encoding movie with FFmpeg"
+        : "Starting animation rendering...";
+      if (!encodingOnly) {
+        renderedFrames = 0;
+        renderComplete = false;
+        lastLoggedFrame = 0;
+        log.value = "";
+        previewSlider.disabled = true;
+        previewImage.hidden = true;
+      }
+      appendLog(encodingOnly ? "Re-encoding movie" : "Animation rendering started");
+      pollTimer = setInterval(poll, 150);
     };
     const startStop = button("Start", "dialog-primary", async () => {
       if (running) {
@@ -6756,34 +7138,27 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         return;
       }
       try {
-        const state = await invoke("start_animation_render", {
-          input: {
-            sceneUid: Number(targetScene.value),
-            outputDir: outputDir.value,
-            baseName: baseName.value,
-            width: Number(width.value),
-            height: Number(height.value),
-            frameRate: Number(frameRate.value),
-            perspective: projection.value === "perspec",
-            duplicateLastFrame: loop.checked,
-          },
-        });
-        if (!state.startsWith("running:")) {
-          throw new Error(`Unexpected animation render state: ${state}`);
-        }
-        running = true;
-        stopping = false;
-        controls.forEach((control) => { control.disabled = true; });
-        close.disabled = true;
-        if (headerClose) headerClose.disabled = true;
-        startStop.textContent = "Stop";
-        progress.value = 0;
-        progressText.textContent = "Starting animation rendering...";
-        pollTimer = setInterval(poll, 150);
+        await begin(false);
       } catch (error) {
         showError(error);
       }
     });
+    reencode.onclick = async () => {
+      try {
+        await begin(true);
+      } catch (error) {
+        showError(error);
+      }
+    };
+    backend.addEventListener("change", syncBackend);
+    makeMovie.addEventListener("change", syncMovie);
+    movieFormat.addEventListener("change", updateFfmpegOptions);
+    previewSlider.addEventListener("input", () => {
+      void refreshPreview(Number(previewSlider.value));
+    });
+    updateFfmpegOptions();
+    syncBackend();
+    syncMovie();
     const preventCloseWhileRunning = (event) => {
       if (running) event.preventDefault();
     };
@@ -6791,6 +7166,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     referenceDialog.addEventListener(
       "close",
       () => {
+        persistSettings();
         clearInterval(pollTimer);
         referenceDialog.removeEventListener("cancel", preventCloseWhileRunning);
       },

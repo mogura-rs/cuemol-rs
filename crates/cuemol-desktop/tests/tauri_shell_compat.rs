@@ -172,8 +172,10 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "execute_script_file",
         "export_pov",
         "start_animation_render",
+        "start_animation_movie",
         "poll_animation_render",
         "cancel_animation_render",
+        "animation_render_preview",
         "open_pdb",
         "merge_molecules",
         "save_object",
@@ -905,9 +907,30 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
         "Width (px)",
         "Height (px)",
         "Frame rate (fps)",
+        "NCPU",
         "Loop",
         "Projection",
+        "Main options",
+        "Render options",
+        "Movie options",
+        "Preview",
+        "Preset size",
+        "Backend",
+        "Povray exe file",
+        "Povray inc dir",
+        "Clipping plane",
+        "Post-render alpha blending",
+        "Shadow",
+        "Edge lines",
+        "Labels",
+        "Radiosity",
+        "Make movie",
+        "FFmpeg exe file",
+        "Output format",
+        "Bitrate (kbps)",
+        "Re-encode",
         "Progress",
+        "Log",
     ] {
         assert!(
             dialog.contains(label),
@@ -916,8 +939,10 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
     }
     for command in [
         "start_animation_render",
+        "start_animation_movie",
         "poll_animation_render",
         "cancel_animation_render",
+        "animation_render_preview",
     ] {
         assert!(
             dialog.contains(command),
@@ -925,11 +950,17 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
         );
     }
     assert!(dialog.contains("duplicateLastFrame: loop.checked"));
+    assert!(dialog.contains("concurrency: Number(concurrency.value)"));
+    assert!(dialog.contains("backend: backend.value"));
+    assert!(dialog.contains("makeMovie: makeMovie.checked"));
     assert!(dialog.contains("setInterval(poll, 150)"));
     assert!(dialog.contains("if (running) event.preventDefault()"));
     assert!(TAURI_APP_RS.contains("struct TauriAnimationRenderJob"));
     assert!(TAURI_APP_RS.contains("restore: AppModelUndo"));
     assert!(TAURI_APP_RS.contains("spawn_tauri_animation_frame(task)"));
+    assert!(TAURI_APP_RS.contains("spawn_tauri_animation_movie(task)"));
+    assert!(TAURI_APP_RS.contains("run_pov_process_with_poll"));
+    assert!(TAURI_APP_RS.contains("_frm_%04d.png"));
 }
 
 #[test]

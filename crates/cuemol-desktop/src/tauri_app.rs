@@ -3,16 +3,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
     mpsc, Arc, Mutex, OnceLock,
 };
 
 use cuemol_core::{LDom2Node, Quat, Uid, Vector4};
 use cuemol_qsys::{Camera, CenterMark, StereoMode, View};
 use cuemol_render::{
-    tessellate_snapshot, RenderBond, RenderMesh, RenderSceneSnapshot, UmbreonDenoiseMode,
-    UmbreonSceneExporter,
+    tessellate_snapshot, PovSceneExporter, RenderBond, RenderMesh, RenderSceneSnapshot,
+    UmbreonDenoiseMode, UmbreonSceneExporter,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -21,10 +22,11 @@ use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRen
 use crate::{
     anim_step, atoms_in_screen_rect, collect_scene_pov_labels, create_apbs_work_dir,
     create_pov_work_dir, overlay_pov_labels, pick_atom_screen, run_apbs_process, run_pov_process,
-    AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod,
-    GuiApbsOptions, GuiApbsPaths, GuiAtomLabel, GuiPovSceneOptions, PovProcessOptions,
-    PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
-    WorkspaceRendererClipboard, WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
+    run_pov_process_with_poll, AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask,
+    DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths, GuiAtomLabel,
+    GuiPovSceneOptions, PovProcessOptions, PovProcessOutput, PovProcessTask,
+    WorkspaceCameraClipboard, WorkspaceObjectClipboard, WorkspaceRendererClipboard,
+    WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
@@ -1441,6 +1443,20 @@ struct AnimationRenderInput {
     frame_rate: f64,
     perspective: bool,
     duplicate_last_frame: bool,
+    concurrency: u32,
+    backend: String,
+    povray_executable: String,
+    povray_include_dir: String,
+    pov_clip_plane: bool,
+    pov_post_blend: bool,
+    pov_shadow: bool,
+    pov_edge_lines: bool,
+    pov_labels: bool,
+    pov_radiosity: i32,
+    make_movie: bool,
+    ffmpeg_executable: String,
+    movie_format: String,
+    bitrate_kbps: u32,
 }
 
 struct AppModel {
@@ -1509,24 +1525,44 @@ struct TauriAnimationRenderJob {
     input: AnimationRenderInput,
     restore: AppModelUndo,
     cancel: Arc<AtomicBool>,
+    progress: Arc<AtomicU32>,
     total_frames: u32,
     next_frame: u32,
     completed_frames: u32,
-    frame_receiver: Option<mpsc::Receiver<Result<TauriAnimationFrameOutput, String>>>,
+    frame_receivers: Vec<mpsc::Receiver<Result<TauriAnimationTaskOutput, String>>>,
+    movie_receiver: Option<mpsc::Receiver<Result<TauriAnimationTaskOutput, String>>>,
+    encoding_started: bool,
 }
 
 struct TauriAnimationFrameTask {
+    input: AnimationRenderInput,
+    index: u32,
+    total_frames: u32,
     snapshot: RenderSceneSnapshot,
     camera: Camera,
+    labels: Vec<GuiAtomLabel>,
     background: [f32; 4],
-    width: u32,
-    height: u32,
-    path: PathBuf,
     cancel: Arc<AtomicBool>,
+    progress: Arc<AtomicU32>,
 }
 
-struct TauriAnimationFrameOutput {
-    path: PathBuf,
+struct TauriAnimationMovieTask {
+    input: AnimationRenderInput,
+    total_frames: u32,
+    cancel: Arc<AtomicBool>,
+    progress: Arc<AtomicU32>,
+}
+
+enum TauriAnimationTaskOutput {
+    Frame {
+        index: u32,
+        path: PathBuf,
+        log: String,
+    },
+    Movie {
+        path: PathBuf,
+        log: String,
+    },
 }
 
 #[derive(Clone)]
@@ -6152,11 +6188,14 @@ impl AppModel {
         if self.animation_objects.is_empty() {
             return Err("no animation objects are defined".to_string());
         }
-        if !input.frame_rate.is_finite() || !(1.0..=120.0).contains(&input.frame_rate) {
-            return Err("frame rate must be between 1 and 120 fps".to_string());
+        if !input.frame_rate.is_finite() || !(1.0..=240.0).contains(&input.frame_rate) {
+            return Err("frame rate must be between 1 and 240 fps".to_string());
         }
         if !(100..=10_000).contains(&input.width) || !(100..=10_000).contains(&input.height) {
             return Err("animation dimensions must be between 100 and 10000".to_string());
+        }
+        if input.output_dir.trim().is_empty() {
+            return Err("animation output directory is required".to_string());
         }
         let base_name = input.base_name.trim();
         if base_name.is_empty()
@@ -6166,6 +6205,39 @@ impl AppModel {
             || base_name == ".."
         {
             return Err("output base name must be a simple file name".to_string());
+        }
+        if !(1..=32).contains(&input.concurrency) {
+            return Err("animation concurrency must be between 1 and 32".to_string());
+        }
+        if !matches!(input.backend.as_str(), "povray" | "umbreon") {
+            return Err("animation backend must be POV-Ray or Umbreon".to_string());
+        }
+        if input.backend == "povray" {
+            if input.povray_executable.trim().is_empty() {
+                return Err("POV-Ray executable is required".to_string());
+            }
+            if !input.povray_include_dir.trim().is_empty()
+                && !Path::new(input.povray_include_dir.trim()).is_dir()
+            {
+                return Err("POV-Ray include directory does not exist".to_string());
+            }
+            if !(-1..=10).contains(&input.pov_radiosity) {
+                return Err("POV-Ray radiosity mode must be between -1 and 10".to_string());
+            }
+        }
+        if input.make_movie {
+            if input.ffmpeg_executable.trim().is_empty() {
+                return Err("FFmpeg executable is required".to_string());
+            }
+            if !matches!(
+                input.movie_format.as_str(),
+                "mov_h264" | "mov_h265" | "mov_raw" | "mp4_h264" | "mp4_h265" | "wmv2" | "gifanim"
+            ) {
+                return Err("unsupported animation movie format".to_string());
+            }
+            if !(1..=200_000).contains(&input.bitrate_kbps) {
+                return Err("animation movie bitrate must be between 1 and 200000 kbps".to_string());
+            }
         }
         let total = self.animation_duration();
         let intervals = (total * input.frame_rate).round().max(1.0) as u32;
@@ -6177,7 +6249,8 @@ impl AppModel {
     }
 
     fn begin_animation_render(&mut self, input: &AnimationRenderInput) -> Result<(), String> {
-        fs::create_dir_all(Path::new(&input.output_dir)).map_err(|error| error.to_string())?;
+        fs::create_dir_all(Path::new(input.output_dir.trim()))
+            .map_err(|error| error.to_string())?;
         let scene_uid = Uid::new(input.scene_uid);
         if self.desktop.active_scene() != Some(scene_uid) {
             if !self.desktop.set_active_scene(Some(scene_uid)) {
@@ -6202,7 +6275,9 @@ impl AppModel {
         &mut self,
         input: &AnimationRenderInput,
         index: u32,
+        total_frames: u32,
         cancel: Arc<AtomicBool>,
+        progress: Arc<AtomicU32>,
     ) -> Result<TauriAnimationFrameTask, String> {
         let total = self.animation_duration();
         let target = (f64::from(index) / input.frame_rate).min(total);
@@ -6245,20 +6320,29 @@ impl AppModel {
             }
         }
         let background = background_rgba(&self.background)?;
+        let labels = collect_scene_pov_labels(
+            &self.desktop,
+            Uid::new(input.scene_uid),
+            &self.camera,
+            input.width,
+            input.height,
+            input.backend == "povray" && input.pov_labels,
+        );
         Ok(TauriAnimationFrameTask {
+            input: input.clone(),
+            index,
+            total_frames,
             snapshot,
             camera: self.camera.clone(),
+            labels,
             background: [
                 background[0] as f32,
                 background[1] as f32,
                 background[2] as f32,
                 1.0,
             ],
-            width: input.width,
-            height: input.height,
-            path: Path::new(&input.output_dir)
-                .join(format!("{}_{index:04}.png", input.base_name.trim())),
             cancel,
+            progress,
         })
     }
 
@@ -7242,8 +7326,17 @@ enum ModelRequest {
     },
     ClearPovRenderResult,
     StartAnimationRender(AnimationRenderInput),
+    StartAnimationMovie {
+        input: AnimationRenderInput,
+        total_frames: u32,
+    },
     PollAnimationRender,
     CancelAnimationRender,
+    AnimationRenderPreview {
+        output_dir: String,
+        base_name: String,
+        frame_index: u32,
+    },
     Render {
         width: u32,
         height: u32,
@@ -7934,43 +8027,259 @@ fn parse_center_mark(value: &str) -> Result<CenterMark, String> {
 
 fn spawn_tauri_animation_frame(
     task: TauriAnimationFrameTask,
-) -> Result<mpsc::Receiver<Result<TauriAnimationFrameOutput, String>>, String> {
+) -> Result<mpsc::Receiver<Result<TauriAnimationTaskOutput, String>>, String> {
     let (sender, receiver) = mpsc::channel();
     std::thread::Builder::new()
         .name("cuemol-tauri-animation-frame".to_string())
         .spawn(move || {
-            let _ = sender.send(render_tauri_animation_frame(task));
+            let _ = sender.send(render_tauri_animation_frame(&task));
         })
         .map_err(|error| format!("failed to start animation frame renderer: {error}"))?;
     Ok(receiver)
 }
 
 fn render_tauri_animation_frame(
-    task: TauriAnimationFrameTask,
-) -> Result<TauriAnimationFrameOutput, String> {
+    task: &TauriAnimationFrameTask,
+) -> Result<TauriAnimationTaskOutput, String> {
     if task.cancel.load(Ordering::Relaxed) {
         return Err("Animation rendering cancelled".to_string());
     }
+    if task.input.backend == "povray" {
+        render_tauri_pov_animation_frame(task)
+    } else {
+        render_tauri_umbreon_animation_frame(task)
+    }
+}
+
+fn tauri_animation_frame_path(
+    input: &AnimationRenderInput,
+    index: u32,
+    extension: &str,
+) -> PathBuf {
+    Path::new(input.output_dir.trim()).join(format!(
+        "{}_frm_{index:04}.{extension}",
+        input.base_name.trim()
+    ))
+}
+
+fn update_tauri_animation_progress(task: &TauriAnimationFrameTask, frame_progress: f64) {
+    let frames_weight = if task.input.make_movie { 0.95 } else { 1.0 };
+    let completed = f64::from(task.index) + frame_progress.clamp(0.0, 1.0);
+    let progress = ((completed / f64::from(task.total_frames.max(1))) * frames_weight * 1_000_000.0)
+        .round()
+        .clamp(0.0, 1_000_000.0) as u32;
+    task.progress.fetch_max(progress, Ordering::Relaxed);
+}
+
+fn render_tauri_umbreon_animation_frame(
+    task: &TauriAnimationFrameTask,
+) -> Result<TauriAnimationTaskOutput, String> {
+    let path = tauri_animation_frame_path(&task.input, task.index, "png");
     let mut exporter = UmbreonSceneExporter::new();
     exporter
         .handler_mut()
-        .set_path(task.path.to_string_lossy().into_owned());
-    exporter.set_width(task.width.min(i32::MAX as u32) as i32);
-    exporter.set_height(task.height.min(i32::MAX as u32) as i32);
+        .set_path(path.to_string_lossy().into_owned());
+    exporter.set_width(task.input.width.min(i32::MAX as u32) as i32);
+    exporter.set_height(task.input.height.min(i32::MAX as u32) as i32);
     exporter.set_denoise_mode(UmbreonDenoiseMode::default());
-    exporter.set_render_input(task.snapshot, task.camera, task.background);
+    exporter.set_render_input(task.snapshot.clone(), task.camera.clone(), task.background);
     exporter.begin_render().map_err(|error| error.to_string())?;
     while !exporter.is_render_done() {
         if task.cancel.load(Ordering::Relaxed) {
             exporter.cancel_render();
         }
+        update_tauri_animation_progress(task, exporter.get_render_progress());
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     let frame = exporter.end_render().map_err(|error| error.to_string())?;
     if frame.is_none() || task.cancel.load(Ordering::Relaxed) {
         return Err("Animation rendering cancelled".to_string());
     }
-    Ok(TauriAnimationFrameOutput { path: task.path })
+    update_tauri_animation_progress(task, 1.0);
+    Ok(TauriAnimationTaskOutput::Frame {
+        index: task.index,
+        path,
+        log: "Umbreon frame complete".to_string(),
+    })
+}
+
+fn render_tauri_pov_animation_frame(
+    task: &TauriAnimationFrameTask,
+) -> Result<TauriAnimationTaskOutput, String> {
+    let pov_path = tauri_animation_frame_path(&task.input, task.index, "pov");
+    let png_path = tauri_animation_frame_path(&task.input, task.index, "png");
+    let mesh = tessellate_snapshot(&task.snapshot);
+    let mut exporter = PovSceneExporter::new();
+    exporter.set_use_clip_z(task.input.pov_clip_plane);
+    exporter.set_use_post_blend(task.input.pov_post_blend);
+    exporter.set_show_edge_lines(task.input.pov_edge_lines);
+    exporter
+        .handler_mut()
+        .set_path(pov_path.to_string_lossy().into_owned());
+    exporter
+        .write_scene_file_with_camera(&mesh, &task.camera)
+        .map_err(|error| error.to_string())?;
+    if task.cancel.load(Ordering::Relaxed) {
+        return Err("Animation rendering cancelled".to_string());
+    }
+    update_tauri_animation_progress(task, 0.25);
+    let process_task = tauri_animation_pov_process_task(&task.input, &pov_path, &png_path);
+    let output = run_pov_process_with_poll(process_task, Arc::clone(&task.cancel), || {
+        update_tauri_animation_progress(task, 0.5);
+    })
+    .map_err(|error| {
+        if error == "POV-Ray rendering cancelled" {
+            "Animation rendering cancelled".to_string()
+        } else {
+            error
+        }
+    })?;
+    if task.input.pov_labels && !task.labels.is_empty() {
+        overlay_pov_labels(&output.output_path, &task.labels)?;
+    }
+    let _ = fs::remove_file(pov_path);
+    update_tauri_animation_progress(task, 1.0);
+    Ok(TauriAnimationTaskOutput::Frame {
+        index: task.index,
+        path: output.output_path,
+        log: if output.log.trim().is_empty() {
+            "POV-Ray frame complete".to_string()
+        } else {
+            output.log
+        },
+    })
+}
+
+fn tauri_animation_pov_process_task(
+    input: &AnimationRenderInput,
+    pov_path: &Path,
+    png_path: &Path,
+) -> PovProcessTask {
+    PovProcessTask {
+        executable: input.povray_executable.clone(),
+        include_dir: input.povray_include_dir.clone(),
+        input_path: pov_path.to_path_buf(),
+        output_path: png_path.to_path_buf(),
+        options: PovProcessOptions {
+            width: input.width,
+            height: input.height,
+            threads: 1,
+            perspective: input.perspective,
+            transparent: false,
+            shadow: input.pov_shadow,
+            radiosity: input.pov_radiosity,
+            verbose: false,
+            ..PovProcessOptions::default()
+        },
+    }
+}
+
+fn tauri_animation_movie_extension(format: &str) -> &'static str {
+    match format {
+        "mov_h264" | "mov_h265" | "mov_raw" => "mov",
+        "wmv2" => "wmv",
+        "gifanim" => "gif",
+        _ => "mp4",
+    }
+}
+
+fn spawn_tauri_animation_movie(
+    task: TauriAnimationMovieTask,
+) -> Result<mpsc::Receiver<Result<TauriAnimationTaskOutput, String>>, String> {
+    for index in 0..task.total_frames {
+        let path = tauri_animation_frame_path(&task.input, index, "png");
+        if !path.is_file() {
+            return Err(format!(
+                "Movie encoding requires frame {}",
+                path.to_string_lossy()
+            ));
+        }
+    }
+    let (sender, receiver) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("cuemol-tauri-animation-movie".to_string())
+        .spawn(move || {
+            let _ = sender.send(encode_tauri_animation_movie(&task));
+        })
+        .map_err(|error| format!("failed to start FFmpeg worker: {error}"))?;
+    Ok(receiver)
+}
+
+fn encode_tauri_animation_movie(
+    task: &TauriAnimationMovieTask,
+) -> Result<TauriAnimationTaskOutput, String> {
+    let extension = tauri_animation_movie_extension(&task.input.movie_format);
+    let output_dir = PathBuf::from(task.input.output_dir.trim());
+    let output_file = format!("{}.{}", task.input.base_name.trim(), extension);
+    let output_path = output_dir.join(&output_file);
+    let input_pattern = format!("{}_frm_%04d.png", task.input.base_name.trim());
+    let mut command = Command::new(task.input.ffmpeg_executable.trim());
+    command
+        .current_dir(&output_dir)
+        .args(["-y", "-framerate"])
+        .arg(task.input.frame_rate.to_string())
+        .args(["-start_number", "0", "-i"])
+        .arg(input_pattern)
+        .args(["-an", "-frames:v"])
+        .arg(task.total_frames.to_string());
+    match task.input.movie_format.as_str() {
+        "mov_h265" => {
+            command.args(["-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]);
+        }
+        "mp4_h265" => {
+            command.args(["-c:v", "libx265", "-pix_fmt", "yuv420p"]);
+        }
+        "mov_raw" => {
+            command.args(["-c:v", "rawvideo"]);
+        }
+        "wmv2" => {
+            command.args(["-c:v", "wmv2"]);
+        }
+        "gifanim" => {
+            command.args(["-loop", "0"]);
+        }
+        _ => {
+            command.args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+        }
+    }
+    if task.input.movie_format != "mov_raw" {
+        command
+            .arg("-b:v")
+            .arg(format!("{}k", task.input.bitrate_kbps));
+    }
+    command
+        .arg(&output_file)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start FFmpeg: {error}"))?;
+    let status = loop {
+        if task.cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Animation rendering cancelled".to_string());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(error) => return Err(format!("FFmpeg wait failed: {error}")),
+        }
+    };
+    if !status.success() {
+        return Err(format!("FFmpeg exited with {status}"));
+    }
+    if !output_path.is_file() {
+        return Err(format!(
+            "FFmpeg did not create {}",
+            output_path.to_string_lossy()
+        ));
+    }
+    task.progress.store(1_000_000, Ordering::Relaxed);
+    Ok(TauriAnimationTaskOutput::Movie {
+        path: output_path,
+        log: format!("FFmpeg exited with {status}"),
+    })
 }
 
 fn animation_kind(value: &str) -> Option<AnimKind> {
@@ -10969,62 +11278,239 @@ fn handle_model_request(
                 return Err(error);
             }
             let cancel = Arc::new(AtomicBool::new(false));
+            let progress = Arc::new(AtomicU32::new(0));
             model.animation_render_job = Some(TauriAnimationRenderJob {
                 input,
                 restore,
                 cancel,
+                progress,
                 total_frames,
                 next_frame: 0,
                 completed_frames: 0,
-                frame_receiver: None,
+                frame_receivers: Vec::new(),
+                movie_receiver: None,
+                encoding_started: false,
             });
             model.status = format!("Animation rendering started: {total_frames} frame(s)");
-            Ok(ModelResponse::Message(format!("running:0:{total_frames}")))
+            Ok(ModelResponse::Message(format!(
+                "running:0:{total_frames}:0:frames"
+            )))
+        }
+        ModelRequest::StartAnimationMovie {
+            input,
+            total_frames,
+        } => {
+            if model.animation_render_job.is_some() {
+                return Err("an animation rendering job is already running".to_string());
+            }
+            if !input.make_movie {
+                return Err("movie encoding is disabled".to_string());
+            }
+            let expected_frames = model.animation_render_frame_count(&input)?;
+            if total_frames != expected_frames {
+                return Err(format!(
+                    "movie frame count must be {expected_frames} for the current animation"
+                ));
+            }
+            let progress = Arc::new(AtomicU32::new(950_000));
+            model.animation_render_job = Some(TauriAnimationRenderJob {
+                input,
+                restore: model.capture_undo(),
+                cancel: Arc::new(AtomicBool::new(false)),
+                progress,
+                total_frames,
+                next_frame: total_frames,
+                completed_frames: total_frames,
+                frame_receivers: Vec::new(),
+                movie_receiver: None,
+                encoding_started: false,
+            });
+            model.status = "Animation movie encoding started".to_string();
+            Ok(ModelResponse::Message(format!(
+                "running:{total_frames}:{total_frames}:950000:movie"
+            )))
         }
         ModelRequest::PollAnimationRender => {
             let Some(mut job) = model.animation_render_job.take() else {
                 return Ok(ModelResponse::Message("idle".to_string()));
             };
-            if let Some(receiver) = job.frame_receiver.take() {
+            let mut pending_receivers = Vec::with_capacity(job.frame_receivers.len());
+            let mut failure = None;
+            for receiver in std::mem::take(&mut job.frame_receivers) {
                 match receiver.try_recv() {
                     Err(mpsc::TryRecvError::Empty) => {
-                        job.frame_receiver = Some(receiver);
-                        let response =
-                            format!("running:{}:{}", job.completed_frames, job.total_frames);
-                        model.animation_render_job = Some(job);
-                        return Ok(ModelResponse::Message(response));
+                        pending_receivers.push(receiver);
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        if !job.cancel.load(Ordering::Relaxed) {
+                            failure.get_or_insert_with(|| {
+                                "Animation rendering worker disconnected".to_string()
+                            });
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        if !job.cancel.load(Ordering::Relaxed) {
+                            failure.get_or_insert(error);
+                        }
+                    }
+                    Ok(Ok(TauriAnimationTaskOutput::Frame { index, path, log })) => {
+                        job.completed_frames = job.completed_frames.saturating_add(1);
+                        model
+                            .log_lines
+                            .push(format!("Animation frame {index:04}: {}", path.display()));
+                        model.log_lines.extend(
+                            log.lines()
+                                .filter(|line| !line.trim().is_empty())
+                                .map(|line| format!("Animation> {line}")),
+                        );
+                    }
+                    Ok(Ok(TauriAnimationTaskOutput::Movie { .. })) => {
+                        failure.get_or_insert_with(|| {
+                            "Animation frame worker returned a movie".to_string()
+                        });
+                    }
+                }
+            }
+            job.frame_receivers = pending_receivers;
+            if let Some(error) = failure {
+                job.cancel.store(true, Ordering::Relaxed);
+                model.restore_undo(job.restore)?;
+                model.status = error.clone();
+                return Ok(ModelResponse::Message(format!("error:{error}")));
+            }
+
+            if let Some(receiver) = job.movie_receiver.take() {
+                match receiver.try_recv() {
+                    Err(mpsc::TryRecvError::Empty) => {
+                        job.movie_receiver = Some(receiver);
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        let error = "Animation movie worker disconnected".to_string();
                         model.restore_undo(job.restore)?;
-                        let error = "Animation rendering worker disconnected".to_string();
                         model.status = error.clone();
                         return Ok(ModelResponse::Message(format!("error:{error}")));
                     }
                     Ok(Err(error)) => {
+                        let error = if job.cancel.load(Ordering::Relaxed) {
+                            "Animation rendering cancelled".to_string()
+                        } else {
+                            error
+                        };
                         model.restore_undo(job.restore)?;
                         model.status = error.clone();
                         return Ok(ModelResponse::Message(format!("error:{error}")));
                     }
-                    Ok(Ok(output)) => {
-                        job.completed_frames += 1;
-                        model.log_lines.push(format!(
-                            "Animation frame {}: {}",
-                            job.completed_frames,
-                            output.path.display()
-                        ));
+                    Ok(Ok(TauriAnimationTaskOutput::Movie { path, log })) => {
+                        model
+                            .log_lines
+                            .push(format!("Animation movie: {}", path.display()));
+                        if !log.trim().is_empty() {
+                            model.log_lines.push(format!("Animation> {log}"));
+                        }
+                        let frame_count = job.completed_frames;
+                        model.restore_undo(job.restore)?;
+                        model.status = format!("Animation movie rendered: {frame_count} frame(s)");
+                        return Ok(ModelResponse::Message(format!("complete:{frame_count}")));
+                    }
+                    Ok(Ok(TauriAnimationTaskOutput::Frame { .. })) => {
+                        let error = "Animation movie worker returned a frame".to_string();
+                        model.restore_undo(job.restore)?;
+                        model.status = error.clone();
+                        return Ok(ModelResponse::Message(format!("error:{error}")));
                     }
                 }
             }
             if job.cancel.load(Ordering::Relaxed) {
-                model.restore_undo(job.restore)?;
-                let message = "Animation rendering cancelled".to_string();
-                model.status = message.clone();
-                return Ok(ModelResponse::Message(format!("error:{message}")));
+                if job.frame_receivers.is_empty() && job.movie_receiver.is_none() {
+                    model.restore_undo(job.restore)?;
+                    let message = "Animation rendering cancelled".to_string();
+                    model.status = message.clone();
+                    return Ok(ModelResponse::Message(format!("error:{message}")));
+                }
+                model.animation_render_job = Some(job);
+                return Ok(ModelResponse::Message("stopping".to_string()));
             }
+
+            while job.next_frame < job.total_frames
+                && job.frame_receivers.len() < job.input.concurrency as usize
+            {
+                let frame_index = job.next_frame;
+                let task = match model.prepare_animation_frame_task(
+                    &job.input,
+                    frame_index,
+                    job.total_frames,
+                    Arc::clone(&job.cancel),
+                    Arc::clone(&job.progress),
+                ) {
+                    Ok(task) => task,
+                    Err(error) => {
+                        job.cancel.store(true, Ordering::Relaxed);
+                        model.restore_undo(job.restore)?;
+                        model.status = error.clone();
+                        return Ok(ModelResponse::Message(format!("error:{error}")));
+                    }
+                };
+                let receiver = match spawn_tauri_animation_frame(task) {
+                    Ok(receiver) => receiver,
+                    Err(error) => {
+                        job.cancel.store(true, Ordering::Relaxed);
+                        model.restore_undo(job.restore)?;
+                        model.status = error.clone();
+                        return Ok(ModelResponse::Message(format!("error:{error}")));
+                    }
+                };
+                job.next_frame += 1;
+                job.frame_receivers.push(receiver);
+            }
+            if !job.frame_receivers.is_empty() || job.movie_receiver.is_some() {
+                let progress = job.progress.load(Ordering::Relaxed);
+                let phase = if job.encoding_started {
+                    "movie"
+                } else {
+                    "frames"
+                };
+                let response = format!(
+                    "running:{}:{}:{progress}:{phase}",
+                    job.completed_frames, job.total_frames
+                );
+                model.animation_render_job = Some(job);
+                return Ok(ModelResponse::Message(response));
+            }
+
+            if job.input.make_movie && !job.encoding_started {
+                let task = TauriAnimationMovieTask {
+                    input: job.input.clone(),
+                    total_frames: job.total_frames,
+                    cancel: Arc::clone(&job.cancel),
+                    progress: Arc::clone(&job.progress),
+                };
+                match spawn_tauri_animation_movie(task) {
+                    Ok(receiver) => {
+                        job.encoding_started = true;
+                        job.movie_receiver = Some(receiver);
+                        job.progress.store(950_000, Ordering::Relaxed);
+                        model
+                            .log_lines
+                            .push("Animation: encoding movie with FFmpeg".to_string());
+                        let response = format!(
+                            "running:{}:{}:950000:movie",
+                            job.completed_frames, job.total_frames
+                        );
+                        model.animation_render_job = Some(job);
+                        return Ok(ModelResponse::Message(response));
+                    }
+                    Err(error) => {
+                        model.restore_undo(job.restore)?;
+                        model.status = error.clone();
+                        return Ok(ModelResponse::Message(format!("error:{error}")));
+                    }
+                }
+            }
+
             if job.next_frame >= job.total_frames {
                 let frame_count = job.completed_frames;
                 let output_pattern = Path::new(&job.input.output_dir)
-                    .join(format!("{}_%04d.png", job.input.base_name.trim()));
+                    .join(format!("{}_frm_%04d.png", job.input.base_name.trim()));
                 model.restore_undo(job.restore)?;
                 model.status = format!("Animation rendered: {frame_count} frame(s)");
                 model.log_lines.push(format!(
@@ -11033,30 +11519,11 @@ fn handle_model_request(
                 ));
                 return Ok(ModelResponse::Message(format!("complete:{frame_count}")));
             }
-            let frame_index = job.next_frame;
-            let task = match model.prepare_animation_frame_task(
-                &job.input,
-                frame_index,
-                Arc::clone(&job.cancel),
-            ) {
-                Ok(task) => task,
-                Err(error) => {
-                    model.restore_undo(job.restore)?;
-                    model.status = error.clone();
-                    return Ok(ModelResponse::Message(format!("error:{error}")));
-                }
-            };
-            let receiver = match spawn_tauri_animation_frame(task) {
-                Ok(receiver) => receiver,
-                Err(error) => {
-                    model.restore_undo(job.restore)?;
-                    model.status = error.clone();
-                    return Ok(ModelResponse::Message(format!("error:{error}")));
-                }
-            };
-            job.next_frame += 1;
-            job.frame_receiver = Some(receiver);
-            let response = format!("running:{}:{}", job.completed_frames, job.total_frames);
+            let progress = job.progress.load(Ordering::Relaxed);
+            let response = format!(
+                "running:{}:{}:{progress}:frames",
+                job.completed_frames, job.total_frames
+            );
             model.animation_render_job = Some(job);
             Ok(ModelResponse::Message(response))
         }
@@ -11073,6 +11540,39 @@ fn handle_model_request(
             } else {
                 "idle".to_string()
             }))
+        }
+        ModelRequest::AnimationRenderPreview {
+            output_dir,
+            base_name,
+            frame_index,
+        } => {
+            let base_name = base_name.trim();
+            if base_name.is_empty()
+                || base_name.contains('/')
+                || base_name.contains('\\')
+                || base_name == "."
+                || base_name == ".."
+            {
+                return Err("output base name must be a simple file name".to_string());
+            }
+            if frame_index > 9_999 {
+                return Err("animation preview frame must not exceed 9999".to_string());
+            }
+            let path =
+                Path::new(output_dir.trim()).join(format!("{base_name}_frm_{frame_index:04}.png"));
+            if !path.is_file() {
+                return Ok(ModelResponse::Message("missing".to_string()));
+            }
+            let image = fs::read(&path).map_err(|error| {
+                format!(
+                    "failed to read animation preview {}: {error}",
+                    path.display()
+                )
+            })?;
+            Ok(ModelResponse::Message(format!(
+                "data:image/png;base64,{}",
+                base64_encode(&image)
+            )))
         }
         ModelRequest::Render { width, height } => {
             Ok(ModelResponse::Viewport(model.render(width, height)))
@@ -13739,6 +14239,21 @@ fn start_animation_render(
 }
 
 #[tauri::command]
+fn start_animation_movie(
+    input: AnimationRenderInput,
+    total_frames: u32,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::StartAnimationMovie {
+            input,
+            total_frames,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn poll_animation_render(state: State<'_, ManagedState>) -> Result<String, String> {
     message_response(request_model(&state, ModelRequest::PollAnimationRender)?)
 }
@@ -13746,6 +14261,23 @@ fn poll_animation_render(state: State<'_, ManagedState>) -> Result<String, Strin
 #[tauri::command]
 fn cancel_animation_render(state: State<'_, ManagedState>) -> Result<String, String> {
     message_response(request_model(&state, ModelRequest::CancelAnimationRender)?)
+}
+
+#[tauri::command]
+fn animation_render_preview(
+    output_dir: String,
+    base_name: String,
+    frame_index: u32,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::AnimationRenderPreview {
+            output_dir,
+            base_name,
+            frame_index,
+        },
+    )?)
 }
 
 #[tauri::command]
@@ -14178,8 +14710,10 @@ pub fn run() -> Result<(), tauri::Error> {
             save_pov_render_image,
             clear_pov_render_result,
             start_animation_render,
+            start_animation_movie,
             poll_animation_render,
             cancel_animation_render,
+            animation_render_preview,
             render_viewport,
             update_camera,
             save_scene,
@@ -20775,6 +21309,133 @@ mod tests {
         let _ = std::fs::remove_dir(output_dir);
     }
 
+    fn animation_test_input(scene_uid: u64, output_dir: &Path) -> AnimationRenderInput {
+        AnimationRenderInput {
+            scene_uid,
+            output_dir: output_dir.to_string_lossy().into_owned(),
+            base_name: "movie".to_string(),
+            width: 800,
+            height: 600,
+            frame_rate: 24.0,
+            perspective: false,
+            duplicate_last_frame: false,
+            concurrency: 3,
+            backend: "povray".to_string(),
+            povray_executable: "povray".to_string(),
+            povray_include_dir: String::new(),
+            pov_clip_plane: true,
+            pov_post_blend: true,
+            pov_shadow: true,
+            pov_edge_lines: true,
+            pov_labels: true,
+            pov_radiosity: 3,
+            make_movie: false,
+            ffmpeg_executable: "ffmpeg".to_string(),
+            movie_format: "mp4_h264".to_string(),
+            bitrate_kbps: 2_048,
+        }
+    }
+
+    #[test]
+    fn animation_render_paths_and_pov_options_match_reference() {
+        let input = animation_test_input(1, Path::new("frames"));
+        assert_eq!(
+            tauri_animation_frame_path(&input, 7, "png"),
+            PathBuf::from("frames/movie_frm_0007.png")
+        );
+        let task = tauri_animation_pov_process_task(
+            &input,
+            Path::new("frames/movie_frm_0007.pov"),
+            Path::new("frames/movie_frm_0007.png"),
+        );
+        let args = crate::pov_job::povray_args(&task);
+        for expected in [
+            "+Iframes/movie_frm_0007.pov",
+            "+Oframes/movie_frm_0007.png",
+            "+W800",
+            "+H600",
+            "+WT1",
+            "Declare=_perspective=0",
+            "Declare=_shadow=1",
+            "Declare=_radiosity=3",
+            "-V",
+        ] {
+            assert!(
+                args.iter().any(|argument| argument == expected),
+                "{expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn animation_render_preview_reads_reference_frame_name() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "cuemol-tauri-animation-preview-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&output_dir).unwrap();
+        fs::write(output_dir.join("movie_frm_0007.png"), b"PNG").unwrap();
+        let mut model = model_without_gpu();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::AnimationRenderPreview {
+                output_dir: output_dir.to_string_lossy().into_owned(),
+                base_name: "movie".to_string(),
+                frame_index: 7,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            response,
+            ModelResponse::Message(ref value) if value == "data:image/png;base64,UE5H"
+        ));
+        fs::remove_dir_all(output_dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn animation_movie_encoder_uses_reference_frame_pattern() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let output_dir = std::env::temp_dir().join(format!(
+            "cuemol-tauri-animation-movie-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&output_dir).unwrap();
+        for index in 0..2 {
+            fs::write(output_dir.join(format!("movie_frm_{index:04}.png")), b"PNG").unwrap();
+        }
+        let executable = output_dir.join("fake-ffmpeg.sh");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > ffmpeg-args.txt\nlast=''\nfor arg in \"$@\"; do last=\"$arg\"; done\nprintf movie > \"$last\"\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let mut input = animation_test_input(1, &output_dir);
+        input.make_movie = true;
+        input.ffmpeg_executable = executable.to_string_lossy().into_owned();
+        let output = encode_tauri_animation_movie(&TauriAnimationMovieTask {
+            input,
+            total_frames: 2,
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(AtomicU32::new(0)),
+        })
+        .unwrap();
+        assert!(matches!(
+            output,
+            TauriAnimationTaskOutput::Movie { ref path, .. }
+                if path == &output_dir.join("movie.mp4")
+        ));
+        let args = fs::read_to_string(output_dir.join("ffmpeg-args.txt")).unwrap();
+        assert!(args.contains("movie_frm_%04d.png"));
+        assert!(args.contains("2048k"));
+        assert!(args.contains("movie.mp4"));
+        fs::remove_dir_all(output_dir).unwrap();
+    }
+
     #[test]
     fn animation_render_frame_count_matches_reference_loop_semantics() {
         let mut model = model_without_gpu();
@@ -20791,6 +21452,20 @@ mod tests {
             frame_rate: 30.0,
             perspective: true,
             duplicate_last_frame: false,
+            concurrency: 2,
+            backend: "umbreon".to_string(),
+            povray_executable: "povray".to_string(),
+            povray_include_dir: String::new(),
+            pov_clip_plane: true,
+            pov_post_blend: true,
+            pov_shadow: false,
+            pov_edge_lines: true,
+            pov_labels: false,
+            pov_radiosity: -1,
+            make_movie: false,
+            ffmpeg_executable: "ffmpeg".to_string(),
+            movie_format: "mov_h264".to_string(),
+            bitrate_kbps: 10_240,
         };
         assert_eq!(model.animation_render_frame_count(&input).unwrap(), 60);
         input.duplicate_last_frame = true;
@@ -20823,6 +21498,20 @@ mod tests {
             frame_rate: 30.0,
             perspective: false,
             duplicate_last_frame: false,
+            concurrency: 2,
+            backend: "umbreon".to_string(),
+            povray_executable: "povray".to_string(),
+            povray_include_dir: String::new(),
+            pov_clip_plane: true,
+            pov_post_blend: true,
+            pov_shadow: false,
+            pov_edge_lines: true,
+            pov_labels: false,
+            pov_radiosity: -1,
+            make_movie: false,
+            ffmpeg_executable: "ffmpeg".to_string(),
+            movie_format: "mov_h264".to_string(),
+            bitrate_kbps: 10_240,
         };
         handle_model_request(&mut model, ModelRequest::StartAnimationRender(input)).unwrap();
         assert_eq!(model.animation_elapsed, 0.0);
@@ -20874,12 +21563,26 @@ mod tests {
                 frame_rate: 2.0,
                 perspective: true,
                 duplicate_last_frame: false,
+                concurrency: 2,
+                backend: "umbreon".to_string(),
+                povray_executable: "povray".to_string(),
+                povray_include_dir: String::new(),
+                pov_clip_plane: true,
+                pov_post_blend: true,
+                pov_shadow: false,
+                pov_edge_lines: true,
+                pov_labels: false,
+                pov_radiosity: -1,
+                make_movie: false,
+                ffmpeg_executable: "ffmpeg".to_string(),
+                movie_format: "mov_h264".to_string(),
+                bitrate_kbps: 10_240,
             }),
         )
         .unwrap();
         assert!(matches!(
             response,
-            ModelResponse::Message(ref state) if state == "running:0:2"
+            ModelResponse::Message(ref state) if state.starts_with("running:0:2:")
         ));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
@@ -20896,10 +21599,10 @@ mod tests {
         }
         let snapshot = model.snapshot();
         assert_eq!(snapshot.status, "Animation rendered: 2 frame(s)");
-        let first = std::fs::read(output_dir.join("frame_0000.png")).unwrap();
+        let first = std::fs::read(output_dir.join("frame_frm_0000.png")).unwrap();
         assert_eq!(&first[..8], b"\x89PNG\r\n\x1a\n");
-        let _ = std::fs::remove_file(output_dir.join("frame_0000.png"));
-        let _ = std::fs::remove_file(output_dir.join("frame_0001.png"));
+        let _ = std::fs::remove_file(output_dir.join("frame_frm_0000.png"));
+        let _ = std::fs::remove_file(output_dir.join("frame_frm_0001.png"));
         let _ = std::fs::remove_dir(output_dir);
     }
 }

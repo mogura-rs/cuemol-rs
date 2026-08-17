@@ -1329,7 +1329,7 @@ impl Default for AnimationRenderSettings {
             pov_radiosity: -1,
             make_movie: false,
             ffmpeg_executable: "ffmpeg".to_string(),
-            movie_format: "mp4_h264".to_string(),
+            movie_format: "mov_h264".to_string(),
             bitrate_kbps: 10_240,
         }
     }
@@ -26057,7 +26057,7 @@ fn animation_frame_path(
     extension: &str,
 ) -> PathBuf {
     PathBuf::from(settings.output_dir.trim())
-        .join(format!("{}_{index:04}.{extension}", settings.base_name))
+        .join(format!("{}_frm_{index:04}.{extension}", settings.base_name))
 }
 
 fn animation_frame_labels(
@@ -26208,7 +26208,7 @@ fn animation_pov_process_task(
             height: settings.height,
             threads: 1,
             perspective: settings.perspective,
-            transparent: true,
+            transparent: false,
             shadow: settings.pov_shadow,
             radiosity: settings.pov_radiosity,
             ..PovProcessOptions::default()
@@ -26256,7 +26256,7 @@ fn encode_animation_movie(
     let output_dir = PathBuf::from(task.settings.output_dir.trim());
     let output_file = format!("{}.{}", task.settings.base_name, extension);
     let output_path = output_dir.join(&output_file);
-    let input_pattern = format!("{}_%04d.png", task.settings.base_name);
+    let input_pattern = format!("{}_frm_%04d.png", task.settings.base_name);
     let mut command = Command::new(task.settings.ffmpeg_executable.trim());
     command
         .current_dir(&output_dir)
@@ -26281,7 +26281,7 @@ fn encode_animation_movie(
             command.args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
         }
     }
-    if !matches!(task.settings.movie_format.as_str(), "mov_raw" | "gifanim") {
+    if task.settings.movie_format != "mov_raw" {
         command
             .arg("-b:v")
             .arg(format!("{}k", task.settings.bitrate_kbps.max(1)));
@@ -27868,7 +27868,7 @@ mod tests {
         };
         assert_eq!(
             animation_frame_path(&settings, 7, "png"),
-            PathBuf::from("frames/demo_0007.png")
+            PathBuf::from("frames/demo_frm_0007.png")
         );
 
         let pov_settings = AnimationRenderSettings {
@@ -33437,7 +33437,7 @@ mod tests {
         // (1e) Animation-render preview dialog with a decoded PNG frame. This verifies
         // the reference frame slider, aspect-preserving image area, and file label.
         {
-            let preview_path = out_dir.join("animation-preview-frame_0000.png");
+            let preview_path = out_dir.join("animation-preview-frame_frm_0000.png");
             let preview_image = image::RgbaImage::from_fn(640, 360, |x, y| {
                 let red = ((x as f32 / 639.0) * 180.0 + 30.0) as u8;
                 let green = ((y as f32 / 359.0) * 140.0 + 40.0) as u8;

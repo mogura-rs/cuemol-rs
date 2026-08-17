@@ -2082,6 +2082,68 @@ summary:focus-visible {
   width: min(780px, calc(100vw - 48px));
 }
 
+.reference-dialog.animation-render-dialog {
+  width: min(780px, calc(100vw - 48px));
+}
+
+.reference-dialog.animation-render-dialog form {
+  height: min(650px, calc(100vh - 48px));
+}
+
+.reference-dialog.animation-render-dialog.has-actions form {
+  grid-template-rows: 30px minmax(0, 1fr);
+}
+
+.reference-dialog.animation-render-dialog .dialog-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  padding: 8px;
+}
+
+.animation-render-editor {
+  flex: 1;
+}
+
+.animation-render-editor .property-dialog-tabs button {
+  min-width: 112px;
+}
+
+.animation-render-progress progress,
+.animation-preview-controls input,
+.animation-render-path-controls input {
+  width: 100%;
+}
+
+.animation-render-path-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.animation-render-log-field {
+  grid-template-columns: 70px minmax(0, 1fr);
+}
+
+.animation-render-log {
+  min-height: 120px;
+  resize: vertical;
+  font-family: var(--font-mono);
+}
+
+.animation-render-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 410px;
+  margin: 8px auto 0;
+  object-fit: contain;
+}
+
+.animation-render-preview[hidden] {
+  display: none;
+}
+
 .pov-render-dialog progress {
   width: 100%;
 }

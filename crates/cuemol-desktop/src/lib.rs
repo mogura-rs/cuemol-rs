@@ -20,7 +20,7 @@ pub(crate) use apbs_job::{
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 mod pov_job;
-#[cfg(feature = "egui-gui")]
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 pub(crate) use pov_job::run_pov_process_with_poll;
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 pub(crate) use pov_job::{
@@ -29,8 +29,10 @@ pub(crate) use pov_job::{
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 mod pov_labels;
+#[cfg(feature = "egui-gui")]
+pub(crate) use pov_labels::collect_pov_labels;
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-pub(crate) use pov_labels::{collect_pov_labels, collect_scene_pov_labels, overlay_pov_labels};
+pub(crate) use pov_labels::{collect_scene_pov_labels, overlay_pov_labels};
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 use std::collections::{BTreeMap, HashMap};
