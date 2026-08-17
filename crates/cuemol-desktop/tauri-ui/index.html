@@ -288,7 +288,7 @@
               <div id="scene-tree" class="scene-tree"></div>
               <div class="workspace-tools">
                 <button id="workspace-zoom" type="button" data-action="fit-workspace-item" title="Zoom at" disabled>⌕</button>
-                <button type="button" data-action="add-renderer" title="Add renderer">＋</button>
+                <button id="workspace-add" type="button" data-action="add-renderer" title="Add renderer" disabled>＋</button>
                 <button id="workspace-delete" type="button" data-action="delete-workspace-item" title="Delete" disabled>−</button>
                 <button id="workspace-properties" type="button" title="Property" disabled>⚙</button>
               </div>
@@ -317,7 +317,7 @@
                     <option value="trace">trace</option>
                     <option value="tube">tube</option>
                   </select>
-                  <button type="button" data-action="add-renderer">Add</button>
+                  <button id="inspector-add-renderer" type="button" data-action="add-renderer">Add</button>
                 </div>
                 <div id="renderer-list" class="renderer-list"></div>
               </div>

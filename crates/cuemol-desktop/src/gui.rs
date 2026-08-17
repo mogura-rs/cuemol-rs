@@ -5822,8 +5822,10 @@ impl GuiApplication {
                 self.workspace_aux_selection,
                 Some(WorkspaceAuxSelection::StyleRoot { .. } | WorkspaceAuxSelection::Style { .. })
             );
+            let add_enabled = !multiple_selected
+                && (self.selected_object.is_some() || self.workspace_aux_selection.is_some());
             if ui
-                .add_enabled(!multiple_selected, egui::Button::new("Add"))
+                .add_enabled(add_enabled, egui::Button::new("Add"))
                 .on_hover_text(if adding_camera {
                     "Save current view as camera"
                 } else if adding_style {
@@ -5848,13 +5850,6 @@ impl GuiApplication {
                         }
                         _ => self.open_aux_renderer_dialog(selection),
                     }
-                } else if let Some(object_uid) = self
-                    .state
-                    .active_object_summaries()
-                    .first()
-                    .map(|object| object.uid)
-                {
-                    self.open_renderer_dialog(object_uid);
                 }
             }
             let delete_enabled = multiple_selected

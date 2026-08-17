@@ -96,6 +96,8 @@ const trajectoryBlockCount = document.getElementById("trajectory-block-count");
 const recentMenu = document.getElementById("recent-menu");
 const windowsMenu = document.getElementById("windows-menu");
 const windowsMenuTrigger = document.getElementById("windows-menu-trigger");
+const workspaceAdd = document.getElementById("workspace-add");
+const inspectorAddRenderer = document.getElementById("inspector-add-renderer");
 const workspaceProperties = document.getElementById("workspace-properties");
 const workspaceDelete = document.getElementById("workspace-delete");
 const workspaceZoom = document.getElementById("workspace-zoom");
@@ -9392,6 +9394,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
   renderedSceneTreeKey = renderKey;
   sceneTree.replaceChildren();
   if (snapshot.scenes.length === 0) {
+    workspaceAdd.disabled = true;
     workspaceProperties.disabled = true;
     workspaceDelete.disabled = true;
     workspaceZoom.disabled = true;
@@ -10259,6 +10262,22 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       sceneTree.append(styleRow);
     });
   }
+  workspaceAdd.disabled =
+    ![
+      "object",
+      "renderer",
+      "rendererGroup",
+      "densityMap",
+      "densityRenderer",
+      "surface",
+      "surfaceRenderer",
+      "lwObject",
+      "lwRenderer",
+      "cameraRoot",
+      "camera",
+      "styleRoot",
+      "style",
+    ].includes(workspaceSelectionKind);
   workspaceProperties.disabled =
     workspaceSelectionKind === "multiple"
       ? true
@@ -10379,9 +10398,7 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
     : lwObject
       ? [["lwrend", "Lightweight"]]
       : MOLECULE_RENDERER_TYPES.map((rendererType) => [rendererType, rendererType]);
-  document.querySelectorAll('[data-action="add-renderer"]').forEach((control) => {
-    control.disabled = false;
-  });
+  inspectorAddRenderer.disabled = !object && !map && !surface && !lwObject;
   rendererType.replaceChildren();
   for (const [value, label] of rendererChoices) {
     const option = document.createElement("option");

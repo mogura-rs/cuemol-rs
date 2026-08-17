@@ -1152,6 +1152,11 @@ fn tauri_workspace_reorders_objects_across_supported_kinds() {
 
 #[test]
 fn tauri_workspace_context_menu_matches_selection_presets() {
+    assert!(HTML.contains("id=\"workspace-add\""));
+    assert!(HTML.contains("id=\"inspector-add-renderer\""));
+    assert!(JS.contains("workspaceAdd.disabled ="));
+    assert!(JS.contains("inspectorAddRenderer.disabled ="));
+    assert!(NATIVE_GUI_RS.contains("let add_enabled = !multiple_selected"));
     assert!(JS.contains("function showWorkspaceContextMenu(event, items)"));
     assert!(JS.contains("function workspaceObjectContextItems(scene, object)"));
     assert!(JS.contains("function workspaceAuxObjectContextItems(scene, kind, object)"));
