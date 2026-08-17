@@ -1398,18 +1398,143 @@ summary:focus-visible {
   background: #dcecff;
 }
 
-.density-summary {
-  display: grid;
-  gap: 1px;
-  padding: 4px;
-  border: 1px solid #c5c5c5;
-  background: #fff;
+.density-target-row {
+  display: flex;
+  gap: 2px;
 }
 
-.density-summary span {
-  color: #666;
+.density-target {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.density-options {
+  position: relative;
+  flex: 0 0 24px;
+}
+
+.density-options > summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 24px;
+  height: 100%;
+  min-height: 22px;
+  border: 1px solid #aaa;
+  border-radius: 2px;
+  background: linear-gradient(#fff, #e7e7e7);
+  cursor: default;
+  list-style: none;
+}
+
+.density-options > summary::-webkit-details-marker {
+  display: none;
+}
+
+.density-options > summary::after {
+  content: "▾";
+  font-size: 9px;
+}
+
+.density-options.disabled > summary {
+  opacity: 0.5;
+}
+
+.density-options-popup {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 2px);
+  right: 0;
+  display: grid;
+  min-width: 188px;
+  padding: 2px;
+  border: 1px solid #999;
+  background: #f7f7f7;
+  box-shadow: 0 3px 8px #0003;
+}
+
+.density-options:not([open]) .density-options-popup {
+  display: none;
+}
+
+.density-options-popup button {
+  position: relative;
+  width: 100%;
+  padding: 3px 6px 3px 20px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.density-options-popup button:nth-child(3) {
+  margin-top: 2px;
+  border-top: 1px solid #bbb;
+}
+
+.density-options-popup button.selected::before {
+  position: absolute;
+  left: 6px;
+  content: "●";
+  font-size: 8px;
+}
+
+.density-options-popup button:hover {
+  background: #dcecff;
+}
+
+.density-controls {
+  display: grid;
+  gap: 3px;
+}
+
+.density-actions {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 3px;
+}
+
+.density-actions > button,
+.density-actions > input {
+  min-height: 22px;
+}
+
+.density-actions > input[type="color"] {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 1px 3px;
+}
+
+.density-color-edit {
+  width: 100%;
+}
+
+.density-range {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 47px;
+  gap: 4px;
+  align-items: center;
+}
+
+.density-range > span {
+  color: #333;
+}
+
+.density-range input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  min-height: auto;
+  margin: 0;
+}
+
+.density-range output {
+  overflow: hidden;
   font-family: var(--font-mono);
   font-size: 10px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .view-body fieldset {

@@ -72,7 +72,9 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
     for command in [
         "set_coloring",
         "set_display_option",
-        "set_density_level",
+        "set_density_renderer_properties",
+        "redraw_density_renderer",
+        "show_unit_cell",
         "set_background",
         "set_selection",
         "molecule_selection_action",
@@ -178,6 +180,46 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
     assert!(JS.contains("RainbowColoring"));
     assert!(JS.contains("BfacColoring"));
     assert!(JS.contains(r#"extensions: ["dcd", "xtc", "trr", "nc"]"#));
+}
+
+#[test]
+fn tauri_densitymap_panel_matches_reference_renderer_controls() {
+    for label in [
+        "Use sigma contour level",
+        "Use absolute contour level",
+        "Solid coloring",
+        "Multi gradient",
+        "Redraw",
+        "Cell",
+        "Edit color...",
+        "Transp:",
+        "Level:",
+        "Extent:",
+    ] {
+        assert!(
+            JS.contains(label),
+            "missing Tauri Density map control {label}"
+        );
+    }
+    for command in [
+        "set_density_renderer_properties",
+        "redraw_density_renderer",
+        "show_unit_cell",
+    ] {
+        assert!(
+            JS.contains(command),
+            "missing Density map command {command}"
+        );
+        assert!(TAURI_APP_RS.contains(command));
+    }
+    assert!(JS.contains("[\"contour\", \"isosurf\", \"gpu_mapmesh\", \"gpu_mapvol\"]"));
+    assert!(JS.contains("renderer.specific.use_abslevel"));
+    assert!(JS.contains("renderer.specific.maxExtent"));
+    assert!(CSS.contains(".density-target-row"));
+    assert!(CSS.contains(".density-options-popup"));
+    assert!(CSS.contains(".density-range"));
+    assert!(!HTML.contains("id=\"show-density-contour\""));
+    assert!(!HTML.contains("id=\"density-level\""));
 }
 
 #[test]

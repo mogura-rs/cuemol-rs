@@ -2863,7 +2863,7 @@ impl AppModel {
                 "density renderer name must be non-empty and cannot contain ':'".to_string(),
             );
         }
-        if !properties.alpha.is_finite() || properties.alpha <= 0.0 || properties.alpha > 1.0 {
+        if !properties.alpha.is_finite() || properties.alpha < 0.0 || properties.alpha > 1.0 {
             return Err("opacity must be between 0 and 1".to_string());
         }
         if !properties.edge_width.is_finite() || !(0.0..=1.0).contains(&properties.edge_width) {
@@ -2899,7 +2899,7 @@ impl AppModel {
         }
         for (key, minimum, maximum) in [
             ("siglevel", -1_000_000.0, 1_000_000.0),
-            ("extent", f64::EPSILON, 10_000.0),
+            ("extent", 0.0, 10_000.0),
             ("width", f64::EPSILON, 10.0),
             ("bndry_rng", f64::EPSILON, 100.0),
         ] {
@@ -7414,6 +7414,10 @@ enum ModelRequest {
         renderer_uid: u64,
         visible: bool,
     },
+    RedrawDensityRenderer {
+        map_uid: u64,
+        renderer_uid: u64,
+    },
     AddDensityRenderer {
         map_uid: u64,
         renderer_type: String,
@@ -8569,6 +8573,17 @@ fn parse_center_mark(value: &str) -> Result<CenterMark, String> {
     }
 }
 
+fn parse_density_renderer_center(value: &str) -> Option<[f64; 3]> {
+    let values = value
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .split(',')
+        .map(|component| component.trim().parse::<f64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    (values.len() == 3).then(|| [values[0], values[1], values[2]])
+}
+
 fn spawn_tauri_animation_frame(
     task: TauriAnimationFrameTask,
 ) -> Result<mpsc::Receiver<Result<TauriAnimationTaskOutput, String>>, String> {
@@ -9536,8 +9551,14 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetDensityRendererProperties(properties) => {
+            let scene_uid = model
+                .desktop
+                .density_map_summary(Uid::new(properties.object_uid))
+                .ok_or_else(|| format!("density map {} was not found", properties.object_uid))?
+                .scene_uid;
             let undo = model.capture_undo();
             model.set_density_renderer_properties(properties)?;
+            model.modified_scenes.insert(scene_uid);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -9548,6 +9569,47 @@ fn handle_model_request(
         } => {
             let undo = model.capture_undo();
             model.set_density_renderer_visible(map_uid, renderer_uid, visible)?;
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::RedrawDensityRenderer {
+            map_uid,
+            renderer_uid,
+        } => {
+            let map_uid = Uid::new(map_uid);
+            let renderer_uid = Uid::new(renderer_uid);
+            let map = model
+                .desktop
+                .density_map_summary(map_uid)
+                .ok_or_else(|| format!("density map {} was not found", map_uid.get()))?;
+            let renderer = map
+                .renderers
+                .iter()
+                .find(|renderer| renderer.uid == renderer_uid)
+                .ok_or_else(|| format!("density renderer {} was not found", renderer_uid.get()))?;
+            let center = model.camera.center();
+            let already_centered = renderer
+                .specific
+                .get("center")
+                .and_then(|value| parse_density_renderer_center(value))
+                .is_some_and(|current| {
+                    let dx = current[0] - center.x;
+                    let dy = current[1] - center.y;
+                    let dz = current[2] - center.z;
+                    (dx * dx + dy * dy + dz * dz).sqrt() < 0.1
+                });
+            if already_centered {
+                return Ok(ModelResponse::Snapshot(Box::new(model.snapshot())));
+            }
+            let scene_uid = map.scene_uid;
+            let undo = model.capture_undo();
+            model
+                .desktop
+                .set_density_renderer_center(map_uid, renderer_uid, center)
+                .map_err(|error| error.to_string())?;
+            model.modified_scenes.insert(scene_uid);
+            model.status = "Density map redrawn".to_string();
+            model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -13098,6 +13160,21 @@ fn set_density_renderer_visible(
 }
 
 #[tauri::command]
+fn redraw_density_renderer(
+    map_uid: u64,
+    renderer_uid: u64,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::RedrawDensityRenderer {
+            map_uid,
+            renderer_uid,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn add_density_renderer(
     map_uid: u64,
     renderer_type: String,
@@ -15506,6 +15583,7 @@ pub fn run() -> Result<(), tauri::Error> {
             set_density_map_properties,
             set_density_renderer_properties,
             set_density_renderer_visible,
+            redraw_density_renderer,
             add_density_renderer,
             generate_density_surface,
             set_surface_properties,
@@ -19713,9 +19791,10 @@ mod tests {
             default_renderer_properties_input(map_uid, Uid::new(renderer_uid), "edited contour");
         properties.selection.clear();
         properties.material = "glass".to_string();
-        properties.alpha = 0.5;
+        properties.alpha = 0.0;
         properties.specific = BTreeMap::from([
             ("siglevel".to_string(), "0".to_string()),
+            ("extent".to_string(), "0".to_string()),
             ("width".to_string(), "2.5".to_string()),
             ("bufsize".to_string(), "150".to_string()),
             ("autoupdate".to_string(), "false".to_string()),
@@ -19729,7 +19808,8 @@ mod tests {
         let renderer = &snapshot.density_maps[0].renderers[0];
         assert_eq!(renderer.name, "edited contour");
         assert_eq!(renderer.material, "glass");
-        assert_eq!(renderer.alpha, 0.5);
+        assert_eq!(renderer.alpha, 0.0);
+        assert_eq!(renderer.specific["extent"], "0");
         assert_eq!(renderer.specific["width"], "2.5");
         assert_eq!(renderer.specific["bufsize"], "150");
         assert!(snapshot.can_undo);
@@ -19743,6 +19823,33 @@ mod tests {
             model.snapshot().density_maps[0].renderers[0].name,
             "edited contour"
         );
+
+        model.camera.set_center(Vector4::new3(3.0, 4.0, 5.0));
+        handle_model_request(
+            &mut model,
+            ModelRequest::RedrawDensityRenderer {
+                map_uid: map_uid.get(),
+                renderer_uid,
+            },
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        assert_eq!(
+            snapshot.density_maps[0].renderers[0].specific["center"],
+            "(3,4,5)"
+        );
+        assert_eq!(snapshot.status, "Density map redrawn");
+        assert!(model.modified_scenes.contains(&scene_uid));
+        let undo_count = snapshot.undo_descriptions.len();
+        handle_model_request(
+            &mut model,
+            ModelRequest::RedrawDensityRenderer {
+                map_uid: map_uid.get(),
+                renderer_uid,
+            },
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().undo_descriptions.len(), undo_count);
 
         handle_model_request(
             &mut model,

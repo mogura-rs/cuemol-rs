@@ -56,9 +56,6 @@ const coloringType = document.getElementById("coloring-type");
 const coloringDeck = document.getElementById("coloring-deck");
 const symmetryContent = document.getElementById("symmetry-content");
 const densityContent = document.getElementById("density-content");
-const showDensityContour = document.getElementById("show-density-contour");
-const densityLevel = document.getElementById("density-level");
-const densityLevelValue = document.getElementById("density-level-value");
 const sequenceView = document.getElementById("sequence-view");
 const referenceDialog = document.getElementById("reference-dialog");
 const dialogTitle = document.getElementById("dialog-title");
@@ -189,6 +186,7 @@ let selectionEditorItems = [];
 let selectionEditorSelectedIndex = -1;
 let coloringTargetKey = null;
 let symmetryTargetKey = null;
+let densityPanelTargetKey = null;
 let coloringPaintSelectedIndex = -1;
 let coloringGradientSelectedIndex = -1;
 let selectionHistoryEntries = loadSelectionHistory();
@@ -14038,30 +14036,259 @@ function renderSymmetry() {
   symmetryContent.append(selector, heading, cell, actions);
 }
 
+function densityPanelTargets() {
+  return snapshot.densityMaps.flatMap((map) =>
+    map.renderers
+      .filter((renderer) =>
+        ["contour", "isosurf", "gpu_mapmesh", "gpu_mapvol"].includes(renderer.rendererType),
+      )
+      .map((renderer) => ({
+        key: `${map.uid}:${renderer.uid}`,
+        map,
+        renderer,
+        name: `${map.name} → ${renderer.name}`,
+      })),
+  );
+}
+
+function selectedDensityPanelTarget() {
+  const targets = densityPanelTargets();
+  let target = targets.find((candidate) => candidate.key === densityPanelTargetKey) || null;
+  if (!target && workspaceSelectionKind === "densityRenderer") {
+    target =
+      targets.find(
+        (candidate) =>
+          candidate.map.uid === selectedDensityMapUid &&
+          candidate.renderer.uid === selectedDensityRendererUid,
+      ) || null;
+  }
+  target ||= targets[0] || null;
+  densityPanelTargetKey = target?.key || null;
+  return target;
+}
+
+function densityPanelProperties(target, changes = {}) {
+  const { map, renderer } = target;
+  return {
+    objectUid: map.uid,
+    rendererUid: renderer.uid,
+    name: renderer.name,
+    selection: renderer.selection,
+    visible: renderer.visible,
+    locked: renderer.locked,
+    material: renderer.material,
+    alpha: changes.alpha ?? renderer.alpha,
+    edgeType: renderer.edgeType,
+    edgeWidth: renderer.edgeWidth,
+    edgeColor: renderer.edgeColor,
+    lineWidth: renderer.lineWidth,
+    detail: renderer.detail,
+    bondWidth: renderer.bondWidth,
+    sphereRadius: renderer.sphereRadius,
+    showRing: renderer.showRing,
+    ringThickness: renderer.ringThickness,
+    ringColor: renderer.ringColor,
+    specific: { ...renderer.specific, ...(changes.specific || {}) },
+  };
+}
+
+function updateDensityPanelRenderer(target, changes) {
+  return mutate("set_density_renderer_properties", {
+    properties: densityPanelProperties(target, changes),
+  });
+}
+
+function openDensityGradientEditor(target) {
+  coloringTargetKey = `densityRenderer:${target.map.uid}:${target.renderer.uid}`;
+  coloringPaintSelectedIndex = -1;
+  coloringGradientSelectedIndex = -1;
+  const card = sidePanelCard("Coloring");
+  if (!card) return;
+  card.hidden = false;
+  card.classList.add("open");
+  card.querySelector("[data-panel-toggle]")?.setAttribute("aria-expanded", "true");
+  const disclosure = card.querySelector(".disclosure");
+  if (disclosure) disclosure.textContent = "▾";
+  syncSidePanelVisibility();
+  renderColoring();
+  card.scrollIntoView({ block: "nearest" });
+}
+
+function densityPanelRange(labelText, value, minimum, maximum, step, unit, onChange) {
+  const row = document.createElement("label");
+  row.className = "density-range";
+  const label = document.createElement("span");
+  label.textContent = labelText;
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = String(minimum);
+  slider.max = String(maximum);
+  slider.step = String(step);
+  slider.value = String(Math.min(maximum, Math.max(minimum, value)));
+  const output = document.createElement("output");
+  const decimals = step >= 1 ? 0 : Math.min(6, Math.max(1, -Math.floor(Math.log10(step))));
+  const refresh = () => {
+    output.textContent = `${Number(slider.value).toFixed(decimals)}${unit}`;
+  };
+  refresh();
+  slider.addEventListener("input", refresh);
+  slider.addEventListener("change", () => onChange(Number(slider.value)));
+  row.append(label, slider, output);
+  return { row, slider };
+}
+
 function renderDensity() {
   densityContent.replaceChildren();
-  if (snapshot.densityMaps.length === 0) {
+  const targets = densityPanelTargets();
+  const target = selectedDensityPanelTarget();
+  const selectorRow = document.createElement("div");
+  selectorRow.className = "density-target-row";
+  const selector = document.createElement("select");
+  selector.className = "density-target";
+  selector.disabled = targets.length === 0;
+  if (targets.length === 0) {
+    selector.append(new Option("(none)", ""));
+  } else {
+    for (const candidate of targets) selector.append(new Option(candidate.name, candidate.key));
+    selector.value = target.key;
+  }
+  selector.addEventListener("change", () => {
+    densityPanelTargetKey = selector.value || null;
+    renderDensity();
+  });
+
+  const options = document.createElement("details");
+  options.className = "density-options";
+  const optionsSummary = document.createElement("summary");
+  optionsSummary.setAttribute("aria-label", "Density map options");
+  const optionsPopup = document.createElement("div");
+  optionsPopup.className = "density-options-popup";
+  if (target) {
+    const useAbsolute = target.renderer.specific.use_abslevel === "true";
+    const colorMode = target.renderer.specific.colormode || "solid";
+    for (const [label, key, value, selected] of [
+      ["Use sigma contour level", "use_abslevel", "false", !useAbsolute],
+      ["Use absolute contour level", "use_abslevel", "true", useAbsolute],
+      ["Solid coloring", "colormode", "solid", colorMode === "solid"],
+      ["Multi gradient", "colormode", "multigrad", colorMode === "multigrad"],
+    ]) {
+      const item = button(label, selected ? "selected" : "", async () => {
+        options.open = false;
+        await updateDensityPanelRenderer(target, { specific: { [key]: value } });
+      });
+      optionsPopup.append(item);
+    }
+  }
+  options.classList.toggle("disabled", !target);
+  optionsSummary.addEventListener("click", (event) => {
+    if (!target) event.preventDefault();
+  });
+  options.append(optionsSummary, optionsPopup);
+  selectorRow.append(selector, options);
+  densityContent.append(selectorRow);
+
+  if (!target) {
     const empty = document.createElement("p");
-    empty.textContent = "No density map loaded.";
+    empty.textContent = snapshot.densityMaps.length
+      ? "No density renderer."
+      : "No density map loaded.";
     densityContent.append(empty);
+    return;
   }
-  for (const map of snapshot.densityMaps) {
-    const entry = document.createElement("div");
-    entry.className = "density-summary";
-    const title = document.createElement("strong");
-    title.textContent = map.name;
-    const dimensions = document.createElement("span");
-    dimensions.textContent = `${map.format} · ${map.counts.join(" × ")}`;
-    const range = document.createElement("span");
-    range.textContent = `mean ${map.meanDensity.toFixed(3)} / rmsd ${map.rmsdDensity.toFixed(3)}`;
-    entry.append(title, dimensions, range);
-    densityContent.append(entry);
+
+  const { map, renderer } = target;
+  const controls = document.createElement("div");
+  controls.className = "density-controls";
+  const actions = document.createElement("div");
+  actions.className = "density-actions";
+  actions.append(
+    button("Redraw", "", () =>
+      mutate("redraw_density_renderer", { mapUid: map.uid, rendererUid: renderer.uid }),
+    ),
+  );
+  const hasUnitCell = map.renderers.some((item) =>
+    ["*unitcell", "unitcell"].includes(item.rendererType),
+  );
+  const cell = button("Cell", "", () =>
+    mutate("show_unit_cell", { targetKind: "density", objectUid: map.uid }),
+  );
+  cell.disabled = hasUnitCell;
+  actions.append(cell);
+  if ((renderer.specific.colormode || "solid") === "multigrad") {
+    actions.append(button("Edit color...", "density-color-edit", () => openDensityGradientEditor(target)));
+  } else {
+    const color = document.createElement("input");
+    color.type = "color";
+    const fallback = renderer.rendererType === "contour" ? "#0000ff" : "#00ff00";
+    color.value = /^#[0-9a-f]{6}$/i.test(renderer.specific.color || "")
+      ? renderer.specific.color
+      : fallback;
+    color.setAttribute("aria-label", "Density color");
+    color.addEventListener("change", () =>
+      updateDensityPanelRenderer(target, { specific: { color: color.value } }),
+    );
+    actions.append(color);
   }
-  showDensityContour.checked = snapshot.showDensityContour;
-  showDensityContour.disabled = snapshot.densityMaps.length === 0;
-  densityLevel.value = String(snapshot.densityLevel);
-  densityLevel.disabled = snapshot.densityMaps.length === 0;
-  densityLevelValue.textContent = `${snapshot.densityLevel.toFixed(1)} σ`;
+  controls.append(actions);
+
+  const transparency = densityPanelRange(
+    "Transp:",
+    renderer.alpha,
+    0,
+    1,
+    0.1,
+    "",
+    (value) => updateDensityPanelRenderer(target, { alpha: value }),
+  );
+  controls.append(transparency.row);
+
+  const useAbsolute = renderer.specific.use_abslevel === "true";
+  const sigma = map.rmsdDensity;
+  const sigmaLevel = Number(renderer.specific.siglevel ?? 1.1);
+  const minimumSigma = Number(renderer.specific.minLevel ?? -10);
+  const maximumSigma = Number(renderer.specific.maxLevel ?? 10);
+  const scale = useAbsolute ? sigma : 1;
+  let levelMinimum = minimumSigma * scale;
+  let levelMaximum = maximumSigma * scale;
+  if (!Number.isFinite(levelMinimum) || !Number.isFinite(levelMaximum) || levelMinimum === levelMaximum) {
+    levelMinimum = -10;
+    levelMaximum = 10;
+  }
+  if (levelMinimum > levelMaximum) [levelMinimum, levelMaximum] = [levelMaximum, levelMinimum];
+  const levelRange = Math.abs(levelMaximum - levelMinimum);
+  const levelStep = useAbsolute && levelRange > 0
+    ? 10 ** Math.floor(Math.log10(levelRange / 100))
+    : 0.1;
+  const level = densityPanelRange(
+    "Level:",
+    sigmaLevel * scale,
+    levelMinimum,
+    levelMaximum,
+    levelStep,
+    useAbsolute ? "" : " σ",
+    (value) =>
+      updateDensityPanelRenderer(target, {
+        specific: { siglevel: String(useAbsolute ? value / sigma : value) },
+      }),
+  );
+  level.slider.disabled = useAbsolute && Math.abs(sigma) < Number.EPSILON;
+  controls.append(level.row);
+
+  const configuredMaxExtent = Number(renderer.specific.maxExtent);
+  const maximumExtent = Number.isFinite(configuredMaxExtent) && configuredMaxExtent > 0
+    ? configuredMaxExtent
+    : 100;
+  const extent = densityPanelRange(
+    "Extent:",
+    Number(renderer.specific.extent ?? 15),
+    0,
+    maximumExtent,
+    1,
+    " Å",
+    (value) => updateDensityPanelRenderer(target, { specific: { extent: String(value) } }),
+  );
+  controls.append(extent.row);
+  densityContent.append(controls);
 }
 
 function renderSequence() {
@@ -15789,18 +16016,6 @@ coloringType.addEventListener("change", () => {
   coloringPaintSelectedIndex = -1;
   coloringGradientSelectedIndex = -1;
   commitColoring(target, coloringType.value, defaultColoringState(coloringType.value, target));
-});
-
-showDensityContour.addEventListener("change", () => {
-  mutate("set_display_option", { option: "density-contour", value: showDensityContour.checked });
-});
-
-densityLevel.addEventListener("input", () => {
-  densityLevelValue.textContent = `${Number(densityLevel.value).toFixed(1)} σ`;
-});
-
-densityLevel.addEventListener("change", () => {
-  mutate("set_density_level", { level: Number(densityLevel.value) });
 });
 
 animationPlay.addEventListener("click", () => {
