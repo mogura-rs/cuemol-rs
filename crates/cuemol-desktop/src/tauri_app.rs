@@ -6969,6 +6969,132 @@ impl AppModel {
             .unwrap_or(0.0)
     }
 
+    fn delete_animation_objects(&mut self, indices: &[usize]) -> Result<(), String> {
+        self.restore_animation_playback(false)?;
+        self.animation_elapsed = 0.0;
+        let mut animation = self.active_animation_manager()?;
+        let mut indices = indices.to_vec();
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty() {
+            return Err("no animation objects are selected".to_string());
+        }
+        if let Some(index) = indices.iter().find(|index| **index >= animation.size()) {
+            return Err(format!("animation object {index} was not found"));
+        }
+        let undo = self.capture_undo();
+        let deleted_names = indices
+            .iter()
+            .filter_map(|index| animation.motions().get(*index))
+            .map(|motion| motion.base().name().to_string())
+            .collect::<BTreeSet<_>>();
+        let deleted_references = indices
+            .iter()
+            .filter_map(|index| animation.motions().get(*index))
+            .map(|motion| {
+                (
+                    motion.base().name().to_string(),
+                    motion.base().time_ref_name().to_string(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let rewrites = animation
+            .motions()
+            .iter()
+            .filter(|motion| !deleted_names.contains(motion.base().name()))
+            .filter_map(|motion| {
+                let original = motion.base().time_ref_name();
+                if !deleted_names.contains(original) {
+                    return None;
+                }
+                let mut reference = original.to_string();
+                let mut visited = BTreeSet::new();
+                while deleted_names.contains(&reference) && visited.insert(reference.clone()) {
+                    reference = deleted_references
+                        .get(&reference)
+                        .cloned()
+                        .unwrap_or_default();
+                }
+                Some((motion.base().uid(), reference))
+            })
+            .collect::<Vec<_>>();
+        for (uid, reference) in rewrites {
+            animation.edit_motion_by_uid(uid, "timeRefName", "", |motion| {
+                motion.base_mut().set_time_ref_name(reference);
+            });
+        }
+        for index in indices.iter().rev() {
+            animation.remove_at(*index);
+        }
+        self.set_active_animation_manager(&animation)?;
+        self.reset_animation_playback();
+        self.status = if indices.len() == 1 {
+            "Animation object deleted".to_string()
+        } else {
+            format!("Deleted {} animation objects", indices.len())
+        };
+        self.push_undo(undo);
+        Ok(())
+    }
+
+    fn move_animation_objects(&mut self, indices: &[usize], direction: i32) -> Result<(), String> {
+        self.restore_animation_playback(false)?;
+        self.animation_elapsed = 0.0;
+        if direction == 0 {
+            return Err("animation move direction must be non-zero".to_string());
+        }
+        let mut animation = self.active_animation_manager()?;
+        let mut indices = indices.to_vec();
+        indices.sort_unstable();
+        indices.dedup();
+        if indices.is_empty() {
+            return Err("no animation objects are selected".to_string());
+        }
+        if let Some(index) = indices.iter().find(|index| **index >= animation.size()) {
+            return Err(format!("animation object {index} was not found"));
+        }
+        if (direction < 0 && indices[0] == 0)
+            || (direction > 0 && indices[indices.len() - 1] + 1 == animation.size())
+        {
+            return Err("animation objects cannot move farther".to_string());
+        }
+
+        let undo = self.capture_undo();
+        let mut motions = animation.motions().to_vec();
+        let mut selected = vec![false; motions.len()];
+        for index in &indices {
+            selected[*index] = true;
+        }
+        if direction < 0 {
+            for index in 1..motions.len() {
+                if selected[index] && !selected[index - 1] {
+                    motions.swap(index, index - 1);
+                    selected.swap(index, index - 1);
+                }
+            }
+        } else {
+            for index in (0..motions.len().saturating_sub(1)).rev() {
+                if selected[index] && !selected[index + 1] {
+                    motions.swap(index, index + 1);
+                    selected.swap(index, index + 1);
+                }
+            }
+        }
+        animation.clear();
+        for motion in motions {
+            animation.append_motion(motion);
+        }
+        self.set_active_animation_manager(&animation)?;
+        self.reset_animation_playback();
+        self.status = if indices.len() == 1 {
+            "Animation object moved".to_string()
+        } else {
+            format!("Moved {} animation objects", indices.len())
+        };
+        self.push_undo(undo);
+        Ok(())
+    }
+
     fn reset_animation_playback(&mut self) {
         self.animation_elapsed = 0.0;
         self.animation_playing = false;
@@ -7615,10 +7741,18 @@ enum ModelRequest {
         width: u32,
         height: u32,
     },
-    AddAnimationObject(String),
+    AddAnimationObject {
+        kind: String,
+        after_index: Option<usize>,
+    },
     DeleteAnimationObject(usize),
+    DeleteAnimationObjects(Vec<usize>),
     MoveAnimationObject {
         index: usize,
+        direction: i32,
+    },
+    MoveAnimationObjects {
+        indices: Vec<usize>,
         direction: i32,
     },
     SetAnimationDuration {
@@ -11375,7 +11509,7 @@ fn handle_model_request(
                 },
             )))
         }
-        ModelRequest::AddAnimationObject(kind) => {
+        ModelRequest::AddAnimationObject { kind, after_index } => {
             let kind =
                 animation_kind(&kind).ok_or_else(|| format!("unsupported animation: {kind}"))?;
             model.restore_animation_playback(false)?;
@@ -11388,13 +11522,21 @@ fn handle_model_request(
             }
             let prefix = animation_name_prefix(kind);
             let name = unique_animation_name(&animation, prefix);
-            let reference = animation
-                .motions()
-                .last()
+            let insertion_index = after_index
+                .map(|index| index.saturating_add(1).min(animation.size()))
+                .unwrap_or_else(|| animation.size());
+            let reference = insertion_index
+                .checked_sub(1)
+                .and_then(|index| animation.motions().get(index))
                 .map(AnimMotion::base)
                 .map(|object| object.name().to_string())
                 .unwrap_or_default();
-            animation.append_motion(new_animation_motion(kind, name, reference));
+            let motion = new_animation_motion(kind, name, reference);
+            if insertion_index == animation.size() {
+                animation.append_motion(motion);
+            } else {
+                animation.insert_motion_before(insertion_index, motion);
+            }
             model.set_active_animation_manager(&animation)?;
             model.reset_animation_playback();
             model.status = format!("Added {} animation", kind.label());
@@ -11402,46 +11544,19 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::DeleteAnimationObject(index) => {
-            model.restore_animation_playback(false)?;
-            model.animation_elapsed = 0.0;
-            let mut animation = model.active_animation_manager()?;
-            if index >= animation.size() {
-                return Err(format!("animation object {index} was not found"));
-            }
-            let undo = model.capture_undo();
-            animation.remove_at(index);
-            model.set_active_animation_manager(&animation)?;
-            model.reset_animation_playback();
-            model.status = "Animation object deleted".to_string();
-            model.push_undo(undo);
+            model.delete_animation_objects(&[index])?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::DeleteAnimationObjects(indices) => {
+            model.delete_animation_objects(&indices)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::MoveAnimationObject { index, direction } => {
-            model.restore_animation_playback(false)?;
-            model.animation_elapsed = 0.0;
-            let mut animation = model.active_animation_manager()?;
-            if index >= animation.size() {
-                return Err(format!("animation object {index} was not found"));
-            }
-            let target = if direction < 0 {
-                index.checked_sub(1)
-            } else {
-                index
-                    .checked_add(1)
-                    .filter(|target| *target < animation.size())
-            }
-            .ok_or_else(|| "animation object cannot move farther".to_string())?;
-            let undo = model.capture_undo();
-            let mut motions = animation.motions().to_vec();
-            motions.swap(index, target);
-            animation.clear();
-            for motion in motions {
-                animation.append_motion(motion);
-            }
-            model.set_active_animation_manager(&animation)?;
-            model.reset_animation_playback();
-            model.status = "Animation object moved".to_string();
-            model.push_undo(undo);
+            model.move_animation_objects(&[index], direction)?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::MoveAnimationObjects { indices, direction } => {
+            model.move_animation_objects(&indices, direction)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetAnimationDuration { index, duration } => {
@@ -14674,11 +14789,12 @@ fn select_screen_rect(
 #[tauri::command]
 fn add_animation_object(
     kind: String,
+    after_index: Option<usize>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
         &state,
-        ModelRequest::AddAnimationObject(kind),
+        ModelRequest::AddAnimationObject { kind, after_index },
     )?)
 }
 
@@ -14694,6 +14810,17 @@ fn delete_animation_object(
 }
 
 #[tauri::command]
+fn delete_animation_objects(
+    indices: Vec<usize>,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::DeleteAnimationObjects(indices),
+    )?)
+}
+
+#[tauri::command]
 fn move_animation_object(
     index: usize,
     direction: i32,
@@ -14702,6 +14829,18 @@ fn move_animation_object(
     snapshot_response(request_model(
         &state,
         ModelRequest::MoveAnimationObject { index, direction },
+    )?)
+}
+
+#[tauri::command]
+fn move_animation_objects(
+    indices: Vec<usize>,
+    direction: i32,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::MoveAnimationObjects { indices, direction },
     )?)
 }
 
@@ -15300,7 +15439,9 @@ pub fn run() -> Result<(), tauri::Error> {
             select_screen_rect,
             add_animation_object,
             delete_animation_object,
+            delete_animation_objects,
             move_animation_object,
+            move_animation_objects,
             set_animation_duration,
             set_animation_object_properties,
             animation_control,
@@ -21170,7 +21311,10 @@ mod tests {
         let before = model.camera.rotation();
         handle_model_request(
             &mut model,
-            ModelRequest::AddAnimationObject("simple-spin".to_string()),
+            ModelRequest::AddAnimationObject {
+                kind: "simple-spin".to_string(),
+                after_index: None,
+            },
         )
         .unwrap();
         handle_model_request(
@@ -21248,7 +21392,10 @@ mod tests {
             .clone();
         handle_model_request(
             &mut model,
-            ModelRequest::AddAnimationObject("hide".to_string()),
+            ModelRequest::AddAnimationObject {
+                kind: "hide".to_string(),
+                after_index: None,
+            },
         )
         .unwrap();
         let mut input = animation_properties_input(&model.snapshot().animation_objects[0]);
@@ -21299,7 +21446,10 @@ mod tests {
         let first_scene = model.desktop.active_scene().unwrap();
         handle_model_request(
             &mut model,
-            ModelRequest::AddAnimationObject("simple-spin".to_string()),
+            ModelRequest::AddAnimationObject {
+                kind: "simple-spin".to_string(),
+                after_index: None,
+            },
         )
         .unwrap();
         let first = model.desktop.scene_animation(first_scene).unwrap().unwrap();
@@ -21317,7 +21467,10 @@ mod tests {
         assert!(model.snapshot().animation_objects.is_empty());
         handle_model_request(
             &mut model,
-            ModelRequest::AddAnimationObject("hide".to_string()),
+            ModelRequest::AddAnimationObject {
+                kind: "hide".to_string(),
+                after_index: None,
+            },
         )
         .unwrap();
         handle_model_request(
@@ -21395,7 +21548,10 @@ mod tests {
         model.save_named_camera("overview", false).unwrap();
         handle_model_request(
             &mut model,
-            ModelRequest::AddAnimationObject("noop".to_string()),
+            ModelRequest::AddAnimationObject {
+                kind: "noop".to_string(),
+                after_index: None,
+            },
         )
         .unwrap();
         handle_model_request(
@@ -21411,16 +21567,140 @@ mod tests {
     }
 
     #[test]
+    fn animation_add_inserts_after_the_selected_row() {
+        let mut model = model_without_gpu();
+        for kind in ["noop", "simple-spin"] {
+            handle_model_request(
+                &mut model,
+                ModelRequest::AddAnimationObject {
+                    kind: kind.to_string(),
+                    after_index: None,
+                },
+            )
+            .unwrap();
+        }
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddAnimationObject {
+                kind: "hide".to_string(),
+                after_index: Some(0),
+            },
+        )
+        .unwrap();
+
+        let objects = model.snapshot().animation_objects;
+        assert_eq!(
+            objects
+                .iter()
+                .map(|object| object.type_name.as_str())
+                .collect::<Vec<_>>(),
+            ["NoopAnimObj", "ShowHideAnim", "SimpleSpin"]
+        );
+        assert_eq!(objects[1].time_ref_name, objects[0].name);
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(
+            model
+                .snapshot()
+                .animation_objects
+                .iter()
+                .map(|object| object.type_name.as_str())
+                .collect::<Vec<_>>(),
+            ["NoopAnimObj", "SimpleSpin"]
+        );
+    }
+
+    #[test]
+    fn animation_multiple_selection_moves_and_deletes_in_one_undo_step() {
+        let mut model = model_without_gpu();
+        for kind in ["noop", "simple-spin", "hide", "slide-in"] {
+            handle_model_request(
+                &mut model,
+                ModelRequest::AddAnimationObject {
+                    kind: kind.to_string(),
+                    after_index: None,
+                },
+            )
+            .unwrap();
+        }
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::MoveAnimationObjects {
+                indices: vec![1, 2],
+                direction: -1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            model
+                .snapshot()
+                .animation_objects
+                .into_iter()
+                .map(|object| object.type_name)
+                .collect::<Vec<_>>(),
+            [
+                "SimpleSpin",
+                "ShowHideAnim",
+                "NoopAnimObj",
+                "SlideInOutAnim"
+            ]
+        );
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::MoveAnimationObjects {
+                indices: vec![0, 1],
+                direction: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            model
+                .snapshot()
+                .animation_objects
+                .into_iter()
+                .map(|object| object.type_name)
+                .collect::<Vec<_>>(),
+            [
+                "NoopAnimObj",
+                "SimpleSpin",
+                "ShowHideAnim",
+                "SlideInOutAnim"
+            ]
+        );
+
+        handle_model_request(&mut model, ModelRequest::DeleteAnimationObjects(vec![1, 2])).unwrap();
+        assert_eq!(
+            model
+                .snapshot()
+                .animation_objects
+                .into_iter()
+                .map(|object| object.type_name)
+                .collect::<Vec<_>>(),
+            ["NoopAnimObj", "SlideInOutAnim"]
+        );
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.snapshot().animation_objects.len(), 4);
+    }
+
+    #[test]
     fn animation_object_properties_update_typed_values_and_reference_names() {
         let mut model = model_without_gpu();
         handle_model_request(
             &mut model,
-            ModelRequest::AddAnimationObject("simple-spin".to_string()),
+            ModelRequest::AddAnimationObject {
+                kind: "simple-spin".to_string(),
+                after_index: None,
+            },
         )
         .unwrap();
         handle_model_request(
             &mut model,
-            ModelRequest::AddAnimationObject("noop".to_string()),
+            ModelRequest::AddAnimationObject {
+                kind: "noop".to_string(),
+                after_index: None,
+            },
         )
         .unwrap();
         let snapshot = model.snapshot();

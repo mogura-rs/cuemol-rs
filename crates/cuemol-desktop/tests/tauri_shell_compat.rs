@@ -994,7 +994,17 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
         assert!(JS.contains(label), "missing animation property {label}");
     }
     assert!(JS.contains("mutate(\"set_animation_object_properties\""));
+    assert!(JS.contains("function formatAnimationObjectTime(seconds)"));
+    assert!(JS.contains("afterIndex: selectedAnimationIndex"));
+    assert!(JS.contains("row.addEventListener(\"dblclick\""));
+    assert!(JS.contains("let selectedAnimationIndices = new Set()"));
+    assert!(JS.contains("event.shiftKey && selectedAnimationAnchor !== null"));
+    assert!(JS.contains("mutate(\"delete_animation_objects\""));
+    assert!(JS.contains("mutate(\"move_animation_objects\""));
     assert!(TAURI_APP_RS.contains("fn set_animation_object_properties("));
+    assert!(TAURI_APP_RS.contains("animation.insert_motion_before(insertion_index, motion)"));
+    assert!(TAURI_APP_RS.contains("fn delete_animation_objects("));
+    assert!(TAURI_APP_RS.contains("fn move_animation_objects("));
     assert!(TAURI_APP_RS.contains("animation.edit_motion_by_uid"));
     assert!(TAURI_APP_RS.contains("motion.base_mut().set_time_ref_name(name.clone())"));
 }

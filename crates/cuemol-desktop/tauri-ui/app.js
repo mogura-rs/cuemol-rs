@@ -210,6 +210,8 @@ let performanceMeasure = false;
 let interactionMode = "rotate";
 let atomPickerTarget = null;
 let selectedAnimationIndex = null;
+let selectedAnimationIndices = new Set();
+let selectedAnimationAnchor = null;
 let selectedMorphFrameIndex = null;
 let lastModelLogCount = 0;
 let animationTimer = null;
@@ -13733,6 +13735,21 @@ function formatAnimationTime(seconds) {
   return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
+function formatAnimationObjectTime(seconds) {
+  const totalMillis = Math.round(Number(seconds) * 1000) || 0;
+  const totalSeconds = Math.trunc(totalMillis / 1000);
+  const millis = ((totalMillis % 1000) + 1000) % 1000;
+  const hours = Math.trunc(totalSeconds / 3600);
+  const totalMinutes = Math.trunc(totalSeconds / 60);
+  const minutes = Math.trunc((totalSeconds % 3600) / 60);
+  const secondsPart = totalSeconds % 60;
+  const fraction = String(millis).padStart(3, "0").replace(/0+$/, "");
+  const secondsText = fraction ? `${secondsPart}.${fraction}` : String(secondsPart);
+  if (hours > 0) return `${hours}:${minutes}:${secondsText}`;
+  if (totalMinutes > 0) return `${totalMinutes}:${secondsText}`;
+  return secondsText;
+}
+
 function syncAnimationTimer() {
   if (snapshot?.animationPlaying && invoke) {
     if (animationTimer) return;
@@ -13763,11 +13780,16 @@ function syncAnimationTimer() {
 
 function renderAnimation() {
   const objects = snapshot.animationObjects;
-  if (!objects.some((object) => object.index === selectedAnimationIndex)) {
-    selectedAnimationIndex = null;
+  const validIndices = new Set(objects.map((object) => object.index));
+  selectedAnimationIndices = new Set(
+    [...selectedAnimationIndices].filter((index) => validIndices.has(index)),
+  );
+  if (!validIndices.has(selectedAnimationIndex)) {
+    selectedAnimationIndex = [...selectedAnimationIndices][0] ?? null;
   }
+  if (!validIndices.has(selectedAnimationAnchor)) selectedAnimationAnchor = null;
   const listKey = JSON.stringify([
-    selectedAnimationIndex,
+    [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs),
     objects.map((object) => [object.index, object.name, object.start, object.end]),
   ]);
   if (renderedAnimationListKey !== listKey) {
@@ -13782,9 +13804,30 @@ function renderAnimation() {
     for (const object of objects) {
       const row = button(
         "",
-        `animation-row${object.index === selectedAnimationIndex ? " selected" : ""}`,
-        () => {
-          selectedAnimationIndex = object.index;
+        `animation-row${selectedAnimationIndices.has(object.index) ? " selected" : ""}`,
+        (event) => {
+          if (event.shiftKey && selectedAnimationAnchor !== null) {
+            const first = Math.min(selectedAnimationAnchor, object.index);
+            const last = Math.max(selectedAnimationAnchor, object.index);
+            selectedAnimationIndices = new Set(
+              objects
+                .filter((candidate) => candidate.index >= first && candidate.index <= last)
+                .map((candidate) => candidate.index),
+            );
+          } else if (event.metaKey || event.ctrlKey) {
+            if (selectedAnimationIndices.has(object.index)) {
+              selectedAnimationIndices.delete(object.index);
+            } else {
+              selectedAnimationIndices.add(object.index);
+            }
+            selectedAnimationAnchor = object.index;
+          } else {
+            selectedAnimationIndices = new Set([object.index]);
+            selectedAnimationAnchor = object.index;
+          }
+          selectedAnimationIndex = selectedAnimationIndices.has(object.index)
+            ? object.index
+            : [...selectedAnimationIndices][0] ?? null;
           renderAnimation();
         },
       );
@@ -13793,10 +13836,16 @@ function renderAnimation() {
         ? `${object.name} (${object.typeName})`
         : object.typeName;
       const start = document.createElement("span");
-      start.textContent = object.start.toFixed(1);
+      start.textContent = formatAnimationObjectTime(object.start);
       const end = document.createElement("span");
-      end.textContent = object.end.toFixed(1);
+      end.textContent = formatAnimationObjectTime(object.end);
       row.append(name, start, end);
+      row.addEventListener("dblclick", () => {
+        selectedAnimationIndices = new Set([object.index]);
+        selectedAnimationIndex = object.index;
+        selectedAnimationAnchor = object.index;
+        showReferenceDialog("Animation object properties");
+      });
       animationList.append(row);
     }
   }
@@ -13836,11 +13885,12 @@ function renderAnimation() {
   const playLabel = animationPlay.querySelector("span:last-child");
   playIcon.textContent = snapshot.animationPlaying ? "Ⅱ" : "▶";
   playLabel.textContent = snapshot.animationPlaying ? "Pause" : "Play";
-  const selected = selectedAnimationIndex !== null;
+  const selected = selectedAnimationIndices.size > 0;
+  const selectedValues = [...selectedAnimationIndices];
   animationDelete.disabled = !selected;
-  animationChange.disabled = !selected;
-  animationUp.disabled = !selected || selectedAnimationIndex === 0;
-  animationDown.disabled = !selected || selectedAnimationIndex === objects.length - 1;
+  animationChange.disabled = selectedAnimationIndices.size !== 1;
+  animationUp.disabled = !selected || Math.min(...selectedValues) === 0;
+  animationDown.disabled = !selected || Math.max(...selectedValues) === objects.length - 1;
   syncAnimationTimer();
 }
 
@@ -15158,38 +15208,53 @@ animationSlider.addEventListener("change", () => {
   mutate("seek_animation", { elapsed: Number(animationSlider.value) });
 });
 
-animationAdd.addEventListener("click", () => {
-  mutate("add_animation_object", { kind: animationKind.value });
+animationAdd.addEventListener("click", async () => {
+  const insertionIndex = selectedAnimationIndex === null
+    ? snapshot.animationObjects.length
+    : selectedAnimationIndex + 1;
+  await mutate("add_animation_object", {
+    kind: animationKind.value,
+    afterIndex: selectedAnimationIndex,
+  });
+  selectedAnimationIndex = Math.min(insertionIndex, snapshot.animationObjects.length - 1);
+  selectedAnimationIndices = new Set([selectedAnimationIndex]);
+  selectedAnimationAnchor = selectedAnimationIndex;
+  renderAnimation();
 });
 
-animationDelete.addEventListener("click", () => {
-  if (selectedAnimationIndex !== null) {
-    mutate("delete_animation_object", { index: selectedAnimationIndex });
-  }
+animationDelete.addEventListener("click", async () => {
+  if (selectedAnimationIndices.size === 0) return;
+  await mutate("delete_animation_objects", {
+    indices: [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs),
+  });
+  selectedAnimationIndex = null;
+  selectedAnimationIndices = new Set();
+  selectedAnimationAnchor = null;
+  renderAnimation();
 });
 
 animationChange.addEventListener("click", () => {
   showReferenceDialog("Animation object properties");
 });
 
-animationUp.addEventListener("click", () => {
-  if (selectedAnimationIndex !== null) {
-    mutate("move_animation_object", {
-      index: selectedAnimationIndex,
-      direction: -1,
-    });
-    selectedAnimationIndex -= 1;
-  }
+animationUp.addEventListener("click", async () => {
+  if (selectedAnimationIndices.size === 0) return;
+  const indices = [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs);
+  await mutate("move_animation_objects", { indices, direction: -1 });
+  selectedAnimationIndices = new Set(indices.map((index) => index - 1));
+  selectedAnimationIndex = selectedAnimationIndex === null ? null : selectedAnimationIndex - 1;
+  selectedAnimationAnchor = selectedAnimationAnchor === null ? null : selectedAnimationAnchor - 1;
+  renderAnimation();
 });
 
-animationDown.addEventListener("click", () => {
-  if (selectedAnimationIndex !== null) {
-    mutate("move_animation_object", {
-      index: selectedAnimationIndex,
-      direction: 1,
-    });
-    selectedAnimationIndex += 1;
-  }
+animationDown.addEventListener("click", async () => {
+  if (selectedAnimationIndices.size === 0) return;
+  const indices = [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs);
+  await mutate("move_animation_objects", { indices, direction: 1 });
+  selectedAnimationIndices = new Set(indices.map((index) => index + 1));
+  selectedAnimationIndex = selectedAnimationIndex === null ? null : selectedAnimationIndex + 1;
+  selectedAnimationAnchor = selectedAnimationAnchor === null ? null : selectedAnimationAnchor + 1;
+  renderAnimation();
 });
 
 trajectoryObject.addEventListener("change", () => {
