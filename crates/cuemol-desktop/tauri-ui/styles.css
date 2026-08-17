@@ -1998,6 +1998,11 @@ body.resizing-side-panel {
   background: #aaa;
 }
 
+.main-view.bottom-panel-collapsed .bottom-panel {
+  visibility: hidden;
+  overflow: hidden;
+}
+
 body.resizing-bottom-panel {
   cursor: row-resize;
   user-select: none;

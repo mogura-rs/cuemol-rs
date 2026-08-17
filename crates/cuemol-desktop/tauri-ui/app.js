@@ -573,9 +573,13 @@ function closeMenus(except = null) {
 }
 
 let bottomPanelHeight = 148;
+let expandedBottomPanelHeight = 148;
 try {
   const storedBottomPanelHeight = Number(localStorage.getItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY));
-  if (Number.isFinite(storedBottomPanelHeight)) bottomPanelHeight = storedBottomPanelHeight;
+  if (Number.isFinite(storedBottomPanelHeight)) {
+    bottomPanelHeight = storedBottomPanelHeight;
+    if (storedBottomPanelHeight >= 80) expandedBottomPanelHeight = storedBottomPanelHeight;
+  }
 } catch {
   // Storage can be unavailable in restricted webviews.
 }
@@ -589,11 +593,14 @@ function bottomPanelMinimumHeight() {
 function setBottomPanelHeight(height, persist = false) {
   const minimum = bottomPanelMinimumHeight();
   const maximum = Math.max(minimum, (mainView?.getBoundingClientRect().height || 480) - 126);
-  bottomPanelHeight = Math.min(maximum, Math.max(minimum, height));
+  bottomPanelHeight = height < 40 ? 0 : Math.min(maximum, Math.max(minimum, height));
+  if (bottomPanelHeight > 0) expandedBottomPanelHeight = bottomPanelHeight;
   mainView?.style.setProperty("--bottom-panel-height", `${bottomPanelHeight}px`);
-  horizontalSplitter?.setAttribute("aria-valuemin", String(minimum));
+  mainView?.classList.toggle("bottom-panel-collapsed", bottomPanelHeight === 0);
+  horizontalSplitter?.setAttribute("aria-valuemin", "0");
   horizontalSplitter?.setAttribute("aria-valuemax", String(Math.round(maximum)));
   horizontalSplitter?.setAttribute("aria-valuenow", String(Math.round(bottomPanelHeight)));
+  horizontalSplitter?.setAttribute("aria-expanded", String(bottomPanelHeight > 0));
   if (!persist) return;
   try {
     localStorage.setItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY, String(bottomPanelHeight));
@@ -629,11 +636,17 @@ function setupBottomPanelSplitter() {
     horizontalSplitter.addEventListener("pointerup", finish);
     horizontalSplitter.addEventListener("pointercancel", finish);
   });
-  horizontalSplitter.addEventListener("dblclick", () => setBottomPanelHeight(148, true));
+  horizontalSplitter.addEventListener("dblclick", () => {
+    setBottomPanelHeight(bottomPanelHeight === 0 ? expandedBottomPanelHeight : 0, true);
+  });
   horizontalSplitter.addEventListener("keydown", (event) => {
     if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
     event.preventDefault();
-    setBottomPanelHeight(bottomPanelHeight + (event.key === "ArrowUp" ? 10 : -10), true);
+    if (bottomPanelHeight === 0 && event.key === "ArrowUp") {
+      setBottomPanelHeight(expandedBottomPanelHeight, true);
+    } else {
+      setBottomPanelHeight(bottomPanelHeight + (event.key === "ArrowUp" ? 10 : -10), true);
+    }
   });
   window.addEventListener("resize", () => setBottomPanelHeight(bottomPanelHeight));
 }
