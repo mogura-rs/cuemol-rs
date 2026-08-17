@@ -14366,6 +14366,43 @@ impl DesktopAppState {
         Ok(object.mol().atom_count())
     }
 
+    pub fn set_secondary_structure_in_object(
+        &mut self,
+        object_uid: Uid,
+        selection_text: &str,
+        secondary_type: i32,
+    ) -> Result<usize> {
+        if !(0..=4).contains(&secondary_type) {
+            return Err(CueMolError::invalid_argument(format!(
+                "invalid secondary structure type {secondary_type}"
+            )));
+        }
+        let selector =
+            parse_gui_selector(nonempty_selection(selection_text))?.unwrap_or(Selector::All);
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let selected_atoms = object
+            .mol()
+            .select_indices(&selector)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let count = object
+            .mol()
+            .residue_summaries()
+            .iter()
+            .filter(|residue| {
+                residue
+                    .atom_indices
+                    .iter()
+                    .any(|index| selected_atoms.contains(index))
+            })
+            .count();
+        MolAnlManager::new().set_prot_2ndry(object.mol_mut(), &selector, secondary_type);
+        Ok(count)
+    }
+
     pub fn calc_atom_contacts_in_object(
         &self,
         object_uid: Uid,
@@ -66053,6 +66090,20 @@ attribute \"dep\" string \"positions\"
             app.assign_secondary_structure_in_object(first, false, 60.0)
                 .unwrap(),
             327
+        );
+        assert_eq!(
+            app.set_secondary_structure_in_object(first, "chain A and resi 1", 2)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            app.scene_manager()
+                .object(first)
+                .unwrap()
+                .mol()
+                .get_residue_prop_str("A", "1", "secondary2")
+                .unwrap(),
+            Some("Hs")
         );
     }
 

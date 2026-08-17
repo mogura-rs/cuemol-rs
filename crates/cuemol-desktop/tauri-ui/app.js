@@ -6210,19 +6210,67 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         objectOptions,
         selectedObjectUid ?? objects[0].uid,
       );
-      const ignoreBulge = dialogCheckbox("Ignore β bulge", false);
-      const gapFill = dialogCheckbox("Helix gap-fill angle (°)", false);
-      const angle = dialogField("Gap-fill angle", "120", "number");
+      const modeGroup = (label, value, checked) => {
+        const group = document.createElement("fieldset");
+        group.className = "property-common-group";
+        const legend = document.createElement("legend");
+        const choice = document.createElement("label");
+        choice.className = "dialog-check";
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = "secondary-structure-mode";
+        input.value = value;
+        input.checked = checked;
+        choice.append(input, document.createTextNode(label));
+        legend.append(choice);
+        group.append(legend);
+        return { group, input };
+      };
+      const recalc = modeGroup("Recalc secondry str", "recalc", true);
+      const ignoreBulge = dialogCheckbox("Ignore β bulge", false, recalc.group);
+      const gapFill = dialogCheckbox("Helix gap-fill angle (°):", false, recalc.group);
+      const angle = dialogField("Gap-fill angle", "120", "number", recalc.group);
       angle.min = "0";
       angle.max = "180";
       angle.step = "5";
       angle.disabled = true;
-      gapFill.addEventListener("change", () => {
-        angle.disabled = !gapFill.checked;
-      });
+      const manual = modeGroup("Assign by selection", "assign", false);
+      const selection = dialogField(
+        "Selection",
+        snapshot.selection || "",
+        "text",
+        manual.group,
+      );
+      const secondaryType = dialogSelect(
+        "Type",
+        [
+          [0, "Coil"],
+          [1, "β strand"],
+          [2, "α helix"],
+          [3, "3-10 helix"],
+          [4, "π helix"],
+        ],
+        0,
+        manual.group,
+      );
+      dialogContent.append(recalc.group, manual.group);
+      const syncMode = () => {
+        ignoreBulge.disabled = !recalc.input.checked;
+        gapFill.disabled = !recalc.input.checked;
+        angle.disabled = !recalc.input.checked || !gapFill.checked;
+        selection.disabled = !manual.input.checked;
+        secondaryType.disabled = !manual.input.checked;
+      };
+      recalc.input.addEventListener("change", syncMode);
+      manual.input.addEventListener("change", syncMode);
+      gapFill.addEventListener("change", syncMode);
+      syncMode();
       const assign = button("OK", "dialog-primary", async () => {
         await mutate("assign_secondary_structure", {
           objectUid: Number(object.value),
+          mode: manual.input.checked ? "assign" : "recalc",
+          selection: selection.value,
+          secondaryType: Number(secondaryType.value),
           ignoreBulge: ignoreBulge.checked,
           angle: gapFill.checked ? Number(angle.value) : 0,
         });

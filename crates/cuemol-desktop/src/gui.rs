@@ -1362,6 +1362,10 @@ struct GuiApplication {
     contact_hbond: bool,
     contact_max_count: usize,
     contact_renderer_name: String,
+    secondary_target: Option<cuemol_core::Uid>,
+    secondary_assign_by_selection: bool,
+    secondary_selection: String,
+    secondary_type: i32,
     secondary_ignore_breaks: bool,
     secondary_gap_fill: bool,
     secondary_angle: f64,
@@ -4959,6 +4963,10 @@ impl GuiApplication {
             contact_hbond: true,
             contact_max_count: 100,
             contact_renderer_name: "measure".to_string(),
+            secondary_target: None,
+            secondary_assign_by_selection: false,
+            secondary_selection: String::new(),
+            secondary_type: 0,
             secondary_ignore_breaks: false,
             secondary_gap_fill: false,
             secondary_angle: 120.0,
@@ -19047,24 +19055,42 @@ impl GuiApplication {
     }
 
     fn assign_secondary_structure(&mut self) {
-        let Some(object_uid) = self.target_object_uid() else {
+        let Some(object_uid) = self
+            .secondary_target
+            .filter(|uid| self.state.scene_manager().object(*uid).is_some())
+            .or_else(|| self.target_object_uid())
+        else {
             self.set_status("No object selected");
             return;
         };
         let undo = self.capture_undo();
-        match self.state.assign_secondary_structure_in_object(
-            object_uid,
-            self.secondary_ignore_breaks,
-            if self.secondary_gap_fill {
-                self.secondary_angle
-            } else {
-                0.0
-            },
-        ) {
+        let result = if self.secondary_assign_by_selection {
+            self.state.set_secondary_structure_in_object(
+                object_uid,
+                &self.secondary_selection,
+                self.secondary_type,
+            )
+        } else {
+            self.state.assign_secondary_structure_in_object(
+                object_uid,
+                self.secondary_ignore_breaks,
+                if self.secondary_gap_fill {
+                    self.secondary_angle
+                } else {
+                    0.0
+                },
+            )
+        };
+        match result {
             Ok(count) => {
                 self.push_undo_snapshot(undo);
                 self.rebuild_snapshot();
-                self.set_status(format!("Secondary structure assigned for {count} atoms"));
+                let unit = if self.secondary_assign_by_selection {
+                    "residues"
+                } else {
+                    "atoms"
+                };
+                self.set_status(format!("Secondary structure assigned for {count} {unit}"));
             }
             Err(error) => self.set_error(error),
         }
@@ -26401,16 +26427,84 @@ impl GuiApplication {
     }
 
     fn secondary_structure_tool_ui(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.secondary_ignore_breaks, "Ignore β bulge");
-        ui.checkbox(&mut self.secondary_gap_fill, "Helix gap-fill angle (°)");
-        ui.horizontal(|ui| {
-            ui.label("Gap-fill angle");
-            ui.add_enabled(
-                self.secondary_gap_fill,
-                egui::DragValue::new(&mut self.secondary_angle)
-                    .speed(5.0)
-                    .range(0.0..=180.0),
+        let objects = self.state.active_object_summaries();
+        if objects.is_empty() {
+            ui.weak("No molecular object is loaded.");
+            return;
+        }
+        if self
+            .secondary_target
+            .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
+        {
+            self.secondary_target = self
+                .target_object_uid()
+                .filter(|uid| objects.iter().any(|object| object.uid == *uid))
+                .or_else(|| objects.first().map(|object| object.uid));
+        }
+        egui::ComboBox::from_label("Molecule")
+            .selected_text(object_combo_label(&objects, self.secondary_target))
+            .show_ui(ui, |ui| {
+                for object in &objects {
+                    ui.selectable_value(
+                        &mut self.secondary_target,
+                        Some(object.uid),
+                        object.name.as_str(),
+                    );
+                }
+            });
+        ui.group(|ui| {
+            ui.radio_value(
+                &mut self.secondary_assign_by_selection,
+                false,
+                "Recalc secondry str",
             );
+            ui.add_enabled_ui(!self.secondary_assign_by_selection, |ui| {
+                ui.checkbox(&mut self.secondary_ignore_breaks, "Ignore β bulge");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.secondary_gap_fill, "Helix gap-fill angle (°):");
+                    ui.add_enabled(
+                        self.secondary_gap_fill,
+                        egui::DragValue::new(&mut self.secondary_angle)
+                            .speed(5.0)
+                            .range(0.0..=180.0),
+                    );
+                });
+            });
+        });
+        ui.group(|ui| {
+            ui.radio_value(
+                &mut self.secondary_assign_by_selection,
+                true,
+                "Assign by selection",
+            );
+            ui.add_enabled_ui(self.secondary_assign_by_selection, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Selection");
+                    ui.add_sized(
+                        [ui.available_width(), 22.0],
+                        egui::TextEdit::singleline(&mut self.secondary_selection),
+                    );
+                });
+                egui::ComboBox::from_label("Type")
+                    .selected_text(match self.secondary_type {
+                        1 => "β strand",
+                        2 => "α helix",
+                        3 => "3-10 helix",
+                        4 => "π helix",
+                        _ => "Coil",
+                    })
+                    .show_ui(ui, |ui| {
+                        for (value, label) in [
+                            (0, "Coil"),
+                            (1, "β strand"),
+                            (2, "α helix"),
+                            (3, "3-10 helix"),
+                            (4, "π helix"),
+                        ] {
+                            ui.selectable_value(&mut self.secondary_type, value, label);
+                        }
+                    });
+            });
         });
         if ui.button("Assign").clicked() {
             self.assign_secondary_structure();

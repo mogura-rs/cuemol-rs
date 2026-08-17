@@ -8015,6 +8015,9 @@ enum ModelRequest {
     },
     AssignSecondaryStructure {
         object_uid: u64,
+        mode: String,
+        selection: String,
+        secondary_type: i32,
         ignore_bulge: bool,
         angle: f64,
     },
@@ -11619,18 +11622,44 @@ fn handle_model_request(
         }
         ModelRequest::AssignSecondaryStructure {
             object_uid,
+            mode,
+            selection,
+            secondary_type,
             ignore_bulge,
             angle,
         } => {
-            if !angle.is_finite() || !(0.0..=180.0).contains(&angle) {
-                return Err("helix angle must be between 0 and 180 degrees".to_string());
-            }
             let undo = model.capture_undo();
-            let count = model
-                .desktop
-                .assign_secondary_structure_in_object(Uid::new(object_uid), ignore_bulge, angle)
-                .map_err(|error| error.to_string())?;
-            model.status = format!("Secondary structure assigned for {count} atom(s)");
+            let (count, unit) = match mode.as_str() {
+                "recalc" => {
+                    if !angle.is_finite() || !(0.0..=180.0).contains(&angle) {
+                        return Err("helix angle must be between 0 and 180 degrees".to_string());
+                    }
+                    (
+                        model
+                            .desktop
+                            .assign_secondary_structure_in_object(
+                                Uid::new(object_uid),
+                                ignore_bulge,
+                                angle,
+                            )
+                            .map_err(|error| error.to_string())?,
+                        "atom(s)",
+                    )
+                }
+                "assign" => (
+                    model
+                        .desktop
+                        .set_secondary_structure_in_object(
+                            Uid::new(object_uid),
+                            &selection,
+                            secondary_type,
+                        )
+                        .map_err(|error| error.to_string())?,
+                    "residue(s)",
+                ),
+                _ => return Err(format!("unsupported secondary structure mode: {mode}")),
+            };
+            model.status = format!("Secondary structure assigned for {count} {unit}");
             model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -15198,6 +15227,9 @@ fn show_unit_cell(
 #[tauri::command]
 fn assign_secondary_structure(
     object_uid: u64,
+    mode: String,
+    selection: String,
+    secondary_type: i32,
     ignore_bulge: bool,
     angle: f64,
     state: State<'_, ManagedState>,
@@ -15206,6 +15238,9 @@ fn assign_secondary_structure(
         &state,
         ModelRequest::AssignSecondaryStructure {
             object_uid,
+            mode,
+            selection,
+            secondary_type,
             ignore_bulge,
             angle,
         },
@@ -23109,6 +23144,9 @@ mod tests {
             &mut model,
             ModelRequest::AssignSecondaryStructure {
                 object_uid: first,
+                mode: "recalc".to_string(),
+                selection: String::new(),
+                secondary_type: 0,
                 ignore_bulge: false,
                 angle: 0.0,
             },
@@ -23122,6 +23160,36 @@ mod tests {
             "Secondary structure assigned for 327 atom(s)"
         );
         assert!(snapshot.can_undo);
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::AssignSecondaryStructure {
+                object_uid: first,
+                mode: "assign".to_string(),
+                selection: "chain A and resi 1".to_string(),
+                secondary_type: 2,
+                ignore_bulge: false,
+                angle: 0.0,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(
+            snapshot.status,
+            "Secondary structure assigned for 1 residue(s)"
+        );
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .object(Uid::new(first))
+                .unwrap()
+                .mol()
+                .get_residue_prop_str("A", "1", "secondary2")
+                .unwrap(),
+            Some("Hs")
+        );
     }
 
     #[test]

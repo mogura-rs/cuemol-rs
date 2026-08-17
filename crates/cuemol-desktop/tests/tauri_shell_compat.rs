@@ -409,6 +409,26 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     assert!(NATIVE_GUI_RS.contains("superpose_write_rmsd"));
     assert!(NATIVE_GUI_RS.contains("NativeFileDialog::SaveRmsdReport"));
     assert!(NATIVE_GUI_RS.contains("write_superposition_rmsd_report"));
+    for label in [
+        "Recalc secondry str",
+        "Assign by selection",
+        "β strand",
+        "α helix",
+        "3-10 helix",
+        "π helix",
+    ] {
+        assert!(
+            JS.contains(label),
+            "missing secondary structure control {label}"
+        );
+        assert!(
+            NATIVE_GUI_RS.contains(label),
+            "missing native secondary structure control {label}"
+        );
+    }
+    assert!(JS.contains("secondaryType: Number(secondaryType.value)"));
+    assert!(TAURI_APP_RS.contains("secondary_type: i32"));
+    assert!(NATIVE_GUI_RS.contains("set_secondary_structure_in_object"));
     assert!(CSS.contains(".bond-list-row"));
     assert!(CSS.contains(".bond-list-columns"));
     assert!(CSS.contains(".bond-column-splitter"));
